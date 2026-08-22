@@ -1,0 +1,14 @@
+<svg width="1280" height="640" viewBox="0 0 1280 640" xmlns="http://www.w3.org/2000/svg">
+<defs><linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+<stop offset="0%" stop-color="#171512"/><stop offset="100%" stop-color="#211E19"/></linearGradient></defs>
+<rect width="1280" height="640" fill="url(#bg)"/>
+<g transform="translate(90,160)"><defs><linearGradient id="g" x1="0%" y1="100%" x2="100%" y2="0%"><stop offset="0%" stop-color="#D97757"/><stop offset="100%" stop-color="#F2A65E"/></linearGradient></defs>
+<g transform="translate(40,40) scale(0.8)">
+  <!-- THE mark, single source of truth. circle r=140, stroke 0.12r; triangle
+       apex 0.667r above center, half-width 0.573r, base 0.333r below center -->
+  <circle cx="150" cy="150" r="140" fill="none" stroke="#9C9284" stroke-width="17"/>
+  <path d="M 150 56.6 L 230.2 196.6 L 69.8 196.6 Z" fill="url(#g)"/>
+</g>
+<text x="330" y="192" font-family="monospace" font-size="150" font-weight="bold" fill="url(#g)" letter-spacing="10">&#x394;&#x39F;&#x39E;&#x391;</text>
+<text x="336" y="252" font-family="monospace" font-size="34" fill="#9C9284">doxa &#xB7; belief earning knowledge</text></g>
+</svg>

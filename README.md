@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/banner.png" width="720" alt="DOXA — belief earning knowledge: the doxa-to-episteme ascent, outline beliefs earning fill toward the STEER triangle"></p>
+<p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 **DOXA** is a terminal for working with a Claude agent whose memory you can
 audit — the native home for [LORE](https://github.com/docwilde/LORE)'s memory model,
