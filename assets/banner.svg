@@ -1,0 +1,57 @@
+<svg width="1280" height="640" viewBox="0 0 1280 640" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#D97757"/>
+      <stop offset="100%" stop-color="#F2A65E"/>
+    </linearGradient>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#171512"/>
+      <stop offset="100%" stop-color="#211E19"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+
+  <!-- terminal frame hint: rounded panel with thin border -->
+  <rect x="60" y="60" width="1160" height="520" rx="18" fill="#1D1A15" stroke="#3A3429" stroke-width="2"/>
+  <!-- title bar dots -->
+  <circle cx="100" cy="98" r="7" fill="#3A3429"/>
+  <circle cx="126" cy="98" r="7" fill="#3A3429"/>
+  <circle cx="152" cy="98" r="7" fill="#3A3429"/>
+
+  <!-- the ascent: beliefs earning knowledge, left (outline, muted) to right (filled, orange) -->
+  <g>
+    <circle cx="240" cy="420" r="16" fill="none" stroke="#9C9284" stroke-width="3"/>
+    <circle cx="330" cy="395" r="16" fill="none" stroke="#9C9284" stroke-width="3"/>
+    <circle cx="420" cy="368" r="16" fill="none" stroke="#B8A488" stroke-width="3"/>
+    <circle cx="510" cy="340" r="16" fill="none" stroke="#C99A6E" stroke-width="3.5"/>
+    <circle cx="600" cy="310" r="16" fill="#D97757" opacity="0.45"/>
+    <circle cx="690" cy="278" r="16" fill="#D97757" opacity="0.75"/>
+    <path d="M 780 262 L 798 230 L 816 262 Z" fill="url(#grad)"/>
+  </g>
+  <!-- connecting rise line -->
+  <path d="M 240 420 Q 520 350 798 246" fill="none" stroke="#3A3429" stroke-width="2" stroke-dasharray="2 8"/>
+
+  <!-- labels under the ascent -->
+  <text x="240" y="470" font-family="monospace" font-size="22" fill="#9C9284" text-anchor="middle">&#x3B4;&#x3CC;&#x3BE;&#x3B1;</text>
+  <text x="798" y="215" font-family="monospace" font-size="22" fill="#F2A65E" text-anchor="middle">&#x1F10;&#x3C0;&#x3B9;&#x3C3;&#x3C4;&#x3AE;&#x3BC;&#x3B7;</text>
+
+  <!-- wordmark -->
+  <text x="240" y="220" font-family="monospace" font-size="128" font-weight="bold" fill="url(#grad)" letter-spacing="14">DOXA</text>
+  <!-- block accent left-rule, the ▎ motif -->
+  <rect x="205" y="128" width="10" height="110" fill="url(#grad)"/>
+
+  <!-- tagline -->
+  <text x="240" y="278" font-family="monospace" font-size="30" fill="#F2ECE4">where belief earns knowledge</text>
+
+  <!-- STEER / CITE pills, bottom right: the calibration encoding -->
+  <g font-family="monospace" font-size="20">
+    <rect x="828" y="480" width="150" height="42" rx="21" fill="#D97757"/>
+    <text x="903" y="508" fill="#171512" text-anchor="middle" font-weight="bold">&#x25B2; STEER</text>
+    <rect x="994" y="480" width="150" height="42" rx="21" fill="none" stroke="#9C9284" stroke-width="2"/>
+    <text x="1069" y="508" fill="#9C9284" text-anchor="middle">&#x25CB; CITE</text>
+  </g>
+
+  <!-- footer line -->
+  <text x="240" y="540" font-family="monospace" font-size="19" fill="#9C9284">a terminal for a Claude agent whose memory you can audit &#xB7; LORE-native</text>
+</svg>
