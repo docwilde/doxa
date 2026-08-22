@@ -88,9 +88,9 @@ class TurnBlock(Collapsible):
         self.thinking = LoadingIndicator(id="thinking", classes="thinking")
         self.body = Static("", id="turn-body", classes="turn-body")
         self.tools = Vertical(id="turn-tools", classes="turn-tools")
-        super().__init__(self.thinking, self.body, self.tools, title=self._title(), collapsed=False)
+        super().__init__(self.thinking, self.body, self.tools, title=self._render_title(), collapsed=False)
 
-    def _title(self, suffix: str = "") -> str:
+    def _render_title(self, suffix: str = "") -> str:
         return f"▎ {_one_line(self.prompt_text)}{suffix}"
 
     def hide_thinking(self) -> None:
@@ -112,7 +112,7 @@ class TurnBlock(Collapsible):
         if is_error:
             bits.append("✗ error")
         suffix = f"  ·  {'  ·  '.join(bits)}" if bits else ""
-        self.title = self._title(suffix)
+        self.title = self._render_title(suffix)
 
 
 class DoxaApp(App):
@@ -126,7 +126,7 @@ class DoxaApp(App):
         self.cwd = cwd or os.getcwd()
         self.model = model
         self.engine: SessionEngine | None = None
-        self._ready = asyncio.Event()
+        self._engine_ready = asyncio.Event()
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="block-list")
@@ -141,7 +141,7 @@ class DoxaApp(App):
     async def _boot(self) -> None:
         assert self.engine is not None
         await self.engine.start()
-        self._ready.set()
+        self._engine_ready.set()
         self._refresh_status()
 
     def _refresh_status(self) -> None:
@@ -167,7 +167,7 @@ class DoxaApp(App):
 
     async def _run_turn(self, prompt: str) -> None:
         assert self.engine is not None
-        await self._ready.wait()
+        await self._engine_ready.wait()
         block = TurnBlock(prompt)
         block_list = self.query_one("#block-list", VerticalScroll)
         await block_list.mount(block)
