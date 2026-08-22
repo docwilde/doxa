@@ -74,7 +74,7 @@ import lore_core
 from lore_core import context as lore_context
 from lore_core import deriver as lore_deriver
 from lore_core import store as lore_store
-from lore_core.config import PROJECTS_DIR, project_slug
+from lore_core.config import PROJECTS_DIR, project_slug, stage_disabled
 from lore_core.scrub import scrub_secrets
 
 DEFAULT_MODEL: str | None = None  # None = whatever the CLI/session default is
@@ -243,7 +243,15 @@ class SessionEngine:
 
     def _run_review_sync(self, older: bool) -> None:
         """Blocking: build the deriver job for the transcript so far and run
-        it. Called off the event loop (see _on_pre_compact / finalize)."""
+        it. Called off the event loop (see _on_pre_compact / finalize).
+
+        Both call sites here are automatic paths (PreCompact hook,
+        host-driven finalize) -- the equivalent of a hook firing in
+        lore_core.deriver.cmd_review, not an explicit `lore review` command
+        -- so this honors LORE_DISABLE_REVIEW the same way cmd_review's hook
+        branch does: skip silently, never block the session over it."""
+        if stage_disabled("review"):
+            return
         try:
             job = lore_deriver.build_review_job(
                 self.transcript_path, self.slug, cwd_hint=self.cwd, older=older,
