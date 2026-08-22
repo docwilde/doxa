@@ -1,11 +1,7 @@
 <p align="center"><img src="assets/banner.png" width="720" alt="DOXA — belief earning knowledge: the doxa-to-episteme ascent, outline beliefs earning fill toward the STEER triangle"></p>
 
-# <img src="assets/icon.png" width="42" align="top" alt=""> DOXA
-
-**Belief earning knowledge.**
-
-A terminal for working with a Claude agent whose memory you can audit. DOXA is
-the native home for [LORE](https://github.com/docwilde/LORE)'s memory model —
+**DOXA** is a terminal for working with a Claude agent whose memory you can
+audit — the native home for [LORE](https://github.com/docwilde/LORE)'s memory model,
 built on the Claude Agent SDK (engine) and Textual (TUI), billed through your
 Claude subscription, not API keys.
 
