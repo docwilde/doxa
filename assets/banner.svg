@@ -42,7 +42,7 @@
   <rect x="205" y="128" width="10" height="110" fill="url(#grad)"/>
 
   <!-- tagline -->
-  <text x="240" y="278" font-family="monospace" font-size="30" fill="#F2ECE4">where belief earns knowledge</text>
+  <text x="240" y="278" font-family="monospace" font-size="30" fill="#F2ECE4">belief earning knowledge</text>
 
   <!-- STEER / CITE pills, bottom right: the calibration encoding -->
   <g font-family="monospace" font-size="20">
