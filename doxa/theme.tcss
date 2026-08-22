@@ -1,0 +1,83 @@
+/* DOXA theme -- Phase 1 slice 2 scope only (see README's status table: full
+   spec lives in the private vault, this file implements the approved
+   load-bearing subset).
+
+   Tokens: dark surface ramp #171512 (screen) -> #221F1A (blocks) -> #2A251E
+   (nested chips) -> #3A3429 (borders, top of the ramp); primary #D97757
+   (Claude orange); round borders everywhere; generous padding; warm
+   off-white text (#F2E9DD body / #D8CDBB secondary). The block accent is
+   the literal "▎" glyph doxa/app.py's TurnBlock/ToolChip prefix their
+   titles with -- a left-rule character, not a CSS border trick, so it reads
+   identically whether or not the terminal's border-drawing glyphs render
+   cleanly.
+
+   No animation beyond the single thinking indicator: LoadingIndicator (a
+   Textual built-in, `.thinking` below) is the only animated element in
+   Phase 1 -- no transitions, no pulsing borders, nothing else moves. */
+
+Screen {
+    background: #171512;
+    color: #F2E9DD;
+}
+
+#block-list {
+    background: #171512;
+    padding: 1 2;
+}
+
+Collapsible {
+    background: #221F1A;
+    border: round #3A3429;
+    padding: 1 2;
+    margin-bottom: 1;
+}
+
+Collapsible > CollapsibleTitle {
+    color: #D97757;
+    text-style: bold;
+}
+
+.turn-body {
+    color: #F2E9DD;
+    padding: 1 1;
+}
+
+.turn-tools {
+    padding: 0 1;
+}
+
+ToolChip {
+    background: #2A251E;
+    border: round #3A3429;
+    margin: 0 0 1 0;
+    padding: 0 1;
+}
+
+ToolChip > CollapsibleTitle {
+    color: #D8CDBB;
+    text-style: none;
+}
+
+.chip-body {
+    color: #D8CDBB;
+    padding: 1 2;
+}
+
+.thinking {
+    color: #D97757;
+    height: 1;
+}
+
+#status-bar {
+    background: #221F1A;
+    color: #D8CDBB;
+    height: 1;
+    padding: 0 2;
+}
+
+#prompt-input {
+    background: #221F1A;
+    color: #F2E9DD;
+    border: round #D97757;
+    margin: 0 1 1 1;
+}
