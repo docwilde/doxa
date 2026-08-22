@@ -37,7 +37,7 @@
   <text x="798" y="215" font-family="monospace" font-size="22" fill="#F2A65E" text-anchor="middle">&#x1F10;&#x3C0;&#x3B9;&#x3C3;&#x3C4;&#x3AE;&#x3BC;&#x3B7;</text>
 
   <!-- wordmark -->
-  <text x="240" y="220" font-family="monospace" font-size="128" font-weight="bold" fill="url(#grad)" letter-spacing="14">DOXA</text>
+  <text x="240" y="220" font-family="monospace" font-size="128" font-weight="bold" fill="url(#grad)" letter-spacing="14">&#x394;&#x39F;&#x39E;&#x391;</text>
   <!-- block accent left-rule, the ▎ motif -->
   <rect x="205" y="128" width="10" height="110" fill="url(#grad)"/>
 

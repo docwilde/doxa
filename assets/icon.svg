@@ -1,8 +1,8 @@
-<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
-  <defs><linearGradient id="g" x1="0%" y1="100%" x2="100%" y2="0%">
-    <stop offset="0%" stop-color="#D97757"/><stop offset="100%" stop-color="#F2A65E"/>
-  </linearGradient></defs>
-  <rect width="512" height="512" rx="96" fill="#171512"/>
-  <circle cx="256" cy="256" r="150" fill="none" stroke="#9C9284" stroke-width="18"/>
-  <path d="M 256 156 L 342 306 L 170 306 Z" fill="url(#g)"/>
-</svg>
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="g" x1="0%" y1="100%" x2="100%" y2="0%"><stop offset="0%" stop-color="#D97757"/><stop offset="100%" stop-color="#F2A65E"/></linearGradient></defs>
+<rect width="512" height="512" rx="96" fill="#171512"/>
+<g transform="translate(86,86) scale(1.1333)">
+  <!-- THE mark, single source of truth. circle r=140, stroke 0.12r; triangle
+       apex 0.667r above center, half-width 0.573r, base 0.333r below center -->
+  <circle cx="150" cy="150" r="140" fill="none" stroke="#9C9284" stroke-width="17"/>
+  <path d="M 150 56.6 L 230.2 196.6 L 69.8 196.6 Z" fill="url(#g)"/>
+</g></svg>
