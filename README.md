@@ -1,6 +1,6 @@
 <p align="center"><img src="assets/banner.png" width="720" alt="DOXA — where belief earns knowledge: the doxa-to-episteme ascent, outline beliefs earning fill toward the STEER triangle"></p>
 
-# DOXA
+# <img src="assets/logo.png" width="42" align="top" alt=""> DOXA
 
 **Where belief earns knowledge.**
 
