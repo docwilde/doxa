@@ -95,6 +95,36 @@ Verdict: GO with four small redesigns, all itemized.
 | 3 | Streaming deriver, multi-agent panes + merge queue, act-time consult, trace tree | planned |
 | 4 | Container isolation tier, calibration dashboard, plugin-compat hardening | planned |
 
+## Run it
+
+Phase 1 slice 2 status, honestly: single pane only (no split panes, no
+palette, no FTS search yet — those are Phase 2). One session, one prompt
+input at the bottom, a scrolling list of foldable turn blocks above it, a
+status bar (model · session cost · context estimate · active belief count).
+Billed through your Claude subscription — authenticates via the local
+`claude` CLI's own OAuth session, same as `PHASE0_FINDINGS.md` verified; no
+`ANTHROPIC_API_KEY` needed or read.
+
+```sh
+uv sync
+uv run doxa
+```
+
+`uv run doxa` launches the TUI in the current directory (used as the
+session's cwd, and to resolve the LORE project scope the same way the LORE
+plugin does — the git repo root when you're inside one). Type a prompt,
+press enter; `ctrl+q` quits and runs the host-driven session-end review +
+index before exiting (see `PHASE0_FINDINGS.md` redesign item 1 — there is no
+SessionEnd hook to drive this any other way).
+
+`lore_core` is picked up from the LORE Claude Code plugin's marketplace
+checkout via a `sys.path` shim (`doxa/_lore_bootstrap.py`), documented there
+as temporary until `lore_core` ships to PyPI. Override its location with
+`DOXA_LORE_CORE_PATH` if your marketplace checkout lives somewhere other
+than `~/.claude/plugins/marketplaces/lore`.
+
+Run the tests with `uv run pytest`.
+
 ## Non-goals
 
 Provider-agnostic model routing (the subscription-auth path is the point);
