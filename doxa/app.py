@@ -31,12 +31,16 @@ import json
 import os
 from typing import Any, Callable
 
+from functools import partial
+
 from textual import on
 from textual.app import App, ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Collapsible, Input, LoadingIndicator, Static
 
+from . import peers as peers_mod
 from .engine import EngineEvent, SessionEngine
+from .palette import DoxaCommandProvider
 from .peers import PeerSendError, age_secs
 
 
@@ -163,10 +167,13 @@ class TurnBlock(Collapsible):
 
 
 class DoxaApp(App):
-    """The DOXA terminal -- single pane, Phase 1 slice 2."""
+    """The DOXA terminal."""
 
     CSS_PATH = "theme.tcss"
     TITLE = "DOXA"
+    # Ctrl+P (App.COMMAND_PALETTE_BINDING's default) opens the built-in
+    # CommandPalette; DoxaCommandProvider feeds it doxa_commands() below.
+    COMMANDS = App.COMMANDS | {DoxaCommandProvider}
 
     def __init__(
         self,
@@ -196,6 +203,7 @@ class DoxaApp(App):
         self._oob_chips: dict[str, ToolChip] = {}
 
     def compose(self) -> ComposeResult:
+        yield Static("", id="belief-inspector")  # hidden stub, palette-toggled
         yield VerticalScroll(id="block-list")
         yield Static("doxa · connecting…", id="status-bar")
         yield Input(placeholder="Ask DOXA…", id="prompt-input")
@@ -364,10 +372,145 @@ class DoxaApp(App):
         if isinstance(event.collapsible, ToolChip):
             event.collapsible.format_body()
 
+    # -- palette (Ctrl+P) --------------------------------------------
+
+    def doxa_commands(self) -> "list[tuple[str, str, Callable[[], Any]]]":
+        """The DOXA command surface, as (name, help, callback) tuples --
+        consumed by palette.DoxaCommandProvider on every palette open, so
+        the attach picker's entries reflect the live registry each time."""
+        commands: list[tuple[str, str, Any]] = [
+            (
+                "New session",
+                "Start a fresh DOXA session in this project and switch to it",
+                self._cmd_new_session,
+            ),
+            (
+                "Peers: list",
+                "Same-project live sessions (the /peers command)",
+                self._cmd_list_peers,
+            ),
+            (
+                "Peers: message",
+                "Prefill /msg <session> <text> in the prompt",
+                self._cmd_message_peer,
+            ),
+            (
+                "Belief inspector: toggle",
+                "Show/hide the belief inspector pane (stub until Phase 3)",
+                self.action_toggle_inspector,
+            ),
+            (
+                "Quit: detach",
+                "Close this TUI; the session daemon keeps running "
+                "(reattach with `doxa attach`)",
+                self.action_quit,
+            ),
+            (
+                "Quit: stop session",
+                "Finalize now (LORE review + index) and stop the daemon",
+                self.action_quit_stop,
+            ),
+        ]
+        # Attach picker: live daemon-hosted sessions from the shared
+        # peer/daemon registry, newest first, never this session itself.
+        self_id = str(getattr(self.engine, "session_id", "") or "") or None
+        for entry in peers_mod.list_daemons(self_id=self_id):
+            commands.append((
+                f"Attach: {entry.title} ({entry.session_id[:8]})",
+                f"Reattach to the live session in {entry.cwd}",
+                partial(self._cmd_attach, entry),
+            ))
+        return commands
+
+    def _cmd_new_session(self) -> None:
+        self.run_worker(
+            self._switch_engine(self._new_session_factory),
+            exclusive=True, group="switch",
+        )
+
+    def _cmd_attach(self, entry: peers_mod.PeerInfo) -> None:
+        from .client import EngineClient  # deferred: tests without a daemon never import it
+
+        socket_path = entry.daemon_socket
+        if not socket_path:
+            return
+        self.run_worker(
+            self._switch_engine(lambda: EngineClient(socket_path)),
+            exclusive=True, group="switch",
+        )
+
+    def _cmd_list_peers(self) -> None:
+        self.run_worker(self._run_command("/peers"), group="command")
+
+    def _cmd_message_peer(self) -> None:
+        prompt = self.query_one("#prompt-input", Input)
+        prompt.value = "/msg "
+        prompt.cursor_position = len(prompt.value)
+        prompt.focus()
+
+    async def _switch_engine(self, make_engine: "Callable[[], Any]") -> None:
+        """Swap the live engine handle: detach/finalize the old one, build
+        the new one (off-loop -- a daemon spawn blocks on subprocess+registry
+        polling), reset the block list, and restart the boot + pump workers
+        (both exclusive in their groups, so the old pump dies with its
+        engine)."""
+        old, self.engine = self.engine, None
+        self._engine_ready = asyncio.Event()
+        self._oob_turn = None
+        self._oob_chips = {}
+        if old is not None:
+            with contextlib.suppress(Exception):
+                await old.finalize()
+        try:
+            self.engine = await asyncio.to_thread(make_engine)
+        except Exception as exc:  # noqa: BLE001 -- spawn/attach failure must surface, not crash
+            block_list = self.query_one("#block-list", VerticalScroll)
+            await block_list.mount(SystemBlock(f"session switch failed: {exc}"))
+            return
+        await self.query_one("#block-list", VerticalScroll).remove_children()
+        self.query_one("#status-bar", Static).update("doxa · connecting…")
+        self.run_worker(self._boot(), exclusive=True, group="engine")
+        self.run_worker(self._peer_pump(), exclusive=True, group="peers")
+
+    def action_toggle_inspector(self) -> None:
+        """Belief-inspector stub: Phase 3 owns the real pane (live STEER/
+        CITE split, evidence trails); Phase 2 reserves the toggle, the dock
+        and the count so the palette command and the muscle memory exist."""
+        panel = self.query_one("#belief-inspector", Static)
+        if panel.display:
+            panel.display = False
+            return
+        beliefs = self.engine.belief_count() if self.engine is not None else 0
+        panel.update(
+            "▎ belief inspector — stub\n\n"
+            f"{beliefs} active beliefs in the store.\n\n"
+            "Phase 3 renders them here: STEER/CITE split,\n"
+            "evidence trails, calibration. Until then use\n"
+            "the lore_belief_search / lore_belief_show tools."
+        )
+        panel.display = True
+
+    async def action_quit_stop(self) -> None:
+        """Palette 'Quit: stop session' -- finalize NOW. Over a daemon
+        client this stops the daemon itself (LORE review + index run
+        there); in-process it is plain finalize-and-quit."""
+        engine, self.engine = self.engine, None
+        if engine is not None:
+            stop = getattr(engine, "stop", None)
+            with contextlib.suppress(Exception):
+                if stop is not None:
+                    await stop()
+                else:
+                    await engine.finalize()
+        await super().action_quit()
+
     async def action_quit(self) -> None:
-        """Host-driven finalization (PHASE0 redesign item 1: no SessionEnd
-        hook exists, so the app's own teardown path is where the session-end
-        review + index deterministically runs -- see SessionEngine.finalize)."""
+        """ctrl+q / palette 'Quit: detach'. Over a daemon client,
+        finalize() only DETACHES -- the daemon lingers and runs the
+        session-end review + index itself once the last client is gone
+        (or on `doxa stop`). In-process (Phase 1 shape), finalize() still
+        runs the review + index right here, host-driven (PHASE0 redesign
+        item 1: no SessionEnd hook exists)."""
         if self.engine is not None:
             await self.engine.finalize()
         await super().action_quit()

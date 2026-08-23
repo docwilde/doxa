@@ -101,3 +101,52 @@ PeerMessageBlock {
     border: round #D97757;
     margin: 0 1 1 1;
 }
+
+/* Belief inspector -- Phase 2 stub pane (palette-toggled, hidden by
+   default). Docked right so toggling never reflows the block list's
+   scroll anchor; real content lands in Phase 3. */
+#belief-inspector {
+    dock: right;
+    display: none;
+    width: 46;
+    background: #1D1B17;
+    color: #D8CDBB;
+    border: round #3A3429;
+    padding: 1 2;
+}
+
+/* Command palette (Ctrl+P): Textual's built-in modal, reskinned onto the
+   DOXA surface ramp -- dimmed screen behind (the 60% wash over the screen
+   surface is the house modal-overlay treatment), block surface for the
+   panel, Claude-orange for matched spans. */
+CommandPalette {
+    background: #171512 60%;
+}
+
+CommandPalette > Vertical {
+    background: #221F1A;
+}
+
+CommandPalette #--input {
+    background: #221F1A;
+    border: round #D97757;
+}
+
+CommandPalette #--results {
+    background: #221F1A;
+}
+
+CommandPalette CommandList {
+    background: #221F1A;
+    border: round #3A3429;
+    color: #F2E9DD;
+}
+
+CommandPalette > .command-palette--help-text {
+    color: #D8CDBB;
+}
+
+CommandPalette > .command-palette--highlight {
+    color: #D97757;
+    text-style: bold;
+}
