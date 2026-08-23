@@ -90,6 +90,12 @@ REGISTRY: tuple[SlashCommand, ...] = (
         usage="/logout [provider]",
         palette="Auth: logout",
     ),
+    SlashCommand(
+        name="/settings",
+        summary="Open the settings modal (env > config file > default)",
+        palette="Settings",
+        binding="ctrl+,",
+    ),
 )
 
 

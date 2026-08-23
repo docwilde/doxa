@@ -28,8 +28,9 @@ cache, and a user whose terminal lies about its support has a way out.
 
 from __future__ import annotations
 
-import os
 from typing import Any
+
+from . import config as config_mod
 
 MODES = ("kgp", "sixel", "halfblock", "text")
 ENV_VAR = "DOXA_IMAGE_MODE"
@@ -82,7 +83,7 @@ def _probe() -> str:
 def detect_mode() -> str:
     """The effective render mode: the DOXA_IMAGE_MODE override when set to a
     known mode, else the (once-)probed ladder result."""
-    forced = (os.environ.get(ENV_VAR) or "").strip().lower()
+    forced = config_mod.raw(ENV_VAR).strip().lower()
     if forced in MODES:
         return forced
     global _detected

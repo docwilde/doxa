@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import Any
 
 from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see module docstring
+from . import config as config_mod
 from . import gate as gate_mod
 from . import images as images_mod
 from . import operators as operators_mod
@@ -102,7 +103,7 @@ def consult_floor() -> float | None:
     Unset/empty means the default (the consult is ON by default -- it is
     cite-only material, never steering); zero/negative/garbage disables it.
     Read per call, same as every other env knob here."""
-    raw = os.environ.get("DOXA_CONSULT_FLOOR", "").strip()
+    raw = config_mod.raw("DOXA_CONSULT_FLOOR").strip()
     if not raw:
         return DEFAULT_CONSULT_FLOOR
     try:
@@ -118,7 +119,7 @@ def derive_interval() -> float | None:
     mid-session deriver is opt-in; unset/empty/zero/garbage all mean None.
     Read per call, like lore_core's own env-driven knobs, so a toggle
     doesn't need a new engine."""
-    raw = os.environ.get("DOXA_DERIVE_SECS", "").strip()
+    raw = config_mod.raw("DOXA_DERIVE_SECS").strip()
     if not raw:
         return None
     try:

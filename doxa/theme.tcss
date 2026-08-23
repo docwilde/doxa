@@ -291,3 +291,85 @@ HistorySearchScreen {
     color: #D8CDBB;
     padding-top: 1;
 }
+
+/* Settings (Ctrl+, / /settings): same modal treatment again -- dimmed
+   screen wash, block surface, ramp-top border. Rows are label / field /
+   help, deliberately plain: nothing in this panel animates. */
+SettingsScreen {
+    align: center middle;
+    background: #171512 60%;
+}
+
+#settings-panel {
+    width: 80%;
+    max-width: 100;
+    height: auto;
+    max-height: 90%;
+    background: #221F1A;
+    border: round #3A3429;
+    padding: 1 2;
+}
+
+#settings-header {
+    height: 1;
+}
+
+#settings-title {
+    width: 1fr;
+    color: #D97757;
+    text-style: bold;
+}
+
+/* Panel close affordance: the ✕ every closeable panel in the house wears
+   in its upper-right corner, for the mouse users the key bindings leave
+   out. Static, not a Button -- no ripple, no transition, no timer. */
+.panel-close {
+    width: 3;
+    content-align: center middle;
+    color: #D8CDBB;
+    text-style: bold;
+}
+
+.panel-close:hover {
+    color: #D97757;
+}
+
+#settings-rows {
+    height: auto;
+    max-height: 24;
+    padding: 1 0 0 0;
+}
+
+.setting-label {
+    color: #F2E9DD;
+    text-style: bold;
+}
+
+.setting-field {
+    background: #1D1B17;
+    color: #F2E9DD;
+    border: round #3A3429;
+}
+
+.setting-field:focus {
+    border: round #D97757;
+}
+
+.setting-readonly {
+    color: #D8CDBB;
+    padding: 0 1;
+}
+
+.setting-help {
+    color: #8A8073;
+    padding: 0 1 1 1;
+}
+
+#settings-path {
+    color: #8A8073;
+    padding-top: 1;
+}
+
+#settings-hint {
+    color: #D8CDBB;
+}

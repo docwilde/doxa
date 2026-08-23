@@ -250,6 +250,36 @@ than `~/.claude/plugins/marketplaces/lore`.
 
 Run the tests with `uv run pytest`.
 
+## Configuration
+
+**Precedence, everywhere: environment > config file > default.** An
+environment variable is a deliberate act with a narrower scope than a file
+(a shell, a launcher, a systemd unit, a test), so it beats the file it
+cannot see. The file is `$XDG_CONFIG_HOME/doxa/config.toml` (else
+`~/.config/doxa/config.toml`), written by the settings modal — `Ctrl+,`,
+`/settings`, or the palette's *Settings* entry — and safe to hand-edit
+(0600, plain TOML). Emptying a field removes the key, which returns that
+knob to its default. Keys DOXA doesn't recognize are preserved on save, so
+a file written by a newer version survives an older one.
+
+The modal lists only knobs that already do something, and each row names
+the code that reads it. A row whose environment variable is set is marked
+`[env]` and says what the environment is forcing — an edit that cannot
+take effect says so rather than silently doing nothing.
+
+| setting | env | default | read by |
+|---|---|---|---|
+| `model` | `DOXA_MODEL` | CLI default | `doxa.cli --model` (and `/model` for the live session) |
+| `derive_secs` | `DOXA_DERIVE_SECS` | off | `doxa.engine.derive_interval` — streaming-deriver debounce |
+| `linger_secs` | `DOXA_LINGER_SECS` | 120 | `doxa.cli --linger` — daemon detach-to-finalize window |
+| `consult_floor` | `DOXA_CONSULT_FLOOR` | 1.0 | `doxa.engine.consult_floor` — act-time belief consult; 0 disables |
+| `nerd_font` | `DOXA_NERD_FONT` | off | `doxa.app.git_branch_symbol` — branch glyph |
+| `image_mode` | `DOXA_IMAGE_MODE` | probe | `doxa.images.detect_mode` — force a rung of the image ladder |
+| *lore store* | `LORE_ROOT` | `~/.claude/lore` | `lore_core.ROOT` — shown read-only |
+
+There is deliberately no theme row: DOXA ships one theme, and a settings
+menu that lists an inert choice teaches the user that the menu lies.
+
 ## Non-goals
 
 Provider-agnostic model routing (the subscription-auth path is the point);

@@ -29,9 +29,9 @@ import asyncio
 import os
 import sys
 
-from . import peers
+from . import config, peers
 from .app import DoxaApp
-from .daemon import DEFAULT_LINGER_SECS, spawn_daemon
+from .daemon import spawn_daemon
 
 
 def _resolve(entries: list[peers.PeerInfo], prefix: str | None) -> peers.PeerInfo:
@@ -97,8 +97,10 @@ def main(argv: "list[str] | None" = None) -> int:
     )
     parser.add_argument("prefix", nargs="?", default=None,
                         help="session id or title prefix (attach/stop)")
-    parser.add_argument("--model", default=None)
-    parser.add_argument("--linger", type=float, default=DEFAULT_LINGER_SECS,
+    # Flag > env > config file > default: argparse supplies the flag layer,
+    # doxa.config supplies the two beneath it (see doxa/config.py).
+    parser.add_argument("--model", default=config.model())
+    parser.add_argument("--linger", type=float, default=config.linger_secs(),
                         help="seconds a spawned daemon outlives its last "
                              "client before finalizing (default %(default)s)")
     parser.add_argument("--in-process", action="store_true",

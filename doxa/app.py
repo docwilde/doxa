@@ -64,6 +64,7 @@ from textual.widgets.option_list import Option
 
 from . import auth as auth_mod
 from . import commands as commands_mod
+from . import config as config_mod
 from . import identity as identity_mod
 from . import images as images_mod
 from . import peers as peers_mod
@@ -95,8 +96,10 @@ def _fmt_age(secs: float) -> str:
 def git_branch_symbol() -> str:
     """The nerd-font branch glyph (U+E0A0) when the user opted in via
     DOXA_NERD_FONT (a TUI cannot detect font glyph coverage itself);
-    the universally-rendering ⎇ otherwise."""
-    return "" if os.environ.get("DOXA_NERD_FONT", "").strip() else "⎇"
+    the universally-rendering ⎇ otherwise. Read through doxa.config, so
+    the settings modal's stored value works exactly like the env var --
+    env first, file second (doxa/config.py's one precedence rule)."""
+    return "\ue0a0" if config_mod.raw("DOXA_NERD_FONT").strip() else "⎇"
 
 
 class GitLine:
@@ -786,7 +789,11 @@ class SessionPane(TabPane):
             "/img": self._cmd_img,
             "/login": partial(self._cmd_auth, "login"),
             "/logout": partial(self._cmd_auth, "logout"),
+            "/settings": self._cmd_settings,
         }
+
+    async def _cmd_settings(self, args: str) -> None:
+        self.app.action_settings()
 
     async def _system(self, text: str) -> None:
         """Mount one doxa-generated block and stay scrolled to it."""
@@ -978,6 +985,7 @@ class DoxaApp(App):
     # CTRL_C_DOUBLE_SECS = quit-stop ALL -- see action_ctrl_c_quit.
     BINDINGS = [
         ("ctrl+r", "history_search", "History"),
+        Binding("ctrl+comma", "settings", "Settings", show=False, priority=True),
         Binding("ctrl+t", "new_tab", "New tab", show=False, priority=True),
         Binding("ctrl+w", "close_tab", "Close tab", show=False, priority=True),
         Binding("ctrl+c", "ctrl_c_quit", "Quit (detach)", show=False, priority=True),
@@ -1264,6 +1272,23 @@ class DoxaApp(App):
             prompt.focus()
 
         self.push_screen(HistorySearchScreen(self.cwd), callback=_insert)
+
+    def action_settings(self) -> None:
+        """Ctrl+, / /settings / the palette's Settings entry -- one modal,
+        three doors. Saving re-reads the affected surfaces immediately
+        (the status line's branch glyph and the plan chip are the two that
+        show without a new session); knobs the ENGINE reads take effect on
+        its next read, which is per turn by construction."""
+        from .settings import SettingsScreen
+
+        def _saved(saved: "bool | None") -> None:
+            if not saved:
+                return
+            config_mod.invalidate()
+            for pane in self.panes():
+                pane._refresh_status()
+
+        self.push_screen(SettingsScreen(), callback=_saved)
 
     def action_toggle_inspector(self) -> None:
         """Belief-inspector stub: Phase 3 owns the real pane (live STEER/
