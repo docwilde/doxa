@@ -1,15 +1,45 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
-**DOXA** is a terminal for working with a Claude agent whose memory you can
-audit — the native TUI home for [LORE](https://github.com/docwilde/LORE)'s
-memory model, built on the Claude Agent SDK and Textual, billed through your
+**DOXA** is a terminal for Claude agents whose sessions outlive your
+window and whose memory of your own codebases you can actually watch
+form — built on the Claude Agent SDK and Textual, billed through your
 Claude subscription rather than an API key.
 
+A session runs in a **daemon** of its own: close the terminal, walk away,
+`doxa attach` an hour later, and the transcript picks up exactly where it
+left off — nothing lost, no tmux involved.
+
+Start it inside a repository and the session already knows the project.
+Durable facts about this codebase — its conventions, its past
+workarounds, corrections a human already made once — are injected before
+your first prompt, alongside a per-project file map (which files matter
+and why) the agent consults instead of grepping blind. That context is
+per-repo, not global: a tab open in this project and a tab open in
+another carry different project memory, on purpose. Procedures that
+worked before — captured as reusable runbooks, approved by you — are
+available to the agent here too, not just in the session that learned
+them.
+
+Every durable conclusion the agent reaches about you or your code goes
+through the same gate before it can shape a later answer: it starts as a
+**belief** — visible, queryable, citable but never acted on — and only
+gains real influence by being approved by a human or by building an
+actual track record of being right. Nothing writes itself into the
+model's context unsupervised; the running count sits in the status bar,
+and `/search` reaches every past session, not just the current one. This
+is what the tagline means literally, not as a slogan: *where belief earns
+knowledge* — an idea has to earn its way from opinion to something the
+agent will actually rely on.
+
+The memory engine underneath all of this is
+[LORE](https://github.com/docwilde/LORE), which also ships as a
+standalone Claude Code plugin; DOXA compiles it in-process
+(`lore_core`, imported, not shelled out to) rather than requiring the
+plugin to be installed — one memory model, two front ends.
+
 δόξα (*dóxa*): belief, opinion — as distinct from ἐπιστήμη (*epistēmē*),
-justified knowledge. Everything the agent derives starts as belief:
-visible, queryable, cite-only. Only what a human approves, or what earns a
-track record, steers the next answer. LORE holds the beliefs; DOXA is where
-you watch them form.
+justified knowledge. The name is the thesis: belief is the raw material,
+never the finished thing.
 
 <p align="center"><img src="assets/shots/hero.png" width="780" alt="DOXA shell: three tabs (Opus, Sonnet, Haiku, all on doxa:main), a turn asking what the repo believes about deploys, a lore_belief_search tool chip, and a status bar showing the git sha, subscription headroom, context percentage, belief count, session handle and peer count"></p>
 
