@@ -80,6 +80,38 @@ async def test_turn_block_and_tool_chip_appear_live(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_no_live_animation_timers_after_turns(monkeypatch, tmp_path):
+    """Idle-CPU regression: a finished turn's hidden LoadingIndicator must
+    not keep its 16Hz auto-refresh timer alive -- one leaked timer per turn
+    made idle CPU grow linearly with scrollback. After N completed turns,
+    zero auto-refresh timers may remain armed anywhere in the DOM."""
+    monkeypatch.setattr(
+        "doxa.app.SessionEngine",
+        lambda cwd, model=None: FakeEngine(SCRIPT),
+    )
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for i in range(3):
+            app.query_one("#prompt-input").value = f"turn {i}"
+            await pilot.press("enter")
+            for _ in range(100):
+                blocks = list(app.query(TurnBlock))
+                if len(blocks) == i + 1 and blocks[i].assistant_text:
+                    break
+                await pilot.pause(0.02)
+        assert len(list(app.query(TurnBlock))) == 3
+        armed = [
+            node for node in app.query("*")
+            if getattr(node, "_auto_refresh_timer", None) is not None
+        ]
+        assert armed == []
+        for block in app.query(TurnBlock):
+            assert block.thinking.display is False
+            assert block.thinking.auto_refresh is None
+
+
+@pytest.mark.asyncio
 async def test_tool_disabled_shows_in_status_area(monkeypatch, tmp_path):
     """Two-strikes containment is visible: the tool_disabled event mounts a
     system block and the status bar carries the small `⊘ toolname` note."""

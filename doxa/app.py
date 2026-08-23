@@ -147,6 +147,13 @@ class TurnBlock(Collapsible):
     def hide_thinking(self) -> None:
         if self.thinking.display:
             self.thinking.display = False
+            # display=False only HIDES the indicator: LoadingIndicator arms a
+            # 16Hz auto-refresh animation timer on mount and nothing else ever
+            # stops it, so every finished turn would leave one live timer
+            # behind and idle CPU grew linearly with scrollback (measured
+            # ~0.2%/turn headless; the fix takes 40 idle turn blocks from
+            # ~8.7% CPU to baseline). The animation dies with the display.
+            self.thinking.auto_refresh = None
 
     def append_text(self, chunk: str) -> None:
         self.hide_thinking()
