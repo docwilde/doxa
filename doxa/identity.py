@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -60,8 +62,33 @@ def claude_config_path() -> Path:
 def invalidate() -> None:
     """Drop the cached read -- called after an interactive auth flow, where
     the config may have been rewritten within the same mtime granularity."""
-    global _CACHE
+    global _CACHE, _CONFIG_CACHE
     _CACHE = None
+    _CONFIG_CACHE = None
+
+
+_CONFIG_CACHE: "tuple[tuple[str, float, int], dict[str, Any]] | None" = None
+
+
+def _config() -> dict[str, Any]:
+    """The whole CLI config document, cached like :func:`local_account`."""
+    global _CONFIG_CACHE
+    path = claude_config_path()
+    try:
+        stat = path.stat()
+    except OSError:
+        _CONFIG_CACHE = None
+        return {}
+    key = (str(path), stat.st_mtime, stat.st_size)
+    if _CONFIG_CACHE is not None and _CONFIG_CACHE[0] == key:
+        return _CONFIG_CACHE[1]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return {}
+    data = data if isinstance(data, dict) else {}
+    _CONFIG_CACHE = (key, data)
+    return data
 
 
 def local_account() -> dict[str, Any]:
@@ -80,14 +107,144 @@ def local_account() -> dict[str, Any]:
     key = (str(path), stat.st_mtime, stat.st_size)
     if _CACHE is not None and _CACHE[0] == key:
         return _CACHE[1]
-    try:
-        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, ValueError):
-        return {}
-    account = data.get("oauthAccount") if isinstance(data, dict) else None
+    account = _config().get("oauthAccount")
     account = dict(account) if isinstance(account, dict) else {}
     _CACHE = (key, account)
     return account
+
+
+# -- subscription usage ---------------------------------------------------
+#
+# What a subscription user actually wants next to the cost figure is not
+# dollars (there are none) but headroom: how much of the 5-hour session
+# window and the weekly window is spent. That number is NOT in the SDK's
+# account payload and there is no endpoint DOXA may call with the CLI's
+# token -- but the CLI itself fetches it and caches the answer verbatim in
+# its own config, under ``cachedUsageUtilization``. Reading that cache is
+# the whole feature: real numbers, local file, no new credential handling,
+# no polling. It is a CACHE, so it carries its own fetch timestamp and
+# DOXA reports staleness rather than pretending the number is live.
+
+USAGE_STALE_SECS = 6 * 3600
+
+
+@dataclass(frozen=True)
+class UsageLimit:
+    """One limit window as the CLI cached it."""
+
+    kind: str
+    percent: int
+    severity: str
+    resets_at: str
+
+
+@dataclass(frozen=True)
+class Usage:
+    """The cached utilization snapshot, normalized."""
+
+    session: "UsageLimit | None"
+    weekly: "UsageLimit | None"
+    scoped: "UsageLimit | None"
+    """The tightest per-model weekly window, when the CLI reported one --
+    this is the limit that usually bites first, and its ``scope`` names the
+    model it applies to."""
+
+    scope_label: str
+    fetched_at: "datetime | None"
+
+    def age_secs(self) -> "float | None":
+        if self.fetched_at is None:
+            return None
+        return max(
+            0.0, (datetime.now(timezone.utc) - self.fetched_at).total_seconds()
+        )
+
+    def is_stale(self) -> bool:
+        age = self.age_secs()
+        return age is None or age > USAGE_STALE_SECS
+
+    def chip(self) -> "str | None":
+        """The compact status-line form: ``s:9% w:48%`` (plus the scoped
+        window when it is the tighter one). None when nothing real is
+        cached -- an absent number is shown as nothing, never as a zero."""
+        bits = []
+        if self.session is not None:
+            bits.append(f"s:{self.session.percent}%")
+        if self.weekly is not None:
+            bits.append(f"w:{self.weekly.percent}%")
+        if self.scoped is not None and (
+            self.weekly is None or self.scoped.percent > self.weekly.percent
+        ):
+            label = self.scope_label.lower() or "model"
+            bits.append(f"{label}:{self.scoped.percent}%")
+        if not bits:
+            return None
+        return " ".join(bits) + ("~" if self.is_stale() else "")
+
+
+def _limit(raw: Any) -> "UsageLimit | None":
+    if not isinstance(raw, dict):
+        return None
+    percent = raw.get("percent", raw.get("utilization"))
+    if percent is None:
+        return None
+    try:
+        percent = int(round(float(percent)))
+    except (TypeError, ValueError):
+        return None
+    return UsageLimit(
+        kind=str(raw.get("kind") or ""),
+        percent=percent,
+        severity=str(raw.get("severity") or "normal"),
+        resets_at=str(raw.get("resets_at") or ""),
+    )
+
+
+def usage() -> "Usage | None":
+    """The CLI's cached subscription utilization, or None.
+
+    None means the honest thing to display is nothing: API-key auth, a CLI
+    that has never fetched it, or a config we cannot read."""
+    cached = _config().get("cachedUsageUtilization")
+    if not isinstance(cached, dict):
+        return None
+    utilization = cached.get("utilization")
+    if not isinstance(utilization, dict):
+        return None
+    limits = utilization.get("limits")
+    limits = limits if isinstance(limits, list) else []
+    session = weekly = scoped = None
+    scope_label = ""
+    for raw in limits:
+        if not isinstance(raw, dict):
+            continue
+        parsed = _limit(raw)
+        if parsed is None:
+            continue
+        if parsed.kind == "session":
+            session = parsed
+        elif parsed.kind == "weekly_all":
+            weekly = parsed
+        elif parsed.kind == "weekly_scoped":
+            if scoped is None or parsed.percent > scoped.percent:
+                scoped = parsed
+                scope = raw.get("scope") or {}
+                model = (scope.get("model") or {}) if isinstance(scope, dict) else {}
+                scope_label = str(model.get("display_name") or "")
+    if session is None and weekly is None and scoped is None:
+        # Older shape: five_hour / seven_day objects without the limits list.
+        session = _limit(utilization.get("five_hour"))
+        weekly = _limit(utilization.get("seven_day"))
+        if session is None and weekly is None:
+            return None
+    fetched_at = None
+    raw_ms = cached.get("fetchedAtMs")
+    if isinstance(raw_ms, (int, float)):
+        fetched_at = datetime.fromtimestamp(raw_ms / 1000.0, tz=timezone.utc)
+    return Usage(
+        session=session, weekly=weekly, scoped=scoped,
+        scope_label=scope_label, fetched_at=fetched_at,
+    )
 
 
 # The precise-tier mapping, pinned as a table for the values that actually

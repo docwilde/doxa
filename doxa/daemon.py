@@ -412,6 +412,20 @@ class SessionDaemon:
                 await self._reply(writer, req_id, ok=True, peer=vars(peer))
             except PeerSendError as exc:
                 await self._reply(writer, req_id, ok=False, error=str(exc))
+        elif method == "set_model":
+            # /model over the daemon split: a control request to the SDK
+            # client the daemon already owns -- no reconnect, so the
+            # transcript, this ring and every attached client survive it.
+            try:
+                model = await self.engine.set_model(params.get("model") or None)
+            except Exception as exc:  # noqa: BLE001 -- the client shows it
+                await self._reply(writer, req_id, ok=False,
+                                  error=f"{type(exc).__name__}: {exc}")
+                return
+            # Every attached client learns the new model, not just the one
+            # that asked -- two tabs on one daemon must not disagree.
+            self._publish(None, EngineEvent("model_changed", {"model": model}))
+            await self._reply(writer, req_id, ok=True, model=model)
         elif method == "stop":
             await self._reply(writer, req_id, ok=True, stopping=True)
             await self._shutdown("explicit stop")
@@ -432,6 +446,9 @@ class SessionDaemon:
             "lore_root": getattr(self.engine, "lore_root", None),
             "total_cost_usd": self.engine.total_cost_usd,
             "ctx_percentage": self.engine.last_ctx_percentage,
+            # /usage over the split: the engine's own token accounting,
+            # cached client-side like every other status value.
+            "usage": self.engine.usage_summary(),
             "belief_count": self.engine.belief_count(),
             "disabled_tools": self.engine.disabled_tools(),
             "peers": [vars(p) for p in self.engine.list_peers()],

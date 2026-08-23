@@ -96,6 +96,37 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette="Settings",
         binding="ctrl+,",
     ),
+    SlashCommand(
+        name="/model",
+        summary="Switch the model for the rest of this session (no reconnect)",
+        usage="/model [name]",
+        palette="Model: switch",
+    ),
+    SlashCommand(
+        name="/effort",
+        summary="Effort level for NEW sessions (the SDK sets it at connect only)",
+        usage="/effort [low|medium|high|xhigh|max]",
+    ),
+    SlashCommand(
+        name="/usage",
+        summary="Session tokens, turns, cost, and subscription headroom",
+        palette="Usage",
+    ),
+    SlashCommand(
+        name="/clear",
+        summary="Fresh session in THIS tab: finalize, rotate transcript, reset",
+        palette="Clear session",
+    ),
+    SlashCommand(
+        name="/compact",
+        summary="Ask the CLI to compact the transcript (runs LORE's review first)",
+        passthrough=True,
+    ),
+    SlashCommand(
+        name="/help",
+        summary="Every command and key binding, generated from this registry",
+        palette="Help",
+    ),
 )
 
 

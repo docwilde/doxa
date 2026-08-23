@@ -250,6 +250,26 @@ than `~/.claude/plugins/marketplaces/lore`.
 
 Run the tests with `uv run pytest`.
 
+## Commands
+
+`/help` prints this list — it is generated from the one command registry
+(`doxa/commands.py`), which the Ctrl+P palette and the prompt's `/`
+autocomplete also read, so no surface can drift from another.
+
+What the Claude-Code-shaped commands do is bounded by what the SDK
+actually supports, and each one was implemented only that far:
+
+| command | what it really does |
+|---|---|
+| `/model [name]` | **Live.** `ClaudeSDKClient.set_model` is a control request, so the model changes for subsequent turns with **no reconnect** — transcript, daemon, replay ring, peer presence and hooks all survive. The chosen model is also written to the settings file: the `model` row and this command are one state. |
+| `/effort [level]` | **Connect-time only.** `ClaudeAgentOptions.effort` (the CLI's `--effort`) has no control-request counterpart, so this sets the level for *new* sessions and says plainly that the running one keeps its own. It is not a live knob and does not pretend to be. |
+| `/usage` | Measured numbers only: token counts and turn count summed from the CLI's own per-result `usage` block, plus the subscription headroom the `claude` CLI itself fetched and cached (`cachedUsageUtilization` — session %, weekly %, per-model weekly % with its severity). Nothing cached ⇒ nothing shown. |
+| `/clear` | A **fresh session in this tab**: the old handle is finalized (LORE review + index), the transcript rotates to the new session's file, the tab stays. Distinct from Ctrl+T (new tab) and from scrolling away (the context is gone because the session is). |
+| `/compact` | Registered but deliberately **not intercepted** — the literal prompt text is what makes the CLI compact and what fires the `PreCompact` hook the deriver hangs off. There is no typed `compact()` in the SDK (`PHASE0_FINDINGS.md` §6). |
+| `/login`, `/logout` | The provider's own auth CLI, under a suspended TUI. |
+| `/settings` | The settings modal (`Ctrl+,`). |
+| `/peers`, `/msg`, `/img` | Peer listing, peer message, image-ladder probe. |
+
 ## Configuration
 
 **Precedence, everywhere: environment > config file > default.** An
@@ -270,6 +290,7 @@ take effect says so rather than silently doing nothing.
 | setting | env | default | read by |
 |---|---|---|---|
 | `model` | `DOXA_MODEL` | CLI default | `doxa.cli --model` (and `/model` for the live session) |
+| `effort` | `DOXA_EFFORT` | CLI default | `doxa.engine.effort_level` → `ClaudeAgentOptions.effort` — connect-time only |
 | `derive_secs` | `DOXA_DERIVE_SECS` | off | `doxa.engine.derive_interval` — streaming-deriver debounce |
 | `linger_secs` | `DOXA_LINGER_SECS` | 120 | `doxa.cli --linger` — daemon detach-to-finalize window |
 | `consult_floor` | `DOXA_CONSULT_FLOOR` | 1.0 | `doxa.engine.consult_floor` — act-time belief consult; 0 disables |

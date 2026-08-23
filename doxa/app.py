@@ -80,6 +80,25 @@ from .peers import PeerSendError, age_secs
 # a second press inside it upgrades to quit-stop (finalize NOW).
 CTRL_C_DOUBLE_SECS = 2.0
 
+# Model aliases the installed CLI documents for --model ("provide an alias
+# for the latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's
+# full name"). /model accepts any string -- these are what it OFFERS, and
+# the list is short because a stale menu of full model ids is worse than
+# an alias that always resolves to the current one.
+MODEL_ALIASES = ("haiku", "sonnet", "opus", "fable")
+
+
+def help_text() -> str:
+    """``/help``, generated from the command registry -- never a
+    hand-maintained list, because a hand-maintained list is a list that is
+    wrong by the second command anyone adds."""
+    lines = ["commands", ""]
+    width = max(len(cmd.call_form()) for cmd in commands_mod.REGISTRY)
+    for command in commands_mod.REGISTRY:
+        suffix = "  (sent to the CLI, not intercepted)" if command.passthrough else ""
+        lines.append(f"  {command.call_form():<{width}}  {command.summary}{suffix}")
+    return "\n".join(lines)
+
 
 def _one_line(text: str, limit: int = 70) -> str:
     return " ".join(text.split())[:limit]
@@ -790,10 +809,175 @@ class SessionPane(TabPane):
             "/login": partial(self._cmd_auth, "login"),
             "/logout": partial(self._cmd_auth, "logout"),
             "/settings": self._cmd_settings,
+            "/model": self._cmd_model,
+            "/effort": self._cmd_effort,
+            "/usage": self._cmd_usage,
+            "/clear": self._cmd_clear,
+            "/help": self._cmd_help,
         }
 
     async def _cmd_settings(self, args: str) -> None:
         self.app.action_settings()
+
+    async def _cmd_model(self, args: str) -> None:
+        """/model -- switch the model for subsequent turns, in place.
+
+        The SDK's set_model is a control request, so this is genuinely a
+        switch and not a restart: the transcript, the daemon, the replay
+        ring and every hook survive it untouched. The chosen model is also
+        written to the settings file, because the settings modal's `model`
+        row and this command are the SAME state -- one source of truth."""
+        engine = self.engine
+        current = str(getattr(engine, "model", None) or "default")
+        if not args:
+            lines = [f"model: {current}", ""]
+            for alias in MODEL_ALIASES:
+                mark = "▸" if alias in current.lower() else " "
+                lines.append(f" {mark} {alias}")
+            lines.append("")
+            lines.append("usage: /model <alias or full model id>")
+            await self._system("\n".join(lines))
+            return
+        wanted = args.split()[0]
+        setter = getattr(engine, "set_model", None)
+        if setter is None:
+            await self._system(
+                "model: this session's handle cannot switch models"
+            )
+            return
+        try:
+            resolved = await setter(wanted)
+        except Exception as exc:  # noqa: BLE001 -- a refusal is information
+            await self._system(f"model: {type(exc).__name__}: {exc}")
+            return
+        config_mod.save({"model": wanted})
+        self._refresh_status()
+        self._refresh_identity()
+        await self._system(
+            f"model: {current} → {resolved}  ·  transcript and session kept "
+            "(SDK control request, no reconnect)"
+        )
+
+    async def _cmd_effort(self, args: str) -> None:
+        """/effort -- honest about a real SDK limit.
+
+        ``ClaudeAgentOptions.effort`` (the CLI's --effort) is a CONNECT-TIME
+        option; there is no control request for it the way there is for the
+        model. So this sets the level for NEW sessions and says plainly
+        that the running one keeps its own, rather than pretending to
+        change something it cannot."""
+        from . import engine as engine_mod
+
+        current = engine_mod.effort_level()
+        if not args:
+            lines = [f"effort: {current or '(CLI default)'}", ""]
+            for level in engine_mod.EFFORT_LEVELS:
+                lines.append(f" {'▸' if level == current else ' '} {level}")
+            lines.append("")
+            lines.append("usage: /effort <level>   ·   empty value clears it")
+            lines.append(
+                "the SDK sets effort at connect only — a change applies to "
+                "NEW sessions (/clear, a new tab), never to this one"
+            )
+            await self._system("\n".join(lines))
+            return
+        level = args.split()[0].lower()
+        if level not in engine_mod.EFFORT_LEVELS and level != "default":
+            await self._system(
+                f"effort: unknown level {level!r} — "
+                + ", ".join(engine_mod.EFFORT_LEVELS)
+            )
+            return
+        config_mod.save({"effort": "" if level == "default" else level})
+        await self._system(
+            f"effort: new sessions will use {level} — this session keeps "
+            f"{current or 'the CLI default'} (the SDK has no live setter)"
+        )
+
+    async def _cmd_usage(self, args: str) -> None:
+        await self._system(self._usage_text())
+
+    def _usage_text(self) -> str:
+        """/usage: the session's REAL numbers, and the account's real
+        headroom. Both sides are measured, neither is modelled -- the
+        token counts are the CLI's own per-result usage block, and the
+        percentages are the utilization snapshot the CLI itself fetched
+        and cached (doxa.identity.usage). Anything absent is omitted."""
+        engine = self.engine
+        summary = {}
+        if engine is not None and hasattr(engine, "usage_summary"):
+            summary = engine.usage_summary() or {}
+        rows: list[tuple[str, str]] = []
+        session_id = str(summary.get("session_id") or "")
+        if session_id:
+            rows.append(("session", session_id[:8]))
+        rows.append(("model", str(summary.get("model") or "default")))
+        rows.append(("turns", f"{int(summary.get('num_turns') or 0):,}"))
+        for key, label in (
+            ("input_tokens", "tokens in"),
+            ("output_tokens", "tokens out"),
+            ("cache_read_input_tokens", "cache read"),
+            ("cache_creation_input_tokens", "cache write"),
+        ):
+            if key in summary:
+                rows.append((label, f"{int(summary.get(key) or 0):,}"))
+        ctx = summary.get("ctx_percentage")
+        if ctx is not None:
+            rows.append(("context", f"{float(ctx):.0f}%"))
+        account = getattr(engine, "account", None) or {}
+        tier = identity_mod.account_tier(account)
+        cost = float(summary.get("total_cost_usd") or 0.0)
+        if tier:
+            rows.append(("plan", f"{tier}  (≈${cost:.4f} if API)"))
+        else:
+            rows.append(("cost", f"${cost:.4f}"))
+        lines = [f"{label:<12} {value}" for label, value in rows]
+
+        usage = identity_mod.usage()
+        if usage is None:
+            lines.append("")
+            lines.append(
+                "no subscription utilization cached by the claude CLI "
+                "(API-key auth, or it has not fetched one yet)"
+            )
+            return "usage\n" + "\n".join(lines)
+        lines.append("")
+        for limit, label in (
+            (usage.session, "session (5h)"),
+            (usage.weekly, "weekly"),
+            (usage.scoped, f"weekly ({usage.scope_label or 'model'})"),
+        ):
+            if limit is None:
+                continue
+            note = f"  ⚠ {limit.severity}" if limit.severity != "normal" else ""
+            resets = f"  · resets {limit.resets_at[:16]}" if limit.resets_at else ""
+            lines.append(f"{label:<12} {limit.percent}%{resets}{note}")
+        age = usage.age_secs()
+        if age is not None:
+            lines.append("")
+            lines.append(
+                f"utilization cached by the claude CLI {_fmt_age(age)} ago"
+                + (" — stale" if usage.is_stale() else "")
+            )
+        return "usage\n" + "\n".join(lines)
+
+    async def _cmd_clear(self, args: str) -> None:
+        """/clear -- a FRESH session in this tab, not a cleared screen.
+
+        Distinct from Ctrl+T: the tab stays, its engine handle is
+        finalized (LORE review + index, transcript rotated to the new
+        session's file) and replaced. Distinct from scrolling away: the
+        model's context is genuinely gone, because the session is."""
+        factory = getattr(self.app, "_new_session_factory", None)
+        if factory is None:
+            await self._system("clear: no session factory on this app")
+            return
+        self.run_worker(
+            self.switch_engine(factory), exclusive=True, group="switch"
+        )
+
+    async def _cmd_help(self, args: str) -> None:
+        await self._system(help_text())
 
     async def _system(self, text: str) -> None:
         """Mount one doxa-generated block and stay scrolled to it."""

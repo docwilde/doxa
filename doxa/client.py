@@ -80,6 +80,7 @@ class EngineClient:
         self._peers: list[PeerInfo] = []
         self._belief_count = 0
         self._disabled: list[str] = []
+        self._usage: dict = {}
         self._closed = False
 
     # -- lifecycle ---------------------------------------------------
@@ -229,6 +230,11 @@ class EngineClient:
             name = ev.data.get("name")
             if name and name not in self._disabled:
                 self._disabled.append(name)
+        elif ev.type == "model_changed":
+            # Another client (or this one) switched the session's model:
+            # the cached value follows immediately, not at the next status.
+            if ev.data.get("model"):
+                self.model = str(ev.data["model"])
         elif ev.type in ("peer_joined", "peer_left"):
             asyncio.ensure_future(self._refresh_status_quietly())
         if frame.get("turn") and frame["turn"] == self._active_turn:
@@ -269,6 +275,21 @@ class EngineClient:
                 return
             yield item
 
+    async def set_model(self, model: "str | None") -> str:
+        """/model over the socket. The daemon does the control request; a
+        refusal comes back as an error the caller shows verbatim."""
+        reply = await self._call("set_model", model=model)
+        if not reply.get("ok"):
+            raise EngineClientError(reply.get("error") or "model switch refused")
+        self.model = reply.get("model") or model
+        return str(self.model)
+
+    def usage_summary(self) -> dict:
+        """Engine-parity surface for /usage -- the daemon's own numbers,
+        cached from the last status reply (same read-it-synchronously
+        contract as belief_count and the cost figure)."""
+        return dict(self._usage)
+
     async def refresh_status(self) -> dict:
         reply = await self._call("status")
         status = reply.get("status") or {}
@@ -282,6 +303,8 @@ class EngineClient:
             self.total_cost_usd = status["total_cost_usd"]
         self.last_ctx_percentage = status.get("ctx_percentage")
         self._belief_count = int(status.get("belief_count") or 0)
+        if isinstance(status.get("usage"), dict):
+            self._usage = status["usage"]
         self._disabled = list(status.get("disabled_tools") or [])
         self._peers = [
             PeerInfo(**p) for p in status.get("peers") or []

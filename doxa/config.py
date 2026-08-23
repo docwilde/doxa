@@ -71,6 +71,12 @@ SETTINGS: tuple[Setting, ...] = (
              "switches the live session)",
     ),
     Setting(
+        key="effort", env="DOXA_EFFORT", label="effort",
+        kind="choice", choices=("", "low", "medium", "high", "xhigh", "max"),
+        help="Effort level for NEW sessions; the SDK sets it at connect only, "
+             "so a running session keeps its own (doxa.engine.effort_level)",
+    ),
+    Setting(
         key="derive_secs", env="DOXA_DERIVE_SECS", label="derive secs",
         kind="number",
         help="Streaming-deriver debounce interval, seconds; empty = off "

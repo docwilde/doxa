@@ -112,6 +112,8 @@ class FakeEngine:
         # exercise the subscription-aware display / identity block.
         self.account: dict = {}
         self.lore_root: "str | None" = None
+        self.model_switches: list = []
+        self.num_turns = 0
 
     def disabled_tools(self) -> list[str]:
         return list(self.disabled)
@@ -144,6 +146,27 @@ class FakeEngine:
                 self.total_cost_usd += ev.data.get("cost_usd") or 0.0
                 self.last_ctx_percentage = ev.data.get("ctx_percentage")
             yield ev
+
+    async def set_model(self, model: "str | None") -> str:
+        """Engine parity for /model. The real engine issues an SDK control
+        request; the fake just records the switch, which is exactly the
+        surface app.py touches."""
+        self.model = model
+        self.model_switches.append(model)
+        return model or "default"
+
+    def usage_summary(self) -> dict:
+        return {
+            "session_id": "fake-session-id",
+            "model": self.model,
+            "num_turns": self.num_turns,
+            "total_cost_usd": self.total_cost_usd,
+            "ctx_percentage": self.last_ctx_percentage,
+            "input_tokens": 1200,
+            "output_tokens": 340,
+            "cache_read_input_tokens": 8000,
+            "cache_creation_input_tokens": 150,
+        }
 
     def belief_count(self) -> int:
         return 3

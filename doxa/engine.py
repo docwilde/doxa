@@ -113,6 +113,22 @@ def consult_floor() -> float | None:
     return value if value > 0 else None
 
 
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+
+def effort_level() -> "str | None":
+    """``DOXA_EFFORT`` / the config file's ``effort`` row, validated.
+
+    The SDK exposes effort as ``ClaudeAgentOptions.effort`` (the CLI's
+    ``--effort`` flag) -- a CONNECT-TIME option. There is no control
+    request for it, unlike set_model, so a session's effort is fixed for
+    its lifetime and this is read exactly once, in _build_options. An
+    unknown value is ignored rather than passed through, because an
+    invalid --effort is a CLI that refuses to start."""
+    value = config_mod.raw("DOXA_EFFORT").strip().lower()
+    return value if value in EFFORT_LEVELS else None
+
+
 def derive_interval() -> float | None:
     """The streaming-deriver debounce interval from ``DOXA_DERIVE_SECS``
     (LORE_REVIEW_SECS-style: seconds, positive number). Default OFF -- the
@@ -254,6 +270,15 @@ class SessionEngine:
         self._tool_started: dict[str, float] = {}  # tool_use_id -> monotonic start
         self.total_cost_usd = 0.0
         self.last_ctx_percentage: float | None = None
+        # Session token accounting for /usage: summed from every
+        # ResultMessage's own usage block -- the CLI's numbers, not an
+        # estimate of our own. Cache reads/creates are kept separate
+        # because they are separately priced and separately interesting.
+        self.usage_totals: dict[str, int] = {
+            "input_tokens": 0, "output_tokens": 0,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+        }
+        self.num_turns = 0
         # Identity surface (the app's initial identity block + the
         # subscription-aware cost display): the CLI's initialize payload,
         # captured at connect via the SDK's get_server_info(). ``account``
@@ -538,8 +563,12 @@ class SessionEngine:
             include_write=True,
             ctx={"belief_store": lore_store.db_connect, "lore_root": str(lore_core.ROOT)},
         )
+        effort = effort_level()
         return ClaudeAgentOptions(
             model=self.model,
+            # Connect-time only -- see effort_level(). None leaves the CLI's
+            # own default alone rather than asserting a level we made up.
+            **({"effort": effort} if effort else {}),
             cwd=self.cwd,
             system_prompt={
                 "type": "preset",
@@ -768,6 +797,12 @@ class SessionEngine:
             elif isinstance(message, ResultMessage):
                 if message.total_cost_usd:
                     self.total_cost_usd += message.total_cost_usd
+                self.num_turns += 1
+                if isinstance(message.usage, dict):
+                    for field_name in self.usage_totals:
+                        value = message.usage.get(field_name)
+                        if isinstance(value, (int, float)):
+                            self.usage_totals[field_name] += int(value)
                 ctx_percentage = await self._safe_ctx_percentage()
                 self.last_ctx_percentage = ctx_percentage
                 yield EngineEvent("turn_done", {
@@ -781,6 +816,46 @@ class SessionEngine:
                 # The transcript just grew: the streaming deriver's one
                 # trigger site (debounced + single-flight inside).
                 self._maybe_schedule_derive()
+
+    # -- live model switching ----------------------------------------
+
+    async def set_model(self, model: "str | None") -> str:
+        """Switch the model for subsequent turns, IN PLACE.
+
+        The SDK exposes this as a control request
+        (``ClaudeSDKClient.set_model`` -> the CLI's ``set_model`` subtype),
+        so there is no reconnect: the transcript, the daemon, the replay
+        ring, the peer presence and every hook stay exactly as they are.
+        That is the whole reason /model is a real command and not a
+        restart in disguise.
+
+        Returns the model now in force. Raises RuntimeError when the
+        session cannot switch (not connected, or a client without the
+        method) -- the caller reports that rather than pretending."""
+        if not self._connected or self._client is None:
+            raise RuntimeError("session is not connected")
+        setter = getattr(self._client, "set_model", None)
+        if setter is None:
+            raise RuntimeError(
+                "this session's client cannot switch models (no set_model)"
+            )
+        await setter(model)
+        self.model = model
+        return model or "default"
+
+    def usage_summary(self) -> dict[str, Any]:
+        """Everything /usage knows from the SESSION side: the CLI's own
+        token counts, the turn count, and the cost figure (which is a
+        list-price estimate on subscription auth -- the caller labels it,
+        this only reports it)."""
+        return {
+            "session_id": self.session_id,
+            "model": self.model,
+            "num_turns": self.num_turns,
+            "total_cost_usd": self.total_cost_usd,
+            "ctx_percentage": self.last_ctx_percentage,
+            **self.usage_totals,
+        }
 
     async def _safe_ctx_percentage(self) -> float | None:
         get_usage = getattr(self._client, "get_context_usage", None)
