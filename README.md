@@ -14,7 +14,7 @@ are examined.
 
 <p align="center"><img src="assets/screenshot.png" width="760" alt="DOXA shell: a turn block with prompt metadata chips (duration, cost), streamed answer, a foldable tool-call chip, and the status bar (model, session cost, context %, belief count)"></p>
 
-*The Phase 1 shell, headless-rendered from the real Textual app (scripted engine, no spend): turn blocks with cost/duration chips, foldable tool calls, the belief-count status bar.*
+*The shell, headless-rendered from the real Textual app (scripted engine, no spend): turn blocks with cost/duration chips, foldable tool calls, the belief-count status bar. The session behind it is a detachable daemon -- close the terminal, `doxa attach` later, replay from your cursor.*
 
 ## The one property everything serves
 
@@ -122,7 +122,7 @@ Verdict: GO with four small redesigns, all itemized.
 |---|---|---|
 | 0 | SDK lifecycle validation, Textual coexistence, auth | **done** |
 | 1 | `lore_core` extraction; single-pane shell; block rendering; session-end review; ask | **done** |
-| 2 | Daemon split + detach/reattach, palette, FTS history search, theme (panes, review pane: deferred to 3) | **in progress** |
+| 2 | Daemon split + detach/reattach, Ctrl+P palette, Ctrl+R FTS history search, theme | **done** |
 | 3 | Split panes + review pane, streaming deriver, multi-agent panes + merge queue, act-time consult, trace tree | planned |
 | 4 | Container isolation tier, calibration dashboard, plugin-compat hardening | planned |
 

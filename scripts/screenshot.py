@@ -19,6 +19,7 @@ from doxa.engine import EngineEvent  # noqa: E402
 from tests.fakes import FakeEngine  # noqa: E402
 
 SCRIPT = [
+    EngineEvent("peer_joined", {"session_id": "b3f2a1c9", "title": "paper draft session"}),
     EngineEvent("turn_started", {}),
     EngineEvent("text_delta", {"text": "Two beliefs about this repo are relevant — one is "}),
     EngineEvent("text_delta", {"text": "calibrated (STEER), one is cite-only until it earns a track record."}),
@@ -28,7 +29,7 @@ SCRIPT = [
                                 "result_summary": "2 beliefs: #184 STEER (0.91 · 12 outcomes) · #201 CITE",
                                 "is_error": False, "duration_ms": 45}),
     EngineEvent("turn_done", {"cost_usd": 0.0031, "duration_ms": 1840, "is_error": False,
-                              "session_cost_usd": 0.0031, "ctx_percentage": 6.0}),
+                              "session_cost_usd": 0.0031, "ctx_percentage": 11.0}),
 ]
 
 
