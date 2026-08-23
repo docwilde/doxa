@@ -12,6 +12,10 @@ Only what survives the dialectic — human approval, or a calibrated record of
 being right — ascends to steer. LORE holds the engrams; DOXA is where they
 are examined.
 
+<p align="center"><img src="assets/screenshot.png" width="760" alt="DOXA shell: a turn block with prompt metadata chips (duration, cost), streamed answer, a foldable tool-call chip, and the status bar (model, session cost, context %, belief count)"></p>
+
+*The Phase 1 shell, headless-rendered from the real Textual app (scripted engine, no spend): turn blocks with cost/duration chips, foldable tool calls, the belief-count status bar.*
+
 ## The one property everything serves
 
 **Nothing steers the agent that isn't human-approved or outcome-calibrated.**
