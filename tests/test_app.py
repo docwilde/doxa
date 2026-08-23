@@ -142,6 +142,58 @@ async def test_tool_disabled_shows_in_status_area(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_status_line_shows_repo_and_branch(monkeypatch, tmp_path):
+    """Inside a repo the status line carries ` <repo> ⎇ <branch>`, detected
+    from a real tmp-repo fixture -- and a branch switch shows up on the next
+    event-driven refresh (no polling anywhere)."""
+    import subprocess
+
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "trunk", str(repo)], check=True)
+
+    monkeypatch.setattr(
+        "doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([])
+    )
+    app = DoxaApp(cwd=str(repo))
+    async with app.run_test() as pilot:
+        for _ in range(100):
+            if app._git is not None:
+                break
+            await pilot.pause(0.02)
+        status = str(app.query_one("#status-bar").renderable)
+        assert "myrepo ⎇ trunk" in status
+
+        # Branch switch: .git/HEAD changes; the next refresh must see it.
+        subprocess.run(
+            ["git", "-C", str(repo), "checkout", "-q", "-b", "feature/x"],
+            check=True,
+        )
+        app._git._mtime = None  # defeat same-second mtime granularity
+        app._refresh_status()
+        status = str(app.query_one("#status-bar").renderable)
+        assert "myrepo ⎇ feature/x" in status
+
+
+@pytest.mark.asyncio
+async def test_status_line_has_no_git_chip_outside_a_repo(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([])
+    )
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    app = DoxaApp(cwd=str(plain))
+    async with app.run_test() as pilot:
+        for _ in range(100):
+            if app._git is not None:
+                break
+            await pilot.pause(0.02)
+        assert app._git.render() is None
+        status = str(app.query_one("#status-bar").renderable)
+        assert "⎇" not in status
+
+
+@pytest.mark.asyncio
 async def test_ctrl_c_quits_via_detach_path(monkeypatch, tmp_path):
     """One Ctrl+C = quit-detach: after the double-press window expires the
     app finalizes the engine handle (detach over a daemon client, full

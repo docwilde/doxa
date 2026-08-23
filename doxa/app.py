@@ -29,6 +29,7 @@ import asyncio
 import contextlib
 import json
 import os
+from pathlib import Path
 from typing import Any, Callable
 
 from functools import partial
@@ -60,6 +61,79 @@ def _fmt_age(secs: float) -> str:
     if secs < 3600:
         return f"{int(secs // 60)}m"
     return f"{int(secs // 3600)}h{int((secs % 3600) // 60)}m"
+
+
+def git_branch_symbol() -> str:
+    """The nerd-font branch glyph (U+E0A0) when the user opted in via
+    DOXA_NERD_FONT (a TUI cannot detect font glyph coverage itself);
+    the universally-rendering ⎇ otherwise."""
+    return "" if os.environ.get("DOXA_NERD_FONT", "").strip() else "⎇"
+
+
+class GitLine:
+    """The `repo ⎇ branch` chip for the status line.
+
+    Cost discipline (this sits next to the idle-CPU fix for a reason): the
+    repo root is resolved ONCE at construction (the only subprocess); after
+    that a branch read is one stat + at most one small file read of
+    .git/HEAD, re-parsed only when HEAD's mtime moves (checkout/switch touch
+    it). render() is called from event-driven sites only (_refresh_status:
+    boot, turn done, peer events) -- NEVER from a timer or per-frame hook,
+    which would recreate the busy-idle bug this app just shed."""
+
+    def __init__(self, cwd: str) -> None:
+        self.repo_root = peers_mod.repo_root_of(cwd)
+        self.repo = Path(self.repo_root).name if self.repo_root else None
+        self._head: Path | None = None
+        self._mtime: float | None = None
+        self._branch: str | None = None
+        if self.repo_root:
+            git = Path(self.repo_root) / ".git"
+            if git.is_file():
+                # Worktree/submodule: .git is a one-line pointer file.
+                try:
+                    for line in git.read_text(
+                        encoding="utf-8", errors="replace"
+                    ).splitlines():
+                        if line.startswith("gitdir:"):
+                            gitdir = Path(line.split(":", 1)[1].strip())
+                            if not gitdir.is_absolute():
+                                gitdir = (Path(self.repo_root) / gitdir).resolve()
+                            git = gitdir
+                            break
+                except OSError:
+                    return
+            self._head = git / "HEAD"
+
+    def render(self) -> str | None:
+        """` repo ⎇ branch`, or None outside a repo (no chip at all)."""
+        if not self.repo:
+            return None
+        branch = self._read_branch()
+        if not branch:
+            return self.repo
+        return f"{self.repo} {git_branch_symbol()} {branch}"
+
+    def _read_branch(self) -> str | None:
+        if self._head is None:
+            return None
+        try:
+            mtime = self._head.stat().st_mtime
+        except OSError:
+            return self._branch  # HEAD briefly gone (rebase): keep last known
+        if mtime == self._mtime:
+            return self._branch
+        self._mtime = mtime
+        try:
+            head = self._head.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return self._branch
+        if head.startswith("ref:"):
+            ref = head.split(":", 1)[1].strip()
+            self._branch = ref.removeprefix("refs/heads/")
+        else:
+            self._branch = head[:8] or None  # detached HEAD: short sha
+        return self._branch
 
 
 class SystemBlock(Static):
@@ -230,6 +304,9 @@ class DoxaApp(App):
         # timer that will quit-detach when it fires; a second Ctrl+C while
         # it is armed cancels it and quit-stops instead.
         self._ctrl_c_timer: Any = None
+        # Status-line git chip -- built in _boot (per engine, since attach
+        # can land in another project's cwd), refreshed event-driven only.
+        self._git: GitLine | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("", id="belief-inspector")  # hidden stub, palette-toggled
@@ -246,6 +323,10 @@ class DoxaApp(App):
     async def _boot(self) -> None:
         assert self.engine is not None
         await self.engine.start()
+        # Engine cwd wins over the app's own (attach may cross projects);
+        # GitLine's constructor runs one git subprocess -- off the loop.
+        git_cwd = str(getattr(self.engine, "cwd", None) or self.cwd)
+        self._git = await asyncio.to_thread(GitLine, git_cwd)
         self._engine_ready.set()
         self._refresh_status()
 
@@ -301,7 +382,11 @@ class DoxaApp(App):
             else "—"
         )
         beliefs = self.engine.belief_count()
-        parts = [model, cost, f"ctx {ctx}", f"{beliefs} beliefs"]
+        parts = [model]
+        git_chip = self._git.render() if self._git is not None else None
+        if git_chip:  # hidden entirely outside a repo
+            parts.append(git_chip)
+        parts += [cost, f"ctx {ctx}", f"{beliefs} beliefs"]
         if getattr(self.engine, "detachable", False):
             sid = str(getattr(self.engine, "session_id", "") or "")
             if sid:  # attached to a daemon: show the reattach handle
