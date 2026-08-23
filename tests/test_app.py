@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from doxa.app import DoxaApp, ToolChip, TurnBlock
+from doxa.app import DoxaApp, SystemBlock, ToolChip, TurnBlock
 from doxa.engine import EngineEvent
 from tests.fakes import FakeEngine
 
@@ -77,6 +77,36 @@ async def test_turn_block_and_tool_chip_appear_live(monkeypatch, tmp_path):
         status = app.query_one("#status-bar").renderable
         assert "0.0020" in status or "$0.0020" in status
         assert "3 beliefs" in status
+
+
+@pytest.mark.asyncio
+async def test_tool_disabled_shows_in_status_area(monkeypatch, tmp_path):
+    """Two-strikes containment is visible: the tool_disabled event mounts a
+    system block and the status bar carries the small `⊘ toolname` note."""
+    fake = FakeEngine([])
+    monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: fake)
+
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        fake.disabled = ["lore_belief_search"]
+        fake.push_peer_event(EngineEvent("tool_disabled", {
+            "name": "lore_belief_search",
+            "reason": "lore_belief_search failed: RuntimeError: belief db unavailable",
+        }))
+
+        for _ in range(100):
+            if list(app.query(SystemBlock)):
+                break
+            await pilot.pause(0.02)
+
+        blocks = list(app.query(SystemBlock))
+        assert len(blocks) == 1
+        assert "⊘" in blocks[0].text
+        assert "lore_belief_search" in blocks[0].text
+
+        status = str(app.query_one("#status-bar").renderable)
+        assert "⊘ lore_belief_search" in status
 
 
 @pytest.mark.asyncio

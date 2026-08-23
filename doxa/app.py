@@ -183,16 +183,25 @@ class DoxaApp(App):
         self._refresh_status()
 
     async def _peer_pump(self) -> None:
-        """Consume the engine's out-of-band peer stream for the life of the
-        app: peer_message mounts a block immediately (display path only --
-        the model sees it on the next user turn, engine-side); joins/leaves
-        just move the status-bar chip."""
+        """Consume the engine's out-of-band stream for the life of the app:
+        peer_message mounts a block immediately (display path only -- the
+        model sees it on the next user turn, engine-side); joins/leaves just
+        move the status-bar chip; tool_disabled (the gate's two-strikes
+        containment) mounts a system block and adds the status-bar
+        `⊘ toolname` note."""
         await self._engine_ready.wait()
         assert self.engine is not None
         async for ev in self.engine.peer_events():
             if ev.type == "peer_message":
                 block_list = self.query_one("#block-list", VerticalScroll)
                 await block_list.mount(PeerMessageBlock(ev.data))
+                block_list.scroll_end(animate=False)
+            elif ev.type == "tool_disabled":
+                block_list = self.query_one("#block-list", VerticalScroll)
+                await block_list.mount(SystemBlock(
+                    f"⊘ tool disabled for this session: {ev.data.get('name')}"
+                    f" — {ev.data.get('reason')}"
+                ))
                 block_list.scroll_end(animate=False)
             self._refresh_status()
 
@@ -211,6 +220,9 @@ class DoxaApp(App):
         peer_count = self.engine.peer_count()
         if peer_count:  # hidden at 0 -- a solo session has no peers chip
             parts.append(f"peers {peer_count}")
+        disabled = self.engine.disabled_tools()
+        if disabled:  # two-strikes containment note -- hidden when empty
+            parts.append(" ".join(f"⊘ {name}" for name in disabled))
         bar = self.query_one("#status-bar", Static)
         bar.update("  ·  ".join(parts))
 

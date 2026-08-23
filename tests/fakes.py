@@ -98,6 +98,10 @@ class FakeEngine:
         self._peers = peers or []
         self._peer_queue: asyncio.Queue[EngineEvent] = asyncio.Queue()
         self.sent_peer_messages: list[tuple[str, str]] = []
+        self.disabled: list[str] = []  # two-strikes containment, scripted
+
+    def disabled_tools(self) -> list[str]:
+        return list(self.disabled)
 
     def list_peers(self) -> list[PeerInfo]:
         return list(self._peers)

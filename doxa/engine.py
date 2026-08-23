@@ -23,10 +23,17 @@ Boundaries used, and why:
   convention (§6 compaction-control note) -- the harness is about to summarize
   the transcript away, so the deriver reviews it first, same as the LORE
   plugin's own SessionEnd-adjacent PreCompact wiring in ``deriver.cmd_review``.
-* Tool gating -- ``PreToolUse`` hook. PHASE0 redesign item 3: tool
-  allowlisting is session-scoped in ``ClaudeAgentOptions``, not swappable
-  per call, so "this stage may only use these tools" has to become "gate
-  individual tool calls via a PreToolUse hook" instead.
+* Tool gating -- ``PreToolUse`` hook, routed through ``doxa.gate.ToolGate``
+  (no longer a wired no-op). PHASE0 redesign item 3: tool allowlisting is
+  session-scoped in ``ClaudeAgentOptions``, not swappable per call, so
+  "this stage may only use these tools" has to become "gate individual tool
+  calls via a PreToolUse hook" instead. The gate also owns two-strikes
+  containment and the OperatorContext sidecar -- see doxa/gate.py.
+* Native tools -- ``doxa.operators``' registry, projected to an IN-PROCESS
+  SDK MCP server (``create_sdk_mcp_server``, PHASE0 SS6: the SDK's own
+  custom-tool mechanism, no subprocess/IPC per call) registered under
+  ``ClaudeAgentOptions.mcp_servers``. Every native handler executes via
+  ``ToolGate.execute`` -- registry describes, gate contains.
 * Session-end finalization -- host-driven, not hook-driven. PHASE0 redesign
   item 1: there is no SessionEnd hook at all (confirmed by grep across the
   installed package). ``SessionEngine.finalize()`` is called from the
@@ -55,6 +62,8 @@ from pathlib import Path
 from typing import Any
 
 from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see module docstring
+from . import gate as gate_mod
+from . import operators as operators_mod
 from . import peers as peers_mod
 
 from claude_agent_sdk import (
@@ -62,6 +71,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     HookMatcher,
+    create_sdk_mcp_server,
     ResultMessage,
     StreamEvent,
     SystemMessage,
@@ -88,10 +98,12 @@ class EngineEvent:
 
     ``type`` is one of: turn_started, text_delta, tool_call, tool_result,
     turn_done, session_done -- the six event kinds the TUI (doxa/app.py)
-    switches on to build/update blocks -- plus peer_joined, peer_left and
-    peer_message, which arrive out-of-band on the same EngineEvent type via
-    :meth:`SessionEngine.peer_events` (a turn generator can only yield while
-    a turn runs; peer activity doesn't wait for one).
+    switches on to build/update blocks -- plus peer_joined, peer_left,
+    peer_message and tool_disabled, which arrive out-of-band on the same
+    EngineEvent type via :meth:`SessionEngine.peer_events` (a turn generator
+    can only yield while a turn runs; peer activity doesn't wait for one,
+    and a two-strikes disable fires from inside the SDK's tool dispatch,
+    outside our generator's yield points).
     """
 
     type: str
@@ -146,6 +158,7 @@ class SessionEngine:
         model: str | None = DEFAULT_MODEL,
         session_id: str | None = None,
         client_factory: Callable[[ClaudeAgentOptions], Any] = ClaudeSDKClient,
+        allowed_tools: "set[str] | None" = None,
     ) -> None:
         self.cwd = cwd
         self.model = model
@@ -168,6 +181,22 @@ class SessionEngine:
         self.peer_error: str | None = None
         self._peer_queue: asyncio.Queue[EngineEvent] = asyncio.Queue()
         self._pending_peer_frames: list[dict] = []
+
+        # Containment gate (doxa/gate.py): session-scoped state -- allowed
+        # set, two-strikes tracker, OperatorContext sidecar. Built here (not
+        # in _build_options) because its state must span the whole session,
+        # not one options object. The sidecar carries only HOST-resolved
+        # values; nothing model-supplied ever lands in it.
+        self.tool_gate = gate_mod.ToolGate(
+            allowed=allowed_tools,
+            op_ctx=gate_mod.OperatorContext(
+                session_id=self.session_id,
+                cwd=self.cwd,
+                repo_root=gate_mod.repo_root_of(self.cwd),
+                belief_store=lore_store.db_connect,
+            ),
+            on_disable=self._on_tool_disabled,
+        )
 
         transcript_dir = PROJECTS_DIR / self.slug
         transcript_dir.mkdir(parents=True, exist_ok=True)
@@ -247,11 +276,24 @@ class SessionEngine:
         """PreToolUse -- the tool-gating choke point (PHASE0 redesign item
         3: tool allowlisting is session-scoped, not per-call, so per-stage
         gating has to live here instead of swapping ClaudeAgentOptions
-        mid-session). Phase 1 slice 2 has exactly one stage and allows
-        everything; the hook exists so a future stage model has a single
-        place to plug a deny/ask decision in, without changing the calling
-        convention."""
-        return {}
+        mid-session). ALL tools route through the gate: SDK built-ins pass
+        untouched unless the allowed-set policy or a two-strikes disable
+        denies them; DOXA-native calls additionally execute via the gate's
+        registry path (see _build_options). With no allowed set (Phase 1's
+        one stage) everything passes -- the calling convention is what a
+        future stage model plugs into."""
+        return self.tool_gate.pre_tool_use(input_data)
+
+    def _on_tool_disabled(self, name: str, reason: str) -> None:
+        """Two-strikes disable fired from inside the gate (during SDK tool
+        dispatch -- outside send()'s yield points, so it travels on the
+        out-of-band queue the TUI's pump already consumes)."""
+        self._peer_queue.put_nowait(
+            EngineEvent("tool_disabled", {"name": name, "reason": reason})
+        )
+
+    def disabled_tools(self) -> list[str]:
+        return self.tool_gate.disabled_tools()
 
     def _run_review_sync(self, older: bool) -> None:
         """Blocking: build the deriver job for the transcript so far and run
@@ -285,6 +327,17 @@ class SessionEngine:
 
     def _build_options(self) -> ClaudeAgentOptions:
         snapshot = lore_context.build_context(self.cwd)
+        # Native LORE tools: the registry projected through the gate's
+        # executor onto an in-process SDK MCP server. include_write=True is
+        # deliberate -- lore_remember only STAGES a pending proposal, so the
+        # review gate is what keeps the write path safe, not its absence.
+        # The configuredness ctx names the seams this engine actually wired.
+        native_tools = operators_mod.to_sdk_tools(
+            self.tool_gate.execute,
+            allowed=self.tool_gate.allowed,
+            include_write=True,
+            ctx={"belief_store": lore_store.db_connect, "lore_root": str(lore_core.ROOT)},
+        )
         return ClaudeAgentOptions(
             model=self.model,
             cwd=self.cwd,
@@ -297,6 +350,11 @@ class SessionEngine:
                 "UserPromptSubmit": [HookMatcher(hooks=[self._on_user_prompt_submit])],
                 "PreCompact": [HookMatcher(hooks=[self._on_pre_compact])],
                 "PreToolUse": [HookMatcher(hooks=[self._on_pre_tool_use])],
+            },
+            mcp_servers={
+                operators_mod.SDK_SERVER_NAME: create_sdk_mcp_server(
+                    operators_mod.SDK_SERVER_NAME, version="0.1.0", tools=native_tools,
+                ),
             },
             include_partial_messages=True,
         )
@@ -347,9 +405,11 @@ class SessionEngine:
         self._peer_queue.put_nowait(EngineEvent("peer_left", {"session_id": session_id}))
 
     async def peer_events(self) -> AsyncIterator[EngineEvent]:
-        """Out-of-band peer events (peer_joined/peer_left/peer_message) --
-        same EngineEvent type as :meth:`send` yields, separate stream
-        because peer activity doesn't wait for a turn to be running."""
+        """Out-of-band events (peer_joined/peer_left/peer_message, plus
+        tool_disabled from the gate's two-strikes tracker) -- same
+        EngineEvent type as :meth:`send` yields, separate stream because
+        neither peer activity nor a mid-dispatch disable waits for a turn's
+        generator to be at a yield point."""
         while True:
             yield await self._peer_queue.get()
 

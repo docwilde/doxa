@@ -42,6 +42,20 @@ dialectic split, the calibration outcomes ledger, the pending-proposal review
 gate, per-stage toggles. Same files, same SQLite database, byte-compatible
 with the LORE Claude Code plugin — one codebase, two carriers.
 
+**Native tools (registry discipline).** The LORE surface the agent calls —
+belief search and inspection, curated-memory listing, session FTS — is an
+explicit registry of frozen operator definitions (hand-written schemas, cost
+tiers, a declared read/write posture), projected onto an in-process SDK MCP
+server. Adding a tool is a reviewed act, never an import side effect; the
+registry's closure is a test. Exactly one operator can write, and it doesn't:
+`lore_remember` stages a pending proposal for the same human review gate
+everything else passes — the model proposes, the user approves. Every call
+routes through a containment gate at the PreToolUse choke point: calls
+outside the offered set are gracefully denied, every operator failure comes
+back as an ordinary error result the model can recover from, and a tool that
+hard-fails twice is removed from the session's surface (`⊘` in the status
+bar) instead of burning the step budget on retries.
+
 **Blocks, panes, palette (Warp/tmux ergonomics).** Each turn is a foldable
 block with metadata chips: model, duration, cost, exit code. Split panes —
 agent | logs | belief-inspector — plus a read-only Profile pane showing the
