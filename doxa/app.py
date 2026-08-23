@@ -51,6 +51,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.fuzzy import Matcher
+from textual.message import Message
 from textual.widgets import (
     Collapsible,
     Input,
@@ -66,6 +67,7 @@ from . import commands as commands_mod
 from . import config as config_mod
 from . import identity as identity_mod
 from . import images as images_mod
+from . import naming as naming_mod
 from . import peers as peers_mod
 from .engine import EngineEvent, SessionEngine
 from .history import SEARCH_PREFIX, SessionSearch, hit_reference
@@ -88,27 +90,80 @@ CTRL_C_DOUBLE_SECS = 2.0
 # an alias that always resolves to the current one.
 MODEL_ALIASES = ("haiku", "sonnet", "opus", "fable")
 
-# Tab labels: `<short model> · <repo> ⎇ <branch>`, e.g. `sonnet · doxa ⎇ main`.
-# Wide enough for that shape at typical repo/branch lengths, narrow enough
-# that four tabs still fit across a normal terminal.
+# Tab labels: `Model@repo:branch`, e.g. `Opus@doxa:main`. No provider
+# segment: model names are distinct across providers anyway (`Opus` vs
+# `deepseek-chat`), so the model already says who is answering, and a
+# prefix repeated on every tab of the strip is width spent saying nothing.
+#
+# Widths: 34 columns total, which fits `Sonnet@re_ab_harness:kg-stats` and
+# keeps four tabs on an 80-column terminal. When it does not fit, the MODEL
+# is trimmed first (down to 4 columns: `Son…`), then the repo (down to 6),
+# and the BRANCH last of all -- across several open tabs the model is
+# usually identical and the branch is usually what differs, so trimming the
+# branch would destroy exactly the information the label exists to carry.
 TAB_LABEL_MAX = 34
+TAB_MODEL_MIN = 4
+TAB_REPO_MIN = 6
 
 
 def short_model(model: "str | None") -> str:
-    """The tier word out of a model name: claude-sonnet-4-5 -> sonnet.
+    """The tier word out of a model name: claude-sonnet-4-5 -> `Sonnet`.
 
     A tab label has room for the thing that actually varies between tabs,
     and that is the tier, not the vendor prefix or the point release. An
-    unrecognised name keeps its first dash-segment (gpt-5.4 -> gpt) rather
-    than being truncated mid-word; an unset model is "default", the same
-    word the status bar and the identity block use for it."""
+    unrecognised name keeps its first dash-segment verbatim (deepseek-chat
+    -> deepseek) rather than being truncated mid-word or title-cased into
+    something that looks like a tier it is not; an unset model is
+    "default", the same word the status bar and identity block use."""
     name = (model or "").strip().lower()
     if not name:
         return "default"
     for tier in MODEL_ALIASES:
         if tier in name:
-            return tier
+            return tier.capitalize()
     return name.split("-", 1)[0] or name
+
+
+def _shrink(text: str, width: int) -> str:
+    """`Sonnet` -> `Son…` at width 4. Never returns more than ``width``."""
+    if width <= 0:
+        return ""
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def compose_tab_label(
+    model: str,
+    repo: str,
+    branch: "str | None" = None,
+    limit: int = TAB_LABEL_MAX,
+) -> str:
+    """`Model@repo:branch`, trimmed model-first when it must be.
+
+    Outside a repo there is no branch and therefore NO colon: a dangling
+    separator is a label saying "something is missing here", which is worse
+    than the shorter label it replaced."""
+
+    def build(m: str, r: str, b: "str | None") -> str:
+        return f"{m}@{r}" + (f":{b}" if b else "")
+
+    model_s, repo_s = model, repo
+    for segment, floor in (("model", TAB_MODEL_MIN), ("repo", TAB_REPO_MIN)):
+        text = build(model_s, repo_s, branch)
+        overflow = len(text) - limit
+        if overflow <= 0:
+            return text
+        current = model_s if segment == "model" else repo_s
+        room = len(current) - floor
+        if room <= 0:
+            continue
+        shrunk = _shrink(current, len(current) - min(room, overflow))
+        if segment == "model":
+            model_s = shrunk
+        else:
+            repo_s = shrunk
+    # Only now, with the model and the repo already at their floors, does
+    # the branch give ground.
+    return ellipsize(build(model_s, repo_s, branch), limit)
 
 
 def ellipsize(text: str, limit: int = TAB_LABEL_MAX) -> str:
@@ -116,6 +171,7 @@ def ellipsize(text: str, limit: int = TAB_LABEL_MAX) -> str:
     its neighbours off the bar, which costs more than the tail of a branch
     name is worth."""
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
 
 # Context-pressure escalation. The README calls this out as "a containment
 # signal, not decoration": the chip changes COLOR as the window fills, and
@@ -855,6 +911,41 @@ class PromptInput(Input):
         event.prevent_default()
 
 
+class TabRename(Input):
+    """The inline editor a double-clicked tab header turns into.
+
+    It is mounted INTO the tab strip, in the tab's own slot, with the tab
+    hidden behind it -- so the field appears exactly where the label was
+    rather than as a dialog about the label. Enter commits (Input.Submitted,
+    handled by the app), Esc cancels, and losing focus cancels too: a stray
+    click elsewhere must not silently rename a tab.
+
+    An EMPTY value is not a name -- it is the instruction to go back to the
+    automatic label, which is also the only way to un-pin a renamed tab."""
+
+    def __init__(self, pane_id: str, value: str) -> None:
+        super().__init__(value=value, id="tab-rename")
+        self.pane_id = pane_id
+        self.cursor_position = len(value)
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            event.stop()
+            event.prevent_default()
+            self.post_message(TabRenameCancelled(self.pane_id))
+
+    def on_blur(self, event: events.Blur) -> None:
+        self.post_message(TabRenameCancelled(self.pane_id))
+
+
+class TabRenameCancelled(Message):
+    """Esc (or a lost focus) inside the inline tab editor."""
+
+    def __init__(self, pane_id: str) -> None:
+        super().__init__()
+        self.pane_id = pane_id
+
+
 class SessionPane(TabPane):
     """One session's whole surface: engine handle, block list, status bar,
     prompt input, and the boot/pump workers that drive them.
@@ -893,6 +984,17 @@ class SessionPane(TabPane):
         # status bar is refreshed -- never on a timer, and only WRITTEN
         # when it actually changed, since writing it repaints the tab.
         self._tab_label: str | None = None
+        # A tab the user NAMED. Set, it pins the label: model switches and
+        # branch changes stop rewriting it, because a name the user typed
+        # outranks anything DOXA can derive. Cleared (an empty rename) the
+        # automatic label takes over again -- that is the only un-pin.
+        self.custom_name: str | None = None
+        # Outside a repo there is no repo:branch to label with, so the tab
+        # is named from the session's first turn (doxa/naming.py, one Haiku
+        # call, cached). None until that lands -- the dirname stands in
+        # meanwhile, and a failure leaves it standing for good.
+        self.generated_name: str | None = None
+        self._naming_done = False
         # Subscription-headroom chip, recomputed at most once per turn-done
         # (see _refresh_usage_chip). Cached as a plain string because
         # _refresh_status runs on every peer event and must stay free.
@@ -954,6 +1056,15 @@ class SessionPane(TabPane):
         # this pane in another project: the engine's cwd wins here too.
         with contextlib.suppress(Exception):
             self.query_one("#session-search", SessionSearch).cwd = git_cwd
+        # A session named on an earlier run keeps that name across restarts
+        # -- the cache IS the persistence, and reusing it is what stops a
+        # restore from re-spending a call per restored tab.
+        session_id = str(getattr(self.engine, "session_id", "") or "")
+        if session_id and not self.generated_name:
+            cached = await asyncio.to_thread(naming_mod.cached_name, session_id)
+            if cached:
+                self.generated_name = cached
+                self._naming_done = True
         self._refresh_usage_chip()
         self._engine_ready.set()
         self._refresh_status()
@@ -1110,31 +1221,74 @@ class SessionPane(TabPane):
     # -- the tab's own label -----------------------------------------
 
     def auto_label(self) -> str:
-        """`sonnet · doxa ⎇ main` -- what a tab says when nobody has named
-        it: which model is answering, and where.
+        """`Opus@doxa:main` -- which model is answering, and where.
 
-        Both halves are already tracked state: the model is the engine's
+        Both halves are tracked state already: the model is the engine's
         (so a live /model switch moves it), and the repo/branch come from
         the pane's GitLine, whose reads are event-driven stats -- this adds
-        no polling and no subprocess. Outside a repo the git half is
-        dropped rather than faked: `sonnet · Downloads`."""
+        no polling and no subprocess. OUTSIDE a repo there is nothing after
+        the `@` that would mean anything, so the session names itself from
+        its first turn (doxa/naming.py) and the directory name stands in
+        until it does."""
         engine = self.engine
         model = short_model(getattr(engine, "model", None) or self.model)
         cwd = str(getattr(engine, "cwd", None) or self.cwd)
         git = self._git
         if git is not None and git.repo:
-            branch = git.branch_label()
-            where = (
-                f"{git.repo} {git_branch_symbol()} {branch}" if branch
-                else git.repo
-            )
+            return compose_tab_label(model, git.repo, git.branch_label())
+        return compose_tab_label(
+            model, self.generated_name or Path(cwd).name or cwd
+        )
+
+    def display_name(self) -> str:
+        """What this tab currently says -- the user's name for it if it has
+        one, the automatic label otherwise."""
+        return self.custom_name or self._tab_label or self.auto_label()
+
+    def set_custom_name(self, name: "str | None") -> None:
+        """Name this tab (pinning it), or pass None/"" to un-pin it and
+        hand the label back to :meth:`auto_label`."""
+        name = (name or "").strip()
+        self.custom_name = name or None
+        if self.custom_name:
+            self.set_tab_label(ellipsize(self.custom_name))
         else:
-            where = Path(cwd).name or cwd
-        return ellipsize(f"{model} · {where}")
+            self._tab_label = None
+            self.refresh_tab_label()
+
+    def _maybe_name_tab(self, first_message: str) -> None:
+        """After the FIRST completed turn of a repo-less session: ask Haiku
+        for a name, once. Never on a tab the user named, never inside a
+        repo (repo and branch already say where you are), and never twice
+        -- a namer that failed must not retry in a loop."""
+        if self._naming_done or self.custom_name:
+            return
+        git = self._git
+        if git is not None and git.repo:
+            return
+        self._naming_done = True
+        session_id = str(getattr(self.engine, "session_id", "") or "")
+        self.run_worker(
+            self._name_tab(session_id, first_message), group="naming"
+        )
+
+    async def _name_tab(self, session_id: str, first_message: str) -> None:
+        name = await asyncio.to_thread(
+            naming_mod.name_for, session_id, first_message
+        )
+        if not name or self.custom_name:
+            return  # keep the dirname; the failure is final for this session
+        self.generated_name = name
+        self._tab_label = None
+        self.refresh_tab_label()
 
     def refresh_tab_label(self) -> None:
         """Re-render the tab's label if it changed. Cheap, idempotent, and
-        called from exactly where the status bar is refreshed."""
+        called from exactly where the status bar is refreshed. A NAMED tab
+        keeps its name through every model switch and branch change --
+        that is what pinning means."""
+        if self.custom_name:
+            return
         label = self.auto_label()
         if label == self._tab_label:
             return
@@ -1256,6 +1410,7 @@ class SessionPane(TabPane):
             "/effort": self._cmd_effort,
             "/usage": self._cmd_usage,
             "/clear": self._cmd_clear,
+            "/rename": self._cmd_rename,
             "/search": self._cmd_search,
             "/help": self._cmd_help,
         }
@@ -1420,6 +1575,23 @@ class SessionPane(TabPane):
             self.switch_engine(factory), exclusive=True, group="switch"
         )
 
+    async def _cmd_rename(self, args: str) -> None:
+        """/rename -- the keyboard door to what double-clicking a tab
+        header does. An empty argument returns the tab to its automatic
+        label, exactly like an emptied inline editor."""
+        before = self.display_name()
+        self.set_custom_name(args)
+        if self.custom_name:
+            await self._system(
+                f"tab renamed: {before} → {self.custom_name}  ·  pinned "
+                "(model and branch changes no longer rewrite it)"
+            )
+        else:
+            await self._system(
+                f"tab name cleared → {self.display_name()}  ·  back to the "
+                "automatic label"
+            )
+
     async def _cmd_search(self, args: str) -> None:
         """/search as a SUBMITTED command -- the fallback path.
 
@@ -1563,6 +1735,8 @@ class SessionPane(TabPane):
             block_list.scroll_end(animate=False)
 
         self._refresh_status()
+        # First completed turn of a repo-less session: name the tab from it.
+        self._maybe_name_tab(prompt)
 
     async def _handle_event(self, ev: EngineEvent, block: TurnBlock, chips: dict[str, ToolChip]) -> None:
         if ev.type == "turn_started":
@@ -1761,6 +1935,79 @@ class DoxaApp(App):
     def _on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         self._jump_tab_marker()
         pane = self.active_pane
+        if pane is not None:
+            with contextlib.suppress(Exception):
+                pane.query_one("#prompt-input", Input).focus()
+
+    # -- renaming a tab in place -------------------------------------
+
+    @on(events.Click)
+    def _on_click_maybe_rename(self, event: events.Click) -> None:
+        """Double-clicking a tab header turns it into a field.
+
+        Textual counts click chains for us (``event.chain``), so this needs
+        no timing of its own -- and a SINGLE click keeps meaning "switch to
+        this tab", untouched."""
+        if event.chain != 2:
+            return
+        from textual.widgets import Tab
+
+        widget = event.widget
+        while widget is not None and not isinstance(widget, Tab):
+            widget = widget.parent
+        if widget is None:
+            return
+        pane = self._pane_for_tab(widget)
+        if pane is None:
+            return
+        event.stop()
+        self.run_worker(self._start_rename(pane), group="rename")
+
+    def _pane_for_tab(self, tab: Any) -> "SessionPane | None":
+        from textual.widgets._tabbed_content import ContentTab
+
+        pane_id = ContentTab.sans_prefix(tab.id or "")
+        for pane in self.panes():
+            if pane.id == pane_id:
+                return pane
+        return None
+
+    async def _start_rename(self, pane: "SessionPane") -> None:
+        """Mount the editor in the tab's own slot and hide the tab behind
+        it, so the label is edited where the label IS."""
+        if self.query("#tab-rename"):
+            return  # one rename at a time
+        with contextlib.suppress(Exception):
+            tabbed = self.query_one("#session-tabs", TabbedContent)
+            tab = tabbed.get_tab(pane.id or "")
+            editor = TabRename(pane.id or "", pane.display_name())
+            editor.styles.width = max(len(editor.value) + 4, 14)
+            await tab.parent.mount(editor, before=tab)
+            tab.display = False
+            editor.focus()
+
+    @on(Input.Submitted, "#tab-rename")
+    def _on_rename_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        pane_id = getattr(event.input, "pane_id", "")
+        pane = next((p for p in self.panes() if p.id == pane_id), None)
+        if pane is not None:
+            # Empty means "no name", which is how a pinned tab is un-pinned.
+            pane.set_custom_name(event.value)
+        self._end_rename(pane_id)
+
+    @on(TabRenameCancelled)
+    def _on_rename_cancelled(self, event: TabRenameCancelled) -> None:
+        event.stop()
+        self._end_rename(event.pane_id)
+
+    def _end_rename(self, pane_id: str) -> None:
+        with contextlib.suppress(Exception):
+            tabbed = self.query_one("#session-tabs", TabbedContent)
+            tabbed.get_tab(pane_id).display = True
+        for editor in list(self.query(TabRename)):
+            editor.remove()
+        pane = next((p for p in self.panes() if p.id == pane_id), None)
         if pane is not None:
             with contextlib.suppress(Exception):
                 pane.query_one("#prompt-input", Input).focus()

@@ -55,6 +55,17 @@ SessionPane {
     background: #3A3429;
 }
 
+/* Inline tab rename (double-click a tab header): the field takes the
+   tab's own slot in the strip -- one row high, no border of its own, so
+   the strip does not jump while a name is being typed. */
+#tab-rename {
+    height: 1;
+    border: none;
+    padding: 0 1;
+    background: #2A251E;
+    color: #F2E9DD;
+}
+
 #block-list {
     background: #171512;
     padding: 1 2;

@@ -154,6 +154,14 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette="Clear session",
     ),
     SlashCommand(
+        name="/rename",
+        group="Panes & tabs",
+        summary="Name this tab (pins the label); empty restores the automatic one",
+        usage="/rename [name]",
+        palette="Rename tab",
+        palette_prefill=True,
+    ),
+    SlashCommand(
         name="/search",
         group="Memory",
         summary="Search every past session (live results as you type)",
