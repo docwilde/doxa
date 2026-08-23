@@ -334,10 +334,47 @@ SettingsScreen {
     color: #D97757;
 }
 
-#settings-rows {
+#settings-categories {
+    height: auto;
+    max-height: 30;
+}
+
+#settings-categories ContentTabs {
+    background: #221F1A;
+    color: #D8CDBB;
+}
+
+#settings-categories Tab.-active {
+    color: #D97757;
+    text-style: bold;
+}
+
+#settings-categories Underline > .underline--bar {
+    color: #D97757;
+    background: #3A3429;
+}
+
+.settings-rows {
     height: auto;
     max-height: 24;
     padding: 1 0 0 0;
+}
+
+/* The effective value, and where it came from -- the two things a
+   settings row exists to tell you. */
+.setting-value {
+    color: #D97757;
+    padding: 0 1;
+}
+
+.setting-shadowed {
+    color: #8A8073;
+    padding: 0 1;
+}
+
+.setting-note {
+    color: #8A8073;
+    padding: 0 1 1 1;
 }
 
 .setting-label {

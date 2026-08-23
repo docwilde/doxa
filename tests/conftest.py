@@ -48,3 +48,10 @@ Path(os.environ["CLAUDE_CONFIG_DIR"]).mkdir(parents=True, exist_ok=True)
 # disabled suite-wide (stage_disabled("review") honors this, same as the
 # LORE plugin's own hook path).
 os.environ["LORE_DISABLE_REVIEW"] = "1"
+
+# DOXA state-home isolation: doxa.config writes ~/.doxa/config.toml by
+# default (DOXA_HOME overrides). No test may read or write the developer's
+# real settings -- and the legacy XDG path is redirected too, so the
+# one-shot migration cannot find a real file to move either.
+os.environ["DOXA_HOME"] = str(_tmp / "doxa-home")
+os.environ["XDG_CONFIG_HOME"] = str(_tmp / "xdg")

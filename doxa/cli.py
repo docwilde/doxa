@@ -109,6 +109,13 @@ def main(argv: "list[str] | None" = None) -> int:
 
     cwd = os.getcwd()
 
+    # One-shot relocation of a pre-~/.doxa config. Announced, never silent:
+    # a settings file that moves without saying so is a settings file the
+    # user will look for in the wrong place forever.
+    moved = config.migrate_legacy()
+    if moved is not None:
+        print(f"doxa: settings moved to {moved}", file=sys.stderr)
+
     if args.in_process:
         DoxaApp(cwd=cwd, model=args.model).run()
         return 0

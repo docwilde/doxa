@@ -275,17 +275,38 @@ actually supports, and each one was implemented only that far:
 **Precedence, everywhere: environment > config file > default.** An
 environment variable is a deliberate act with a narrower scope than a file
 (a shell, a launcher, a systemd unit, a test), so it beats the file it
-cannot see. The file is `$XDG_CONFIG_HOME/doxa/config.toml` (else
-`~/.config/doxa/config.toml`), written by the settings modal — `Ctrl+,`,
-`/settings`, or the palette's *Settings* entry — and safe to hand-edit
-(0600, plain TOML). Emptying a field removes the key, which returns that
-knob to its default. Keys DOXA doesn't recognize are preserved on save, so
-a file written by a newer version survives an older one.
+cannot see. The file is `~/.doxa/config.toml` (`DOXA_HOME` overrides),
+written by the settings modal — `Ctrl+,`, `/settings`, or the palette's
+*Settings* entry — and safe to hand-edit (0600, plain TOML). Emptying a
+field removes the key, which returns that knob to its default. Keys DOXA
+doesn't recognize are preserved on save, so a file written by a newer
+version survives an older one. A config left behind by an earlier build at
+`~/.config/doxa/config.toml` is moved into place once, out loud.
 
-The modal lists only knobs that already do something, and each row names
-the code that reads it. A row whose environment variable is set is marked
-`[env]` and says what the environment is forcing — an edit that cannot
-take effect says so rather than silently doing nothing.
+**Two homes, deliberately split.** `~/.doxa/` holds *durable* state — this
+config, and anything else that must survive a reboot. The **runtime dir**
+(`$DOXA_RUNTIME_DIR` → `$XDG_RUNTIME_DIR/doxa` → `~/.local/share/doxa`)
+holds *ephemeral* endpoints — the daemon sockets and the peer registry.
+Sockets stay out of the home directory because a home directory can be NFS
+(where `AF_UNIX` misbehaves) and because a stale socket file must not
+outlive a reboot, which the runtime dir's tmpfs semantics guarantee. The
+LORE store is neither: it stays `lore_core`'s own (`~/.claude/lore`,
+`LORE_ROOT`-overridable), because sharing one store with the Claude Code
+plugin is a product property — a private DOXA store would silently fork
+your memory and beliefs into two divergent halves.
+
+The modal groups rows into category tabs (Session · Memory · Appearance ·
+Paths · About; `shift+←/→`, deliberately not the app's own tab keys) and
+lists only knobs that already do something, each row naming the code that
+reads it. Every row shows its **effective** value — read fresh when the
+modal opens, resolved through the precedence above — next to **where it
+came from**: `900 (config)`, `120 (default)`, `1 (env DOXA_NERD_FONT —
+overrides config)`. A row the environment is winning is **read-only**: it
+offers no field at all and says why, because an edit that writes a value
+the environment keeps shadowing is a silent no-op, the worst thing a
+settings menu can do. Saving re-reads, so what you see afterwards is what
+is in force. The `model` row follows the *session* (a mid-session `/model`
+moves it) and names the config default when the two differ.
 
 | setting | env | default | read by |
 |---|---|---|---|

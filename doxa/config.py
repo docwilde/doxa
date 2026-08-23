@@ -4,9 +4,9 @@ One rule, everywhere: **environment > config file > default.**
 
 An env var is a deliberate act with a narrower scope than a file (a shell,
 a launcher, a systemd unit, a test), so it must beat the file it can't see.
-The config file (XDG: ``$XDG_CONFIG_HOME/doxa/config.toml``, else
-``~/.config/doxa/config.toml``) is where the settings modal writes what the
-user picked. A default is what DOXA does when neither says otherwise.
+The config file (``$DOXA_HOME/config.toml``, default ``~/.doxa/config.toml``)
+is where the settings modal writes what the user picked. A default is what
+DOXA does when neither says otherwise.
 
 The knobs here are exactly the knobs that already DO something -- each row
 names the code that reads it. This module does not invent settings; it
@@ -53,6 +53,12 @@ class Setting:
     default: str = ""
     read_only: bool = False
 
+    category: str = "Session"
+    """Which tab of the settings modal this row lives on."""
+
+    note: str = ""
+    """Extra line under the help, for rows that need a caveat."""
+
     def placeholder(self) -> str:
         if self.choices:
             return " | ".join(c for c in self.choices if c)
@@ -66,49 +72,68 @@ class Setting:
 # lists something inert teaches the user that the menu lies.
 SETTINGS: tuple[Setting, ...] = (
     Setting(
-        key="model", env="DOXA_MODEL", label="model",
+        key="model", env="DOXA_MODEL", label="model", category="Session",
         help="Model for new sessions (doxa.cli --model default; /model "
              "switches the live session)",
     ),
     Setting(
-        key="effort", env="DOXA_EFFORT", label="effort",
+        key="effort", env="DOXA_EFFORT", label="effort", category="Session",
         kind="choice", choices=("", "low", "medium", "high", "xhigh", "max"),
-        help="Effort level for NEW sessions; the SDK sets it at connect only, "
-             "so a running session keeps its own (doxa.engine.effort_level)",
-    ),
-    Setting(
-        key="derive_secs", env="DOXA_DERIVE_SECS", label="derive secs",
-        kind="number",
-        help="Streaming-deriver debounce interval, seconds; empty = off "
-             "(doxa.engine.derive_interval)",
+        help="Effort level for NEW sessions (doxa.engine.effort_level)",
+        note="ClaudeAgentOptions.effort is a connect-time option -- the SDK "
+             "has no live setter, so a running session keeps its own.",
     ),
     Setting(
         key="linger_secs", env="DOXA_LINGER_SECS", label="linger secs",
-        kind="number", default="120",
+        category="Session", kind="number", default="120",
         help="Seconds a daemon outlives its last client before finalizing "
              "(doxa.cli --linger default)",
     ),
     Setting(
+        key="derive_secs", env="DOXA_DERIVE_SECS", label="derive secs",
+        category="Memory", kind="number",
+        help="Streaming-deriver debounce interval, seconds; empty = off "
+             "(doxa.engine.derive_interval)",
+    ),
+    Setting(
         key="consult_floor", env="DOXA_CONSULT_FLOOR", label="consult floor",
-        kind="number", default="1.0",
+        category="Memory", kind="number", default="1.0",
         help="bm25 relevance floor for the act-time belief consult; 0 "
              "disables it (doxa.engine.consult_floor)",
     ),
     Setting(
+        key="", env="LORE_ROOT", label="lore store", category="Memory",
+        help="Where the belief store and session index live (lore_core.ROOT)",
+        note="Shared with the Claude Code LORE plugin -- one store, two "
+             "carriers. Set LORE_ROOT to point elsewhere; a private store "
+             "would fork your memory into two divergent halves.",
+        read_only=True,
+    ),
+    Setting(
         key="nerd_font", env="DOXA_NERD_FONT", label="nerd font",
-        kind="bool",
-        help="Use the nerd-font branch glyph  instead of ⎇ in the status "
-             "line (doxa.app.git_branch_symbol)",
+        category="Appearance", kind="bool",
+        help="Use the nerd-font branch glyph instead of the branch sign in "
+             "the status line (doxa.app.git_branch_symbol)",
     ),
     Setting(
         key="image_mode", env="DOXA_IMAGE_MODE", label="image mode",
-        kind="choice", choices=("", "kgp", "sixel", "halfblock", "text"),
+        category="Appearance", kind="choice",
+        choices=("", "kgp", "sixel", "halfblock", "text"),
         help="Force a rung of the terminal-image ladder; empty = probe "
              "(doxa.images.detect_mode)",
     ),
     Setting(
-        key="", env="LORE_ROOT", label="lore store",
-        help="Where the belief store and session index live (lore_core.ROOT)",
+        key="", env="DOXA_HOME", label="doxa home", category="Paths",
+        help="Durable DOXA state: this config, the window layout",
+        read_only=True,
+    ),
+    Setting(
+        key="", env="DOXA_RUNTIME_DIR", label="runtime dir", category="Paths",
+        help="Ephemeral endpoints: daemon sockets and the peer registry "
+             "(doxa.peers.runtime_dir)",
+        note="Deliberately NOT under ~/.doxa: home directories can be NFS "
+             "(AF_UNIX misbehaves) and stale sockets must not outlive a "
+             "reboot.",
         read_only=True,
     ),
 )
@@ -117,13 +142,64 @@ SETTINGS_BY_KEY: dict[str, Setting] = {s.key: s for s in SETTINGS if s.key}
 SETTINGS_BY_ENV: dict[str, Setting] = {s.env: s for s in SETTINGS}
 
 
+# Where DOXA's durable state lives. Deliberately ~/.doxa (DOXA_HOME
+# overrides), mirroring ~/.claude -- and deliberately NOT the runtime dir:
+#
+#   ~/.doxa        durable state: config.toml, window layout, anything that
+#                  must survive a reboot.
+#   runtime dir    ephemeral endpoints: the daemon sockets and the peer
+#                  registry ($DOXA_RUNTIME_DIR -> $XDG_RUNTIME_DIR/doxa ->
+#                  ~/.local/share/doxa). Sockets stay there because a home
+#                  directory can be NFS (AF_UNIX misbehaves there) and
+#                  because stale socket files must not survive a reboot,
+#                  which the runtime dir's tmpfs semantics guarantee.
+#
+# The LORE store is neither: it stays lore_core's own (~/.claude/lore,
+# LORE_ROOT-overridable) because sharing one store with the Claude Code
+# plugin is a product property -- a private DOXA store would silently fork
+# the user's memory and beliefs into two divergent halves.
+_MIGRATED = False
+
+
+def doxa_home() -> Path:
+    base = os.environ.get("DOXA_HOME", "").strip()
+    return Path(base) if base else Path.home() / ".doxa"
+
+
 def config_dir() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME", "").strip()
-    return (Path(base) if base else Path.home() / ".config") / "doxa"
+    return doxa_home()
 
 
 def config_path() -> Path:
-    return config_dir() / "config.toml"
+    return doxa_home() / "config.toml"
+
+
+def legacy_config_path() -> Path:
+    """Where an early build wrote it (XDG). Migrated once, then forgotten."""
+    base = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    return (Path(base) if base else Path.home() / ".config") / "doxa" / "config.toml"
+
+
+def migrate_legacy() -> "Path | None":
+    """Move a pre-~/.doxa config into place, once per process. Returns the
+    destination when something was actually moved, else None -- so the
+    caller can say so out loud rather than silently relocating a file."""
+    global _MIGRATED
+    if _MIGRATED:
+        return None
+    _MIGRATED = True
+    destination = config_path()
+    legacy = legacy_config_path()
+    if destination.exists() or not legacy.exists() or legacy == destination:
+        return None
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(destination.parent, 0o700)
+        os.replace(legacy, destination)
+    except OSError:
+        return None
+    invalidate()
+    return destination
 
 
 # Cache key: (path, mtime, size) -- same discipline as doxa.identity. The
@@ -192,6 +268,35 @@ def effective(env_name: str) -> str:
         return value
     setting = SETTINGS_BY_ENV.get(env_name)
     return setting.default if setting else ""
+
+
+def provenance(env_name: str) -> tuple[str, str]:
+    """``(source, value)`` for one knob -- where the effective value came
+    from, resolved through the same precedence every reader uses.
+
+    ``source`` is "env", "config" or "default". The settings modal shows
+    this next to every row: a value the user cannot change from the UI must
+    be visibly EXPLAINED, not mysteriously ignored."""
+    env_value = os.environ.get(env_name, "")
+    if env_value.strip():
+        return "env", env_value
+    setting = SETTINGS_BY_ENV.get(env_name)
+    if setting is not None and setting.key:
+        stored = load().get(setting.key)
+        if stored is not None and stored != "":
+            if isinstance(stored, bool):
+                return "config", "true" if stored else "false"
+            return "config", str(stored)
+    return "default", (setting.default if setting else "")
+
+
+def source_label(env_name: str) -> str:
+    """The human form of :func:`provenance`'s source, naming the env var
+    that is winning when one is."""
+    source, _value = provenance(env_name)
+    if source == "env":
+        return f"env {env_name} — overrides config"
+    return source
 
 
 def overridden_by_env(env_name: str) -> bool:
@@ -286,6 +391,7 @@ def save(values: dict[str, str]) -> Path:
         lines.append(f"{key} = {_toml_value(stored[key])}")
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)  # DOXA's state home is the user's alone
     tmp = path.with_suffix(".toml.tmp")
     tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     os.chmod(tmp, 0o600)

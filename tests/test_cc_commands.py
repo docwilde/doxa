@@ -33,7 +33,7 @@ from tests.fakes import FakeEngine, factory_with_script
 
 @pytest.fixture(autouse=True)
 def _isolated_config(monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("DOXA_HOME", str(tmp_path / "doxa-home"))
     config.invalidate()
     yield
     config.invalidate()

@@ -1472,7 +1472,14 @@ class DoxaApp(App):
             for pane in self.panes():
                 pane._refresh_status()
 
-        self.push_screen(SettingsScreen(), callback=_saved)
+        engine = self.engine
+        self.push_screen(
+            SettingsScreen(
+                session_model=getattr(engine, "model", None),
+                account=getattr(engine, "account", None) or {},
+            ),
+            callback=_saved,
+        )
 
     def action_toggle_inspector(self) -> None:
         """Belief-inspector stub: Phase 3 owns the real pane (live STEER/
