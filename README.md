@@ -123,8 +123,29 @@ Verdict: GO with four small redesigns, all itemized.
 | 0 | SDK lifecycle validation, Textual coexistence, auth | **done** |
 | 1 | `lore_core` extraction; single-pane shell; block rendering; session-end review; ask | **done** |
 | 2 | Daemon split + detach/reattach, Ctrl+P palette, Ctrl+R FTS history search, theme | **done** |
-| 3 | Split panes + review pane, streaming deriver, multi-agent panes + merge queue, act-time consult, trace tree | planned |
+| 3 | Warp-style tabs (sketch below), split panes + review pane, streaming deriver, multi-agent panes + merge queue, act-time consult, trace tree | planned |
 | 4 | Container isolation tier, calibration dashboard, plugin-compat hardening | planned |
+
+**Tab-system sketch (Phase 3, deferred from the dogfooding round).** The
+daemon split already did the hard part: a session is a process, the TUI is a
+thin `EngineClient`, and `_switch_engine` proves the shell can swap live
+handles. Tabs are therefore N clients in one TUI, not N engines: a
+`TabbedContent` (or a custom one-line tab bar) across the top, where each
+tab owns exactly the per-session widget subtree the single pane owns today —
+block list, status bar, prompt input — plus its own `EngineClient`, git
+chip, and boot/pump workers (worker groups keyed by tab id, so an exclusive
+pump dies with its tab, not with its neighbor). `Ctrl+T` and a palette "New
+tab" spawn a fresh daemon **in the same repo scope** (exactly
+`new_session_factory`) and attach it in a new tab; the attach picker gains
+"open in new tab" so a foreign session reattaches without evicting the
+current one. Closing a tab is quit-detach for that client only; quit-stop
+stays per-tab; Ctrl+C keeps its double-press semantics but scoped to the
+active tab, and closing the LAST tab closes the app. The peer layer needs
+zero changes — each daemon already registers its own presence, so two tabs
+of the same repo see each other as peers, which is correct and useful.
+Migration path: extract today's single-pane subtree into a `SessionPane`
+widget first (pure refactor, tests unchanged), then mount N of them under
+`TabbedContent`. 
 
 ## Detach/reattach
 
@@ -157,10 +178,15 @@ peers, belief-inspector stub, quit-detach vs quit-stop), and `ctrl+r` opens
 history search — instant BM25 over LORE's index of every past session, a
 chosen hit inserting its session reference into the prompt. One prompt
 input at the bottom, a scrolling list of foldable turn blocks above it, a
-status bar (model · session cost · context estimate · active belief count ·
-`⌁` reattach handle). Billed through your Claude subscription —
-authenticates via the local `claude` CLI's own OAuth session, same as
-`PHASE0_FINDINGS.md` verified; no `ANTHROPIC_API_KEY` needed or read.
+status bar (model · repo `⎇` branch · `sub:<tier>` on subscription auth or
+the `$` estimate on API-key auth · context estimate · active belief count ·
+`⌁` reattach handle). Session start renders an identity block — account,
+plan, model, cwd, repo, LORE store — from the fields the CLI actually
+reports, never guesses. `Ctrl+C` quits: one press detaches (daemon keeps
+running), a second press within 2s stops the session (finalize now).
+Billed through your Claude subscription — authenticates via the local
+`claude` CLI's own OAuth session, same as `PHASE0_FINDINGS.md` verified;
+no `ANTHROPIC_API_KEY` needed or read.
 
 ```sh
 uv sync
