@@ -59,9 +59,15 @@ from textual.widgets import (
     TabPane,
 )
 
+from . import auth as auth_mod
+from . import commands as commands_mod
+from . import identity as identity_mod
 from . import images as images_mod
 from . import peers as peers_mod
 from .engine import EngineEvent, SessionEngine
+from .identity import tier_short  # noqa: F401 -- re-exported: the status
+# line's plan label lives in doxa.identity now (precise local tier first,
+# SDK subscriptionType second); app.py keeps the name callers already use.
 from .palette import DoxaCommandProvider
 from .peers import PeerSendError, age_secs
 
@@ -81,17 +87,6 @@ def _fmt_age(secs: float) -> str:
     if secs < 3600:
         return f"{int(secs // 60)}m"
     return f"{int(secs // 3600)}h{int((secs % 3600) // 60)}m"
-
-
-def tier_short(subscription_type: "str | None") -> "str | None":
-    """Compact status-line form of the CLI-reported subscription tier:
-    'Claude Max' -> 'max', 'Claude Pro' -> 'pro'; any other non-empty tier
-    lowercased as-is. None/empty (API-key auth) stays None -- the caller
-    then shows the plain $ figure."""
-    if not subscription_type or not str(subscription_type).strip():
-        return None
-    tier = str(subscription_type).strip().lower()
-    return tier.removeprefix("claude").strip() or tier
 
 
 def git_branch_symbol() -> str:
@@ -435,21 +430,28 @@ class SessionPane(TabPane):
 
     def _identity_text(self, cwd: str) -> str:
         """The session-start identity summary. Every line renders a REAL
-        field (the SDK's connect-time account block, the engine handle, the
-        git chip, LORE's store) -- absent fields are omitted, not invented."""
+        field (the SDK's connect-time account block, the CLI's own local
+        config for the precise plan tier, the engine handle, the git chip,
+        LORE's store) -- absent fields are omitted, not invented.
+
+        plan and org are SEPARATE lines on purpose: an organization name is
+        informative, never the plan. Conflating the two is how a Max
+        subscription can end up reading as somebody's "team subscription"."""
         engine = self.engine
         account = getattr(engine, "account", None) or {}
+        local = identity_mod.local_account()
         lines: list[str] = []
-        who = " · ".join(
-            str(account[k]) for k in ("email", "organization") if account.get(k)
-        )
-        if who:
-            lines.append(f"account  {who}")
-        if account.get("subscriptionType"):
-            plan = str(account["subscriptionType"])
-            if account.get("apiProvider"):
-                plan += f" ({account['apiProvider']})"
-            lines.append(f"plan     {plan}")
+        if account.get("email"):
+            lines.append(f"account  {account['email']}")
+        elif local.get("emailAddress"):
+            lines.append(f"account  {local['emailAddress']}")
+        plan_line = self._plan_line(account, local)
+        if plan_line:
+            lines.append(f"plan     {plan_line}")
+        org = identity_mod.organization(account, local)
+        if org:
+            role = local.get("organizationRole")
+            lines.append(f"org      {org}" + (f" ({role})" if role else ""))
         lines.append(f"model    {getattr(engine, 'model', None) or 'default'}")
         lines.append(f"cwd      {cwd}")
         git_chip = self._git.render() if self._git is not None else None
@@ -463,6 +465,37 @@ class SessionPane(TabPane):
         if lore_bits:
             lines.append(f"lore     {' · '.join(lore_bits)}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _plan_line(account: dict, local: dict) -> str | None:
+        """`max 20x (Claude Max · firstParty)` -- the precise local tier
+        leading, with the coarse SDK string kept visible as its provenance.
+        Falls back to the SDK string alone, then to nothing at all."""
+        tier = identity_mod.account_tier(account, local)
+        if not tier:
+            return None
+        detail = [
+            str(account[k]) for k in ("subscriptionType", "apiProvider")
+            if account.get(k)
+        ]
+        # The SDK string stays visible as provenance -- it is what the
+        # session actually reported -- unless it IS the label verbatim.
+        if detail and detail[0].strip().lower() == tier:
+            detail = detail[1:]
+        return tier + (f" ({' · '.join(detail)})" if detail else "")
+
+    def _refresh_identity(self) -> None:
+        """Re-render the identity block in place -- after an auth flow the
+        account, the plan tier and the organization may all have changed,
+        and a stale identity block is worse than none."""
+        try:
+            block = self.query_one("#identity-block", SystemBlock)
+        except Exception:
+            return
+        engine = self.engine
+        cwd = str(getattr(engine, "cwd", None) or self.cwd)
+        block.text = self._identity_text(cwd)
+        block.update(f"▎ doxa\n{block.text}")
 
     async def _peer_pump(self) -> None:
         """Consume the engine's out-of-band stream for the life of the pane:
@@ -526,7 +559,7 @@ class SessionPane(TabPane):
         # with the (already-computed) list-price figure demoted to an
         # explicit what-if. API-key auth keeps the real $ estimate.
         account = getattr(self.engine, "account", None) or {}
-        tier = tier_short(account.get("subscriptionType"))
+        tier = identity_mod.account_tier(account)
         if tier:
             cost = f"sub:{tier} (≈${self.engine.total_cost_usd:.4f} if API)"
         else:
@@ -563,56 +596,118 @@ class SessionPane(TabPane):
         if not prompt:
             return
         event.input.value = ""
-        # Only doxa's own commands (peers, msg, img) are intercepted;
-        # anything else starting with "/" (e.g. the literal "/compact"
-        # convention) still goes to the model untouched.
-        if (
-            prompt in ("/peers", "/msg", "/img")
-            or prompt.startswith(("/peers ", "/msg ", "/img "))
-        ):
+        # Only rows of the slash registry (doxa/commands.py) are
+        # intercepted, and passthrough rows deliberately are not: the
+        # literal "/compact" convention has to REACH the CLI to do anything.
+        command = commands_mod.lookup(prompt)
+        if command is not None and not command.passthrough:
             self.run_worker(self._run_command(prompt), group="command")
             return
         self.run_worker(self._run_turn(prompt), exclusive=True, group="turn")
 
-    async def _run_command(self, prompt: str) -> None:
-        await self._engine_ready.wait()
-        assert self.engine is not None
-        if prompt.split()[0] == "/img":
-            # Debug render site for image support -- see ImageBlock.
-            parts = prompt.split(maxsplit=1)
-            path = os.path.expanduser(parts[1].strip()) if len(parts) > 1 else ""
-            block_list = self.query_one("#block-list", VerticalScroll)
-            if not path:
-                await block_list.mount(SystemBlock("usage: /img <path>"))
-            elif not os.path.isfile(path):
-                await block_list.mount(SystemBlock(f"img: no such file: {path}"))
-            else:
-                await block_list.mount(ImageBlock(path))
-            block_list.scroll_end(animate=False)
-            return
-        if prompt.split()[0] == "/peers":
-            peers = self.engine.list_peers()
-            if not peers:
-                text = "peers: none in this project right now"
-            else:
-                lines = [
-                    f"{p.title}  {p.session_id[:8]}  {p.cwd}  ·  up {_fmt_age(age_secs(p.started_at))}"
-                    for p in peers
-                ]
-                text = "peers:\n" + "\n".join(lines)
-        else:  # /msg
-            parts = prompt.split(maxsplit=2)
-            if len(parts) < 3:
-                text = "usage: /msg <session_prefix> <text>"
-            else:
-                try:
-                    peer = await self.engine.send_peer_message(parts[1], parts[2])
-                    text = f"sent to {peer.title} ({peer.session_id[:8]})"
-                except PeerSendError as exc:
-                    text = f"msg error: {exc}"
+    # -- slash commands ----------------------------------------------
+
+    def _command_handlers(self) -> "dict[str, Callable[[str], Any]]":
+        """name -> coroutine handler, each taking the argument string.
+
+        The keys of this dict and ``commands.interactive_names()`` are
+        asserted equal by the test suite: the registry describes, the pane
+        executes, and neither may grow a command the other doesn't have."""
+        return {
+            "/peers": self._cmd_peers,
+            "/msg": self._cmd_msg,
+            "/img": self._cmd_img,
+            "/login": partial(self._cmd_auth, "login"),
+            "/logout": partial(self._cmd_auth, "logout"),
+        }
+
+    async def _system(self, text: str) -> None:
+        """Mount one doxa-generated block and stay scrolled to it."""
         block_list = self.query_one("#block-list", VerticalScroll)
         await block_list.mount(SystemBlock(text))
         block_list.scroll_end(animate=False)
+
+    async def _run_command(self, prompt: str) -> None:
+        await self._engine_ready.wait()
+        name, _, args = prompt.strip().partition(" ")
+        handler = self._command_handlers().get(name)
+        if handler is None:  # registry/handler drift -- the closure test's job
+            await self._system(f"unknown command: {name}")
+            return
+        await handler(args.strip())
+
+    async def _cmd_img(self, args: str) -> None:
+        # Debug render site for image support -- see ImageBlock.
+        path = os.path.expanduser(args) if args else ""
+        if not path:
+            await self._system("usage: /img <path>")
+            return
+        if not os.path.isfile(path):
+            await self._system(f"img: no such file: {path}")
+            return
+        block_list = self.query_one("#block-list", VerticalScroll)
+        await block_list.mount(ImageBlock(path))
+        block_list.scroll_end(animate=False)
+
+    async def _cmd_peers(self, args: str) -> None:
+        assert self.engine is not None
+        peers = self.engine.list_peers()
+        if not peers:
+            await self._system("peers: none in this project right now")
+            return
+        lines = [
+            f"{p.title}  {p.session_id[:8]}  {p.cwd}"
+            f"  ·  up {_fmt_age(age_secs(p.started_at))}"
+            for p in peers
+        ]
+        await self._system("peers:\n" + "\n".join(lines))
+
+    async def _cmd_msg(self, args: str) -> None:
+        assert self.engine is not None
+        parts = args.split(maxsplit=1)
+        if len(parts) < 2:
+            await self._system("usage: /msg <session_prefix> <text>")
+            return
+        try:
+            peer = await self.engine.send_peer_message(parts[0], parts[1])
+        except PeerSendError as exc:
+            await self._system(f"msg error: {exc}")
+            return
+        await self._system(f"sent to {peer.title} ({peer.session_id[:8]})")
+
+    async def _cmd_auth(self, verb: str, args: str) -> None:
+        """/login [provider] and /logout [provider].
+
+        DOXA holds no credential and runs no auth logic: it suspends the
+        TUI (App.suspend -- the supported way to hand the terminal over),
+        execs the provider's OWN interactive auth CLI from the data table
+        in doxa/auth.py, and on return re-reads identity so the block and
+        the status chips reflect whoever is signed in NOW."""
+        try:
+            provider = auth_mod.resolve(args.split()[0] if args.split() else None)
+        except auth_mod.AuthError as exc:
+            await self._system(f"{verb}: {exc}")
+            return
+        cmd = provider.command_for(verb)
+        try:
+            with self.app.suspend():
+                code = auth_mod.run_auth_command(cmd)
+        except Exception as exc:  # noqa: BLE001 -- SuspendNotSupported and
+            # friends must surface as an ordinary block, not a crashed TUI.
+            await self._system(
+                f"{verb}: cannot hand the terminal to {provider.binary} here "
+                f"({exc}) — run `{' '.join(cmd)}` in another terminal instead"
+            )
+            return
+        # The CLI may have rewritten its config within one mtime tick.
+        identity_mod.invalidate()
+        self._refresh_identity()
+        self._refresh_status()
+        shown = " ".join(cmd)
+        if code == 0:
+            await self._system(f"{shown} — done; identity re-read")
+        else:
+            await self._system(f"{shown} — exited {code}; identity re-read")
 
     async def _run_turn(self, prompt: str) -> None:
         assert self.engine is not None
@@ -859,16 +954,6 @@ class DoxaApp(App):
                 self._cmd_new_session,
             ),
             (
-                "Peers: list",
-                "Same-project live sessions (the /peers command)",
-                self._cmd_list_peers,
-            ),
-            (
-                "Peers: message",
-                "Prefill /msg <session> <text> in the prompt",
-                self._cmd_message_peer,
-            ),
-            (
                 "Belief inspector: toggle",
                 "Show/hide the belief inspector pane (stub until Phase 3)",
                 self.action_toggle_inspector,
@@ -891,6 +976,19 @@ class DoxaApp(App):
                 self._cmd_stop_active,
             ),
         ]
+        # Slash registry, second surface: every row that declares a palette
+        # label appears here too (doxa/commands.py is the single list --
+        # the prompt's autocomplete reads the same rows). Rows that need
+        # arguments PREFILL the prompt instead of running blind.
+        for command in commands_mod.REGISTRY:
+            if not command.palette:
+                continue
+            callback = (
+                partial(self._cmd_prefill, command.name + " ")
+                if command.palette_prefill
+                else partial(self._cmd_run_slash, command.name)
+            )
+            commands.append((command.palette, command.summary, callback))
         # Tab picker: one entry per OTHER live tab, in tab order.
         active = self.active_pane
         for pane in self.panes():
@@ -963,17 +1061,19 @@ class DoxaApp(App):
             pane.id or ""
         )
 
-    def _cmd_list_peers(self) -> None:
+    def _cmd_run_slash(self, name: str) -> None:
+        """Palette -> the ACTIVE pane's slash handler. One dispatch path for
+        both surfaces: the palette never reimplements a command."""
         pane = self.active_pane
         if pane is not None:
-            pane.run_worker(pane._run_command("/peers"), group="command")
+            pane.run_worker(pane._run_command(name), group="command")
 
-    def _cmd_message_peer(self) -> None:
+    def _cmd_prefill(self, text: str) -> None:
         pane = self.active_pane
         if pane is None:
             return
         prompt = pane.query_one("#prompt-input", Input)
-        prompt.value = "/msg "
+        prompt.value = text
         prompt.cursor_position = len(prompt.value)
         prompt.focus()
 

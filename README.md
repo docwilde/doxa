@@ -102,6 +102,21 @@ behind an explicit untrusted-peer preamble — peer data to weigh, never an
 instruction to follow. The registry entry points at whoever hosts the
 engine, so the layer survives the Phase 2 daemon split unchanged.
 
+**Identity you can trust, auth DOXA never touches.** The session-start
+identity block and the status line report the plan you actually have. The
+SDK's connect-time account block gives `subscriptionType` — a coarse
+display string that cannot tell a Max 5x from a Max 20x — so DOXA prefers
+the precise field the Claude Code CLI already keeps locally
+(`organizationRateLimitTier` = `default_claude_max_20x` → `max 20x`),
+falls back to the SDK string, and shows nothing at all when neither exists.
+Plan and organization are separate lines, always: an org name is
+informative and is never rendered as the plan. `/login [provider]` and
+`/logout [provider]` suspend the TUI and exec the provider's *own*
+interactive auth CLI (`claude auth login`, `codex login` — probed, not
+assumed), then resume and re-read identity. No credential is ever handled,
+stored, or written by DOXA; the provider table is data, so another agent
+CLI is a row, not a code path.
+
 **Claude Code plugin compatibility.** DOXA loads existing Claude Code
 plugins: hooks (all observed events, both manifest conventions) and slash
 commands first; skills and tool-scoped custom agents next. Verified against

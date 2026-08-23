@@ -31,6 +31,15 @@ os.environ["DOXA_RUNTIME_DIR"] = str(_tmp / "runtime")
 # DOXA_IMAGE_MODE themselves via monkeypatch.
 os.environ["DOXA_IMAGE_MODE"] = "text"
 
+# Identity isolation: doxa.identity reads the Claude Code CLI's own global
+# config for the PRECISE plan tier (organizationRateLimitTier), resolving
+# its path the way the CLI does -- CLAUDE_CONFIG_DIR first, home directory
+# otherwise. Pointing it at the throwaway directory means no test ever
+# reads the developer's real account block (and every test therefore sees
+# the "no local precision" fallback path unless it writes a config itself).
+os.environ["CLAUDE_CONFIG_DIR"] = str(_tmp / "claude-config")
+Path(os.environ["CLAUDE_CONFIG_DIR"]).mkdir(parents=True, exist_ok=True)
+
 # Review kill switch: SessionEngine.finalize()/PreCompact run the LORE
 # deriver review, whose worker shells out to a headless `claude -p` when a
 # transcript is long enough to build a job. The daemon tests finalize real
