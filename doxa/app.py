@@ -1,15 +1,27 @@
-"""doxa.app -- the single-pane Textual shell.
+"""doxa.app -- the Textual shell: N session tabs over N engine handles.
 
 Phase 1 built this as one pane over an in-process SessionEngine; Phase 2's
-daemon split keeps the shell almost unchanged and swaps what sits behind
-``self.engine``: a factory now supplies EITHER an in-process
-``SessionEngine`` (tests, ``--in-process``) or a ``doxa.client.EngineClient``
-attached to a session daemon over its Unix socket (the default --
-see doxa/daemon.py). The app consumes the same async-iterator surface either
-way. One addition the split forces: turn events can now arrive OUT-OF-BAND
--- replayed history right after a reattach, or a turn another attached
-client is driving -- so the peer pump renders those into turn blocks too,
-not just peer messages.
+daemon split swapped what sits behind the engine handle (an in-process
+``SessionEngine`` or a ``doxa.client.EngineClient`` attached to a session
+daemon -- the app consumes the same async-iterator surface either way).
+Phase 3's tab step is exactly the README sketch: the single-session surface
+became :class:`SessionPane` (a pure extraction -- block list, status bar,
+prompt input, boot/pump workers, out-of-band rendering), and a
+``TabbedContent`` hosts N of them, one engine handle EACH. Tabs are N
+clients in one TUI, not N engines in one process: Ctrl+T spawns a fresh
+daemon in the same repo scope (``new_session_factory``) and attaches it in
+a new tab; Ctrl+W close-detaches just that tab's client. Worker groups are
+scoped per pane node (Textual cancels by (node, group)), so an exclusive
+pump dies with its tab, not with its neighbor. The peer layer needed zero
+changes -- each daemon registers its own presence, so two tabs of the same
+repo correctly see each other as peers.
+
+Ctrl+C stays APP-level, deliberately: one press arms the double-press
+window and then detaches ALL tabs (every daemon keeps running -- the
+cheapest outcome to recover from is always chosen on a reflex
+keystroke); a second press inside the window stops EVERY tab's session
+(finalize NOW). Per-tab stopping remains available where deliberation
+lives: the palette's quit-stop and Ctrl+W.
 
 Each turn is a foldable Collapsible; tool calls inside a turn render as
 compact chips (name + one-line arg summary + duration + a check or cross)
@@ -38,7 +50,14 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
-from textual.widgets import Collapsible, Input, LoadingIndicator, Static
+from textual.widgets import (
+    Collapsible,
+    Input,
+    LoadingIndicator,
+    Static,
+    TabbedContent,
+    TabPane,
+)
 
 from . import images as images_mod
 from . import peers as peers_mod
@@ -79,7 +98,7 @@ def git_branch_symbol() -> str:
     """The nerd-font branch glyph (U+E0A0) when the user opted in via
     DOXA_NERD_FONT (a TUI cannot detect font glyph coverage itself);
     the universally-rendering ⎇ otherwise."""
-    return "" if os.environ.get("DOXA_NERD_FONT", "").strip() else "⎇"
+    return "" if os.environ.get("DOXA_NERD_FONT", "").strip() else "⎇"
 
 
 class GitLine:
@@ -263,9 +282,9 @@ class TurnBlock(Collapsible):
     def __init__(self, prompt: str) -> None:
         self.prompt_text = prompt
         self.assistant_text = ""
-        self.thinking = LoadingIndicator(id="thinking", classes="thinking")
-        self.body = Static("", id="turn-body", classes="turn-body")
-        self.tools = Vertical(id="turn-tools", classes="turn-tools")
+        self.thinking = LoadingIndicator(classes="thinking")
+        self.body = Static("", classes="turn-body")
+        self.tools = Vertical(classes="turn-tools")
         super().__init__(self.thinking, self.body, self.tools, title=self._render_title(), collapsed=False)
 
     def _render_title(self, suffix: str = "") -> str:
@@ -300,68 +319,41 @@ class TurnBlock(Collapsible):
         self.title = self._render_title(suffix)
 
 
-class DoxaApp(App):
-    """The DOXA terminal."""
+class SessionPane(TabPane):
+    """One session's whole surface: engine handle, block list, status bar,
+    prompt input, and the boot/pump workers that drive them.
 
-    CSS_PATH = "theme.tcss"
-    TITLE = "DOXA"
-    # Ctrl+P (App.COMMAND_PALETTE_BINDING's default) opens the built-in
-    # CommandPalette; DoxaCommandProvider feeds it doxa_commands() below.
-    COMMANDS = App.COMMANDS | {DoxaCommandProvider}
-    # Ctrl+R: history search over LORE's session FTS (doxa/history.py) --
-    # instant BM25 over every indexed session, not a scrollback scan.
-    # Ctrl+C: quit. Textual 5 binds ctrl+c to a "press ctrl+q to quit"
-    # notification app-side and to "copy" on a focused Input -- with the
-    # prompt input permanently focused, Ctrl+C therefore did NOTHING
-    # quit-shaped (the dogfooding bug). priority=True beats both: one press
-    # = quit-detach (daemon keeps running), double press within
-    # CTRL_C_DOUBLE_SECS = quit-stop -- see action_ctrl_c_quit.
-    BINDINGS = [
-        ("ctrl+r", "history_search", "History"),
-        Binding("ctrl+c", "ctrl_c_quit", "Quit (detach)", show=False, priority=True),
-    ]
+    This is the README sketch's extraction step: exactly the widget subtree
+    (and exactly the per-session state) the single-pane app owned before,
+    now owned per tab. Every worker this pane starts runs on the PANE node
+    (``self.run_worker``), so exclusivity groups are scoped per tab and a
+    removed tab takes its workers down with it (Textual cancels a node's
+    workers on removal)."""
 
     def __init__(
         self,
-        cwd: str | None = None,
-        model: str | None = None,
-        engine_factory: "Callable[[], Any] | None" = None,
-        new_session_factory: "Callable[[], Any] | None" = None,
+        title: str,
+        cwd: str,
+        model: str | None,
+        engine_factory: "Callable[[], Any]",
+        *,
+        id: str | None = None,
     ) -> None:
-        super().__init__()
-        self.cwd = cwd or os.getcwd()
+        super().__init__(title, id=id)
+        self.cwd = cwd
         self.model = model
         self.engine: Any | None = None
-        # The daemon-split seam: engine_factory builds whatever this shell
-        # drives (in-process SessionEngine by default; an EngineClient when
-        # doxa.cli attached us to a daemon). new_session_factory builds a
-        # FRESH session for the palette's "new session" command -- distinct
-        # because an attach-flavored engine_factory must not be re-invoked
-        # to mean "new".
-        self._engine_factory = engine_factory or (
-            lambda: SessionEngine(cwd=self.cwd, model=self.model)
-        )
-        self._new_session_factory = new_session_factory or self._engine_factory
+        self._engine_factory = engine_factory
         self._engine_ready = asyncio.Event()
         # Out-of-band turn rendering state (replayed history after reattach,
         # or a turn another attached client drives) -- see _peer_pump.
         self._oob_turn: TurnBlock | None = None
         self._oob_chips: dict[str, ToolChip] = {}
-        # Ctrl+C double-press window (see action_ctrl_c_quit): the armed
-        # timer that will quit-detach when it fires; a second Ctrl+C while
-        # it is armed cancels it and quit-stops instead.
-        self._ctrl_c_timer: Any = None
         # Status-line git chip -- built in _boot (per engine, since attach
         # can land in another project's cwd), refreshed event-driven only.
         self._git: GitLine | None = None
-        # Settle the image-mode probe NOW, while this process still owns the
-        # terminal: textual-image's TGP/sixel queries read their answer from
-        # stdin, which Textual's own reader thread will grab the moment
-        # App.run() starts (doxa/images.py's detection discipline note).
-        images_mod.detect_mode()
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="belief-inspector")  # hidden stub, palette-toggled
         yield VerticalScroll(id="block-list")
         yield Static("doxa · connecting…", id="status-bar")
         yield Input(placeholder="Ask DOXA…", id="prompt-input")
@@ -372,10 +364,32 @@ class DoxaApp(App):
         self.run_worker(self._boot(), exclusive=True, group="engine")
         self.run_worker(self._peer_pump(), exclusive=True, group="peers")
 
+    # -- lifecycle ---------------------------------------------------
+
+    async def detach(self) -> None:
+        """Close-detach this pane's engine handle: over a daemon client
+        finalize() only detaches (the daemon lingers); in-process it
+        finalizes for real. Never raises -- teardown paths call this."""
+        engine, self.engine = self.engine, None
+        if engine is not None:
+            with contextlib.suppress(Exception):
+                await engine.finalize()
+
+    async def stop(self) -> None:
+        """Finalize this pane's session NOW (daemon included)."""
+        engine, self.engine = self.engine, None
+        if engine is not None:
+            stop = getattr(engine, "stop", None)
+            with contextlib.suppress(Exception):
+                if stop is not None:
+                    await stop()
+                else:
+                    await engine.finalize()
+
     async def _boot(self) -> None:
         assert self.engine is not None
         await self.engine.start()
-        # Engine cwd wins over the app's own (attach may cross projects);
+        # Engine cwd wins over the pane's own (attach may cross projects);
         # GitLine's constructor runs one git subprocess -- off the loop.
         git_cwd = str(getattr(self.engine, "cwd", None) or self.cwd)
         self._git = await asyncio.to_thread(GitLine, git_cwd)
@@ -421,7 +435,7 @@ class DoxaApp(App):
         return "\n".join(lines)
 
     async def _peer_pump(self) -> None:
-        """Consume the engine's out-of-band stream for the life of the app:
+        """Consume the engine's out-of-band stream for the life of the pane:
         peer_message mounts a block immediately (display path only -- the
         model sees it on the next user turn, engine-side); joins/leaves just
         move the status-bar chip; tool_disabled (the gate's two-strikes
@@ -502,6 +516,7 @@ class DoxaApp(App):
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "prompt-input":
             return  # a modal overlay's input is never a prompt
+        event.stop()  # this pane's prompt is nobody else's business
         prompt = event.value.strip()
         if not prompt:
             return
@@ -601,21 +616,190 @@ class DoxaApp(App):
             block.mark_done(ev.data.get("cost_usd"), ev.data.get("duration_ms"), ev.data.get("is_error", False))
             self._refresh_status()
 
-    @on(Collapsible.Expanded)
-    def _on_chip_expanded(self, event: Collapsible.Expanded) -> None:
-        if isinstance(event.collapsible, ToolChip):
-            event.collapsible.format_body()
+    async def switch_engine(self, make_engine: "Callable[[], Any]") -> None:
+        """Swap this pane's live engine handle: detach/finalize the old one,
+        build the new one (off-loop -- a daemon spawn blocks on
+        subprocess+registry polling), reset the block list, and restart the
+        boot + pump workers (both exclusive in their pane-scoped groups, so
+        the old pump dies with its engine)."""
+        old, self.engine = self.engine, None
+        self._engine_ready = asyncio.Event()
+        self._oob_turn = None
+        self._oob_chips = {}
+        if old is not None:
+            with contextlib.suppress(Exception):
+                await old.finalize()
+        try:
+            self.engine = await asyncio.to_thread(make_engine)
+        except Exception as exc:  # noqa: BLE001 -- spawn/attach failure must surface, not crash
+            block_list = self.query_one("#block-list", VerticalScroll)
+            await block_list.mount(SystemBlock(f"session switch failed: {exc}"))
+            return
+        await self.query_one("#block-list", VerticalScroll).remove_children()
+        self.query_one("#status-bar", Static).update("doxa · connecting…")
+        self.run_worker(self._boot(), exclusive=True, group="engine")
+        self.run_worker(self._peer_pump(), exclusive=True, group="peers")
+
+
+class DoxaApp(App):
+    """The DOXA terminal."""
+
+    CSS_PATH = "theme.tcss"
+    TITLE = "DOXA"
+    # Ctrl+P (App.COMMAND_PALETTE_BINDING's default) opens the built-in
+    # CommandPalette; DoxaCommandProvider feeds it doxa_commands() below.
+    COMMANDS = App.COMMANDS | {DoxaCommandProvider}
+    # Ctrl+R: history search over LORE's session FTS (doxa/history.py) --
+    # instant BM25 over every indexed session, not a scrollback scan.
+    # Ctrl+T/Ctrl+W: tab lifecycle (new same-repo session / close-detach).
+    # Ctrl+C: quit. Textual 5 binds ctrl+c to a "press ctrl+q to quit"
+    # notification app-side and to "copy" on a focused Input -- with the
+    # prompt input permanently focused, Ctrl+C therefore did NOTHING
+    # quit-shaped (the dogfooding bug). priority=True beats both: one press
+    # = quit-detach ALL tabs (daemons keep running), double press within
+    # CTRL_C_DOUBLE_SECS = quit-stop ALL -- see action_ctrl_c_quit.
+    BINDINGS = [
+        ("ctrl+r", "history_search", "History"),
+        Binding("ctrl+t", "new_tab", "New tab", show=False, priority=True),
+        Binding("ctrl+w", "close_tab", "Close tab", show=False, priority=True),
+        Binding("ctrl+c", "ctrl_c_quit", "Quit (detach)", show=False, priority=True),
+    ]
+
+    def __init__(
+        self,
+        cwd: str | None = None,
+        model: str | None = None,
+        engine_factory: "Callable[[], Any] | None" = None,
+        new_session_factory: "Callable[[], Any] | None" = None,
+    ) -> None:
+        super().__init__()
+        self.cwd = cwd or os.getcwd()
+        self.model = model
+        # The daemon-split seam: engine_factory builds whatever the first
+        # tab drives (in-process SessionEngine by default; an EngineClient
+        # when doxa.cli attached us to a daemon). new_session_factory builds
+        # a FRESH session -- the palette's "new session", and every Ctrl+T
+        # tab -- distinct because an attach-flavored engine_factory must not
+        # be re-invoked to mean "new".
+        self._engine_factory = engine_factory or (
+            lambda: SessionEngine(cwd=self.cwd, model=self.model)
+        )
+        self._new_session_factory = new_session_factory or self._engine_factory
+        self._tab_serial = 0
+        # Ctrl+C double-press window (see action_ctrl_c_quit): the armed
+        # timer that will quit-detach when it fires; a second Ctrl+C while
+        # it is armed cancels it and quit-stops instead.
+        self._ctrl_c_timer: Any = None
+        # Settle the image-mode probe NOW, while this process still owns the
+        # terminal: textual-image's TGP/sixel queries read their answer from
+        # stdin, which Textual's own reader thread will grab the moment
+        # App.run() starts (doxa/images.py's detection discipline note).
+        images_mod.detect_mode()
+
+    # -- pane plumbing -----------------------------------------------
+
+    def _tab_title(self) -> str:
+        self._tab_serial += 1
+        name = Path(self.cwd).name or "session"
+        return name if self._tab_serial == 1 else f"{name} ·{self._tab_serial}"
+
+    def _make_pane(self, engine_factory: "Callable[[], Any]") -> SessionPane:
+        return SessionPane(
+            self._tab_title(), self.cwd, self.model, engine_factory,
+        )
+
+    @property
+    def active_pane(self) -> SessionPane | None:
+        try:
+            pane = self.query_one("#session-tabs", TabbedContent).active_pane
+        except Exception:
+            return None
+        return pane if isinstance(pane, SessionPane) else None
+
+    def panes(self) -> list[SessionPane]:
+        return list(self.query(SessionPane))
+
+    @property
+    def engine(self) -> Any | None:
+        """The ACTIVE tab's engine handle -- the single-session accessors
+        (palette callbacks, history insertion, tests) read the app the way
+        they always did; multi-tab awareness lives in panes()."""
+        pane = self.active_pane
+        return pane.engine if pane is not None else None
+
+    @property
+    def _git(self) -> GitLine | None:
+        pane = self.active_pane
+        return pane._git if pane is not None else None
+
+    def _refresh_status(self) -> None:
+        pane = self.active_pane
+        if pane is not None:
+            pane._refresh_status()
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="belief-inspector")  # hidden stub, palette-toggled
+        with TabbedContent(id="session-tabs"):
+            yield self._make_pane(self._engine_factory)
+
+    @on(TabbedContent.TabActivated)
+    def _on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        pane = self.active_pane
+        if pane is not None:
+            with contextlib.suppress(Exception):
+                pane.query_one("#prompt-input", Input).focus()
+
+    # -- tab lifecycle -----------------------------------------------
+
+    async def action_new_tab(self) -> None:
+        """Ctrl+T: a fresh session in the same repo scope (exactly
+        new_session_factory -- a new daemon under the CLI, a new in-process
+        engine otherwise), attached in a new tab and focused."""
+        tabbed = self.query_one("#session-tabs", TabbedContent)
+        pane = self._make_pane(self._new_session_factory)
+        await tabbed.add_pane(pane)
+        tabbed.active = pane.id or tabbed.active
+
+    async def action_close_tab(self) -> None:
+        """Ctrl+W: close-DETACH the active tab -- its daemon keeps running
+        (reattach later via the palette's attach picker or `doxa attach`).
+        Closing the last tab closes the app, on the same detach semantics."""
+        pane = self.active_pane
+        if pane is None:
+            return
+        if len(self.panes()) == 1:
+            await self.action_quit()
+            return
+        await pane.detach()
+        await self.query_one("#session-tabs", TabbedContent).remove_pane(
+            pane.id or ""
+        )
+
+    def _switch_to_tab(self, pane_id: str) -> None:
+        with contextlib.suppress(Exception):
+            self.query_one("#session-tabs", TabbedContent).active = pane_id
 
     # -- palette (Ctrl+P) --------------------------------------------
 
     def doxa_commands(self) -> "list[tuple[str, str, Callable[[], Any]]]":
         """The DOXA command surface, as (name, help, callback) tuples --
         consumed by palette.DoxaCommandProvider on every palette open, so
-        the attach picker's entries reflect the live registry each time."""
+        the attach picker's and tab picker's entries reflect the live state
+        each time."""
         commands: list[tuple[str, str, Any]] = [
             (
+                "New tab",
+                "Open a fresh DOXA session in this repo scope in a new tab (ctrl+t)",
+                self._cmd_new_tab,
+            ),
+            (
+                "Close tab",
+                "Close-detach the current tab; its session keeps running (ctrl+w)",
+                self._cmd_close_tab,
+            ),
+            (
                 "New session",
-                "Start a fresh DOXA session in this project and switch to it",
+                "Start a fresh DOXA session and switch THIS tab to it",
                 self._cmd_new_session,
             ),
             (
@@ -640,32 +824,57 @@ class DoxaApp(App):
             ),
             (
                 "Quit: detach",
-                "Close this TUI; the session daemon keeps running "
+                "Close this TUI; every session daemon keeps running "
                 "(reattach with `doxa attach`)",
                 self.action_quit,
             ),
             (
                 "Quit: stop session",
-                "Finalize now (LORE review + index) and stop the daemon",
-                self.action_quit_stop,
+                "Finalize the current tab's session now (LORE review + index) "
+                "and close its tab",
+                self._cmd_stop_active,
             ),
         ]
+        # Tab picker: one entry per OTHER live tab, in tab order.
+        active = self.active_pane
+        for pane in self.panes():
+            if pane is active or not pane.id:
+                continue
+            sid = str(getattr(pane.engine, "session_id", "") or "")[:8]
+            commands.append((
+                f"Tab: {pane._title}" + (f" ({sid})" if sid else ""),
+                "Switch to this tab",
+                partial(self._switch_to_tab, pane.id),
+            ))
         # Attach picker: live daemon-hosted sessions from the shared
-        # peer/daemon registry, newest first, never this session itself.
-        self_id = str(getattr(self.engine, "session_id", "") or "") or None
-        for entry in peers_mod.list_daemons(self_id=self_id):
+        # peer/daemon registry, newest first, never any session already
+        # open in one of our tabs.
+        open_ids = {
+            str(getattr(p.engine, "session_id", "") or "") for p in self.panes()
+        }
+        for entry in peers_mod.list_daemons():
+            if entry.session_id in open_ids:
+                continue
             commands.append((
                 f"Attach: {entry.title} ({entry.session_id[:8]})",
-                f"Reattach to the live session in {entry.cwd}",
+                f"Reattach to the live session in {entry.cwd} (in this tab)",
                 partial(self._cmd_attach, entry),
             ))
         return commands
 
+    def _cmd_new_tab(self) -> None:
+        self.run_worker(self.action_new_tab(), group="tabs")
+
+    def _cmd_close_tab(self) -> None:
+        self.run_worker(self.action_close_tab(), group="tabs")
+
     def _cmd_new_session(self) -> None:
-        self.run_worker(
-            self._switch_engine(self._new_session_factory),
-            exclusive=True, group="switch",
-        )
+        pane = self.active_pane
+        if pane is not None:
+            pane.run_worker(
+                pane.switch_engine(self._new_session_factory),
+                exclusive=True, group="switch",
+            )
 
     def _cmd_attach(self, entry: peers_mod.PeerInfo) -> None:
         from .client import EngineClient  # deferred: tests without a daemon never import it
@@ -673,55 +882,59 @@ class DoxaApp(App):
         socket_path = entry.daemon_socket
         if not socket_path:
             return
-        self.run_worker(
-            self._switch_engine(lambda: EngineClient(socket_path)),
-            exclusive=True, group="switch",
+        pane = self.active_pane
+        if pane is not None:
+            pane.run_worker(
+                pane.switch_engine(lambda: EngineClient(socket_path)),
+                exclusive=True, group="switch",
+            )
+
+    def _cmd_stop_active(self) -> None:
+        self.run_worker(self._stop_active(), group="tabs")
+
+    async def _stop_active(self) -> None:
+        """Palette 'Quit: stop session', tab-scoped: finalize the ACTIVE
+        tab's session NOW; the tab closes with it. Stopping the only tab
+        closes the app (the Phase 2 behavior, per-app == per-tab then)."""
+        pane = self.active_pane
+        if pane is None:
+            return
+        await pane.stop()
+        if len(self.panes()) == 1:
+            await App.action_quit(self)
+            return
+        await self.query_one("#session-tabs", TabbedContent).remove_pane(
+            pane.id or ""
         )
 
     def _cmd_list_peers(self) -> None:
-        self.run_worker(self._run_command("/peers"), group="command")
+        pane = self.active_pane
+        if pane is not None:
+            pane.run_worker(pane._run_command("/peers"), group="command")
 
     def _cmd_message_peer(self) -> None:
-        prompt = self.query_one("#prompt-input", Input)
+        pane = self.active_pane
+        if pane is None:
+            return
+        prompt = pane.query_one("#prompt-input", Input)
         prompt.value = "/msg "
         prompt.cursor_position = len(prompt.value)
         prompt.focus()
 
-    async def _switch_engine(self, make_engine: "Callable[[], Any]") -> None:
-        """Swap the live engine handle: detach/finalize the old one, build
-        the new one (off-loop -- a daemon spawn blocks on subprocess+registry
-        polling), reset the block list, and restart the boot + pump workers
-        (both exclusive in their groups, so the old pump dies with its
-        engine)."""
-        old, self.engine = self.engine, None
-        self._engine_ready = asyncio.Event()
-        self._oob_turn = None
-        self._oob_chips = {}
-        if old is not None:
-            with contextlib.suppress(Exception):
-                await old.finalize()
-        try:
-            self.engine = await asyncio.to_thread(make_engine)
-        except Exception as exc:  # noqa: BLE001 -- spawn/attach failure must surface, not crash
-            block_list = self.query_one("#block-list", VerticalScroll)
-            await block_list.mount(SystemBlock(f"session switch failed: {exc}"))
-            return
-        await self.query_one("#block-list", VerticalScroll).remove_children()
-        self.query_one("#status-bar", Static).update("doxa · connecting…")
-        self.run_worker(self._boot(), exclusive=True, group="engine")
-        self.run_worker(self._peer_pump(), exclusive=True, group="peers")
-
     def action_history_search(self) -> None:
         """Ctrl+R: modal FTS search over LORE's session index. A chosen hit
         inserts its text reference (full session id + timestamp + snippet)
-        into the prompt input -- material for the next turn, never an
-        auto-sent prompt."""
+        into the ACTIVE tab's prompt input -- material for the next turn,
+        never an auto-sent prompt."""
         from .history import HistorySearchScreen, hit_reference
 
         def _insert(hit: "dict | None") -> None:
             if not hit:
                 return
-            prompt = self.query_one("#prompt-input", Input)
+            pane = self.active_pane
+            if pane is None:
+                return
+            prompt = pane.query_one("#prompt-input", Input)
             ref = hit_reference(hit)
             prompt.value = f"{prompt.value.rstrip()} {ref}".strip()
             prompt.cursor_position = len(prompt.value)
@@ -747,48 +960,52 @@ class DoxaApp(App):
         )
         panel.display = True
 
+    @on(Collapsible.Expanded)
+    def _on_chip_expanded(self, event: Collapsible.Expanded) -> None:
+        if isinstance(event.collapsible, ToolChip):
+            event.collapsible.format_body()
+
+    # -- quit semantics (app-level, all tabs) ------------------------
+
     async def action_ctrl_c_quit(self) -> None:
-        """Ctrl+C (priority binding). First press: arm the double-press
-        window, then quit-DETACH when it expires -- over a daemon client the
-        session keeps running (same as ctrl+q / palette 'Quit: detach');
-        in-process, finalize runs right here, so Ctrl+C always exits
-        cleanly. Second press inside the window: quit-STOP (finalize NOW,
-        daemon included -- the palette's 'Quit: stop session')."""
+        """Ctrl+C (priority binding), APP-level by design -- a reflex
+        keystroke gets the cheapest-to-recover outcome across every tab.
+        First press: arm the double-press window, then quit-DETACH when it
+        expires -- every daemon-hosted session keeps running (same as
+        ctrl+q); in-process engines finalize right there, so Ctrl+C always
+        exits cleanly. Second press inside the window: quit-STOP EVERY
+        tab's session (finalize NOW, daemons included). Per-tab stop stays
+        on the palette's 'Quit: stop session' and per-tab detach on
+        Ctrl+W, where the choice is deliberate rather than reflexive."""
         if self._ctrl_c_timer is not None:
             self._ctrl_c_timer.stop()
             self._ctrl_c_timer = None
             await self.action_quit_stop()
             return
         self.notify(
-            "detaching — Ctrl+C again to STOP the session (finalize now)",
+            "detaching all tabs — Ctrl+C again to STOP the sessions (finalize now)",
             severity="warning",
             timeout=CTRL_C_DOUBLE_SECS,
         )
         self._ctrl_c_timer = self.set_timer(CTRL_C_DOUBLE_SECS, self.action_quit)
 
     async def action_quit_stop(self) -> None:
-        """Palette 'Quit: stop session' -- finalize NOW. Over a daemon
+        """Quit-stop, ALL tabs -- finalize every session NOW. Over a daemon
         client this stops the daemon itself (LORE review + index run
         there); in-process it is plain finalize-and-quit."""
-        engine, self.engine = self.engine, None
-        if engine is not None:
-            stop = getattr(engine, "stop", None)
-            with contextlib.suppress(Exception):
-                if stop is not None:
-                    await stop()
-                else:
-                    await engine.finalize()
+        for pane in self.panes():
+            await pane.stop()
         await super().action_quit()
 
     async def action_quit(self) -> None:
-        """ctrl+q / palette 'Quit: detach'. Over a daemon client,
-        finalize() only DETACHES -- the daemon lingers and runs the
+        """ctrl+q / palette 'Quit: detach' -- ALL tabs. Over a daemon
+        client, finalize() only DETACHES -- the daemon lingers and runs the
         session-end review + index itself once the last client is gone
         (or on `doxa stop`). In-process (Phase 1 shape), finalize() still
         runs the review + index right here, host-driven (PHASE0 redesign
         item 1: no SessionEnd hook exists)."""
-        if self.engine is not None:
-            await self.engine.finalize()
+        for pane in self.panes():
+            await pane.detach()
         await super().action_quit()
 
 

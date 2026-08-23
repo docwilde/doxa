@@ -20,6 +20,38 @@ Screen {
     color: #F2E9DD;
 }
 
+/* Session tabs (Phase 3): the TabbedContent hosts one SessionPane per
+   session; both default to height:auto, which would collapse the panes'
+   1fr block list -- pin the whole tab system to the screen. The tab strip
+   itself rides the surface ramp; the active tab gets the orange accent. */
+#session-tabs {
+    height: 1fr;
+}
+
+SessionPane {
+    height: 1fr;
+    padding: 0;
+}
+
+#session-tabs ContentTabs {
+    background: #171512;
+    color: #D8CDBB;
+}
+
+#session-tabs Tab {
+    color: #D8CDBB;
+}
+
+#session-tabs Tab.-active {
+    color: #D97757;
+    text-style: bold;
+}
+
+#session-tabs Underline > .underline--bar {
+    color: #D97757;
+    background: #3A3429;
+}
+
 #block-list {
     background: #171512;
     padding: 1 2;

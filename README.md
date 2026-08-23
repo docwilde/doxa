@@ -123,10 +123,23 @@ Verdict: GO with four small redesigns, all itemized.
 | 0 | SDK lifecycle validation, Textual coexistence, auth | **done** |
 | 1 | `lore_core` extraction; single-pane shell; block rendering; session-end review; ask | **done** |
 | 2 | Daemon split + detach/reattach, Ctrl+P palette, Ctrl+R FTS history search, theme | **done** |
-| 3 | Warp-style tabs (sketch below), split panes + review pane, streaming deriver, multi-agent panes + merge queue, act-time consult, trace tree | **in progress** — landed: terminal images (KGP → sixel → half-block → text ladder; tool results + `/img`) |
+| 3 | Warp-style tabs (sketch below), split panes + review pane, streaming deriver, multi-agent panes + merge queue, act-time consult, trace tree | **in progress** — landed: terminal images (KGP → sixel → half-block → text ladder; tool results + `/img`); tabs (`SessionPane` under `TabbedContent`, one client per tab, Ctrl+T/Ctrl+W + palette picker) |
 | 4 | Container isolation tier, calibration dashboard, plugin-compat hardening | planned |
 
-**Tab-system sketch (Phase 3, deferred from the dogfooding round).** The
+**Tab system (Phase 3 — landed as sketched, with one documented
+divergence).** The sketch below is what shipped: `SessionPane` extraction
+first (pure refactor), then N panes under a `TabbedContent`, one
+`EngineClient`/engine handle each, worker groups scoped per pane node.
+`Ctrl+T` opens a fresh same-repo session in a new tab; `Ctrl+W`
+close-detaches just that tab (its daemon keeps running; the last tab closes
+the app); the palette gained "New tab", "Close tab" and a tab picker, and
+its "Quit: stop session" became tab-scoped. The divergence: `Ctrl+C` stays
+**app-level** — one press detaches ALL tabs, a double press stops ALL
+sessions — because a reflex keystroke should always get the
+cheapest-to-recover outcome; deliberate per-tab stopping lives in the
+palette and `Ctrl+W`, where you are looking at the tab you mean.
+
+**Original sketch (kept for the record).** The
 daemon split already did the hard part: a session is a process, the TUI is a
 thin `EngineClient`, and `_switch_engine` proves the shell can swap live
 handles. Tabs are therefore N clients in one TUI, not N engines: a
