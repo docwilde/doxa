@@ -425,6 +425,11 @@ class SessionDaemon:
             "session_id": self.session_id,
             "model": self.engine.model,
             "cwd": self.cwd,
+            # Identity surface for the client's status cache: the account
+            # block the CLI reported at connect (may be {}), and where the
+            # LORE store lives daemon-side.
+            "account": getattr(self.engine, "account", None) or {},
+            "lore_root": getattr(self.engine, "lore_root", None),
             "total_cost_usd": self.engine.total_cost_usd,
             "ctx_percentage": self.engine.last_ctx_percentage,
             "belief_count": self.engine.belief_count(),

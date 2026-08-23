@@ -63,6 +63,17 @@ def _fmt_age(secs: float) -> str:
     return f"{int(secs // 3600)}h{int((secs % 3600) // 60)}m"
 
 
+def tier_short(subscription_type: "str | None") -> "str | None":
+    """Compact status-line form of the CLI-reported subscription tier:
+    'Claude Max' -> 'max', 'Claude Pro' -> 'pro'; any other non-empty tier
+    lowercased as-is. None/empty (API-key auth) stays None -- the caller
+    then shows the plain $ figure."""
+    if not subscription_type or not str(subscription_type).strip():
+        return None
+    tier = str(subscription_type).strip().lower()
+    return tier.removeprefix("claude").strip() or tier
+
+
 def git_branch_symbol() -> str:
     """The nerd-font branch glyph (U+E0A0) when the user opted in via
     DOXA_NERD_FONT (a TUI cannot detect font glyph coverage itself);
@@ -329,6 +340,44 @@ class DoxaApp(App):
         self._git = await asyncio.to_thread(GitLine, git_cwd)
         self._engine_ready.set()
         self._refresh_status()
+        # Initial identity block: who/where this session actually is --
+        # only fields the CLI/config really reported, never guesses.
+        block_list = self.query_one("#block-list", VerticalScroll)
+        identity = SystemBlock(self._identity_text(git_cwd))
+        identity.id = "identity-block"
+        await block_list.mount(identity)
+        block_list.scroll_end(animate=False)
+
+    def _identity_text(self, cwd: str) -> str:
+        """The session-start identity summary. Every line renders a REAL
+        field (the SDK's connect-time account block, the engine handle, the
+        git chip, LORE's store) -- absent fields are omitted, not invented."""
+        engine = self.engine
+        account = getattr(engine, "account", None) or {}
+        lines: list[str] = []
+        who = " · ".join(
+            str(account[k]) for k in ("email", "organization") if account.get(k)
+        )
+        if who:
+            lines.append(f"account  {who}")
+        if account.get("subscriptionType"):
+            plan = str(account["subscriptionType"])
+            if account.get("apiProvider"):
+                plan += f" ({account['apiProvider']})"
+            lines.append(f"plan     {plan}")
+        lines.append(f"model    {getattr(engine, 'model', None) or 'default'}")
+        lines.append(f"cwd      {cwd}")
+        git_chip = self._git.render() if self._git is not None else None
+        if git_chip:
+            lines.append(f"repo     {git_chip}")
+        lore_bits = []
+        if getattr(engine, "lore_root", None):
+            lore_bits.append(str(engine.lore_root))
+        if engine is not None:
+            lore_bits.append(f"{engine.belief_count()} beliefs")
+        if lore_bits:
+            lines.append(f"lore     {' · '.join(lore_bits)}")
+        return "\n".join(lines)
 
     async def _peer_pump(self) -> None:
         """Consume the engine's out-of-band stream for the life of the app:
@@ -375,7 +424,16 @@ class DoxaApp(App):
         if self.engine is None:
             return
         model = self.engine.model or "default"
-        cost = f"${self.engine.total_cost_usd:.4f}"
+        # Subscription-aware cost: on subscription auth the session costs
+        # no dollars, so a bare $ figure is misleading -- show the tier,
+        # with the (already-computed) list-price figure demoted to an
+        # explicit what-if. API-key auth keeps the real $ estimate.
+        account = getattr(self.engine, "account", None) or {}
+        tier = tier_short(account.get("subscriptionType"))
+        if tier:
+            cost = f"sub:{tier} (≈${self.engine.total_cost_usd:.4f} if API)"
+        else:
+            cost = f"${self.engine.total_cost_usd:.4f}"
         ctx = (
             f"{self.engine.last_ctx_percentage:.0f}%"
             if self.engine.last_ctx_percentage is not None

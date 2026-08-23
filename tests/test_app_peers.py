@@ -34,12 +34,17 @@ TWO_PEERS = [_peer("aaaa1111-0000", "alpha"), _peer("bbbb2222-0000", "beta")]
 
 
 async def _wait_blocks(app, pilot, block_type, n=1):
+    # The session-start identity block (#identity-block) is a SystemBlock
+    # too -- these tests count the blocks their own actions produced.
+    def _query():
+        return [b for b in app.query(block_type) if b.id != "identity-block"]
+
     for _ in range(100):
-        blocks = list(app.query(block_type))
+        blocks = _query()
         if len(blocks) >= n:
             return blocks
         await pilot.pause(0.02)
-    return list(app.query(block_type))
+    return _query()
 
 
 @pytest.mark.asyncio

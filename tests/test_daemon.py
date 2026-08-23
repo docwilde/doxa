@@ -59,11 +59,14 @@ EXPECTED_TURN_TYPES = [
 
 
 @contextlib.asynccontextmanager
-async def running_daemon(tmp_path, monkeypatch, linger=30.0, script=None):
+async def running_daemon(tmp_path, monkeypatch, linger=30.0, script=None,
+                         server_info=None):
     """A served SessionDaemon over a FakeClient in an isolated runtime dir.
     Yields (daemon, created) where created[0] is the FakeClient."""
     monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
-    factory, created = factory_with_script(list(script or TURN_SCRIPT))
+    factory, created = factory_with_script(
+        list(script or TURN_SCRIPT), server_info=server_info
+    )
     daemon = SessionDaemon(
         cwd=str(tmp_path),
         linger_secs=linger,
@@ -298,6 +301,23 @@ async def test_second_prompt_while_turn_runs_is_refused(tmp_path, monkeypatch):
             with contextlib.suppress(Exception):
                 await daemon._shutdown("test teardown")
                 await asyncio.wait_for(serve_task, 5)
+
+
+@pytest.mark.asyncio
+async def test_status_carries_identity_surface_to_the_client(tmp_path, monkeypatch):
+    """The daemon's status reply relays the engine's connect-time account
+    block and LORE store path; EngineClient caches them on refresh --
+    engine-parity attributes the app reads synchronously mid-render."""
+    account = {"email": "doc@example.org", "subscriptionType": "Claude Max",
+               "apiProvider": "firstParty"}
+    async with running_daemon(
+        tmp_path, monkeypatch, server_info={"account": account}
+    ) as (daemon, _, _):
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()  # start() seeds the status cache
+        assert client.account == account
+        assert client.lore_root  # daemon-side LORE store path
+        await client.finalize()
 
 
 @pytest.mark.asyncio

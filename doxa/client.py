@@ -64,6 +64,11 @@ class EngineClient:
         self.cwd: str | None = None
         self.total_cost_usd = 0.0
         self.last_ctx_percentage: float | None = None
+        # Identity surface, cached from status replies -- same engine-parity
+        # attributes SessionEngine carries (account fields the CLI actually
+        # reported at connect; {} / None until the first status refresh).
+        self.account: dict = {}
+        self.lore_root: str | None = None
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._reader_task: asyncio.Task | None = None
@@ -269,6 +274,10 @@ class EngineClient:
         status = reply.get("status") or {}
         if status.get("model"):
             self.model = status["model"]
+        if isinstance(status.get("account"), dict):
+            self.account = status["account"]
+        if status.get("lore_root"):
+            self.lore_root = str(status["lore_root"])
         if status.get("total_cost_usd") is not None:
             self.total_cost_usd = status["total_cost_usd"]
         self.last_ctx_percentage = status.get("ctx_percentage")

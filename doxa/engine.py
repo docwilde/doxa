@@ -179,6 +179,15 @@ class SessionEngine:
         self._tool_started: dict[str, float] = {}  # tool_use_id -> monotonic start
         self.total_cost_usd = 0.0
         self.last_ctx_percentage: float | None = None
+        # Identity surface (the app's initial identity block + the
+        # subscription-aware cost display): the CLI's initialize payload,
+        # captured at connect via the SDK's get_server_info(). ``account``
+        # holds exactly the fields the CLI reports (measured live:
+        # email, organization, subscriptionType, apiProvider) -- never
+        # guessed, empty when the SDK/CLI doesn't provide them.
+        self.server_info: dict[str, Any] | None = None
+        self.account: dict[str, Any] = {}
+        self.lore_root = str(lore_core.ROOT)
 
         # Peer layer (doxa/peers.py): the host lives on the engine, not the
         # TUI, so the presence entry follows whoever hosts the engine when
@@ -372,6 +381,21 @@ class SessionEngine:
         self._client = self._client_factory(self._build_options())
         await self._client.__aenter__()
         self._connected = True
+        # Connect-time identity: the CLI's initialize result (available in
+        # streaming mode; None otherwise). Strictly additive -- a client
+        # without the method (fakes, older SDKs) or a failing call leaves
+        # the identity surface empty, never blocks the session.
+        get_info = getattr(self._client, "get_server_info", None)
+        if get_info is not None:
+            try:
+                info = await get_info()
+            except Exception:
+                info = None
+            if isinstance(info, dict):
+                self.server_info = info
+                account = info.get("account")
+                if isinstance(account, dict):
+                    self.account = account
         try:
             self.peer_host = peers_mod.PeerHost(
                 session_id=self.session_id,
@@ -520,7 +544,12 @@ class SessionEngine:
                     self._persist_tool_results(tool_result_blocks)
 
             elif isinstance(message, SystemMessage):
-                continue  # not surfaced as a block; informational only
+                # Not surfaced as a block -- but the init message names the
+                # ACTUAL model of the session (self.model is None when the
+                # user rides the CLI default), which the status line shows.
+                if message.subtype == "init" and message.data.get("model"):
+                    self.model = str(message.data["model"])
+                continue
 
             elif isinstance(message, ResultMessage):
                 if message.total_cost_usd:

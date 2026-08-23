@@ -42,6 +42,54 @@ def _script_one_turn_with_tool_call() -> list:
 
 
 @pytest.mark.asyncio
+async def test_start_captures_account_and_init_names_the_model(tmp_path):
+    """Identity surface: start() captures the CLI's connect-time account
+    block via get_server_info (only the fields it actually reports), and the
+    first turn's init SystemMessage names the ACTUAL session model when the
+    engine rode the CLI default (model=None)."""
+    from claude_agent_sdk import SystemMessage
+
+    script = [
+        SystemMessage(subtype="init", data={"model": "claude-haiku-4-5"}),
+        ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+            num_turns=1, session_id="s", total_cost_usd=0.0,
+        ),
+    ]
+    factory, created = factory_with_script(script, server_info={
+        "account": {
+            "email": "doc@example.org", "organization": "Doc's Org",
+            "subscriptionType": "Claude Max", "apiProvider": "firstParty",
+        },
+        "output_style": "default",
+    })
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+    await engine.start()
+    assert engine.account["email"] == "doc@example.org"
+    assert engine.account["subscriptionType"] == "Claude Max"
+    assert engine.server_info["output_style"] == "default"
+    assert engine.lore_root  # LORE store path, for the identity block
+    assert engine.model is None  # CLI default until init says otherwise
+
+    events = [ev async for ev in engine.send("hi")]
+    assert events[-1].type == "turn_done"
+    assert engine.model == "claude-haiku-4-5"
+    await engine.finalize()
+
+
+@pytest.mark.asyncio
+async def test_start_without_server_info_leaves_identity_empty(tmp_path):
+    """No initialize payload (fakes, older SDKs, API-key non-streaming):
+    the identity surface stays empty -- never guessed."""
+    factory, _created = factory_with_script([])
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+    await engine.start()
+    assert engine.account == {}
+    assert engine.server_info is None
+    await engine.finalize()
+
+
+@pytest.mark.asyncio
 async def test_start_injects_lore_snapshot_into_system_prompt(tmp_path):
     factory, created = factory_with_script([])
     engine = SessionEngine(cwd=str(tmp_path), model="claude-haiku-4-5", client_factory=factory)

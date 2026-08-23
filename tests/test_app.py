@@ -127,18 +127,77 @@ async def test_tool_disabled_shows_in_status_area(monkeypatch, tmp_path):
             "reason": "lore_belief_search failed: RuntimeError: belief db unavailable",
         }))
 
+        def _blocks():
+            # ignore the session-start identity block
+            return [b for b in app.query(SystemBlock) if b.id != "identity-block"]
+
         for _ in range(100):
-            if list(app.query(SystemBlock)):
+            if _blocks():
                 break
             await pilot.pause(0.02)
 
-        blocks = list(app.query(SystemBlock))
+        blocks = _blocks()
         assert len(blocks) == 1
         assert "⊘" in blocks[0].text
         assert "lore_belief_search" in blocks[0].text
 
         status = str(app.query_one("#status-bar").renderable)
         assert "⊘ lore_belief_search" in status
+
+
+def test_tier_short_forms():
+    from doxa.app import tier_short
+
+    assert tier_short("Claude Max") == "max"
+    assert tier_short("Claude Pro") == "pro"
+    assert tier_short("Team") == "team"
+    assert tier_short(None) is None
+    assert tier_short("   ") is None
+
+
+@pytest.mark.asyncio
+async def test_subscription_auth_shows_tier_not_dollars(monkeypatch, tmp_path):
+    """On subscription auth the status line leads with sub:<tier>; the
+    list-price figure survives only as the explicit '≈$ if API' what-if.
+    The identity block renders the REAL account fields."""
+    fake = FakeEngine([])
+    fake.account = {
+        "email": "doc@example.org", "organization": "Doc's Org",
+        "subscriptionType": "Claude Max", "apiProvider": "firstParty",
+    }
+    fake.lore_root = "/fake/lore"
+    monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: fake)
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test() as pilot:
+        for _ in range(100):
+            if app.query("#identity-block"):
+                break
+            await pilot.pause(0.02)
+        status = str(app.query_one("#status-bar").renderable)
+        assert "sub:max" in status
+        assert "(≈$0.0000 if API)" in status  # secondary what-if, not a bill
+
+        identity = app.query_one("#identity-block", SystemBlock)
+        text = identity.text
+        assert "doc@example.org" in text and "Doc's Org" in text
+        assert "Claude Max" in text and "firstParty" in text
+        assert fake.model in text
+        assert str(tmp_path) in text
+        assert "/fake/lore" in text and "3 beliefs" in text
+
+
+@pytest.mark.asyncio
+async def test_api_key_auth_keeps_the_dollar_display(monkeypatch, tmp_path):
+    """No subscription tier reported (API-key auth): the plain $ figure
+    stays, no sub: chip appears."""
+    fake = FakeEngine([])
+    monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: fake)
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        status = str(app.query_one("#status-bar").renderable)
+        assert "$0.0000" in status
+        assert "sub:" not in status and "if API" not in status
 
 
 @pytest.mark.asyncio

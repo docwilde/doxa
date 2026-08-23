@@ -30,10 +30,12 @@ class FakeClient:
         options: Any,
         script: list[Any] | None = None,
         ctx_usage: dict | None = None,
+        server_info: dict | None = None,
     ) -> None:
         self.options = options
         self.script = script or []
         self.ctx_usage = ctx_usage
+        self.server_info = server_info
         self.entered = False
         self.exited = False
         self.queried: list[tuple[str, str]] = []
@@ -58,9 +60,14 @@ class FakeClient:
             raise RuntimeError("no context usage scripted for this FakeClient")
         return self.ctx_usage
 
+    async def get_server_info(self) -> "dict | None":
+        return self.server_info
+
 
 def factory_with_script(
-    script: list[Any], ctx_usage: dict | None = None
+    script: list[Any],
+    ctx_usage: dict | None = None,
+    server_info: dict | None = None,
 ) -> tuple[Any, list[FakeClient]]:
     """Returns (factory, created); created[0] is the FakeClient instance
     SessionEngine.start() built, once it has run -- for post-hoc assertions
@@ -68,7 +75,9 @@ def factory_with_script(
     created: list[FakeClient] = []
 
     def factory(options: Any) -> FakeClient:
-        client = FakeClient(options, script=script, ctx_usage=ctx_usage)
+        client = FakeClient(
+            options, script=script, ctx_usage=ctx_usage, server_info=server_info
+        )
         created.append(client)
         return client
 
@@ -99,6 +108,10 @@ class FakeEngine:
         self._peer_queue: asyncio.Queue[EngineEvent] = asyncio.Queue()
         self.sent_peer_messages: list[tuple[str, str]] = []
         self.disabled: list[str] = []  # two-strikes containment, scripted
+        # Identity surface (engine parity): tests set account fields to
+        # exercise the subscription-aware display / identity block.
+        self.account: dict = {}
+        self.lore_root: "str | None" = None
 
     def disabled_tools(self) -> list[str]:
         return list(self.disabled)
