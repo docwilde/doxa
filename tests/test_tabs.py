@@ -201,20 +201,23 @@ async def test_palette_carries_tab_surface_and_picker(tmp_path):
     app, engines = _app(tmp_path)
     async with app.run_test() as pilot:
         await pilot.pause()
-        names = [name for name, _h, _cb in app.doxa_commands()]
+        from doxa.palette import SECTION_TABS
+
+        names = [entry.label for entry in app.doxa_commands()]
         assert "New tab" in names and "Close tab" in names
-        # Single tab: no picker entries for the tab you are already on.
-        assert not any(n.startswith("Tab: ") for n in names)
+        # Every open tab is listed -- including the one you are on, marked
+        # as active: "where am I" is a question the palette should answer.
+        tabs = [e for e in app.doxa_commands() if e.section == SECTION_TABS]
+        assert len(tabs) == 1 and tabs[0].label.endswith("· active")
 
         await pilot.press("ctrl+t")
         assert await _wait(pilot, lambda: len(app.panes()) == 2)
-        names = [name for name, _h, _cb in app.doxa_commands()]
-        pickers = [n for n in names if n.startswith("Tab: ")]
-        assert len(pickers) == 1  # exactly the OTHER tab
+        tabs = [e for e in app.doxa_commands() if e.section == SECTION_TABS]
+        assert len(tabs) == 2
+        assert [t.label.endswith("· active") for t in tabs] == [False, True]
 
-        # The picker callback actually switches the active tab.
-        cb = next(cb for name, _h, cb in app.doxa_commands() if name.startswith("Tab: "))
-        cb()
+        # The entry for the other tab actually switches the active tab.
+        tabs[0].callback()
         await pilot.pause()
         assert app.engine is engines[0]
 

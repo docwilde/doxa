@@ -71,7 +71,8 @@ from .engine import EngineEvent, SessionEngine
 from .identity import tier_short  # noqa: F401 -- re-exported: the status
 # line's plan label lives in doxa.identity now (precise local tier first,
 # SDK subscriptionType second); app.py keeps the name callers already use.
-from .palette import DoxaCommandProvider
+from . import palette as palette_mod
+from .palette import DoxaCommandProvider, PaletteEntry
 from .peers import PeerSendError, age_secs
 
 
@@ -1648,55 +1649,76 @@ class DoxaApp(App):
 
     # -- palette (Ctrl+P) --------------------------------------------
 
-    def doxa_commands(self) -> "list[tuple[str, str, Callable[[], Any]]]":
-        """The DOXA command surface, as (name, help, callback) tuples --
-        consumed by palette.DoxaCommandProvider on every palette open, so
-        the attach picker's and tab picker's entries reflect the live state
-        each time."""
-        commands: list[tuple[str, str, Any]] = [
-            (
+    def doxa_commands(self) -> "list[PaletteEntry]":
+        """The DOXA palette surface, as :class:`~doxa.palette.PaletteEntry`
+        rows in display order.
+
+        Rebuilt from live state on EVERY palette open (that is what the
+        provider calls), so a tab opened or closed while the palette is up
+        cannot leave a stale row behind.
+
+        The order is the one doxa/palette.py documents: New tab, then the
+        open tabs in tab-bar order, then the commands in the registry's own
+        groups, then the attachable sessions. App-level entries that have
+        no registry row (Close tab, the quits, the inspector) declare a
+        registry GROUP like everything else -- there is one grouping in
+        this app, not one per surface."""
+        entries: list[PaletteEntry] = [
+            PaletteEntry(
+                palette_mod.SECTION_NEW,
                 "New tab",
                 "Open a fresh DOXA session in this repo scope in a new tab (ctrl+t)",
                 self._cmd_new_tab,
             ),
-            (
-                "Close tab",
-                "Close-detach the current tab; its session keeps running (ctrl+w)",
-                self._cmd_close_tab,
-            ),
-            (
-                "New session",
-                "Start a fresh DOXA session and switch THIS tab to it",
-                self._cmd_new_session,
-            ),
-            (
-                "Belief inspector: toggle",
-                "Show/hide the belief inspector pane (stub until Phase 3)",
-                self.action_toggle_inspector,
-            ),
-            (
-                "History: search past sessions",
-                "BM25 search over LORE's session index (ctrl+r)",
-                self.action_history_search,
-            ),
-            (
-                "Quit: detach",
-                "Close this TUI; every session daemon keeps running "
-                "(reattach with `doxa attach`)",
-                self.action_quit,
-            ),
-            (
-                "Quit: stop session",
-                "Finalize the current tab's session now (LORE review + index) "
-                "and close its tab",
-                self._cmd_stop_active,
-            ),
         ]
+        # Open tabs, LEFT TO RIGHT -- the palette mirrors the tab bar, so
+        # the order the user sees along the top is the order they get here.
+        # The active tab is marked rather than hidden: "where am I" is as
+        # much a question as "where do I want to go".
+        active = self.active_pane
+        for position, pane in enumerate(self.panes()):
+            if not pane.id:
+                continue
+            sid = str(getattr(pane.engine, "session_id", "") or "")[:8]
+            is_active = pane is active
+            entries.append(PaletteEntry(
+                palette_mod.SECTION_TABS,
+                f"{pane._title}" + (f"  ({sid})" if sid else "")
+                + ("  · active" if is_active else ""),
+                "This tab (already active)" if is_active
+                else "Switch to this tab",
+                partial(self._switch_to_tab, pane.id),
+                sort_key=(position, ""),
+            ))
+        # App-level entries: no slash row of their own, but the SAME
+        # registry groups -- they sort after the registry's rows inside a
+        # group (sort_key (1, label) vs the registry's (0, name)).
+        for group, label, help_text, callback in (
+            ("Panes & tabs", "Close tab",
+             "Close-detach the current tab; its session keeps running (ctrl+w)",
+             self._cmd_close_tab),
+            ("Session", "New session",
+             "Start a fresh DOXA session and switch THIS tab to it",
+             self._cmd_new_session),
+            ("Panes & tabs", "Belief inspector: toggle",
+             "Show/hide the belief inspector pane (stub until Phase 3)",
+             self.action_toggle_inspector),
+            ("Session", "Quit: detach",
+             "Close this TUI; every session daemon keeps running "
+             "(reattach with `doxa attach`)",
+             self.action_quit),
+            ("Session", "Quit: stop session",
+             "Finalize the current tab's session now (LORE review + index) "
+             "and close its tab",
+             self._cmd_stop_active),
+        ):
+            entries.append(PaletteEntry(group, label, help_text, callback))
         # Slash registry, second surface: every row that declares a palette
         # label appears here too (doxa/commands.py is the single list --
-        # the prompt's autocomplete reads the same rows). Rows that need
+        # the prompt's autocomplete reads the same rows), keeping
+        # commands.ordered()'s sequence inside its group. Rows that need
         # arguments PREFILL the prompt instead of running blind.
-        for command in commands_mod.ordered():
+        for index, command in enumerate(commands_mod.ordered()):
             if not command.palette:
                 continue
             callback = (
@@ -1704,33 +1726,36 @@ class DoxaApp(App):
                 if command.palette_prefill
                 else partial(self._cmd_run_slash, command.name)
             )
-            commands.append((command.palette, command.summary, callback))
-        # Tab picker: one entry per OTHER live tab, in tab order.
-        active = self.active_pane
-        for pane in self.panes():
-            if pane is active or not pane.id:
-                continue
-            sid = str(getattr(pane.engine, "session_id", "") or "")[:8]
-            commands.append((
-                f"Tab: {pane._title}" + (f" ({sid})" if sid else ""),
-                "Switch to this tab",
-                partial(self._switch_to_tab, pane.id),
+            entries.append(PaletteEntry(
+                command.group, command.palette, command.summary, callback,
+                sort_key=(0, f"{index:03d}"),
             ))
-        # Attach picker: live daemon-hosted sessions from the shared
-        # peer/daemon registry, newest first, never any session already
-        # open in one of our tabs.
+        # Attach: live daemon-hosted sessions from the shared peer/daemon
+        # registry, newest first, never any session already open in a tab.
         open_ids = {
             str(getattr(p.engine, "session_id", "") or "") for p in self.panes()
         }
-        for entry in peers_mod.list_daemons():
+        for position, entry in enumerate(peers_mod.list_daemons()):
             if entry.session_id in open_ids:
                 continue
-            commands.append((
+            entries.append(PaletteEntry(
+                palette_mod.SECTION_ATTACH,
                 f"Attach: {entry.title} ({entry.session_id[:8]})",
                 f"Reattach to the live session in {entry.cwd} (in this tab)",
                 partial(self._cmd_attach, entry),
+                sort_key=(position, ""),
             ))
-        return commands
+        return palette_mod.ordered_entries(entries)
+
+    def action_command_palette(self) -> None:
+        """Ctrl+P -- DOXA's palette screen, which is Textual's plus the
+        section headers (doxa/palette.py). Overridden rather than
+        configured because Textual's App pushes its own CommandPalette
+        class by name."""
+        from textual.command import CommandPalette
+
+        if self.use_command_palette and not CommandPalette.is_open(self):
+            self.push_screen(palette_mod.DoxaPalette(id="--command-palette"))
 
     def _cmd_new_tab(self) -> None:
         self.run_worker(self.action_new_tab(), group="tabs")

@@ -330,7 +330,7 @@ async def test_palette_entries_follow_the_same_order(monkeypatch, tmp_path):
     app, _fake = await _app(monkeypatch, tmp_path)
     async with app.run_test() as pilot:
         await pilot.pause()
-        names = [name for name, _help, _cb in app.doxa_commands()]
+        names = [entry.label for entry in app.doxa_commands()]
         labelled = [c for c in commands.ordered() if c.palette]
         positions = [names.index(c.palette) for c in labelled]
         assert positions == sorted(positions)

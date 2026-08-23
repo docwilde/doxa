@@ -193,6 +193,13 @@ PeerMessageBlock {
     text-style: bold;
 }
 
+/* Ctrl+P palette: its section headers are the SAME disabled rows as the
+   dropdown's group headers, so both command surfaces read alike. */
+CommandList > .option-list--option-disabled {
+    color: #8A8073;
+    text-style: bold;
+}
+
 #slash-complete > .option-list--option-highlighted {
     color: #D97757;
     background: #2A251E;
