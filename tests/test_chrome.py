@@ -119,6 +119,69 @@ async def test_tab_cycling_is_a_no_op_with_one_tab(monkeypatch, tmp_path):
         assert app.query_one("#session-tabs").active == before
 
 
+def _tab_marker(app):
+    """(underline, start, end, expected_span) for the active tab."""
+    from textual.widgets import Tabs
+    from textual.widgets._tabs import Underline
+
+    tabs = app.query_one("#session-tabs").query_one(Tabs)
+    underline = tabs.query_one(Underline)
+    active = tabs.query_one("#tabs-list > Tab.-active")
+    span = active.virtual_region.shrink(active.styles.gutter).column_span
+    return underline, underline.highlight_start, underline.highlight_end, span
+
+
+@pytest.mark.asyncio
+async def test_switching_tabs_arms_no_animation(monkeypatch, tmp_path):
+    """The reported "tab switching is laggy": Textual's Tabs SLIDES its
+    underline to the new tab (0.3 s animation, armed behind a 0.02 s
+    timer). Measured at ~290-345 ms of extra wall time per switch,
+    independent of scrollback. DOXA turns Textual's animation off wholesale
+    -- so a switch must leave nothing animating behind it."""
+    from textual.widgets._tabs import Underline
+
+    app, _e = await _app(monkeypatch, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.animation_level == "none"
+        for _ in range(2):
+            await pilot.press("ctrl+t")
+            await pilot.pause(0.05)
+        assert len(app.panes()) == 3
+
+        underline = app.query_one(Underline)
+        await pilot.press("ctrl+right")
+        # Same frame as the activation: nothing animating, nothing armed.
+        for attribute in ("highlight_start", "highlight_end"):
+            assert not app.animator.is_being_animated(underline, attribute)
+        assert app.animator._animations == {}
+        assert _armed(app) == []
+
+
+@pytest.mark.asyncio
+async def test_the_tab_marker_lands_on_the_switch_frame(monkeypatch, tmp_path):
+    """Not merely un-animated: AT its new position immediately. Textual's
+    no-animate path still defers the move to call_after_refresh, one frame
+    late; DOXA places the marker itself as the tab activates."""
+    app, _e = await _app(monkeypatch, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(2):
+            await pilot.press("ctrl+t")
+            await pilot.pause(0.05)
+        await pilot.pause(0.1)
+
+        app._cycle_tab(1)  # exactly what Ctrl+→ calls
+        # No pause: the reactives are already at their final values.
+        _underline, start, end, span = _tab_marker(app)
+        assert (start, end) == span
+        assert end > start
+
+        await pilot.pause(0.3)  # ...and they stay there, unmoved
+        _underline, settled_start, settled_end, _span = _tab_marker(app)
+        assert (settled_start, settled_end) == (start, end)
+
+
 # -- (b) /help carries the bindings ---------------------------------------
 
 
@@ -268,6 +331,19 @@ async def test_no_armed_timers_with_every_overlay_open(monkeypatch, tmp_path):
 
         assert isinstance(app.screen, HistorySearchScreen)
         assert _armed(app) == []
+        await pilot.press("escape")
+        await pilot.pause()
+
+        # ...and the tab bar, whose underline is the one piece of chrome
+        # DOXA does not draw itself: Textual animates it unless told not to.
+        await pilot.press("ctrl+t")
+        for _ in range(100):
+            if len(app.panes()) == 2:
+                break
+            await pilot.pause(0.02)
+        await pilot.press("ctrl+left")
+        assert _armed(app) == []
+        assert app.animator._animations == {}
 
 
 def test_no_animated_widget_types_are_imported_by_the_app():

@@ -1487,6 +1487,17 @@ class DoxaApp(App):
         # timer that will quit-detach when it fires; a second Ctrl+C while
         # it is armed cancels it and quit-stops instead.
         self._ctrl_c_timer: Any = None
+        # Nothing in DOXA's chrome animates -- and that has to include the
+        # animations DOXA did not write. Textual's own tab underline slides
+        # to the newly-activated tab over 0.3 s (textual.widgets._tabs:
+        # _highlight_active -> underline.animate), which is felt as lag when
+        # arrowing through tabs and measured as ~290-345 ms of extra wall
+        # time PER SWITCH. This one attribute is the supported off switch
+        # for every Textual animation (App.animation_level, the same value
+        # TEXTUAL_ANIMATIONS sets), and it is off for the same reason the
+        # thinking marker stopped spinning: motion the user did not ask for
+        # is paid for in their latency.
+        self.animation_level = "none"
         # Settle the image-mode probe NOW, while this process still owns the
         # terminal: textual-image's TGP/sixel queries read their answer from
         # stdin, which Textual's own reader thread will grab the moment
@@ -1541,10 +1552,43 @@ class DoxaApp(App):
 
     @on(TabbedContent.TabActivated)
     def _on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        self._jump_tab_marker()
         pane = self.active_pane
         if pane is not None:
             with contextlib.suppress(Exception):
                 pane.query_one("#prompt-input", Input).focus()
+
+    def _jump_tab_marker(self) -> None:
+        """Put the active-tab underline at its destination on THIS frame.
+
+        Textual's ``Tabs`` slides the marker: ``watch_active`` calls
+        ``_highlight_active(animate=True)``, which arms a 0.02 s timer and
+        then animates ``highlight_start``/``highlight_end`` over 0.3 s.
+        ``animation_level = "none"`` (set in __init__) already takes the
+        no-animate branch, but that branch still defers the move to
+        ``call_after_refresh`` -- one frame late. Measured: the slide cost
+        ~290-345 ms of WALL time per switch on top of the switch itself,
+        constant regardless of scrollback, which is exactly the "tab
+        switching is laggy" report.
+
+        So the marker is placed directly, from the same geometry Textual's
+        own mover reads. Failure is not an error: if Textual's internals
+        move, this degrades to the built-in (still un-animated) path rather
+        than breaking tab switching."""
+        with contextlib.suppress(Exception):
+            from textual.widgets import Tabs
+            from textual.widgets._tabs import Underline
+
+            tabs = self.query_one("#session-tabs", TabbedContent).query_one(Tabs)
+            active = tabs.query_one("#tabs-list > Tab.-active")
+            start, end = active.virtual_region.shrink(
+                active.styles.gutter
+            ).column_span
+            if end <= start:
+                return  # geometry not laid out yet: leave the marker alone
+            underline = tabs.query_one(Underline)
+            underline.highlight_start = start
+            underline.highlight_end = end
 
     # -- tab lifecycle -----------------------------------------------
 
@@ -1585,6 +1629,11 @@ class DoxaApp(App):
         except ValueError:
             index = 0
         tabbed.active = ids[(index + delta) % len(ids)]
+        # Textual's reactive watcher has already moved the `-active` class
+        # by the time that assignment returns, so the marker can be placed
+        # NOW -- one message-pump turn earlier than TabActivated arrives.
+        # Held Ctrl+←/→ is the case this exists for.
+        self._jump_tab_marker()
 
     def action_prev_tab(self) -> None:
         self._cycle_tab(-1)
@@ -1595,6 +1644,7 @@ class DoxaApp(App):
     def _switch_to_tab(self, pane_id: str) -> None:
         with contextlib.suppress(Exception):
             self.query_one("#session-tabs", TabbedContent).active = pane_id
+        self._jump_tab_marker()
 
     # -- palette (Ctrl+P) --------------------------------------------
 
