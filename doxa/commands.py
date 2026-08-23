@@ -154,6 +154,19 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette="Clear session",
     ),
     SlashCommand(
+        name="/detach",
+        group="Panes & tabs",
+        summary="Close this tab but LEAVE its session running (reattach later)",
+        palette="Detach tab",
+    ),
+    SlashCommand(
+        name="/sessions",
+        group="Session",
+        summary="Every live session: name, age, attached — and how to kill one",
+        usage="/sessions [kill <prefix> | kill-detached]",
+        palette="Sessions: list",
+    ),
+    SlashCommand(
         name="/rename",
         group="Panes & tabs",
         summary="Name this tab (pins the label); empty restores the automatic one",

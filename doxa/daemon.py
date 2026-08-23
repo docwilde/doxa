@@ -209,6 +209,7 @@ class SessionDaemon:
         )
         os.chmod(self.socket_path, 0o600)
         self._pump_task = asyncio.create_task(self._peer_pump())
+        self._sync_client_count()  # 0 until someone attaches: detached, honestly
         self._arm_linger()  # nobody attached yet: don't run forever unclaimed
         self.ready.set()
         try:
@@ -289,8 +290,17 @@ class SessionDaemon:
             except Exception:
                 self._drop_client(writer)
 
+    def _sync_client_count(self) -> None:
+        """Keep the presence entry's attached-client count honest -- it is
+        what tells every other session whether this one is detached."""
+        host = getattr(self.engine, "peer_host", None)
+        if host is not None:
+            with contextlib.suppress(Exception):
+                host.set_client_count(len(self._clients))
+
     def _drop_client(self, writer: asyncio.StreamWriter) -> None:
         self._clients.discard(writer)
+        self._sync_client_count()
         with contextlib.suppress(Exception):
             writer.close()
         if not self._clients and self._had_client and not self._stopping:
@@ -346,6 +356,7 @@ class SessionDaemon:
             replay = self.ring.since(cursor)
             self._clients.add(writer)
             self._had_client = True
+            self._sync_client_count()
             self._cancel_linger()
             for f in replay:
                 writer.write(encode_frame(f))

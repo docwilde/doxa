@@ -26,7 +26,23 @@ from tests.fakes import factory_with_script
 FAKE_AWS_KEY = "AKIAABCDEFGHIJKLMNOP"
 
 
-def _entry(tmp_rt, session_id, pid, heartbeat_at=None, scope="/some/repo"):
+_OPEN_SOCKETS: list = []
+
+
+def _listening(path):
+    """A real AF_UNIX listener at `path`, so a probed registry read sees a
+    connectable socket. Returned so the caller can keep it open (and close
+    it to simulate a session that died leaving its presence file behind)."""
+    import socket as _socket
+
+    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    sock.bind(str(path))
+    sock.listen(1)
+    return sock
+
+
+def _entry(tmp_rt, session_id, pid, heartbeat_at=None, scope="/some/repo",
+           listening=False):
     entry = {
         "session_id": session_id,
         "pid": pid,
@@ -40,6 +56,10 @@ def _entry(tmp_rt, session_id, pid, heartbeat_at=None, scope="/some/repo"):
     path = tmp_rt / "registry" / f"{session_id}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(entry), encoding="utf-8")
+    if listening:
+        # Held in a module-level list so the listener outlives this call --
+        # a closed socket is exactly what "dead session" looks like.
+        _OPEN_SOCKETS.append(_listening(entry["socket_path"]))
     return path
 
 
@@ -106,7 +126,7 @@ def test_stale_entries_reaped_never_trusted(tmp_path, monkeypatch):
     junk = tmp_path / "registry" / "junk.json"
     junk.write_text("{not json", encoding="utf-8")
     # One genuinely live entry.
-    live = _entry(tmp_path, "live-one", os.getpid())
+    live = _entry(tmp_path, "live-one", os.getpid(), listening=True)
 
     got = peers.list_peers("/some/repo")
     assert [p.session_id for p in got] == ["live-one"]

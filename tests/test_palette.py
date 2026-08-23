@@ -7,6 +7,7 @@ FakeEngine underneath -- same pattern as tests/test_app.py.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 
@@ -27,13 +28,35 @@ EXPECTED_COMMANDS = {
 }
 
 
+_OPEN_SOCKETS: list = []
+
+
+def _listen(path: str):
+    """A real AF_UNIX listener, held open for the test: since the launch
+    sweep (and the peer count) check that a session's socket ACCEPTS a
+    connection, a seeded entry needs a real one to count as live."""
+    import socket as _socket
+
+    with contextlib.suppress(OSError):
+        os.unlink(path)
+    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    sock.bind(path)
+    sock.listen(1)
+    _OPEN_SOCKETS.append(sock)
+    return sock
+
+
 def _seed_daemon_entry(sid: str, title: str, cwd: str = "/work/repo") -> None:
-    """A live registry entry with the daemon marker: our own pid (alive)
-    and a fresh heartbeat, so read_registry treats it as live."""
+    """A live registry entry with the daemon marker: our own pid (alive),
+    a fresh heartbeat and a socket that answers, so every liveness check
+    read_registry makes passes."""
     now = peers._iso_now()
+    peers.registry_dir()  # ensures the runtime dir exists, clamped 0700
+    socket_path = str(peers.runtime_dir() / f"peer-{sid[:8]}.sock")
+    _listen(socket_path)
     entry = {
         "session_id": sid, "pid": os.getpid(),
-        "socket_path": f"/tmp/peer-{sid[:8]}.sock",
+        "socket_path": socket_path,
         "cwd": cwd, "repo_root": cwd, "title": title,
         "started_at": now, "heartbeat_at": now,
         "daemon_socket": f"/tmp/daemon-{sid[:8]}.sock",

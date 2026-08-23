@@ -52,6 +52,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.fuzzy import Matcher
 from textual.message import Message
+from textual.screen import ModalScreen
 from textual.widgets import (
     Collapsible,
     Input,
@@ -270,6 +271,32 @@ def _fmt_age(secs: float) -> str:
     if secs < 3600:
         return f"{int(secs // 60)}m"
     return f"{int(secs // 3600)}h{int((secs % 3600) // 60)}m"
+
+
+def _stop_session(entry: "peers_mod.PeerInfo") -> bool:
+    """End one live session by its registry entry -- the same path `doxa
+    stop` takes: attach to its daemon socket, ask it to finalize (LORE
+    review + index run there), let it exit. Returns whether it confirmed.
+
+    Blocking, and deliberately so: callers hand it to a thread. A session
+    without a daemon socket is in-process somewhere else and cannot be
+    reached this way, which is reported as a failure rather than pretended
+    away."""
+    if not entry.daemon_socket:
+        return False
+
+    async def _stop() -> None:
+        from .client import EngineClient
+
+        client = EngineClient(entry.daemon_socket)
+        await client.start()
+        await client.stop()
+
+    try:
+        asyncio.run(_stop())
+    except Exception:  # noqa: BLE001 -- a refusal is information, not a crash
+        return False
+    return True
 
 
 def git_branch_symbol() -> str:
@@ -911,6 +938,55 @@ class PromptInput(Input):
         event.prevent_default()
 
 
+class CloseWithTurnRunning(ModalScreen[str]):
+    """Ctrl+W with a turn still running: terminate, detach, or neither.
+
+    The three-way choice is the point. Silently killing a running turn
+    throws away work the user is waiting for; silently keeping it alive is
+    the leak this whole change exists to end. So the one case where both
+    defaults are wrong asks, and every other close stays instant."""
+
+    BINDINGS = [("escape", "pick_cancel", "Cancel")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="close-confirm"):
+            yield Static("▎ a turn is still running", id="close-confirm-title")
+            yield Static(
+                "terminate  — stop the session now, losing the running turn\n"
+                "detach     — close this tab and leave the turn running\n"
+                "cancel     — keep the tab open",
+                id="close-confirm-body",
+            )
+            with Horizontal(id="close-confirm-buttons"):
+                yield Static("[ terminate ]", id="close-terminate")
+                yield Static("[ detach ]", id="close-detach")
+                yield Static("[ cancel ]", id="close-cancel")
+
+    def action_pick_cancel(self) -> None:
+        self.dismiss("cancel")
+
+    def on_key(self, event: events.Key) -> None:
+        choice = {"t": "terminate", "d": "detach", "c": "cancel"}.get(event.key)
+        if choice:
+            event.stop()
+            self.dismiss(choice)
+
+    @on(events.Click, "#close-terminate")
+    def _click_terminate(self, event: events.Click) -> None:
+        event.stop()
+        self.dismiss("terminate")
+
+    @on(events.Click, "#close-detach")
+    def _click_detach(self, event: events.Click) -> None:
+        event.stop()
+        self.dismiss("detach")
+
+    @on(events.Click, "#close-cancel")
+    def _click_cancel(self, event: events.Click) -> None:
+        event.stop()
+        self.dismiss("cancel")
+
+
 class TabRename(Input):
     """The inline editor a double-clicked tab header turns into.
 
@@ -995,6 +1071,12 @@ class SessionPane(TabPane):
         # meanwhile, and a failure leaves it standing for good.
         self.generated_name: str | None = None
         self._naming_done = False
+        # Is a turn running right now? Ctrl+W asks before killing one.
+        self.turn_in_flight = False
+        # Did the USER detach this session on purpose? Then it is no longer
+        # this window's to terminate -- quit-stop leaves it alone, and
+        # /sessions' kill-all-detached is the only thing that comes for it.
+        self.detached_on_purpose = False
         # Subscription-headroom chip, recomputed at most once per turn-done
         # (see _refresh_usage_chip). Cached as a plain string because
         # _refresh_status runs on every peer event and must stay free.
@@ -1105,6 +1187,11 @@ class SessionPane(TabPane):
         git_chip = self._git.render() if self._git is not None else None
         if git_chip:
             lines.append(f"repo     {git_chip}")
+        swept = int(getattr(self.app, "swept_at_boot", 0) or 0)
+        if swept:
+            lines.append(
+                f"swept    {swept} stale session presence file(s) — /sessions"
+            )
         lore_bits = []
         if getattr(engine, "lore_root", None):
             lore_bits.append(str(engine.lore_root))
@@ -1336,7 +1423,18 @@ class SessionPane(TabPane):
                 parts.append(f"[#8A8073]⌁ session {sid[:8]}[/]")
         peer_count = self.engine.peer_count()
         if peer_count:  # hidden at 0 -- a solo session has no peers chip
-            parts.append(f"peers {peer_count}")
+            # Under detach-by-default a bare count is ambiguous: four live
+            # peers could be four colleagues or two sessions the user left
+            # running an hour ago. The ⌁ suffix (the same glyph the attach
+            # handle wears) says how many are running with nobody watching
+            # -- and is omitted entirely at zero, because "(0⌁)" is noise
+            # on the common case. /sessions is where the number leads.
+            detached = sum(
+                1 for peer in self.engine.list_peers() if peer.clients == 0
+            )
+            parts.append(
+                f"peers {peer_count}" + (f" ({detached}⌁)" if detached else "")
+            )
         disabled = self.engine.disabled_tools()
         if disabled:  # two-strikes containment note -- hidden when empty
             parts.append(" ".join(f"⊘ {name}" for name in disabled))
@@ -1410,6 +1508,8 @@ class SessionPane(TabPane):
             "/effort": self._cmd_effort,
             "/usage": self._cmd_usage,
             "/clear": self._cmd_clear,
+            "/detach": self._cmd_detach,
+            "/sessions": self._cmd_sessions,
             "/rename": self._cmd_rename,
             "/search": self._cmd_search,
             "/help": self._cmd_help,
@@ -1575,6 +1675,103 @@ class SessionPane(TabPane):
             self.switch_engine(factory), exclusive=True, group="switch"
         )
 
+    async def _cmd_detach(self, args: str) -> None:
+        """/detach -- the deliberate opposite of Ctrl+W: this tab closes,
+        its session keeps running, and quitting will not come back for
+        it."""
+        await self.app.action_detach_tab()
+
+    async def _cmd_sessions(self, args: str) -> None:
+        """/sessions -- what is actually alive, and the way to end it.
+
+        Live means all three checks pass: presence file, live pid, and a
+        socket that accepts a connection. A file left behind by a crash is
+        not a session, and this is the surface where that has to be true,
+        because it is where the user comes to find out what is running."""
+        parts = args.split()
+        verb = parts[0].lower() if parts else ""
+        if verb == "kill":
+            if len(parts) < 2:
+                await self._system("usage: /sessions kill <session prefix>")
+                return
+            await self._kill_sessions(prefix=parts[1])
+            return
+        if verb in ("kill-detached", "kill-all-detached"):
+            await self._kill_sessions(detached_only=True)
+            return
+        if verb:
+            await self._system(
+                f"sessions: unknown action {verb!r} — "
+                "usage: /sessions [kill <prefix> | kill-detached]"
+            )
+            return
+        await self._system(self._sessions_text())
+
+    def _sessions_text(self) -> str:
+        entries = peers_mod.read_registry(probe=True)
+        if not entries:
+            return "sessions: none live"
+        attached = {
+            str(getattr(p.engine, "session_id", "") or "")
+            for p in self.app.panes()
+        }
+        names = {
+            str(getattr(p.engine, "session_id", "") or ""): p.display_name()
+            for p in self.app.panes()
+        }
+        rows = []
+        for entry in sorted(entries, key=lambda e: e.started_at):
+            here = entry.session_id in attached
+            label = names.get(entry.session_id) or entry.title
+            rows.append(
+                f"{entry.session_id[:8]}  {label[:28]:<28} "
+                f"up {_fmt_age(age_secs(entry.started_at)):<5} "
+                f"{'attached here' if here else 'detached'}"
+            )
+        return (
+            "sessions\n" + "\n".join(rows)
+            + "\n\nkill one: /sessions kill <prefix>   ·   "
+            "kill every detached one: /sessions kill-detached"
+        )
+
+    async def _kill_sessions(
+        self, prefix: str = "", detached_only: bool = False
+    ) -> None:
+        """Terminate live sessions by prefix, or every session no tab of
+        this window is attached to. Same stop path as Ctrl+W and `doxa
+        stop`: the daemon finalizes (LORE review + index) and exits."""
+        entries = peers_mod.read_registry(probe=True)
+        attached = {
+            str(getattr(p.engine, "session_id", "") or "")
+            for p in self.app.panes()
+        }
+        if detached_only:
+            targets = [e for e in entries if e.session_id not in attached]
+        else:
+            targets = [
+                e for e in entries
+                if e.session_id.startswith(prefix) or e.title.startswith(prefix)
+            ]
+        if not targets:
+            await self._system(
+                "sessions: nothing matched" if prefix
+                else "sessions: nothing detached to kill"
+            )
+            return
+        killed, failed = [], []
+        for entry in targets:
+            ok = await asyncio.to_thread(_stop_session, entry)
+            (killed if ok else failed).append(entry.session_id[:8])
+        swept = await asyncio.to_thread(peers_mod.sweep_stale)
+        lines = []
+        if killed:
+            lines.append(f"stopped: {', '.join(killed)}")
+        if failed:
+            lines.append(f"could not stop: {', '.join(failed)}")
+        if swept:
+            lines.append(f"swept {swept} stale presence file(s)")
+        await self._system("sessions\n" + "\n".join(lines))
+
     async def _cmd_rename(self, args: str) -> None:
         """/rename -- the keyboard door to what double-clicking a tab
         header does. An empty argument returns the tab to its automatic
@@ -1716,6 +1913,7 @@ class SessionPane(TabPane):
     async def _run_turn(self, prompt: str) -> None:
         assert self.engine is not None
         await self._engine_ready.wait()
+        self.turn_in_flight = True
         block = TurnBlock(prompt)
         block_list = self.query_one("#block-list", VerticalScroll)
         await block_list.mount(block)
@@ -1734,6 +1932,7 @@ class SessionPane(TabPane):
             await block_list.mount(SystemBlock(f"turn failed: {exc}"))
             block_list.scroll_end(animate=False)
 
+        self.turn_in_flight = False
         self._refresh_status()
         # First completed turn of a repo-less session: name the tab from it.
         self._maybe_name_tab(prompt)
@@ -1825,7 +2024,23 @@ class DoxaApp(App):
         Binding("ctrl+r", "history_search", "Search past sessions (/search)"),
         Binding("ctrl+comma", "settings", "Settings", show=False, priority=True),
         Binding("ctrl+t", "new_tab", "New tab", show=False, priority=True),
-        Binding("ctrl+w", "close_tab", "Close tab (detach)", show=False, priority=True),
+        Binding(
+            "ctrl+w", "close_tab",
+            "Close tab — DETACHES: the session keeps running",
+            show=False, priority=True,
+        ),
+        # Ctrl+Q is Textual's own quit-the-app binding; this overrides it
+        # deliberately and scopes it to the TAB. Quitting the window is
+        # Ctrl+C (twice) here, and a key that ends one session must not be
+        # the same key that ends all of them. priority=True for the same
+        # reason Ctrl+C needs it: the focused Input would otherwise eat it.
+        # (Terminal flow control does not: Textual's Linux driver clears
+        # IXON/IXOFF, i.e. `stty -ixon`, so Ctrl+Q reaches the app.)
+        Binding(
+            "ctrl+q", "end_session",
+            "End this session (finalize now) and close its tab",
+            show=False, priority=True,
+        ),
         Binding("ctrl+left", "prev_tab", "Previous tab", show=False, priority=True),
         Binding("ctrl+right", "next_tab", "Next tab", show=False, priority=True),
         Binding(
@@ -1860,6 +2075,15 @@ class DoxaApp(App):
         # timer that will quit-detach when it fires; a second Ctrl+C while
         # it is armed cancels it and quit-stops instead.
         self._ctrl_c_timer: Any = None
+        # One sweep of the registry per launch: a crash can always leave a
+        # presence file behind, so the fleet needs a sweeper that does not
+        # depend on anything shutting down cleanly. Here rather than in a
+        # worker because it must be done before the first status line reads
+        # the registry -- it is a handful of stats and local connects, the
+        # same class of startup cost as the image-mode probe below. Silently
+        # cleaning is fine; silently IGNORING is not, so the count shows up
+        # in the session's identity block when it is nonzero.
+        self.swept_at_boot = peers_mod.sweep_stale()
         # Nothing in DOXA's chrome animates -- and that has to include the
         # animations DOXA did not write. Textual's own tab underline slides
         # to the newly-activated tab over 0.3 s (textual.widgets._tabs:
@@ -2056,16 +2280,62 @@ class DoxaApp(App):
         tabbed.active = pane.id or tabbed.active
 
     async def action_close_tab(self) -> None:
-        """Ctrl+W: close-DETACH the active tab -- its daemon keeps running
-        (reattach later via the palette's attach picker or `doxa attach`).
+        """Ctrl+W: close-DETACH the active tab -- its daemon keeps running,
+        by design (reattach via the palette's attach picker or `doxa
+        attach`). The cheapest outcome to recover from is what a close key
+        does; ENDING a session is Ctrl+Q, which says so.
+
         Closing the last tab closes the app, on the same detach semantics."""
+        pane = self.active_pane
+        if pane is not None:
+            await self._close_pane(pane, terminate=False)
+
+    def action_end_session(self) -> None:
+        """Ctrl+Q: END this tab's session -- finalize NOW (LORE review +
+        index run daemon-side), socket closed, presence file removed, the
+        daemon child reaped -- and close the tab. Nothing survives but the
+        transcript.
+
+        Tab-scoped, never app-scoped: quitting the whole window is Ctrl+C
+        (twice). A turn IN FLIGHT is the one case this refuses to decide by
+        itself -- killing work silently is not a thing a keystroke should
+        do -- so it asks; an idle session ends without a prompt.
+
+        Dispatched into a worker because awaiting a modal's answer
+        (push_screen_wait) is only legal from one."""
+        self.run_worker(self._end_session(), group="close")
+
+    async def _end_session(self) -> None:
         pane = self.active_pane
         if pane is None:
             return
+        if pane.turn_in_flight:
+            choice = await self.push_screen_wait(CloseWithTurnRunning())
+            if choice == "cancel":
+                return
+            if choice == "detach":
+                await self._close_pane(pane, terminate=False)
+                return
+        await self._close_pane(pane, terminate=True)
+
+    async def action_detach_tab(self) -> None:
+        """`/detach` -- the named form of what Ctrl+W does."""
+        await self.action_close_tab()
+
+    async def _close_pane(self, pane: "SessionPane", terminate: bool) -> None:
+        """One close path, two dispositions. Closing the LAST tab closes the
+        app on the same disposition -- a window with no tabs is not a
+        window, and the session's fate must not depend on tab arithmetic."""
+        if terminate:
+            await pane.stop()
+        else:
+            # Detached ON PURPOSE: it is no longer this window's to end, so
+            # a later quit-stop leaves it running.
+            pane.detached_on_purpose = True
+            await pane.detach()
         if len(self.panes()) == 1:
-            await self.action_quit()
+            await App.action_quit(self)
             return
-        await pane.detach()
         await self.query_one("#session-tabs", TabbedContent).remove_pane(
             pane.id or ""
         )
@@ -2337,12 +2607,12 @@ class DoxaApp(App):
         """Ctrl+C (priority binding), APP-level by design -- a reflex
         keystroke gets the cheapest-to-recover outcome across every tab.
         First press: arm the double-press window, then quit-DETACH when it
-        expires -- every daemon-hosted session keeps running (same as
-        ctrl+q); in-process engines finalize right there, so Ctrl+C always
-        exits cleanly. Second press inside the window: quit-STOP EVERY
-        tab's session (finalize NOW, daemons included). Per-tab stop stays
-        on the palette's 'Quit: stop session' and per-tab detach on
-        Ctrl+W, where the choice is deliberate rather than reflexive."""
+        expires -- every daemon-hosted session keeps running; in-process
+        engines finalize right there, so Ctrl+C always exits cleanly.
+        Second press inside the window: quit-STOP every tab's session
+        (finalize NOW, daemons included). Per-tab ending lives on Ctrl+Q
+        and the palette's 'Quit: stop session', where the choice is
+        deliberate rather than reflexive."""
         if self._ctrl_c_timer is not None:
             self._ctrl_c_timer.stop()
             self._ctrl_c_timer = None
@@ -2358,21 +2628,30 @@ class DoxaApp(App):
     async def action_quit_stop(self) -> None:
         """Quit-stop, ALL tabs -- finalize every session NOW. Over a daemon
         client this stops the daemon itself (LORE review + index run
-        there); in-process it is plain finalize-and-quit."""
+        there); in-process it is plain finalize-and-quit.
+
+        A pane the user DETACHED on purpose is not stopped: detaching is
+        the explicit "keep this running" gesture, and a later quit must not
+        quietly undo it. Those sessions outlive the window, which is what
+        /sessions exists to show and reap."""
         for pane in self.panes():
-            await pane.stop()
-        await super().action_quit()
+            if pane.detached_on_purpose:
+                await pane.detach()
+            else:
+                await pane.stop()
+        await App.action_quit(self)
 
     async def action_quit(self) -> None:
-        """ctrl+q / palette 'Quit: detach' -- ALL tabs. Over a daemon
-        client, finalize() only DETACHES -- the daemon lingers and runs the
-        session-end review + index itself once the last client is gone
-        (or on `doxa stop`). In-process (Phase 1 shape), finalize() still
-        runs the review + index right here, host-driven (PHASE0 redesign
-        item 1: no SessionEnd hook exists)."""
+        """palette 'Quit: detach' (and the Ctrl+C window's expiry) -- ALL
+        tabs. Over a daemon client, finalize() only DETACHES: the daemon
+        lingers and runs the session-end review + index itself once the
+        last client has been gone for the linger window (or on `doxa
+        stop`). In-process (Phase 1 shape), finalize() still runs the
+        review + index right here, host-driven (PHASE0 redesign item 1: no
+        SessionEnd hook exists)."""
         for pane in self.panes():
             await pane.detach()
-        await super().action_quit()
+        await App.action_quit(self)
 
 
 def main() -> None:

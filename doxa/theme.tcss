@@ -55,6 +55,42 @@ SessionPane {
     background: #3A3429;
 }
 
+/* Ctrl+Q with a turn running: the one close that asks. Same modal wash and
+   surface ramp as the palette and the settings screen. */
+CloseWithTurnRunning {
+    align: center middle;
+    background: #171512 60%;
+}
+
+#close-confirm {
+    width: 64;
+    height: auto;
+    background: #221F1A;
+    border: round #3A3429;
+    padding: 1 2;
+}
+
+#close-confirm-title {
+    color: #D97757;
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+#close-confirm-body {
+    color: #D8CDBB;
+}
+
+#close-confirm-buttons {
+    height: 1;
+    padding-top: 1;
+}
+
+#close-confirm-buttons > Static {
+    width: auto;
+    padding-right: 2;
+    color: #F2E9DD;
+}
+
 /* Inline tab rename (double-click a tab header): the field takes the
    tab's own slot in the strip -- one row high, no border of its own, so
    the strip does not jump while a name is being typed. */

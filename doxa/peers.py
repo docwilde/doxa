@@ -52,6 +52,7 @@ import contextlib
 import inspect
 import json
 import os
+import socket
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -168,6 +169,14 @@ class PeerInfo:
     heartbeat_at: str
     daemon_socket: str | None = None
 
+    clients: "int | None" = None
+    """How many TUI clients are attached to this session right now, as the
+    session itself last reported it. 0 means DETACHED -- running with
+    nobody watching, which is the normal outcome of Ctrl+W and the thing
+    the status bar's peers chip has to be able to say. None means the
+    session does not report it (an in-process engine, or an entry written
+    by an older build): unknown, never assumed to be zero."""
+
     @property
     def scope_key(self) -> str:
         return self.repo_root or self.cwd
@@ -185,11 +194,41 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def read_registry(reap: bool = True) -> list[PeerInfo]:
+def socket_alive(path: "str | Path | None", timeout: float = 0.2) -> bool:
+    """Can this AF_UNIX socket actually be connected to?
+
+    The third liveness check, added after a measured leak: a presence file
+    can outlive its session (a crash, a kill -9, a close that only
+    detached), and a pid can be alive while the session behind it is gone
+    or its server closed. A connect is microseconds on a local socket and
+    happens only on the counting paths, never per frame."""
+    if not path:
+        return False
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(timeout)
+        sock.connect(str(path))
+        return True
+    except OSError:
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            sock.close()
+
+
+def read_registry(reap: bool = True, probe: bool = False) -> list[PeerInfo]:
     """All live entries. Stale ones (dead pid, old heartbeat, malformed
     JSON) are never returned and -- reap=True -- removed on sight by
     whichever reader gets there first; a registry entry is a claim, not a
-    fact, until the liveness checks pass."""
+    fact, until the liveness checks pass.
+
+    ``probe=True`` adds the third check -- the session's inbox socket must
+    accept a connection -- for the paths where a wrong number is visible to
+    the user (the peer count) or actively harmful (the startup sweep). An
+    unconnectable entry is FILTERED but not reaped here: a session still
+    coming up has a presence file before it has a server, and reaping it
+    would race the session that is about to be fine. Sweeping those is
+    :func:`sweep_stale`'s deliberate, once-per-launch job."""
     live: list[PeerInfo] = []
     for path in sorted(registry_dir().glob("*.json")):
         try:
@@ -198,6 +237,8 @@ def read_registry(reap: bool = True) -> list[PeerInfo]:
             info.pid = int(info.pid)
             ds = data.get("daemon_socket")
             info.daemon_socket = str(ds) if ds else None
+            clients = data.get("clients")
+            info.clients = int(clients) if isinstance(clients, (int, float)) else None
         except (OSError, ValueError, TypeError, KeyError):
             if reap:
                 with contextlib.suppress(OSError):
@@ -210,15 +251,58 @@ def read_registry(reap: bool = True) -> list[PeerInfo]:
                 with contextlib.suppress(OSError):
                     Path(info.socket_path).unlink()
             continue
+        if probe and not socket_alive(info.socket_path):
+            continue
         live.append(info)
     return live
 
 
-def list_peers(scope_key: str, self_id: str | None = None) -> list[PeerInfo]:
+def sweep_stale() -> int:
+    """Remove presence files whose session is provably gone -- dead pid,
+    stale heartbeat, or a socket that refuses a connection -- and return
+    how many were removed.
+
+    Run once at launch. A crash will always be able to leave a file behind,
+    so the fleet needs a sweeper independent of anything shutting down
+    cleanly; this is it. Silently cleaning is fine, silently IGNORING is
+    not -- the caller says out loud when this returns nonzero."""
+    swept = 0
+    for path in sorted(registry_dir().glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            pid = int(data["pid"])
+            socket_path = str(data["socket_path"])
+            heartbeat = str(data["heartbeat_at"])
+        except (OSError, ValueError, TypeError, KeyError):
+            with contextlib.suppress(OSError):
+                path.unlink()
+            swept += 1
+            continue
+        if (
+            _pid_alive(pid)
+            and age_secs(heartbeat) <= STALE_AFTER_SECS
+            and socket_alive(socket_path)
+        ):
+            continue
+        with contextlib.suppress(OSError):
+            path.unlink()
+        with contextlib.suppress(OSError):
+            Path(socket_path).unlink()
+        swept += 1
+    return swept
+
+
+def list_peers(
+    scope_key: str, self_id: str | None = None, probe: bool = True
+) -> list[PeerInfo]:
     """Live peers sharing ``scope_key`` (repo root, or cwd outside a repo),
-    excluding the asking session itself."""
+    excluding the asking session itself.
+
+    Probed by default: this is what the status bar's `peers N` counts, and
+    a number that includes sessions which are gone is worse than no number
+    -- it was the visible symptom of the close-only-detaches leak."""
     return [
-        p for p in read_registry()
+        p for p in read_registry(probe=probe)
         if p.scope_key == scope_key and p.session_id != self_id
     ]
 
@@ -332,6 +416,11 @@ class PeerHost:
         # hosts the engine, written into the same registry entry -- one
         # discovery surface for peers AND `doxa attach`, not two.
         self.daemon_socket = daemon_socket
+        # Attached-client count, written into the presence entry so OTHER
+        # sessions can tell a detached session from a watched one. The
+        # daemon owns the number (it holds the sockets); an in-process
+        # engine leaves it at None, which reads as "unknown", not "zero".
+        self.client_count: "int | None" = None
         self._on_message = on_message
         self._on_peer_joined = on_peer_joined
         self._on_peer_left = on_peer_left
@@ -387,10 +476,22 @@ class PeerHost:
         }
         if self.daemon_socket:
             entry["daemon_socket"] = self.daemon_socket
+        if self.client_count is not None:
+            entry["clients"] = int(self.client_count)
         tmp = self.registry_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
         os.chmod(tmp, 0o600)
         os.replace(tmp, self.registry_path)
+
+    def set_client_count(self, count: int) -> None:
+        """The daemon calls this on every attach and detach: presence has
+        to move when the answer changes, not on the next heartbeat, or a
+        just-detached session reads as attached for another beat."""
+        if self.client_count == count:
+            return
+        self.client_count = int(count)
+        with contextlib.suppress(OSError):
+            self._write_entry()
 
     def refresh(self) -> None:
         """One heartbeat tick, callable directly (tests) or from the loop:
