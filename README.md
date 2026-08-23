@@ -57,6 +57,7 @@ uv run doxa          # spawn a session here, or attach this repo's most recent o
 uv run doxa new      # force a fresh session instead of attaching
 uv run doxa attach   # reattach by session id / title prefix
 uv run doxa stop     # finalize now (LORE review + index), daemon exits
+uv run doxa doctor   # read-only health checks, no TUI: pass/fail + fix per check
 ```
 
 `uv run doxa` spawns a session **daemon** — a process of its own — and
@@ -160,6 +161,19 @@ DOXA version ships one, then model/effort defaults, handing off to the
 settings modal to set them. Auto-runs once, on a genuine first launch on
 this machine; `/setup` any time after runs it again on demand.
 
+**`/doctor` / `doxa doctor`.** Read-only health checks, pass/fail plus the
+exact fix command for anything failing: python and DOXA versions, the
+`claude` CLI's version and auth state, the LORE store's location and
+active belief count, whether `config.toml` parses, live daemon count and
+stale presence files (report only — `/doctor` never deletes what it
+counts; a normal launch's sweep does that), the detected terminal image
+protocol, and MCP reachability (nothing configured yet, so nothing to
+check). Keyboard-enhancement grant is reported `?` rather than guessed —
+Textual requests it at session start but doesn't yet expose whether the
+terminal actually honored it. `doxa doctor` runs the same checks with no
+TUI at all (what `scripts/install.sh` runs at the end of a fresh install)
+and exits 1 if anything failed; `/setup` runs it too, as its last step.
+
 **Identity and auth.** The session-start block and status line report the
 plan you actually have — DOXA prefers the precise tier the `claude` CLI
 keeps locally over the SDK's coarser `subscriptionType` string, and shows
@@ -238,9 +252,9 @@ checkout isn't at the default `~/.claude/plugins/marketplaces/lore`.
 DOXA is a working daily driver for its author, not a finished product.
 Shipped so far: the daemon/detach model, tabs, the command palette,
 `/search`, the trace tree, the image ladder, peer discovery, the settings
-modal described above, the `curl | sh` installer, and `/setup` (below) —
-see [CHANGELOG.md](CHANGELOG.md) for the version-by-version history. Not
-yet built: a `/doctor` health check, session-history drill-in past
+modal described above, the `curl | sh` installer, `/setup`, and
+`/doctor` / `doxa doctor` — see [CHANGELOG.md](CHANGELOG.md) for the
+version-by-version history. Not yet built: session-history drill-in past
 `/search`'s result list, customizable keybindings, and a graphical
 context-window map. Interfaces (config keys, socket protocol, command
 names) can still change between minor versions.

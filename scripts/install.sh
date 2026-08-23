@@ -173,14 +173,16 @@ main() {
     _info "created ${doxa_home}"
   fi
 
-  # -- doctor -------------------------------------------------------------
-  # `doxa doctor` does not exist yet (it ships in a later change to this
-  # repo); this placeholder is the explicit TODO for that commit to wire
-  # up, rather than a silent gap.
-  if _need doxa && doxa doctor >/dev/null 2>&1; then
-    doxa doctor
+  # -- doctor ---------------------------------------------------------
+  # Read-only report from the checkout `uv tool install` just placed on
+  # PATH. `|| true`: a check FAILING (e.g. a stale presence file from an
+  # old crash) is real information, worth printing, and must never abort
+  # an installer whose actual job -- getting doxa onto PATH -- already
+  # succeeded a few lines up.
+  if _need doxa; then
+    doxa doctor || true
   else
-    _info "doxa doctor: not available in this doxa version yet -- run \`doxa\` and see README.md for the current feature set"
+    _info "doxa doctor: doxa is not on PATH in this shell yet -- open a new one and run: doxa doctor"
   fi
 
   _info "done. cd into a project and run: doxa"

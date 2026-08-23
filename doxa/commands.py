@@ -135,6 +135,12 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette="Setup",
     ),
     SlashCommand(
+        name="/doctor",
+        group="Tools & config",
+        summary="Read-only health checks: pass/fail and the fix command for each",
+        palette="Doctor",
+    ),
+    SlashCommand(
         name="/model",
         group="Session",
         summary="Switch the model for the rest of this session (no reconnect)",

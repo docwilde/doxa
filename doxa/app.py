@@ -1512,6 +1512,7 @@ class SessionPane(TabPane):
             "/logout": partial(self._cmd_auth, "logout"),
             "/settings": self._cmd_settings,
             "/setup": self._cmd_setup,
+            "/doctor": self._cmd_doctor,
             "/model": self._cmd_model,
             "/effort": self._cmd_effort,
             "/usage": self._cmd_usage,
@@ -1529,6 +1530,15 @@ class SessionPane(TabPane):
 
     async def _cmd_setup(self, args: str) -> None:
         self.app.action_setup()
+
+    async def _cmd_doctor(self, args: str) -> None:
+        """/doctor -- read-only, so this is the whole handler: run every
+        check off the event loop (the claude CLI probes shell out) and
+        print the report as an ordinary SystemBlock."""
+        from . import doctor as doctor_mod
+
+        checks = await asyncio.to_thread(doctor_mod.run_checks)
+        await self._system(doctor_mod.report(checks))
 
     async def _cmd_model(self, args: str) -> None:
         """/model -- switch the model for subsequent turns, in place.

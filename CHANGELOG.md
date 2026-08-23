@@ -1,8 +1,28 @@
 # Changelog
 
 Newest first. Versions are annotated git tags on the commit that shipped
-them (`v0.1.0` … `v0.6.0`); the ranges below are derived from that history,
+them (`v0.1.0` … `v0.7.0`); the ranges below are derived from that history,
 not written from memory.
+
+## 0.7.0 — 2026-08-24
+
+- **`/doctor` and `doxa doctor`** (Tools & config) — read-only health
+  checks: pass/fail plus the exact fix command per check. Python and DOXA
+  versions, the `claude` CLI's version and auth state, the LORE store's
+  location and active belief count, whether `config.toml` parses, live
+  daemon count plus stale presence files (report only — added
+  `doxa.peers.count_stale`, the read-only twin of `sweep_stale` that
+  counts the same dead entries without deleting any of them), the
+  detected terminal image protocol, and MCP reachability (nothing
+  configured yet, honestly reported as such rather than a check standing
+  in for a feature that doesn't exist). Keyboard-enhancement grant is
+  reported `?`, not guessed pass/fail — Textual requests the protocol at
+  session start but doesn't expose whether the terminal actually granted
+  it; real detection is item O's job. `doxa doctor` (`doxa/cli.py`) runs
+  headless, no TUI, exit 1 if anything failed.
+- `scripts/install.sh`'s doctor step and `/setup`'s final step both wire
+  to this for real now — the placeholder wording each shipped with is
+  gone.
 
 ## 0.6.0 — 2026-08-23
 

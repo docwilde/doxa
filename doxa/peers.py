@@ -292,6 +292,32 @@ def sweep_stale() -> int:
     return swept
 
 
+def count_stale() -> int:
+    """The read-only twin of :func:`sweep_stale`: same liveness rule (dead
+    pid, stale heartbeat, or a socket that refuses a connection), counted
+    but never acted on -- what ``/doctor`` reports (a fleet health check
+    must not itself mutate the fleet); a normal launch's sweep is what
+    actually removes these."""
+    stale = 0
+    for path in sorted(registry_dir().glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            pid = int(data["pid"])
+            socket_path = str(data["socket_path"])
+            heartbeat = str(data["heartbeat_at"])
+        except (OSError, ValueError, TypeError, KeyError):
+            stale += 1
+            continue
+        if (
+            _pid_alive(pid)
+            and age_secs(heartbeat) <= STALE_AFTER_SECS
+            and socket_alive(socket_path)
+        ):
+            continue
+        stale += 1
+    return stale
+
+
 def list_peers(
     scope_key: str, self_id: str | None = None, probe: bool = True
 ) -> list[PeerInfo]:

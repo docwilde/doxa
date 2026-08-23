@@ -165,11 +165,23 @@ def test_collect_findings_returns_one_per_check(monkeypatch):
     assert [f.id for f in findings] == ["auth", "lore-store", "migrate", "model-effort"]
 
 
-def test_doctor_placeholder_and_summary_text():
-    text = setup_mod.summary(["auth: informational", "lore-store: skipped"])
+def test_summary_embeds_the_supplied_doctor_text():
+    text = setup_mod.summary(
+        ["auth: informational", "lore-store: skipped"],
+        doctor_text="doctor: fake report for this test",
+    )
     assert "setup: done." in text
     assert "auth: informational" in text
-    assert setup_mod.doctor_placeholder() in text
+    assert "doctor: fake report for this test" in text
+
+
+def test_summary_falls_back_to_a_real_doctor_report_when_none_given(monkeypatch):
+    """The end-of-wizard step really is /doctor's report, not a
+    placeholder -- doctor_report() is doxa.doctor.report() under a name
+    setup.py owns, patched here so the test never shells out."""
+    monkeypatch.setattr(setup_mod, "doctor_report", lambda: "doctor: patched report")
+    text = setup_mod.summary([])
+    assert "doctor: patched report" in text
 
 
 # -- config.save_lore_root --------------------------------------------------
@@ -233,6 +245,7 @@ async def _open_setup(app, pilot):
 async def test_slash_setup_opens_the_wizard(monkeypatch):
     monkeypatch.setattr(auth_mod.AuthProvider, "installed", lambda self: False)
     monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([]))
+    monkeypatch.setattr(setup_mod, "doctor_report", lambda: "doctor: patched report")
     app = DoxaApp(cwd=".")
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -247,6 +260,7 @@ async def test_walking_an_info_only_step_with_enter(monkeypatch):
     monkeypatch.setattr(auth_mod.AuthProvider, "installed", lambda self: False)
     monkeypatch.setenv("LORE_ROOT", "/tmp/env-store")  # makes lore-store info-only too
     monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([]))
+    monkeypatch.setattr(setup_mod, "doctor_report", lambda: "doctor: patched report")
     app = DoxaApp(cwd=".")
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -265,6 +279,7 @@ async def test_applying_a_choice_and_skipping_reach_the_summary(monkeypatch, tmp
     monkeypatch.delenv("LORE_ROOT", raising=False)
     monkeypatch.setattr(setup_mod, "PLUGIN_LORE_DIR", tmp_path / "no-plugin-here")
     monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([]))
+    monkeypatch.setattr(setup_mod, "doctor_report", lambda: "doctor: patched report")
     app = DoxaApp(cwd=".")
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -284,7 +299,7 @@ async def test_applying_a_choice_and_skipping_reach_the_summary(monkeypatch, tmp
         assert screen.index == len(screen.findings)
         body = str(screen.query_one("#setup-body").renderable)
         assert "setup: done." in body
-        assert setup_mod.doctor_placeholder() in body
+        assert "doctor: patched report" in body
         assert "LORE store:" in body
         assert "/migrate: skipped" in body
 
@@ -294,6 +309,7 @@ async def test_model_effort_choice_chains_into_the_settings_modal(monkeypatch, t
     monkeypatch.setattr(auth_mod.AuthProvider, "installed", lambda self: False)
     monkeypatch.setenv("LORE_ROOT", "/tmp/env-store")
     monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([]))
+    monkeypatch.setattr(setup_mod, "doctor_report", lambda: "doctor: patched report")
     app = DoxaApp(cwd=".")
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -321,6 +337,7 @@ async def test_model_effort_choice_chains_into_the_settings_modal(monkeypatch, t
 async def test_escape_closes_the_wizard_at_any_step(monkeypatch):
     monkeypatch.setattr(auth_mod.AuthProvider, "installed", lambda self: False)
     monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([]))
+    monkeypatch.setattr(setup_mod, "doctor_report", lambda: "doctor: patched report")
     app = DoxaApp(cwd=".")
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -340,6 +357,7 @@ async def test_genuine_first_launch_auto_opens_setup_once(monkeypatch, tmp_path)
     monkeypatch.setenv("DOXA_HOME", str(tmp_path / "fresh-doxa-home"))
     monkeypatch.setattr(auth_mod.AuthProvider, "installed", lambda self: False)
     monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([]))
+    monkeypatch.setattr(setup_mod, "doctor_report", lambda: "doctor: patched report")
     config_mod.invalidate()
     assert setup_mod.needs_first_run() is True
 
@@ -357,6 +375,7 @@ async def test_genuine_first_launch_auto_opens_setup_once(monkeypatch, tmp_path)
 
     # A second launch with the SAME home must not auto-open it again.
     monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([]))
+    monkeypatch.setattr(setup_mod, "doctor_report", lambda: "doctor: patched report")
     app2 = DoxaApp(cwd=".")
     async with app2.run_test() as pilot2:
         await pilot2.pause(0.3)
@@ -369,6 +388,7 @@ async def test_on_demand_setup_still_works_after_marker_is_set(monkeypatch, tmp_
     long spent."""
     monkeypatch.setattr(auth_mod.AuthProvider, "installed", lambda self: False)
     monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([]))
+    monkeypatch.setattr(setup_mod, "doctor_report", lambda: "doctor: patched report")
     setup_mod.mark_seen()  # this test's own (conftest) DOXA_HOME, already "seen"
     app = DoxaApp(cwd=".")
     async with app.run_test() as pilot:

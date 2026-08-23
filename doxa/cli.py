@@ -13,6 +13,9 @@ peer registry, whose entries carry the ``daemon_socket`` marker:
                              replays, then the live tail follows).
 * ``doxa stop [prefix]``  -- finalize a session NOW (LORE review + index)
                              and stop its daemon. No TUI.
+* ``doxa doctor``         -- read-only health checks (doxa/doctor.py),
+                             no TUI: pass/fail + fix command per check.
+                             Exits 1 if anything failed.
 * ``doxa --in-process``   -- the Phase 1 shape: engine inside the TUI
                              process, no daemon, quit finalizes immediately.
 
@@ -103,9 +106,11 @@ def main(argv: "list[str] | None" = None) -> int:
         description="DOXA -- a terminal for a Claude agent whose memory you can audit.",
     )
     parser.add_argument(
-        "command", nargs="?", default=None, choices=["new", "attach", "stop"],
+        "command", nargs="?", default=None,
+        choices=["new", "attach", "stop", "doctor"],
         help="new: fresh session; attach [prefix]: reattach; stop [prefix]: "
-             "finalize now. Default: spawn-or-attach in this project.",
+             "finalize now; doctor: read-only health checks, no TUI. "
+             "Default: spawn-or-attach in this project.",
     )
     parser.add_argument("prefix", nargs="?", default=None,
                         help="session id or title prefix (attach/stop)")
@@ -131,6 +136,13 @@ def main(argv: "list[str] | None" = None) -> int:
     if args.in_process:
         DoxaApp(cwd=cwd, model=args.model).run()
         return 0
+
+    if args.command == "doctor":
+        from . import doctor as doctor_mod
+
+        checks = doctor_mod.run_checks()
+        print(doctor_mod.report(checks))
+        return 1 if doctor_mod.any_failing(checks) else 0
 
     if args.command == "stop":
         entry = _resolve(peers.list_daemons(), args.prefix)

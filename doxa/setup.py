@@ -280,18 +280,20 @@ def collect_findings() -> list[Finding]:
     return [check() for check in CHECKS]
 
 
-def doctor_placeholder() -> str:
-    """``/doctor`` doesn't exist in this DOXA version yet -- this is the
-    explicit placeholder line, same wording convention as
-    ``scripts/install.sh``'s, wired to the real thing once it ships."""
-    return "doctor: not available in this DOXA version yet"
+def doctor_report() -> str:
+    """/doctor's real report, run at the end of the wizard -- the "finish
+    with doctor + summary" step. Import kept local: doxa.doctor is a
+    peer module, not a dependency setup.py needs at import time."""
+    from . import doctor as doctor_mod
+
+    return doctor_mod.report()
 
 
-def summary(results: "list[str]") -> str:
+def summary(results: "list[str]", doctor_text: "str | None" = None) -> str:
     lines = ["setup: done.", ""]
     lines.extend(f"  {line}" for line in results)
     lines.append("")
-    lines.append(doctor_placeholder())
+    lines.append(doctor_text if doctor_text is not None else doctor_report())
     return "\n".join(lines)
 
 
@@ -313,6 +315,7 @@ class SetupScreen(ModalScreen["str | None"]):
         self.index = 0
         self.results: list[str] = []
         self.open_settings = False
+        self.doctor_text = ""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="setup-panel"):
@@ -322,10 +325,15 @@ class SetupScreen(ModalScreen["str | None"]):
             yield Static("checking…", id="setup-body")
             yield Static("", id="setup-hint")
 
+    @staticmethod
+    def _prepare() -> "tuple[list[Finding], str]":
+        return collect_findings(), doctor_report()
+
     async def on_mount(self) -> None:
-        # The auth probe shells out -- off the event loop, same discipline
+        # Both shell out (the auth probe here, the claude-CLI probe inside
+        # doctor_report) -- off the event loop, same discipline
         # doxa.naming.name_for documents for its own subprocess call.
-        self.findings = await asyncio.to_thread(collect_findings)
+        self.findings, self.doctor_text = await asyncio.to_thread(self._prepare)
         self.index = 0
         self._render_step()
 
@@ -337,7 +345,7 @@ class SetupScreen(ModalScreen["str | None"]):
         body = self.query_one("#setup-body", Static)
         hint = self.query_one("#setup-hint", Static)
         if finding is None:
-            body.update(summary(self.results))
+            body.update(summary(self.results, self.doctor_text))
             hint.update("enter / esc: close")
             return
         lines = [

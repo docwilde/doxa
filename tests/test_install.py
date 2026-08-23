@@ -192,10 +192,38 @@ def test_happy_path_installs_and_reports_version_and_commit(tmp_path):
     assert "done. cd into a project and run: doxa" in proc.stdout
 
 
-def test_doctor_placeholder_when_doxa_has_no_doctor_command(tmp_path):
+def test_doctor_reports_doxa_not_yet_on_path(tmp_path):
+    """The fake `uv tool install` in these tests doesn't actually place a
+    `doxa` binary anywhere real -- exactly the state a freshly installed
+    shell is in until it's reopened, which is what this message is for."""
     bindir = _fakebin(tmp_path)
     proc = _run(tmp_path, bindir)
-    assert "doxa doctor: not available" in proc.stdout
+    assert "doxa doctor: doxa is not on PATH" in proc.stdout
+
+
+def test_doctor_runs_for_real_when_on_path_even_if_a_check_fails(tmp_path):
+    """A failing doctor check (exit 1) is real information the installer
+    must still print -- and must NOT treat as its own failure, since the
+    installer's actual job already succeeded a few lines up (`|| true`
+    in scripts/install.sh)."""
+    bindir = _fakebin(tmp_path)
+    _write_fake(
+        bindir / "doxa",
+        f"""
+echo "doxa $*" >> '{tmp_path / "calls.log"}'
+if [ "$1" = "doctor" ]; then
+  echo "doctor: read-only health checks"
+  echo "x claude CLI -- NOT authenticated"
+  exit 1
+fi
+exit 0
+""",
+    )
+    proc = _run(tmp_path, bindir)
+    assert proc.returncode == 0, proc.stderr
+    assert "doctor: read-only health checks" in proc.stdout
+    assert "NOT authenticated" in proc.stdout
+    assert "done. cd into a project and run: doxa" in proc.stdout
 
 
 def test_never_overwrites_an_existing_doxa_home(tmp_path):
