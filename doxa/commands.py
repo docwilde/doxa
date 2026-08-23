@@ -52,9 +52,10 @@ class SlashCommand:
     """Listed, never intercepted: the text goes to the model/CLI verbatim."""
 
     binding: str = ""
-    """Key binding that reaches the same place, if one exists. Rendered by
-    ``/help``; the binding itself is declared on the app (BINDINGS is the
-    thing Textual reads) and a test pins the two together."""
+    """Key binding that reaches the same place, if one exists, spelled the
+    way TEXTUAL spells it ("ctrl+comma", not "ctrl+,") -- /help renders the
+    pretty form, and matching the app's BINDINGS verbatim is what lets
+    /help tell a bound command apart from a bare hotkey."""
 
     def call_form(self) -> str:
         return self.usage or self.name
@@ -94,7 +95,7 @@ REGISTRY: tuple[SlashCommand, ...] = (
         name="/settings",
         summary="Open the settings modal (env > config file > default)",
         palette="Settings",
-        binding="ctrl+,",
+        binding="ctrl+comma",
     ),
     SlashCommand(
         name="/model",

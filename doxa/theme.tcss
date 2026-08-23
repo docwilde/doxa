@@ -11,9 +11,12 @@
    identically whether or not the terminal's border-drawing glyphs render
    cleanly.
 
-   No animation beyond the single thinking indicator: LoadingIndicator (a
-   Textual built-in, `.thinking` below) is the only animated element in
-   Phase 1 -- no transitions, no pulsing borders, nothing else moves. */
+   NOTHING ANIMATES. No transitions, no pulsing borders, no spinners: the
+   in-flight turn marker (`.thinking` below) is a static Static, having
+   replaced a LoadingIndicator whose 16 Hz auto-refresh was CPU spent on
+   reassurance. The only interval left anywhere is Textual's own 2 Hz
+   caret blink on the focused prompt input, which is load-bearing -- it is
+   how you find the caret -- and runs on exactly one widget. */
 
 Screen {
     background: #171512;
@@ -198,15 +201,32 @@ PeerMessageBlock {
 
 /* Belief inspector -- Phase 2 stub pane (palette-toggled, hidden by
    default). Docked right so toggling never reflows the block list's
-   scroll anchor; real content lands in Phase 3. */
+   scroll anchor; real content lands in Phase 3. Wears the house panel
+   header: title plus a clickable close affordance. */
 #belief-inspector {
     dock: right;
     display: none;
     width: 46;
+    height: 1fr;
     background: #1D1B17;
     color: #D8CDBB;
     border: round #3A3429;
     padding: 1 2;
+}
+
+#inspector-header {
+    height: 1;
+}
+
+#inspector-title {
+    width: 1fr;
+    color: #D97757;
+    text-style: bold;
+}
+
+#inspector-body {
+    color: #D8CDBB;
+    padding-top: 1;
 }
 
 /* Command palette (Ctrl+P): Textual's built-in modal, reskinned onto the

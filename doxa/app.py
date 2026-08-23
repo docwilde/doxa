@@ -49,12 +49,11 @@ from functools import partial
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.fuzzy import Matcher
 from textual.widgets import (
     Collapsible,
     Input,
-    LoadingIndicator,
     OptionList,
     Static,
     TabbedContent,
@@ -111,15 +110,57 @@ def ctx_chip(percentage: "float | None") -> str:
     return text
 
 
+def app_bindings() -> "list[tuple[str, str]]":
+    """``(key, description)`` for every app-level binding, read off
+    ``DoxaApp.BINDINGS`` itself -- the thing Textual actually dispatches.
+    /help renders this, so a binding cannot exist without being documented
+    and cannot be documented without existing."""
+    rows: list[tuple[str, str]] = []
+    for binding in DoxaApp.BINDINGS:
+        if isinstance(binding, tuple):
+            key, _action, description = (list(binding) + ["", "", ""])[:3]
+        else:
+            key, description = binding.key, binding.description
+        if key and description:
+            rows.append((key, description))
+    return rows
+
+
+def _pretty_key(key: str) -> str:
+    """`ctrl+comma` is what Textual dispatches; `Ctrl+,` is what a keyboard
+    has written on it."""
+    parts = key.split("+")
+    names = {"comma": ",", "left": "←", "right": "→", "ctrl": "Ctrl", "shift": "Shift"}
+    return "+".join(names.get(p, p.upper() if len(p) == 1 else p.capitalize())
+                    for p in parts)
+
+
 def help_text() -> str:
-    """``/help``, generated from the command registry -- never a
-    hand-maintained list, because a hand-maintained list is a list that is
-    wrong by the second command anyone adds."""
+    """``/help``, generated from the command registry AND the live binding
+    list -- never a hand-maintained list, because a hand-maintained list is
+    wrong by the second command anyone adds.
+
+    Two columns for commands (call form + what it does, with its key
+    binding where one reaches the same place), then a hotkeys section for
+    the bindings that have no slash form at all."""
     lines = ["commands", ""]
     width = max(len(cmd.call_form()) for cmd in commands_mod.REGISTRY)
+    bound: set[str] = set()
     for command in commands_mod.REGISTRY:
-        suffix = "  (sent to the CLI, not intercepted)" if command.passthrough else ""
-        lines.append(f"  {command.call_form():<{width}}  {command.summary}{suffix}")
+        note = ""
+        if command.binding:
+            bound.add(command.binding)
+            note = f"   [{_pretty_key(command.binding)}]"
+        if command.passthrough:
+            note += "  (sent to the CLI, not intercepted)"
+        lines.append(f"  {command.call_form():<{width}}  {command.summary}{note}")
+
+    hotkeys = [(k, d) for k, d in app_bindings() if k not in bound]
+    if hotkeys:
+        lines += ["", "hotkeys (no slash form)", ""]
+        key_width = max(len(_pretty_key(k)) for k, _d in hotkeys)
+        for key, description in hotkeys:
+            lines.append(f"  {_pretty_key(key):<{key_width}}  {description}")
     return "\n".join(lines)
 
 
@@ -414,6 +455,23 @@ class ToolChip(Collapsible):
             )
 
 
+class ThinkingMarker(Static):
+    """The in-flight marker on a running turn -- STATIC, deliberately.
+
+    This replaced a ``LoadingIndicator``, whose 16 Hz auto-refresh
+    animation was the same class of cost as the leaked-timer bug this app
+    already fixed once: every in-flight turn armed a repaint tick, and a
+    terminal that repaints sixteen times a second to say "working" is
+    spending the user's CPU on reassurance. The marker says the same thing
+    with zero timers. Nothing in DOXA's own chrome animates; the only
+    interval left in the app is Textual's caret blink on the focused
+    prompt, which is load-bearing (it is how you find the caret) and runs
+    at 2 Hz on exactly one widget."""
+
+    def __init__(self) -> None:
+        super().__init__("⋯ thinking", classes="thinking")
+
+
 class TurnBlock(Collapsible):
     """One user turn + the assistant's response, foldable. Streaming text
     updates the body live; tool chips mount into `self.tools` as tool_call
@@ -422,7 +480,7 @@ class TurnBlock(Collapsible):
     def __init__(self, prompt: str) -> None:
         self.prompt_text = prompt
         self.assistant_text = ""
-        self.thinking = LoadingIndicator(classes="thinking")
+        self.thinking = ThinkingMarker()
         self.body = Static("", classes="turn-body")
         self.tools = Vertical(classes="turn-tools")
         super().__init__(self.thinking, self.body, self.tools, title=self._render_title(), collapsed=False)
@@ -433,12 +491,13 @@ class TurnBlock(Collapsible):
     def hide_thinking(self) -> None:
         if self.thinking.display:
             self.thinking.display = False
-            # display=False only HIDES the indicator: LoadingIndicator arms a
-            # 16Hz auto-refresh animation timer on mount and nothing else ever
-            # stops it, so every finished turn would leave one live timer
-            # behind and idle CPU grew linearly with scrollback (measured
-            # ~0.2%/turn headless; the fix takes 40 idle turn blocks from
-            # ~8.7% CPU to baseline). The animation dies with the display.
+            # Belt and braces after the LoadingIndicator removal: the old
+            # indicator armed a 16 Hz auto-refresh on mount that nothing
+            # else stopped, so every finished turn leaked a live timer and
+            # idle CPU grew linearly with scrollback (measured ~0.2%/turn
+            # headless; clearing it took 40 idle turn blocks from ~8.7% CPU
+            # to baseline). ThinkingMarker arms nothing at all -- this line
+            # now guarantees the invariant rather than repairing a widget.
             self.thinking.auto_refresh = None
 
     def append_text(self, chunk: str) -> None:
@@ -457,6 +516,37 @@ class TurnBlock(Collapsible):
             bits.append("✗ error")
         suffix = f"  ·  {'  ·  '.join(bits)}" if bits else ""
         self.title = self._render_title(suffix)
+
+
+class BeliefInspector(Vertical):
+    """The docked belief pane (palette-toggled, hidden by default).
+
+    Carries the house panel convention: a title row with a ✕ in its
+    upper-right corner, clickable, because a panel that can only be closed
+    by the same command that opened it is a panel mouse users get stuck
+    in. Same treatment as the settings modal's header -- one convention,
+    every panel."""
+
+    def __init__(self) -> None:
+        super().__init__(id="belief-inspector")
+        self.text = ""
+        self._body = Static("", id="inspector-body")
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="inspector-header"):
+            yield Static("▎ belief inspector — stub", id="inspector-title")
+            yield Static("✕", id="inspector-close", classes="panel-close")
+        yield self._body
+
+    def set_text(self, text: str) -> None:
+        self.text = text
+        self._body.update(text)
+
+    @property
+    def renderable(self) -> str:
+        """Kept so every caller that treated this as a Static still reads
+        its content the same way."""
+        return self.text
 
 
 class SlashComplete(OptionList):
@@ -1284,11 +1374,18 @@ class DoxaApp(App):
     # = quit-detach ALL tabs (daemons keep running), double press within
     # CTRL_C_DOUBLE_SECS = quit-stop ALL -- see action_ctrl_c_quit.
     BINDINGS = [
-        ("ctrl+r", "history_search", "History"),
+        Binding("ctrl+p", "command_palette", "Command palette", show=False),
+        Binding("ctrl+r", "history_search", "History search (LORE FTS)"),
         Binding("ctrl+comma", "settings", "Settings", show=False, priority=True),
         Binding("ctrl+t", "new_tab", "New tab", show=False, priority=True),
-        Binding("ctrl+w", "close_tab", "Close tab", show=False, priority=True),
-        Binding("ctrl+c", "ctrl_c_quit", "Quit (detach)", show=False, priority=True),
+        Binding("ctrl+w", "close_tab", "Close tab (detach)", show=False, priority=True),
+        Binding("ctrl+left", "prev_tab", "Previous tab", show=False, priority=True),
+        Binding("ctrl+right", "next_tab", "Next tab", show=False, priority=True),
+        Binding(
+            "ctrl+c", "ctrl_c_quit",
+            "Quit: detach all tabs (twice = stop the sessions)",
+            show=False, priority=True,
+        ),
     ]
 
     def __init__(
@@ -1364,7 +1461,7 @@ class DoxaApp(App):
             pane._refresh_status()
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="belief-inspector")  # hidden stub, palette-toggled
+        yield BeliefInspector()  # hidden stub, palette-toggled
         with TabbedContent(id="session-tabs"):
             yield self._make_pane(self._engine_factory)
 
@@ -1400,6 +1497,26 @@ class DoxaApp(App):
         await self.query_one("#session-tabs", TabbedContent).remove_pane(
             pane.id or ""
         )
+
+    def _cycle_tab(self, delta: int) -> None:
+        """Ctrl+← / Ctrl+→ -- move to the neighbouring tab, wrapping. One
+        tab wraps to itself, which is the correct no-op."""
+        panes = self.panes()
+        if len(panes) < 2:
+            return
+        tabbed = self.query_one("#session-tabs", TabbedContent)
+        ids = [p.id for p in panes if p.id]
+        try:
+            index = ids.index(tabbed.active)
+        except ValueError:
+            index = 0
+        tabbed.active = ids[(index + delta) % len(ids)]
+
+    def action_prev_tab(self) -> None:
+        self._cycle_tab(-1)
+
+    def action_next_tab(self) -> None:
+        self._cycle_tab(1)
 
     def _switch_to_tab(self, pane_id: str) -> None:
         with contextlib.suppress(Exception):
@@ -1601,19 +1718,24 @@ class DoxaApp(App):
         """Belief-inspector stub: Phase 3 owns the real pane (live STEER/
         CITE split, evidence trails); Phase 2 reserves the toggle, the dock
         and the count so the palette command and the muscle memory exist."""
-        panel = self.query_one("#belief-inspector", Static)
+        panel = self.query_one("#belief-inspector", BeliefInspector)
         if panel.display:
             panel.display = False
             return
         beliefs = self.engine.belief_count() if self.engine is not None else 0
-        panel.update(
-            "▎ belief inspector — stub\n\n"
+        panel.set_text(
             f"{beliefs} active beliefs in the store.\n\n"
             "Phase 3 renders them here: STEER/CITE split,\n"
             "evidence trails, calibration. Until then use\n"
             "the lore_belief_search / lore_belief_show tools."
         )
         panel.display = True
+
+    @on(events.Click, "#inspector-close")
+    def _on_inspector_close(self, event: events.Click) -> None:
+        """The ✕ is a real target for the mouse the key toggle leaves out."""
+        event.stop()
+        self.query_one("#belief-inspector", BeliefInspector).display = False
 
     @on(Collapsible.Expanded)
     def _on_chip_expanded(self, event: Collapsible.Expanded) -> None:

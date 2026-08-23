@@ -233,6 +233,19 @@ moves the ref, not HEAD) — never a poll. Session start renders an identity blo
 plan, model, cwd, repo, LORE store — from the fields the CLI actually
 reports, never guesses. `Ctrl+C` quits: one press detaches (daemon keeps
 running), a second press within 2s stops the session (finalize now).
+`Ctrl+←`/`Ctrl+→` cycle tabs; `/help` prints every command *and* every key
+binding, generated from the registry and from `BINDINGS` itself, so a key
+cannot exist without being documented.
+
+**Nothing in DOXA's chrome animates.** The in-flight turn marker is a
+static `⋯ thinking`, not a spinner: the `LoadingIndicator` it replaced
+armed a 16 Hz repaint tick for the whole duration of every turn, which is
+CPU spent on reassurance. Measured headless with 20 turn blocks of
+scrollback and one turn in flight: **6.5% of a core → 0.6%**, and zero
+armed auto-refresh timers anywhere in the DOM (a test asserts that, with
+every overlay open). The single interval left in the app is Textual's own
+2 Hz caret blink on the focused prompt — kept, because it is how you find
+the caret, and it runs on exactly one widget.
 Billed through your Claude subscription — authenticates via the local
 `claude` CLI's own OAuth session, same as `PHASE0_FINDINGS.md` verified;
 no `ANTHROPIC_API_KEY` needed or read.
