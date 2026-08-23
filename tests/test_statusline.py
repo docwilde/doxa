@@ -1,0 +1,289 @@
+"""The status line: containment signal, real headroom, and chip ORDER.
+
+Three properties, each with a reason:
+
+* the context chip escalates by COLOR and keeps its percentage in every
+  tier -- a color that replaced the number would be decoration, and this
+  chip exists to be a containment signal;
+* the headroom chip shows only numbers that are real (the `claude` CLI's
+  own cached utilization) and is recomputed at most once per turn-done,
+  never on a timer;
+* the git short sha sits immediately right of the branch it qualifies, and
+  is read event-driven -- a commit moves the ref file, not HEAD, which is
+  why the sha needs its own stat.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import time
+
+import pytest
+
+from doxa import identity
+from doxa.app import (
+    CTX_AMBER,
+    CTX_AMBER_PCT,
+    CTX_RED,
+    CTX_RED_PCT,
+    DoxaApp,
+    GitLine,
+    ctx_chip,
+)
+from doxa.engine import EngineEvent
+from tests.fakes import FakeEngine
+
+
+# -- (a) context escalation ----------------------------------------------
+
+
+def test_ctx_chip_escalates_and_always_shows_the_percentage():
+    assert ctx_chip(12.0) == "ctx 12%"
+    assert CTX_AMBER in ctx_chip(CTX_AMBER_PCT)
+    assert CTX_AMBER in ctx_chip(80.0)
+    assert CTX_RED in ctx_chip(CTX_RED_PCT)
+    assert CTX_RED in ctx_chip(99.4)
+    # The number survives every tier -- that is the whole rule.
+    for value in (12.0, 74.0, 95.0):
+        assert f"{value:.0f}%" in ctx_chip(value)
+    assert ctx_chip(None) == "ctx —"
+
+
+def test_ctx_thresholds_are_the_documented_ones():
+    assert (CTX_AMBER_PCT, CTX_RED_PCT) == (70.0, 90.0)
+    assert ctx_chip(CTX_AMBER_PCT - 0.1) == "ctx 70%"  # below amber: plain
+    assert CTX_AMBER in ctx_chip(CTX_RED_PCT - 0.1)
+
+
+@pytest.mark.asyncio
+async def test_status_line_colors_the_chip_after_a_pressured_turn(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    script = [
+        EngineEvent("turn_started", {}),
+        EngineEvent("turn_done", {"cost_usd": 0.0, "ctx_percentage": 93.0}),
+    ]
+    monkeypatch.setattr(
+        "doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine(script)
+    )
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#prompt-input").value = "go"
+        await pilot.press("enter")
+        for _ in range(200):
+            status = str(app.query_one("#status-bar").renderable)
+            if "93%" in status:
+                break
+            await pilot.pause(0.02)
+        assert CTX_RED in status and "ctx 93%" in status
+
+
+# -- (b) the headroom chip -----------------------------------------------
+
+
+def _write_utilization(tmp_path, session=9, weekly=48):
+    (tmp_path / ".claude.json").write_text(
+        json.dumps({
+            "cachedUsageUtilization": {
+                "fetchedAtMs": int(time.time() * 1000),
+                "utilization": {"limits": [
+                    {"kind": "session", "percent": session, "severity": "normal",
+                     "resets_at": ""},
+                    {"kind": "weekly_all", "percent": weekly, "severity": "normal",
+                     "resets_at": ""},
+                ]},
+            },
+        }),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.asyncio
+async def test_headroom_chip_shows_real_cached_numbers(monkeypatch, tmp_path):
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    identity.invalidate()
+    _write_utilization(tmp_path)
+    monkeypatch.setattr(
+        "doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([])
+    )
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test() as pilot:
+        for _ in range(200):
+            status = str(app.query_one("#status-bar").renderable)
+            if "s:9%" in status:
+                break
+            await pilot.pause(0.02)
+        assert "s:9% w:48%" in status
+    identity.invalidate()
+
+
+@pytest.mark.asyncio
+async def test_no_headroom_chip_when_nothing_is_cached(monkeypatch, tmp_path):
+    """API-key auth, or a CLI that never fetched one: show NOTHING rather
+    than a fabricated zero. The $ tally beside it is the honest figure."""
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty"))
+    identity.invalidate()
+    monkeypatch.setattr(
+        "doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([])
+    )
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for _ in range(100):
+            if app.active_pane is not None and app.active_pane._git is not None:
+                break
+            await pilot.pause(0.02)
+        status = str(app.query_one("#status-bar").renderable)
+        assert "s:" not in status and "w:" not in status
+        assert "$0.0000" in status
+    identity.invalidate()
+
+
+@pytest.mark.asyncio
+async def test_headroom_chip_refreshes_on_turn_done_and_never_on_a_timer(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    identity.invalidate()
+    _write_utilization(tmp_path, session=9, weekly=48)
+
+    calls: list[float] = []
+    real = identity.usage
+
+    def counted():
+        calls.append(time.monotonic())
+        return real()
+
+    monkeypatch.setattr(identity, "usage", counted)
+    script = [
+        EngineEvent("turn_started", {}),
+        EngineEvent("turn_done", {"cost_usd": 0.0, "ctx_percentage": 5.0}),
+    ]
+    monkeypatch.setattr(
+        "doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine(script)
+    )
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test() as pilot:
+        for _ in range(200):
+            if "s:9%" in str(app.query_one("#status-bar").renderable):
+                break
+            await pilot.pause(0.02)
+        assert len(calls) == 1  # boot only
+
+        # Sitting idle must cost nothing: no timer refreshes this chip.
+        await pilot.pause(0.4)
+        assert len(calls) == 1
+
+        # The CLI refreshes its cache; the next turn-done picks it up.
+        _write_utilization(tmp_path, session=31, weekly=52)
+        app.query_one("#prompt-input").value = "go"
+        await pilot.press("enter")
+        for _ in range(200):
+            status = str(app.query_one("#status-bar").renderable)
+            if "s:31%" in status:
+                break
+            await pilot.pause(0.02)
+        assert "s:31% w:52%" in status
+        assert len(calls) == 2  # exactly one more: per turn-done, not per event
+    identity.invalidate()
+
+
+# -- (c) the git chip's order --------------------------------------------
+
+
+def _repo(tmp_path, branch="trunk"):
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", branch, str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+    (repo / "f.txt").write_text("one", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "one"], check=True)
+    return repo
+
+
+def _short_sha(repo) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--short=7", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def test_git_chip_puts_the_sha_immediately_right_of_the_branch(tmp_path):
+    repo = _repo(tmp_path)
+    chip = GitLine(str(repo)).render()
+    assert chip == f"myrepo ⎇ trunk {_short_sha(repo)}"
+
+
+def test_git_chip_follows_a_new_commit_without_polling(tmp_path):
+    """A commit moves the REF file, not HEAD -- so the sha has its own
+    stat, and the next event-driven render sees it."""
+    repo = _repo(tmp_path)
+    line = GitLine(str(repo))
+    first = line.render()
+    (repo / "f.txt").write_text("two", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "commit", "-qam", "two"], check=True)
+    line._sha_mtime = None  # defeat same-second mtime granularity
+    second = line.render()
+    assert first != second
+    assert second == f"myrepo ⎇ trunk {_short_sha(repo)}"
+
+
+def test_git_chip_reads_a_packed_ref(tmp_path):
+    repo = _repo(tmp_path)
+    subprocess.run(["git", "-C", str(repo), "pack-refs", "--all"], check=True)
+    assert GitLine(str(repo)).render() == f"myrepo ⎇ trunk {_short_sha(repo)}"
+
+
+def test_git_chip_omits_a_sha_that_would_repeat_the_branch(tmp_path):
+    """Detached HEAD already shows the sha as its 'branch' -- printing it
+    twice is noise, not information."""
+    repo = _repo(tmp_path)
+    sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", sha], check=True)
+    chip = GitLine(str(repo)).render()
+    assert chip == f"myrepo ⎇ {sha[:8]}"
+
+
+@pytest.mark.asyncio
+async def test_status_line_chip_order(monkeypatch, tmp_path):
+    """Pinned ORDER: model · repo ⎇ branch sha · cost · headroom · ctx ·
+    beliefs. The sha belongs next to the branch it qualifies."""
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    identity.invalidate()
+    _write_utilization(tmp_path)
+    repo = _repo(tmp_path)
+    fake = FakeEngine([])
+    fake.account = {"subscriptionType": "Claude Max"}
+    fake.last_ctx_percentage = 74.0
+    monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: fake)
+    app = DoxaApp(cwd=str(repo))
+    async with app.run_test() as pilot:
+        for _ in range(200):
+            status = str(app.query_one("#status-bar").renderable)
+            if "myrepo" in status:
+                break
+            await pilot.pause(0.02)
+        sha = _short_sha(repo)
+        order = [
+            fake.model,
+            f"myrepo ⎇ trunk {sha}",
+            "sub:max",
+            "s:9% w:48%",
+            "ctx 74%",
+            "3 beliefs",
+        ]
+        positions = [status.index(chunk) for chunk in order]
+        assert positions == sorted(positions), status
+    identity.invalidate()

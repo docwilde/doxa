@@ -215,9 +215,21 @@ peers, belief-inspector stub, quit-detach vs quit-stop), and `ctrl+r` opens
 history search — instant BM25 over LORE's index of every past session, a
 chosen hit inserting its session reference into the prompt. One prompt
 input at the bottom, a scrolling list of foldable turn blocks above it, a
-status bar (model · repo `⎇` branch · `sub:<tier>` on subscription auth or
-the `$` estimate on API-key auth · context estimate · active belief count ·
-`⌁` reattach handle). Session start renders an identity block — account,
+status bar, in this order: **model · repo `⎇` branch `<sha>` ·
+`sub:<tier>` (or the `$` estimate on API-key auth) · `s:9% w:48%` headroom ·
+context · belief count · `⌁` reattach handle**. The short sha sits
+immediately right of the branch it qualifies. The context chip escalates
+**normal → amber (≥70%) → red (≥90%)** and keeps its percentage in every
+tier — a containment signal, not decoration; a color that replaced the
+number would be the latter. The headroom chip is real and local: the
+`claude` CLI fetches its own subscription utilization and caches the answer
+in its config, so DOXA reads a file rather than calling an endpoint — no
+new credential handling, nothing to rate-limit. It is recomputed at most
+once per turn-done and never on a timer, a stale cache is marked `~`, and
+with nothing cached (API-key auth) the chip is simply absent rather than a
+fabricated zero. Every git read is event-driven the same way: a `stat` of
+`.git/HEAD` for the branch and of the branch's ref for the sha (a commit
+moves the ref, not HEAD) — never a poll. Session start renders an identity block — account,
 plan, model, cwd, repo, LORE store — from the fields the CLI actually
 reports, never guesses. `Ctrl+C` quits: one press detaches (daemon keeps
 running), a second press within 2s stops the session (finalize now).

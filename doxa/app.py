@@ -87,6 +87,29 @@ CTRL_C_DOUBLE_SECS = 2.0
 # an alias that always resolves to the current one.
 MODEL_ALIASES = ("haiku", "sonnet", "opus", "fable")
 
+# Context-pressure escalation. The README calls this out as "a containment
+# signal, not decoration": the chip changes COLOR as the window fills, and
+# keeps showing the percentage throughout -- a color that replaced the
+# number would be decoration. Amber is "start thinking about /compact",
+# red is "the next long tool result may not fit".
+CTX_AMBER_PCT = 70.0
+CTX_RED_PCT = 90.0
+CTX_AMBER = "#E8A33D"
+CTX_RED = "#D9534F"
+
+
+def ctx_chip(percentage: "float | None") -> str:
+    """The context chip, escalating normal -> amber -> red. Markup only:
+    the percentage is always present, in every tier."""
+    if percentage is None:
+        return "ctx —"
+    text = f"ctx {percentage:.0f}%"
+    if percentage >= CTX_RED_PCT:
+        return f"[{CTX_RED}]{text}[/]"
+    if percentage >= CTX_AMBER_PCT:
+        return f"[{CTX_AMBER}]{text}[/]"
+    return text
+
 
 def help_text() -> str:
     """``/help``, generated from the command registry -- never a
@@ -122,22 +145,30 @@ def git_branch_symbol() -> str:
 
 
 class GitLine:
-    """The `repo ⎇ branch` chip for the status line.
+    """The `repo ⎇ branch sha` chip for the status line.
 
     Cost discipline (this sits next to the idle-CPU fix for a reason): the
     repo root is resolved ONCE at construction (the only subprocess); after
-    that a branch read is one stat + at most one small file read of
-    .git/HEAD, re-parsed only when HEAD's mtime moves (checkout/switch touch
-    it). render() is called from event-driven sites only (_refresh_status:
-    boot, turn done, peer events) -- NEVER from a timer or per-frame hook,
-    which would recreate the busy-idle bug this app just shed."""
+    that a read is a couple of stats and at most two small file reads --
+    ``.git/HEAD`` re-parsed only when its mtime moves (checkout/switch touch
+    it), and the branch's ref file re-read only when ITS mtime moves (a
+    commit touches the ref, not HEAD -- which is exactly why the sha needs
+    its own stat rather than riding HEAD's). ``packed-refs`` is the
+    fallback for a branch with no loose ref, cached the same way.
+    render() is called from event-driven sites only (_refresh_status: boot,
+    turn done, peer events) -- NEVER from a timer or per-frame hook, which
+    would recreate the busy-idle bug this app just shed."""
 
     def __init__(self, cwd: str) -> None:
         self.repo_root = peers_mod.repo_root_of(cwd)
         self.repo = Path(self.repo_root).name if self.repo_root else None
         self._head: Path | None = None
+        self._gitdir: Path | None = None
         self._mtime: float | None = None
         self._branch: str | None = None
+        self._ref: str | None = None      # refs/heads/<branch>, when attached
+        self._sha: str | None = None
+        self._sha_mtime: float | None = None
         if self.repo_root:
             git = Path(self.repo_root) / ".git"
             if git.is_file():
@@ -154,16 +185,26 @@ class GitLine:
                             break
                 except OSError:
                     return
+            self._gitdir = git
             self._head = git / "HEAD"
 
     def render(self) -> str | None:
-        """` repo ⎇ branch`, or None outside a repo (no chip at all)."""
+        """`repo ⎇ branch sha`, or None outside a repo (no chip at all).
+
+        The short sha sits immediately right of the branch, because that is
+        where "which commit am I actually on" belongs -- next to the branch
+        it qualifies, not at the far end of the bar. Omitted when it would
+        merely repeat the branch label (detached HEAD)."""
         if not self.repo:
             return None
         branch = self._read_branch()
         if not branch:
             return self.repo
-        return f"{self.repo} {git_branch_symbol()} {branch}"
+        chip = f"{self.repo} {git_branch_symbol()} {branch}"
+        sha = self._read_sha()
+        if sha and not branch.startswith(sha):
+            chip += f" {sha}"
+        return chip
 
     def _read_branch(self) -> str | None:
         if self._head is None:
@@ -179,12 +220,61 @@ class GitLine:
             head = self._head.read_text(encoding="utf-8", errors="replace").strip()
         except OSError:
             return self._branch
+        self._sha_mtime = None  # HEAD moved: the sha must be re-read too
         if head.startswith("ref:"):
-            ref = head.split(":", 1)[1].strip()
-            self._branch = ref.removeprefix("refs/heads/")
+            self._ref = head.split(":", 1)[1].strip()
+            self._branch = self._ref.removeprefix("refs/heads/")
         else:
+            self._ref = None
+            self._sha = head[:7] or None
             self._branch = head[:8] or None  # detached HEAD: short sha
         return self._branch
+
+    def _read_sha(self) -> str | None:
+        """The short sha of the branch tip. A COMMIT moves the ref file,
+        not HEAD, so this stats the ref in its own right -- still event-
+        driven (a stat per status refresh), still never polled."""
+        if self._gitdir is None or self._ref is None:
+            return self._sha
+        ref_path = self._gitdir / self._ref
+        try:
+            mtime = ref_path.stat().st_mtime
+        except OSError:
+            return self._read_packed_sha()
+        if mtime == self._sha_mtime:
+            return self._sha
+        self._sha_mtime = mtime
+        try:
+            self._sha = ref_path.read_text(
+                encoding="utf-8", errors="replace"
+            ).strip()[:7] or None
+        except OSError:
+            pass
+        return self._sha
+
+    def _read_packed_sha(self) -> str | None:
+        """A freshly cloned or gc'd repo keeps its branch tips in
+        packed-refs and has no loose ref file. Same mtime discipline."""
+        if self._gitdir is None or self._ref is None:
+            return self._sha
+        packed = self._gitdir / "packed-refs"
+        try:
+            mtime = packed.stat().st_mtime
+        except OSError:
+            return self._sha
+        if mtime == self._sha_mtime:
+            return self._sha
+        self._sha_mtime = mtime
+        try:
+            for line in packed.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines():
+                if line.endswith(f" {self._ref}"):
+                    self._sha = line.split(" ", 1)[0].strip()[:7] or None
+                    break
+        except OSError:
+            pass
+        return self._sha
 
 
 class SystemBlock(Static):
@@ -542,6 +632,10 @@ class SessionPane(TabPane):
         # Status-line git chip -- built in _boot (per engine, since attach
         # can land in another project's cwd), refreshed event-driven only.
         self._git: GitLine | None = None
+        # Subscription-headroom chip, recomputed at most once per turn-done
+        # (see _refresh_usage_chip). Cached as a plain string because
+        # _refresh_status runs on every peer event and must stay free.
+        self._usage_chip: str | None = None
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="block-list")
@@ -589,6 +683,7 @@ class SessionPane(TabPane):
         # GitLine's constructor runs one git subprocess -- off the loop.
         git_cwd = str(getattr(self.engine, "cwd", None) or self.cwd)
         self._git = await asyncio.to_thread(GitLine, git_cwd)
+        self._refresh_usage_chip()
         self._engine_ready.set()
         self._refresh_status()
         # Initial identity block: who/where this session actually is --
@@ -721,6 +816,26 @@ class SessionPane(TabPane):
                         self._oob_chips = {}
             self._refresh_status()
 
+    def _refresh_usage_chip(self) -> None:
+        """Recompute the subscription-headroom chip (``s:9% w:48%``).
+
+        The numbers are REAL and local: the `claude` CLI fetches its own
+        utilization and caches the answer verbatim in its config
+        (``cachedUsageUtilization``), so DOXA reads a file rather than
+        calling an endpoint -- no new credential handling, and nothing to
+        rate-limit. It is a cache, so a stale one is marked (`~`) instead
+        of being presented as live.
+
+        Called from boot and turn-done ONLY. Never a timer: this app pays
+        for what events tell it, and a status chip is not worth a tick.
+        API-key auth has no such cache and shows nothing here -- the plain
+        $ tally next to it is already the honest figure for that case."""
+        try:
+            snapshot = identity_mod.usage()
+        except Exception:  # noqa: BLE001 -- a chip must degrade to silence
+            snapshot = None
+        self._usage_chip = snapshot.chip() if snapshot is not None else None
+
     def _refresh_status(self) -> None:
         if self.engine is None:
             return
@@ -735,17 +850,15 @@ class SessionPane(TabPane):
             cost = f"sub:{tier} (≈${self.engine.total_cost_usd:.4f} if API)"
         else:
             cost = f"${self.engine.total_cost_usd:.4f}"
-        ctx = (
-            f"{self.engine.last_ctx_percentage:.0f}%"
-            if self.engine.last_ctx_percentage is not None
-            else "—"
-        )
         beliefs = self.engine.belief_count()
         parts = [model]
         git_chip = self._git.render() if self._git is not None else None
         if git_chip:  # hidden entirely outside a repo
             parts.append(git_chip)
-        parts += [cost, f"ctx {ctx}", f"{beliefs} beliefs"]
+        parts.append(cost)
+        if self._usage_chip:  # only when real numbers exist -- see below
+            parts.append(self._usage_chip)
+        parts += [ctx_chip(self.engine.last_ctx_percentage), f"{beliefs} beliefs"]
         if getattr(self.engine, "detachable", False):
             sid = str(getattr(self.engine, "session_id", "") or "")
             if sid:  # attached to a daemon: show the reattach handle
@@ -1123,6 +1236,9 @@ class SessionPane(TabPane):
                 )
         elif ev.type == "turn_done":
             block.mark_done(ev.data.get("cost_usd"), ev.data.get("duration_ms"), ev.data.get("is_error", False))
+            # The one place the headroom chip is recomputed: a turn just
+            # spent budget, and the CLI may have refreshed its own cache.
+            self._refresh_usage_chip()
             self._refresh_status()
 
     async def switch_engine(self, make_engine: "Callable[[], Any]") -> None:
