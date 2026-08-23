@@ -88,6 +88,35 @@ CTRL_C_DOUBLE_SECS = 2.0
 # an alias that always resolves to the current one.
 MODEL_ALIASES = ("haiku", "sonnet", "opus", "fable")
 
+# Tab labels: `<short model> · <repo> ⎇ <branch>`, e.g. `sonnet · doxa ⎇ main`.
+# Wide enough for that shape at typical repo/branch lengths, narrow enough
+# that four tabs still fit across a normal terminal.
+TAB_LABEL_MAX = 34
+
+
+def short_model(model: "str | None") -> str:
+    """The tier word out of a model name: claude-sonnet-4-5 -> sonnet.
+
+    A tab label has room for the thing that actually varies between tabs,
+    and that is the tier, not the vendor prefix or the point release. An
+    unrecognised name keeps its first dash-segment (gpt-5.4 -> gpt) rather
+    than being truncated mid-word; an unset model is "default", the same
+    word the status bar and the identity block use for it."""
+    name = (model or "").strip().lower()
+    if not name:
+        return "default"
+    for tier in MODEL_ALIASES:
+        if tier in name:
+            return tier
+    return name.split("-", 1)[0] or name
+
+
+def ellipsize(text: str, limit: int = TAB_LABEL_MAX) -> str:
+    """Truncate with a real ellipsis. A tab that grows without bound pushes
+    its neighbours off the bar, which costs more than the tail of a branch
+    name is worth."""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
 # Context-pressure escalation. The README calls this out as "a containment
 # signal, not decoration": the chip changes COLOR as the window fills, and
 # keeps showing the percentage throughout -- a color that replaced the
@@ -221,6 +250,7 @@ class GitLine:
         self._ref: str | None = None      # refs/heads/<branch>, when attached
         self._sha: str | None = None
         self._sha_mtime: float | None = None
+        self.worktree: str | None = None
         if self.repo_root:
             git = Path(self.repo_root) / ".git"
             if git.is_file():
@@ -237,6 +267,12 @@ class GitLine:
                             break
                 except OSError:
                     return
+                # A linked worktree's gitdir is <main>/.git/worktrees/<name>
+                # -- the last component IS the worktree's name, which is
+                # what `git worktree list` calls it. A submodule's gitdir
+                # sits under modules/ instead and leaves this None.
+                if git.parent.name == "worktrees":
+                    self.worktree = git.name
             self._gitdir = git
             self._head = git / "HEAD"
 
@@ -262,6 +298,23 @@ class GitLine:
             # that). Neither is dropped -- both are labelled instead.
             chip += f" @{sha}"
         return chip
+
+    def branch_label(self) -> str | None:
+        """The branch as a TAB says it: `main`, or `main@featureX` inside a
+        linked worktree.
+
+        The worktree name is only added when it says something the label
+        does not already carry -- `git worktree add ../foo -b foo` makes
+        the worktree, the branch and the directory all "foo", and a label
+        reading `foo ⎇ foo@foo` is three copies of one fact. So the suffix
+        appears only when the worktree name differs from BOTH the branch
+        and the repo slot beside it."""
+        branch = self._read_branch()
+        if not branch:
+            return None
+        if self.worktree and self.worktree not in (branch, self.repo):
+            return f"{branch}@{self.worktree}"
+        return branch
 
     def _read_branch(self) -> str | None:
         if self._head is None:
@@ -835,6 +888,11 @@ class SessionPane(TabPane):
         # Status-line git chip -- built in _boot (per engine, since attach
         # can land in another project's cwd), refreshed event-driven only.
         self._git: GitLine | None = None
+        # Tab label: `<short model> · <repo> ⎇ <branch>`, recomputed from
+        # the tracked model and the (event-driven) GitLine wherever the
+        # status bar is refreshed -- never on a timer, and only WRITTEN
+        # when it actually changed, since writing it repaints the tab.
+        self._tab_label: str | None = None
         # Subscription-headroom chip, recomputed at most once per turn-done
         # (see _refresh_usage_chip). Cached as a plain string because
         # _refresh_status runs on every peer event and must stay free.
@@ -1049,9 +1107,53 @@ class SessionPane(TabPane):
             snapshot = None
         self._usage_chip = snapshot.chip() if snapshot is not None else None
 
+    # -- the tab's own label -----------------------------------------
+
+    def auto_label(self) -> str:
+        """`sonnet · doxa ⎇ main` -- what a tab says when nobody has named
+        it: which model is answering, and where.
+
+        Both halves are already tracked state: the model is the engine's
+        (so a live /model switch moves it), and the repo/branch come from
+        the pane's GitLine, whose reads are event-driven stats -- this adds
+        no polling and no subprocess. Outside a repo the git half is
+        dropped rather than faked: `sonnet · Downloads`."""
+        engine = self.engine
+        model = short_model(getattr(engine, "model", None) or self.model)
+        cwd = str(getattr(engine, "cwd", None) or self.cwd)
+        git = self._git
+        if git is not None and git.repo:
+            branch = git.branch_label()
+            where = (
+                f"{git.repo} {git_branch_symbol()} {branch}" if branch
+                else git.repo
+            )
+        else:
+            where = Path(cwd).name or cwd
+        return ellipsize(f"{model} · {where}")
+
+    def refresh_tab_label(self) -> None:
+        """Re-render the tab's label if it changed. Cheap, idempotent, and
+        called from exactly where the status bar is refreshed."""
+        label = self.auto_label()
+        if label == self._tab_label:
+            return
+        self.set_tab_label(label)
+
+    def set_tab_label(self, text: str) -> None:
+        """Write one label onto the tab header AND onto the pane's own
+        title, which is what the palette's tab section and any later
+        re-add of the pane read."""
+        self._tab_label = text
+        self._title = self.render_str(text)
+        with contextlib.suppress(Exception):
+            tabbed = self.app.query_one("#session-tabs", TabbedContent)
+            tabbed.get_tab(self.id or "").label = text
+
     def _refresh_status(self) -> None:
         if self.engine is None:
             return
+        self.refresh_tab_label()
         model = self.engine.model or "default"
         # Subscription-aware cost: on subscription auth the session costs
         # no dollars, so a bare $ figure is misleading -- show the tier,
@@ -1604,9 +1706,17 @@ class DoxaApp(App):
     # -- pane plumbing -----------------------------------------------
 
     def _tab_title(self) -> str:
+        """The label a pane is BORN with -- model plus directory, no git.
+
+        The pane replaces it with its own ``auto_label`` the moment its
+        engine and GitLine exist (one boot later); this exists so a tab
+        never flashes a differently-shaped label on the way there. Two tabs
+        on the same repo, branch and model do read alike, deliberately:
+        they ARE alike, and the palette's tab section carries the session
+        id that tells them apart."""
         self._tab_serial += 1
         name = Path(self.cwd).name or "session"
-        return name if self._tab_serial == 1 else f"{name} ·{self._tab_serial}"
+        return ellipsize(f"{short_model(self.model)} · {name}")
 
     def _make_pane(self, engine_factory: "Callable[[], Any]") -> SessionPane:
         return SessionPane(
