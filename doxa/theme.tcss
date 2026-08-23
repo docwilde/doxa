@@ -63,6 +63,35 @@ ToolChip > CollapsibleTitle {
     padding: 1 2;
 }
 
+/* Image surfaces (doxa/images.py ladder): the media area inside a tool
+   chip, the /img debug block, and the text fallback every tier degrades
+   to. Sizes stay auto -- textual-image widgets measure themselves. */
+.chip-media {
+    height: auto;
+}
+
+.image-block {
+    height: auto;
+    background: #221F1A;
+    border: round #3A3429;
+    padding: 0 2;
+    margin-bottom: 1;
+}
+
+.image-caption {
+    color: #D97757;
+    text-style: bold;
+}
+
+.image-widget {
+    height: auto;
+    max-height: 24;
+}
+
+.image-fallback {
+    color: #D8CDBB;
+}
+
 .thinking {
     color: #D97757;
     height: 1;

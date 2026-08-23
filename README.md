@@ -123,7 +123,7 @@ Verdict: GO with four small redesigns, all itemized.
 | 0 | SDK lifecycle validation, Textual coexistence, auth | **done** |
 | 1 | `lore_core` extraction; single-pane shell; block rendering; session-end review; ask | **done** |
 | 2 | Daemon split + detach/reattach, Ctrl+P palette, Ctrl+R FTS history search, theme | **done** |
-| 3 | Warp-style tabs (sketch below), split panes + review pane, streaming deriver, multi-agent panes + merge queue, act-time consult, trace tree | planned |
+| 3 | Warp-style tabs (sketch below), split panes + review pane, streaming deriver, multi-agent panes + merge queue, act-time consult, trace tree | **in progress** — landed: terminal images (KGP → sixel → half-block → text ladder; tool results + `/img`) |
 | 4 | Container isolation tier, calibration dashboard, plugin-compat hardening | planned |
 
 **Tab-system sketch (Phase 3, deferred from the dogfooding round).** The

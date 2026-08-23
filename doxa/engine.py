@@ -63,6 +63,7 @@ from typing import Any
 
 from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see module docstring
 from . import gate as gate_mod
+from . import images as images_mod
 from . import operators as operators_mod
 from . import peers as peers_mod
 
@@ -145,6 +146,43 @@ def _tool_result_text(content: Any) -> str:
             c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"
         )
     return ""
+
+
+_IMAGE_MEDIA_SUFFIX = {
+    "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
+    "image/webp": ".webp", "image/bmp": ".bmp",
+}
+
+
+def _tool_result_image_path(tool_use_id: str, content: Any, result_text: str) -> str | None:
+    """The EngineEvent image convention: a tool_result event gains an
+    optional ``image_path`` when its payload IS an image -- either an inline
+    base64 image block (materialized to a runtime-dir file, 0700 like
+    everything else there, so the path fits in a JSON event frame where the
+    bytes never would) or a result text that is nothing but a path to an
+    existing image file. None otherwise; display is the TUI's business, and
+    the TUI has a text fallback for every tier -- so a detection miss here
+    costs polish, never data."""
+    if isinstance(content, list):
+        for c in content:
+            if not (isinstance(c, dict) and c.get("type") == "image"):
+                continue
+            src = c.get("source") or {}
+            data = src.get("data")
+            if src.get("type") != "base64" or not data:
+                continue
+            try:
+                import base64
+
+                suffix = _IMAGE_MEDIA_SUFFIX.get(str(src.get("media_type")), ".png")
+                path = peers_mod.runtime_dir() / f"toolimg-{tool_use_id}{suffix}"
+                path.write_bytes(base64.b64decode(data))
+                return str(path)
+            except Exception:
+                return None
+    if images_mod.looks_like_image_path(result_text):
+        return result_text.strip()
+    return None
 
 
 class SessionEngine:
@@ -533,13 +571,19 @@ class SessionEngine:
                             "type": "tool_result", "tool_use_id": block.tool_use_id,
                             "content": result_text, "is_error": bool(block.is_error),
                         })
-                        yield EngineEvent("tool_result", {
+                        event_data = {
                             "id": block.tool_use_id,
                             "name": self._tool_names.get(block.tool_use_id),
                             "result_summary": result_text[:280],
                             "is_error": bool(block.is_error),
                             "duration_ms": duration_ms,
-                        })
+                        }
+                        image_path = _tool_result_image_path(
+                            block.tool_use_id, block.content, result_text
+                        )
+                        if image_path:  # optional key -- see the convention
+                            event_data["image_path"] = image_path
+                        yield EngineEvent("tool_result", event_data)
                 if tool_result_blocks:
                     self._persist_tool_results(tool_result_blocks)
 

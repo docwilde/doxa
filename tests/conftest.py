@@ -23,6 +23,14 @@ os.environ["LORE_PROJECTS_DIR"] = str(_tmp / "projects")
 # registers in, reaps, or listens inside the machine's real registry.
 os.environ["DOXA_RUNTIME_DIR"] = str(_tmp / "runtime")
 
+# Image-mode kill switch: doxa.images probes the terminal for KGP/sixel
+# support by writing escape queries to the REAL stdout and reading stdin --
+# harmless headless (non-tty short-circuits) but rude and slow when the
+# suite runs from an interactive terminal. Forcing the text tier suite-wide
+# means no test ever probes; tests that exercise other tiers set
+# DOXA_IMAGE_MODE themselves via monkeypatch.
+os.environ["DOXA_IMAGE_MODE"] = "text"
+
 # Review kill switch: SessionEngine.finalize()/PreCompact run the LORE
 # deriver review, whose worker shells out to a headless `claude -p` when a
 # transcript is long enough to build a job. The daemon tests finalize real

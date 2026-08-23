@@ -40,6 +40,7 @@ from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Collapsible, Input, LoadingIndicator, Static
 
+from . import images as images_mod
 from . import peers as peers_mod
 from .engine import EngineEvent, SessionEngine
 from .palette import DoxaCommandProvider
@@ -157,6 +158,22 @@ class SystemBlock(Static):
         super().__init__(f"▎ doxa\n{text}", classes="system-block")
 
 
+class ImageBlock(Vertical):
+    """The `/img <path>` debug block: a caption line plus whatever
+    doxa.images.widget_for yields for this terminal -- a real image widget
+    on a KGP/sixel/half-block tier, the "[image: ...]" Static otherwise.
+    Exists so image support can be eyeballed without needing a tool call
+    that happens to return a picture."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        super().__init__(classes="image-block")
+
+    def compose(self) -> ComposeResult:
+        yield Static(f"▎ img · {self.path}", classes="image-caption")
+        yield images_mod.widget_for(self.path, self.path)
+
+
 class PeerMessageBlock(Static):
     """One incoming peer message. Visually distinct from turns (dim border,
     peer title in the header -- see PeerMessageBlock rules in theme.tcss);
@@ -179,18 +196,24 @@ class ToolChip(Collapsible):
     """One tool call, collapsed by default. Body content (full args + full
     result) is formatted lazily -- only on first expand, per the "lazy-
     formatted" requirement -- so a turn with a dozen tool calls doesn't pay
-    for a dozen JSON pretty-prints it may never look at."""
+    for a dozen JSON pretty-prints it may never look at. A tool result that
+    carries the engine's ``image_path`` convention gets an image widget (or
+    its guaranteed text fallback -- doxa/images.py) mounted into the media
+    area, equally lazily: on first expand only."""
 
     def __init__(self, call_id: str, name: str, input_data: dict) -> None:
         self.call_id = call_id
         self.tool_name = name
         self.tool_input = input_data
         self.tool_result: str | None = None
+        self.tool_image_path: str | None = None
         self.is_error = False
         self.duration_ms: int | None = None
         self._formatted = False
+        self._image_mounted = False
         self._body = Static("", id=f"chip-body-{call_id}", classes="chip-body")
-        super().__init__(self._body, title=self._chip_title(), collapsed=True)
+        self._media = Vertical(id=f"chip-media-{call_id}", classes="chip-media")
+        super().__init__(self._body, self._media, title=self._chip_title(), collapsed=True)
 
     def _chip_title(self) -> str:
         arg_summary = _one_line(json.dumps(self.tool_input, ensure_ascii=False), 60)
@@ -201,22 +224,35 @@ class ToolChip(Collapsible):
             dur = f"{self.duration_ms}ms" if self.duration_ms is not None else "?"
         return f"⚒ {self.tool_name}({arg_summary})  ·  {dur}  {status}"
 
-    def update_result(self, result_summary: str, is_error: bool, duration_ms: int | None) -> None:
+    def update_result(
+        self,
+        result_summary: str,
+        is_error: bool,
+        duration_ms: int | None,
+        image_path: str | None = None,
+    ) -> None:
         self.tool_result = result_summary
         self.is_error = is_error
         self.duration_ms = duration_ms
+        self.tool_image_path = image_path
         self.title = self._chip_title()
         if not self.collapsed:
             self.format_body()
 
     def format_body(self) -> None:
-        if self._formatted:
-            return
-        self._formatted = True
-        text = "ARGS:\n" + json.dumps(self.tool_input, indent=2, ensure_ascii=False)
-        if self.tool_result is not None:
-            text += "\n\nRESULT:\n" + self.tool_result
-        self._body.update(text)
+        if not self._formatted:
+            self._formatted = True
+            text = "ARGS:\n" + json.dumps(self.tool_input, indent=2, ensure_ascii=False)
+            if self.tool_result is not None:
+                text += "\n\nRESULT:\n" + self.tool_result
+            self._body.update(text)
+        if self.tool_image_path and not self._image_mounted:
+            self._image_mounted = True
+            # widget_for NEVER raises and never returns None: an unsupported
+            # terminal or a bad file yields the "[image: ...]" Static.
+            self._media.mount(
+                images_mod.widget_for(self.tool_image_path, self.tool_image_path)
+            )
 
 
 class TurnBlock(Collapsible):
@@ -318,6 +354,11 @@ class DoxaApp(App):
         # Status-line git chip -- built in _boot (per engine, since attach
         # can land in another project's cwd), refreshed event-driven only.
         self._git: GitLine | None = None
+        # Settle the image-mode probe NOW, while this process still owns the
+        # terminal: textual-image's TGP/sixel queries read their answer from
+        # stdin, which Textual's own reader thread will grab the moment
+        # App.run() starts (doxa/images.py's detection discipline note).
+        images_mod.detect_mode()
 
     def compose(self) -> ComposeResult:
         yield Static("", id="belief-inspector")  # hidden stub, palette-toggled
@@ -465,10 +506,13 @@ class DoxaApp(App):
         if not prompt:
             return
         event.input.value = ""
-        # Only doxa's own two peer commands are intercepted; anything else
-        # starting with "/" (e.g. the literal "/compact" convention) still
-        # goes to the model untouched.
-        if prompt == "/peers" or prompt.startswith(("/peers ", "/msg ")) or prompt == "/msg":
+        # Only doxa's own commands (peers, msg, img) are intercepted;
+        # anything else starting with "/" (e.g. the literal "/compact"
+        # convention) still goes to the model untouched.
+        if (
+            prompt in ("/peers", "/msg", "/img")
+            or prompt.startswith(("/peers ", "/msg ", "/img "))
+        ):
             self.run_worker(self._run_command(prompt), group="command")
             return
         self.run_worker(self._run_turn(prompt), exclusive=True, group="turn")
@@ -476,6 +520,19 @@ class DoxaApp(App):
     async def _run_command(self, prompt: str) -> None:
         await self._engine_ready.wait()
         assert self.engine is not None
+        if prompt.split()[0] == "/img":
+            # Debug render site for image support -- see ImageBlock.
+            parts = prompt.split(maxsplit=1)
+            path = os.path.expanduser(parts[1].strip()) if len(parts) > 1 else ""
+            block_list = self.query_one("#block-list", VerticalScroll)
+            if not path:
+                await block_list.mount(SystemBlock("usage: /img <path>"))
+            elif not os.path.isfile(path):
+                await block_list.mount(SystemBlock(f"img: no such file: {path}"))
+            else:
+                await block_list.mount(ImageBlock(path))
+            block_list.scroll_end(animate=False)
+            return
         if prompt.split()[0] == "/peers":
             peers = self.engine.list_peers()
             if not peers:
@@ -536,7 +593,10 @@ class DoxaApp(App):
         elif ev.type == "tool_result":
             chip = chips.get(ev.data["id"])
             if chip is not None:
-                chip.update_result(ev.data["result_summary"], ev.data["is_error"], ev.data["duration_ms"])
+                chip.update_result(
+                    ev.data["result_summary"], ev.data["is_error"],
+                    ev.data["duration_ms"], image_path=ev.data.get("image_path"),
+                )
         elif ev.type == "turn_done":
             block.mark_done(ev.data.get("cost_usd"), ev.data.get("duration_ms"), ev.data.get("is_error", False))
             self._refresh_status()
