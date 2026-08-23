@@ -186,6 +186,13 @@ PeerMessageBlock {
     margin: 0 1;
 }
 
+/* Group headers are disabled Options: dim, unselectable, and skipped by
+   the highlight -- a label, never a destination. */
+#slash-complete > .option-list--option-disabled {
+    color: #8A8073;
+    text-style: bold;
+}
+
 #slash-complete > .option-list--option-highlighted {
     color: #D97757;
     background: #2A251E;

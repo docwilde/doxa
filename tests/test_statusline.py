@@ -217,9 +217,12 @@ def _short_sha(repo) -> str:
 
 
 def test_git_chip_puts_the_sha_immediately_right_of_the_branch(tmp_path):
+    """...and marks it as a COMMIT with "@". The bar also carries the
+    session handle, another short hex-ish id: two unlabelled hex strings a
+    few chips apart read as one commit id printed twice."""
     repo = _repo(tmp_path)
     chip = GitLine(str(repo)).render()
-    assert chip == f"myrepo ⎇ trunk {_short_sha(repo)}"
+    assert chip == f"myrepo ⎇ trunk @{_short_sha(repo)}"
 
 
 def test_git_chip_follows_a_new_commit_without_polling(tmp_path):
@@ -233,13 +236,13 @@ def test_git_chip_follows_a_new_commit_without_polling(tmp_path):
     line._sha_mtime = None  # defeat same-second mtime granularity
     second = line.render()
     assert first != second
-    assert second == f"myrepo ⎇ trunk {_short_sha(repo)}"
+    assert second == f"myrepo ⎇ trunk @{_short_sha(repo)}"
 
 
 def test_git_chip_reads_a_packed_ref(tmp_path):
     repo = _repo(tmp_path)
     subprocess.run(["git", "-C", str(repo), "pack-refs", "--all"], check=True)
-    assert GitLine(str(repo)).render() == f"myrepo ⎇ trunk {_short_sha(repo)}"
+    assert GitLine(str(repo)).render() == f"myrepo ⎇ trunk @{_short_sha(repo)}"
 
 
 def test_git_chip_omits_a_sha_that_would_repeat_the_branch(tmp_path):
@@ -278,7 +281,7 @@ async def test_status_line_chip_order(monkeypatch, tmp_path):
         sha = _short_sha(repo)
         order = [
             fake.model,
-            f"myrepo ⎇ trunk {sha}",
+            f"myrepo ⎇ trunk @{sha}",
             "sub:max",
             "s:9% w:48%",
             "ctx 74%",
@@ -287,3 +290,39 @@ async def test_status_line_chip_order(monkeypatch, tmp_path):
         positions = [status.index(chunk) for chunk in order]
         assert positions == sorted(positions), status
     identity.invalidate()
+
+
+@pytest.mark.asyncio
+async def test_the_two_hex_ids_in_the_bar_are_told_apart(monkeypatch, tmp_path):
+    """The reported "commit id appears doubled": nothing renders twice --
+    the git sha and the detached-session handle are both short hex-ish
+    strings a few chips apart, and unlabelled they read as one id printed
+    twice. Both stay; both are labelled."""
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    repo = _repo(tmp_path)
+
+    class Detachable(FakeEngine):
+        detachable = True
+
+        def __init__(self):
+            super().__init__([])
+            self.session_id = "4f8e2a91-77bc-4c1d-9a01-000000000000"
+
+    monkeypatch.setattr(
+        "doxa.app.SessionEngine", lambda cwd, model=None: Detachable()
+    )
+    app = DoxaApp(cwd=str(repo))
+    async with app.run_test() as pilot:
+        for _ in range(200):
+            status = str(app.query_one("#status-bar").renderable)
+            if "myrepo" in status:
+                break
+            await pilot.pause(0.02)
+        sha = _short_sha(repo)
+        # Each id appears exactly once, and each says what kind it is.
+        assert status.count(sha) == 1
+        assert status.count("4f8e2a91") == 1
+        assert f"@{sha}" in status
+        assert "⌁ session 4f8e2a91" in status
+        # ...and no bare hex string sits in the bar unlabelled.
+        assert f" {sha} " not in status

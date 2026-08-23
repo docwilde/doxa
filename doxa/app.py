@@ -146,14 +146,23 @@ def help_text() -> str:
     lines = ["commands", ""]
     width = max(len(cmd.call_form()) for cmd in commands_mod.REGISTRY)
     bound: set[str] = set()
-    for command in commands_mod.REGISTRY:
-        note = ""
-        if command.binding:
-            bound.add(command.binding)
-            note = f"   [{_pretty_key(command.binding)}]"
-        if command.passthrough:
-            note += "  (sent to the CLI, not intercepted)"
-        lines.append(f"  {command.call_form():<{width}}  {command.summary}{note}")
+    # Same grouping and the same order the dropdown and the palette use --
+    # commands.grouped() is the single sequence (see doxa/commands.py).
+    for group, group_commands in commands_mod.grouped():
+        lines.append(f"  {group}")
+        for command in group_commands:
+            note = ""
+            if command.binding:
+                bound.add(command.binding)
+                note = f"   [{_pretty_key(command.binding)}]"
+            if command.passthrough:
+                note += "  (sent to the CLI, not intercepted)"
+            lines.append(
+                f"    {command.call_form():<{width}}  {command.summary}{note}"
+            )
+        lines.append("")
+    while lines and lines[-1] == "":
+        lines.pop()
 
     hotkeys = [(k, d) for k, d in app_bindings() if k not in bound]
     if hotkeys:
@@ -244,7 +253,12 @@ class GitLine:
         chip = f"{self.repo} {git_branch_symbol()} {branch}"
         sha = self._read_sha()
         if sha and not branch.startswith(sha):
-            chip += f" {sha}"
+            # "@" marks this hex string as a COMMIT. The status bar also
+            # carries the detached-session handle, another short hex-ish
+            # id a few chips away, and two unlabelled hex strings in one
+            # bar read as one commit id printed twice (reported as exactly
+            # that). Neither is dropped -- both are labelled instead.
+            chip += f" @{sha}"
         return chip
 
     def _read_branch(self) -> str | None:
@@ -560,8 +574,17 @@ class SlashComplete(OptionList):
 
     It reads :data:`doxa.commands.REGISTRY` and scores with the SAME
     ``textual.fuzzy.Matcher`` the Ctrl+P palette uses: one registry, one
-    matcher, two surfaces. "/" alone lists everything (registration order,
-    stable-sorted under equal scores); "/pe" narrows to /peers.
+    matcher, two surfaces.
+
+    Two modes, because browsing and filtering want different orders:
+
+    * **"/" alone -- browsing.** Everything, in the registry's display
+      order (functional group, then alphabetical inside it), with a dim
+      header row per group. Insertion order is meaningless to a reader
+      looking for a command they cannot name yet.
+    * **"/pe" -- filtering.** Headers collapse and rows rank by match
+      quality, then alphabetically. Someone who is typing has already told
+      us what they want; grouping would only push the best match down.
 
     Dismissal latches: Esc, or completing an entry, closes the dropdown and
     keeps it closed for the rest of this "/"-prefixed line. Deleting the
@@ -574,6 +597,10 @@ class SlashComplete(OptionList):
         super().__init__(id="slash-complete")
         self.display = False
         self.matches: list[commands_mod.SlashCommand] = []
+        # Row-by-row map onto what the OptionList shows: None marks a group
+        # header (a disabled Option), so highlight movement and selection
+        # can both address rows by the SAME index the widget uses.
+        self._rows: list["commands_mod.SlashCommand | None"] = []
         self._dismissed = False
 
     @property
@@ -593,31 +620,67 @@ class SlashComplete(OptionList):
             # typed): the dropdown has nothing left to say about this line.
             self.close()
             return
+        if value == "/":
+            self._show_grouped()
+        else:
+            self._show_ranked(value)
+
+    def _show_grouped(self) -> None:
+        """Browsing: group headers, alphabetical inside each group."""
+        self._rows = []
+        self.matches = []
+        self.clear_options()
+        for group, group_commands in commands_mod.grouped():
+            self._rows.append(None)
+            self.add_option(Option(group, disabled=True))
+            for cmd in group_commands:
+                self._rows.append(cmd)
+                self.matches.append(cmd)
+                self.add_option(Option(self._row_text(cmd)))
+        if not self.matches:
+            self.close()
+            return
+        self.highlighted = self._first_command_row()
+        self.display = True
+
+    def _show_ranked(self, value: str) -> None:
+        """Filtering: no headers, best match first, alphabetical to break
+        ties -- a deterministic order, never insertion order."""
         matcher = Matcher(value)
         scored = [
-            (matcher.match(cmd.name), index, cmd)
-            for index, cmd in enumerate(commands_mod.REGISTRY)
+            (matcher.match(cmd.name), cmd)
+            for cmd in commands_mod.ordered()
         ]
-        # Score first, registration order as the tie-break -- so "/" lists
-        # the registry in the order it declares itself.
-        scored = sorted(
+        ranked = sorted(
             (item for item in scored if item[0] > 0),
-            key=lambda item: (-item[0], item[1]),
+            key=lambda item: (-item[0], item[1].name),
         )
-        self.matches = [cmd for _score, _index, cmd in scored]
+        self.matches = [cmd for _score, cmd in ranked]
+        self._rows = list(self.matches)
         if not self.matches:
             self.close()
             return
         self.clear_options()
         for cmd in self.matches:
-            self.add_option(Option(f"{cmd.call_form():<28} {cmd.summary}"))
+            self.add_option(Option(self._row_text(cmd)))
         self.highlighted = 0
         self.display = True
+
+    @staticmethod
+    def _row_text(cmd: "commands_mod.SlashCommand") -> str:
+        return f"  {cmd.call_form():<28} {cmd.summary}"
+
+    def _first_command_row(self) -> int:
+        for index, row in enumerate(self._rows):
+            if row is not None:
+                return index
+        return 0
 
     def close(self) -> None:
         if self.display:
             self.display = False
         self.matches = []
+        self._rows = []
 
     def dismiss_for_this_line(self) -> None:
         """Esc / a completed entry: stay shut until the "/" line is gone."""
@@ -625,16 +688,25 @@ class SlashComplete(OptionList):
         self.close()
 
     def move(self, delta: int) -> None:
-        if not self.matches:
+        """Move the highlight, SKIPPING group headers -- a header is a
+        label, never a destination, and arrowing onto one would offer a
+        selection that cannot be completed."""
+        if not self.matches or not self._rows:
             return
-        current = self.highlighted or 0
-        self.highlighted = (current + delta) % len(self.matches)
+        index = self.highlighted if self.highlighted is not None else 0
+        for _ in range(len(self._rows)):
+            index = (index + delta) % len(self._rows)
+            if self._rows[index] is not None:
+                self.highlighted = index
+                return
 
     def chosen(self) -> "commands_mod.SlashCommand | None":
-        if not self.matches:
+        if not self._rows:
             return None
         index = self.highlighted if self.highlighted is not None else 0
-        return self.matches[index] if 0 <= index < len(self.matches) else None
+        if 0 <= index < len(self._rows):
+            return self._rows[index]
+        return None
 
 
 class PromptInput(Input):
@@ -952,7 +1024,9 @@ class SessionPane(TabPane):
         if getattr(self.engine, "detachable", False):
             sid = str(getattr(self.engine, "session_id", "") or "")
             if sid:  # attached to a daemon: show the reattach handle
-                parts.append(f"⌁ {sid[:8]}")
+                # Labelled and dimmed for the same reason the git sha wears
+                # an "@": this is a SESSION id, not a commit id.
+                parts.append(f"[#8A8073]⌁ session {sid[:8]}[/]")
         peer_count = self.engine.peer_count()
         if peer_count:  # hidden at 0 -- a solo session has no peers chip
             parts.append(f"peers {peer_count}")
@@ -1572,7 +1646,7 @@ class DoxaApp(App):
         # label appears here too (doxa/commands.py is the single list --
         # the prompt's autocomplete reads the same rows). Rows that need
         # arguments PREFILL the prompt instead of running blind.
-        for command in commands_mod.REGISTRY:
+        for command in commands_mod.ordered():
             if not command.palette:
                 continue
             callback = (

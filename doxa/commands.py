@@ -12,6 +12,12 @@ asserts that the set of interactive rows here and the set of handlers there
 are the same set -- the same registry-closure discipline
 ``tests/test_operators.py`` applies to the tool registry.
 
+Rows also carry their functional ``group``. Ordering is a property of the
+registry, not of any surface: :func:`ordered` (group order, then
+alphabetical inside a group) is what the palette, the prompt's
+autocomplete and ``/help`` all iterate. Three surfaces with three sort
+orders is three chances to be inconsistent; there is one.
+
 ``passthrough`` rows are real commands that DOXA deliberately does NOT
 intercept: ``/compact`` is the CLI's own prompt-text convention (PHASE0
 §2/§6 -- sending the literal string is what triggers compaction and fires
@@ -23,6 +29,21 @@ break the very mechanism it names.
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+
+# Functional groups, in the order every surface shows them. Groups that
+# have no rows yet are still listed here: it is where the commands that
+# belong to them will land, and declaring the slot now is what keeps a
+# later addition from inventing a sixth ordering. An empty group renders
+# nowhere -- a header with nothing under it is a placeholder row, and this
+# house does not ship those.
+GROUPS: tuple[str, ...] = (
+    "Session",
+    "Memory",
+    "Panes & tabs",
+    "Tools & config",
+    "Maintenance",
+)
 
 
 @dataclass(frozen=True)
@@ -57,6 +78,10 @@ class SlashCommand:
     pretty form, and matching the app's BINDINGS verbatim is what lets
     /help tell a bound command apart from a bare hotkey."""
 
+    group: str = "Session"
+    """Functional group -- one of :data:`GROUPS`. Ordering lives HERE, on
+    the definition, so every surface derives the same sequence from it."""
+
     def call_form(self) -> str:
         return self.usage or self.name
 
@@ -64,11 +89,13 @@ class SlashCommand:
 REGISTRY: tuple[SlashCommand, ...] = (
     SlashCommand(
         name="/peers",
+        group="Panes & tabs",
         summary="Live sessions in this project right now",
         palette="Peers: list",
     ),
     SlashCommand(
         name="/msg",
+        group="Panes & tabs",
         summary="Send a message to one same-project peer session",
         usage="/msg <session_prefix> <text>",
         palette="Peers: message",
@@ -76,63 +103,93 @@ REGISTRY: tuple[SlashCommand, ...] = (
     ),
     SlashCommand(
         name="/img",
+        group="Tools & config",
         summary="Render an image file here (terminal image-support probe)",
         usage="/img <path>",
     ),
     SlashCommand(
         name="/login",
+        group="Tools & config",
         summary="Sign in through a provider's own auth CLI (default: claude)",
         usage="/login [provider]",
         palette="Auth: login",
     ),
     SlashCommand(
         name="/logout",
+        group="Tools & config",
         summary="Sign out through a provider's own auth CLI (default: claude)",
         usage="/logout [provider]",
         palette="Auth: logout",
     ),
     SlashCommand(
         name="/settings",
+        group="Tools & config",
         summary="Open the settings modal (env > config file > default)",
         palette="Settings",
         binding="ctrl+comma",
     ),
     SlashCommand(
         name="/model",
+        group="Session",
         summary="Switch the model for the rest of this session (no reconnect)",
         usage="/model [name]",
         palette="Model: switch",
     ),
     SlashCommand(
         name="/effort",
+        group="Session",
         summary="Effort level for NEW sessions (the SDK sets it at connect only)",
         usage="/effort [low|medium|high|xhigh|max]",
     ),
     SlashCommand(
         name="/usage",
+        group="Session",
         summary="Session tokens, turns, cost, and subscription headroom",
         palette="Usage",
     ),
     SlashCommand(
         name="/clear",
+        group="Session",
         summary="Fresh session in THIS tab: finalize, rotate transcript, reset",
         palette="Clear session",
     ),
     SlashCommand(
         name="/compact",
+        group="Maintenance",
         summary="Ask the CLI to compact the transcript (runs LORE's review first)",
         passthrough=True,
     ),
     SlashCommand(
         name="/help",
+        group="Maintenance",
         summary="Every command and key binding, generated from this registry",
         palette="Help",
     ),
 )
 
 
+def ordered() -> list[SlashCommand]:
+    """The registry in DISPLAY order: group order (:data:`GROUPS`), then
+    alphabetical by name inside each group. The one sequence every surface
+    iterates -- palette, autocomplete dropdown, generated /help."""
+    index = {group: position for position, group in enumerate(GROUPS)}
+    return sorted(
+        REGISTRY, key=lambda cmd: (index.get(cmd.group, len(GROUPS)), cmd.name)
+    )
+
+
+def grouped() -> list[tuple[str, list[SlashCommand]]]:
+    """``[(group, [commands])]`` in display order, EMPTY GROUPS OMITTED --
+    a header with nothing under it is a placeholder row."""
+    buckets: dict[str, list[SlashCommand]] = {}
+    for cmd in ordered():
+        buckets.setdefault(cmd.group, []).append(cmd)
+    return [(group, buckets[group]) for group in GROUPS if buckets.get(group)]
+
+
 def names() -> list[str]:
-    return [cmd.name for cmd in REGISTRY]
+    """Registry names in DISPLAY order (see :func:`ordered`)."""
+    return [cmd.name for cmd in ordered()]
 
 
 def interactive() -> tuple[SlashCommand, ...]:
@@ -161,9 +218,8 @@ def lookup(text: str) -> "SlashCommand | None":
 
 def matches(fragment: str) -> list[SlashCommand]:
     """Registry rows whose name starts with ``fragment`` (which includes
-    the leading "/"), in registration order. The autocomplete overlay's
-    coarse filter; the palette's own fuzzy matcher refines within it."""
+    the leading "/"), in display order."""
     fragment = fragment.strip().lower()
     if not fragment.startswith("/"):
         return []
-    return [cmd for cmd in REGISTRY if cmd.name.startswith(fragment)]
+    return [cmd for cmd in ordered() if cmd.name.startswith(fragment)]

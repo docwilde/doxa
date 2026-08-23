@@ -64,8 +64,15 @@ command palette; Ctrl+R history search backed by LORE's own FTS index, so
 search is instant BM25 over every session ever, not a scrollback scan.
 Typing `/` at the start of the prompt opens a suggestion dropdown above the
 input — the same command registry the palette reads, scored by the same
-fuzzy matcher (one registry, two surfaces): arrows move, Tab/Enter
-complete, Esc dismisses, deleting the `/` puts it away.
+fuzzy matcher (one registry, several surfaces): arrows move, Tab/Enter
+complete, Esc dismisses, deleting the `/` puts it away. Ordering is a
+property of the *registry*, not of any surface: each command declares its
+functional group (Session · Memory · Panes & tabs · Tools & config ·
+Maintenance) and the dropdown, the palette and generated `/help` all
+iterate that one sequence — group order, alphabetical inside a group.
+Browsing shows dim, unselectable group headers; the moment you start
+filtering they collapse and rows rank by match quality, then
+alphabetically.
 
 **Trace transparency (DeepSeek-harness grade, redaction kept).** Every tool
 call is inspectable: exact arguments, full results, timing; subagent calls
@@ -215,10 +222,13 @@ peers, belief-inspector stub, quit-detach vs quit-stop), and `ctrl+r` opens
 history search — instant BM25 over LORE's index of every past session, a
 chosen hit inserting its session reference into the prompt. One prompt
 input at the bottom, a scrolling list of foldable turn blocks above it, a
-status bar, in this order: **model · repo `⎇` branch `<sha>` ·
+status bar, in this order: **model · repo `⎇` branch `@<sha>` ·
 `sub:<tier>` (or the `$` estimate on API-key auth) · `s:9% w:48%` headroom ·
-context · belief count · `⌁` reattach handle**. The short sha sits
-immediately right of the branch it qualifies. The context chip escalates
+context · belief count · `⌁ session <id>` reattach handle**. The short sha
+sits immediately right of the branch it qualifies, prefixed `@` to mark it
+as a commit; the session handle is labelled and dimmed for the same
+reason — the bar carries two short hex-ish ids, and unlabelled they read
+as one commit id printed twice. The context chip escalates
 **normal → amber (≥70%) → red (≥90%)** and keeps its percentage in every
 tier — a containment signal, not decoration; a color that replaced the
 number would be the latter. The headroom chip is real and local: the
