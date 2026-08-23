@@ -234,7 +234,7 @@ wheels = [
 
 [[package]]
 name = "doxa"
-version = "0.8.0"
+version = "0.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "claude-agent-sdk" },

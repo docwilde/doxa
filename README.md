@@ -187,6 +187,24 @@ Textual's own 2 Hz caret blink on the focused prompt, and the clock below,
 which only exists at all while it's switched on. A test asserts no other
 timer is ever armed, with every overlay open.
 
+**Multi-line prompt and paste.** The prompt is a `TextArea`, not a
+single-line `Input` — it grows with the conversation, up to 10 rows, then
+scrolls internally rather than displacing the block list above it. Enter
+submits; Shift+Enter and Alt+Enter both insert a literal newline (whichever
+your terminal actually distinguishes from bare Enter — item O's keyboard-
+protocol detection will one day tell you which). Bracketed paste is one
+edit no matter how many lines land — never one submit per embedded
+newline — and CRLF/CR both normalize to LF. A paste past 4 lines or 4 KB
+collapses to `⧉ pasted N lines (X KB)`; Ctrl+G expands it back in place to
+look, and the FULL text goes out on submit either way, expanded or not.
+`ctrl+v` is deliberately unbound (it would paste from this app's own
+in-process clipboard variable, not the terminal's — silently stale); the
+terminal's own paste delivers the real clipboard content directly. An
+image on the clipboard can't reach a terminal app at all (no escape
+sequence carries binary data) — DOXA notices the empty paste that results,
+checks `wl-paste`/`xclip` for what's actually there, and says so rather
+than pretending to attach it.
+
 **Clock.** Fixed-width, right edge of the tab bar, on its own compositing
 layer so it paints over that corner without ever displacing a tab or
 narrowing a pane. Configurable: 12/24-hour, a date prefix, seconds, an

@@ -60,6 +60,7 @@ from textual.widgets import (
     Static,
     TabbedContent,
     TabPane,
+    TextArea,
 )
 from textual.widgets.option_list import Option
 
@@ -70,6 +71,7 @@ from . import config as config_mod
 from . import identity as identity_mod
 from . import images as images_mod
 from . import naming as naming_mod
+from . import paste as paste_mod
 from . import peers as peers_mod
 from . import version as version_mod
 from .engine import EngineEvent, SessionEngine
@@ -909,27 +911,134 @@ class SlashComplete(OptionList):
         return None
 
 
-class PromptInput(Input):
-    """The prompt line, plus the key protocols of the two popups above it.
+class PromptInput(TextArea):
+    """The prompt: a multi-line editor, plus the key protocols of the two
+    popups above it (item N -- clipboard paste).
 
-    While a popup is open, up/down/tab/enter/escape belong to IT.
-    ``on_key`` on the focused widget runs BEFORE that widget's own bindings,
-    so consuming the key here (stop + prevent_default) is what keeps Enter
-    from submitting a half-typed command and Tab from moving focus out of
-    the prompt. With both popups closed, every one of those keys behaves
-    exactly as it always did -- the protocol is additive, never a
-    reinterpretation of the prompt line.
+    Was a single-line ``Input`` through 0.8.0; a bracketed multi-line paste
+    landing in a widget that can only show ONE row was the immediate
+    forcing function (``Input._on_paste`` keeps only ``splitlines()[0]`` --
+    every line after the first was silently dropped, no error, nothing).
+    ``TextArea`` is Textual's only multi-line text widget; it comes with a
+    gutter, undo history and a real ``ctrl+v`` action none of which this
+    prompt wants, so most of this class exists to strip those back down to
+    "one growing line" rather than to add anything TextArea lacks.
+
+    Height policy: :data:`MIN_ROWS` (1) up to :data:`MAX_ROWS` (10) content
+    rows, recomputed after every edit from ``wrapped_document.height`` (the
+    SOFT-WRAPPED row count, so a long single line grows the box the same
+    way embedded newlines do) -- past the cap the box stops growing and
+    TextArea's own scrolling takes over, never displacing the block list
+    above it by more than the cap allows.
+
+    ``value``/``value=`` stay as a thin alias over ``.text`` -- every test
+    and script written against the old ``Input``-backed prompt keeps
+    working; :meth:`clear` is the new spelling of ``self.value = ""`` (it
+    also forgets pending paste placeholders, which a bare text reset should
+    not leave dangling).
+
+    ``ctrl+v`` is deliberately UNBOUND (mapped to a no-op): TextArea's own
+    binding pastes from Textual's OWN in-process clipboard variable --
+    whatever this app last copied -- not the live OS clipboard, which is
+    silently wrong on any terminal that hasn't echoed an OSC52 write back
+    in. The real paste path is bracketed paste (:meth:`_on_paste`): the
+    terminal delivers the actual, current clipboard content as one
+    ``events.Paste``, and a stray physical Ctrl+V that a terminal does NOT
+    special-case reaches us as an ordinary (now harmless) keystroke.
+
+    While a popup is open, up/down/tab/enter/escape belong to IT. With
+    both popups closed, bare Enter submits (see :class:`Submitted`) and
+    Shift+Enter/Alt+Enter insert a literal newline -- whichever a given
+    terminal actually distinguishes from bare Enter; item O's keyboard-
+    protocol detection is what will one day tell the operator which of the
+    two their terminal grants, but both are bound here regardless so
+    neither terminal family is left without a deliberate-newline key.
 
     The search popup is checked FIRST because it is the one that can be
     open while a command name is fully typed (``/search ...``); the two are
     mutually exclusive in practice, and this settles the order anyway."""
 
+    MIN_ROWS = 1
+    MAX_ROWS = 10
+
+    BINDINGS = [
+        Binding("ctrl+v", "noop", show=False),
+    ]
+
+    class Submitted(Message):
+        """Bare Enter, both popups closed: this pane's turn to run --
+        TextArea has no ``Input.Submitted`` equivalent, so the prompt
+        defines its own rather than repurposing a message class tied to a
+        different widget type."""
+
+        def __init__(self, prompt_input: "PromptInput", value: str) -> None:
+            self.prompt_input = prompt_input
+            self.value = value
+            super().__init__()
+
+        @property
+        def control(self) -> "PromptInput":
+            return self.prompt_input
+
+    class ClipboardImageNotice(Message):
+        """Posted when a paste event arrives with NO text and the system
+        clipboard turns out to be holding an image right then. A terminal
+        cannot forward binary clipboard content through bracketed paste --
+        there is no escape sequence for it -- so an empty paste is the only
+        signal DOXA ever gets that something was pasted at all. This is the
+        "stub, and report" half of item N.4: there is no image-attachment
+        plumbing in the engine to hand the bytes to yet, so the honest
+        thing is to say what was noticed, not to pretend to attach it."""
+
+        def __init__(self, mime: str) -> None:
+            self.mime = mime
+            super().__init__()
+
     def __init__(
         self, dropdown: SlashComplete, search: SessionSearch, **kwargs: Any
     ) -> None:
+        kwargs.setdefault("tab_behavior", "focus")
+        kwargs.setdefault("soft_wrap", True)
+        kwargs.setdefault("show_line_numbers", False)
+        kwargs.setdefault("highlight_cursor_line", False)
         super().__init__(**kwargs)
         self.dropdown = dropdown
         self.search = search
+        # (placeholder text, original text) for every paste collapsed in
+        # THIS message -- resolved back into the real content at submit
+        # time regardless of whether the operator ever expanded it to
+        # look. See doxa/paste.py for the collapse threshold and format.
+        self._pending_pastes: list[tuple[str, str]] = []
+        self.styles.height = self.MIN_ROWS + 2  # +2: the round border
+
+    def action_noop(self) -> None:
+        """Where ``ctrl+v`` lands now -- see the class docstring."""
+
+    @property
+    def value(self) -> str:
+        """Back-compat alias for the ``Input.value`` this widget
+        replaced."""
+        return self.text
+
+    @value.setter
+    def value(self, text: str) -> None:
+        self.text = text
+        self.move_cursor(self.document.end)
+
+    @property
+    def cursor_position(self) -> int:
+        """Back-compat alias for ``Input.cursor_position``: the cursor's
+        flat character offset into :attr:`text`, counting embedded
+        newlines as one character each -- unambiguous for the single-line
+        content every existing caller of this property still uses it on."""
+        return self.document.get_index_from_location(self.cursor_location)
+
+    def clear(self) -> None:
+        """Blank the prompt and forget its pending paste placeholders --
+        the pane calls this once it has taken the value, in place of the
+        old ``self.value = ""``."""
+        self.text = ""
+        self._pending_pastes = []
 
     def take_hit(self) -> bool:
         """Enter inside the search popup: the chosen session's reference
@@ -942,7 +1051,6 @@ class PromptInput(Input):
             return False
         self.search.dismiss_for_this_line()
         self.value = hit_reference(hit)
-        self.cursor_position = len(self.value)
         return True
 
     def complete(self) -> bool:
@@ -954,8 +1062,90 @@ class PromptInput(Input):
             return False
         self.dropdown.dismiss_for_this_line()
         self.value = command.name + (" " if command.usage else "")
-        self.cursor_position = len(self.value)
         return True
+
+    def _resolved_text(self) -> str:
+        """The text to actually send: every collapsed-paste placeholder
+        swapped back for what it stood for."""
+        text = self.text
+        for placeholder, original in self._pending_pastes:
+            text = text.replace(placeholder, original)
+        return text
+
+    def _submit(self) -> None:
+        self.post_message(self.Submitted(self, self._resolved_text()))
+
+    def _expand_pending_paste(self) -> bool:
+        """Ctrl+G: if the cursor sits on a line that is EXACTLY a collapsed
+        placeholder, swap it back for the text it stands for -- the
+        "expandable" half of "collapse to a placeholder, expandable" (item
+        N.3). Submitting without ever expanding still sends the real
+        content (:meth:`_resolved_text`); this is only for looking first."""
+        if not self._pending_pastes:
+            return False
+        row, _col = self.cursor_location
+        line = self.document.get_line(row)
+        for index, (placeholder, original) in enumerate(self._pending_pastes):
+            if line == placeholder:
+                start = (row, 0)
+                end = (row, len(line))
+                self.replace(original, start, end)
+                del self._pending_pastes[index]
+                return True
+        return False
+
+    def _resize_to_content(self) -> None:
+        """Grow the box to fit :attr:`MIN_ROWS`..:attr:`MAX_ROWS` content
+        rows -- past the cap TextArea's own vertical scrolling takes over
+        instead. Uses the WRAPPED row count (``wrapped_document.height``),
+        not the raw newline count, so a long single line (soft-wrapped)
+        grows the box the same way embedded newlines would."""
+        rows = max(self.MIN_ROWS, min(self.MAX_ROWS, self.wrapped_document.height))
+        self.styles.height = rows + 2  # +2: the round border, top and bottom
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        # Deliberately NOT stopped: SessionPane's own ``@on(TextArea.Changed,
+        # "#prompt-input")`` handler still needs this to drive the two
+        # popups -- this instance-level handler only owns the box's height.
+        self._resize_to_content()
+
+    async def _on_paste(self, event: events.Paste) -> None:
+        """Bracketed paste, handled explicitly rather than left to
+        TextArea's own ``_on_paste`` (which inserts the raw text verbatim,
+        no collapse) -- see doxa/paste.py. Always exactly ONE edit no
+        matter how many lines the clipboard held: nothing here can ever
+        submit a turn, spurious or otherwise -- only :meth:`_submit` posts
+        ``Submitted``, and paste handling never calls it.
+
+        ``prevent_default()`` (not just ``stop()``) is required here:
+        Textual calls EVERY class's own ``_on_paste`` up the MRO, most-
+        derived first, and only ``prevent_default()`` short-circuits that
+        walk before it reaches ``TextArea._on_paste`` -- without it the
+        paste would land TWICE, once collapsed here and once verbatim
+        from TextArea's own default handling."""
+        event.stop()
+        event.prevent_default()
+        if not event.text:
+            # No text at all: possibly a genuine no-op paste, possibly a
+            # clipboard holding something a terminal can't forward (an
+            # image). Worth a cheap, off-loop check -- never worth
+            # blocking the keystroke on.
+            self.run_worker(self._check_clipboard_image(), group="clipboard-probe")
+            return
+        text = paste_mod.normalize_newlines(event.text)
+        if paste_mod.should_collapse(text):
+            placeholder = paste_mod.placeholder_for(text)
+            self._pending_pastes.append((placeholder, text))
+            insert = placeholder
+        else:
+            insert = text
+        if result := self._replace_via_keyboard(insert, *self.selection):
+            self.move_cursor(result.end_location)
+
+    async def _check_clipboard_image(self) -> None:
+        mime = await asyncio.to_thread(paste_mod.detect_clipboard_image_mime)
+        if mime:
+            self.post_message(self.ClipboardImageNotice(mime))
 
     def on_key(self, event: events.Key) -> None:
         if self.search.is_open:
@@ -970,34 +1160,51 @@ class PromptInput(Input):
                 self.search.move(-1)
             elif event.key == "enter":
                 if not self.take_hit():
-                    return  # no hits: Enter submits, and /search answers
+                    self._submit()  # no hits: Enter submits, /search answers
             else:
                 return
             event.stop()
             event.prevent_default()
             return
-        if not self.dropdown.is_open:
-            return
-        if event.key == "escape":
-            self.dropdown.dismiss_for_this_line()
-        elif event.key == "down":
-            self.dropdown.move(1)
-        elif event.key == "up":
-            self.dropdown.move(-1)
-        elif event.key in ("tab", "enter"):
-            command = self.dropdown.chosen()
-            if event.key == "enter" and command is not None and self.value == command.name:
-                # Already typed in full: there is nothing to complete, so
-                # Enter means SEND. (Otherwise typing a whole command would
-                # cost two Enters -- one to "complete" it into itself.)
+        if self.dropdown.is_open:
+            if event.key == "escape":
                 self.dropdown.dismiss_for_this_line()
-                return  # not consumed: Input's own submit binding runs
-            if not self.complete():
+            elif event.key == "down":
+                self.dropdown.move(1)
+            elif event.key == "up":
+                self.dropdown.move(-1)
+            elif event.key in ("tab", "enter"):
+                command = self.dropdown.chosen()
+                if event.key == "enter" and command is not None and self.text == command.name:
+                    # Already typed in full: there is nothing to complete,
+                    # so Enter means SEND. (Otherwise typing a whole
+                    # command would cost two Enters -- one to "complete"
+                    # it into itself.)
+                    self.dropdown.dismiss_for_this_line()
+                    self._submit()
+                else:
+                    if not self.complete():
+                        return
+            else:
                 return
-        else:
+            event.stop()
+            event.prevent_default()
             return
-        event.stop()
-        event.prevent_default()
+        # Neither popup open: this widget's own submit/newline protocol.
+        if event.key == "enter":
+            event.stop()
+            event.prevent_default()
+            self._submit()
+            return
+        if event.key in ("shift+enter", "alt+enter"):
+            event.stop()
+            event.prevent_default()
+            self._replace_via_keyboard("\n", *self.selection)
+            return
+        if event.key == "ctrl+g":
+            if self._expand_pending_paste():
+                event.stop()
+                event.prevent_default()
 
 
 class CloseWithTurnRunning(ModalScreen[str]):
@@ -1157,13 +1364,13 @@ class SessionPane(TabPane):
         yield search
         dropdown = SlashComplete()
         yield dropdown
-        yield PromptInput(
-            dropdown, search, placeholder="Ask DOXA…", id="prompt-input"
-        )
+        # No ``placeholder=`` -- TextArea has no built-in placeholder text
+        # (Input did); a deliberate drop, not an oversight, see item N.
+        yield PromptInput(dropdown, search, id="prompt-input")
 
     async def on_mount(self) -> None:
         self.engine = self._engine_factory()
-        self.query_one("#prompt-input", Input).focus()
+        self.query_one("#prompt-input", PromptInput).focus()
         self.run_worker(self._boot(), exclusive=True, group="engine")
         self.run_worker(self._peer_pump(), exclusive=True, group="peers")
 
@@ -1509,16 +1716,19 @@ class SessionPane(TabPane):
         bar = self.query_one("#status-bar", Static)
         bar.update("  ·  ".join(parts))
 
-    @on(Input.Changed, "#prompt-input")
-    def _on_prompt_changed(self, event: Input.Changed) -> None:
+    @on(TextArea.Changed, "#prompt-input")
+    def _on_prompt_changed(self, event: TextArea.Changed) -> None:
         """The two popups' only trigger: what the prompt currently says.
         Cheap by construction -- a registry scan of a handful of rows for
         the dropdown, and for the search popup a debounce timer rather than
         a query (this app does not poll, and it does not hit SQLite on a
-        keystroke either)."""
+        keystroke either). PromptInput's OWN ``on_text_area_changed``
+        (box-height resize) has already run by the time this bubbles here
+        -- it deliberately does not stop the event."""
         event.stop()
-        self.query_one("#slash-complete", SlashComplete).sync(event.value)
-        self.query_one("#session-search", SessionSearch).sync(event.value)
+        text = event.text_area.text
+        self.query_one("#slash-complete", SlashComplete).sync(text)
+        self.query_one("#session-search", SessionSearch).sync(text)
 
     @on(OptionList.OptionSelected, "#slash-complete")
     def _on_slash_selected(self, event: OptionList.OptionSelected) -> None:
@@ -1538,16 +1748,15 @@ class SessionPane(TabPane):
         prompt.take_hit()
         prompt.focus()
 
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id != "prompt-input":
-            return  # a modal overlay's input is never a prompt
+    @on(PromptInput.Submitted)
+    def on_prompt_submitted(self, event: "PromptInput.Submitted") -> None:
         event.stop()  # this pane's prompt is nobody else's business
         self.query_one("#slash-complete", SlashComplete).close()
         self.query_one("#session-search", SessionSearch).close()
         prompt = event.value.strip()
         if not prompt:
             return
-        event.input.value = ""
+        event.control.clear()
         # Only rows of the slash registry (doxa/commands.py) are
         # intercepted, and passthrough rows deliberately are not: the
         # literal "/compact" convention has to REACH the CLI to do anything.
@@ -1556,6 +1765,18 @@ class SessionPane(TabPane):
             self.run_worker(self._run_command(prompt), group="command")
             return
         self.run_worker(self._run_turn(prompt), exclusive=True, group="turn")
+
+    @on(PromptInput.ClipboardImageNotice)
+    async def on_clipboard_image_notice(
+        self, event: "PromptInput.ClipboardImageNotice"
+    ) -> None:
+        event.stop()
+        await self._system(
+            f"clipboard holds an image ({event.mime}) — image attachments "
+            "aren't wired into turns yet; save it to a file and use "
+            "/img <path>, or paste it somewhere that turns it into a "
+            "file DOXA can point at"
+        )
 
     # -- slash commands ----------------------------------------------
 
@@ -2269,7 +2490,7 @@ class DoxaApp(App):
         pane = self.active_pane
         if pane is not None:
             with contextlib.suppress(Exception):
-                pane.query_one("#prompt-input", Input).focus()
+                pane.query_one("#prompt-input", PromptInput).focus()
 
     # -- renaming a tab in place -------------------------------------
 
@@ -2342,7 +2563,7 @@ class DoxaApp(App):
         pane = next((p for p in self.panes() if p.id == pane_id), None)
         if pane is not None:
             with contextlib.suppress(Exception):
-                pane.query_one("#prompt-input", Input).focus()
+                pane.query_one("#prompt-input", PromptInput).focus()
 
     def _jump_tab_marker(self) -> None:
         """Put the active-tab underline at its destination on THIS frame.
@@ -2644,9 +2865,8 @@ class DoxaApp(App):
         pane = self.active_pane
         if pane is None:
             return
-        prompt = pane.query_one("#prompt-input", Input)
-        prompt.value = text
-        prompt.cursor_position = len(prompt.value)
+        prompt = pane.query_one("#prompt-input", PromptInput)
+        prompt.value = text  # the setter also moves the cursor to the end
         prompt.focus()
 
     def action_history_search(self) -> None:

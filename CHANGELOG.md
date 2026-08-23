@@ -1,8 +1,53 @@
 # Changelog
 
 Newest first. Versions are annotated git tags on the commit that shipped
-them (`v0.1.0` … `v0.8.0`); the ranges below are derived from that history,
+them (`v0.1.0` … `v0.9.0`); the ranges below are derived from that history,
 not written from memory.
+
+## 0.9.0 — 2026-08-24
+
+- **Multi-line prompt and clipboard paste** (item N) — the prompt is now a
+  `TextArea` (`doxa.app.PromptInput`), not the single-line `Input` it was
+  through 0.8.0. The forcing bug: `Input._on_paste` keeps only
+  `event.text.splitlines()[0]` on a bracketed paste — every line after the
+  first was silently dropped, no error, nothing. New behavior:
+  - Grows 1..10 content rows from the wrapped (soft-wrap-aware) line
+    count, then scrolls internally rather than displacing the block list.
+  - Enter submits; Shift+Enter and Alt+Enter both insert a literal
+    newline (whichever a given terminal actually distinguishes from bare
+    Enter — item O's keyboard-protocol detection is what will one day
+    tell the operator which; both are bound regardless so neither
+    terminal family goes without a deliberate-newline key).
+  - A bracketed paste is always exactly ONE document edit, however many
+    embedded newlines it carries — nothing in the paste path can trigger
+    a submit, so a multi-line paste can never be mistaken for N presses
+    of Enter (each of which is a billed message). CRLF and lone CR both
+    normalize to LF.
+  - A paste over 4 lines or 4 KB collapses to `⧉ pasted N lines (X KB)`
+    (`doxa/paste.py`, shared with item J's excerpt-insertion clipboard
+    helper); Ctrl+G expands the placeholder under the cursor back to the
+    real text to look at it, and the full text is what actually goes out
+    on submit whether or not it was ever expanded.
+  - `ctrl+v` is deliberately unbound (mapped to a no-op): `TextArea`'s own
+    binding pastes from Textual's in-process `App.clipboard` variable —
+    whatever this app last copied — not the live OS clipboard, which is
+    silently wrong on a terminal that hasn't echoed an OSC52 write back
+    in. The terminal's own paste (bracketed paste) is the real path and
+    is unaffected.
+  - Image clipboard: a terminal cannot forward binary clipboard content
+    through bracketed paste at all (no escape sequence carries it) — an
+    empty paste is the only signal available. DOXA checks `wl-paste`/
+    `xclip` off the event loop and reports what it found (`image/png`,
+    say) as a `SystemBlock`, rather than pretending to attach it — there
+    is no image-attachment path into a turn yet to hand the bytes to.
+  - Deferred, deliberately: the old `Input` placeholder text
+    ("Ask DOXA…") has no `TextArea` equivalent and was dropped rather
+    than reimplemented behind an overlay widget; interactive verification
+    in a real terminal (bracketed-paste baseline, Shift-drag copy-out)
+    was not re-done here and should be spot-checked in one before relying
+    on it blind.
+  - Every `Input`-era test/script call site (`.value`, `.cursor_position`)
+    keeps working through compatibility properties on `PromptInput`.
 
 ## 0.8.0 — 2026-08-24
 

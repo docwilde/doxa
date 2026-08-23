@@ -114,6 +114,10 @@ class FakeEngine:
         self.lore_root: "str | None" = None
         self.model_switches: list = []
         self.num_turns = 0
+        # Every prompt string actually handed to send() -- what item N's
+        # tests check to prove a submitted turn carried the FULL resolved
+        # text (pending pastes expanded), not a collapsed placeholder.
+        self.received_prompts: list[str] = []
 
     def disabled_tools(self) -> list[str]:
         return list(self.disabled)
@@ -141,6 +145,7 @@ class FakeEngine:
         return EngineEvent("session_started", {"session_id": "fake", "model": self.model})
 
     async def send(self, prompt: str) -> AsyncIterator[EngineEvent]:
+        self.received_prompts.append(prompt)
         for ev in self._script:
             if ev.type == "turn_done":
                 self.total_cost_usd += ev.data.get("cost_usd") or 0.0
