@@ -488,6 +488,18 @@ class SessionPane(TabPane):
                     f" — {ev.data.get('reason')}"
                 ))
                 block_list.scroll_end(animate=False)
+            elif ev.type == "derive_done":
+                # Streaming deriver (engine-side, DOXA_DERIVE_SECS): newly
+                # staged proposals await the SAME human review gate as ever
+                # -- this is a notification, never an auto-apply.
+                staged = int(ev.data.get("staged") or 0)
+                if staged > 0:
+                    block_list = self.query_one("#block-list", VerticalScroll)
+                    noun = "proposal" if staged == 1 else "proposals"
+                    await block_list.mount(SystemBlock(
+                        f"{staged} {noun} staged — /lore:pending"
+                    ))
+                    block_list.scroll_end(animate=False)
             elif ev.type == "turn_started":
                 block_list = self.query_one("#block-list", VerticalScroll)
                 self._oob_turn = TurnBlock(str(ev.data.get("prompt") or ""))

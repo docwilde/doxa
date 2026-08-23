@@ -92,6 +92,22 @@ from lore_core.scrub import scrub_secrets
 DEFAULT_MODEL: str | None = None  # None = whatever the CLI/session default is
 
 
+def derive_interval() -> float | None:
+    """The streaming-deriver debounce interval from ``DOXA_DERIVE_SECS``
+    (LORE_REVIEW_SECS-style: seconds, positive number). Default OFF -- the
+    mid-session deriver is opt-in; unset/empty/zero/garbage all mean None.
+    Read per call, like lore_core's own env-driven knobs, so a toggle
+    doesn't need a new engine."""
+    raw = os.environ.get("DOXA_DERIVE_SECS", "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
 @dataclass
 class EngineEvent:
     """One typed event out of :meth:`SessionEngine.send` /
@@ -251,6 +267,18 @@ class SessionEngine:
             on_disable=self._on_tool_disabled,
         )
 
+        # Streaming deriver (opt-in via DOXA_DERIVE_SECS): a debounced
+        # background review of the transcript-so-far, reusing the exact
+        # deriver machinery finalize/PreCompact already run. Guards:
+        # _review_lock serializes every review runner (derive can NEVER
+        # overlap finalize), _derive_task caps it at one in flight, and
+        # _last_derive debounces LORE_REVIEW_SECS-style -- armed at
+        # construction, so the first derive fires only after a full
+        # interval of session, same throttle shape as _last_refresh.
+        self._review_lock = asyncio.Lock()
+        self._derive_task: "asyncio.Task | None" = None
+        self._last_derive = time.monotonic()
+
         transcript_dir = PROJECTS_DIR / self.slug
         transcript_dir.mkdir(parents=True, exist_ok=True)
         self.transcript_path = transcript_dir / f"{self.session_id}.jsonl"
@@ -374,6 +402,57 @@ class SessionEngine:
             # A review failure must never take the session down with it --
             # same posture as cmd_review's hook path ("never block session
             # end"/"never block the prompt loop").
+            pass
+
+    # -- streaming deriver -------------------------------------------
+
+    def _pending_count(self) -> int:
+        """Staged proposals visible to this project's reviews -- the number
+        behind the 'N proposals staged' notification. lore_core's own
+        pending list, scoped the way build_review_job scopes it."""
+        try:
+            return len(lore_deriver.pending_texts(self.slug))
+        except Exception:
+            return 0
+
+    def _maybe_schedule_derive(self) -> None:
+        """Turn-done hook for the streaming deriver: schedule ONE background
+        incremental review if the feature is on, the debounce interval has
+        passed, nothing is already in flight, and the session isn't
+        finalizing. Never blocks the turn path."""
+        interval = derive_interval()
+        if interval is None or self._finalized:
+            return
+        if self._derive_task is not None and not self._derive_task.done():
+            return  # never more than one in flight
+        now = time.monotonic()
+        if now - self._last_derive < interval:
+            return  # debounced: at most every DOXA_DERIVE_SECS
+        self._last_derive = now
+        self._derive_task = asyncio.create_task(self._derive_once())
+
+    async def _derive_once(self) -> None:
+        """One incremental review of the transcript-so-far, via the SAME
+        _run_review_sync path finalize and PreCompact use (build_review_job
+        + worker_run -- nothing reimplemented; the deriver prompt's own
+        pending-list dedupe keeps repeat runs idempotent). Serialized with
+        finalize through _review_lock; newly staged proposals surface as an
+        out-of-band derive_done event the TUI renders as a notification."""
+        try:
+            async with self._review_lock:
+                if self._finalized:
+                    return  # finalize won the race: it runs the last review
+                before = self._pending_count()
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self._run_review_sync, False)
+                staged = self._pending_count() - before
+            if staged > 0:
+                self._peer_queue.put_nowait(
+                    EngineEvent("derive_done", {"staged": staged})
+                )
+        except Exception:
+            # Same posture as _run_review_sync: a review failure must never
+            # take the session down with it.
             pass
 
     # -- lifecycle ---------------------------------------------------
@@ -631,6 +710,9 @@ class SessionEngine:
                     "is_error": message.is_error,
                     "ctx_percentage": ctx_percentage,
                 })
+                # The transcript just grew: the streaming deriver's one
+                # trigger site (debounced + single-flight inside).
+                self._maybe_schedule_derive()
 
     async def _safe_ctx_percentage(self) -> float | None:
         get_usage = getattr(self._client, "get_context_usage", None)
@@ -667,6 +749,17 @@ class SessionEngine:
             return EngineEvent("session_done", {"already_finalized": True})
         self._finalized = True
 
+        # Streaming-deriver guard, finalize side: an in-flight derive holds
+        # _review_lock; wait it out (its executor job cannot be cancelled
+        # mid-run anyway), then run the final review under the same lock --
+        # derive and finalize reviews are serialized by construction, and a
+        # derive that was still QUEUED sees _finalized and bails.
+        if self._derive_task is not None and not self._derive_task.done():
+            try:
+                await self._derive_task
+            except Exception:
+                pass
+
         if self.peer_host is not None:
             try:
                 await self.peer_host.stop()  # presence file + socket removed
@@ -683,7 +776,8 @@ class SessionEngine:
             pass
 
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._run_review_sync, False)
+        async with self._review_lock:
+            await loop.run_in_executor(None, self._run_review_sync, False)
 
         if self._client is not None and self._connected:
             try:

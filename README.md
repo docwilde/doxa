@@ -75,7 +75,12 @@ payloads withheld.
 (debounced, capped per session, cheap-model only) instead of only at session
 end — generalizing LORE's live-index watermark pattern. A belief minted
 30 seconds ago obeys the same read-time gate as one minted last month: the
-calibration gate is cadence-agnostic by construction.
+calibration gate is cadence-agnostic by construction. Landed shape: opt-in
+via `DOXA_DERIVE_SECS=<secs>` (default off) — the engine runs lore_core's
+incremental review against the session transcript at most once per
+interval, never overlapping finalize, never more than one in flight; newly
+staged proposals surface as a "N proposals staged — /lore:pending" block
+and wait at the same human review gate as everything else.
 
 **Multi-agent, isolated by default.** Parallel subagents each run in their
 own git worktree with a single-consumer merge queue (agents race to finish;
@@ -123,7 +128,7 @@ Verdict: GO with four small redesigns, all itemized.
 | 0 | SDK lifecycle validation, Textual coexistence, auth | **done** |
 | 1 | `lore_core` extraction; single-pane shell; block rendering; session-end review; ask | **done** |
 | 2 | Daemon split + detach/reattach, Ctrl+P palette, Ctrl+R FTS history search, theme | **done** |
-| 3 | Warp-style tabs (sketch below), split panes + review pane, streaming deriver, multi-agent panes + merge queue, act-time consult, trace tree | **in progress** — landed: terminal images (KGP → sixel → half-block → text ladder; tool results + `/img`); tabs (`SessionPane` under `TabbedContent`, one client per tab, Ctrl+T/Ctrl+W + palette picker) |
+| 3 | Warp-style tabs (sketch below), split panes + review pane, streaming deriver, multi-agent panes + merge queue, act-time consult, trace tree | **in progress** — landed: terminal images (KGP → sixel → half-block → text ladder; tool results + `/img`); tabs (`SessionPane` under `TabbedContent`, one client per tab, Ctrl+T/Ctrl+W + palette picker); trace tree (subagent calls nest foldably under their Task chip via the SDK's `parent_tool_use_id`, scrubbed); streaming deriver (`DOXA_DERIVE_SECS`, debounced, never concurrent with finalize) |
 | 4 | Container isolation tier, calibration dashboard, plugin-compat hardening | planned |
 
 **Tab system (Phase 3 — landed as sketched, with one documented
