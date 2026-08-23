@@ -182,7 +182,7 @@ async def test_no_armed_timers_while_a_turn_is_in_flight(monkeypatch, tmp_path):
     class SlowEngine(FakeEngine):
         async def send(self, prompt):
             yield EngineEvent("turn_started", {})
-            await asyncio.sleep(0.25)  # a turn genuinely in flight
+            await asyncio.sleep(0.6)  # a turn genuinely in flight
             yield EngineEvent("turn_done", {"cost_usd": 0.0})
 
     monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: SlowEngine([]))
@@ -191,18 +191,21 @@ async def test_no_armed_timers_while_a_turn_is_in_flight(monkeypatch, tmp_path):
         await pilot.pause()
         app.query_one("#prompt-input").value = "go"
         await pilot.press("enter")
-        for _ in range(100):
-            if list(app.query(TurnBlock)):
-                break
-            await pilot.pause(0.02)
-        block = list(app.query(TurnBlock))[0]
-        assert block.thinking.display is True  # the marker IS showing
-        assert _armed(app) == []               # ...and costs nothing
 
-        for _ in range(200):
-            if block.thinking.display is False:
-                break
+        # Sampled across the whole turn rather than at one instant: under
+        # load the turn can finish between two pauses, and a timing race
+        # is not what this test is about.
+        saw_in_flight = False
+        for _ in range(400):
+            blocks = list(app.query(TurnBlock))
+            if blocks:
+                assert _armed(app) == []
+                if blocks[0].thinking.display:
+                    saw_in_flight = True
+                elif saw_in_flight:
+                    break
             await pilot.pause(0.02)
+        assert saw_in_flight, "the marker never showed -- nothing was sampled"
         assert _armed(app) == []
 
 
