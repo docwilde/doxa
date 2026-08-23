@@ -1,370 +1,238 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 **DOXA** is a terminal for working with a Claude agent whose memory you can
-audit — the native home for [LORE](https://github.com/docwilde/LORE)'s memory model,
-built on the Claude Agent SDK (engine) and Textual (TUI), billed through your
-Claude subscription, not API keys.
+audit — the native TUI home for [LORE](https://github.com/docwilde/LORE)'s
+memory model, built on the Claude Agent SDK and Textual, billed through your
+Claude subscription rather than an API key.
 
 δόξα (*dóxa*): belief, opinion — as distinct from ἐπιστήμη (*epistēmē*),
-justified knowledge. Greek epistemology drew the line; DOXA implements it.
-Everything the agent derives starts as doxa: visible, queryable, cite-only.
-Only what survives the dialectic — human approval, or a calibrated record of
-being right — ascends to steer. LORE holds the engrams; DOXA is where they
-are examined.
+justified knowledge. Everything the agent derives starts as belief:
+visible, queryable, cite-only. Only what a human approves, or what earns a
+track record, steers the next answer. LORE holds the beliefs; DOXA is where
+you watch them form.
 
-<p align="center"><img src="assets/screenshot.png" width="760" alt="DOXA shell: a turn block with prompt metadata chips (duration, cost), streamed answer, a foldable tool-call chip, and the status bar (model, session cost, context %, belief count)"></p>
+<p align="center"><img src="assets/shots/hero.png" width="780" alt="DOXA shell: three tabs (Opus, Sonnet, Haiku, all on doxa:main), a turn asking what the repo believes about deploys, a lore_belief_search tool chip, and a status bar showing the git sha, subscription headroom, context percentage, belief count, session handle and peer count"></p>
 
-*The shell, headless-rendered from the real Textual app (scripted engine, no spend): turn blocks with cost/duration chips, foldable tool calls, the belief-count status bar. The session behind it is a detachable daemon -- close the terminal, `doxa attach` later, replay from your cursor.*
+*Headless-rendered from the real Textual app (a scripted session, no
+spend, fake account numbers). A session is a detachable daemon: close the
+terminal, `doxa attach` later, and the transcript resumes where it left
+off. Every screenshot below is generated the same way by
+[`scripts/screenshot.py`](scripts/screenshot.py).*
 
-## The one property everything serves
-
-**Nothing steers the agent that isn't human-approved or outcome-calibrated.**
-Curated memory writes pass a review gate. Skills pass the same gate and carry
-usage track records. Derived beliefs never enter context uninvited; at
-decision time they split STEER (calibrated, may shape the call) from
-CITE-ONLY (mention, never follow). Every new ingestion path routes through
-one secret-scrubbing choke point. A terminal that owns the whole loop can
-enforce this at every tool-call boundary — a plugin can only enforce it where
-the host offers hooks.
-
-## What DOXA is (functionality by subsystem)
-
-**Engine — Claude Agent SDK daemon.** One daemon per session runs the agentic
-loop: streaming completions, tool execution, subagents. Authenticates through
-the local Claude Code OAuth session (subscription-billed — verified in the
-Phase 0 spike, no `ANTHROPIC_API_KEY` involved). The TUI is a thin client
-over a Unix socket, so sessions detach and reattach without tmux.
-
-**LORE, in-process.** The memory system is imported as `lore_core`, not
-shelled out to: hard-capped curated memory (user + project), the uncapped
-belief store with its FTS index and evidence trails, the deriver / dreamer /
-dialectic split, the calibration outcomes ledger, the pending-proposal review
-gate, per-stage toggles. Same files, same SQLite database, byte-compatible
-with the LORE Claude Code plugin — one codebase, two carriers.
-
-**Native tools (registry discipline).** The LORE surface the agent calls —
-belief search and inspection, curated-memory listing, session FTS — is an
-explicit registry of frozen operator definitions (hand-written schemas, cost
-tiers, a declared read/write posture), projected onto an in-process SDK MCP
-server. Adding a tool is a reviewed act, never an import side effect; the
-registry's closure is a test. Exactly one operator can write, and it doesn't:
-`lore_remember` stages a pending proposal for the same human review gate
-everything else passes — the model proposes, the user approves. Every call
-routes through a containment gate at the PreToolUse choke point: calls
-outside the offered set are gracefully denied, every operator failure comes
-back as an ordinary error result the model can recover from, and a tool that
-hard-fails twice is removed from the session's surface (`⊘` in the status
-bar) instead of burning the step budget on retries.
-
-**Blocks, panes, palette (Warp/tmux ergonomics).** Each turn is a foldable
-block with metadata chips: model, duration, cost, exit code. Split panes —
-agent | logs | belief-inspector — plus a read-only Profile pane showing the
-derived interaction model live (transparency as the safeguard). Ctrl+P
-command palette; Ctrl+R history search backed by LORE's own FTS index, so
-search is instant BM25 over every session ever, not a scrollback scan.
-Typing `/` at the start of the prompt opens a suggestion dropdown above the
-input — the same command registry the palette reads, scored by the same
-fuzzy matcher (one registry, several surfaces): arrows move, Tab/Enter
-complete, Esc dismisses, deleting the `/` puts it away. Ordering is a
-property of the *registry*, not of any surface: each command declares its
-functional group (Session · Memory · Panes & tabs · Tools & config ·
-Maintenance) and the dropdown, the palette and generated `/help` all
-iterate that one sequence — group order, alphabetical inside a group.
-Browsing shows dim, unselectable group headers; the moment you start
-filtering they collapse and rows rank by match quality, then
-alphabetically.
-
-**Trace transparency (DeepSeek-harness grade, redaction kept).** Every tool
-call is inspectable: exact arguments, full results, timing; subagent calls
-nest as an indented, foldable tree under their parent. Traces persist and
-are searchable. One deliberate divergence from the unredacted-by-design
-reference: trace bodies pass the same scrubber as everything else —
-`[REDACTED:kind]` markers inline, the call's shape fully visible, credential
-payloads withheld.
-
-**Streaming deriver.** Beliefs derive incrementally as the session runs
-(debounced, capped per session, cheap-model only) instead of only at session
-end — generalizing LORE's live-index watermark pattern. A belief minted
-30 seconds ago obeys the same read-time gate as one minted last month: the
-calibration gate is cadence-agnostic by construction. Landed shape: opt-in
-via `DOXA_DERIVE_SECS=<secs>` (default off) — the engine runs lore_core's
-incremental review against the session transcript at most once per
-interval, never overlapping finalize, never more than one in flight; newly
-staged proposals surface as a "N proposals staged — /lore:pending" block
-and wait at the same human review gate as everything else.
-
-**Multi-agent, isolated by default.** Parallel subagents each run in their
-own git worktree with a single-consumer merge queue (agents race to finish;
-merges land one at a time — conflict flags the pane, never clobbers the
-checkout). An opt-in container tier (rootless Podman) sandboxes risk-classed
-tasks: only the task's worktree mounted, no credentials inside the container
-at all — the SDK loop and its OAuth stay on the host.
-
-**Peer sessions.** Independently launched DOXA sessions discover each other
-when they work on the same repo: every live session registers in a
-same-user runtime registry (0700; dead entries reaped on sight, never
-trusted), the status bar counts your same-repo peers, and messaging is
-explicit — `/peers` lists them, `/msg <session> <text>` sends one frame
-over the target's own Unix socket. Received text is treated as what it is:
-another agent talking. It passes the same `[REDACTED:kind]` scrubber as
-everything else, renders in its own dimmed block, waits for your next turn
-(a peer can never start or interrupt one), and reaches the model only
-behind an explicit untrusted-peer preamble — peer data to weigh, never an
-instruction to follow. The registry entry points at whoever hosts the
-engine, so the layer survives the Phase 2 daemon split unchanged.
-
-**Identity you can trust, auth DOXA never touches.** The session-start
-identity block and the status line report the plan you actually have. The
-SDK's connect-time account block gives `subscriptionType` — a coarse
-display string that cannot tell a Max 5x from a Max 20x — so DOXA prefers
-the precise field the Claude Code CLI already keeps locally
-(`organizationRateLimitTier` = `default_claude_max_20x` → `max 20x`),
-falls back to the SDK string, and shows nothing at all when neither exists.
-Plan and organization are separate lines, always: an org name is
-informative and is never rendered as the plan. `/login [provider]` and
-`/logout [provider]` suspend the TUI and exec the provider's *own*
-interactive auth CLI (`claude auth login`, `codex login` — probed, not
-assumed), then resume and re-read identity. No credential is ever handled,
-stored, or written by DOXA; the provider table is data, so another agent
-CLI is a row, not a code path.
-
-**Claude Code plugin compatibility.** DOXA loads existing Claude Code
-plugins: hooks (all observed events, both manifest conventions) and slash
-commands first; skills and tool-scoped custom agents next. Verified against
-a real plugin set, not a spec — because there is no public spec, and the
-compat layer ships with regression fixtures for exactly that reason.
-
-**Crush-grade look, Claude-orange.** Rounded borders, OKLab gradient
-accents, pill chips, dimmed modal overlays, native Markdown rendering — a
-dark theme built on `#D97757`. Calibration is encoded visually: `▲ STEER`
-is a filled orange pill; `○ CITE` is outline-only — a belief that hasn't
-earned color. The context-usage chip turns amber, then red, as a containment
-signal, not decoration.
-
-## Status
-
-Phase 0 (validation spike) is complete — see `PHASE0_FINDINGS.md`:
-subscription auth confirmed, PreCompact and UserPromptSubmit hooks fire,
-SessionStart fires (despite missing type hints), SessionEnd is absent (the
-daemon finalizes sessions itself — deterministic beats hoping a hook fires).
-Verdict: GO with four small redesigns, all itemized.
-
-| Phase | Scope | State |
-|---|---|---|
-| 0 | SDK lifecycle validation, Textual coexistence, auth | **done** |
-| 1 | `lore_core` extraction; single-pane shell; block rendering; session-end review; ask | **done** |
-| 2 | Daemon split + detach/reattach, Ctrl+P palette, Ctrl+R FTS history search, theme | **done** |
-| 3 | Warp-style tabs (sketch below), split panes + review pane, streaming deriver, multi-agent panes + merge queue, act-time consult, trace tree | **in progress** — landed: terminal images (KGP → sixel → half-block → text ladder; tool results + `/img`); tabs (`SessionPane` under `TabbedContent`, one client per tab, Ctrl+T/Ctrl+W + palette picker); trace tree (subagent calls nest foldably under their Task chip via the SDK's `parent_tool_use_id`, scrubbed); streaming deriver (`DOXA_DERIVE_SECS`, debounced, never concurrent with finalize); act-time consult (cheap FTS belief note on the prompt, cite-only, `DOXA_CONSULT_FLOOR`). Remaining: split panes + review pane, multi-agent panes + merge queue |
-| 4 | Container isolation tier, calibration dashboard, plugin-compat hardening | planned |
-
-**Tab system (Phase 3 — landed as sketched, with one documented
-divergence).** The sketch below is what shipped: `SessionPane` extraction
-first (pure refactor), then N panes under a `TabbedContent`, one
-`EngineClient`/engine handle each, worker groups scoped per pane node.
-`Ctrl+T` opens a fresh same-repo session in a new tab; `Ctrl+W`
-close-detaches just that tab (its daemon keeps running; the last tab closes
-the app); the palette gained "New tab", "Close tab" and a tab picker, and
-its "Quit: stop session" became tab-scoped. The divergence: `Ctrl+C` stays
-**app-level** — one press detaches ALL tabs, a double press stops ALL
-sessions — because a reflex keystroke should always get the
-cheapest-to-recover outcome; deliberate per-tab stopping lives in the
-palette and `Ctrl+W`, where you are looking at the tab you mean.
-
-**Original sketch (kept for the record).** The
-daemon split already did the hard part: a session is a process, the TUI is a
-thin `EngineClient`, and `_switch_engine` proves the shell can swap live
-handles. Tabs are therefore N clients in one TUI, not N engines: a
-`TabbedContent` (or a custom one-line tab bar) across the top, where each
-tab owns exactly the per-session widget subtree the single pane owns today —
-block list, status bar, prompt input — plus its own `EngineClient`, git
-chip, and boot/pump workers (worker groups keyed by tab id, so an exclusive
-pump dies with its tab, not with its neighbor). `Ctrl+T` and a palette "New
-tab" spawn a fresh daemon **in the same repo scope** (exactly
-`new_session_factory`) and attach it in a new tab; the attach picker gains
-"open in new tab" so a foreign session reattaches without evicting the
-current one. Closing a tab is quit-detach for that client only; quit-stop
-stays per-tab; Ctrl+C keeps its double-press semantics but scoped to the
-active tab, and closing the LAST tab closes the app. The peer layer needs
-zero changes — each daemon already registers its own presence, so two tabs
-of the same repo see each other as peers, which is correct and useful.
-Migration path: extract today's single-pane subtree into a `SessionPane`
-widget first (pure refactor, tests unchanged), then mount N of them under
-`TabbedContent`. 
-
-## Detach/reattach
-
-Since Phase 2 a DOXA session is a process of its own: `uv run doxa` spawns a
-session daemon (`doxa/daemon.py`) that hosts the engine — the SDK client,
-the LORE hooks, the transcript, the peer presence entry — and attaches the
-TUI to it as a thin client over a 0600 Unix socket (line-JSON frames, the
-same idioms as the peer layer; the hello frame is version-stamped so a
-mismatched client backs off instead of misparsing). Closing the TUI
-(`ctrl+q`, or the palette's "Quit: detach") leaves the session running; no
-tmux involved. `doxa attach [prefix]` reattaches from anywhere: the daemon
-replays its bounded, seq-numbered ring of recent events from your cursor,
-then the live tail follows on the same stream. Running `doxa` again in the
-same repo reattaches to that repo's most recent live session; `doxa new`
-forces a fresh one. The daemon finalizes the session — the LORE review +
-index that used to run on TUI quit — once the **last** client has been
-detached for `--linger` seconds, or immediately on `doxa stop` (or the
-palette's "Quit: stop session"). Discovery reuses the peer registry: a
-daemon-hosted session's entry carries a `daemon_socket` marker — one
-surface for peers and attach alike, and the peer layer itself survived the
-split unchanged, exactly as its docstring promised. `doxa --in-process`
-keeps the Phase 1 shape (engine inside the TUI, quit finalizes at once).
-
-## Run it
-
-Phase 2 status, honestly: single pane still (split panes and the review
-pane moved to Phase 3), but the session is now a detachable daemon, `ctrl+p`
-opens the command palette (new session, attach picker over live sessions,
-peers, belief-inspector stub, quit-detach vs quit-stop), and `ctrl+r` opens
-history search — instant BM25 over LORE's index of every past session, a
-chosen hit inserting its session reference into the prompt. One prompt
-input at the bottom, a scrolling list of foldable turn blocks above it, a
-status bar, in this order: **model · repo `⎇` branch `@<sha>` ·
-`sub:<tier>` (or the `$` estimate on API-key auth) · `s:9% w:48%` headroom ·
-context · belief count · `⌁ session <id>` reattach handle**. The short sha
-sits immediately right of the branch it qualifies, prefixed `@` to mark it
-as a commit; the session handle is labelled and dimmed for the same
-reason — the bar carries two short hex-ish ids, and unlabelled they read
-as one commit id printed twice. The context chip escalates
-**normal → amber (≥70%) → red (≥90%)** and keeps its percentage in every
-tier — a containment signal, not decoration; a color that replaced the
-number would be the latter. The headroom chip is real and local: the
-`claude` CLI fetches its own subscription utilization and caches the answer
-in its config, so DOXA reads a file rather than calling an endpoint — no
-new credential handling, nothing to rate-limit. It is recomputed at most
-once per turn-done and never on a timer, a stale cache is marked `~`, and
-with nothing cached (API-key auth) the chip is simply absent rather than a
-fabricated zero. Every git read is event-driven the same way: a `stat` of
-`.git/HEAD` for the branch and of the branch's ref for the sha (a commit
-moves the ref, not HEAD) — never a poll. Session start renders an identity block — account,
-plan, model, cwd, repo, LORE store — from the fields the CLI actually
-reports, never guesses. `Ctrl+C` quits: one press detaches (daemon keeps
-running), a second press within 2s stops the session (finalize now).
-`Ctrl+←`/`Ctrl+→` cycle tabs; `/help` prints every command *and* every key
-binding, generated from the registry and from `BINDINGS` itself, so a key
-cannot exist without being documented.
-
-**Nothing in DOXA's chrome animates.** The in-flight turn marker is a
-static `⋯ thinking`, not a spinner: the `LoadingIndicator` it replaced
-armed a 16 Hz repaint tick for the whole duration of every turn, which is
-CPU spent on reassurance. Measured headless with 20 turn blocks of
-scrollback and one turn in flight: **6.5% of a core → 0.6%**, and zero
-armed auto-refresh timers anywhere in the DOM (a test asserts that, with
-every overlay open). The single interval left in the app is Textual's own
-2 Hz caret blink on the focused prompt — kept, because it is how you find
-the caret, and it runs on exactly one widget.
-Billed through your Claude subscription — authenticates via the local
-`claude` CLI's own OAuth session, same as `PHASE0_FINDINGS.md` verified;
-no `ANTHROPIC_API_KEY` needed or read.
+## Install
 
 ```sh
 uv sync
-uv run doxa          # spawn-or-attach this repo's session
-uv run doxa new      # force a fresh session
-uv run doxa attach   # reattach (add a session-id/title prefix if several)
-uv run doxa stop     # finalize now: LORE review + index, daemon exits
+uv run doxa
 ```
 
-`uv run doxa` resolves the current directory as the session's cwd (and the
-LORE project scope the same way the LORE plugin does — the git repo root
-when you're inside one). Type a prompt, press enter; `ctrl+q` **detaches**
-— the daemon keeps the session alive and finalizes (the host-driven
-session-end review + index, `PHASE0_FINDINGS.md` redesign item 1) only
-after `--linger` seconds with no client attached, or immediately on
-`doxa stop`. `doxa --in-process` keeps the Phase 1 single-process shape,
-where `ctrl+q` finalizes on the spot.
+This clones-and-runs from a source checkout. There is no packaged
+installer yet (`scripts/install.sh` is on the roadmap); until then, `git
+clone`, `cd`, then the two lines above.
 
-`lore_core` is picked up from the LORE Claude Code plugin's marketplace
-checkout via a `sys.path` shim (`doxa/_lore_bootstrap.py`), documented there
-as temporary until `lore_core` ships to PyPI. Override its location with
-`DOXA_LORE_CORE_PATH` if your marketplace checkout lives somewhere other
-than `~/.claude/plugins/marketplaces/lore`.
+Requires Python 3.11+, [`uv`](https://docs.astral.sh/uv/), and the
+[`claude` CLI](https://docs.claude.com/en/docs/claude-code) signed in
+(`claude auth login`) — DOXA authenticates through that CLI's own OAuth
+session and never reads `ANTHROPIC_API_KEY`.
 
-Run the tests with `uv run pytest`.
+## Quickstart
 
-## Commands
+```sh
+uv run doxa          # spawn a session here, or attach this repo's most recent one
+uv run doxa new      # force a fresh session instead of attaching
+uv run doxa attach   # reattach by session id / title prefix
+uv run doxa stop     # finalize now (LORE review + index), daemon exits
+```
 
-`/help` prints this list — it is generated from the one command registry
-(`doxa/commands.py`), which the Ctrl+P palette and the prompt's `/`
-autocomplete also read, so no surface can drift from another.
+`uv run doxa` spawns a session **daemon** — a process of its own — and
+attaches the TUI to it as a thin client over a Unix socket. Closing the TUI
+(`ctrl+q`, or the palette's "Quit: detach") leaves the daemon running with
+no tmux involved; running `doxa` again in the same repo reattaches to it.
+The daemon finalizes the session (LORE's review + index pass) once every
+client has been detached for `--linger` seconds (120 by default), or
+immediately on `doxa stop`. `doxa --in-process` runs the engine inside the
+TUI instead, with no daemon and no detach — quitting finalizes on the spot.
 
-What the Claude-Code-shaped commands do is bounded by what the SDK
-actually supports, and each one was implemented only that far:
+Once you're in: type a prompt, press enter. `ctrl+p` opens the command
+palette, `ctrl+t` opens a new tab, `/help` lists every command and key
+binding.
 
-| command | what it really does |
-|---|---|
-| `/model [name]` | **Live.** `ClaudeSDKClient.set_model` is a control request, so the model changes for subsequent turns with **no reconnect** — transcript, daemon, replay ring, peer presence and hooks all survive. The chosen model is also written to the settings file: the `model` row and this command are one state. |
-| `/effort [level]` | **Connect-time only.** `ClaudeAgentOptions.effort` (the CLI's `--effort`) has no control-request counterpart, so this sets the level for *new* sessions and says plainly that the running one keeps its own. It is not a live knob and does not pretend to be. |
-| `/usage` | Measured numbers only: token counts and turn count summed from the CLI's own per-result `usage` block, plus the subscription headroom the `claude` CLI itself fetched and cached (`cachedUsageUtilization` — session %, weekly %, per-model weekly % with its severity). Nothing cached ⇒ nothing shown. |
-| `/clear` | A **fresh session in this tab**: the old handle is finalized (LORE review + index), the transcript rotates to the new session's file, the tab stays. Distinct from Ctrl+T (new tab) and from scrolling away (the context is gone because the session is). |
-| `/compact` | Registered but deliberately **not intercepted** — the literal prompt text is what makes the CLI compact and what fires the `PreCompact` hook the deriver hangs off. There is no typed `compact()` in the SDK (`PHASE0_FINDINGS.md` §6). |
-| `/login`, `/logout` | The provider's own auth CLI, under a suspended TUI. |
-| `/settings` | The settings modal (`Ctrl+,`). |
-| `/peers`, `/msg`, `/img` | Peer listing, peer message, image-ladder probe. |
+## Features
+
+**LORE, in-process.** The memory system is imported as `lore_core`, not
+shelled out to: hard-capped curated memory (user + project), an uncapped
+belief store with an FTS index and evidence trails, the same review gate a
+human clears before anything is written. It is the same SQLite database
+the LORE Claude Code plugin uses — one store, two carriers — so switching
+between the plugin and DOXA never forks your memory. A tool call against
+that store renders as an ordinary foldable chip; opened up, it shows the
+exact arguments and the exact result text — here, one calibrated belief
+(`STEER`, with its outcome count) and one still cite-only:
+
+<p align="center"><img src="assets/shots/memory.png" width="780" alt="A lore_belief_search tool chip expanded, showing its JSON arguments and a result listing one STEER belief with an outcome count and one CITE-only belief"></p>
+
+**Tabs.** `SessionPane` widgets mount under a `TabbedContent`, one engine
+client per tab. `ctrl+t` opens a fresh session in a new tab (same repo
+scope); `ctrl+w` closes a tab and detaches its daemon (the session keeps
+running); `ctrl+←`/`ctrl+→` cycle tabs. Outside a git repo, or once a
+custom name is cleared, a tab names itself from its first turn with one
+cheap Haiku call, cached in `~/.doxa/names.toml` so a session is never
+renamed twice. Double-clicking a tab header (or `/rename`) opens an inline
+editor in the tab strip itself; Enter commits, Esc cancels, an empty name
+restores the automatic label:
+
+<p align="center"><img src="assets/shots/rename.png" width="780" alt="Three tabs in the tab strip; the second tab has become an inline text editor reading 'kg-stats refi', mid-rename"></p>
+
+**Command palette and `/` autocomplete.** `ctrl+p` opens a palette listing
+new-tab, the open tabs (in tab-bar order, active one marked), every
+registered command grouped (Session · Memory · Panes & tabs · Tools &
+config · Maintenance), then live sessions available to attach. Typing `/`
+at the start of the prompt opens the same list as a dropdown above the
+input. Both read one registry (`doxa/commands.py`); a command cannot exist
+on one surface and not the other.
+
+<p align="center"><img src="assets/shots/palette.png" width="780" alt="The Ctrl+P command palette open: a New tab entry, two open tabs with the active one marked, then grouped commands under dim section headers"></p>
+
+**`/search`.** Full-text search over LORE's session index, live in a popup
+the moment you type `/search `. Debounced and sequence-guarded, so a slow
+query can never repaint over a newer one's results; an empty query lists
+recent sessions. This is the one search path — `ctrl+r` opens it too. The
+matched terms are FTS5's own `snippet()` output, highlighted rather than
+re-matched:
+
+<p align="center"><img src="assets/shots/search.png" width="780" alt="The /search popup open over the prompt after typing '/search deploy checklist', showing three result rows with the matched words highlighted in each snippet"></p>
+
+**Trace tree.** A subagent spawned by the `Task` tool streams its own text
+and tool calls, which nest as a foldable tree under the parent chip rather
+than interleaving with the main thread. Formatting happens lazily, only
+once a chip is opened, and subagent text passes the same secret-scrubber
+as everything else before it reaches a block:
+
+<p align="center"><img src="assets/shots/trace.png" width="780" alt="A Task tool chip expanded, showing its own arguments and result plus a SUBAGENT narration line and a nested Grep tool chip inside it"></p>
+
+**Terminal images.** A detection ladder — Kitty graphics protocol → sixel →
+half-block cells → a plain `[image: ...]` text line — so a tool result or
+`/img <path>` degrades gracefully on any terminal instead of failing on
+one that doesn't support graphics.
+
+**Peer sessions and `/sessions`.** Independently launched DOXA sessions on
+the same repo discover each other through a same-user runtime registry:
+the status bar's `peers N (k⌁)` chip counts live peers and how many are
+detached, `/peers` lists them, `/msg <session> <text>` sends a message
+over the target's own socket. Received peer text renders in its own
+dimmed block and reaches the model, if at all, behind an explicit
+untrusted-peer preamble — data to weigh, never an instruction to follow.
+`/sessions` lists every live session with its age and whether it's
+attached here or running detached, with a kill command for either:
+
+<p align="center"><img src="assets/shots/sessions.png" width="780" alt="/sessions output listing three sessions: one attached here, two detached, each with an age, plus the kill commands and the peers chip in the status bar"></p>
+
+**Settings.** `ctrl+,` opens a modal grouped into category tabs (Session ·
+Memory · Appearance · Paths · About). Every row shows its effective value
+next to where it came from — session, config file, or default — so a
+value the environment is shadowing is never mistaken for one the modal can
+edit:
+
+<p align="center"><img src="assets/shots/settings.png" width="620" alt="The settings modal, Session category, showing the model row as 'claude-opus-4-5 (session)' and effort/linger_secs rows marked '(default)'"></p>
+
+**Identity and auth.** The session-start block and status line report the
+plan you actually have — DOXA prefers the precise tier the `claude` CLI
+keeps locally over the SDK's coarser `subscriptionType` string, and shows
+nothing rather than a guess when neither is available. `/login [provider]`
+and `/logout [provider]` suspend the TUI and exec the provider's own
+interactive auth CLI; DOXA never handles or stores a credential itself.
+
+**No animated chrome.** The in-flight turn marker is a static `⋯ thinking`,
+not a spinner, and there is exactly one timer anywhere in the app —
+Textual's own 2 Hz caret blink on the focused prompt. A test asserts no
+other timer is ever armed, with every overlay open.
+
+**Status bar**, left to right: model · `repo ⎇ branch @sha` · subscription
+headroom (`s:9% w:48%`, session/week) or a `$` cost estimate on API-key
+auth · context-window percentage (escalates normal → amber ≥70% → red
+≥90%, percentage always shown) · belief count · `⌁ session <id>` reattach
+handle · peers.
 
 ## Configuration
 
-**Precedence, everywhere: environment > config file > default.** An
-environment variable is a deliberate act with a narrower scope than a file
-(a shell, a launcher, a systemd unit, a test), so it beats the file it
-cannot see. The file is `~/.doxa/config.toml` (`DOXA_HOME` overrides),
-written by the settings modal — `Ctrl+,`, `/settings`, or the palette's
-*Settings* entry — and safe to hand-edit (0600, plain TOML). Emptying a
-field removes the key, which returns that knob to its default. Keys DOXA
-doesn't recognize are preserved on save, so a file written by a newer
-version survives an older one. A config left behind by an earlier build at
-`~/.config/doxa/config.toml` is moved into place once, out loud.
+Precedence is the same everywhere: **environment > `~/.doxa/config.toml` >
+default.** The file is plain TOML, 0600, and safe to hand-edit; it's also
+what the settings modal (`ctrl+,` / `/settings`) writes. Clearing a field
+in the modal removes that key, which returns the setting to its default.
+Unrecognized keys are preserved on save, so a file written by a newer DOXA
+survives being opened by an older one.
 
-**Two homes, deliberately split.** `~/.doxa/` holds *durable* state — this
-config, and anything else that must survive a reboot. The **runtime dir**
-(`$DOXA_RUNTIME_DIR` → `$XDG_RUNTIME_DIR/doxa` → `~/.local/share/doxa`)
-holds *ephemeral* endpoints — the daemon sockets and the peer registry.
-Sockets stay out of the home directory because a home directory can be NFS
-(where `AF_UNIX` misbehaves) and because a stale socket file must not
-outlive a reboot, which the runtime dir's tmpfs semantics guarantee. The
-LORE store is neither: it stays `lore_core`'s own (`~/.claude/lore`,
-`LORE_ROOT`-overridable), because sharing one store with the Claude Code
-plugin is a product property — a private DOXA store would silently fork
-your memory and beliefs into two divergent halves.
-
-The modal groups rows into category tabs (Session · Memory · Appearance ·
-Paths · About; `shift+←/→`, deliberately not the app's own tab keys) and
-lists only knobs that already do something, each row naming the code that
-reads it. Every row shows its **effective** value — read fresh when the
-modal opens, resolved through the precedence above — next to **where it
-came from**: `900 (config)`, `120 (default)`, `1 (env DOXA_NERD_FONT —
-overrides config)`. A row the environment is winning is **read-only**: it
-offers no field at all and says why, because an edit that writes a value
-the environment keeps shadowing is a silent no-op, the worst thing a
-settings menu can do. Saving re-reads, so what you see afterwards is what
-is in force. The `model` row follows the *session* (a mid-session `/model`
-moves it) and names the config default when the two differ.
-
-| setting | env | default | read by |
+| setting | env | default | what it controls |
 |---|---|---|---|
-| `model` | `DOXA_MODEL` | CLI default | `doxa.cli --model` (and `/model` for the live session) |
-| `effort` | `DOXA_EFFORT` | CLI default | `doxa.engine.effort_level` → `ClaudeAgentOptions.effort` — connect-time only |
-| `derive_secs` | `DOXA_DERIVE_SECS` | off | `doxa.engine.derive_interval` — streaming-deriver debounce |
-| `linger_secs` | `DOXA_LINGER_SECS` | 120 | `doxa.cli --linger` — daemon detach-to-finalize window |
-| `consult_floor` | `DOXA_CONSULT_FLOOR` | 1.0 | `doxa.engine.consult_floor` — act-time belief consult; 0 disables |
-| `nerd_font` | `DOXA_NERD_FONT` | off | `doxa.app.git_branch_symbol` — branch glyph |
-| `image_mode` | `DOXA_IMAGE_MODE` | probe | `doxa.images.detect_mode` — force a rung of the image ladder |
-| *lore store* | `LORE_ROOT` | `~/.claude/lore` | `lore_core.ROOT` — shown read-only |
+| `model` | `DOXA_MODEL` | CLI default | model for new turns (`/model` also switches live) |
+| `effort` | `DOXA_EFFORT` | CLI default | reasoning effort, new sessions only (connect-time SDK option) |
+| `derive_secs` | `DOXA_DERIVE_SECS` | off | streaming-deriver interval; unset runs review only at session end |
+| `linger_secs` | `DOXA_LINGER_SECS` | 120 | seconds a daemon outlives its last detached client |
+| `consult_floor` | `DOXA_CONSULT_FLOOR` | 1.0 | act-time belief-consult threshold; 0 disables it |
+| `nerd_font` | `DOXA_NERD_FONT` | off | use a Nerd Font glyph for the branch chip |
+| `image_mode` | `DOXA_IMAGE_MODE` | probe | force a rung of the image ladder (`kgp`/`sixel`/`halfblock`/`text`) |
+| *lore store* | `LORE_ROOT` | `~/.claude/lore` | `lore_core`'s own store path (read-only here) |
 
-There is deliberately no theme row: DOXA ships one theme, and a settings
-menu that lists an inert choice teaches the user that the menu lies.
+The settings modal shows every row's **effective** value next to where it
+came from (`900 (config)`, `120 (default)`, `1 (env DOXA_NERD_FONT)`); a
+row the environment is winning is read-only, because an edit that a live
+environment variable would immediately shadow is a silent no-op.
+
+`~/.doxa/` holds durable state (this config); the runtime directory
+(`$DOXA_RUNTIME_DIR` → `$XDG_RUNTIME_DIR/doxa` → `~/.local/share/doxa`)
+holds ephemeral daemon sockets and the peer registry — kept out of the
+home directory because a home directory can be network-mounted, where Unix
+sockets misbehave. The LORE store is neither: it stays `lore_core`'s own
+path, shared with the LORE Claude Code plugin on purpose, so switching
+between the two never forks your memory into two divergent halves.
+
+## How it works
+
+Each session runs as its own **daemon process** hosting the Claude Agent
+SDK client, the LORE hooks, and the transcript; the TUI is a thin client
+attached over a 0600 Unix socket, so detaching and reattaching never
+depends on the terminal that started the session staying open. Every tool
+call the agent makes passes a containment gate at the PreToolUse
+boundary — a call outside the declared tool registry is denied, and a tool
+that fails twice in a session is disabled for the rest of it rather than
+retried into the step budget.
+
+LORE's memory model is summarized above; the full model — curated memory,
+the belief store, the derive/dream/dialectic split, calibration — is
+documented in the [LORE repository](https://github.com/docwilde/LORE),
+which DOXA embeds as `lore_core` rather than reimplementing.
+
+`lore_core` currently ships inside the LORE Claude Code plugin's
+marketplace checkout, not as an installable package, so DOXA locates it
+with a `sys.path` shim (`doxa/_lore_bootstrap.py`) documented there as
+temporary. Override the location with `DOXA_LORE_CORE_PATH` if your
+checkout isn't at the default `~/.claude/plugins/marketplaces/lore`.
+
+## Status
+
+DOXA is a working daily driver for its author, not a finished product.
+Shipped so far: the daemon/detach model, tabs, the command palette,
+`/search`, the trace tree, the image ladder, peer discovery, and the
+settings modal described above — see [CHANGELOG.md](CHANGELOG.md) for the
+version-by-version history. Not yet built: a packaged installer, a
+first-run setup flow, a `/doctor` health check, session-history drill-in
+past `/search`'s result list, customizable keybindings, and a graphical
+context-window map. Interfaces (config keys, socket protocol, command
+names) can still change between minor versions.
+
+Run the test suite with `uv run pytest`.
 
 ## Non-goals
 
-Provider-agnostic model routing (the subscription-auth path is the point);
-replacing the LORE plugin (it keeps shipping — same core, one gets the fixes
-of the other); general Claude Code plugin compatibility claims (scoped to
-tested plugins at tested versions — the contract is reverse-engineered and
-Anthropic may change it any release).
+Provider-agnostic model routing — the point is subscription auth, not a
+router. Replacing the LORE Claude Code plugin, which keeps shipping the
+same core. General Claude Code plugin compatibility — DOXA does not load
+third-party plugins today.
 
 ## License
 
-[DOXA Noncommercial License 1.0](LICENSE) (PolyForm-Noncommercial-derived) — free for personal use, research, education, and noncommercial organizations; commercial use requires a separate arrangement with the author. Same license family as [LORE](https://github.com/docwilde/LORE), whose `lore_core` DOXA embeds.
+[DOXA Noncommercial License 1.0](LICENSE) (PolyForm-Noncommercial-derived)
+— free for personal use, research, education, and noncommercial
+organizations; commercial use requires a separate arrangement with the
+author. Same license family as [LORE](https://github.com/docwilde/LORE),
+whose `lore_core` DOXA embeds.

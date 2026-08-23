@@ -1,28 +1,91 @@
-"""Render a README screenshot of the DOXA shell — no live SDK, no spend.
+"""Render the README's screenshot gallery -- no live SDK, no spend.
 
-Drives DoxaApp headlessly with a scripted FakeEngine (the pilot-test
-fixture), plays a richer multi-turn session than the test uses, and saves
-Textual's SVG screenshot to assets/screenshot.svg. Convert to PNG with
-inkscape (CI does not need to; the SVG is committed too).
+Drives DoxaApp headlessly, one Textual pilot session per SCENE, each scene
+scripting a FakeEngine (and, where a scene needs live-registry state the
+app would otherwise read from disk, patching doxa.peers for the duration)
+to put a real feature on screen: the shell mid-conversation, the /search
+popup, the command palette, the trace tree, a tab rename in progress, the
+settings modal, /sessions, and a belief-search tool call opened up. Saves
+each as assets/shots/<scene>.svg; convert to PNG with inkscape (CI does not
+need to -- the SVGs are committed too):
 
-    uv run python scripts/screenshot.py
+    uv run python scripts/screenshot.py            # every scene
+    uv run python scripts/screenshot.py hero search # just these
+
+One driver, so a UI change is one command away from a refreshed gallery.
 """
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Awaitable, Callable
+from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
+from datetime import datetime, timezone  # noqa: E402
+
+from doxa.app import DoxaApp, PromptInput, SessionSearch, ToolChip  # noqa: E402
 from doxa.engine import EngineEvent  # noqa: E402
+from doxa.identity import Usage, UsageLimit  # noqa: E402
+from doxa.peers import PeerInfo  # noqa: E402
 from tests.fakes import FakeEngine  # noqa: E402
 
-SCRIPT = [
-    EngineEvent("peer_joined", {"session_id": "b3f2a1c9", "title": "paper draft session"}),
+SHOTS = ROOT / "assets" / "shots"
+
+# Every scene runs under this machine's real `claude` CLI config on disk --
+# doxa.identity reads it directly (subscription tier, cached usage
+# utilization). Screenshots must never leak whoever generated them, so the
+# whole identity surface is patched to fixed, plausible FAKE values for the
+# duration of every scene, not just the ones that show a status bar.
+_FAKE_LOCAL_ACCOUNT = {"organizationRateLimitTier": "default_claude_max_20x"}
+_FAKE_USAGE = Usage(
+    session=UsageLimit(kind="session", percent=40, severity="normal", resets_at=""),
+    weekly=UsageLimit(kind="weekly_all", percent=54, severity="normal", resets_at=""),
+    scoped=None,
+    scope_label="",
+    fetched_at=datetime.now(timezone.utc),
+)
+
+
+def _fake_identity():
+    return mock.patch.multiple(
+        "doxa.identity",
+        local_account=lambda: dict(_FAKE_LOCAL_ACCOUNT),
+        usage=lambda: _FAKE_USAGE,
+    )
+
+
+def _peer(session_id: str, title: str, clients: "int | None") -> PeerInfo:
+    """A plausible, entirely fake registry entry -- no real ids, no real
+    cwd outside this checkout."""
+    return PeerInfo(
+        session_id=session_id, pid=42424, socket_path=f"/run/doxa/{session_id}.sock",
+        cwd=str(ROOT), repo_root=str(ROOT), title=title,
+        started_at="2026-08-23T08:14:00.000000Z",
+        heartbeat_at="2026-08-23T09:58:00.000000Z",
+        daemon_socket=f"/run/doxa/{session_id}.sock", clients=clients,
+    )
+
+
+async def _settle(pilot, turns: int = 40, step: float = 0.02) -> None:
+    for _ in range(turns):
+        await pilot.pause(step)
+
+
+# --------------------------------------------------------------------- #
+# Scene: hero -- the shell mid-conversation, three tabs, full status bar.
+# --------------------------------------------------------------------- #
+
+HERO_SCRIPT = [
     EngineEvent("turn_started", {}),
-    EngineEvent("text_delta", {"text": "Two beliefs about this repo are relevant — one is "}),
-    EngineEvent("text_delta", {"text": "calibrated (STEER), one is cite-only until it earns a track record."}),
+    EngineEvent("text_delta", {"text": "Two beliefs about this repo are relevant here — one "}),
+    EngineEvent("text_delta", {"text": "is calibrated (12 outcomes so far), one is cite-only "}),
+    EngineEvent("text_delta", {"text": "until it earns a track record of its own."}),
     EngineEvent("tool_call", {"id": "t1", "name": "lore_belief_search",
                               "input": {"query": "deploy checklist", "scope": "project"}}),
     EngineEvent("tool_result", {"id": "t1", "name": "lore_belief_search",
@@ -33,28 +96,271 @@ SCRIPT = [
 ]
 
 
-async def main() -> None:
-    import doxa.app as app_mod
-    orig = app_mod.SessionEngine
-    app_mod.SessionEngine = lambda cwd, model=None: FakeEngine(SCRIPT)
+def _hero_engine() -> FakeEngine:
+    peers = [
+        _peer("f00dfeed", "paper draft session", clients=1),
+        _peer("cafebabe1", "kg-stats refactor", clients=0),
+    ]
+    engine = FakeEngine(HERO_SCRIPT, model="claude-opus-4-5", peers=peers)
+    engine.detachable = True
+    engine.session_id = "a1b2c3d4e5"
+    return engine
+
+
+def _sibling_tab_factory() -> Callable[[], FakeEngine]:
+    models = iter(["claude-sonnet-4-5", "claude-haiku-4-5"])
+
+    def factory() -> FakeEngine:
+        model = next(models, "claude-sonnet-4-5")
+        engine = FakeEngine([], model=model)
+        engine.detachable = True
+        engine.session_id = f"{model[:6]}0000"
+        return engine
+
+    return factory
+
+
+async def _drive_hero(app: DoxaApp, pilot) -> None:
+    await pilot.pause()
+    await app.action_new_tab()
+    await pilot.pause()
+    await app.action_new_tab()
+    await pilot.pause()
+    tabbed = app.query_one("#session-tabs")
+    tabbed.active = app.panes()[0].id or tabbed.active
+    await pilot.pause()
+    app.query_one("#prompt-input").value = "what do we believe about deploys here?"
+    await pilot.press("enter")
+    for _ in range(200):
+        blocks = list(app.query("TurnBlock"))
+        if blocks and "earns a track record" in getattr(blocks[0], "assistant_text", ""):
+            break
+        await pilot.pause(0.02)
+    await pilot.pause(0.2)
+
+
+# --------------------------------------------------------------------- #
+# Scene: search -- the live /search popup, mid-query, snippets highlighted.
+# --------------------------------------------------------------------- #
+
+SEARCH_HITS = [
+    {"session_id": "f00dfeed01", "title": "deploy checklist rewrite",
+     "ts": "2026-08-19T14:02:00",
+     "snippet": "confirmed the [deploy] runbook now checks the [checklist] before tagging"},
+    {"session_id": "cafebabe02", "title": "kg-stats refactor",
+     "ts": "2026-08-17T09:41:00",
+     "snippet": "reused the same [deploy] gate from the [checklist] item for the batch job"},
+    {"session_id": "1234abcd03", "title": "onboarding notes",
+     "ts": "2026-08-11T18:20:00",
+     "snippet": "linked the release [checklist] from the team's [deploy] doc"},
+]
+
+
+async def _drive_search(app: DoxaApp, pilot) -> None:
+    await pilot.pause()
+    prompt = app.query_one("#prompt-input", PromptInput)
+    prompt.value = "/search deploy checklist"
+    await pilot.pause()
+    popup = app.query_one("#session-search", SessionSearch)
+    popup.display = True
+    popup._render("deploy checklist", SEARCH_HITS)
+    await pilot.pause()
+
+
+# --------------------------------------------------------------------- #
+# Scene: palette -- Ctrl+P, new tab / open tabs / grouped commands / attach.
+# --------------------------------------------------------------------- #
+
+async def _drive_palette(app: DoxaApp, pilot) -> None:
+    await pilot.pause()
+    await app.action_new_tab()
+    await pilot.pause()
+    daemons = [_peer("9988aabb04", "midnight repro session", clients=0)]
+    with mock.patch("doxa.peers.list_daemons", return_value=daemons):
+        await pilot.press("ctrl+p")
+        await _settle(pilot, 15)
+
+
+# --------------------------------------------------------------------- #
+# Scene: trace -- a Task call's subagent activity nested under its chip.
+# --------------------------------------------------------------------- #
+
+TRACE_SCRIPT = [
+    EngineEvent("turn_started", {}),
+    EngineEvent("tool_call", {
+        "id": "task-1", "name": "Task",
+        "input": {"description": "explore the auth path", "subagent_type": "Explore"},
+    }),
+    EngineEvent("text_delta", {"text": "checking the token refresh path now", "parent_id": "task-1"}),
+    EngineEvent("tool_call", {
+        "id": "sub-1", "name": "Grep", "input": {"pattern": "refresh_token"},
+        "parent_id": "task-1",
+    }),
+    EngineEvent("tool_result", {
+        "id": "sub-1", "name": "Grep", "result_summary": "3 hits in doxa/auth.py",
+        "is_error": False, "duration_ms": 12, "parent_id": "task-1",
+    }),
+    EngineEvent("text_delta", {"text": "The refresh path reuses the CLI's own cached token."}),
+    EngineEvent("tool_result", {
+        "id": "task-1", "name": "Task",
+        "result_summary": "explored: refresh handled in doxa/auth.py, 3 call sites",
+        "is_error": False, "duration_ms": 640,
+    }),
+    EngineEvent("turn_done", {
+        "cost_usd": 0.0045, "duration_ms": 710, "is_error": False,
+        "session_cost_usd": 0.0045, "ctx_percentage": 14.0,
+    }),
+]
+
+
+async def _drive_trace(app: DoxaApp, pilot) -> None:
+    await pilot.pause()
+    app.query_one("#prompt-input").value = "how does token refresh work here?"
+    await pilot.press("enter")
+    chips = {}
+    for _ in range(150):
+        chips = {c.call_id: c for c in app.query(ToolChip)}
+        task = chips.get("task-1")
+        if task is not None and task.tool_result is not None:
+            break
+        await pilot.pause(0.02)
+    task, sub = chips["task-1"], chips["sub-1"]
+    task.collapsed = False
+    await pilot.pause()
+    sub.collapsed = False
+    await pilot.pause()
+    app.query_one("#block-list").scroll_end(animate=False)
+    await pilot.pause()
+
+
+# --------------------------------------------------------------------- #
+# Scene: memory -- a lore tool chip opened up, showing STEER vs CITE.
+# --------------------------------------------------------------------- #
+
+async def _drive_memory(app: DoxaApp, pilot) -> None:
+    await pilot.pause()
+    app.query_one("#prompt-input").value = "what do we believe about deploys here?"
+    await pilot.press("enter")
+    for _ in range(150):
+        chips = list(app.query(ToolChip))
+        if chips and chips[0].tool_result is not None:
+            break
+        await pilot.pause(0.02)
+    chip = list(app.query(ToolChip))[0]
+    chip.collapsed = False
+    await pilot.pause()
+
+
+# --------------------------------------------------------------------- #
+# Scene: rename -- a tab's inline editor, mid-edit.
+# --------------------------------------------------------------------- #
+
+async def _drive_rename(app: DoxaApp, pilot) -> None:
+    await pilot.pause()
+    await app.action_new_tab()
+    await pilot.pause()
+    await app.action_new_tab()
+    await pilot.pause()
+    pane = app.panes()[1]
+    await app._start_rename(pane)
+    await pilot.pause()
+    editor = app.query_one("#tab-rename")
+    editor.value = "kg-stats refi"
+    await pilot.pause()
+
+
+# --------------------------------------------------------------------- #
+# Scene: settings -- the modal, effective values + provenance.
+# --------------------------------------------------------------------- #
+
+async def _drive_settings(app: DoxaApp, pilot) -> None:
+    from doxa import config as config_mod
+
+    await pilot.pause()
+    os.environ["DOXA_NERD_FONT"] = "1"
+    config_mod.invalidate()
     try:
-        app = app_mod.DoxaApp(cwd=".")
-        async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
-            app.query_one("#prompt-input").value = "what do we believe about deploys here?"
-            await pilot.press("enter")
-            for _ in range(200):
-                blocks = list(app.query(app_mod.TurnBlock))
-                if blocks and "earns a track record" in blocks[0].assistant_text:
-                    break
-                await pilot.pause(0.02)
-            await pilot.pause(0.2)
-            out = Path(__file__).resolve().parents[1] / "assets" / "screenshot.svg"
+        await pilot.press("ctrl+comma")
+        await _settle(pilot, 10)
+    finally:
+        del os.environ["DOXA_NERD_FONT"]
+        config_mod.invalidate()
+
+
+# --------------------------------------------------------------------- #
+# Scene: sessions -- /sessions output, attached + detached rows, peers chip.
+# --------------------------------------------------------------------- #
+
+async def _drive_sessions(app: DoxaApp, pilot) -> None:
+    await pilot.pause()
+    entries = [
+        _peer("a1b2c3d4e5", "deploy checklist rewrite", clients=1),
+        _peer("f00dfeed01", "kg-stats refactor", clients=0),
+        _peer("cafebabe02", "onboarding notes", clients=0),
+    ]
+    pane = app.active_pane
+    with mock.patch("doxa.peers.read_registry", return_value=entries):
+        await pane._cmd_sessions("")
+    await pilot.pause()
+
+
+# --------------------------------------------------------------------- #
+
+@dataclass
+class Scene:
+    name: str
+    drive: Callable[[DoxaApp, object], Awaitable[None]]
+    size: tuple[int, int] = (104, 32)
+    engine_factory: "Callable[[], FakeEngine] | None" = None
+    new_session_factory: "Callable[[], FakeEngine] | None" = None
+
+
+SCENES: list[Scene] = [
+    Scene("hero", _drive_hero, size=(172, 32), engine_factory=_hero_engine,
+          new_session_factory=_sibling_tab_factory()),
+    Scene("search", _drive_search, size=(100, 26),
+          engine_factory=lambda: FakeEngine([], model="claude-opus-4-5")),
+    Scene("palette", _drive_palette, size=(120, 32),
+          engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
+          new_session_factory=lambda: FakeEngine([], model="claude-sonnet-4-5")),
+    Scene("trace", _drive_trace, size=(172, 40),
+          engine_factory=lambda: FakeEngine(TRACE_SCRIPT, model="claude-opus-4-5")),
+    Scene("memory", _drive_memory, size=(172, 30),
+          engine_factory=_hero_engine),
+    Scene("rename", _drive_rename, size=(120, 26),
+          engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
+          new_session_factory=_sibling_tab_factory()),
+    Scene("settings", _drive_settings, size=(104, 32),
+          engine_factory=lambda: FakeEngine([], model="claude-opus-4-5")),
+    Scene("sessions", _drive_sessions, size=(172, 24),
+          engine_factory=_hero_engine),
+]
+
+
+async def _run_scene(scene: Scene) -> None:
+    app = DoxaApp(
+        cwd=str(ROOT),
+        engine_factory=scene.engine_factory,
+        new_session_factory=scene.new_session_factory,
+    )
+    with _fake_identity():
+        async with app.run_test(size=scene.size) as pilot:
+            await scene.drive(app, pilot)
+            SHOTS.mkdir(parents=True, exist_ok=True)
+            out = SHOTS / f"{scene.name}.svg"
             app.save_screenshot(str(out))
             print(f"saved {out}")
-    finally:
-        app_mod.SessionEngine = orig
+
+
+async def main(names: list[str]) -> None:
+    wanted = set(names) or {scene.name for scene in SCENES}
+    unknown = wanted - {scene.name for scene in SCENES}
+    if unknown:
+        raise SystemExit(f"unknown scene(s): {', '.join(sorted(unknown))}")
+    for scene in SCENES:
+        if scene.name in wanted:
+            await _run_scene(scene)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main(sys.argv[1:]))
