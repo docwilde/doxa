@@ -12,10 +12,12 @@ rather than a reimplementation of the engine.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
 from doxa.engine import EngineEvent
+from doxa.peers import PeerInfo, resolve_peer
 
 
 class FakeClient:
@@ -74,15 +76,46 @@ def factory_with_script(
 
 
 class FakeEngine:
-    """The doxa.app.DoxaApp-facing surface of SessionEngine, scripted."""
+    """The doxa.app.DoxaApp-facing surface of SessionEngine, scripted.
 
-    def __init__(self, script: list[EngineEvent], model: str = "claude-haiku-4-5") -> None:
+    Peer surface: `peers` is the static list list_peers() returns (real
+    PeerInfo objects, so /peers formatting and /msg resolution exercise the
+    same doxa.peers.resolve_peer the real engine uses); push_peer_event()
+    feeds the app's peer pump exactly like the real out-of-band queue."""
+
+    def __init__(
+        self,
+        script: list[EngineEvent],
+        model: str = "claude-haiku-4-5",
+        peers: list[PeerInfo] | None = None,
+    ) -> None:
         self._script = script
         self.model = model
         self.total_cost_usd = 0.0
         self.last_ctx_percentage: float | None = None
         self.started = False
         self.finalized = False
+        self._peers = peers or []
+        self._peer_queue: asyncio.Queue[EngineEvent] = asyncio.Queue()
+        self.sent_peer_messages: list[tuple[str, str]] = []
+
+    def list_peers(self) -> list[PeerInfo]:
+        return list(self._peers)
+
+    def peer_count(self) -> int:
+        return len(self._peers)
+
+    def push_peer_event(self, ev: EngineEvent) -> None:
+        self._peer_queue.put_nowait(ev)
+
+    async def peer_events(self) -> AsyncIterator[EngineEvent]:
+        while True:
+            yield await self._peer_queue.get()
+
+    async def send_peer_message(self, target_prefix: str, text: str) -> PeerInfo:
+        peer = resolve_peer(self._peers, target_prefix)  # may raise PeerSendError
+        self.sent_peer_messages.append((peer.session_id, text))
+        return peer
 
     async def start(self) -> EngineEvent:
         self.started = True

@@ -68,6 +68,26 @@ ToolChip > CollapsibleTitle {
     height: 1;
 }
 
+.system-block {
+    background: #221F1A;
+    color: #D8CDBB;
+    border: round #3A3429;
+    padding: 0 2;
+    margin-bottom: 1;
+}
+
+/* Peer messages: deliberately dimmer than a turn -- border one step DOWN
+   the surface ramp (#2A251E, the chip surface, instead of #3A3429) and
+   secondary text only. Another session talking must never read as this
+   session's own output. */
+PeerMessageBlock {
+    background: #1D1B17;
+    color: #D8CDBB;
+    border: round #2A251E;
+    padding: 0 2;
+    margin-bottom: 1;
+}
+
 #status-bar {
     background: #221F1A;
     color: #D8CDBB;

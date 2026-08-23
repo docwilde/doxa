@@ -27,10 +27,47 @@ from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Collapsible, Input, LoadingIndicator, Static
 
 from .engine import EngineEvent, SessionEngine
+from .peers import PeerSendError, age_secs
 
 
 def _one_line(text: str, limit: int = 70) -> str:
     return " ".join(text.split())[:limit]
+
+
+def _fmt_age(secs: float) -> str:
+    if secs < 60:
+        return f"{int(secs)}s"
+    if secs < 3600:
+        return f"{int(secs // 60)}m"
+    return f"{int(secs // 3600)}h{int((secs % 3600) // 60)}m"
+
+
+class SystemBlock(Static):
+    """One block of doxa-generated (not model-generated) output -- slash
+    command results, peer-layer errors. Same ▎ accent as turns, secondary
+    color via .system-block in the theme."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        super().__init__(f"▎ doxa\n{text}", classes="system-block")
+
+
+class PeerMessageBlock(Static):
+    """One incoming peer message. Visually distinct from turns (dim border,
+    peer title in the header -- see PeerMessageBlock rules in theme.tcss);
+    the body was scrubbed on receive in peers.PeerHost, the one choke point
+    for peer input."""
+
+    def __init__(self, frame: dict) -> None:
+        self.frame = frame
+        title = frame.get("from_title", "?")
+        short_id = str(frame.get("from_id", ""))[:8]
+        sent_at = frame.get("sent_at", "")
+        body = str(frame.get("body", ""))
+        super().__init__(
+            f"✉ peer · {title} ({short_id}) · {sent_at}\n{body}",
+            classes="peer-block",
+        )
 
 
 class ToolChip(Collapsible):
@@ -137,12 +174,27 @@ class DoxaApp(App):
         self.engine = SessionEngine(cwd=self.cwd, model=self.model)
         self.query_one("#prompt-input", Input).focus()
         self.run_worker(self._boot(), exclusive=True, group="engine")
+        self.run_worker(self._peer_pump(), group="peers")
 
     async def _boot(self) -> None:
         assert self.engine is not None
         await self.engine.start()
         self._engine_ready.set()
         self._refresh_status()
+
+    async def _peer_pump(self) -> None:
+        """Consume the engine's out-of-band peer stream for the life of the
+        app: peer_message mounts a block immediately (display path only --
+        the model sees it on the next user turn, engine-side); joins/leaves
+        just move the status-bar chip."""
+        await self._engine_ready.wait()
+        assert self.engine is not None
+        async for ev in self.engine.peer_events():
+            if ev.type == "peer_message":
+                block_list = self.query_one("#block-list", VerticalScroll)
+                await block_list.mount(PeerMessageBlock(ev.data))
+                block_list.scroll_end(animate=False)
+            self._refresh_status()
 
     def _refresh_status(self) -> None:
         if self.engine is None:
@@ -155,15 +207,52 @@ class DoxaApp(App):
             else "—"
         )
         beliefs = self.engine.belief_count()
+        parts = [model, cost, f"ctx {ctx}", f"{beliefs} beliefs"]
+        peer_count = self.engine.peer_count()
+        if peer_count:  # hidden at 0 -- a solo session has no peers chip
+            parts.append(f"peers {peer_count}")
         bar = self.query_one("#status-bar", Static)
-        bar.update(f"{model}  ·  {cost}  ·  ctx {ctx}  ·  {beliefs} beliefs")
+        bar.update("  ·  ".join(parts))
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         prompt = event.value.strip()
         if not prompt:
             return
         event.input.value = ""
+        # Only doxa's own two peer commands are intercepted; anything else
+        # starting with "/" (e.g. the literal "/compact" convention) still
+        # goes to the model untouched.
+        if prompt == "/peers" or prompt.startswith(("/peers ", "/msg ")) or prompt == "/msg":
+            self.run_worker(self._run_command(prompt), group="command")
+            return
         self.run_worker(self._run_turn(prompt), exclusive=True, group="turn")
+
+    async def _run_command(self, prompt: str) -> None:
+        await self._engine_ready.wait()
+        assert self.engine is not None
+        if prompt.split()[0] == "/peers":
+            peers = self.engine.list_peers()
+            if not peers:
+                text = "peers: none in this project right now"
+            else:
+                lines = [
+                    f"{p.title}  {p.session_id[:8]}  {p.cwd}  ·  up {_fmt_age(age_secs(p.started_at))}"
+                    for p in peers
+                ]
+                text = "peers:\n" + "\n".join(lines)
+        else:  # /msg
+            parts = prompt.split(maxsplit=2)
+            if len(parts) < 3:
+                text = "usage: /msg <session_prefix> <text>"
+            else:
+                try:
+                    peer = await self.engine.send_peer_message(parts[1], parts[2])
+                    text = f"sent to {peer.title} ({peer.session_id[:8]})"
+                except PeerSendError as exc:
+                    text = f"msg error: {exc}"
+        block_list = self.query_one("#block-list", VerticalScroll)
+        await block_list.mount(SystemBlock(text))
+        block_list.scroll_end(animate=False)
 
     async def _run_turn(self, prompt: str) -> None:
         assert self.engine is not None

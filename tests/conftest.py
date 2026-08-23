@@ -16,3 +16,9 @@ from pathlib import Path
 _tmp = Path(tempfile.mkdtemp(prefix="doxa-test-lore-"))
 os.environ["LORE_ROOT"] = str(_tmp / "lore")
 os.environ["LORE_PROJECTS_DIR"] = str(_tmp / "projects")
+
+# Peer layer isolation: doxa.peers reads DOXA_RUNTIME_DIR per call (not at
+# import), but setting it here too guarantees no test -- including ones
+# that start a real SessionEngine without thinking about peers -- ever
+# registers in, reaps, or listens inside the machine's real registry.
+os.environ["DOXA_RUNTIME_DIR"] = str(_tmp / "runtime")

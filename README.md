@@ -70,6 +70,19 @@ checkout). An opt-in container tier (rootless Podman) sandboxes risk-classed
 tasks: only the task's worktree mounted, no credentials inside the container
 at all — the SDK loop and its OAuth stay on the host.
 
+**Peer sessions.** Independently launched DOXA sessions discover each other
+when they work on the same repo: every live session registers in a
+same-user runtime registry (0700; dead entries reaped on sight, never
+trusted), the status bar counts your same-repo peers, and messaging is
+explicit — `/peers` lists them, `/msg <session> <text>` sends one frame
+over the target's own Unix socket. Received text is treated as what it is:
+another agent talking. It passes the same `[REDACTED:kind]` scrubber as
+everything else, renders in its own dimmed block, waits for your next turn
+(a peer can never start or interrupt one), and reaches the model only
+behind an explicit untrusted-peer preamble — peer data to weigh, never an
+instruction to follow. The registry entry points at whoever hosts the
+engine, so the layer survives the Phase 2 daemon split unchanged.
+
 **Claude Code plugin compatibility.** DOXA loads existing Claude Code
 plugins: hooks (all observed events, both manifest conventions) and slash
 commands first; skills and tool-scoped custom agents next. Verified against

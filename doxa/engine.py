@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import Any
 
 from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see module docstring
+from . import peers as peers_mod
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -87,7 +88,10 @@ class EngineEvent:
 
     ``type`` is one of: turn_started, text_delta, tool_call, tool_result,
     turn_done, session_done -- the six event kinds the TUI (doxa/app.py)
-    switches on to build/update blocks.
+    switches on to build/update blocks -- plus peer_joined, peer_left and
+    peer_message, which arrive out-of-band on the same EngineEvent type via
+    :meth:`SessionEngine.peer_events` (a turn generator can only yield while
+    a turn runs; peer activity doesn't wait for one).
     """
 
     type: str
@@ -156,6 +160,14 @@ class SessionEngine:
         self._tool_started: dict[str, float] = {}  # tool_use_id -> monotonic start
         self.total_cost_usd = 0.0
         self.last_ctx_percentage: float | None = None
+
+        # Peer layer (doxa/peers.py): the host lives on the engine, not the
+        # TUI, so the presence entry follows whoever hosts the engine when
+        # the daemon split lands (see peers.py's daemon-split note).
+        self.peer_host: peers_mod.PeerHost | None = None
+        self.peer_error: str | None = None
+        self._peer_queue: asyncio.Queue[EngineEvent] = asyncio.Queue()
+        self._pending_peer_frames: list[dict] = []
 
         transcript_dir = PROJECTS_DIR / self.slug
         transcript_dir.mkdir(parents=True, exist_ok=True)
@@ -296,9 +308,72 @@ class SessionEngine:
         self._client = self._client_factory(self._build_options())
         await self._client.__aenter__()
         self._connected = True
+        try:
+            self.peer_host = peers_mod.PeerHost(
+                session_id=self.session_id,
+                cwd=self.cwd,
+                on_message=self._on_peer_frame,
+                on_peer_joined=self._on_peer_joined,
+                on_peer_left=self._on_peer_left,
+            )
+            await self.peer_host.start()
+        except Exception as exc:
+            # Peer awareness is strictly additive -- a socket/registry
+            # failure must never keep a session from starting. The cause is
+            # kept for inspection instead of vanishing.
+            self.peer_host = None
+            self.peer_error = repr(exc)
         return EngineEvent("session_started", {
             "session_id": self.session_id, "model": self.model, "cwd": self.cwd,
         })
+
+    # -- peers -------------------------------------------------------
+
+    def _on_peer_frame(self, frame: dict) -> None:
+        """A received peer frame (already scrubbed by PeerHost's receive
+        path). Queued twice, deliberately: once for the TUI (peer_message
+        event, rendered immediately) and once for the model, which only
+        ever sees it prepended to the NEXT user turn -- a peer message
+        never interrupts a running turn and never starts one."""
+        self._pending_peer_frames.append(dict(frame))
+        self._peer_queue.put_nowait(EngineEvent("peer_message", dict(frame)))
+
+    def _on_peer_joined(self, info: peers_mod.PeerInfo) -> None:
+        self._peer_queue.put_nowait(EngineEvent("peer_joined", {
+            "session_id": info.session_id, "title": info.title, "cwd": info.cwd,
+        }))
+
+    def _on_peer_left(self, session_id: str) -> None:
+        self._peer_queue.put_nowait(EngineEvent("peer_left", {"session_id": session_id}))
+
+    async def peer_events(self) -> AsyncIterator[EngineEvent]:
+        """Out-of-band peer events (peer_joined/peer_left/peer_message) --
+        same EngineEvent type as :meth:`send` yields, separate stream
+        because peer activity doesn't wait for a turn to be running."""
+        while True:
+            yield await self._peer_queue.get()
+
+    def list_peers(self) -> list[peers_mod.PeerInfo]:
+        return self.peer_host.list_peers() if self.peer_host is not None else []
+
+    def peer_count(self) -> int:
+        return len(self.list_peers())
+
+    async def send_peer_message(self, target_prefix: str, text: str) -> peers_mod.PeerInfo:
+        """Explicit outbound message to one same-scope peer, resolved by
+        prefix on session_id or title. Raises peers.PeerSendError on no
+        match, ambiguity, or transport failure -- always the sender's
+        problem to see, never the receiver's."""
+        if self.peer_host is None:
+            raise peers_mod.PeerSendError("peer layer is not running in this session")
+        peer = peers_mod.resolve_peer(self.peer_host.list_peers(), target_prefix)
+        await peers_mod.send_message(
+            peer.socket_path,
+            from_id=self.session_id,
+            from_title=self.peer_host.title,
+            body=text,
+        )
+        return peer
 
     async def send(self, prompt: str) -> AsyncIterator[EngineEvent]:
         """One turn: send `prompt`, stream back typed events until the
@@ -307,10 +382,21 @@ class SessionEngine:
         if not self._connected:
             raise RuntimeError("SessionEngine.start() must run before send()")
 
-        self._persist_user_text(prompt)
-        yield EngineEvent("turn_started", {"prompt": prompt})
+        outbound = prompt
+        if self._pending_peer_frames:
+            # Model visibility for peer messages happens HERE and only here:
+            # pending frames (scrubbed on receive) attach to the next user
+            # turn behind the untrusted-peer marker -- never mid-turn, never
+            # as a turn of their own.
+            frames, self._pending_peer_frames = self._pending_peer_frames, []
+            outbound = peers_mod.frame_for_model(frames) + "\n\n" + prompt
 
-        await self._client.query(prompt, session_id=self.session_id)
+        self._persist_user_text(outbound)
+        yield EngineEvent("turn_started", {
+            "prompt": prompt, "peer_context": outbound is not prompt,
+        })
+
+        await self._client.query(outbound, session_id=self.session_id)
 
         pending_assistant_blocks: list[dict] = []
 
@@ -417,6 +503,13 @@ class SessionEngine:
         if self._finalized:
             return EngineEvent("session_done", {"already_finalized": True})
         self._finalized = True
+
+        if self.peer_host is not None:
+            try:
+                await self.peer_host.stop()  # presence file + socket removed
+            except Exception:
+                pass
+            self.peer_host = None
 
         indexed = 0
         try:
