@@ -150,3 +150,50 @@ CommandPalette > .command-palette--highlight {
     color: #D97757;
     text-style: bold;
 }
+
+/* History search (Ctrl+R): same dimmed-overlay treatment as the palette
+   (60% screen wash), same surface ramp for the panel. */
+HistorySearchScreen {
+    align: center middle;
+    background: #171512 60%;
+}
+
+#history-panel {
+    width: 80%;
+    max-width: 100;
+    height: auto;
+    max-height: 80%;
+    background: #221F1A;
+    border: round #3A3429;
+    padding: 1 2;
+}
+
+#history-title {
+    color: #D97757;
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+#history-input {
+    background: #221F1A;
+    color: #F2E9DD;
+    border: round #D97757;
+}
+
+#history-results {
+    background: #221F1A;
+    color: #D8CDBB;
+    border: round #3A3429;
+    max-height: 16;
+}
+
+#history-results > .option-list--option-highlighted {
+    color: #F2E9DD;
+    background: #2A251E;
+    text-style: bold;
+}
+
+#history-hint {
+    color: #D8CDBB;
+    padding-top: 1;
+}

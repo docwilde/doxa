@@ -174,6 +174,9 @@ class DoxaApp(App):
     # Ctrl+P (App.COMMAND_PALETTE_BINDING's default) opens the built-in
     # CommandPalette; DoxaCommandProvider feeds it doxa_commands() below.
     COMMANDS = App.COMMANDS | {DoxaCommandProvider}
+    # Ctrl+R: history search over LORE's session FTS (doxa/history.py) --
+    # instant BM25 over every indexed session, not a scrollback scan.
+    BINDINGS = [("ctrl+r", "history_search", "History")]
 
     def __init__(
         self,
@@ -287,6 +290,8 @@ class DoxaApp(App):
         bar.update("  ·  ".join(parts))
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "prompt-input":
+            return  # a modal overlay's input is never a prompt
         prompt = event.value.strip()
         if not prompt:
             return
@@ -400,6 +405,11 @@ class DoxaApp(App):
                 self.action_toggle_inspector,
             ),
             (
+                "History: search past sessions",
+                "BM25 search over LORE's session index (ctrl+r)",
+                self.action_history_search,
+            ),
+            (
                 "Quit: detach",
                 "Close this TUI; the session daemon keeps running "
                 "(reattach with `doxa attach`)",
@@ -471,6 +481,24 @@ class DoxaApp(App):
         self.query_one("#status-bar", Static).update("doxa · connecting…")
         self.run_worker(self._boot(), exclusive=True, group="engine")
         self.run_worker(self._peer_pump(), exclusive=True, group="peers")
+
+    def action_history_search(self) -> None:
+        """Ctrl+R: modal FTS search over LORE's session index. A chosen hit
+        inserts its text reference (full session id + timestamp + snippet)
+        into the prompt input -- material for the next turn, never an
+        auto-sent prompt."""
+        from .history import HistorySearchScreen, hit_reference
+
+        def _insert(hit: "dict | None") -> None:
+            if not hit:
+                return
+            prompt = self.query_one("#prompt-input", Input)
+            ref = hit_reference(hit)
+            prompt.value = f"{prompt.value.rstrip()} {ref}".strip()
+            prompt.cursor_position = len(prompt.value)
+            prompt.focus()
+
+        self.push_screen(HistorySearchScreen(self.cwd), callback=_insert)
 
     def action_toggle_inspector(self) -> None:
         """Belief-inspector stub: Phase 3 owns the real pane (live STEER/
