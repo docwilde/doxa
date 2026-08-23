@@ -531,14 +531,30 @@ class SessionEngine:
 
         async for message in self._client.receive_response():
             if isinstance(message, StreamEvent):
+                # Subagent trace convention (the trace tree feeds on this):
+                # everything a Task-spawned subagent emits arrives with
+                # parent_tool_use_id = the Task call's own tool_use id --
+                # the SDK stamps it on StreamEvent, AssistantMessage and
+                # UserMessage alike. (SubagentStart/SubagentStop hooks exist
+                # too, but they carry agent_id/agent_type with no direct
+                # linkage to the Task tool_use id, so the message-level
+                # parent id is the one reliable nesting key.) Events gain an
+                # optional ``parent_id`` so the TUI can nest child activity
+                # under the parent Task chip; subagent text is TRACE
+                # material and passes the scrubber before display.
+                parent = getattr(message, "parent_tool_use_id", None)
                 ev = message.event
                 if ev.get("type") == "content_block_delta":
                     delta = ev.get("delta", {})
                     text = delta.get("text") or ""
                     if text:
-                        yield EngineEvent("text_delta", {"text": text})
+                        data: dict[str, Any] = {"text": text}
+                        if parent:
+                            data = {"text": _scrub_text(text), "parent_id": parent}
+                        yield EngineEvent("text_delta", data)
 
             elif isinstance(message, AssistantMessage):
+                parent = getattr(message, "parent_tool_use_id", None)
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         pending_assistant_blocks.append(
@@ -552,14 +568,18 @@ class SessionEngine:
                         })
                         self._tool_names[block.id] = block.name
                         self._tool_started[block.id] = time.monotonic()
-                        yield EngineEvent("tool_call", {
+                        event_data = {
                             "id": block.id, "name": block.name, "input": scrubbed_input,
-                        })
+                        }
+                        if parent:  # a subagent's call: nests under the Task chip
+                            event_data["parent_id"] = parent
+                        yield EngineEvent("tool_call", event_data)
                 if pending_assistant_blocks:
                     self._persist_assistant_blocks(pending_assistant_blocks)
                     pending_assistant_blocks = []
 
             elif isinstance(message, UserMessage):
+                parent = getattr(message, "parent_tool_use_id", None)
                 content = message.content if isinstance(message.content, list) else []
                 tool_result_blocks = []
                 for block in content:
@@ -583,6 +603,9 @@ class SessionEngine:
                         )
                         if image_path:  # optional key -- see the convention
                             event_data["image_path"] = image_path
+                        if parent:  # a subagent's result: routes by id, but
+                            # the parent id keeps replay consumers honest
+                            event_data["parent_id"] = parent
                         yield EngineEvent("tool_result", event_data)
                 if tool_result_blocks:
                     self._persist_tool_results(tool_result_blocks)

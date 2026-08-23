@@ -95,6 +95,19 @@ ToolChip > CollapsibleTitle {
     padding: 1 2;
 }
 
+/* Trace tree: a subagent's own tool calls nest as further chips inside
+   their Task chip (indented one step), and its streamed text renders in
+   the dimmed .chip-subout block -- both lazily, on expand. */
+.chip-subcalls {
+    height: auto;
+    padding: 0 0 0 2;
+}
+
+.chip-subout {
+    color: #D8CDBB;
+    padding: 0 2;
+}
+
 /* Image surfaces (doxa/images.py ladder): the media area inside a tool
    chip, the /img debug block, and the text fallback every tier degrades
    to. Sizes stay auto -- textual-image widgets measure themselves. */

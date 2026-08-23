@@ -218,7 +218,15 @@ class ToolChip(Collapsible):
     for a dozen JSON pretty-prints it may never look at. A tool result that
     carries the engine's ``image_path`` convention gets an image widget (or
     its guaranteed text fallback -- doxa/images.py) mounted into the media
-    area, equally lazily: on first expand only."""
+    area, equally lazily: on first expand only.
+
+    Trace tree: a Task-spawned subagent's own activity arrives tagged with
+    ``parent_id`` = this chip's call id (the engine's subagent trace
+    convention), and nests HERE -- child tool calls mount as further
+    ToolChips into ``self.subcalls`` (foldable all the way down, each level
+    as lazily formatted as the top), and the subagent's streamed text
+    accumulates in a buffer that only renders on expand. Everything shown
+    was scrubbed engine-side before it ever reached an event."""
 
     def __init__(self, call_id: str, name: str, input_data: dict) -> None:
         self.call_id = call_id
@@ -230,9 +238,17 @@ class ToolChip(Collapsible):
         self.duration_ms: int | None = None
         self._formatted = False
         self._image_mounted = False
+        self._sub_text = ""  # subagent streamed text, rendered lazily
         self._body = Static("", id=f"chip-body-{call_id}", classes="chip-body")
+        self._subout = Static("", id=f"chip-subout-{call_id}", classes="chip-subout")
+        self.subcalls = Vertical(
+            id=f"chip-subcalls-{call_id}", classes="chip-subcalls"
+        )
         self._media = Vertical(id=f"chip-media-{call_id}", classes="chip-media")
-        super().__init__(self._body, self._media, title=self._chip_title(), collapsed=True)
+        super().__init__(
+            self._body, self._subout, self.subcalls, self._media,
+            title=self._chip_title(), collapsed=True,
+        )
 
     def _chip_title(self) -> str:
         arg_summary = _one_line(json.dumps(self.tool_input, ensure_ascii=False), 60)
@@ -258,6 +274,19 @@ class ToolChip(Collapsible):
         if not self.collapsed:
             self.format_body()
 
+    def append_subagent_text(self, chunk: str) -> None:
+        """Streamed text from the subagent behind this Task call. Buffered
+        always; RENDERED only while expanded (or on the next expand) --
+        the same lazy discipline as the body, so a subagent that narrates
+        for pages costs nothing until someone looks."""
+        self._sub_text += chunk
+        if not self.collapsed:
+            self._render_subout()
+
+    def _render_subout(self) -> None:
+        if self._sub_text:
+            self._subout.update("SUBAGENT:\n" + self._sub_text)
+
     def format_body(self) -> None:
         if not self._formatted:
             self._formatted = True
@@ -265,6 +294,7 @@ class ToolChip(Collapsible):
             if self.tool_result is not None:
                 text += "\n\nRESULT:\n" + self.tool_result
             self._body.update(text)
+        self._render_subout()
         if self.tool_image_path and not self._image_mounted:
             self._image_mounted = True
             # widget_for NEVER raises and never returns None: an unsupported
@@ -599,12 +629,26 @@ class SessionPane(TabPane):
         if ev.type == "turn_started":
             return
         if ev.type == "text_delta":
-            block.append_text(ev.data["text"])
+            parent = chips.get(ev.data.get("parent_id") or "")
+            if parent is not None:
+                # A subagent narrating: trace material, nested under its
+                # Task chip -- never mixed into the turn's own prose.
+                parent.append_subagent_text(ev.data["text"])
+            else:
+                block.append_text(ev.data["text"])
         elif ev.type == "tool_call":
             block.hide_thinking()
             chip = ToolChip(ev.data["id"], ev.data["name"], ev.data["input"])
             chips[ev.data["id"]] = chip
-            await block.tools.mount(chip)
+            parent = chips.get(ev.data.get("parent_id") or "")
+            if parent is not None:
+                # Trace tree: a subagent's call nests under the Task chip
+                # that spawned it, foldable at every level. An unknown
+                # parent (ring truncation on replay) degrades to top level
+                # -- the call is never dropped.
+                await parent.subcalls.mount(chip)
+            else:
+                await block.tools.mount(chip)
         elif ev.type == "tool_result":
             chip = chips.get(ev.data["id"])
             if chip is not None:
