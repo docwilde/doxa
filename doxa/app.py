@@ -35,6 +35,7 @@ from functools import partial
 
 from textual import on
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Collapsible, Input, LoadingIndicator, Static
 
@@ -42,6 +43,11 @@ from . import peers as peers_mod
 from .engine import EngineEvent, SessionEngine
 from .palette import DoxaCommandProvider
 from .peers import PeerSendError, age_secs
+
+
+# Ctrl+C quit semantics: the first press arms this window and then detaches;
+# a second press inside it upgrades to quit-stop (finalize NOW).
+CTRL_C_DOUBLE_SECS = 2.0
 
 
 def _one_line(text: str, limit: int = 70) -> str:
@@ -183,7 +189,16 @@ class DoxaApp(App):
     COMMANDS = App.COMMANDS | {DoxaCommandProvider}
     # Ctrl+R: history search over LORE's session FTS (doxa/history.py) --
     # instant BM25 over every indexed session, not a scrollback scan.
-    BINDINGS = [("ctrl+r", "history_search", "History")]
+    # Ctrl+C: quit. Textual 5 binds ctrl+c to a "press ctrl+q to quit"
+    # notification app-side and to "copy" on a focused Input -- with the
+    # prompt input permanently focused, Ctrl+C therefore did NOTHING
+    # quit-shaped (the dogfooding bug). priority=True beats both: one press
+    # = quit-detach (daemon keeps running), double press within
+    # CTRL_C_DOUBLE_SECS = quit-stop -- see action_ctrl_c_quit.
+    BINDINGS = [
+        ("ctrl+r", "history_search", "History"),
+        Binding("ctrl+c", "ctrl_c_quit", "Quit (detach)", show=False, priority=True),
+    ]
 
     def __init__(
         self,
@@ -211,6 +226,10 @@ class DoxaApp(App):
         # or a turn another attached client drives) -- see _peer_pump.
         self._oob_turn: TurnBlock | None = None
         self._oob_chips: dict[str, ToolChip] = {}
+        # Ctrl+C double-press window (see action_ctrl_c_quit): the armed
+        # timer that will quit-detach when it fires; a second Ctrl+C while
+        # it is armed cancels it and quit-stops instead.
+        self._ctrl_c_timer: Any = None
 
     def compose(self) -> ComposeResult:
         yield Static("", id="belief-inspector")  # hidden stub, palette-toggled
@@ -524,6 +543,25 @@ class DoxaApp(App):
             "the lore_belief_search / lore_belief_show tools."
         )
         panel.display = True
+
+    async def action_ctrl_c_quit(self) -> None:
+        """Ctrl+C (priority binding). First press: arm the double-press
+        window, then quit-DETACH when it expires -- over a daemon client the
+        session keeps running (same as ctrl+q / palette 'Quit: detach');
+        in-process, finalize runs right here, so Ctrl+C always exits
+        cleanly. Second press inside the window: quit-STOP (finalize NOW,
+        daemon included -- the palette's 'Quit: stop session')."""
+        if self._ctrl_c_timer is not None:
+            self._ctrl_c_timer.stop()
+            self._ctrl_c_timer = None
+            await self.action_quit_stop()
+            return
+        self.notify(
+            "detaching — Ctrl+C again to STOP the session (finalize now)",
+            severity="warning",
+            timeout=CTRL_C_DOUBLE_SECS,
+        )
+        self._ctrl_c_timer = self.set_timer(CTRL_C_DOUBLE_SECS, self.action_quit)
 
     async def action_quit_stop(self) -> None:
         """Palette 'Quit: stop session' -- finalize NOW. Over a daemon

@@ -142,6 +142,52 @@ async def test_tool_disabled_shows_in_status_area(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_ctrl_c_quits_via_detach_path(monkeypatch, tmp_path):
+    """One Ctrl+C = quit-detach: after the double-press window expires the
+    app finalizes the engine handle (detach over a daemon client, full
+    finalize in-process) and exits -- Textual's default 'ctrl+c does not
+    quit' behavior must never win over the priority binding."""
+    from doxa.app import CTRL_C_DOUBLE_SECS
+
+    fake = FakeEngine([])
+    monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: fake)
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+c")
+        # Window armed, not yet detached -- the second-press upgrade to
+        # quit-stop must still be possible here.
+        assert fake.finalized is False
+        assert app._ctrl_c_timer is not None
+        await pilot.pause(CTRL_C_DOUBLE_SECS + 0.5)
+    assert fake.finalized is True
+
+
+@pytest.mark.asyncio
+async def test_double_ctrl_c_stops_the_session(monkeypatch, tmp_path):
+    """Ctrl+C twice inside the window = quit-stop: the engine's stop()
+    (finalize the daemon NOW) runs instead of the detach-only finalize()."""
+    class StoppableEngine(FakeEngine):
+        def __init__(self):
+            super().__init__([])
+            self.stopped = False
+
+        async def stop(self):
+            self.stopped = True
+
+    engine = StoppableEngine()
+    monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: engine)
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+c")
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+    assert engine.stopped is True
+    assert engine.finalized is False  # stop path, never detach-finalize
+
+
+@pytest.mark.asyncio
 async def test_quit_finalizes_the_engine(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "doxa.app.SessionEngine",

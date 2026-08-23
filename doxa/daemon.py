@@ -496,6 +496,21 @@ def spawn_daemon(
     raise RuntimeError(f"doxa daemon did not become ready within {wait_secs:.0f}s")
 
 
+def install_signal_handlers(
+    daemon: SessionDaemon, loop: "asyncio.AbstractEventLoop | None" = None
+) -> None:
+    """SIGTERM and SIGINT both mean the same thing to a session daemon:
+    finalize gracefully NOW (LORE review + index via engine.finalize), then
+    exit -- an impatient user's Ctrl+C aimed at the daemon must never skip
+    the review gate any more than systemd's SIGTERM does. Split out of
+    _amain so the graceful-signal contract is testable in-process."""
+    loop = loop or asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(
+            sig, lambda: asyncio.ensure_future(daemon._shutdown("signal"))
+        )
+
+
 async def _amain(args: argparse.Namespace) -> int:
     daemon = SessionDaemon(
         cwd=args.cwd,
@@ -503,11 +518,7 @@ async def _amain(args: argparse.Namespace) -> int:
         session_id=args.session_id,
         linger_secs=args.linger,
     )
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(
-            sig, lambda: asyncio.ensure_future(daemon._shutdown("signal"))
-        )
+    install_signal_handlers(daemon)
     await daemon.serve()
     return 0
 

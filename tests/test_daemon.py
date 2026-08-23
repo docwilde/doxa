@@ -300,6 +300,30 @@ async def test_second_prompt_while_turn_runs_is_refused(tmp_path, monkeypatch):
                 await asyncio.wait_for(serve_task, 5)
 
 
+@pytest.mark.asyncio
+async def test_sigint_finalizes_gracefully(tmp_path, monkeypatch):
+    """Ctrl+C aimed at the daemon process (SIGINT) runs the same graceful
+    finalize as SIGTERM: engine finalized (SDK client exited), socket and
+    presence entry gone -- the review gate is never skipped by impatience."""
+    import os
+    import signal as signal_mod
+
+    from doxa.daemon import install_signal_handlers
+
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, created, serve_task):
+        loop = asyncio.get_running_loop()
+        install_signal_handlers(daemon, loop)
+        try:
+            os.kill(os.getpid(), signal_mod.SIGINT)
+            await asyncio.wait_for(serve_task, 5)
+        finally:
+            for sig in (signal_mod.SIGTERM, signal_mod.SIGINT):
+                loop.remove_signal_handler(sig)
+        assert created[0].exited is True  # engine finalized
+        assert not daemon.socket_path.exists()
+        assert peers.read_registry(reap=False) == []
+
+
 def test_event_ring_bounds_and_cursors():
     from doxa.engine import EngineEvent
 
