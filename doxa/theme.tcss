@@ -279,51 +279,25 @@ CommandPalette > .command-palette--highlight {
     text-style: bold;
 }
 
-/* History search (Ctrl+R): same dimmed-overlay treatment as the palette
-   (60% screen wash), same surface ramp for the panel. */
-HistorySearchScreen {
-    align: center middle;
-    background: #171512 60%;
-}
-
-#history-panel {
-    width: 80%;
-    max-width: 100;
+/* The live /search popup: same slab as the slash dropdown, directly above
+   the prompt, never focused. Taller cap than the command dropdown because
+   a result row carries a title, a date and a snippet. */
+#session-search {
     height: auto;
-    max-height: 80%;
-    background: #221F1A;
-    border: round #3A3429;
-    padding: 1 2;
-}
-
-#history-title {
-    color: #D97757;
-    text-style: bold;
-    padding-bottom: 1;
-}
-
-#history-input {
-    background: #221F1A;
-    color: #F2E9DD;
-    border: round #D97757;
-}
-
-#history-results {
+    max-height: 12;
     background: #221F1A;
     color: #D8CDBB;
     border: round #3A3429;
-    max-height: 16;
+    margin: 0 1;
 }
 
-#history-results > .option-list--option-highlighted {
-    color: #F2E9DD;
+#session-search > .option-list--option-disabled {
+    color: #8A8073;
+}
+
+#session-search > .option-list--option-highlighted {
     background: #2A251E;
     text-style: bold;
-}
-
-#history-hint {
-    color: #D8CDBB;
-    padding-top: 1;
 }
 
 /* Settings (Ctrl+, / /settings): same modal treatment again -- dimmed

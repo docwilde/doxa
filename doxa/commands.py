@@ -154,6 +154,15 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette="Clear session",
     ),
     SlashCommand(
+        name="/search",
+        group="Memory",
+        summary="Search every past session (live results as you type)",
+        usage="/search <terms>",
+        palette="Search past sessions",
+        palette_prefill=True,
+        binding="ctrl+r",
+    ),
+    SlashCommand(
         name="/compact",
         group="Maintenance",
         summary="Ask the CLI to compact the transcript (runs LORE's review first)",

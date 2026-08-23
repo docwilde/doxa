@@ -68,6 +68,7 @@ from . import identity as identity_mod
 from . import images as images_mod
 from . import peers as peers_mod
 from .engine import EngineEvent, SessionEngine
+from .history import SEARCH_PREFIX, SessionSearch, hit_reference
 from .identity import tier_short  # noqa: F401 -- re-exported: the status
 # line's plan label lives in doxa.identity now (precise local tier first,
 # SDK subscriptionType second); app.py keeps the name callers already use.
@@ -711,19 +712,40 @@ class SlashComplete(OptionList):
 
 
 class PromptInput(Input):
-    """The prompt line, plus the slash-autocomplete key protocol.
+    """The prompt line, plus the key protocols of the two popups above it.
 
-    While the dropdown is open, up/down/tab/enter/escape belong to IT.
+    While a popup is open, up/down/tab/enter/escape belong to IT.
     ``on_key`` on the focused widget runs BEFORE that widget's own bindings,
     so consuming the key here (stop + prevent_default) is what keeps Enter
     from submitting a half-typed command and Tab from moving focus out of
-    the prompt. With the dropdown closed, every one of those keys behaves
+    the prompt. With both popups closed, every one of those keys behaves
     exactly as it always did -- the protocol is additive, never a
-    reinterpretation of the prompt line."""
+    reinterpretation of the prompt line.
 
-    def __init__(self, dropdown: SlashComplete, **kwargs: Any) -> None:
+    The search popup is checked FIRST because it is the one that can be
+    open while a command name is fully typed (``/search ...``); the two are
+    mutually exclusive in practice, and this settles the order anyway."""
+
+    def __init__(
+        self, dropdown: SlashComplete, search: SessionSearch, **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self.dropdown = dropdown
+        self.search = search
+
+    def take_hit(self) -> bool:
+        """Enter inside the search popup: the chosen session's reference
+        REPLACES the ``/search …`` line that found it. The query was the
+        prompt; the answer takes its place, ready to send (or to type
+        around) -- the same insertion the Ctrl+R overlay used to do, minus
+        the overlay."""
+        hit = self.search.chosen()
+        if hit is None:
+            return False
+        self.search.dismiss_for_this_line()
+        self.value = hit_reference(hit)
+        self.cursor_position = len(self.value)
+        return True
 
     def complete(self) -> bool:
         """Insert the highlighted command. Commands that take arguments
@@ -738,6 +760,24 @@ class PromptInput(Input):
         return True
 
     def on_key(self, event: events.Key) -> None:
+        if self.search.is_open:
+            if event.key == "escape":
+                # Close, but KEEP what was typed: the query is prompt text
+                # like any other, and deleting it would be a second,
+                # unasked-for action on one keystroke.
+                self.search.dismiss_for_this_line()
+            elif event.key == "down":
+                self.search.move(1)
+            elif event.key == "up":
+                self.search.move(-1)
+            elif event.key == "enter":
+                if not self.take_hit():
+                    return  # no hits: Enter submits, and /search answers
+            else:
+                return
+            event.stop()
+            event.prevent_default()
+            return
         if not self.dropdown.is_open:
             return
         if event.key == "escape":
@@ -803,13 +843,19 @@ class SessionPane(TabPane):
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="block-list")
         yield Static("doxa · connecting…", id="status-bar")
-        # The dropdown sits directly ABOVE the prompt (last two children):
-        # in a terminal the block list simply gives up the rows while it is
-        # open, which reads as an overlay without the layer bookkeeping a
-        # floating panel would need over a TabbedContent.
+        # Both popups sit directly ABOVE the prompt (the last children):
+        # in a terminal the block list simply gives up the rows while one
+        # is open, which reads as an overlay without the layer bookkeeping
+        # a floating panel would need over a TabbedContent. They are never
+        # open at once -- the slash dropdown closes at the first space,
+        # which is exactly the keystroke that opens the search popup.
+        search = SessionSearch(self.cwd)
+        yield search
         dropdown = SlashComplete()
         yield dropdown
-        yield PromptInput(dropdown, placeholder="Ask DOXA…", id="prompt-input")
+        yield PromptInput(
+            dropdown, search, placeholder="Ask DOXA…", id="prompt-input"
+        )
 
     async def on_mount(self) -> None:
         self.engine = self._engine_factory()
@@ -846,6 +892,10 @@ class SessionPane(TabPane):
         # GitLine's constructor runs one git subprocess -- off the loop.
         git_cwd = str(getattr(self.engine, "cwd", None) or self.cwd)
         self._git = await asyncio.to_thread(GitLine, git_cwd)
+        # /search scopes "this project first" by cwd, and attach can land
+        # this pane in another project: the engine's cwd wins here too.
+        with contextlib.suppress(Exception):
+            self.query_one("#session-search", SessionSearch).cwd = git_cwd
         self._refresh_usage_chip()
         self._engine_ready.set()
         self._refresh_status()
@@ -1039,11 +1089,14 @@ class SessionPane(TabPane):
 
     @on(Input.Changed, "#prompt-input")
     def _on_prompt_changed(self, event: Input.Changed) -> None:
-        """The autocomplete's only trigger: what the prompt currently says.
-        Cheap by construction -- a registry scan of a handful of rows, no
-        I/O, no timer (this app does not poll)."""
+        """The two popups' only trigger: what the prompt currently says.
+        Cheap by construction -- a registry scan of a handful of rows for
+        the dropdown, and for the search popup a debounce timer rather than
+        a query (this app does not poll, and it does not hit SQLite on a
+        keystroke either)."""
         event.stop()
         self.query_one("#slash-complete", SlashComplete).sync(event.value)
+        self.query_one("#session-search", SessionSearch).sync(event.value)
 
     @on(OptionList.OptionSelected, "#slash-complete")
     def _on_slash_selected(self, event: OptionList.OptionSelected) -> None:
@@ -1054,11 +1107,21 @@ class SessionPane(TabPane):
         prompt.complete()
         prompt.focus()
 
+    @on(OptionList.OptionSelected, "#session-search")
+    def _on_search_selected(self, event: OptionList.OptionSelected) -> None:
+        """Clicking a result takes it, same as Enter would."""
+        event.stop()
+        prompt = self.query_one("#prompt-input", PromptInput)
+        prompt.search.highlighted = event.option_index
+        prompt.take_hit()
+        prompt.focus()
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "prompt-input":
             return  # a modal overlay's input is never a prompt
         event.stop()  # this pane's prompt is nobody else's business
         self.query_one("#slash-complete", SlashComplete).close()
+        self.query_one("#session-search", SessionSearch).close()
         prompt = event.value.strip()
         if not prompt:
             return
@@ -1091,6 +1154,7 @@ class SessionPane(TabPane):
             "/effort": self._cmd_effort,
             "/usage": self._cmd_usage,
             "/clear": self._cmd_clear,
+            "/search": self._cmd_search,
             "/help": self._cmd_help,
         }
 
@@ -1253,6 +1317,36 @@ class SessionPane(TabPane):
         self.run_worker(
             self.switch_engine(factory), exclusive=True, group="switch"
         )
+
+    async def _cmd_search(self, args: str) -> None:
+        """/search as a SUBMITTED command -- the fallback path.
+
+        The command's real surface is the live popup, which opens the
+        moment the separating space is typed and answers as you go. This
+        runs when someone submits the line anyway (no hits highlighted, or
+        Enter on an empty result): it prints the same hits as a block, so
+        the command is never a no-op."""
+        from . import history as history_mod
+
+        term = args.strip()
+        if not term:
+            await self._system(
+                "search: type `/search ` and keep typing — results appear "
+                "above the prompt as you type (↑/↓ to pick, enter to insert "
+                "the reference, esc to close)"
+            )
+            return
+        cwd = str(getattr(self.engine, "cwd", None) or self.cwd)
+        hits = await asyncio.to_thread(history_mod.search_sessions, term, cwd)
+        if not hits:
+            await self._system(f"search: no matches for {term!r}")
+            return
+        lines = [
+            f"{str(h.get('title') or h.get('session_id', '?'))[:30]:<30} "
+            f"{str(h.get('ts', ''))[:16]}  {str(h.get('snippet', ''))}"
+            for h in hits
+        ]
+        await self._system(f"search: {len(hits)} hit(s)\n" + "\n".join(lines))
 
     async def _cmd_help(self, args: str) -> None:
         await self._system(help_text())
@@ -1439,7 +1533,9 @@ class DoxaApp(App):
     # Ctrl+P (App.COMMAND_PALETTE_BINDING's default) opens the built-in
     # CommandPalette; DoxaCommandProvider feeds it doxa_commands() below.
     COMMANDS = App.COMMANDS | {DoxaCommandProvider}
-    # Ctrl+R: history search over LORE's session FTS (doxa/history.py) --
+    # Ctrl+R: prefills "/search " -- the live session-search popup
+    # (doxa/history.py) is the one search surface; the key is a shortcut to
+    # it, not a second door.
     # instant BM25 over every indexed session, not a scrollback scan.
     # Ctrl+T/Ctrl+W: tab lifecycle (new same-repo session / close-detach).
     # Ctrl+C: quit. Textual 5 binds ctrl+c to a "press ctrl+q to quit"
@@ -1450,7 +1546,7 @@ class DoxaApp(App):
     # CTRL_C_DOUBLE_SECS = quit-stop ALL -- see action_ctrl_c_quit.
     BINDINGS = [
         Binding("ctrl+p", "command_palette", "Command palette", show=False),
-        Binding("ctrl+r", "history_search", "History search (LORE FTS)"),
+        Binding("ctrl+r", "history_search", "Search past sessions (/search)"),
         Binding("ctrl+comma", "settings", "Settings", show=False, priority=True),
         Binding("ctrl+t", "new_tab", "New tab", show=False, priority=True),
         Binding("ctrl+w", "close_tab", "Close tab (detach)", show=False, priority=True),
@@ -1819,25 +1915,12 @@ class DoxaApp(App):
         prompt.focus()
 
     def action_history_search(self) -> None:
-        """Ctrl+R: modal FTS search over LORE's session index. A chosen hit
-        inserts its text reference (full session id + timestamp + snippet)
-        into the ACTIVE tab's prompt input -- material for the next turn,
-        never an auto-sent prompt."""
-        from .history import HistorySearchScreen, hit_reference
-
-        def _insert(hit: "dict | None") -> None:
-            if not hit:
-                return
-            pane = self.active_pane
-            if pane is None:
-                return
-            prompt = pane.query_one("#prompt-input", Input)
-            ref = hit_reference(hit)
-            prompt.value = f"{prompt.value.rstrip()} {ref}".strip()
-            prompt.cursor_position = len(prompt.value)
-            prompt.focus()
-
-        self.push_screen(HistorySearchScreen(self.cwd), callback=_insert)
+        """Ctrl+R: prefill ``/search `` in the active tab's prompt, which
+        IS the search surface (doxa/history.py's popup opens on that exact
+        prefix). The modal overlay this used to push is gone: one key, one
+        slash command and one palette entry now land on the same place, so
+        there is nothing left for two search paths to disagree about."""
+        self._cmd_prefill(SEARCH_PREFIX)
 
     def action_settings(self) -> None:
         """Ctrl+, / /settings / the palette's Settings entry -- one modal,

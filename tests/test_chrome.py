@@ -326,10 +326,15 @@ async def test_no_armed_timers_with_every_overlay_open(monkeypatch, tmp_path):
             await pilot.pause(0.02)
         await pilot.pause()
 
-        await pilot.press("ctrl+r")
-        from doxa.history import HistorySearchScreen
+        await pilot.press("ctrl+r")  # the /search popup, not a modal now
+        from doxa.history import SessionSearch
 
-        assert isinstance(app.screen, HistorySearchScreen)
+        popup = app.query_one("#session-search", SessionSearch)
+        for _ in range(200):
+            if popup.is_open:
+                break
+            await pilot.pause(0.02)
+        assert popup.is_open is True
         assert _armed(app) == []
         await pilot.press("escape")
         await pilot.pause()
