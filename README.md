@@ -150,25 +150,34 @@ keeps the Phase 1 shape (engine inside the TUI, quit finalizes at once).
 
 ## Run it
 
-Phase 1 slice 2 status, honestly: single pane only (no split panes, no
-palette, no FTS search yet — those are Phase 2). One session, one prompt
+Phase 2 status, honestly: single pane still (split panes and the review
+pane moved to Phase 3), but the session is now a detachable daemon, `ctrl+p`
+opens the command palette (new session, attach picker over live sessions,
+peers, belief-inspector stub, quit-detach vs quit-stop), and `ctrl+r` opens
+history search — instant BM25 over LORE's index of every past session, a
+chosen hit inserting its session reference into the prompt. One prompt
 input at the bottom, a scrolling list of foldable turn blocks above it, a
-status bar (model · session cost · context estimate · active belief count).
-Billed through your Claude subscription — authenticates via the local
-`claude` CLI's own OAuth session, same as `PHASE0_FINDINGS.md` verified; no
-`ANTHROPIC_API_KEY` needed or read.
+status bar (model · session cost · context estimate · active belief count ·
+`⌁` reattach handle). Billed through your Claude subscription —
+authenticates via the local `claude` CLI's own OAuth session, same as
+`PHASE0_FINDINGS.md` verified; no `ANTHROPIC_API_KEY` needed or read.
 
 ```sh
 uv sync
-uv run doxa
+uv run doxa          # spawn-or-attach this repo's session
+uv run doxa new      # force a fresh session
+uv run doxa attach   # reattach (add a session-id/title prefix if several)
+uv run doxa stop     # finalize now: LORE review + index, daemon exits
 ```
 
-`uv run doxa` launches the TUI in the current directory (used as the
-session's cwd, and to resolve the LORE project scope the same way the LORE
-plugin does — the git repo root when you're inside one). Type a prompt,
-press enter; `ctrl+q` quits and runs the host-driven session-end review +
-index before exiting (see `PHASE0_FINDINGS.md` redesign item 1 — there is no
-SessionEnd hook to drive this any other way).
+`uv run doxa` resolves the current directory as the session's cwd (and the
+LORE project scope the same way the LORE plugin does — the git repo root
+when you're inside one). Type a prompt, press enter; `ctrl+q` **detaches**
+— the daemon keeps the session alive and finalizes (the host-driven
+session-end review + index, `PHASE0_FINDINGS.md` redesign item 1) only
+after `--linger` seconds with no client attached, or immediately on
+`doxa stop`. `doxa --in-process` keeps the Phase 1 single-process shape,
+where `ctrl+q` finalizes on the spot.
 
 `lore_core` is picked up from the LORE Claude Code plugin's marketplace
 checkout via a `sys.path` shim (`doxa/_lore_bootstrap.py`), documented there
