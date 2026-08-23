@@ -169,6 +169,26 @@ PeerMessageBlock {
     padding: 0 2;
 }
 
+/* Slash autocomplete (doxa/app.py's SlashComplete): the dropdown above the
+   prompt input. Same treatment as the palette's result list -- block
+   surface, ramp-top border, Claude-orange on the highlighted row -- so the
+   two command surfaces look like the one registry they read. Height is
+   auto and capped: a dozen commands must never eat the transcript. */
+#slash-complete {
+    height: auto;
+    max-height: 10;
+    background: #221F1A;
+    color: #D8CDBB;
+    border: round #3A3429;
+    margin: 0 1;
+}
+
+#slash-complete > .option-list--option-highlighted {
+    color: #D97757;
+    background: #2A251E;
+    text-style: bold;
+}
+
 #prompt-input {
     background: #221F1A;
     color: #F2E9DD;

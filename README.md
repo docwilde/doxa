@@ -62,6 +62,10 @@ agent | logs | belief-inspector — plus a read-only Profile pane showing the
 derived interaction model live (transparency as the safeguard). Ctrl+P
 command palette; Ctrl+R history search backed by LORE's own FTS index, so
 search is instant BM25 over every session ever, not a scrollback scan.
+Typing `/` at the start of the prompt opens a suggestion dropdown above the
+input — the same command registry the palette reads, scored by the same
+fuzzy matcher (one registry, two surfaces): arrows move, Tab/Enter
+complete, Esc dismisses, deleting the `/` puts it away.
 
 **Trace transparency (DeepSeek-harness grade, redaction kept).** Every tool
 call is inspectable: exact arguments, full results, timing; subagent calls

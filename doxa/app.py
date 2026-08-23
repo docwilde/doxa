@@ -46,18 +46,21 @@ from typing import Any, Callable
 
 from functools import partial
 
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
+from textual.fuzzy import Matcher
 from textual.widgets import (
     Collapsible,
     Input,
     LoadingIndicator,
+    OptionList,
     Static,
     TabbedContent,
     TabPane,
 )
+from textual.widgets.option_list import Option
 
 from . import auth as auth_mod
 from . import commands as commands_mod
@@ -344,6 +347,146 @@ class TurnBlock(Collapsible):
         self.title = self._render_title(suffix)
 
 
+class SlashComplete(OptionList):
+    """The slash-command dropdown above the prompt input.
+
+    Textual has no built-in input autocomplete, so this is an OptionList
+    overlay driven entirely by the prompt's key protocol (see
+    :class:`PromptInput`) -- it never takes focus, because a dropdown that
+    steals the caret from the line you are typing is worse than no
+    dropdown.
+
+    It reads :data:`doxa.commands.REGISTRY` and scores with the SAME
+    ``textual.fuzzy.Matcher`` the Ctrl+P palette uses: one registry, one
+    matcher, two surfaces. "/" alone lists everything (registration order,
+    stable-sorted under equal scores); "/pe" narrows to /peers.
+
+    Dismissal latches: Esc, or completing an entry, closes the dropdown and
+    keeps it closed for the rest of this "/"-prefixed line. Deleting the
+    leading "/" clears the latch, which is what makes the next "/" open a
+    fresh dropdown."""
+
+    can_focus = False
+
+    def __init__(self) -> None:
+        super().__init__(id="slash-complete")
+        self.display = False
+        self.matches: list[commands_mod.SlashCommand] = []
+        self._dismissed = False
+
+    @property
+    def is_open(self) -> bool:
+        return bool(self.display)
+
+    def sync(self, value: str) -> None:
+        """React to the prompt's current text: open, filter, or close."""
+        if not value.startswith("/"):
+            self._dismissed = False  # the leading "/" is gone: latch clears
+            self.close()
+            return
+        if self._dismissed:
+            return
+        if " " in value:
+            # Past the command token (a space means arguments are being
+            # typed): the dropdown has nothing left to say about this line.
+            self.close()
+            return
+        matcher = Matcher(value)
+        scored = [
+            (matcher.match(cmd.name), index, cmd)
+            for index, cmd in enumerate(commands_mod.REGISTRY)
+        ]
+        # Score first, registration order as the tie-break -- so "/" lists
+        # the registry in the order it declares itself.
+        scored = sorted(
+            (item for item in scored if item[0] > 0),
+            key=lambda item: (-item[0], item[1]),
+        )
+        self.matches = [cmd for _score, _index, cmd in scored]
+        if not self.matches:
+            self.close()
+            return
+        self.clear_options()
+        for cmd in self.matches:
+            self.add_option(Option(f"{cmd.call_form():<28} {cmd.summary}"))
+        self.highlighted = 0
+        self.display = True
+
+    def close(self) -> None:
+        if self.display:
+            self.display = False
+        self.matches = []
+
+    def dismiss_for_this_line(self) -> None:
+        """Esc / a completed entry: stay shut until the "/" line is gone."""
+        self._dismissed = True
+        self.close()
+
+    def move(self, delta: int) -> None:
+        if not self.matches:
+            return
+        current = self.highlighted or 0
+        self.highlighted = (current + delta) % len(self.matches)
+
+    def chosen(self) -> "commands_mod.SlashCommand | None":
+        if not self.matches:
+            return None
+        index = self.highlighted if self.highlighted is not None else 0
+        return self.matches[index] if 0 <= index < len(self.matches) else None
+
+
+class PromptInput(Input):
+    """The prompt line, plus the slash-autocomplete key protocol.
+
+    While the dropdown is open, up/down/tab/enter/escape belong to IT.
+    ``on_key`` on the focused widget runs BEFORE that widget's own bindings,
+    so consuming the key here (stop + prevent_default) is what keeps Enter
+    from submitting a half-typed command and Tab from moving focus out of
+    the prompt. With the dropdown closed, every one of those keys behaves
+    exactly as it always did -- the protocol is additive, never a
+    reinterpretation of the prompt line."""
+
+    def __init__(self, dropdown: SlashComplete, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.dropdown = dropdown
+
+    def complete(self) -> bool:
+        """Insert the highlighted command. Commands that take arguments
+        complete with a trailing space (the caret lands where the argument
+        goes); commands that don't are left ready to submit."""
+        command = self.dropdown.chosen()
+        if command is None:
+            return False
+        self.dropdown.dismiss_for_this_line()
+        self.value = command.name + (" " if command.usage else "")
+        self.cursor_position = len(self.value)
+        return True
+
+    def on_key(self, event: events.Key) -> None:
+        if not self.dropdown.is_open:
+            return
+        if event.key == "escape":
+            self.dropdown.dismiss_for_this_line()
+        elif event.key == "down":
+            self.dropdown.move(1)
+        elif event.key == "up":
+            self.dropdown.move(-1)
+        elif event.key in ("tab", "enter"):
+            command = self.dropdown.chosen()
+            if event.key == "enter" and command is not None and self.value == command.name:
+                # Already typed in full: there is nothing to complete, so
+                # Enter means SEND. (Otherwise typing a whole command would
+                # cost two Enters -- one to "complete" it into itself.)
+                self.dropdown.dismiss_for_this_line()
+                return  # not consumed: Input's own submit binding runs
+            if not self.complete():
+                return
+        else:
+            return
+        event.stop()
+        event.prevent_default()
+
+
 class SessionPane(TabPane):
     """One session's whole surface: engine handle, block list, status bar,
     prompt input, and the boot/pump workers that drive them.
@@ -381,7 +524,13 @@ class SessionPane(TabPane):
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="block-list")
         yield Static("doxa · connecting…", id="status-bar")
-        yield Input(placeholder="Ask DOXA…", id="prompt-input")
+        # The dropdown sits directly ABOVE the prompt (last two children):
+        # in a terminal the block list simply gives up the rows while it is
+        # open, which reads as an overlay without the layer bookkeeping a
+        # floating panel would need over a TabbedContent.
+        dropdown = SlashComplete()
+        yield dropdown
+        yield PromptInput(dropdown, placeholder="Ask DOXA…", id="prompt-input")
 
     async def on_mount(self) -> None:
         self.engine = self._engine_factory()
@@ -588,10 +737,28 @@ class SessionPane(TabPane):
         bar = self.query_one("#status-bar", Static)
         bar.update("  ·  ".join(parts))
 
+    @on(Input.Changed, "#prompt-input")
+    def _on_prompt_changed(self, event: Input.Changed) -> None:
+        """The autocomplete's only trigger: what the prompt currently says.
+        Cheap by construction -- a registry scan of a handful of rows, no
+        I/O, no timer (this app does not poll)."""
+        event.stop()
+        self.query_one("#slash-complete", SlashComplete).sync(event.value)
+
+    @on(OptionList.OptionSelected, "#slash-complete")
+    def _on_slash_selected(self, event: OptionList.OptionSelected) -> None:
+        """Clicking an entry completes it, same as Tab/Enter would."""
+        event.stop()
+        prompt = self.query_one("#prompt-input", PromptInput)
+        prompt.dropdown.highlighted = event.option_index
+        prompt.complete()
+        prompt.focus()
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "prompt-input":
             return  # a modal overlay's input is never a prompt
         event.stop()  # this pane's prompt is nobody else's business
+        self.query_one("#slash-complete", SlashComplete).close()
         prompt = event.value.strip()
         if not prompt:
             return
