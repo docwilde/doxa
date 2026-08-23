@@ -91,6 +91,37 @@ def _run(cmd: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProce
     )
 
 
+def check_for_update(root: "Path | None" = None, run=_run) -> bool:
+    """True when the checkout DOXA is running from has commits upstream it
+    has not pulled yet -- the boot-time check behind the "DOXA update
+    available" notification, deliberately read-only (a ``git fetch``
+    updates remote-tracking refs, nothing local).
+
+    Advisory only: EVERY failure -- not a checkout, no network, no
+    upstream configured for the current branch, git missing -- reads as
+    "nothing to report" rather than raising, because this runs from a
+    background worker at boot and must never be the thing that makes
+    startup noisy or slow over a flaky connection."""
+    root = root or version_mod.source_root()
+    if root is None or not (Path(root) / ".git").exists():
+        return False
+    root = Path(root)
+    try:
+        fetched = run(["git", "fetch", "--quiet"], root, GIT_TIMEOUT_SECS)
+        if fetched.returncode != 0:
+            return False
+        counted = run(
+            ["git", "rev-list", "--count", "HEAD..@{upstream}"],
+            root, GIT_TIMEOUT_SECS,
+        )
+        if counted.returncode != 0:
+            return False
+        return int(counted.stdout.strip() or "0") > 0
+    except Exception:  # noqa: BLE001 -- offline, no git binary, a timeout:
+        # all the same "nothing to report" to a background boot check.
+        return False
+
+
 def update(root: "Path | None" = None, run=_run) -> UpdateReport:
     """Fast-forward the checkout DOXA is running from and report on it."""
     root = root or version_mod.source_root()

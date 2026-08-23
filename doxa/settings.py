@@ -14,8 +14,9 @@ Three rules the panel exists to honor:
    value the environment keeps shadowing -- the silent-no-op trap. The row
    is dimmed, marked ``(set by env)``, and offers no field at all.
 
-Rows are grouped into category tabs (Session / Memory / Appearance / Paths
-/ About) because one flat list stopped being readable at ten rows. Category
+Rows are grouped into category tabs (Session / Memory / Appearance /
+Notifications / Paths / About) because one flat list stopped being readable
+at ten rows. Category
 switching is ``shift+left`` / ``shift+right``, deliberately NOT the app's
 own tab keys -- a modal must never move the window's tabs underneath
 itself. Unsaved edits SURVIVE a category switch (every pane stays mounted);
@@ -42,7 +43,9 @@ from textual.widgets import Input, Static, TabbedContent, TabPane
 
 from . import config as config_mod
 
-CATEGORIES: tuple[str, ...] = ("Session", "Memory", "Appearance", "Paths", "About")
+CATEGORIES: tuple[str, ...] = (
+    "Session", "Memory", "Appearance", "Notifications", "Paths", "About",
+)
 
 
 def field_id(key: str) -> str:

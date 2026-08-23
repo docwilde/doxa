@@ -175,6 +175,43 @@ SETTINGS: tuple[Setting, ...] = (
              "visibly, rather than crashing the clock.",
     ),
     Setting(
+        key="notify", env="DOXA_NOTIFY", label="notify",
+        category="Notifications", kind="choice",
+        choices=("auto", "always", "off"), default="auto",
+        help="When to send desktop notifications: auto (only while the "
+             "terminal window is unfocused), always, or off (doxa.notify)",
+    ),
+    Setting(
+        key="notify_turn_done", env="DOXA_NOTIFY_TURN_DONE",
+        label="notify: turn done", category="Notifications",
+        kind="bool_on", default="1",
+        help="Notify when a turn finishes (doxa.notify.notify_turn_done)",
+    ),
+    Setting(
+        key="notify_update", env="DOXA_NOTIFY_UPDATE",
+        label="notify: update available", category="Notifications",
+        kind="bool_on", default="1",
+        help="Notify when /update has something to pull "
+             "(doxa.notify.notify_update_available)",
+    ),
+    Setting(
+        key="notify_lore", env="DOXA_NOTIFY_LORE",
+        label="notify: lore review", category="Notifications",
+        kind="bool_on", default="1",
+        help="Notify when LORE stages memory proposals; off also silences "
+             "lore_core's own in-process notification (LORE_NOTIFY) -- see "
+             "doxa.notify.sync_lore_notify_env",
+    ),
+    Setting(
+        key="notify_needs_input", env="DOXA_NOTIFY_NEEDS_INPUT",
+        label="notify: needs input", category="Notifications",
+        kind="bool_on", default="1",
+        help="Notify when a session is waiting on you",
+        note="Reserved: the trigger (can_use_tool / AskUserQuestion "
+             "plumbing) is phase 2 -- this row exists but nothing fires it "
+             "yet.",
+    ),
+    Setting(
         key="", env="DOXA_HOME", label="doxa home", category="Paths",
         help="Durable DOXA state: this config, the window layout",
         read_only=True,
