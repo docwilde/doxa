@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from doxa.app import DoxaApp, SystemBlock, ToolChip, TurnBlock
+from doxa.app import ClockChip, DoxaApp, SystemBlock, ToolChip, TurnBlock
 from doxa.engine import EngineEvent
 from tests.fakes import FakeEngine
 
@@ -101,9 +101,13 @@ async def test_no_live_animation_timers_after_turns(monkeypatch, tmp_path):
                     break
                 await pilot.pause(0.02)
         assert len(list(app.query(TurnBlock))) == 3
+        # ClockChip (item M) is the ONE permitted standing timer -- see
+        # tests/test_chrome.py's _armed docstring for why excluding it is
+        # not a widening of this guard. Everything else must still be bare.
         armed = [
             node for node in app.query("*")
-            if getattr(node, "_auto_refresh_timer", None) is not None
+            if not isinstance(node, ClockChip)
+            and getattr(node, "_auto_refresh_timer", None) is not None
         ]
         assert armed == []
         for block in app.query(TurnBlock):

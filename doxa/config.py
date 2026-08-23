@@ -47,7 +47,10 @@ class Setting:
     """One line: what it does, and what reads it."""
 
     kind: str = "str"
-    """str | number | bool | choice -- drives validation, not widgets."""
+    """str | number | bool | bool_on | choice | strftime -- drives
+    validation, not widgets. ``bool_on`` is ``bool`` for a knob that
+    defaults ON: see the note on :func:`_coerce` for why it needs a
+    different STORAGE representation, not just a different default."""
 
     choices: tuple[str, ...] = ()
     default: str = ""
@@ -62,8 +65,10 @@ class Setting:
     def placeholder(self) -> str:
         if self.choices:
             return " | ".join(c for c in self.choices if c)
-        if self.kind == "bool":
-            return "1 = on, empty = off"
+        if self.kind in ("bool", "bool_on"):
+            return "1 = on, empty = off" if self.kind == "bool" else "1 = on, 0 = off (empty = on)"
+        if self.kind == "strftime":
+            return "e.g. %a %H:%M (empty = built-in format)"
         return self.default or "(default)"
 
 
@@ -123,6 +128,51 @@ SETTINGS: tuple[Setting, ...] = (
         choices=("", "kgp", "sixel", "halfblock", "text"),
         help="Force a rung of the terminal-image ladder; empty = probe "
              "(doxa.images.detect_mode)",
+    ),
+    Setting(
+        key="clock_show", env="DOXA_CLOCK_SHOW", label="clock: show",
+        category="Appearance", kind="bool_on", default="1",
+        help="Show the fixed-width clock at the right edge of the tab "
+             "bar (doxa.clock.ClockConfig)",
+        note="The one bool setting in this app that defaults ON -- an "
+             "empty field here still means the clock shows; type 0 to "
+             "turn it off.",
+    ),
+    Setting(
+        key="clock_date", env="DOXA_CLOCK_DATE", label="clock: show date",
+        category="Appearance", kind="bool",
+        help="Prefix the clock with %Y-%m-%d (doxa.clock.builtin_format)",
+    ),
+    Setting(
+        key="clock_hour", env="DOXA_CLOCK_HOUR", label="clock: hour format",
+        category="Appearance", kind="choice", choices=("", "12", "24"),
+        default="24",
+        help="12- or 24-hour clock (doxa.clock.builtin_format)",
+    ),
+    Setting(
+        key="clock_seconds", env="DOXA_CLOCK_SECONDS",
+        label="clock: show seconds", category="Appearance", kind="bool",
+        help="Show :SS; also switches the clock's one timer from minute- "
+             "to second-aligned (doxa.clock.seconds_until_boundary)",
+    ),
+    Setting(
+        key="clock_tz", env="DOXA_CLOCK_TZ", label="clock: timezone",
+        category="Appearance",
+        help="IANA zone name, e.g. Europe/Berlin; empty = system local "
+             "(doxa.clock.resolve_tz)",
+        note="An unresolvable name falls back to system local time, "
+             "visibly (the clock's tooltip says so) rather than silently.",
+    ),
+    Setting(
+        key="clock_format", env="DOXA_CLOCK_FORMAT",
+        label="clock: custom format", category="Appearance",
+        kind="strftime",
+        help="strftime format overriding the toggles above "
+             "(doxa.clock.render)",
+        note="Validated on save (a value strftime rejects is not stored); "
+             "a value that becomes invalid later (a hand-edited file, an "
+             "env var) falls back to the built-in format at render time, "
+             "visibly, rather than crashing the clock.",
     ),
     Setting(
         key="", env="DOXA_HOME", label="doxa home", category="Paths",
@@ -355,8 +405,33 @@ def _coerce(setting: Setting, value: str) -> "Any | None":
         except ValueError:
             return None
         return int(number) if number.is_integer() else number
-    if setting.kind == "bool":
-        return value.lower() not in ("0", "false", "no", "off")
+    if setting.kind in ("bool", "bool_on"):
+        truthy = value.lower() not in ("0", "false", "no", "off")
+        if setting.kind == "bool_on":
+            # Stored as the STRING "0"/"1", never a Python bool. raw()
+            # collapses an actual bool False to "" (so a bool row's
+            # "unset" and "explicitly off" read the same) -- harmless for
+            # every OTHER bool knob, whose default is off already, but it
+            # would make an explicit "off" on a DEFAULT-ON knob (clock_show
+            # is the one so far) indistinguishable from never having
+            # touched it. A string survives raw() as itself.
+            return "1" if truthy else "0"
+        return truthy
+    if setting.kind == "strftime":
+        # Reject at save time what the render path would otherwise have
+        # to fall back from silently -- doxa.clock.render carries the
+        # same try/except as a second line of defense, for a value that
+        # becomes invalid AFTER being saved (a hand-edited file, an env
+        # var on a different platform's libc).
+        import datetime as _dt
+
+        try:
+            text = _dt.datetime.now().strftime(value)
+        except (ValueError, TypeError):
+            return None
+        if not text.strip():
+            return None
+        return value
     if setting.choices and value not in setting.choices:
         return None
     return value

@@ -64,6 +64,7 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 from . import auth as auth_mod
+from . import clock as clock_mod
 from . import commands as commands_mod
 from . import config as config_mod
 from . import identity as identity_mod
@@ -700,6 +701,66 @@ class BeliefInspector(Vertical):
         """Kept so every caller that treated this as a Static still reads
         its content the same way."""
         return self.text
+
+
+class ClockChip(Static):
+    """The upper-right clock (item M): fixed width, dock:right on its own
+    layer (see ``#doxa-clock`` in theme.tcss for why that -- not a flow
+    sibling -- is what keeps the tab bar from ever being displaced).
+
+    ONE timer for its whole life, and only while enabled: it rides
+    Textual's own ``auto_refresh`` -- the exact ``_auto_refresh_timer``
+    slot the no-idle-timer guard tests already watch (see
+    ``tests/test_chrome.py``'s ``_armed`` and the matching helper in
+    ``tests/test_app.py``) -- but re-armed to a freshly computed,
+    BOUNDARY-ALIGNED delay on every tick (:func:`doxa.clock.
+    seconds_until_boundary`) rather than left at a fixed period. That is
+    what makes it minute-aligned when seconds are hidden instead of a 1Hz
+    timer silently redrawing an identical string sixty times for one
+    visible change, and second-aligned when they are shown. Disabled
+    config never sets ``auto_refresh`` at all: no config, no timer, full
+    stop -- the same contract :meth:`reconfigure` restores on every
+    settings save, so toggling the clock off leaves nothing armed."""
+
+    def __init__(self) -> None:
+        super().__init__("", id="doxa-clock")
+        self.cfg = clock_mod.ClockConfig.load()
+
+    def on_mount(self) -> None:
+        self.reconfigure()
+
+    def reconfigure(self) -> None:
+        """Re-read settings and restart clean. Called at mount, and again
+        after the settings modal saves -- the settings screen's `_saved`
+        callback owns that second call, the same way it already refreshes
+        every pane's status bar."""
+        self.auto_refresh = None  # stop whatever the OLD config armed
+        self.cfg = clock_mod.ClockConfig.load()
+        self.display = self.cfg.show
+        if self.cfg.show:
+            self._tick()
+
+    def _tick(self) -> None:
+        now = clock_mod.now_utc()
+        text, warning = clock_mod.render(now, self.cfg)
+        self.update(text)
+        self.tooltip = warning  # the "visible-error fallback": a bad
+        # custom format or an unresolvable timezone still renders (the
+        # built-in format, system-local time) -- the tooltip is where the
+        # degradation is disclosed rather than swallowed.
+        self.auto_refresh = clock_mod.seconds_until_boundary(
+            now, self.cfg.show_seconds
+        )
+
+    def automatic_refresh(self) -> None:
+        """Textual calls this when ``_auto_refresh_timer`` fires. The
+        default implementation just repaints; this one repaints AND
+        re-arms the next boundary -- that re-arm, from inside the very
+        callback the old timer is finishing, is what makes this ONE
+        self-rescheduling timer rather than a periodic one this class
+        would otherwise need to stop and restart from outside."""
+        if self.cfg.show:
+            self._tick()
 
 
 class SlashComplete(OptionList):
@@ -2198,6 +2259,7 @@ class DoxaApp(App):
 
     def compose(self) -> ComposeResult:
         yield BeliefInspector()  # hidden stub, palette-toggled
+        yield ClockChip()  # upper-right, own layer -- see theme.tcss
         with TabbedContent(id="session-tabs"):
             yield self._make_pane(self._engine_factory)
 
@@ -2609,6 +2671,8 @@ class DoxaApp(App):
             config_mod.invalidate()
             for pane in self.panes():
                 pane._refresh_status()
+            with contextlib.suppress(Exception):
+                self.query_one(ClockChip).reconfigure()
 
         engine = self.engine
         self.push_screen(

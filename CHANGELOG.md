@@ -1,8 +1,35 @@
 # Changelog
 
 Newest first. Versions are annotated git tags on the commit that shipped
-them (`v0.1.0` … `v0.7.0`); the ranges below are derived from that history,
+them (`v0.1.0` … `v0.8.0`); the ranges below are derived from that history,
 not written from memory.
+
+## 0.8.0 — 2026-08-24
+
+- **Clock** (item M) — a fixed-width chip at the right edge of the tab
+  bar (`doxa/clock.py`, `doxa.app.ClockChip`). Configurable: show/hide
+  (defaults ON — the one bool setting in this app that does), a date
+  prefix, 12/24-hour, seconds, an IANA timezone, or a full custom
+  `strftime` that overrides the toggles; a bad timezone or a format
+  `strftime` rejects (or reduces to nothing, which glibc does more often
+  than it raises) falls back to the built-in format and system-local
+  time VISIBLY, as the chip's tooltip, never silently. Laid out on its
+  own compositing layer (`layers: base overlay` in `theme.tcss`) rather
+  than as a flow sibling of the tab bar, which is what makes it never
+  reserve width from — or displace — a single tab: docking a widget
+  inline with the tabs would have reserved its column for the app's full
+  height, not just the two rows it actually occupies (measured before
+  settling on the layer approach). Exactly one timer for its whole life,
+  and only while enabled: it rides Textual's own `auto_refresh` slot,
+  re-armed to a freshly computed BOUNDARY-ALIGNED delay on every tick
+  (minute-aligned with seconds hidden, second-aligned when shown) rather
+  than a fixed-Hz repaint of a string that usually hasn't changed. The
+  no-idle-timer guard tests (`tests/test_chrome.py`, `tests/test_app.py`)
+  now name this one exception explicitly and still fail on any other.
+  Measured idle CPU over an 8s window (`scripts/clock_cpu_bench.py`):
+  off 0.75%, on with seconds hidden 0.75% (indistinguishable from off —
+  the minute-aligned timer essentially never fires in an 8s sample),
+  on with seconds shown 1.12%. Gallery scene: `assets/shots/clock.png`.
 
 ## 0.7.0 — 2026-08-24
 

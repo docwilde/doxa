@@ -182,9 +182,23 @@ and `/logout [provider]` suspend the TUI and exec the provider's own
 interactive auth CLI; DOXA never handles or stores a credential itself.
 
 **No animated chrome.** The in-flight turn marker is a static `⋯ thinking`,
-not a spinner, and there is exactly one timer anywhere in the app —
-Textual's own 2 Hz caret blink on the focused prompt. A test asserts no
-other timer is ever armed, with every overlay open.
+not a spinner, and there are exactly two timers anywhere in the app —
+Textual's own 2 Hz caret blink on the focused prompt, and the clock below,
+which only exists at all while it's switched on. A test asserts no other
+timer is ever armed, with every overlay open.
+
+**Clock.** Fixed-width, right edge of the tab bar, on its own compositing
+layer so it paints over that corner without ever displacing a tab or
+narrowing a pane. Configurable: 12/24-hour, a date prefix, seconds, an
+IANA timezone, or a full custom `strftime` (validated on save; an
+unresolvable timezone or a format that stops producing text falls back to
+the built-in format and says so, as the chip's tooltip, rather than
+either crashing or going silently wrong). Its one timer is boundary-
+aligned — it wakes at the next minute edge with seconds hidden, the next
+second edge with them shown — never a fixed-Hz repaint of a string that
+usually hasn't changed:
+
+<p align="center"><img src="assets/shots/clock.png" width="780" alt="The upper-right clock reading '2026-08-24 14:32:07' at the far right of the tab bar, past two open tabs, never overlapping either label"></p>
 
 **Status bar**, left to right: model · `repo ⎇ branch @sha` · subscription
 headroom (`s:9% w:48%`, session/week) or a `$` cost estimate on API-key
@@ -210,6 +224,12 @@ survives being opened by an older one.
 | `consult_floor` | `DOXA_CONSULT_FLOOR` | 1.0 | act-time belief-consult threshold; 0 disables it |
 | `nerd_font` | `DOXA_NERD_FONT` | off | use a Nerd Font glyph for the branch chip |
 | `image_mode` | `DOXA_IMAGE_MODE` | probe | force a rung of the image ladder (`kgp`/`sixel`/`halfblock`/`text`) |
+| `clock_show` | `DOXA_CLOCK_SHOW` | **on** | show the upper-right clock (the one bool here that defaults on — `0` turns it off) |
+| `clock_date` | `DOXA_CLOCK_DATE` | off | prefix the clock with `%Y-%m-%d` |
+| `clock_hour` | `DOXA_CLOCK_HOUR` | `24` | `12` or `24`-hour |
+| `clock_seconds` | `DOXA_CLOCK_SECONDS` | off | show `:SS`; also re-aligns the clock's timer to the second instead of the minute |
+| `clock_tz` | `DOXA_CLOCK_TZ` | system | IANA zone name, e.g. `Europe/Berlin`; unresolvable falls back to system local, visibly |
+| `clock_format` | `DOXA_CLOCK_FORMAT` | (none) | custom `strftime`, overrides the toggles above; validated on save |
 | *lore store* | `LORE_ROOT` | `~/.claude/lore` | `lore_core`'s own store path; `lore_root` in the file is `/setup`'s sticky choice, not the modal's to edit |
 
 The settings modal shows every row's **effective** value next to where it
@@ -252,8 +272,8 @@ checkout isn't at the default `~/.claude/plugins/marketplaces/lore`.
 DOXA is a working daily driver for its author, not a finished product.
 Shipped so far: the daemon/detach model, tabs, the command palette,
 `/search`, the trace tree, the image ladder, peer discovery, the settings
-modal described above, the `curl | sh` installer, `/setup`, and
-`/doctor` / `doxa doctor` — see [CHANGELOG.md](CHANGELOG.md) for the
+modal described above, the `curl | sh` installer, `/setup`,
+`/doctor` / `doxa doctor`, and the clock — see [CHANGELOG.md](CHANGELOG.md) for the
 version-by-version history. Not yet built: session-history drill-in past
 `/search`'s result list, customizable keybindings, and a graphical
 context-window map. Interfaces (config keys, socket protocol, command

@@ -288,6 +288,44 @@ async def _drive_settings(app: DoxaApp, pilot) -> None:
 
 
 # --------------------------------------------------------------------- #
+# Scene: clock -- the upper-right clock (item M), date + seconds on,
+# never displacing the tab bar it shares a row with.
+# --------------------------------------------------------------------- #
+
+# A fixed instant, not "now" -- a screenshot with a live clock in it would
+# be a different PNG every time scripts/screenshot.py ran, which defeats
+# the point of a committed gallery. doxa.clock.now_utc is the one seam
+# built for exactly this (see its docstring).
+_CLOCK_FROZEN_AT = datetime(2026, 8, 24, 14, 32, 7, tzinfo=timezone.utc)
+
+
+async def _drive_clock(app: DoxaApp, pilot) -> None:
+    from unittest import mock as mock_mod
+
+    from doxa import config as config_mod
+
+    await pilot.pause()
+    await app.action_new_tab()
+    await pilot.pause()
+    env = {
+        "DOXA_CLOCK_SHOW": "1", "DOXA_CLOCK_DATE": "1",
+        "DOXA_CLOCK_SECONDS": "1", "DOXA_CLOCK_TZ": "UTC",
+    }
+    with mock_mod.patch.dict(os.environ, env), \
+         mock_mod.patch("doxa.clock.now_utc", return_value=_CLOCK_FROZEN_AT):
+        config_mod.invalidate()
+        from doxa.app import ClockChip
+
+        app.query_one(ClockChip).reconfigure()
+        await pilot.pause()
+    # reconfigure() re-read the (now-restored) real environment on exit
+    # from the `with` above only if something ELSE calls it -- freeze the
+    # rendered text in place for the screenshot rather than re-arming
+    # against real wall-clock config.
+    config_mod.invalidate()
+
+
+# --------------------------------------------------------------------- #
 # Scene: sessions -- /sessions output, attached + detached rows, peers chip.
 # --------------------------------------------------------------------- #
 
@@ -332,6 +370,9 @@ SCENES: list[Scene] = [
           new_session_factory=_sibling_tab_factory()),
     Scene("settings", _drive_settings, size=(104, 32),
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5")),
+    Scene("clock", _drive_clock, size=(120, 24),
+          engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
+          new_session_factory=lambda: FakeEngine([], model="claude-sonnet-4-5")),
     Scene("sessions", _drive_sessions, size=(172, 24),
           engine_factory=_hero_engine),
 ]

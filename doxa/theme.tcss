@@ -21,6 +21,11 @@
 Screen {
     background: #171512;
     color: #F2E9DD;
+    /* Two layers, not one: "base" is everything that already existed
+       (tabs, panes, docked panels), "overlay" is paint-only chrome that
+       must never take space away from it. The clock chip (item M) is the
+       one thing on "overlay" today -- see #doxa-clock below. */
+    layers: base overlay;
 }
 
 /* Session tabs (Phase 3): the TabbedContent hosts one SessionPane per
@@ -53,6 +58,31 @@ SessionPane {
 #session-tabs Underline > .underline--bar {
     color: #D97757;
     background: #3A3429;
+}
+
+/* The upper-right clock (item M). `layer: overlay` + `dock: right` +
+   `width: auto` is deliberate as a set, not any one of them alone:
+   docking a widget on the SAME layer as the tab bar reserves its column
+   for the full screen height (measured -- a docked sidebar-style
+   reservation, not just its own row), which would narrow every pane's
+   body permanently for two rows' worth of clock. On its own layer, dock
+   only affects arrangement WITHIN that layer, so the tab bar and every
+   pane keep their full width and are never displaced or resized; the
+   clock simply paints on top of whatever is at the top-right corner
+   (height 2, matching Tabs' own default height) -- covering a tab label
+   that reaches that far is the accepted trade, never reflowing one.
+   `width: auto` keeps its footprint (and therefore its mouse hit box) to
+   exactly its own text, so clicking a tab anywhere the clock isn't
+   painted still reaches the tab underneath. */
+#doxa-clock {
+    layer: overlay;
+    dock: right;
+    width: auto;
+    height: 2;
+    content-align: center middle;
+    color: #D8CDBB;
+    background: #171512;
+    padding: 0 1;
 }
 
 /* Ctrl+Q with a turn running: the one close that asks. Same modal wash and

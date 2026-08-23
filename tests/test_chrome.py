@@ -14,6 +14,7 @@ import pytest
 
 from doxa.app import (
     BeliefInspector,
+    ClockChip,
     DoxaApp,
     ThinkingMarker,
     TurnBlock,
@@ -273,9 +274,18 @@ async def test_no_armed_timers_while_a_turn_is_in_flight(monkeypatch, tmp_path):
 
 
 def _armed(app) -> list:
+    """Every node with a live ``_auto_refresh_timer`` -- except
+    :class:`ClockChip` (item M), the ONE permitted standing timer in this
+    app's chrome. It is boundary-aligned and self-rescheduling (see its
+    docstring in doxa/app.py), never a fixed-Hz repaint, and disabled
+    config leaves it with no timer at all (test_clock.py covers that off
+    switch directly) -- so excluding it here is excluding a timer that
+    was deliberately built to be the one exception, not widening what
+    this guard tolerates. Anything else armed still fails the test."""
     return [
         node for node in app.query("*")
-        if getattr(node, "_auto_refresh_timer", None) is not None
+        if not isinstance(node, ClockChip)
+        and getattr(node, "_auto_refresh_timer", None) is not None
     ]
 
 
@@ -369,3 +379,128 @@ def test_the_theme_declares_no_transitions():
         if stripped.startswith("/*") or stripped.startswith("*"):
             continue
         assert not stripped.startswith("transition:"), line
+
+
+# -- (e) the clock (item M) -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_clock_shows_by_default_and_is_the_only_armed_timer(monkeypatch, tmp_path):
+    app, _ = await _app(monkeypatch, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        chip = app.query_one(ClockChip)
+        assert chip.display is True
+        assert chip.renderable  # something is actually painted, not ""
+        assert chip._auto_refresh_timer is not None
+        # It is the ONLY thing armed -- _armed() already excludes it by
+        # type, so an empty result here means nothing ELSE is running.
+        assert _armed(app) == []
+
+
+@pytest.mark.asyncio
+async def test_clock_disabled_arms_nothing_at_all(monkeypatch, tmp_path):
+    monkeypatch.setenv("DOXA_CLOCK_SHOW", "0")
+    app, _ = await _app(monkeypatch, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        chip = app.query_one(ClockChip)
+        assert chip.display is False
+        assert chip._auto_refresh_timer is None
+        # Unlike every other assertion in this file, this one does NOT
+        # exclude ClockChip -- with the clock off, _auto_refresh_timer
+        # must be bare on EVERY node, the chip included.
+        armed = [
+            node for node in app.query("*")
+            if getattr(node, "_auto_refresh_timer", None) is not None
+        ]
+        assert armed == []
+
+
+@pytest.mark.asyncio
+async def test_clock_seconds_shown_still_arms_exactly_one_timer(monkeypatch, tmp_path):
+    """Turning seconds on changes the boundary the timer re-aligns to
+    (second- instead of minute-), never the COUNT of timers."""
+    monkeypatch.setenv("DOXA_CLOCK_SECONDS", "1")
+    app, _ = await _app(monkeypatch, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        chip = app.query_one(ClockChip)
+        assert chip.cfg.show_seconds is True
+        assert chip._auto_refresh_timer is not None
+        assert chip.auto_refresh <= 1.0 + 1e-6  # second-aligned, not minute
+        assert _armed(app) == []
+
+
+@pytest.mark.asyncio
+async def test_clock_never_reserves_width_from_the_tab_bar(monkeypatch, tmp_path):
+    """The load-bearing layout claim: docking the clock on its OWN layer
+    (theme.tcss) means the tab bar and the pane body keep their full
+    screen width -- the clock paints over the corner, it does not shrink
+    anything to make room for itself."""
+    from textual.widgets import TabbedContent
+
+    app, _ = await _app(monkeypatch, tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        tabs = app.query_one("#session-tabs", TabbedContent)
+        chip = app.query_one(ClockChip)
+        assert tabs.region.width == 80
+        assert chip.region.width < 80  # the chip itself IS fixed-width
+        assert chip.region.right == tabs.region.right  # flush to the edge
+
+
+@pytest.mark.asyncio
+async def test_clicking_the_tab_bar_away_from_the_clock_still_hits_a_tab(monkeypatch, tmp_path):
+    """The other half of the layout claim: the clock's hit box is only
+    its own painted text, so a click on the tab bar anywhere else still
+    reaches the tab underneath -- the overlay layer does not swallow
+    input for space it isn't actually drawing into."""
+    app, _ = await _app(monkeypatch, tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        widget, _offset = app.get_widget_at(2, 0)  # far left of the tab bar
+        assert not isinstance(widget, ClockChip)
+
+
+@pytest.mark.asyncio
+async def test_settings_save_reconfigures_the_clock_live(monkeypatch, tmp_path):
+    from doxa import config as config_mod
+    from doxa.settings import SettingsScreen, field_id
+
+    monkeypatch.setenv("DOXA_HOME", str(tmp_path / "doxa-home"))
+    app, _ = await _app(monkeypatch, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.query_one(ClockChip).display is True
+        await pilot.press("ctrl+comma")
+        for _ in range(100):
+            if isinstance(app.screen, SettingsScreen):
+                break
+            await pilot.pause(0.02)
+        screen = app.screen
+        assert isinstance(screen, SettingsScreen)
+        screen.query_one(f"#{field_id('clock_show')}").value = "0"
+        await pilot.press("ctrl+s")  # writes the file, modal stays open
+        await pilot.pause()
+        await pilot.press("escape")  # dismiss(True) -- what fires _saved
+        for _ in range(100):
+            if not isinstance(app.screen, SettingsScreen):
+                break
+            await pilot.pause(0.02)
+        chip = app.query_one(ClockChip)
+        assert chip.display is False
+        assert chip._auto_refresh_timer is None
+        config_mod.invalidate()
+
+
+@pytest.mark.asyncio
+async def test_clock_tooltip_carries_the_visible_error_for_a_bad_timezone(monkeypatch, tmp_path):
+    monkeypatch.setenv("DOXA_CLOCK_TZ", "Not/A_Real_Zone")
+    app, _ = await _app(monkeypatch, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        chip = app.query_one(ClockChip)
+        assert chip.tooltip is not None
+        assert "Not/A_Real_Zone" in chip.tooltip
+        assert chip.renderable  # still rendered -- the fallback, not a blank chip
