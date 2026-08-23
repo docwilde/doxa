@@ -28,6 +28,18 @@ Path resolution mirrors the CLI's own (``CLAUDE_CONFIG_DIR`` overrides the
 home directory, an existing ``.config.json`` in that directory wins over
 ``.claude.json``), so pointing DOXA at a throwaway config dir -- what the
 test suite does -- points it at the same file the CLI would use there.
+
+THE SPLIT (item AA, see ``doxa.cli_isolation``'s module docstring for the
+full defect/fix writeup): this module reads ``CLAUDE_CONFIG_DIR`` out of
+THIS process's own environment, which ``doxa.cli_isolation`` never touches
+-- so identity/usage display keeps reporting the account and plan the
+OPERATOR is authenticated as (the same CLI they'd run by hand), while the
+engine's SPAWNED ``claude`` subprocess gets a completely separate,
+DOXA-owned config directory via ``ClaudeAgentOptions.env`` (a dict handed
+only to that one child process). Two consumers of "the claude CLI's
+config", two different directories, on purpose: this module's reads stay
+read-only either way, but they are reading a DIFFERENT directory than the
+one the engine's own CLI process sees.
 """
 
 from __future__ import annotations

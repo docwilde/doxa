@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import Any
 
 from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see module docstring
+from . import cli_isolation as cli_isolation_mod
 from . import config as config_mod
 from . import gate as gate_mod
 from . import images as images_mod
@@ -586,14 +587,40 @@ class SessionEngine:
                 ),
             },
             include_partial_messages=True,
+            # Containment (item AA, doxa.cli_isolation): the spawned CLI
+            # gets its OWN config directory, never DOXA's own process
+            # environment -- see that module's docstring for the measured
+            # defect this closes (a bare, unisolated spawn loaded 5 user
+            # plugins, 16 plugin hooks and 28 plugin commands on this
+            # machine, LORE's own SessionStart/UserPromptSubmit hooks among
+            # them, injecting a SECOND memory snapshot on top of the one
+            # above). LORE_SKIP=1 rides the same dict as belt-and-braces.
+            env=cli_isolation_mod.spawn_env(),
         )
 
     async def start(self) -> EngineEvent:
         """Connect the client and return the session_started event. Snapshot
         injection happens here, inside _build_options() -- see module
-        docstring."""
+        docstring.
+
+        One retry, forced-resync-then-reconnect, on the FIRST connect
+        failure only (doxa.cli_isolation.sync_credentials(force=True)):
+        the isolated CLI's credential copy is opportunistically refreshed
+        on every start already (spawn_env, inside _build_options), but a
+        token that rotated between that copy and this connect attempt is
+        exactly the "mysterious 401" item AA calls out -- one forced
+        resync and a fresh client object closes that window without
+        turning every OTHER kind of connect failure into a retry loop (no
+        resync happened -> nothing to gain from trying again -> re-raise
+        the original failure)."""
         self._client = self._client_factory(self._build_options())
-        await self._client.__aenter__()
+        try:
+            await self._client.__aenter__()
+        except Exception:
+            if not cli_isolation_mod.sync_credentials(force=True):
+                raise
+            self._client = self._client_factory(self._build_options())
+            await self._client.__aenter__()
         self._connected = True
         # Connect-time identity: the CLI's initialize result (available in
         # streaming mode; None otherwise). Strictly additive -- a client

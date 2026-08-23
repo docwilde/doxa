@@ -1,8 +1,64 @@
 # Changelog
 
 Newest first. Versions are annotated git tags on the commit that shipped
-them (`v0.1.0` … `v0.9.0`); the ranges below are derived from that history,
+them (`v0.1.0` … `v0.10.0`); the ranges below are derived from that history,
 not written from memory.
+
+## 0.10.0 — 2026-08-24
+
+- **Engine CLI isolation** (item AA) — the `claude` process the engine
+  spawns now gets its OWN config directory (`doxa.cli_isolation`,
+  `~/.doxa/claude-cli`), never DOXA's own process environment. THE DEFECT
+  (operator-reported, then measured): with no `ClaudeAgentOptions.env` set,
+  the spawned CLI inherited the SDK's default env verbatim and read the
+  operator's real `~/.claude` — plugins and all. Measured live on a real
+  machine: a bare, otherwise-default spawn loaded 5 plugins, registered 16
+  plugin hooks and 28 plugin commands (LORE's own `SessionStart`/
+  `UserPromptSubmit`/`PreCompact` hooks among them), and started an
+  external MCP server — ON TOP OF, not instead of, DOXA's own in-process
+  LORE snapshot. That is what produced the reported symptom: a session
+  citing the LORE *plugin*'s own pending count and `/lore:pending`, a
+  command that has nothing to do with DOXA.
+  - `CLAUDE_CONFIG_DIR` now points every spawned engine CLI (and
+    `doxa.naming`'s headless namer call) at a directory DOXA owns
+    outright, with an explicit empty `settings.json` (no `hooks`, no
+    `enabledPlugins`, no `plugins`) and `LORE_SKIP=1` as belt-and-braces
+    (the same self-suppression `lore_core.context`/`lore_core.deriver`
+    already honor for `doxa.naming`'s call). Measured: a fresh
+    `CLAUDE_CONFIG_DIR` alone drops plugin/hook/command loading to zero —
+    no extra CLI flag needed. `--bare`/`CLAUDE_CODE_SIMPLE=1` was measured
+    and rejected: it also forces API-key-only auth, silently logging out
+    every subscription session, which item AA explicitly forbids shipping.
+  - **Auth**: a fresh `CLAUDE_CONFIG_DIR` is a logged-out CLI. Credentials
+    are copied (never symlinked) from the operator's real
+    `~/.claude/.credentials.json` into the isolated directory, resynced at
+    every session start and once more, forced, on the first connect
+    failure — closing the "token rotated, isolated copy is stale" window
+    without turning every OTHER connect failure into a retry loop.
+  - **Learned skills carry through, deliberately**: `~/.claude/skills` is
+    symlinked into the isolated directory (measured: the CLI resolves
+    `<CLAUDE_CONFIG_DIR>/skills` for its own "skill dir commands" and
+    follows a symlink there exactly like a real directory) — skills are
+    human-approved artifacts, not the foreign-hook channel this item
+    closes, and cutting them with the rest of the plugin channel would
+    have been a silent regression.
+  - **Two config directories, two consumers, unchanged for one of them**:
+    `doxa.identity` keeps reading the REAL `~/.claude` directly (this
+    process's own environment, never touched by `doxa.cli_isolation`) for
+    the identity block and the subscription-usage chip — that stays the
+    operator's own account, exactly as before.
+  - `doxa.doctor` gains an `engine CLI isolation` check: directory
+    provisioned, `settings.json` carries none of `hooks`/`enabledPlugins`/
+    `plugins`, N learned skills visible, spawned session authenticates.
+  - Measured, real first-turn usage on this repo, one trivial prompt,
+    same account (prompt-cache noise applies — this is not a controlled
+    A/B, see item T for a byte-priced comparison): unisolated
+    input 10 + cache_read 21043 + cache_creation 7778 vs isolated
+    input 10 + cache_read 18145 + cache_creation 9506 — isolated total
+    ~4% lower, dominated by fewer available-command/skill descriptions in
+    the CLI's own system context. The defect this item fixes is the
+    foreign hook/plugin/command channel itself (structurally: 5 plugins /
+    16 hooks / 28 commands to zero), not primarily token count.
 
 ## 0.9.0 — 2026-08-24
 

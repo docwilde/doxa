@@ -107,6 +107,62 @@ def test_claude_cli_check_passes_when_authenticated(monkeypatch):
     assert check.fix == ""
 
 
+# -- engine CLI isolation (item AA) --------------------------------------
+
+
+def test_cli_isolation_check_fails_when_not_provisioned():
+    check = doctor_mod._cli_isolation_check()
+    assert check.status == doctor_mod.STATUS_FAIL
+    assert "not provisioned" in check.detail
+    assert "/setup" in check.fix
+
+
+def test_cli_isolation_check_fails_when_settings_carry_plugins_or_hooks():
+    from doxa import cli_isolation as iso_mod
+
+    path = iso_mod.ensure_cli_config_dir()
+    (path / iso_mod.SETTINGS_NAME).write_text(
+        json.dumps({"enabledPlugins": {"lore": True}})
+    )
+    check = doctor_mod._cli_isolation_check()
+    assert check.status == doctor_mod.STATUS_FAIL
+    assert "enabledPlugins" in check.detail
+
+
+def test_cli_isolation_check_reports_auth_and_skills(monkeypatch):
+    from doxa import cli_isolation as iso_mod
+
+    path = iso_mod.ensure_cli_config_dir()
+    skills = iso_mod.isolated_skills_path()
+    (skills / "a-skill").mkdir(parents=True)
+    (skills / "a-skill" / "SKILL.md").write_text("body")
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda cmd, **k: subprocess.CompletedProcess(
+            cmd, 0, stdout='{"loggedIn": true}',
+        ),
+    )
+    check = doctor_mod._cli_isolation_check()
+    assert check.status == doctor_mod.STATUS_PASS
+    assert "1 learned skill" in check.detail
+    assert "authenticates" in check.detail
+    assert check.fix == ""
+
+
+def test_cli_isolation_check_fails_when_spawned_session_not_authenticated(monkeypatch):
+    from doxa import cli_isolation as iso_mod
+
+    iso_mod.ensure_cli_config_dir()
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, stdout='{"loggedIn": false}'),
+    )
+    check = doctor_mod._cli_isolation_check()
+    assert check.status == doctor_mod.STATUS_FAIL
+    assert "NOT authenticated" in check.detail
+    assert check.fix
+
+
 # -- LORE store ----------------------------------------------------------
 
 
@@ -231,8 +287,8 @@ def test_mcp_check_reports_nothing_configured():
 def test_run_checks_returns_one_per_check():
     checks = doctor_mod.run_checks()
     assert [c.id for c in checks] == [
-        "python", "doxa-version", "claude-cli", "lore-store", "config",
-        "registry", "image-protocol", "keyboard-enhancement", "mcp",
+        "python", "doxa-version", "claude-cli", "cli-isolation", "lore-store",
+        "config", "registry", "image-protocol", "keyboard-enhancement", "mcp",
     ]
 
 

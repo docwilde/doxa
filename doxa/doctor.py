@@ -25,6 +25,8 @@ measure is worse than one that says so.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import subprocess
 import sys
@@ -33,6 +35,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from . import auth as auth_mod
+from . import cli_isolation as cli_isolation_mod
 from . import config as config_mod
 from . import peers as peers_mod
 from . import version as version_mod
@@ -137,6 +140,73 @@ def _claude_cli_check() -> Check:
     )
 
 
+_ISOLATION_FIX = (
+    "restart doxa (re-provisions ~/.doxa/claude-cli and re-syncs "
+    "credentials), or `claude auth login` if the SOURCE credentials "
+    "themselves are the problem"
+)
+
+
+def _cli_isolation_check() -> Check:
+    """Item AA: is the engine's spawned CLI actually isolated from the
+    operator's own ``~/.claude`` (plugins, hooks, foreign slash commands),
+    still carrying learned skills, and still able to authenticate. See
+    doxa.cli_isolation's module docstring for the measured defect this
+    reports on."""
+    path = cli_isolation_mod.cli_config_dir()
+    settings_path = path / cli_isolation_mod.SETTINGS_NAME
+    if not path.is_dir() or not settings_path.exists():
+        return Check(
+            id="cli-isolation", title="engine CLI isolation", status=STATUS_FAIL,
+            detail=f"{path} not provisioned yet",
+            fix="restart doxa, or run /setup, to provision it",
+        )
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return Check(
+            id="cli-isolation", title="engine CLI isolation", status=STATUS_FAIL,
+            detail=f"{settings_path} malformed: {exc}",
+            fix=f"delete {settings_path} and restart doxa to reprovision it",
+        )
+    leaked = [k for k in ("hooks", "enabledPlugins", "plugins") if data.get(k)]
+    if leaked:
+        return Check(
+            id="cli-isolation", title="engine CLI isolation", status=STATUS_FAIL,
+            detail=f"{settings_path} carries {', '.join(leaked)} -- should be empty",
+            fix=f"delete {settings_path} and restart doxa to reprovision it",
+        )
+    skills_path = cli_isolation_mod.isolated_skills_path()
+    if skills_path.is_symlink() or skills_path.is_dir():
+        try:
+            n_skills = sum(
+                1 for p in skills_path.iterdir()
+                if p.is_dir() and (p / "SKILL.md").exists()
+            )
+            skills_detail = f"{n_skills} learned skill(s) visible"
+        except OSError:
+            skills_detail = "skills path present but unreadable"
+    else:
+        skills_detail = "no skills carried (no ~/.claude/skills to link)"
+    authed = False
+    try:
+        probe = subprocess.run(
+            ["claude", "auth", "status"], capture_output=True, text=True,
+            timeout=CLAUDE_PROBE_TIMEOUT_SECS,
+            env={**os.environ, "CLAUDE_CONFIG_DIR": str(path)},
+        )
+        authed = probe.returncode == 0 and '"loggedIn": true' in (probe.stdout or "")
+    except (OSError, subprocess.SubprocessError):
+        authed = False
+    status = STATUS_PASS if authed else STATUS_FAIL
+    auth_detail = "spawned session authenticates" if authed else "spawned session NOT authenticated"
+    return Check(
+        id="cli-isolation", title="engine CLI isolation", status=status,
+        detail=f"{path} -- no hooks/plugins, {skills_detail}, {auth_detail}",
+        fix="" if authed else _ISOLATION_FIX,
+    )
+
+
 def _lore_store_check() -> Check:
     try:
         import lore_core
@@ -234,6 +304,7 @@ CHECKS: "tuple[Callable[[], Check], ...]" = (
     _python_check,
     _doxa_version_check,
     _claude_cli_check,
+    _cli_isolation_check,
     _lore_store_check,
     _config_check,
     _registry_check,

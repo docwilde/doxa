@@ -6,6 +6,9 @@ applied before anything touches disk, and finalize() running exactly once.
 
 from __future__ import annotations
 
+import os
+from typing import Any
+
 import pytest
 
 from claude_agent_sdk import (
@@ -18,6 +21,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
+from doxa import cli_isolation as cli_isolation_mod
 from doxa.engine import SessionEngine
 from tests.fakes import factory_with_script
 
@@ -106,6 +110,123 @@ async def test_start_injects_lore_snapshot_into_system_prompt(tmp_path):
     assert "LORE SNAPSHOT" in system_prompt["append"]
     assert "hooks" in vars(created[0].options) or created[0].options.hooks
     assert set(created[0].options.hooks) == {"UserPromptSubmit", "PreCompact", "PreToolUse"}
+
+
+@pytest.mark.asyncio
+async def test_start_isolates_the_spawned_cli_from_the_real_claude_config(tmp_path):
+    """Item AA: every spawned CLI gets its OWN CLAUDE_CONFIG_DIR (never
+    DOXA's own process env / the operator's real ~/.claude, where the LORE
+    plugin and every other installed plugin live) via
+    ClaudeAgentOptions.env, plus LORE_SKIP=1 belt-and-braces."""
+    factory, created = factory_with_script([])
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+
+    await engine.start()
+
+    env = created[0].options.env
+    assert env["CLAUDE_CONFIG_DIR"] == str(cli_isolation_mod.cli_config_dir())
+    assert env["CLAUDE_CONFIG_DIR"] != os.environ.get("CLAUDE_CONFIG_DIR")
+    assert env["LORE_SKIP"] == "1"
+    # The mechanism actually provisioned the directory, not just named it.
+    settings_path = cli_isolation_mod.cli_config_dir() / cli_isolation_mod.SETTINGS_NAME
+    assert settings_path.exists()
+    await engine.finalize()
+
+
+@pytest.mark.asyncio
+async def test_start_retries_once_with_forced_credential_resync_on_connect_failure(tmp_path, monkeypatch):
+    """The one retry item AA calls for: a connect failure gets ONE forced
+    credential resync + a fresh client, not a retry loop -- and if there is
+    nothing to resync (no source credentials at all), the original failure
+    is what the caller sees."""
+    attempts: list[Any] = []
+
+    class _FlakyOnceClient:
+        def __init__(self, options: Any) -> None:
+            self.options = options
+            attempts.append(self)
+
+        async def __aenter__(self):
+            if len(attempts) == 1:
+                raise RuntimeError("simulated auth failure")
+            return self
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+        async def get_server_info(self):
+            return None
+
+    monkeypatch.setattr(
+        cli_isolation_mod, "sync_credentials",
+        lambda force=False: True if force else False,
+    )
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=_FlakyOnceClient)
+
+    event = await engine.start()
+
+    assert event.type == "session_started"
+    assert len(attempts) == 2  # the failed attempt, then one retry
+
+
+@pytest.mark.asyncio
+async def test_start_reraises_when_nothing_to_resync(tmp_path, monkeypatch):
+    class _AlwaysFailsClient:
+        def __init__(self, options: Any) -> None:
+            pass
+
+        async def __aenter__(self):
+            raise RuntimeError("simulated auth failure")
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+    monkeypatch.setattr(cli_isolation_mod, "sync_credentials", lambda force=False: False)
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=_AlwaysFailsClient)
+
+    with pytest.raises(RuntimeError, match="simulated auth failure"):
+        await engine.start()
+
+
+@pytest.mark.asyncio
+async def test_lore_snapshot_is_scoped_per_project_not_shared_across_tabs(tmp_path):
+    """Item AA.3: a tab in one repo and a tab in another must get DIFFERENT
+    project memory -- exercising the real lore_core (conftest.py already
+    points LORE_ROOT/LORE_PROJECTS_DIR at a throwaway dir), not a fake, so
+    this proves the actual cwd -> project_slug -> MEMORY.md path
+    doxa.engine._build_options rides via lore_context.build_context(self.cwd)."""
+    import lore_core
+    from lore_core.config import project_slug
+
+    project_a = tmp_path / "repo-a"
+    project_b = tmp_path / "repo-b"
+    project_a.mkdir()
+    project_b.mkdir()
+
+    def _write_memory(cwd, text):
+        slug = project_slug(str(cwd))
+        memory_file = lore_core.ROOT / "projects" / slug / "MEMORY.md"
+        memory_file.parent.mkdir(parents=True, exist_ok=True)
+        memory_file.write_text(f"- {text}\n", encoding="utf-8")
+
+    _write_memory(project_a, "REPO-A-ONLY-MARKER")
+    _write_memory(project_b, "REPO-B-ONLY-MARKER")
+
+    factory_a, created_a = factory_with_script([])
+    engine_a = SessionEngine(cwd=str(project_a), client_factory=factory_a)
+    await engine_a.start()
+
+    factory_b, created_b = factory_with_script([])
+    engine_b = SessionEngine(cwd=str(project_b), client_factory=factory_b)
+    await engine_b.start()
+
+    snapshot_a = created_a[0].options.system_prompt["append"]
+    snapshot_b = created_b[0].options.system_prompt["append"]
+
+    assert "REPO-A-ONLY-MARKER" in snapshot_a
+    assert "REPO-B-ONLY-MARKER" not in snapshot_a
+    assert "REPO-B-ONLY-MARKER" in snapshot_b
+    assert "REPO-A-ONLY-MARKER" not in snapshot_b
 
 
 @pytest.mark.asyncio

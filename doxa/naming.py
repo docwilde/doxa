@@ -32,6 +32,7 @@ import subprocess
 import tomllib
 from pathlib import Path
 
+from . import cli_isolation as cli_isolation_mod
 from . import config as config_mod
 
 # Cheap and fast: naming a tab is not a reasoning task.
@@ -135,7 +136,12 @@ def generate_name(first_message: str, model: str = NAMER_MODEL) -> "str | None":
             capture_output=True,
             text=True,
             timeout=NAMER_TIMEOUT_SECS,
-            env={**os.environ, "LORE_SKIP": "1"},
+            # Same containment as the interactive engine (item AA,
+            # doxa.cli_isolation): this is a spawned `claude` CLI too, so
+            # it gets the same isolated config dir rather than DOXA's own
+            # process env / ~/.claude -- LORE_SKIP=1 rides along the same
+            # way it always has here.
+            env={**os.environ, **cli_isolation_mod.spawn_env()},
         )
     except (OSError, subprocess.SubprocessError):
         return None
