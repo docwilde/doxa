@@ -6,4 +6,6 @@ lifecycle findings this package's engine is built on.
 
 from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see module docstring
 
-__all__: list[str] = []
+__version__ = "0.2.0"
+
+__all__: list[str] = ["__version__"]

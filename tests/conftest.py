@@ -22,3 +22,12 @@ os.environ["LORE_PROJECTS_DIR"] = str(_tmp / "projects")
 # that start a real SessionEngine without thinking about peers -- ever
 # registers in, reaps, or listens inside the machine's real registry.
 os.environ["DOXA_RUNTIME_DIR"] = str(_tmp / "runtime")
+
+# Review kill switch: SessionEngine.finalize()/PreCompact run the LORE
+# deriver review, whose worker shells out to a headless `claude -p` when a
+# transcript is long enough to build a job. The daemon tests finalize real
+# engines after real (fake-client) turns -- no test run may ever spend
+# tokens or depend on a `claude` binary, so the automatic-review stage is
+# disabled suite-wide (stage_disabled("review") honors this, same as the
+# LORE plugin's own hook path).
+os.environ["LORE_DISABLE_REVIEW"] = "1"

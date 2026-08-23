@@ -159,10 +159,16 @@ class SessionEngine:
         session_id: str | None = None,
         client_factory: Callable[[ClaudeAgentOptions], Any] = ClaudeSDKClient,
         allowed_tools: "set[str] | None" = None,
+        daemon_socket: str | None = None,
     ) -> None:
         self.cwd = cwd
         self.model = model
         self.session_id = session_id or str(uuid.uuid4())
+        # Daemon marker for the shared registry entry (peers.PeerInfo.
+        # daemon_socket): set when a doxa.daemon.SessionDaemon hosts this
+        # engine, so `doxa attach` discovers the session through the SAME
+        # registry the peer layer already maintains.
+        self.daemon_socket = daemon_socket
         self.slug = project_slug(cwd)
         self._client_factory = client_factory
         self._client: Any = None
@@ -373,6 +379,7 @@ class SessionEngine:
                 on_message=self._on_peer_frame,
                 on_peer_joined=self._on_peer_joined,
                 on_peer_left=self._on_peer_left,
+                daemon_socket=self.daemon_socket,
             )
             await self.peer_host.start()
         except Exception as exc:

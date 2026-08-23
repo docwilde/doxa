@@ -1,12 +1,21 @@
 """doxa.app -- the single-pane Textual shell.
 
-Phase 1 slice 2 scope only (see /README.md's status table): one pane, one
-session, one prompt input at the bottom, a scrolling list of turn blocks
-above it. Each turn is a foldable Collapsible; tool calls inside a turn
-render as compact chips (name + one-line arg summary + duration + a check
-or cross) that lazily expand into full args/result on first click -- the
-expensive JSON pretty-printing only happens once, on demand, not for every
-tool call that streams past.
+Phase 1 built this as one pane over an in-process SessionEngine; Phase 2's
+daemon split keeps the shell almost unchanged and swaps what sits behind
+``self.engine``: a factory now supplies EITHER an in-process
+``SessionEngine`` (tests, ``--in-process``) or a ``doxa.client.EngineClient``
+attached to a session daemon over its Unix socket (the default --
+see doxa/daemon.py). The app consumes the same async-iterator surface either
+way. One addition the split forces: turn events can now arrive OUT-OF-BAND
+-- replayed history right after a reattach, or a turn another attached
+client is driving -- so the peer pump renders those into turn blocks too,
+not just peer messages.
+
+Each turn is a foldable Collapsible; tool calls inside a turn render as
+compact chips (name + one-line arg summary + duration + a check or cross)
+that lazily expand into full args/result on first click -- the expensive
+JSON pretty-printing only happens once, on demand, not for every tool call
+that streams past.
 
 Asyncio/Textual coexistence follows PHASE0_FINDINGS.md §4 exactly:
 ``run_worker`` schedules the SDK-driving coroutine on Textual's own running
@@ -17,9 +26,10 @@ proved out.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
-from typing import Any
+from typing import Any, Callable
 
 from textual import on
 from textual.app import App, ComposeResult
@@ -158,12 +168,32 @@ class DoxaApp(App):
     CSS_PATH = "theme.tcss"
     TITLE = "DOXA"
 
-    def __init__(self, cwd: str | None = None, model: str | None = None) -> None:
+    def __init__(
+        self,
+        cwd: str | None = None,
+        model: str | None = None,
+        engine_factory: "Callable[[], Any] | None" = None,
+        new_session_factory: "Callable[[], Any] | None" = None,
+    ) -> None:
         super().__init__()
         self.cwd = cwd or os.getcwd()
         self.model = model
-        self.engine: SessionEngine | None = None
+        self.engine: Any | None = None
+        # The daemon-split seam: engine_factory builds whatever this shell
+        # drives (in-process SessionEngine by default; an EngineClient when
+        # doxa.cli attached us to a daemon). new_session_factory builds a
+        # FRESH session for the palette's "new session" command -- distinct
+        # because an attach-flavored engine_factory must not be re-invoked
+        # to mean "new".
+        self._engine_factory = engine_factory or (
+            lambda: SessionEngine(cwd=self.cwd, model=self.model)
+        )
+        self._new_session_factory = new_session_factory or self._engine_factory
         self._engine_ready = asyncio.Event()
+        # Out-of-band turn rendering state (replayed history after reattach,
+        # or a turn another attached client drives) -- see _peer_pump.
+        self._oob_turn: TurnBlock | None = None
+        self._oob_chips: dict[str, ToolChip] = {}
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="block-list")
@@ -171,10 +201,10 @@ class DoxaApp(App):
         yield Input(placeholder="Ask DOXA…", id="prompt-input")
 
     async def on_mount(self) -> None:
-        self.engine = SessionEngine(cwd=self.cwd, model=self.model)
+        self.engine = self._engine_factory()
         self.query_one("#prompt-input", Input).focus()
         self.run_worker(self._boot(), exclusive=True, group="engine")
-        self.run_worker(self._peer_pump(), group="peers")
+        self.run_worker(self._peer_pump(), exclusive=True, group="peers")
 
     async def _boot(self) -> None:
         assert self.engine is not None
@@ -188,7 +218,10 @@ class DoxaApp(App):
         model sees it on the next user turn, engine-side); joins/leaves just
         move the status-bar chip; tool_disabled (the gate's two-strikes
         containment) mounts a system block and adds the status-bar
-        `⊘ toolname` note."""
+        `⊘ toolname` note. Since the daemon split, TURN events can arrive
+        here too -- replayed history right after a reattach, or a turn that
+        another attached client of the same daemon is driving -- and render
+        into the same TurnBlock/ToolChip widgets a local turn uses."""
         await self._engine_ready.wait()
         assert self.engine is not None
         async for ev in self.engine.peer_events():
@@ -203,6 +236,21 @@ class DoxaApp(App):
                     f" — {ev.data.get('reason')}"
                 ))
                 block_list.scroll_end(animate=False)
+            elif ev.type == "turn_started":
+                block_list = self.query_one("#block-list", VerticalScroll)
+                self._oob_turn = TurnBlock(str(ev.data.get("prompt") or ""))
+                self._oob_chips = {}
+                await block_list.mount(self._oob_turn)
+                block_list.scroll_end(animate=False)
+            elif ev.type in ("text_delta", "tool_call", "tool_result", "turn_done"):
+                if self._oob_turn is not None:
+                    await self._handle_event(ev, self._oob_turn, self._oob_chips)
+                    self.query_one("#block-list", VerticalScroll).scroll_end(
+                        animate=False
+                    )
+                    if ev.type == "turn_done":
+                        self._oob_turn = None
+                        self._oob_chips = {}
             self._refresh_status()
 
     def _refresh_status(self) -> None:
@@ -217,6 +265,10 @@ class DoxaApp(App):
         )
         beliefs = self.engine.belief_count()
         parts = [model, cost, f"ctx {ctx}", f"{beliefs} beliefs"]
+        if getattr(self.engine, "detachable", False):
+            sid = str(getattr(self.engine, "session_id", "") or "")
+            if sid:  # attached to a daemon: show the reattach handle
+                parts.append(f"⌁ {sid[:8]}")
         peer_count = self.engine.peer_count()
         if peer_count:  # hidden at 0 -- a solo session has no peers chip
             parts.append(f"peers {peer_count}")
@@ -276,8 +328,15 @@ class DoxaApp(App):
 
         chips: dict[str, ToolChip] = {}
 
-        async for ev in self.engine.send(prompt):
-            await self._handle_event(ev, block, chips)
+        try:
+            async for ev in self.engine.send(prompt):
+                await self._handle_event(ev, block, chips)
+                block_list.scroll_end(animate=False)
+        except Exception as exc:  # noqa: BLE001 -- a refused/broken turn must
+            # not take the shell down (e.g. the daemon is busy with another
+            # client's turn, or the connection dropped mid-stream).
+            block.mark_done(None, None, True)
+            await block_list.mount(SystemBlock(f"turn failed: {exc}"))
             block_list.scroll_end(animate=False)
 
         self._refresh_status()

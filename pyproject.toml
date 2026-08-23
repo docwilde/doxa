@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.scripts]
-doxa = "doxa.app:main"
+doxa = "doxa.cli:main"
 
 [dependency-groups]
 dev = [

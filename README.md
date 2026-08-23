@@ -121,10 +121,32 @@ Verdict: GO with four small redesigns, all itemized.
 | Phase | Scope | State |
 |---|---|---|
 | 0 | SDK lifecycle validation, Textual coexistence, auth | **done** |
-| 1 | `lore_core` extraction; single-pane shell; block rendering; session-end review; ask | **in progress** |
-| 2 | Palette, FTS search, panes, daemon split + detach/reattach, review pane, theme | planned |
-| 3 | Streaming deriver, multi-agent panes + merge queue, act-time consult, trace tree | planned |
+| 1 | `lore_core` extraction; single-pane shell; block rendering; session-end review; ask | **done** |
+| 2 | Daemon split + detach/reattach, palette, FTS history search, theme (panes, review pane: deferred to 3) | **in progress** |
+| 3 | Split panes + review pane, streaming deriver, multi-agent panes + merge queue, act-time consult, trace tree | planned |
 | 4 | Container isolation tier, calibration dashboard, plugin-compat hardening | planned |
+
+## Detach/reattach
+
+Since Phase 2 a DOXA session is a process of its own: `uv run doxa` spawns a
+session daemon (`doxa/daemon.py`) that hosts the engine — the SDK client,
+the LORE hooks, the transcript, the peer presence entry — and attaches the
+TUI to it as a thin client over a 0600 Unix socket (line-JSON frames, the
+same idioms as the peer layer; the hello frame is version-stamped so a
+mismatched client backs off instead of misparsing). Closing the TUI
+(`ctrl+q`, or the palette's "Quit: detach") leaves the session running; no
+tmux involved. `doxa attach [prefix]` reattaches from anywhere: the daemon
+replays its bounded, seq-numbered ring of recent events from your cursor,
+then the live tail follows on the same stream. Running `doxa` again in the
+same repo reattaches to that repo's most recent live session; `doxa new`
+forces a fresh one. The daemon finalizes the session — the LORE review +
+index that used to run on TUI quit — once the **last** client has been
+detached for `--linger` seconds, or immediately on `doxa stop` (or the
+palette's "Quit: stop session"). Discovery reuses the peer registry: a
+daemon-hosted session's entry carries a `daemon_socket` marker — one
+surface for peers and attach alike, and the peer layer itself survived the
+split unchanged, exactly as its docstring promised. `doxa --in-process`
+keeps the Phase 1 shape (engine inside the TUI, quit finalizes at once).
 
 ## Run it
 

@@ -150,7 +150,13 @@ def repo_root_of(cwd: str) -> str | None:
 
 @dataclass
 class PeerInfo:
-    """One live registry entry, already validated by :func:`read_registry`."""
+    """One live registry entry, already validated by :func:`read_registry`.
+
+    ``daemon_socket`` is the Phase 2 daemon marker: when the session is
+    hosted by a detachable daemon (doxa/daemon.py), its entry carries the
+    daemon's client socket path here -- ONE discovery surface for both the
+    peer layer and `doxa attach`, not a second registry. None means the
+    engine runs in-process (not attachable)."""
 
     session_id: str
     pid: int
@@ -160,6 +166,7 @@ class PeerInfo:
     title: str
     started_at: str
     heartbeat_at: str
+    daemon_socket: str | None = None
 
     @property
     def scope_key(self) -> str:
@@ -189,6 +196,8 @@ def read_registry(reap: bool = True) -> list[PeerInfo]:
             data = json.loads(path.read_text(encoding="utf-8"))
             info = PeerInfo(**{k: data[k] for k in _ENTRY_FIELDS})
             info.pid = int(info.pid)
+            ds = data.get("daemon_socket")
+            info.daemon_socket = str(ds) if ds else None
         except (OSError, ValueError, TypeError, KeyError):
             if reap:
                 with contextlib.suppress(OSError):
@@ -212,6 +221,21 @@ def list_peers(scope_key: str, self_id: str | None = None) -> list[PeerInfo]:
         p for p in read_registry()
         if p.scope_key == scope_key and p.session_id != self_id
     ]
+
+
+def list_daemons(
+    scope_key: str | None = None, self_id: str | None = None
+) -> list[PeerInfo]:
+    """Live DAEMON-hosted sessions (entries carrying the daemon_socket
+    marker) -- the attach picker's and `doxa attach`'s discovery surface.
+    scope_key=None means all scopes; newest started_at first."""
+    hits = [
+        p for p in read_registry()
+        if p.daemon_socket
+        and (scope_key is None or p.scope_key == scope_key)
+        and p.session_id != self_id
+    ]
+    return sorted(hits, key=lambda p: p.started_at, reverse=True)
 
 
 def resolve_peer(candidates: list[PeerInfo], prefix: str) -> PeerInfo:
@@ -288,6 +312,7 @@ class PeerHost:
         on_peer_joined: Callable[[PeerInfo], Any] | None = None,
         on_peer_left: Callable[[str], Any] | None = None,
         heartbeat_secs: float = HEARTBEAT_SECS,
+        daemon_socket: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.cwd = str(cwd)
@@ -303,6 +328,10 @@ class PeerHost:
         # same-user sessions from ever colliding on a truncated prefix.
         self.socket_path = runtime_dir() / f"peer-{session_id[:8]}-{os.getpid()}.sock"
         self.registry_path = registry_dir() / f"{session_id}.json"
+        # Daemon marker (see PeerInfo.daemon_socket): set by the daemon that
+        # hosts the engine, written into the same registry entry -- one
+        # discovery surface for peers AND `doxa attach`, not two.
+        self.daemon_socket = daemon_socket
         self._on_message = on_message
         self._on_peer_joined = on_peer_joined
         self._on_peer_left = on_peer_left
@@ -356,6 +385,8 @@ class PeerHost:
             "started_at": self.started_at,
             "heartbeat_at": _iso_now(),
         }
+        if self.daemon_socket:
+            entry["daemon_socket"] = self.daemon_socket
         tmp = self.registry_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
         os.chmod(tmp, 0o600)
