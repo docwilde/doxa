@@ -22,18 +22,33 @@ off. Every screenshot below is generated the same way by
 ## Install
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh
+```
+
+Checks for Python 3.11+, [`uv`](https://docs.astral.sh/uv/) (offers to
+install it if missing), `git`, and the
+[`claude` CLI](https://docs.claude.com/en/docs/claude-code) signed in
+(`claude auth login`) — DOXA authenticates through that CLI's own OAuth
+session and never reads `ANTHROPIC_API_KEY` — then installs with `uv tool
+install git+https://github.com/docwilde/doxa` (never PyPI; DOXA isn't
+published there). Re-running it is safe: it never touches an existing
+`~/.doxa/config.toml`, and picks up whatever changed on `main` since the
+last run. Install a specific tag instead of `main`'s HEAD with
+`sh -s -- v0.5.0`.
+
+Piping a stranger's script into `sh` deserves a second look first:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh -o install.sh && less install.sh   # then: sh install.sh
+```
+
+Or clone-and-run from a source checkout instead of installing at all:
+
+```sh
+git clone https://github.com/docwilde/doxa && cd doxa
 uv sync
 uv run doxa
 ```
-
-This clones-and-runs from a source checkout. There is no packaged
-installer yet (`scripts/install.sh` is on the roadmap); until then, `git
-clone`, `cd`, then the two lines above.
-
-Requires Python 3.11+, [`uv`](https://docs.astral.sh/uv/), and the
-[`claude` CLI](https://docs.claude.com/en/docs/claude-code) signed in
-(`claude auth login`) — DOXA authenticates through that CLI's own OAuth
-session and never reads `ANTHROPIC_API_KEY`.
 
 ## Quickstart
 
@@ -212,13 +227,13 @@ checkout isn't at the default `~/.claude/plugins/marketplaces/lore`.
 
 DOXA is a working daily driver for its author, not a finished product.
 Shipped so far: the daemon/detach model, tabs, the command palette,
-`/search`, the trace tree, the image ladder, peer discovery, and the
-settings modal described above — see [CHANGELOG.md](CHANGELOG.md) for the
-version-by-version history. Not yet built: a packaged installer, a
-first-run setup flow, a `/doctor` health check, session-history drill-in
-past `/search`'s result list, customizable keybindings, and a graphical
-context-window map. Interfaces (config keys, socket protocol, command
-names) can still change between minor versions.
+`/search`, the trace tree, the image ladder, peer discovery, the settings
+modal described above, and the `curl | sh` installer — see
+[CHANGELOG.md](CHANGELOG.md) for the version-by-version history. Not yet
+built: a first-run setup flow, a `/doctor` health check, session-history
+drill-in past `/search`'s result list, customizable keybindings, and a
+graphical context-window map. Interfaces (config keys, socket protocol,
+command names) can still change between minor versions.
 
 Run the test suite with `uv run pytest`.
 

@@ -1,8 +1,27 @@
 # Changelog
 
 Newest first. Versions are annotated git tags on the commit that shipped
-them (`v0.1.0` … `v0.4.0`); the ranges below are derived from that history,
+them (`v0.1.0` … `v0.5.0`); the ranges below are derived from that history,
 not written from memory.
+
+## 0.5.0 — 2026-08-23
+
+- **`scripts/install.sh`** — a `curl | sh` installer, POSIX sh (tested
+  against dash). Checks python3 (minimum read live from the target ref's
+  own `pyproject.toml`, never a literal baked into the script), offers to
+  install `uv` if it's missing (never silently), requires `git`, requires
+  the `claude` CLI present *and* authenticated (`claude auth login`
+  otherwise, and it stops there). Installs with
+  `uv tool install --force git+https://github.com/docwilde/doxa` — never
+  PyPI, DOXA isn't published there. Creates `~/.doxa` if absent, never
+  touches an existing `config.toml`. Idempotent (a second run updates
+  rather than refuses); pipe-safe (the whole script is one function called
+  on the last line, so a `curl | sh` pipe truncated at any point runs
+  nothing — verified by literally truncating the script at nine byte
+  offsets and asserting no side effect). `sh -s -- v0.5.0` installs a
+  specific tag instead of `main`'s HEAD. README's install section leads
+  with the one-liner now, with an inspect-first alternative and the old
+  `git clone` path kept as a fallback.
 
 ## 0.4.0 — 2026-08-23
 
