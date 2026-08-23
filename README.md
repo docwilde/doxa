@@ -194,3 +194,7 @@ replacing the LORE plugin (it keeps shipping — same core, one gets the fixes
 of the other); general Claude Code plugin compatibility claims (scoped to
 tested plugins at tested versions — the contract is reverse-engineered and
 Anthropic may change it any release).
+
+## License
+
+[DOXA Noncommercial License 1.0](LICENSE) (PolyForm-Noncommercial-derived) — free for personal use, research, education, and noncommercial organizations; commercial use requires a separate arrangement with the author. Same license family as [LORE](https://github.com/docwilde/LORE), whose `lore_core` DOXA embeds.
