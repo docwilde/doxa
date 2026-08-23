@@ -6,6 +6,10 @@ lifecycle findings this package's engine is built on.
 
 from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see module docstring
 
-__version__ = "0.2.0"
+from .version import resolve_version
+
+# ONE version, from pyproject.toml (checkout) or the distribution metadata
+# built from it (installed) -- never a second literal to forget to bump.
+__version__ = resolve_version()
 
 __all__: list[str] = ["__version__"]

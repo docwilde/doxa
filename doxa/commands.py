@@ -190,6 +190,13 @@ REGISTRY: tuple[SlashCommand, ...] = (
         passthrough=True,
     ),
     SlashCommand(
+        name="/update",
+        group="Maintenance",
+        summary="Fast-forward this DOXA checkout from origin (never merges)",
+        usage="/update [--restart]",
+        palette="Update DOXA",
+    ),
+    SlashCommand(
         name="/help",
         group="Maintenance",
         summary="Every command and key binding, generated from this registry",

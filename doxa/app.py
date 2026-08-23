@@ -70,6 +70,7 @@ from . import identity as identity_mod
 from . import images as images_mod
 from . import naming as naming_mod
 from . import peers as peers_mod
+from . import version as version_mod
 from .engine import EngineEvent, SessionEngine
 from .history import SEARCH_PREFIX, SessionSearch, hit_reference
 from .identity import tier_short  # noqa: F401 -- re-exported: the status
@@ -1170,7 +1171,13 @@ class SessionPane(TabPane):
         engine = self.engine
         account = getattr(engine, "account", None) or {}
         local = identity_mod.local_account()
-        lines: list[str] = []
+        # Version first: the one line that says WHICH DOXA this is. Its sha
+        # is shown only when it differs from the sha the git chip below
+        # already carries (or when the checkout is dirty, which the chip
+        # never says) -- two identical hex strings in one block is the
+        # confusion the @sha labelling exists to prevent.
+        head_sha = self._git._read_sha() if self._git is not None else None
+        lines: list[str] = [version_mod.version_line(head_sha)]
         if account.get("email"):
             lines.append(f"account  {account['email']}")
         elif local.get("emailAddress"):
@@ -1512,6 +1519,7 @@ class SessionPane(TabPane):
             "/sessions": self._cmd_sessions,
             "/rename": self._cmd_rename,
             "/search": self._cmd_search,
+            "/update": self._cmd_update,
             "/help": self._cmd_help,
         }
 
@@ -1819,6 +1827,26 @@ class SessionPane(TabPane):
         ]
         await self._system(f"search: {len(hits)} hit(s)\n" + "\n".join(lines))
 
+    async def _cmd_update(self, args: str) -> None:
+        """/update -- fast-forward the checkout DOXA runs from, and say what
+        moved. `--restart` is the explicit opt-in that stops THIS window's
+        sessions afterwards and relaunches; without it nothing running is
+        touched, because a terminal that restarts your work to update
+        itself has its priorities backwards."""
+        from . import update as update_mod
+
+        restart = "--restart" in args.split()
+        report = await asyncio.to_thread(update_mod.update)
+        await self._system(report.text())
+        if restart and report.status == "updated":
+            await self._system(
+                "update: stopping this window's sessions and relaunching…"
+            )
+            self.app.restart_requested = True
+            self.app.run_worker(self.app.action_quit_stop(), group="tabs")
+        elif restart:
+            await self._system("update: nothing to restart for")
+
     async def _cmd_help(self, args: str) -> None:
         await self._system(help_text())
 
@@ -2075,6 +2103,10 @@ class DoxaApp(App):
         # timer that will quit-detach when it fires; a second Ctrl+C while
         # it is armed cancels it and quit-stops instead.
         self._ctrl_c_timer: Any = None
+        # Set by `/update --restart`: doxa.cli re-execs after the app exits,
+        # which is the only place that can -- exec'ing out from under a
+        # running Textual app would leave the terminal in raw mode.
+        self.restart_requested = False
         # One sweep of the registry per launch: a crash can always leave a
         # presence file behind, so the fleet needs a sweeper that does not
         # depend on anything shutting down cleanly. Here rather than in a

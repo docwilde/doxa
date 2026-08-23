@@ -61,7 +61,11 @@ async def test_typing_filters_to_one_command(monkeypatch, tmp_path):
         await pilot.pause()
         dropdown = app.query_one("#slash-complete", SlashComplete)
         assert dropdown.is_open is True
-        assert [c.name for c in dropdown.matches] == ["/peers"]
+        # Fuzzy, so "/pe" also reaches /update ("u-P-d-a-t-E") -- but the
+        # literal prefix match ranks first, which is the property that
+        # matters when someone types the start of a command name.
+        assert dropdown.matches[0].name == "/peers"
+        assert "/update" in [c.name for c in dropdown.matches]
 
 
 @pytest.mark.asyncio

@@ -69,12 +69,24 @@ def _run_attached(
         _sid, dsock = spawn_daemon(cwd, model=model, linger_secs=linger)
         return EngineClient(dsock)
 
-    DoxaApp(
+    app = DoxaApp(
         cwd=cwd,
         model=model,
         engine_factory=lambda: EngineClient(socket_path),
         new_session_factory=new_session_factory,
-    ).run()
+    )
+    app.run()
+    _maybe_restart(app)
+
+
+def _maybe_restart(app: DoxaApp) -> None:
+    """`/update --restart` asked for a relaunch. It happens HERE, after the
+    app has given the terminal back -- exec'ing out from under a running
+    Textual app would leave the terminal in raw mode."""
+    if not getattr(app, "restart_requested", False):
+        return
+    print("doxa: relaunching after update…", file=sys.stderr)
+    os.execv(sys.executable, [sys.executable, "-m", "doxa.cli", *sys.argv[1:]])
 
 
 async def _stop(socket_path: str) -> None:
