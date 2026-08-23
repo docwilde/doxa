@@ -128,7 +128,7 @@ Verdict: GO with four small redesigns, all itemized.
 | 0 | SDK lifecycle validation, Textual coexistence, auth | **done** |
 | 1 | `lore_core` extraction; single-pane shell; block rendering; session-end review; ask | **done** |
 | 2 | Daemon split + detach/reattach, Ctrl+P palette, Ctrl+R FTS history search, theme | **done** |
-| 3 | Warp-style tabs (sketch below), split panes + review pane, streaming deriver, multi-agent panes + merge queue, act-time consult, trace tree | **in progress** — landed: terminal images (KGP → sixel → half-block → text ladder; tool results + `/img`); tabs (`SessionPane` under `TabbedContent`, one client per tab, Ctrl+T/Ctrl+W + palette picker); trace tree (subagent calls nest foldably under their Task chip via the SDK's `parent_tool_use_id`, scrubbed); streaming deriver (`DOXA_DERIVE_SECS`, debounced, never concurrent with finalize) |
+| 3 | Warp-style tabs (sketch below), split panes + review pane, streaming deriver, multi-agent panes + merge queue, act-time consult, trace tree | **in progress** — landed: terminal images (KGP → sixel → half-block → text ladder; tool results + `/img`); tabs (`SessionPane` under `TabbedContent`, one client per tab, Ctrl+T/Ctrl+W + palette picker); trace tree (subagent calls nest foldably under their Task chip via the SDK's `parent_tool_use_id`, scrubbed); streaming deriver (`DOXA_DERIVE_SECS`, debounced, never concurrent with finalize); act-time consult (cheap FTS belief note on the prompt, cite-only, `DOXA_CONSULT_FLOOR`). Remaining: split panes + review pane, multi-agent panes + merge queue |
 | 4 | Container isolation tier, calibration dashboard, plugin-compat hardening | planned |
 
 **Tab system (Phase 3 — landed as sketched, with one documented
