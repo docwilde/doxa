@@ -15,6 +15,12 @@ depend on it like any other package.
 ``DOXA_LORE_CORE_PATH`` overrides the parent directory (used by the test
 suite to point at a throwaway lore_core checkout, or by a machine where the
 plugin lives somewhere other than the default marketplace path).
+
+This is also the ONE place a ``/setup``-stickied LORE store choice
+(``config.toml``'s ``lore_root`` key, see ``doxa/setup.py`` and
+``doxa.config.save_lore_root``) gets exported to ``LORE_ROOT`` -- lore_core
+reads that environment variable once, at ITS OWN import time, and nothing
+below this module in the import graph may import it first.
 """
 
 from __future__ import annotations
@@ -40,4 +46,20 @@ def ensure_importable() -> None:
             sys.path.insert(0, p)
 
 
+def export_sticky_lore_root() -> None:
+    """If a previous ``/setup`` stickied a store choice and nothing has
+    already set ``LORE_ROOT``, export it now -- before ``lore_core`` is
+    importable at all is exactly early enough, and idempotent (an env var
+    already present, from a real environment or a test's conftest, always
+    wins and is never touched)."""
+    if os.environ.get("LORE_ROOT", "").strip():
+        return
+    from . import config as config_mod
+
+    stored = config_mod.load().get("lore_root")
+    if stored:
+        os.environ["LORE_ROOT"] = str(stored)
+
+
 ensure_importable()
+export_sticky_lore_root()

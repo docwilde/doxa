@@ -1,8 +1,31 @@
 # Changelog
 
 Newest first. Versions are annotated git tags on the commit that shipped
-them (`v0.1.0` … `v0.5.0`); the ranges below are derived from that history,
+them (`v0.1.0` … `v0.6.0`); the ranges below are derived from that history,
 not written from memory.
+
+## 0.6.0 — 2026-08-23
+
+- **`/setup`** (Tools & config) — check state, fix findings one at a time,
+  each behind its own confirmation showing exactly what applying it will
+  change. Four steps: auth state (surfaced only — `/login` still owns
+  signing in), the LORE store (env wins outright; a prior run's choice is
+  remembered; an existing store the Claude Code plugin uses is the one
+  genuinely ambiguous case, and that's the one that asks instead of
+  silently picking a side), `/migrate` (offered when a later DOXA version
+  ships one, skipped cleanly here since it doesn't yet), and model/effort
+  defaults (hands off to the settings modal, the surface that already
+  edits those knobs). Finishes with a summary; the doctor line is a
+  placeholder until `/doctor` ships. Auto-runs once, on a genuine first
+  launch on this machine (a `~/.doxa/.setup-done` marker, written the
+  moment the wizard is OFFERED so declining it can't make it nag again);
+  `/setup` runs it again on demand, any time.
+- `doxa.config` gained `save_lore_root` — the one write `/setup` makes
+  directly, bypassing the settings modal's read-only gate on that row on
+  purpose (it's `/setup`'s row to decide, not a field to fat-finger). A
+  sticky choice is exported to `LORE_ROOT` before `lore_core` is ever
+  imported (`doxa/_lore_bootstrap.py`), since that module reads the
+  environment once, at its own import time.
 
 ## 0.5.0 — 2026-08-23
 

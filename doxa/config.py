@@ -102,11 +102,13 @@ SETTINGS: tuple[Setting, ...] = (
              "disables it (doxa.engine.consult_floor)",
     ),
     Setting(
-        key="", env="LORE_ROOT", label="lore store", category="Memory",
+        key="lore_root", env="LORE_ROOT", label="lore store", category="Memory",
         help="Where the belief store and session index live (lore_core.ROOT)",
         note="Shared with the Claude Code LORE plugin -- one store, two "
              "carriers. Set LORE_ROOT to point elsewhere; a private store "
-             "would fork your memory into two divergent halves.",
+             "would fork your memory into two divergent halves. /setup "
+             "makes and stickies this choice -- read_only here because "
+             "this row is /setup's, not the settings modal's, to edit.",
         read_only=True,
     ),
     Setting(
@@ -360,23 +362,10 @@ def _coerce(setting: Setting, value: str) -> "Any | None":
     return value
 
 
-def save(values: dict[str, str]) -> Path:
-    """Write the settings file from ``{key: string}`` (the modal's fields).
-
-    Keys absent from ``values`` keep whatever the file already had; keys
-    present but empty are REMOVED, which is what returns a knob to its
-    default. The file is written atomically (tmp + replace) and clamped to
-    0600 -- it is user configuration, not something a shared machine reads.
-    """
-    stored = dict(load())
-    for setting in SETTINGS:
-        if not setting.key or setting.read_only or setting.key not in values:
-            continue
-        coerced = _coerce(setting, values[setting.key])
-        if coerced is None:
-            stored.pop(setting.key, None)
-        else:
-            stored[setting.key] = coerced
+def _write_stored(stored: dict[str, Any]) -> Path:
+    """The shared tail of every writer: render ``stored`` as TOML and
+    replace the file atomically, clamped to 0600 -- it is user
+    configuration, not something a shared machine reads."""
     lines = [
         "# DOXA settings. Precedence: environment > this file > default.",
         "# Written by the settings modal (Ctrl+, or /settings); safe to edit.",
@@ -398,3 +387,37 @@ def save(values: dict[str, str]) -> Path:
     os.replace(tmp, path)
     invalidate()
     return path
+
+
+def save(values: dict[str, str]) -> Path:
+    """Write the settings file from ``{key: string}`` (the modal's fields).
+
+    Keys absent from ``values`` keep whatever the file already had; keys
+    present but empty are REMOVED, which is what returns a knob to its
+    default. Read-only rows are skipped even if present in ``values`` --
+    the modal must never be the thing that writes a row it renders with no
+    field (see :func:`save_lore_root` for the one row that DOES get
+    written outside the modal).
+    """
+    stored = dict(load())
+    for setting in SETTINGS:
+        if not setting.key or setting.read_only or setting.key not in values:
+            continue
+        coerced = _coerce(setting, values[setting.key])
+        if coerced is None:
+            stored.pop(setting.key, None)
+        else:
+            stored[setting.key] = coerced
+    return _write_stored(stored)
+
+
+def save_lore_root(path: str) -> Path:
+    """The one write ``/setup`` makes directly: the sticky LORE store
+    choice (``doxa.setup``'s ladder). Deliberately bypasses :func:`save`'s
+    read-only gate on the ``lore_root`` row -- that gate exists to keep
+    this row OUT of the settings modal's editable fields (it is /setup's
+    to decide, once, not a field to fat-finger), not to make it
+    unwritable altogether."""
+    stored = dict(load())
+    stored["lore_root"] = path
+    return _write_stored(stored)

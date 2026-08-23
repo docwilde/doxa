@@ -1511,6 +1511,7 @@ class SessionPane(TabPane):
             "/login": partial(self._cmd_auth, "login"),
             "/logout": partial(self._cmd_auth, "logout"),
             "/settings": self._cmd_settings,
+            "/setup": self._cmd_setup,
             "/model": self._cmd_model,
             "/effort": self._cmd_effort,
             "/usage": self._cmd_usage,
@@ -1525,6 +1526,9 @@ class SessionPane(TabPane):
 
     async def _cmd_settings(self, args: str) -> None:
         self.app.action_settings()
+
+    async def _cmd_setup(self, args: str) -> None:
+        self.app.action_setup()
 
     async def _cmd_model(self, args: str) -> None:
         """/model -- switch the model for subsequent turns, in place.
@@ -2604,6 +2608,35 @@ class DoxaApp(App):
             ),
             callback=_saved,
         )
+
+    def action_setup(self) -> None:
+        """/setup / the palette's Setup entry -- check state, fix findings
+        one at a time. Also what a genuine first launch auto-triggers (see
+        on_mount): the marker that stops it recurring is consumed there,
+        not here, so this method itself is identical whether it was
+        summoned on demand or by the app."""
+        from .setup import ACTION_OPEN_SETTINGS, SetupScreen
+
+        def _done(result: "str | None") -> None:
+            config_mod.invalidate()
+            for pane in self.panes():
+                pane._refresh_status()
+            if result == ACTION_OPEN_SETTINGS:
+                self.action_settings()
+
+        self.push_screen(SetupScreen(), callback=_done)
+
+    async def on_mount(self) -> None:
+        """Auto-run /setup exactly once: a genuine first launch on this
+        machine (doxa.setup.needs_first_run), never again after. The
+        marker is written the moment this fires -- declining or Esc-ing
+        out of the wizard must not make it reappear at the next launch;
+        /setup still runs on demand any time."""
+        from . import setup as setup_mod
+
+        if setup_mod.needs_first_run():
+            setup_mod.mark_seen()
+            self.call_after_refresh(self.action_setup)
 
     def action_toggle_inspector(self) -> None:
         """Belief-inspector stub: Phase 3 owns the real pane (live STEER/

@@ -150,6 +150,16 @@ edit:
 
 <p align="center"><img src="assets/shots/settings.png" width="620" alt="The settings modal, Session category, showing the model row as 'claude-opus-4-5 (session)' and effort/linger_secs rows marked '(default)'"></p>
 
+**`/setup`.** Checks state and fixes findings one at a time, each behind
+its own confirmation showing exactly what applying it will change: auth
+state (surfaced only — `/login` is what actually signs in), the LORE
+store (env wins outright; a choice a previous run already made is
+remembered; an existing store the Claude Code plugin uses is the one case
+that asks, rather than silently picking a side), `/migrate` when a later
+DOXA version ships one, then model/effort defaults, handing off to the
+settings modal to set them. Auto-runs once, on a genuine first launch on
+this machine; `/setup` any time after runs it again on demand.
+
 **Identity and auth.** The session-start block and status line report the
 plan you actually have — DOXA prefers the precise tier the `claude` CLI
 keeps locally over the SDK's coarser `subscriptionType` string, and shows
@@ -186,7 +196,7 @@ survives being opened by an older one.
 | `consult_floor` | `DOXA_CONSULT_FLOOR` | 1.0 | act-time belief-consult threshold; 0 disables it |
 | `nerd_font` | `DOXA_NERD_FONT` | off | use a Nerd Font glyph for the branch chip |
 | `image_mode` | `DOXA_IMAGE_MODE` | probe | force a rung of the image ladder (`kgp`/`sixel`/`halfblock`/`text`) |
-| *lore store* | `LORE_ROOT` | `~/.claude/lore` | `lore_core`'s own store path (read-only here) |
+| *lore store* | `LORE_ROOT` | `~/.claude/lore` | `lore_core`'s own store path; `lore_root` in the file is `/setup`'s sticky choice, not the modal's to edit |
 
 The settings modal shows every row's **effective** value next to where it
 came from (`900 (config)`, `120 (default)`, `1 (env DOXA_NERD_FONT)`); a
@@ -228,12 +238,12 @@ checkout isn't at the default `~/.claude/plugins/marketplaces/lore`.
 DOXA is a working daily driver for its author, not a finished product.
 Shipped so far: the daemon/detach model, tabs, the command palette,
 `/search`, the trace tree, the image ladder, peer discovery, the settings
-modal described above, and the `curl | sh` installer — see
-[CHANGELOG.md](CHANGELOG.md) for the version-by-version history. Not yet
-built: a first-run setup flow, a `/doctor` health check, session-history
-drill-in past `/search`'s result list, customizable keybindings, and a
-graphical context-window map. Interfaces (config keys, socket protocol,
-command names) can still change between minor versions.
+modal described above, the `curl | sh` installer, and `/setup` (below) —
+see [CHANGELOG.md](CHANGELOG.md) for the version-by-version history. Not
+yet built: a `/doctor` health check, session-history drill-in past
+`/search`'s result list, customizable keybindings, and a graphical
+context-window map. Interfaces (config keys, socket protocol, command
+names) can still change between minor versions.
 
 Run the test suite with `uv run pytest`.
 

@@ -55,3 +55,13 @@ os.environ["LORE_DISABLE_REVIEW"] = "1"
 # one-shot migration cannot find a real file to move either.
 os.environ["DOXA_HOME"] = str(_tmp / "doxa-home")
 os.environ["XDG_CONFIG_HOME"] = str(_tmp / "xdg")
+
+# Setup-wizard kill switch: /setup auto-runs once, on a GENUINE first
+# launch (doxa.setup.needs_first_run -- no ~/.doxa/.setup-done marker
+# yet). Plenty of tests point DOXA_HOME at their OWN fresh tmp_path for
+# isolation reasons that have nothing to do with "has doxa ever run on
+# this machine" (test_settings.py gives every test a new one), so a
+# marker file alone cannot keep the auto-popup out of the suite -- an env
+# var doxa.setup.needs_first_run honors explicitly can. Tests that
+# exercise the auto-trigger itself clear this var first (test_setup.py).
+os.environ["DOXA_SKIP_FIRST_RUN"] = "1"

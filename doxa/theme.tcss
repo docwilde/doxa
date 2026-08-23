@@ -465,3 +465,40 @@ SettingsScreen {
 #settings-hint {
     color: #D8CDBB;
 }
+
+/* /setup: same modal treatment as settings and the close-confirm --
+   dimmed wash, block surface, ramp-top border. One finding at a time,
+   plain text, nothing animated. */
+SetupScreen {
+    align: center middle;
+    background: #171512 60%;
+}
+
+#setup-panel {
+    width: 74;
+    max-width: 90%;
+    height: auto;
+    max-height: 80%;
+    background: #221F1A;
+    border: round #3A3429;
+    padding: 1 2;
+}
+
+#setup-header {
+    height: 1;
+}
+
+#setup-title {
+    width: 1fr;
+    color: #D97757;
+    text-style: bold;
+}
+
+#setup-body {
+    color: #D8CDBB;
+    padding: 1 0;
+}
+
+#setup-hint {
+    color: #D8CDBB;
+}

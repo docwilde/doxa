@@ -129,6 +129,12 @@ REGISTRY: tuple[SlashCommand, ...] = (
         binding="ctrl+comma",
     ),
     SlashCommand(
+        name="/setup",
+        group="Tools & config",
+        summary="Check state, fix findings one at a time (auto-runs once, first launch)",
+        palette="Setup",
+    ),
+    SlashCommand(
         name="/model",
         group="Session",
         summary="Switch the model for the rest of this session (no reconnect)",
