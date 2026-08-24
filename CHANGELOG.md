@@ -4,6 +4,45 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.10.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.11.0 — 2026-08-24
+
+- **Per-status tab colors** — the tab strip now says what each session is
+  doing without switching to it. Before this, a background tab looked the
+  same whether its agent was mid-turn, finished, or idle — the only signal
+  was the active tab's orange accent.
+  - `-working` (amber) while a turn is in flight; `-done-unseen` (green)
+    when a turn finishes on a tab that is not the active one, cleared the
+    moment that tab is activated (or a new turn starts on it). The active
+    tab never shows done-unseen by construction — you are already looking
+    at it.
+  - `-attention` blink infrastructure (0.5 s class toggle) for
+    "the agent needs input": the timer exists ONLY between
+    `set_needs_input(True)` and its matching `False` — zero timers while
+    idle, per this app's idle-CPU discipline. Nothing sets it yet: the
+    engine has no `can_use_tool`/permission-prompt path today, so the
+    trigger lands with that plumbing (phase 2), which will also wire the
+    reserved `notify_needs_input` setting below.
+  - Precedence on an inactive tab: attention > working > done-unseen.
+- **Desktop notifications** (`doxa/notify.py`) — `notify-send`-based, the
+  same shape (and silent no-op degradation) as LORE's own notifier; icon
+  override via `DOXA_NOTIFY_ICON`. New "Notifications" settings category:
+  master `notify` = `auto`/`always`/`off` (`auto` fires only when the
+  terminal window is NOT focused, tracked via Textual's
+  `AppFocus`/`AppBlur`; a terminal that never reports focus never blurs,
+  so `always` is the escape hatch), plus per-trigger toggles.
+  - Wired: turn-done (fires with the pane's display name when a response
+    lands), update-available (a startup background worker runs
+    `git fetch` + `rev-list HEAD..@{upstream}` in the checkout DOXA runs
+    from; any failure — offline, not a checkout — is silent, and the
+    notification fires at most once per app run, pointing at `/update`).
+  - Inherited from LORE: the in-process deriver's staged-proposal
+    notification already fires today (`lore_core` reads `LORE_NOTIFY`
+    fresh on every call), so `notify_lore=off` now sets `LORE_NOTIFY=0`
+    for the process — no engine change needed. What it does NOT get yet
+    is DOXA's focus-gating: lore_core's notifier is a blunt on/off;
+    routing it through `doxa.notify` needs the phase-2 engine touch.
+  - Reserved, unwired: `notify_needs_input` (see above).
+
 ## 0.10.0 — 2026-08-24
 
 - **Engine CLI isolation** (item AA) — the `claude` process the engine
