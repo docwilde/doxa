@@ -1,8 +1,28 @@
 # Changelog
 
 Newest first. Versions are annotated git tags on the commit that shipped
-them (`v0.1.0` … `v0.13.0`); the ranges below are derived from that history,
+them (`v0.1.0` … `v0.14.0`); the ranges below are derived from that history,
 not written from memory.
+
+## 0.14.0 — 2026-08-24
+
+- **Start-menu launcher** (`doxa launcher install|uninstall`) — a per-user
+  freedesktop entry, because "which distro?" turned out to be the wrong
+  question: every major desktop (GNOME grid, KDE kickoff, XFCE whisker,
+  rofi) reads the same two XDG files. `install` writes exactly those two —
+  `~/.local/share/applications/doxa.desktop` (`Terminal=true`, so the
+  DESKTOP picks the terminal emulator rather than DOXA guessing one) and
+  the 512×512 icon into the hicolor theme — then refreshes the caches
+  best-effort. No root anywhere.
+  - The icon is the repo's own `assets/icon.png`, mapped into the wheel at
+    build time (hatch force-include → `doxa/assets/icon.png`, read via
+    `importlib.resources` with a repo-checkout fallback) — one file in
+    git, and the curl-piped installer needs no second network fetch.
+  - `scripts/install.sh` runs `doxa launcher install` best-effort after a
+    successful install; `DOXA_NO_LAUNCHER=1` opts out. macOS: no start
+    menu — the command says so and writes nothing. `uninstall` removes
+    exactly what install wrote, never a foreign file (tested against a
+    neighboring `.desktop`).
 
 ## 0.13.0 — 2026-08-24
 
