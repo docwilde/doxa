@@ -227,19 +227,27 @@ def test_per_trigger_bools_are_independent(monkeypatch):
     assert len(calls) == 1  # unrelated trigger, untouched
 
 
-# -- LORE inheritance: notify_lore <-> LORE_NOTIFY --------------------------
+# -- LORE inheritance: notify_lore / notify_staged <-> LORE_NOTIFY ---------
+#
+# v0.31.0 gave DOXA its OWN staged-proposal banner (notify_staged), which
+# knows about window focus and carries the proposal text -- things
+# lore_core's blunt LORE_NOTIFY banner cannot do. Two notifiers for one
+# event would mean two banners, so while DOXA's is on, lore_core's is held
+# silent. The pre-v0.31.0 rule (notify_lore alone decides) is what is left
+# once DOXA's own trigger is off, so turning it off never leaves the user
+# with silence they did not ask for.
 
 
 def test_notify_lore_off_sets_lore_notify_zero():
     import os
 
-    config.save({"notify_lore": "0"})
+    config.save({"notify_lore": "0", "notify_staged": "0"})
     notify_mod.sync_lore_notify_env()
     assert os.environ["LORE_NOTIFY"] == "0"
 
 
 def test_notify_lore_on_leaves_an_unset_var_alone():
-    config.save({"notify_lore": "1"})
+    config.save({"notify_lore": "1", "notify_staged": "0"})
     notify_mod.sync_lore_notify_env()
     import os
 
@@ -249,11 +257,11 @@ def test_notify_lore_on_leaves_an_unset_var_alone():
 def test_turning_notify_lore_back_on_undoes_our_own_override():
     import os
 
-    config.save({"notify_lore": "0"})
+    config.save({"notify_lore": "0", "notify_staged": "0"})
     notify_mod.sync_lore_notify_env()
     assert os.environ["LORE_NOTIFY"] == "0"
 
-    config.save({"notify_lore": "1"})
+    config.save({"notify_lore": "1", "notify_staged": "0"})
     notify_mod.sync_lore_notify_env()
     assert "LORE_NOTIFY" not in os.environ
 
@@ -262,8 +270,95 @@ def test_a_users_own_lore_notify_choice_survives_notify_lore_on(monkeypatch):
     """We never set LORE_NOTIFY=0 -> notify_lore=on must not pop a value
     that was NOT ours to begin with."""
     monkeypatch.setenv("LORE_NOTIFY", "0")
-    config.save({"notify_lore": "1"})
+    config.save({"notify_lore": "1", "notify_staged": "0"})
     notify_mod.sync_lore_notify_env()
     import os
 
     assert os.environ["LORE_NOTIFY"] == "0"  # untouched: not ours
+
+
+def test_doxas_own_staged_banner_silences_lore_cores_duplicate():
+    """The default state, and the whole point: notify_staged is ON out of
+    the box, so one staged batch produces ONE notification -- DOXA's
+    focus-gated one -- rather than DOXA's plus lore_core's."""
+    import os
+
+    config.save({"notify_lore": "1", "notify_staged": "1"})
+    notify_mod.sync_lore_notify_env()
+    assert os.environ["LORE_NOTIFY"] == "0"
+
+
+def test_turning_doxas_staged_banner_off_hands_the_job_back():
+    import os
+
+    config.save({"notify_lore": "1", "notify_staged": "1"})
+    notify_mod.sync_lore_notify_env()
+    assert os.environ["LORE_NOTIFY"] == "0"
+
+    config.save({"notify_staged": "0"})
+    notify_mod.sync_lore_notify_env()
+    assert "LORE_NOTIFY" not in os.environ
+
+
+# -- the staged trigger itself ---------------------------------------------
+
+
+def _script_notify_send(monkeypatch) -> list:
+    """Collect (title, body) instead of popping a real banner -- the same
+    ``notify_mod.notify`` stand-in every trigger test above installs."""
+    calls: list = []
+    monkeypatch.setattr(
+        notify_mod, "notify", lambda title, body: calls.append((title, body))
+    )
+    return calls
+
+
+def test_notify_staged_names_the_tab_and_quotes_the_first_proposal(monkeypatch):
+    sent = _script_notify_send(monkeypatch)
+    config.save({"notify": "always"})
+    notify_mod.notify_staged(True, "doxa · repo", 3, ["remember uv, not pip"])
+    assert sent[0][-2] == "doxa · repo"
+    body = sent[0][-1]
+    assert "3 proposals staged" in body
+    assert "remember uv, not pip" in body
+
+
+def test_notify_staged_says_one_proposal_in_the_singular(monkeypatch):
+    sent = _script_notify_send(monkeypatch)
+    config.save({"notify": "always"})
+    notify_mod.notify_staged(True, "tab", 1, [])
+    assert "1 proposal staged" in sent[0][-1]
+
+
+def test_notify_staged_survives_an_empty_preview(monkeypatch):
+    sent = _script_notify_send(monkeypatch)
+    config.save({"notify": "always"})
+    notify_mod.notify_staged(True, "tab", 2, None)
+    assert "2 proposals staged" in sent[0][-1]
+
+
+def test_notify_staged_trims_a_runaway_body(monkeypatch):
+    sent = _script_notify_send(monkeypatch)
+    config.save({"notify": "always"})
+    notify_mod.notify_staged(True, "tab", 1, ["z" * 4000])
+    assert len(sent[0][-1]) <= 201 and sent[0][-1].endswith("\u2026")
+
+
+def test_notify_staged_is_gated_like_any_other_trigger(monkeypatch):
+    """A staged proposal is never urgent -- nothing blocks on it and
+    nothing reaches curated memory without an explicit approval -- which is
+    exactly why it must respect the focus rule instead of interrupting
+    someone already looking at DOXA."""
+    sent = _script_notify_send(monkeypatch)
+    config.save({"notify": "auto"})
+    notify_mod.notify_staged(True, "tab", 1, ["x"])  # focused: silent
+    assert sent == []
+    notify_mod.notify_staged(False, "tab", 1, ["x"])  # unfocused: speaks
+    assert len(sent) == 1
+
+
+def test_notify_staged_toggle_off_silences_it_even_when_unfocused(monkeypatch):
+    sent = _script_notify_send(monkeypatch)
+    config.save({"notify": "always", "notify_staged": "0"})
+    notify_mod.notify_staged(False, "tab", 1, ["x"])
+    assert sent == []

@@ -954,3 +954,120 @@ async def test_the_beliefs_picker_opens_complete_and_filterable_over_the_socket(
                 )
     finally:
         _drop_big_belief_store(conn, subject)
+
+
+# -- /pending over the split (v0.31.0) ---------------------------------
+#
+# Same frame-cap discipline the beliefs RPC above had to learn the hard
+# way, applied BEFORE a report this time: a staged proposal is free text of
+# unbounded length, and encode_frame discards an oversize reply rather than
+# shortening it. These pin that the `pending` RPC pages, that the paging is
+# invisible to the caller (engine parity), and that the read-only shape is
+# the whole shape -- there is deliberately no approve/reject RPC.
+
+
+def test_fit_pending_page_splits_on_the_byte_budget():
+    texts = ["y" * 4096 for _ in range(200)]
+    page, next_offset = daemon_mod._fit_pending_page(texts, 0)
+    assert 0 < len(page) < len(texts)
+    assert next_offset == len(page)
+    encoded = daemon_mod.encode_frame(
+        {"type": "reply", "id": 1, "ok": True,
+         "pending": page, "next_offset": next_offset}
+    )
+    assert len(encoded) <= peers.MAX_FRAME_BYTES
+    assert b"exceeded the frame cap" not in encoded
+
+
+def test_fit_pending_page_ends_cleanly_on_a_short_list():
+    page, next_offset = daemon_mod._fit_pending_page(["short"], 7)
+    assert page == ["short"]
+    assert next_offset is None
+
+
+def test_fit_pending_page_never_stalls_on_one_oversize_proposal():
+    """A single proposal larger than the whole frame budget would
+    otherwise page forever without emitting a row. It goes out alone, cut
+    to fit and visibly ellipsized, and the offset still advances."""
+    huge = "z" * (peers.MAX_FRAME_BYTES * 2)
+    page, next_offset = daemon_mod._fit_pending_page([huge, huge], 0)
+    assert len(page) == 1 and next_offset == 1
+    assert len(page[0]) < len(huge) and page[0].endswith("…")
+    assert len(daemon_mod.encode_frame(
+        {"type": "reply", "id": 1, "ok": True, "pending": page}
+    )) <= peers.MAX_FRAME_BYTES
+
+
+@pytest.mark.asyncio
+async def test_pending_call_survives_a_queue_bigger_than_one_frame(
+    tmp_path, monkeypatch,
+):
+    """End to end over a real socket: a staging area whose texts exceed
+    MAX_FRAME_BYTES comes back WHOLE, not as
+    EngineClientError("reply exceeded the frame cap")."""
+    # Prose filler, not a long opaque token: lore_core's scrubber redacts
+    # anything that reads like a base64 blob, and a redacted fixture would
+    # be testing the scrubber rather than the paging.
+    filler = "the operator prefers uv over pip and keeps doxa in home. " * 40
+    staged = [f"proposal {i:04d} {filler}" for i in range(120)]
+    assert len(json.dumps(staged).encode("utf-8")) > peers.MAX_FRAME_BYTES * 3
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+        monkeypatch.setattr(
+            daemon.engine, "_pending_texts", lambda: list(staged)
+        )
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        result = await client.list_pending()
+        assert result == staged  # every row, whole, in order
+        await client.finalize()
+
+
+@pytest.mark.asyncio
+async def test_client_and_engine_list_pending_stay_in_parity(
+    tmp_path, monkeypatch,
+):
+    """Paging is a transport detail and must not be visible in the result
+    -- doxa.app reaches both engines through one `getattr(engine,
+    "list_pending")` and cannot tell them apart."""
+    filler = "remember that the deriver stages proposals for review. " * 20
+    staged = [f"proposal {i} {filler}" for i in range(80)]
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+        monkeypatch.setattr(
+            daemon.engine, "_pending_texts", lambda: list(staged)
+        )
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        over_socket = await client.list_pending()
+        in_process = await daemon.engine.list_pending()
+        assert over_socket == in_process
+        await client.finalize()
+
+
+@pytest.mark.asyncio
+async def test_pending_paging_honours_an_explicit_limit(tmp_path, monkeypatch):
+    filler = "remember that the deriver stages proposals for review. " * 20
+    staged = [f"proposal {i} {filler}" for i in range(200)]
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+        monkeypatch.setattr(
+            daemon.engine, "_pending_texts", lambda: list(staged)
+        )
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        assert len(await client.list_pending(limit=37)) == 37
+        await client.finalize()
+
+
+@pytest.mark.asyncio
+async def test_the_daemon_exposes_no_approve_or_reject_rpc(tmp_path, monkeypatch):
+    """Scope boundary, pinned at the protocol: the read half of the review
+    gate crossed the socket in v0.31.0 and the write half deliberately did
+    not (docs/plugin-api.md §6). An unknown method must be refused, never
+    silently accepted by some future generic handler."""
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        for method in ("approve", "reject", "approve_pending"):
+            reply = await client._call(method)
+            assert reply.get("ok") is False
+            assert "unknown method" in str(reply.get("error"))
+        await client.finalize()

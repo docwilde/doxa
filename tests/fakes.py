@@ -6,7 +6,7 @@ doxa.engine.SessionEngine at the doxa.app layer, so the Textual pilot test
 can drive a scripted turn without a real engine (and therefore without a
 real SDK client) underneath it -- app.py only ever touches the small surface
 reproduced here (start/send/finalize/model/total_cost_usd/
-last_ctx_percentage/effort/belief_count/list_beliefs), so the fake is a
+last_ctx_percentage/effort/belief_count/list_beliefs/list_pending), so the fake is a
 narrow, honest stand-in rather than a reimplementation of the engine.
 
 reasoning_delta (v0.25.0) needs NO change here: FakeEngine.send() replays
@@ -151,6 +151,19 @@ class FakeEngine:
         # itself is opened.
         self.list_beliefs_result: list[dict] = []
         self.list_beliefs_calls = 0
+        # v0.31.0 (/pending): scriptable list_pending() result, the same
+        # shape and the same call counter as the beliefs pair above. The
+        # picker is click-only, so the counter is what proves an ordinary
+        # status refresh never reaches for staged-proposal text.
+        self.list_pending_result: list[str] = []
+        self.list_pending_calls = 0
+        self.list_pending_error: "Exception | None" = None
+
+    async def list_pending(self, limit: int = 500, offset: int = 0) -> list[str]:
+        self.list_pending_calls += 1
+        if self.list_pending_error is not None:
+            raise self.list_pending_error
+        return list(self.list_pending_result)[offset : offset + limit]
 
     async def answer_needs_input(self, req_id: str, answer: dict) -> bool:
         self.needs_input_answers.append((req_id, dict(answer or {})))

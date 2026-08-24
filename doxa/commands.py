@@ -194,6 +194,17 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette_prefill=True,
     ),
     SlashCommand(
+        name="/pending",
+        group="Memory",
+        # READ-ONLY, deliberately, and the summary says so where a user
+        # reads it. Approving or rejecting a staged proposal stays with
+        # LORE's own `/lore:approve` / `/lore:reject`: the write path into
+        # curated memory is under security review (docs/plugin-api.md §6)
+        # and must not gain a second door here.
+        summary="Staged memory proposals from the background reviewer (read-only)",
+        palette="Pending proposals",
+    ),
+    SlashCommand(
         name="/search",
         group="Memory",
         summary="Search every past session (live results as you type)",

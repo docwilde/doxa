@@ -228,6 +228,24 @@ parks the question for whenever `doxa attach` picks it back up:
 
 <p align="center"><img src="assets/shots/attention-blink.gif" width="780" alt="A tab alternates every 0.5s between its normal color and a solid red -attention state while a question is pending"></p>
 
+**Staged memory proposals, and `/pending`.** With `derive_secs` set, a
+background reviewer runs over the live transcript between turns and stages
+whatever it judges worth remembering — behind LORE's approval gate, where
+it waits for a human. DOXA says so on three surfaces at once: a block in
+the transcript that **quotes** what was staged (a count alone cannot tell
+you whether a batch is worth opening), a calm steady tint on that
+session's tab, and a desktop notification gated by window focus like every
+other trigger. The tab tint is deliberately *not* the needs-input blink —
+a staged proposal blocks nothing and expires never, and a signal that
+shouted would be lying about the stakes.
+
+`/pending` (also on the palette, and one click from the block itself)
+lists everything currently staged, a selected row spilling its full text
+into the transcript. It is **read-only**: approving and rejecting stay
+with LORE's own `/lore:approve` / `/lore:reject`, because the write path
+into curated memory is under security review and the approval gate does
+not get a second door until that concludes.
+
 **Command palette and `/` autocomplete.** `ctrl+p` opens a palette listing
 new-tab, the open tabs (in tab-bar order, active one marked), every
 registered command grouped (Session · Memory · Panes & tabs · Tools &

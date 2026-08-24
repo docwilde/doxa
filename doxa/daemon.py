@@ -90,7 +90,12 @@ from typing import Any, Callable
 from . import __version__
 from . import notify as notify_mod
 from . import worktrees as worktrees_mod
-from .engine import BELIEF_LIST_LIMIT, EngineEvent, SessionEngine
+from .engine import (
+    BELIEF_LIST_LIMIT,
+    PENDING_LIST_LIMIT,
+    EngineEvent,
+    SessionEngine,
+)
 from .peers import MAX_FRAME_BYTES, registry_dir, runtime_dir
 
 PROTOCOL_VERSION = 1
@@ -176,46 +181,86 @@ BELIEF_PAGE_OVERHEAD_BYTES = 2048
 # whichever ceiling binds first ends the page. Cost of a smaller page is
 # one more round trip on a local unix socket, on a click-only call.
 BELIEF_PAGE_ROWS = 100
+# Row ceiling for one page of STAGED PROPOSALS (the `pending` RPC, item 3
+# of the v0.31.0 deriver-notification work). Same discipline as
+# BELIEF_PAGE_ROWS and a smaller number for the same reason it is smaller
+# than the belief cap: a proposal is a whole sentence or three of free
+# text, materially longer than a belief claim, so fewer of them fit a
+# frame comfortably. The byte backstop below still has the last word.
+PENDING_PAGE_ROWS = 50
+
+
+def _fit_page(
+    rows: "list[Any]", offset: int, trim_one: "Callable[[Any, int], Any]"
+) -> "tuple[list[Any], int | None]":
+    """As many of ``rows`` as fit in one wire frame, and the offset to
+    resume from (``None`` when this page is the last one). The BYTE
+    backstop shared by every paged RPC here -- beliefs (v0.28.0) and
+    staged proposals (v0.31.0).
+
+    It is applied to a slice the caller has already capped by ROW count.
+    That row ceiling is what normally ends a page and is set well below
+    what a frame holds; this exists because both payloads are free text,
+    so no row count alone can promise a fit -- and an oversize reply is
+    not degraded gracefully by encode_frame, it is discarded entirely,
+    which is the defect this whole mechanism removes.
+
+    A single row bigger than the entire frame budget would otherwise page
+    forever without ever emitting anything, so it is emitted ALONE, cut to
+    fit by ``trim_one(row, budget)`` -- which is also responsible for
+    MARKING the row as cut, because a shortened body must never be shown
+    as if it were whole."""
+    budget = MAX_FRAME_BYTES - BELIEF_PAGE_OVERHEAD_BYTES
+    page: "list[Any]" = []
+    used = 0
+    for index, row in enumerate(rows):
+        size = len(json.dumps(row, ensure_ascii=False).encode("utf-8")) + 1
+        if size > budget:
+            if page:
+                return page, offset + len(page)
+            return [trim_one(row, budget)], offset + 1
+        if used + size > budget and page:
+            return page, offset + index
+        page.append(row)
+        used += size
+    return page, None
+
+
+def _trim_belief(belief: dict, budget: int) -> dict:
+    """One oversize belief cut to fit, marked ``claim_truncated`` -- the
+    picker's row is ellipsized anyway, and the detail view says so out
+    loud rather than showing a short claim as if it were whole."""
+    trimmed = dict(belief)
+    claim = str(trimmed.get("claim") or "")
+    # Bytes, not characters: the cap is a wire cap. Cut on the encoded
+    # form and decode back, dropping any partial rune.
+    keep = claim.encode("utf-8")[: max(0, budget - 512)]
+    trimmed["claim"] = keep.decode("utf-8", errors="ignore")
+    trimmed["claim_truncated"] = True
+    return trimmed
+
+
+def _trim_pending(text: str, budget: int) -> str:
+    """One oversize staged proposal cut to fit. A proposal crosses the
+    wire as a bare string, with no row dict to hang a boolean flag off, so
+    the marker is the ellipsis itself -- the same "…" the picker's own row
+    ellipsis uses, which a reader already reads as "there was more"."""
+    keep = str(text).encode("utf-8")[: max(0, budget - 512)]
+    return keep.decode("utf-8", errors="ignore") + "…"
 
 
 def _fit_belief_page(
     beliefs: "list[dict]", offset: int
 ) -> "tuple[list[dict], int | None]":
-    """As many of ``beliefs`` as fit in one wire frame, and the offset to
-    resume from (``None`` when this page is the last one).
+    """:func:`_fit_page` for the ``beliefs`` RPC."""
+    return _fit_page(beliefs, offset, _trim_belief)
 
-    This is the BYTE backstop, applied to a slice the caller has already
-    capped at :data:`BELIEF_PAGE_ROWS`. The row ceiling is what normally
-    ends a page and is set well below what a frame holds; this exists
-    because claims are free text, so no row count alone can promise a fit
-    -- and an oversize reply is not degraded gracefully by encode_frame,
-    it is discarded entirely, which is the defect this whole change
-    removes. A single belief bigger than the entire frame budget would
-    otherwise page forever without ever emitting a row, so it is emitted
-    alone with its claim cut to fit and marked ``claim_truncated`` -- the
-    picker's row is ellipsized anyway, and the detail view says so out
-    loud rather than showing a short claim as if it were whole."""
-    budget = MAX_FRAME_BYTES - BELIEF_PAGE_OVERHEAD_BYTES
-    page: "list[dict]" = []
-    used = 0
-    for index, belief in enumerate(beliefs):
-        size = len(json.dumps(belief, ensure_ascii=False).encode("utf-8")) + 1
-        if size > budget:
-            if page:
-                return page, offset + len(page)
-            trimmed = dict(belief)
-            claim = str(trimmed.get("claim") or "")
-            # Bytes, not characters: the cap is a wire cap. Cut on the
-            # encoded form and decode back, dropping any partial rune.
-            keep = claim.encode("utf-8")[: max(0, budget - 512)]
-            trimmed["claim"] = keep.decode("utf-8", errors="ignore")
-            trimmed["claim_truncated"] = True
-            return [trimmed], offset + 1
-        if used + size > budget and page:
-            return page, offset + index
-        page.append(belief)
-        used += size
-    return page, None
+
+def _fit_pending_page(
+    texts: "list[str]", offset: int
+) -> "tuple[list[str], int | None]":
+    """:func:`_fit_page` for the ``pending`` RPC."""
+    return _fit_page(texts, offset, _trim_pending)
 
 
 def daemon_socket_path(session_id: str) -> Path:
@@ -654,6 +699,33 @@ class SessionDaemon:
                 next_offset = offset + len(page)
             await self._reply(
                 writer, req_id, ok=True, beliefs=page, next_offset=next_offset,
+            )
+        elif method == "pending":
+            # `/pending` over the daemon split -- the READ half of the LORE
+            # review gate, and only the read half: there is deliberately no
+            # approve/reject RPC beside this one. The write path into
+            # curated memory is under security review (docs/plugin-api.md
+            # §6) and must not gain a second door before that concludes.
+            #
+            # PAGED from the day it shipped rather than after a report,
+            # because the beliefs RPC already paid for that lesson: staged
+            # proposals are free text of unbounded length, one reply
+            # carrying all of them can pass MAX_FRAME_BYTES, and
+            # encode_frame answers an oversize non-event reply by
+            # discarding it wholesale in favour of an error the picker
+            # would print where the list should have been.
+            offset = max(0, int(params.get("offset") or 0))
+            limit = max(1, int(params.get("limit") or PENDING_LIST_LIMIT))
+            fetch = min(limit, PENDING_PAGE_ROWS)
+            texts = await self.engine.list_pending(limit=fetch, offset=offset)
+            page, next_offset = _fit_pending_page(texts, offset)
+            if next_offset is None and len(texts) == fetch:
+                # The window ended this page, not the staging area -- there
+                # may be more behind it, so say so rather than reporting a
+                # short list as complete.
+                next_offset = offset + len(page)
+            await self._reply(
+                writer, req_id, ok=True, pending=page, next_offset=next_offset,
             )
         elif method == "answer_needs_input":
             # The resolution's own needs_input_resolved broadcast comes

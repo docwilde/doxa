@@ -2,8 +2,8 @@
 
 :class:`EngineClient` presents the SAME surface doxa.app consumes from
 ``SessionEngine`` (start / send / peer_events / list_peers / peer_count /
-send_peer_message / belief_count / list_beliefs / disabled_tools /
-finalize, plus the model/total_cost_usd/last_ctx_percentage attributes) --
+send_peer_message / belief_count / list_beliefs / list_pending /
+disabled_tools / finalize, plus the model/total_cost_usd/last_ctx_percentage attributes) --
 the app swaps one handle for the other behind a factory and barely notices.
 Underneath, every call is a line-JSON frame over the daemon's Unix socket
 (protocol sketch in doxa/daemon.py's docstring).
@@ -42,7 +42,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from .daemon import PROTOCOL_VERSION
-from .engine import BELIEF_LIST_LIMIT, EngineEvent
+from .engine import BELIEF_LIST_LIMIT, PENDING_LIST_LIMIT, EngineEvent
 from .peers import MAX_FRAME_BYTES, PeerInfo, PeerSendError
 
 CALL_TIMEOUT_SECS = 15.0
@@ -423,6 +423,40 @@ class EngineClient:
                 # advance -- either way this loop is done. The non-advancing
                 # guard is what keeps an old or buggy peer from spinning
                 # here forever instead of just returning a short list.
+                break
+            cursor = nxt
+        return out[:limit]
+
+    async def list_pending(
+        self, limit: int = PENDING_LIST_LIMIT, offset: int = 0
+    ) -> list[str]:
+        """Engine parity for :meth:`SessionEngine.list_pending` -- the
+        `/pending` list over the daemon split.
+
+        Paged the same way, and for the same reason,
+        :meth:`list_beliefs` above is: a staged proposal is free text of
+        unbounded length, and ``doxa.daemon.encode_frame`` discards an
+        oversize reply rather than shortening it. The caller sees exactly
+        what ``SessionEngine.list_pending`` returns for the same arguments
+        -- one complete list, no cursor to manage -- because ``doxa.app``
+        reaches both engines through the same ``getattr(engine,
+        "list_pending")`` and must not be able to tell them apart."""
+        out: list[str] = []
+        cursor = max(0, offset)
+        while len(out) < limit:
+            reply = await self._call(
+                "pending", offset=cursor, limit=limit - len(out),
+            )
+            if not reply.get("ok"):
+                raise EngineClientError(
+                    reply.get("error") or "pending call failed"
+                )
+            out.extend(str(text) for text in (reply.get("pending") or []))
+            nxt = reply.get("next_offset")
+            if not isinstance(nxt, int) or nxt <= cursor:
+                # Exhausted, or a daemon that failed to advance -- the same
+                # non-advancing guard list_beliefs carries, keeping an old
+                # or buggy peer from spinning here forever.
                 break
             cursor = nxt
         return out[:limit]

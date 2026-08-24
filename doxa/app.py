@@ -85,7 +85,12 @@ from . import providers as providers_mod
 from . import tabsets as tabsets_mod
 from . import version as version_mod
 from . import worktrees as worktrees_mod
-from .engine import BELIEF_LIST_LIMIT, EngineEvent, SessionEngine
+from .engine import (
+    BELIEF_LIST_LIMIT,
+    PENDING_LIST_LIMIT,
+    EngineEvent,
+    SessionEngine,
+)
 from . import history as history_mod
 from .history import SEARCH_PREFIX, SessionSearch
 from .identity import tier_short  # noqa: F401 -- re-exported: the status
@@ -364,6 +369,16 @@ def _fmt_belief_row(belief: dict) -> str:
     the claim has to be IN it, not just referenced by an id."""
     claim = _one_line(str(belief.get("claim") or ""), 200)
     return ellipsize(claim, 72)
+
+
+def _fmt_pending_row(text: str) -> str:
+    """One ``/pending`` row: the staged proposal's own text, ellipsized --
+    same rule :func:`_fmt_belief_row` follows and for the same reason,
+    ChipPicker's type-to-filter matches this string. A staged proposal has
+    no id, title or subject to fall back on (``lore_deriver.pending_texts``
+    returns text and nothing else), so the text is not merely the best row
+    label available, it is the only one."""
+    return ellipsize(_one_line(str(text or ""), 200), 72)
 
 
 def app_bindings() -> "list[tuple[str, str]]":
@@ -877,11 +892,43 @@ class SystemBlock(Static):
     command results, peer-layer errors. Same ▎ accent as turns; v0.13.0's
     restyle carries the role in the background tint instead of a border --
     the dimmer step on the surface ramp, one below the screen, with muted
-    text (.system-block in the theme)."""
+    text (.system-block in the theme).
 
-    def __init__(self, text: str) -> None:
+    ``link_label``/``on_link`` (v0.31.0) add ONE clickable trailing line --
+    the same unprefixed ``[@click=...]`` markup span
+    :class:`StatusBar`/:class:`SubagentLine` already use, resolved against
+    the clicked widget itself by ``Widget.broker_event``, which is why
+    :meth:`action_follow_link` lives right here and needs no ``app.``/
+    ``screen.`` prefix. It exists so a notification block can BE the door
+    to what it is announcing instead of naming a command and leaving the
+    reader to retype it. No new widget kind for that: a system block with
+    an affordance is still a system block.
+
+    Callers embedding model-derived text in ``text`` must escape it
+    themselves (:func:`_escape_markup`) -- this class does not, because
+    every pre-existing caller passes doxa-authored strings and some of
+    them (``/help``) rely on markup being live."""
+
+    def __init__(
+        self,
+        text: str,
+        *,
+        link_label: str = "",
+        on_link: "Callable[[], Any] | None" = None,
+    ) -> None:
         self.text = text
-        super().__init__(f"▎ doxa\n{text}", classes="system-block")
+        self._on_link = on_link
+        body = f"▎ doxa\n{text}"
+        if link_label and on_link is not None:
+            body += (
+                f"\n[@click=follow_link][{CLICKABLE_CHIP_ACCENT}]"
+                f"{_escape_markup(link_label)}[/][/]"
+            )
+        super().__init__(body, classes="system-block")
+
+    def action_follow_link(self) -> None:
+        if self._on_link is not None:
+            self._on_link()
 
 
 class ImageBlock(Vertical):
@@ -2692,6 +2739,11 @@ class SessionPane(TabPane):
         self.needs_input = False
         self._attention_timer: Any = None
         self._attention_on = False
+        # Staged-proposal signal (v0.31.0): the streaming deriver extracted
+        # something and did not reject it. A SEPARATE tab class from the
+        # three above, written through the same _set_tab_class door -- see
+        # set_staged for why it is a steady tint and never a blink.
+        self.staged_pending = False
         # Subagent tracker (queue item 4): running Task-spawned subagents
         # for THIS pane, tool_use_id -> the ToolChip already mounted in the
         # trace tree -- a second INDEX into that same widget, not a copy of
@@ -2961,14 +3013,7 @@ class SessionPane(TabPane):
                 # Streaming deriver (engine-side, DOXA_DERIVE_SECS): newly
                 # staged proposals await the SAME human review gate as ever
                 # -- this is a notification, never an auto-apply.
-                staged = int(ev.data.get("staged") or 0)
-                if staged > 0:
-                    block_list = self.query_one("#block-list", VerticalScroll)
-                    noun = "proposal" if staged == 1 else "proposals"
-                    await block_list.mount(SystemBlock(
-                        f"{staged} {noun} staged — /lore:pending"
-                    ))
-                    block_list.scroll_end(animate=False)
+                await self._announce_staged(ev.data)
             elif ev.type == "turn_started":
                 block_list = self.query_one("#block-list", VerticalScroll)
                 self._oob_turn = TurnBlock(str(ev.data.get("prompt") or ""))
@@ -3156,6 +3201,35 @@ class SessionPane(TabPane):
     def _blink_attention(self) -> None:
         self._attention_on = not self._attention_on
         self._set_tab_class("-attention", self._attention_on)
+
+    def set_staged(self, value: bool) -> None:
+        """"This tab has staged memory proposals you have not looked at" --
+        the ``-staged`` tab class, written through the SAME
+        :meth:`_set_tab_class` door as ``-working``/``-done-unseen``/
+        ``-attention``. Not a second attention mechanism: one tab-status
+        vocabulary, one write path, one precedence ladder in theme.tcss.
+
+        A STEADY TINT, and deliberately not a blink. Blinking is reserved
+        for ``-attention`` (needs-input), and the reservation is not
+        stylistic: a blink says "the session is stopped until you act",
+        which is true of a permission prompt and false of a staged
+        proposal -- nothing is blocked, nothing expires, and nothing
+        reaches curated memory until a human approves it in LORE. A signal
+        that shouted would be lying about the stakes, and a second blinking
+        thing on the tab strip would make the one that IS urgent stop
+        reading as urgent. It also costs no timer: the blink needs a
+        ``set_interval`` alive for its whole duration, and this state can
+        legitimately persist for a whole session, which is exactly the
+        busy-idle bug the ``needs_input`` note in ``__init__`` warns about.
+
+        Cleared when you activate the tab (you have now seen the notice --
+        the block itself is in the transcript to come back to) or when you
+        open the list, the same "looking at it counts" rule
+        ``-done-unseen`` follows."""
+        if value == self.staged_pending:
+            return
+        self.staged_pending = value
+        self._set_tab_class("-staged", value)
 
     def _refresh_status(self) -> None:
         if self.engine is None:
@@ -3469,9 +3543,15 @@ class SessionPane(TabPane):
             "/sessions": self._cmd_sessions,
             "/rename": self._cmd_rename,
             "/search": self._cmd_search,
+            "/pending": self._cmd_pending,
             "/update": self._cmd_update,
             "/help": self._cmd_help,
         }
+
+    async def _cmd_pending(self, args: str) -> None:
+        """``/pending`` -- see :meth:`open_pending_picker` for what it
+        opens and for why it is read-only."""
+        await self.open_pending_picker()
 
     async def _cmd_settings(self, args: str) -> None:
         self.app.action_settings()
@@ -3840,6 +3920,86 @@ class SessionPane(TabPane):
             self._system(
                 f"belief · {_belief_scope_label(subject)} ({subject}) · "
                 f"confidence {conf_text}\n\n{claim}"
+            ),
+            group="command",
+        )
+
+    async def open_pending_picker(self) -> None:
+        """``/pending`` -- the staged proposals the background reviewer put
+        behind LORE's approval gate, listed in the SAME
+        :class:`ChipPicker` the beliefs chip opens, with the full text of
+        a selected row spilled into a system block. Reached from the
+        prompt, from the Ctrl+P palette, and from the click target on the
+        notification block itself.
+
+        This exists because the notification it replaces pointed at
+        ``/lore:pending``, which is a Claude Code PLUGIN command: it is
+        not in ``doxa.commands.REGISTRY``, so typing it inside DOXA
+        reaches the model rather than a list. Telling a user to run a
+        command that does not exist where they are reading the message is
+        a dead end, and the fix is a native surface, not a better
+        sentence.
+
+        READ-ONLY, and that is a scope decision rather than an oversight:
+        there is no approve/reject affordance here and none is planned for
+        this release. The write path into curated memory and beliefs is
+        under security review (docs/plugin-api.md §6, LORE issue #43), and
+        the approval gate must not gain a second door while that review is
+        open. Viewing touches none of it. Approving stays with LORE's own
+        ``/lore:approve``."""
+        engine = self.engine
+        if engine is None:
+            return
+        lister = getattr(engine, "list_pending", None)
+        if lister is None:
+            await self._system(
+                "pending: this session's handle cannot list staged proposals"
+            )
+            return
+        try:
+            texts = await lister()
+        except Exception as exc:  # noqa: BLE001 -- a refusal is information
+            await self._system(f"pending: {type(exc).__name__}: {exc}")
+            return
+        # Looking at the list is the strongest possible "I have seen it".
+        self.set_staged(False)
+        if not texts:
+            await self._system(
+                "pending: nothing staged — the background reviewer has "
+                "proposed nothing awaiting your approval"
+            )
+            return
+        rows = [(f"pending:{index}", _fmt_pending_row(text))
+                for index, text in enumerate(texts)]
+        by_id = {rid: text for (rid, _label), text in zip(rows, texts)}
+        note = ""
+        if len(texts) >= PENDING_LIST_LIMIT:
+            # Same honesty rule the beliefs picker's cap note follows: a
+            # list that ended because it hit the cap must never be shown
+            # as if the staging area had run out.
+            note = (
+                f"showing the first {len(texts)} staged proposals -- this "
+                f"list is capped at {PENDING_LIST_LIMIT}"
+            )
+        self._open_chip_picker(
+            rows, None,
+            lambda rid: self._show_pending_detail(by_id.get(rid)),
+            title="pending", note=note,
+        )
+
+    def _show_pending_detail(self, text: "str | None") -> None:
+        """One staged proposal, in full, as a system block -- the same
+        "a row's selection surfaces its whole body inline" shape
+        :meth:`_show_belief_detail` uses, and for the same reason: the
+        picker row is ellipsized, and the least surprising thing a
+        truncated row can do is show you the rest. Read-only, like
+        everything else on this path."""
+        if not text:
+            return
+        self.run_worker(
+            self._system(
+                "staged proposal · awaiting approval in LORE "
+                f"(/lore:approve)\n\n{text}"
             ),
             group="command",
         )
@@ -4644,6 +4804,68 @@ class SessionPane(TabPane):
             _needs_input_summary(data),
         )
 
+    # -- staged proposals (v0.31.0) ------------------------------------
+
+    async def _announce_staged(self, data: dict) -> None:
+        """One ``derive_done`` event, made reachable from wherever the user
+        actually is. Before v0.31.0 this was a single count-only
+        :class:`SystemBlock` in ONE pane's block list, pointing at
+        ``/lore:pending`` -- a Claude Code plugin command that does not
+        exist inside DOXA -- so a background reviewer that found something
+        was invisible unless you happened to be looking at that pane, and
+        the hint it printed led nowhere. Three surfaces now, all fed by
+        the same event:
+
+        * the transcript block, which QUOTES what was staged (ellipsized
+          per row by ``doxa.engine.staged_event_payload``, which also
+          scrubs it and bounds it to a wire frame) and says how many rows
+          it left out, because a count alone cannot tell you whether a
+          batch is worth opening;
+        * the tab, via :meth:`set_staged` -- a calm steady tint, never the
+          needs-input blink (see that method for why);
+        * a desktop notification, focus-gated exactly like every other
+          trigger (``doxa.notify.notify_staged``) so it can only ever
+          reach you when you are NOT already looking at DOXA.
+
+        The block's trailing line is a live click target onto the same
+        ``/pending`` list the command opens -- an announcement that names a
+        destination should be able to take you there.
+        """
+        staged = int(data.get("staged") or 0)
+        if staged <= 0:
+            return
+        texts = [str(t) for t in (data.get("texts") or [])]
+        omitted = int(data.get("omitted") or 0)
+        noun = "proposal" if staged == 1 else "proposals"
+        lines = [f"{staged} {noun} staged by the background reviewer"]
+        # Model-derived text on a block that carries a click action: escape
+        # it, per SystemBlock's own contract and _escape_markup's docstring.
+        lines += [f"  • {_escape_markup(text)}" for text in texts]
+        if omitted > 0:
+            lines.append(f"  … and {omitted} more")
+        if not texts and staged > 0:
+            # The count is real but the preview is empty (an event that
+            # crossed the daemon socket from an older peer, or proposals
+            # that scrubbed down to nothing). Say so rather than showing a
+            # bare number as if that were the whole story.
+            lines.append("  (no preview available — open the list to read them)")
+        block_list = self.query_one("#block-list", VerticalScroll)
+        await block_list.mount(SystemBlock(
+            "\n".join(lines),
+            link_label="/pending — review them",
+            on_link=lambda: self.run_worker(
+                self.open_pending_picker(), group="command"
+            ),
+        ))
+        block_list.scroll_end(animate=False)
+        self.set_staged(True)
+        notify_mod.notify_staged(
+            getattr(self.app, "app_has_focus", True),
+            self.display_name(),
+            staged,
+            texts,
+        )
+
     async def _resolve_needs_input(
         self, popup: "NeedsInputPopup", index: "int | None", decline: bool,
     ) -> None:
@@ -5106,12 +5328,15 @@ class DoxaApp(App):
         self._jump_tab_marker()
         pane = self.active_pane
         if pane is not None:
-            # Looking at this tab now clears both "you missed something"
-            # signals: the done-unseen dot from a turn that finished while
-            # you were elsewhere, and any attention blink (and its timer --
-            # set_needs_input(False) is what stops that).
+            # Looking at this tab now clears every "you missed something"
+            # signal: the done-unseen dot from a turn that finished while
+            # you were elsewhere, any attention blink (and its timer --
+            # set_needs_input(False) is what stops that), and the staged-
+            # proposal tint (the block announcing it is right there in the
+            # transcript you just opened).
             pane._set_tab_class("-done-unseen", False)
             pane.set_needs_input(False)
+            pane.set_staged(False)
             with contextlib.suppress(Exception):
                 pane.query_one("#prompt-input", PromptInput).focus()
         elif isinstance(event.pane, SubagentTranscriptTab):

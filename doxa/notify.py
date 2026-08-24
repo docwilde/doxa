@@ -146,6 +146,41 @@ def notify_needs_input(app_has_focus: bool, tab_label: str, summary: str) -> Non
     notify_if("DOXA_NOTIFY_NEEDS_INPUT", app_has_focus, tab_label, body)
 
 
+def notify_staged(
+    app_has_focus: bool,
+    tab_label: str,
+    staged: int,
+    texts: "list[str] | None" = None,
+) -> None:
+    """The background reviewer staged something -- the streaming deriver
+    (``DOXA_DERIVE_SECS``) extracted material from the live transcript and
+    did NOT reject it, so it is now sitting behind LORE's approval gate
+    waiting on a human.
+
+    Title is the tab's own label, same as :func:`notify_turn_done`: in a
+    multi-tab window "which session derived this" is the first question.
+    The body leads with the count and then QUOTES the first proposal,
+    because a bare count cannot tell you whether a batch is worth opening.
+    ``texts`` arrive already scrubbed and ellipsized from the producer
+    (``doxa.engine.staged_event_payload``) -- trusted here, the same way
+    :func:`notify_needs_input` trusts its summary -- and trimmed once more
+    only to keep a desktop banner banner-sized.
+
+    Gated like every other trigger: ``DOXA_NOTIFY_STAGED`` AND the master
+    mode AND (on ``auto``) focus. Nothing about a staged proposal is
+    urgent -- it waits indefinitely, and nothing reaches curated memory
+    without an explicit approval -- which is precisely why it must obey
+    the focus rule rather than interrupt someone already looking."""
+    noun = "proposal" if staged == 1 else "proposals"
+    body = f"{staged} {noun} staged by the background reviewer"
+    first = next((t for t in (texts or []) if t.strip()), "")
+    if first:
+        body += f"\n{first.strip()}"
+    if len(body) > 200:
+        body = body[:200] + "…"
+    notify_if("DOXA_NOTIFY_STAGED", app_has_focus, tab_label, body)
+
+
 def notify_update_available(app_has_focus: bool) -> None:
     """A fast-forward is sitting on the remote, unpulled. Fires at most
     once per app run (the caller owns that -- this function is stateless)."""
@@ -189,20 +224,34 @@ def sync_lore_notify_env() -> None:
                          the one that set it to "0" a moment ago, in which
                          case that override is undone.
 
-    What this does NOT achieve -- documented rather than silently
-    pretended away: lore_core's own notification has no DOXA focus
-    awareness (LORE_NOTIFY is a blunt on/off, not an auto/always/off mode
-    like DOXA's own ``notify`` setting), so with notify_lore=on a staged-
-    proposal notification fires even while the DOXA window is focused.
-    Closing that gap needs ``doxa/engine.py`` to call through
-    ``doxa.notify`` itself instead of relying on lore_core's own notify()
-    -- out of scope here; see the task report.
+    ONE MORE INPUT SINCE v0.31.0, and it is the fix for what the previous
+    revision of this docstring recorded as an open gap ("lore_core's own
+    notification has no DOXA focus awareness ... so with notify_lore=on a
+    staged-proposal notification fires even while the DOXA window is
+    focused. Closing that gap needs doxa/engine.py to call through
+    doxa.notify itself"). DOXA now DOES: :func:`notify_staged` fires from
+    the TUI's own ``derive_done`` handler, focus-gated like every other
+    trigger and carrying the proposal text lore_core's banner never had.
+    Two notifiers for one event would mean two banners, so whichever of
+    them is better informed wins:
+
+    notify_staged on -> ``LORE_NOTIFY=0`` regardless of notify_lore. DOXA
+                         owns this banner now; lore_core's blunter one
+                         would only duplicate it, unfocused-unaware.
+    notify_staged off-> the pre-v0.31.0 rule above, unchanged: notify_lore
+                         alone decides whether lore_core speaks. Turning
+                         DOXA's own trigger off therefore does not leave
+                         the user with silence they did not ask for.
+
+    Both branches route through the same ``_lore_notify_silenced_by_us``
+    latch, so a user's OWN ``LORE_NOTIFY`` choice made in their shell is
+    still never clobbered on the way back.
     """
     global _lore_notify_silenced_by_us
-    if _bool("DOXA_NOTIFY_LORE", True):
-        if _lore_notify_silenced_by_us:
-            os.environ.pop("LORE_NOTIFY", None)
-            _lore_notify_silenced_by_us = False
-    else:
+    silence = _bool("DOXA_NOTIFY_STAGED", True) or not _bool("DOXA_NOTIFY_LORE", True)
+    if silence:
         os.environ["LORE_NOTIFY"] = "0"
         _lore_notify_silenced_by_us = True
+    elif _lore_notify_silenced_by_us:
+        os.environ.pop("LORE_NOTIFY", None)
+        _lore_notify_silenced_by_us = False

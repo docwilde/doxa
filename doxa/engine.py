@@ -75,7 +75,7 @@ import json
 import os
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -149,6 +149,82 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 # to exist at all (this SELECTs every claim BODY), so the picker now SAYS
 # when it was reached -- see SessionPane.open_beliefs_picker's note row.
 BELIEF_LIST_LIMIT = 2000
+
+# How many staged proposals ``/pending`` will ever list in one open
+# (:meth:`SessionEngine.list_pending`, and EngineClient's paging loop over
+# the daemon's `pending` RPC, both default to this so the two paths agree
+# on where "the list" ends). Same shape and same honesty rule as
+# BELIEF_LIST_LIMIT above: the picker SAYS when the cap bit rather than
+# showing a short list as if it were the whole staging area. Lower than
+# the belief cap because a pending queue that ever gets near 500 is
+# already a signal to go review it, not to scroll further.
+PENDING_LIST_LIMIT = 500
+
+# -- what rides on ONE derive_done event ------------------------------
+#
+# A count is not information: "3 proposals staged" cannot tell you whether
+# any of them is worth approving. The event therefore carries the staged
+# TEXTS as well -- but an event frame is subject to the same 64KB
+# ``peers.MAX_FRAME_BYTES`` cap every other frame is, and
+# ``doxa.daemon.encode_frame`` answers an oversize EVENT by replacing its
+# whole payload with ``{"truncated": True}``. That degradation is silent
+# from the TUI's side (it would render as nothing at all), so the payload
+# is capped HERE, at the producer, by three independent bounds -- rows,
+# per-row characters, and total bytes -- and whatever is left over is
+# COUNTED and said out loud rather than dropped. See
+# :func:`staged_event_payload`.
+DERIVE_EVENT_TEXTS = 8
+"""Most proposal texts one derive_done event carries."""
+
+DERIVE_TEXT_CHARS = 160
+"""Per-row ellipsis width -- a notification line, not a document."""
+
+DERIVE_EVENT_BUDGET_BYTES = 8 * 1024
+"""Byte backstop for the texts list, well under MAX_FRAME_BYTES (64KB) so
+the surrounding event/frame envelope can never push the encoded frame over
+the cap. Deliberately not tuned to fill a frame: overshooting costs the
+ENTIRE event (encode_frame replaces it with the truncation marker), while
+undershooting costs one ellipsis on a proposal that was already
+ellipsized. Eight rows of 160 characters cannot reach this even when every
+character escapes to a six-byte ``\\uXXXX`` sequence."""
+
+
+def staged_event_payload(staged: int, texts: "Sequence[str]") -> dict:
+    """The ``derive_done`` event payload: how many proposals were newly
+    staged, a bounded preview of WHAT they say, and how many of them the
+    preview left out.
+
+    Every text is scrubbed (:func:`_scrub_text` -- staged proposals are
+    derived from transcripts, so they are model-adjacent text and the
+    module docstring's choke-point rule applies), whitespace-collapsed to
+    one line, and ellipsized to :data:`DERIVE_TEXT_CHARS`. The list then
+    stops at whichever of the two caps binds first --
+    :data:`DERIVE_EVENT_TEXTS` rows or :data:`DERIVE_EVENT_BUDGET_BYTES`
+    of encoded JSON -- and ``omitted`` reports the difference so the UI can
+    say "and N more" instead of quietly showing a partial list as if it
+    were the whole batch.
+
+    ``staged`` is authoritative for the COUNT even when it exceeds the
+    texts carried: the count comes from the pending-list delta, the texts
+    are a preview of it."""
+    shown: "list[str]" = []
+    used = 0
+    for text in list(texts)[:DERIVE_EVENT_TEXTS]:
+        line = " ".join(_scrub_text(text).split())
+        if len(line) > DERIVE_TEXT_CHARS:
+            line = line[: DERIVE_TEXT_CHARS - 1] + "…"
+        if not line:
+            continue
+        size = len(json.dumps(line, ensure_ascii=False).encode("utf-8")) + 1
+        if used + size > DERIVE_EVENT_BUDGET_BYTES:
+            break
+        shown.append(line)
+        used += size
+    return {
+        "staged": staged,
+        "texts": shown,
+        "omitted": max(0, staged - len(shown)),
+    }
 
 
 def effort_level() -> "str | None":
@@ -727,14 +803,70 @@ class SessionEngine:
 
     # -- streaming deriver -------------------------------------------
 
+    def _pending_texts(self) -> list[str]:
+        """Staged proposals visible to this project's reviews, as TEXT --
+        lore_core's own pending list, scoped the way build_review_job scopes
+        it. Raw here on purpose: the two consumers scrub at their own
+        boundary (:func:`staged_event_payload` for the event,
+        :meth:`list_pending` for the picker), and scrubbing twice would
+        make the before/after diff in :meth:`_derive_once` compare scrubbed
+        text against scrubbed text for no gain."""
+        try:
+            return [str(text) for text in lore_deriver.pending_texts(self.slug)]
+        except Exception:
+            return []
+
     def _pending_count(self) -> int:
         """Staged proposals visible to this project's reviews -- the number
-        behind the 'N proposals staged' notification. lore_core's own
-        pending list, scoped the way build_review_job scopes it."""
-        try:
-            return len(lore_deriver.pending_texts(self.slug))
-        except Exception:
-            return 0
+        behind the 'N proposals staged' notification."""
+        return len(self._pending_texts())
+
+    @staticmethod
+    def _newly_staged(before: "Sequence[str]", after: "Sequence[str]") -> list[str]:
+        """The proposals present in ``after`` that were not already in
+        ``before``, in the order the pending list holds them.
+
+        A MULTISET difference, not a set one: two genuinely distinct
+        proposals can carry byte-identical text (the deriver's own dedupe
+        works on its prompt's judgment, not on string equality), and a set
+        difference would silently swallow the second. Never negative --
+        a pending list that SHRANK across the review (a concurrent
+        approve/reject in another window) yields an empty new-list, which
+        is the honest answer."""
+        remaining: "dict[str, int]" = {}
+        for text in before:
+            remaining[text] = remaining.get(text, 0) + 1
+        fresh: list[str] = []
+        for text in after:
+            if remaining.get(text):
+                remaining[text] -= 1
+            else:
+                fresh.append(text)
+        return fresh
+
+    async def list_pending(
+        self, limit: int = PENDING_LIST_LIMIT, offset: int = 0
+    ) -> list[str]:
+        """Staged proposal texts for ``/pending`` -- the READ half of the
+        review gate, and only the read half: DOXA lists and shows staged
+        proposals, it does not approve or reject them. The write path into
+        curated memory stays behind LORE's own approval command until the
+        plugin-API security review concludes (docs/plugin-api.md §6), and a
+        second door onto it is exactly what that review exists to prevent.
+
+        Scrubbed here (the picker is a persistence-adjacent surface in the
+        same sense the transcript is -- see the module docstring's choke
+        point) and returned whole-text: the picker ellipsizes its own rows
+        and the detail block wants the full proposal.
+
+        async, and ``offset``, for the same two reasons
+        :meth:`list_beliefs` has them: symmetry with the other "list, then
+        let the picker render it" calls the app awaits, and the daemon's
+        ``pending`` RPC, which cannot put an unbounded list of free text in
+        a single 64KB wire frame and therefore serves it in pages."""
+        texts = self._pending_texts()
+        window = texts[max(0, offset) : max(0, offset) + max(0, limit)]
+        return [_scrub_text(text) for text in window]
 
     def _maybe_schedule_derive(self) -> None:
         """Turn-done hook for the streaming deriver: schedule ONE background
@@ -758,18 +890,26 @@ class SessionEngine:
         + worker_run -- nothing reimplemented; the deriver prompt's own
         pending-list dedupe keeps repeat runs idempotent). Serialized with
         finalize through _review_lock; newly staged proposals surface as an
-        out-of-band derive_done event the TUI renders as a notification."""
+        out-of-band derive_done event the TUI renders as a notification.
+
+        The event carries WHAT was staged, not only how many (v0.31.0):
+        the before/after pending lists are diffed as multisets
+        (:meth:`_newly_staged`) so the preview shows the proposals THIS
+        review added rather than the tail of a queue that may be mostly
+        old. :func:`staged_event_payload` scrubs and bounds them."""
         try:
             async with self._review_lock:
                 if self._finalized:
                     return  # finalize won the race: it runs the last review
-                before = self._pending_count()
+                before = self._pending_texts()
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, self._run_review_sync, False)
-                staged = self._pending_count() - before
+                after = self._pending_texts()
+                staged = len(after) - len(before)
+                fresh = self._newly_staged(before, after)
             if staged > 0:
                 self._peer_queue.put_nowait(
-                    EngineEvent("derive_done", {"staged": staged})
+                    EngineEvent("derive_done", staged_event_payload(staged, fresh))
                 )
         except Exception:
             # Same posture as _run_review_sync: a review failure must never

@@ -4,6 +4,114 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.31.0 — 2026-08-24
+
+The streaming background reviewer had been staging memory proposals into
+the approval gate for several releases without any reliable way to find
+out. Reported: *"we are still missing doxa internal notifications for
+streaming background reviewer (e.g. when the deriver extracted sth that is
+not rejected immediately)"*. Three separate defects sat behind that one
+sentence; each is written defect-then-fix below. Nothing here touches the
+write path — see the scope note at the end.
+
+- **The announcement was invisible unless you were already looking at the
+  right pane.** THE DEFECT: `SessionEngine._derive_once` emitted a
+  `derive_done` event and `doxa/app.py` had exactly one consumer for it —
+  it mounted a `SystemBlock` into that pane's `#block-list` and stopped
+  there. No tab-status change, no desktop notification. The two other
+  "something happened while you were elsewhere" events in this app
+  (turn-done, needs-input) both get a `notify.notify_if` banner AND a tab
+  affordance; a background reviewer that runs *by definition* while your
+  attention is somewhere else got neither, so on a live config with
+  `derive_secs = 77` the reviewer could stage all session and say so to an
+  empty room. THE FIX: the same event now drives three surfaces. A new
+  `notify_staged` trigger (`DOXA_NOTIFY_STAGED`, defaults on, its own row
+  in the settings modal) routes through the same `notify_if` gate every
+  other trigger uses, so it fires only while the DOXA window is unfocused
+  on the default `auto` mode — a staged proposal is never urgent and must
+  never interrupt someone already looking. The tab gains a `-staged`
+  class, written through the SAME `_set_tab_class` door as
+  `-working`/`-done-unseen`/`-attention` rather than a second mechanism,
+  and it is a STEADY muted-violet tint, not a blink. That is a
+  deliberate reservation: blinking says "this session is stopped until you
+  act", which is true of a permission prompt and false of a staged
+  proposal — nothing is blocked, nothing expires, nothing reaches curated
+  memory without an explicit approval. It also costs no `set_interval`,
+  and this state can legitimately persist for a whole session. Both the
+  tint and the block clear the way `-done-unseen` does: the moment you
+  look at the tab.
+
+  One consequence, handled rather than shipped: `lore_core`'s own
+  `deriver.notify_staged` already fired a banner off this same review
+  path, focus-unaware. Two notifiers for one event is two banners, so
+  `notify.sync_lore_notify_env` now silences `LORE_NOTIFY` while DOXA's
+  own trigger is on — closing the gap that function's docstring had been
+  recording as out of scope since it was written ("closing that gap needs
+  `doxa/engine.py` to call through `doxa.notify` itself"). Turning
+  `notify_staged` off hands the job straight back to `notify_lore`, so
+  nobody ends up with silence they did not ask for.
+
+- **A count is not information.** THE DEFECT: the event carried
+  `{"staged": N}` and the block read `N proposals staged`. That answers
+  "did something happen" and nothing else — you could not tell a batch
+  worth approving from three restatements of something the store already
+  knows without leaving DOXA entirely. The proposal TEXTS were reachable
+  in-process the whole time (`_pending_count` was already calling
+  `lore_deriver.pending_texts(slug)` and throwing the strings away to
+  return a length). THE FIX: `derive_done` carries the texts. They are
+  diffed as a MULTISET against the pending list from before the review, so
+  the preview shows what *this* review added rather than the tail of a
+  queue that may be mostly weeks old — and two genuinely distinct
+  proposals that happen to share byte-identical text no longer collapse
+  into one, which a set difference would have done silently. Every text
+  routes through `lore_core.scrub.scrub_secrets` (staged proposals are
+  transcript-derived, so `doxa/engine.py`'s secret-scrub choke point
+  applies), is collapsed to one line and ellipsized.
+
+  THE FRAME CAP, handled at the producer this time rather than after a
+  report. `doxa.daemon.encode_frame` answers an EVENT frame over
+  `peers.MAX_FRAME_BYTES` (64KB) by replacing its whole payload with
+  `{"truncated": True}` — silent from the TUI's side, where it would
+  render as nothing at all. v0.28.0 paged the beliefs RPC for the
+  non-event half of exactly this problem. So the payload is bounded by
+  three independent limits before it is ever queued: 8 rows, 160
+  characters each, and an 8KB byte backstop that has the last word (eight
+  rows of 160 characters cannot reach it even when every character escapes
+  to a six-byte `\uXXXX` sequence). Whatever the caps drop is COUNTED and
+  said out loud — the block ends `… and N more` — because a partial list
+  shown as a whole one is the one thing a list must not do. Pinned by a
+  test that feeds 400 proposals of 4000 multi-byte characters each through
+  the real `encode_frame` and asserts the wire line stays under the cap
+  with no truncation marker in it.
+
+- **The hint pointed at a command that does not exist here.** THE DEFECT:
+  the block said `/lore:pending`. That is a Claude Code *plugin* command.
+  It is not in `doxa/commands.py`, so typing it inside DOXA does not list
+  anything — it goes to the model as prompt text. The one actionable
+  sentence in the notification was a dead end. THE FIX: DOXA gets its own
+  native surface. `/pending` is a real registry row (Memory group, on the
+  palette, closed over by the same `_command_handlers` ==
+  `interactive_names()` assertion every other command is), opening the
+  shared `ChipPicker` the beliefs chip already uses — no new widget kind —
+  with each staged proposal as an ellipsized row and a selection spilling
+  the full text into a system block. The notification block itself is now
+  a door rather than a signpost: its trailing line is a live
+  `[@click=…]` span onto that same list, using the click-action pattern
+  `StatusBar`/`SubagentLine` established. Over the daemon split the list
+  comes from a new `pending` RPC, PAGED from day one — a staged proposal
+  is free text of unbounded length, and `_fit_belief_page` was generalized
+  into a shared `_fit_page` so the beliefs and pending RPCs enforce one
+  byte budget with one implementation.
+
+**Scope, stated rather than implied: this release is read-only.** There is
+no approve/reject button, no approve/reject RPC, and no plan for one here.
+The write path into curated memory and beliefs is under active security
+review (`docs/plugin-api.md` §6, LORE issue #43), and the approval gate
+must not gain a second door before that concludes. Listing and reading
+staged proposals touches none of it; approving them stays with LORE's own
+`/lore:approve` / `/lore:reject`. Two tests pin the boundary — one that
+the picker offers no such row, one that the daemon refuses the method.
+
 ## 0.29.0 — 2026-08-24
 
 - **Transparency-capable background (the `background` setting), default

@@ -89,19 +89,33 @@ SessionPane {
    without opening it. Single-class rules cascade in the order below (equal
    selector specificity, later wins) so a tab carrying more than one status
    class at once resolves to the state that matters most: done-unseen <
-   working < attention. -active is left OUT of that ladder -- its own rule
-   above still wins the FOREGROUND color on a plain active tab -- and the
-   two compound rules at the end explicitly restore the working/attention
-   color on top of it, because those two are the ones worth seeing even on
-   the tab you are already looking at (see doxa/app.py's
-   SessionPane._set_tab_class and the state-precedence note in the tab
-   status work item).
+   staged < working < attention. -active is left OUT of that ladder -- its
+   own rule above still wins the FOREGROUND color on a plain active tab --
+   and the two compound rules at the end explicitly restore the
+   working/attention color on top of it, because those two are the ones
+   worth seeing even on the tab you are already looking at (see
+   doxa/app.py's SessionPane._set_tab_class and the state-precedence note
+   in the tab status work item).
 
-   done-unseen never appears on the active tab (app-level invariant: it is
-   cleared the moment a tab activates), so it needs no compound rule of its
-   own -- there is nothing for it to lose a fight with. */
+   done-unseen and staged never appear on the active tab (app-level
+   invariant: both are cleared the moment a tab activates), so neither
+   needs a compound rule of its own -- there is nothing for them to lose a
+   fight with. */
 #session-tabs Tab.-done-unseen {
     color: #6FCF97;
+}
+
+/* Staged memory proposals from the background reviewer (v0.31.0). A
+   STEADY tint, never a blink: blinking belongs to -attention, which means
+   "this session is stopped until you answer". A staged proposal stops
+   nothing, expires never, and reaches curated memory only through an
+   explicit human approval -- so it gets the calmest signal on this ladder
+   that is still distinct from "a turn finished". Muted violet: nowhere
+   near the green of done-unseen or the amber of working, so a tab
+   carrying it is not misread as either, and low-saturation enough that a
+   whole strip of them is not a wall of noise. */
+#session-tabs Tab.-staged {
+    color: #A98FD1;
 }
 
 #session-tabs Tab.-working {

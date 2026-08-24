@@ -258,6 +258,23 @@ SETTINGS: tuple[Setting, ...] = (
         help="Notify when LORE stages memory proposals; off also silences "
              "lore_core's own in-process notification (LORE_NOTIFY) -- see "
              "doxa.notify.sync_lore_notify_env",
+        note="This is lore_core's OWN banner, which knows nothing about "
+             "window focus. 'notify: proposals staged' below is DOXA's "
+             "focus-gated replacement for it, and while that one is on "
+             "this one is held silent so a single staged batch produces a "
+             "single notification.",
+    ),
+    Setting(
+        key="notify_staged", env="DOXA_NOTIFY_STAGED",
+        label="notify: proposals staged", category="Notifications",
+        kind="bool_on", default="1",
+        help="Notify when the streaming background reviewer stages memory "
+             "proposals (doxa.notify.notify_staged)",
+        note="Fires off the streaming deriver (derive_secs), names the tab "
+             "and quotes the first proposal, and is gated like every other "
+             "trigger above -- so it stays quiet while you are looking at "
+             "DOXA. Turn it off and 'notify: lore review' decides on its "
+             "own again (doxa.notify.sync_lore_notify_env).",
     ),
     Setting(
         key="notify_needs_input", env="DOXA_NOTIFY_NEEDS_INPUT",
