@@ -972,6 +972,65 @@ class ToolCallsSection(Collapsible):
         await self.chips.mount(chip)
 
 
+class ReasoningSection(Collapsible):
+    """The turn's own summarized reasoning (v0.25.0, DOXA_SHOW_REASONING /
+    doxa.config's show_reasoning row), collapsed by default: "✻ Reasoning
+    (N chars)". Created lazily -- on the FIRST reasoning_delta of a turn
+    (see TurnBlock.append_reasoning) -- so a turn with no reasoning (the
+    setting is off, or the model simply didn't think) grows no section at
+    all (hide-at-zero, same convention as ToolCallsSection/the status
+    chips). Mounted ABOVE the response body: reasoning precedes the answer.
+
+    N updates live as chunks arrive -- a title rewrite only, the SAME
+    cheap pattern ToolCallsSection's "Tool calls (N)" header already uses.
+    If the user expands this section mid-turn it STAYS expanded as more
+    reasoning streams in: nothing here ever writes ``self.collapsed``
+    itself, so only a click (or a test poking the reactive directly) can
+    change it -- it never auto-collapses out from under the cursor, same
+    invariant ToolCallsSection holds.
+
+    Streams live even WHILE COLLAPSED (unlike ToolChip's lazy args/result
+    formatting, which waits for first expand): the spec for this feature
+    is explicit that collapsed must not mean paused, so the header's count
+    and an expand-at-any-point both see up-to-date content. Reasoning
+    turns are short and bounded (one thinking block per turn, not one per
+    tool call), so the cost profile this app's lazy-formatting discipline
+    exists to avoid -- N never-opened JSON pretty-prints -- doesn't apply
+    here the same way.
+
+    Rendering reuses the SAME Markdown.get_stream append-only path
+    TurnBlock's own response body uses (v0.13.0): summarized reasoning is
+    prose that can carry the model's own light formatting (a numbered
+    plan, an occasional bold term), and a second streamed-text idiom next
+    to the one this app already ships and already tested (test_restyle.py)
+    would be a second thing to get right for no benefit."""
+
+    def __init__(self) -> None:
+        self.chars = 0
+        self.body = Markdown("", classes="reasoning-body")
+        self._stream: MarkdownStream | None = None
+        super().__init__(self.body, title=self._render_title(), collapsed=True)
+
+    def _render_title(self) -> str:
+        return f"✻ Reasoning ({self.chars} chars)"
+
+    async def append(self, chunk: str) -> None:
+        self.chars += len(chunk)
+        self.title = self._render_title()
+        if self._stream is None:
+            self._stream = Markdown.get_stream(self.body)
+        await self._stream.write(chunk)
+
+    async def stop(self) -> None:
+        """Mirrors TurnBlock.mark_done's own stream teardown -- a finished
+        turn must not leave this section's background write task running
+        any more than the response body's may (see test_restyle.py's
+        no-stream-survives-mark_done assertion; this feature carries the
+        same one for reasoning)."""
+        if self._stream is not None:
+            await self._stream.stop()
+
+
 class ThinkingMarker(Static):
     """The in-flight marker on a running turn -- STATIC, deliberately.
 
@@ -983,7 +1042,17 @@ class ThinkingMarker(Static):
     with zero timers. Nothing in DOXA's own chrome animates; the only
     interval left in the app is Textual's caret blink on the focused
     prompt, which is load-bearing (it is how you find the caret) and runs
-    at 2 Hz on exactly one widget."""
+    at 2 Hz on exactly one widget.
+
+    v0.25.0 decision (reasoning stream): this marker is SUBSUMED, not
+    replaced -- it still owns the gap before ANYTHING has arrived (a turn
+    with show_reasoning off, or one the model answers without thinking
+    first, has no other sign of life until its first text/tool call), but
+    TurnBlock.hide_thinking() now also fires on the first reasoning_delta,
+    exactly like it already does on the first text_delta/tool_call: once a
+    ReasoningSection exists and is counting characters, that live header
+    IS the "something is happening" signal, and a static "⋯ thinking"
+    sitting above it would be a second, redundant one."""
 
     def __init__(self) -> None:
         super().__init__("⋯ thinking", classes="thinking")
@@ -1002,17 +1071,25 @@ class TurnBlock(Collapsible):
     compact into ``self.tool_section`` (a ``ToolCallsSection``, created
     lazily on the first one -- see its own docstring); a Task call's
     subagent chips still nest inside THAT chip's own ``subcalls``,
-    unaffected by any of this."""
+    unaffected by any of this. The turn's own summarized reasoning (v0.25.0)
+    compacts the SAME way into ``self.reasoning_section`` (a
+    ``ReasoningSection``, created lazily on the first reasoning_delta --
+    see its own docstring), mounted above the response body."""
 
     def __init__(self, prompt: str) -> None:
         self.prompt_text = prompt
         self.assistant_text = ""
         self.thinking = ThinkingMarker()
+        self.reasoning_holder = Vertical(classes="turn-reasoning")
+        self.reasoning_section: ReasoningSection | None = None
         self.body = Markdown("", classes="turn-body")
         self._stream: MarkdownStream | None = None
         self.tools = Vertical(classes="turn-tools")
         self.tool_section: ToolCallsSection | None = None
-        super().__init__(self.thinking, self.body, self.tools, title=self._render_title(), collapsed=False)
+        super().__init__(
+            self.thinking, self.reasoning_holder, self.body, self.tools,
+            title=self._render_title(), collapsed=False,
+        )
 
     def _render_title(self, suffix: str = "") -> str:
         return f"▎ {_one_line(self.prompt_text)}{suffix}"
@@ -1040,6 +1117,19 @@ class TurnBlock(Collapsible):
         if self._stream is None:
             self._stream = Markdown.get_stream(self.body)
         await self._stream.write(chunk)
+
+    async def append_reasoning(self, chunk: str) -> None:
+        """Mount (on first use) and stream into this turn's ONE
+        ``ReasoningSection`` -- same lazy-creation shape as
+        ``add_tool_chip``, mirrored for reasoning instead of tool calls.
+        ``hide_thinking()`` here too: reasoning arriving is exactly as much
+        "something is happening" as a tool call or the first word of the
+        answer (see ThinkingMarker's v0.25.0 docstring note)."""
+        self.hide_thinking()
+        if self.reasoning_section is None:
+            self.reasoning_section = ReasoningSection()
+            await self.reasoning_holder.mount(self.reasoning_section)
+        await self.reasoning_section.append(chunk)
 
     async def add_tool_chip(self, chip: "ToolChip") -> None:
         """Mount one top-level tool chip (no ``parent_id`` -- a subagent's
@@ -1070,6 +1160,10 @@ class TurnBlock(Collapsible):
             # still buffered -- a finished turn must not leave a live
             # asyncio task behind any more than it may leave a timer.
             await self._stream.stop()
+        if self.reasoning_section is not None:
+            # Same rule, same reason, for the reasoning section's own
+            # stream -- see ReasoningSection.stop()'s docstring.
+            await self.reasoning_section.stop()
         bits = []
         if duration_ms is not None:
             bits.append(f"{duration_ms}ms")
@@ -2608,7 +2702,9 @@ class SessionPane(TabPane):
                 # is itself "seen" -- the same stale-dot clear _run_turn
                 # does for a locally-driven turn.
                 self._set_tab_class("-done-unseen", False)
-            elif ev.type in ("text_delta", "tool_call", "tool_result", "turn_done"):
+            elif ev.type in (
+                "text_delta", "reasoning_delta", "tool_call", "tool_result", "turn_done",
+            ):
                 if self._oob_turn is not None:
                     await self._handle_event(ev, self._oob_turn, self._oob_chips)
                     self.query_one("#block-list", VerticalScroll).scroll_end(
@@ -3704,6 +3800,19 @@ class SessionPane(TabPane):
                 self._route_transcript_text(parent_id, ev.data["text"])
             else:
                 await block.append_text(ev.data["text"])
+        elif ev.type == "reasoning_delta":
+            parent_id = ev.data.get("parent_id") or ""
+            parent = chips.get(parent_id)
+            if parent is not None:
+                # A subagent's own thinking: no separate reasoning fold
+                # exists on a ToolChip (out of scope for this feature --
+                # see ReasoningSection's docstring), so it joins the SAME
+                # trace buffer its spoken text already uses rather than
+                # being dropped on the floor.
+                parent.append_subagent_text(ev.data["text"])
+                self._route_transcript_text(parent_id, ev.data["text"])
+            else:
+                await block.append_reasoning(ev.data["text"])
         elif ev.type == "tool_call":
             block.hide_thinking()
             chip = ToolChip(ev.data["id"], ev.data["name"], ev.data["input"])

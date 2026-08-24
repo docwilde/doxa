@@ -290,6 +290,18 @@ on that first look:
 
 <p align="center"><img src="assets/shots/tool-calls.gif" width="780" alt="A turn's 'Tool calls (N)' count ticks from 1 to 3 as chips land; opening the fold reveals all three collapsed chips; opening the first shows its ARGS and RESULT"></p>
 
+**Reasoning stream.** Each turn asks the model for its own **summarized**
+reasoning (`thinking: {type: "adaptive", display: "summarized"}` — see
+[Reasoning](#reasoning) below for exactly what that means and doesn't) and
+streams it into a "✻ Reasoning (N chars)" fold above the response, collapsed
+by default and created lazily on the first chunk — a turn the model answers
+without thinking at all grows no section, same hide-at-zero rule the tool-call
+fold follows. The count updates live while collapsed; expanding mid-turn
+never auto-collapses it back. `show_reasoning` (on by default) turns this
+off entirely — see [Configuration](#configuration):
+
+<p align="center"><img src="assets/shots/reasoning.gif" width="780" alt="A turn's collapsed 'Reasoning (N chars)' fold ticking up as the model thinks; opening it reveals the streamed summarized reasoning text, then the response streams in below once thinking finishes"></p>
+
 **Terminal images.** A detection ladder — Kitty graphics protocol → sixel →
 half-block cells → a plain `[image: ...]` text line — so a tool result or
 `/img <path>` degrades gracefully on any terminal instead of failing on
@@ -346,7 +358,10 @@ and `/logout [provider]` suspend the TUI and exec the provider's own
 interactive auth CLI; DOXA never handles or stores a credential itself.
 
 **No animated chrome.** The in-flight turn marker is a static `⋯ thinking`,
-not a spinner, and there are exactly two timers anywhere in the app —
+not a spinner — it covers the gap before ANYTHING has arrived, and hides
+itself the moment something does, whether that's the model's own reasoning
+(see Reasoning stream above), the first word of its reply, or its first tool
+call. There are exactly two timers anywhere in the app —
 Textual's own 2 Hz caret blink on the focused prompt, and the clock below,
 which only exists at all while it's switched on. A test asserts no other
 timer is ever armed, with every overlay open.
@@ -422,6 +437,7 @@ survives being opened by an older one.
 | `consult_floor` | `DOXA_CONSULT_FLOOR` | 1.0 | act-time belief-consult threshold; 0 disables it |
 | `nerd_font` | `DOXA_NERD_FONT` | off | use a Nerd Font glyph for the branch chip |
 | `image_mode` | `DOXA_IMAGE_MODE` | probe | force a rung of the image ladder (`kgp`/`sixel`/`halfblock`/`text`) |
+| `show_reasoning` | `DOXA_SHOW_REASONING` | **on** | stream the model's summarized reasoning into a collapsed per-turn fold; `0` stops DOXA asking to see it |
 | `clock_show` | `DOXA_CLOCK_SHOW` | **on** | show the upper-right clock (the one bool here that defaults on — `0` turns it off) |
 | `clock_date` | `DOXA_CLOCK_DATE` | off | prefix the clock with `%Y-%m-%d` |
 | `clock_hour` | `DOXA_CLOCK_HOUR` | `24` | `12` or `24`-hour |
@@ -442,6 +458,31 @@ home directory because a home directory can be network-mounted, where Unix
 sockets misbehave. The LORE store is neither: it stays `lore_core`'s own
 path, shared with the LORE Claude Code plugin on purpose, so switching
 between the two never forks your memory into two divergent halves.
+
+## Reasoning
+
+What streams into the "Reasoning" fold is **summarized** reasoning, not
+Claude's raw chain of thought: DOXA requests `thinking: {"type": "adaptive",
+"display": "summarized"}`, and on every current model that field's other
+value — `"omitted"` — is the *default*, meaning the API would otherwise send
+back a `thinking` block whose text is an empty string. The raw internal
+reasoning is never returned by the API at all, on any model, at any setting;
+`"summarized"` is a real (and, per Anthropic's own docs, differently-billed —
+you're charged for the full thinking tokens generated, not the shorter
+summary you're shown) pass over that reasoning by a separate summarizing
+model, not a truncation of it.
+
+`show_reasoning` off does **not** assert `thinking: {"type": "disabled"}` —
+it asserts nothing at all. Claude Fable 5, Claude Mythos 5 and Claude Mythos
+Preview reject an explicit disable outright (thinking cannot be turned off on
+those models under any configuration), and the session's actual model is
+usually still unknown at the point these options are built — the CLI only
+reports it after connecting — so there is no way to special-case around that
+per model. Concretely: off means DOXA stops *asking to see* the reasoning;
+on a model where thinking always runs, it still runs, and is still billed,
+independent of this toggle. On a model where thinking is optional (most
+non-5-generation models), off is a real zero-thinking-cost toggle. This is a
+real API constraint, not a DOXA limitation the setting works around.
 
 ## How it works
 

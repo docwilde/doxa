@@ -54,6 +54,7 @@ from doxa.app import (  # noqa: E402
     DoxaApp,
     NeedsInputPopup,
     PromptInput,
+    ReasoningSection,
     SessionSearch,
     TabRename,
     ToolCallsSection,
@@ -338,6 +339,53 @@ async def _drive_markdown_stream(app: DoxaApp, pilot: Any, rec: FrameRecorder) -
 
 
 # --------------------------------------------------------------------- #
+# Scene: reasoning -- "Reasoning (N chars)" ticking live while collapsed,
+# expanded to read it, then the response streams in below once thinking
+# finishes (v0.25.0)
+# --------------------------------------------------------------------- #
+
+REASONING_CHUNKS = [
+    "The user is asking about the token refresh path. Let me trace through "
+    "how the credential gets renewed before it expires, since that's the "
+    "part most likely to have regressed.\n\n",
+    "Looking at doxa/auth.py, refresh_token() reads the cached expiry, and "
+    "if it's within the grace window it calls the CLI's own refresh "
+    "endpoint rather than trying to do this itself.",
+]
+
+
+async def _drive_reasoning(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
+    await pilot.pause()
+    block = await _mount_bare_turn(app, "what changed in the token refresh path?")
+    await pilot.pause()
+    rec.snap(700, "turn starts: the ⋯ thinking marker is the only sign of life")
+
+    for i, chunk in enumerate(REASONING_CHUNKS):
+        await block.append_reasoning(chunk)
+        await pilot.pause()
+        rec.snap(700, f"Reasoning ({block.reasoning_section.chars} chars) -- collapsed, ticking live")
+
+    block.reasoning_section.collapsed = False
+    await pilot.pause()
+    rec.snap(1100, "expanded mid-turn: stays open as more streams in")
+
+    await block.append_reasoning(
+        " That's the one place a stale cache could linger past the window."
+    )
+    await pilot.pause()
+    rec.snap(900, "still expanded, one more chunk arrived")
+
+    await block.append_text(
+        "The refresh path looks correct: `refresh_token()` renews inside "
+        "the grace window via the CLI's own endpoint."
+    )
+    await pilot.pause()
+    rec.snap(1100, "reasoning done, the answer streams in below it")
+
+    await block.mark_done(0.0021, 780, False)
+
+
+# --------------------------------------------------------------------- #
 # Scene: rename -- real double-click, typing, Enter commits
 # --------------------------------------------------------------------- #
 
@@ -616,6 +664,11 @@ SCENES: list[Scene] = [
     Scene(
         "markdown-stream", _drive_markdown_stream, size=SIZE_WIDE, min_frames=5,
         widgets=(TurnBlock,),
+        engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
+    ),
+    Scene(
+        "reasoning", _drive_reasoning, size=SIZE_WIDE, min_frames=5,
+        widgets=(TurnBlock, ReasoningSection),
         engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
     ),
     Scene(

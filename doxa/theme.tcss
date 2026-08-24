@@ -220,6 +220,46 @@ TurnBlock > Contents {
     padding: 0 1 1 1;
 }
 
+/* Reasoning (v0.25.0): same auto-height reasoning as .turn-tools below --
+   zero rows with no ReasoningSection mounted, one row for a collapsed one.
+   Sits ABOVE .turn-body in the widget tree (see TurnBlock.__init__), so
+   reasoning always reads above the answer it led to. */
+.turn-reasoning {
+    height: auto;
+    background: #171512;
+    padding: 0 1;
+}
+
+/* Reasoning (N chars): doxa's own fold around the turn's summarized
+   reasoning, same dimmer-step chrome as ToolCallsSection (chrome framing
+   model prose, not a transcript entry of its own) -- collapsed by
+   default, created lazily on the first reasoning_delta. */
+ReasoningSection {
+    background: #1D1B17;
+    border: none;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+ReasoningSection > CollapsibleTitle {
+    width: 1fr;
+    background: #1D1B17;
+    color: #8A8073;
+    text-style: none;
+    padding: 0 1;
+}
+
+ReasoningSection > Contents {
+    background: #1D1B17;
+    padding: 1 0 0 1;
+}
+
+.reasoning-body {
+    background: #1D1B17;
+    color: #D8CDBB;
+    padding: 0 1 1 1;
+}
+
 .turn-tools {
     /* height:auto is load-bearing, not decoration: Vertical's own
        DEFAULT_CSS is height:1fr, which -- inside an auto-height Contents,

@@ -8,6 +8,13 @@ real SDK client) underneath it -- app.py only ever touches the small surface
 reproduced here (start/send/finalize/model/total_cost_usd/
 last_ctx_percentage/effort/belief_count), so the fake is a narrow, honest
 stand-in rather than a reimplementation of the engine.
+
+reasoning_delta (v0.25.0) needs NO change here: FakeEngine.send() replays
+whatever EngineEvent script it was given verbatim, so a script that
+includes EngineEvent("reasoning_delta", {...}) already exercises
+doxa.app's handling of it exactly like any other event type -- the parity
+this docstring promises is in the REPLAY, not in a per-type branch that
+would need one more case for every new engine event.
 """
 
 from __future__ import annotations

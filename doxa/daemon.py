@@ -105,7 +105,7 @@ RING_CAPACITY = 512
 # Turn-event kinds, as doxa.engine.EngineEvent documents them. Everything
 # else (peer_*, tool_disabled) is out-of-band and travels with turn=None.
 TURN_EVENT_TYPES = frozenset(
-    {"turn_started", "text_delta", "tool_call", "tool_result", "turn_done"}
+    {"turn_started", "text_delta", "reasoning_delta", "tool_call", "tool_result", "turn_done"}
 )
 
 

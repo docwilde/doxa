@@ -4,6 +4,97 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.25.0 — 2026-08-24
+
+- **Reasoning stream: the model's own summarized thinking, in a collapsed
+  per-turn fold** — mirrors the v0.13.0 "Tool calls (N)" fold exactly:
+  collapsed by default, created lazily on first content, hide-at-zero for a
+  turn with none, live-count title rewrite, never auto-collapses once the
+  operator opens it.
+  - **PRE-WORK FINDING, before any of this was built**: does the installed
+    `claude_agent_sdk` (0.2.144) even expose reasoning text at all? YES, but
+    only opted in. `ClaudeAgentOptions.thinking` (a `ThinkingConfig` —
+    adaptive/enabled/disabled, `types.py:2281`) exists; its optional
+    `display` field (`types.py:1782-1784`) defaults to `"omitted"` on every
+    current model — an EMPTY `thinking` string — unless a caller explicitly
+    requests `"summarized"`. Confirmed against Anthropic's own streaming
+    docs (not guessed): a `thinking_delta` content-block delta looks like
+    `{"delta": {"type": "thinking_delta", "thinking": "..."}}`, distinct
+    from `text_delta`'s `{"delta": {"type": "text_delta", "text": "..."}}`.
+    And: **doxa.engine already had a code path receiving these events and
+    dropping them on the floor** — `send()`'s `StreamEvent` branch
+    (`content_block_delta`) only ever read `delta.get("text")`, which a
+    thinking delta never sets. Fixed by branching on `delta["type"]` before
+    deciding which field to read.
+  - **`show_reasoning`** (Appearance, `DOXA_SHOW_REASONING`, `bool_on`,
+    default ON) — read once at connect (`doxa.engine.show_reasoning()`,
+    same connect-time-only shape as `effort`: the SDK has no live setter for
+    `thinking` either). ON asserts `thinking={"type": "adaptive", "display":
+    "summarized"}` — the documented way to get visible reasoning across the
+    current model line (Opus/Sonnet 5, Fable 5, Mythos 5/Preview, and
+    Opus/Sonnet 4.6+ all support adaptive thinking). **OFF does NOT assert
+    `{"type": "disabled"}`** — Claude Fable 5, Claude Mythos 5 and Claude
+    Mythos Preview reject an explicit disable outright (thinking cannot be
+    turned off on those models at all), and `self.model` is usually still
+    `None` at options-build time (the real model is only known from the
+    CLI's own init message, after connect), so there's no way to
+    special-case around it. OFF means "DOXA stops asking to see it," not
+    "thinking is guaranteed free" — see the README's new Reasoning section
+    for the honest version of that claim, and `config.py`'s `show_reasoning`
+    `Setting.note` for the same caveat in the settings modal itself.
+  - **`doxa.app.ReasoningSection`** — a `Collapsible` titled `"✻ Reasoning
+    (N chars)"`, mounted in a `TurnBlock.reasoning_holder` ABOVE `.body`
+    (reasoning precedes the answer), created lazily on the first
+    `reasoning_delta`. Streams via the SAME `Markdown.get_stream` append-
+    only path the response body already uses (v0.13.0) — reasoning is
+    prose that can carry light formatting, and a second streamed-text idiom
+    next to an already-tested one earns nothing. Unlike `ToolChip`'s lazy
+    args/result formatting (deferred to first expand), this section writes
+    LIVE even while collapsed, because the spec is explicit that collapsed
+    must not mean paused: the header's count and an expand at any point
+    both need current content. `mark_done()` stops this section's stream
+    exactly like it already stops `.body`'s — no background write task
+    survives a finished turn (asserted in tests, the same way v0.13.0's own
+    body-stream teardown is).
+  - **`ThinkingMarker` decision: subsumed, not replaced.** `hide_thinking()`
+    now fires on the first `reasoning_delta`, exactly like it already fires
+    on the first `text_delta`/`tool_call` — a live "Reasoning (N chars)"
+    header IS the "something is happening" signal at that point, so a
+    static `⋯ thinking` above it would be redundant. The marker itself
+    stays: it's still the only sign of life before ANYTHING arrives (a
+    turn with `show_reasoning` off, or one the model answers without
+    thinking first, has no reasoning to hide it early).
+  - **Engine event**: new `reasoning_delta` (`{"text": ..., "parent_id":
+    ...}` — same optional-`parent_id` shape as `text_delta`), routed the
+    same way through `SessionPane._handle_event` and the out-of-band
+    (multi-attached-client) dispatch tuple. A subagent's OWN reasoning
+    (carries `parent_id`) has no separate fold on its `ToolChip` — out of
+    scope here — so it joins the same trace buffer its spoken text already
+    uses (`append_subagent_text`) rather than being dropped.
+    `tests/fakes.py`'s `FakeEngine` needed no code change: it replays
+    scripted `EngineEvent`s verbatim, so a script including
+    `reasoning_delta` already exercises the real dispatch path.
+  - **13 new tests** (`tests/test_reasoning.py`): options wiring (on/off),
+    `thinking_delta` → `reasoning_delta` translation (incl. an empty-string
+    delta yielding no event, and subagent scrub/parent-id parity with
+    `text_delta`'s own test in `test_trace.py`), hide-at-zero, collapsed by
+    default + mounted above the body, live title updates while collapsed,
+    stays-expanded, `ThinkingMarker` subsumption, `mark_done` stream
+    teardown (with and without any reasoning), and one full FakeEngine
+    end-to-end turn through the real `DoxaApp` dispatch path.
+  - **`assets/shots/reasoning.gif`** — new `scripts/record_gif.py` scene
+    (`reasoning`, `SIZE_WIDE`, deterministic FakeEngine-driven Pilot
+    capture, no live model needed): `⋯ thinking` → the collapsed
+    "Reasoning (N chars)" header ticking up → expanded mid-turn and staying
+    that way as more streams in → the response landing below it once
+    thinking finishes. 6 frames, 2117×1197 (1.769, within 2% of 16:9), 411
+    KiB.
+  - **What did NOT ship**: reasoning is never persisted to the LORE
+    transcript (`SessionEngine._persist_assistant_blocks`) — display-only,
+    same as it was silently before this feature (a `ThinkingBlock` in the
+    final `AssistantMessage.content` was, and still is, skipped by that
+    loop).
+
 ## 0.23.0 — 2026-08-24
 
 - **Tab restore (queue item D)** — **this item's original spec text did

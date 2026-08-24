@@ -157,6 +157,20 @@ SETTINGS: tuple[Setting, ...] = (
              "(doxa.images.detect_mode)",
     ),
     Setting(
+        key="show_reasoning", env="DOXA_SHOW_REASONING", label="show reasoning",
+        category="Appearance", kind="bool_on", default="1",
+        help="Stream the model's summarized reasoning into a collapsed "
+             "'Reasoning' section per turn (doxa.engine._build_options / "
+             "doxa.app.ReasoningSection)",
+        note="On: requests thinking={type: adaptive, display: summarized} "
+             "at connect. Off: DOXA asks for nothing extra and leaves the "
+             "model's own default alone -- it does NOT force thinking off, "
+             "because some models (Claude Fable 5, Claude Mythos 5, Claude "
+             "Mythos Preview) reject an explicit disable outright. On "
+             "those models thinking runs (and is billed) regardless of "
+             "this toggle; off only stops DOXA from asking to see it.",
+    ),
+    Setting(
         key="clock_show", env="DOXA_CLOCK_SHOW", label="clock: show",
         category="Appearance", kind="bool_on", default="1",
         help="Show the fixed-width clock at the right edge of the tab "

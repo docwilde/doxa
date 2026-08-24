@@ -154,6 +154,34 @@ def effort_level() -> "str | None":
     return value if value in EFFORT_LEVELS else None
 
 
+def show_reasoning() -> bool:
+    """``DOXA_SHOW_REASONING`` / the config file's ``show_reasoning`` row,
+    default ON. Read once, in _build_options, same connect-time-only shape
+    as effort_level() -- ClaudeAgentOptions.thinking has no live setter
+    either.
+
+    ON asks for ``thinking={"type": "adaptive", "display": "summarized"}``:
+    the documented way to opt into VISIBLE summarized reasoning across the
+    current model family (Opus/Sonnet 5, Fable 5, Mythos 5/Preview all
+    support adaptive thinking; see https://platform.claude.com/docs/en/
+    build-with-claude/thinking). OFF deliberately does NOT set
+    ``thinking={"type": "disabled"}`` -- Claude Fable 5, Claude Mythos 5
+    and Claude Mythos Preview reject that outright (thinking cannot be
+    turned off on those models at all), and self.model is often still None
+    here (the real model only becomes known from the CLI's own init
+    message, AFTER connect -- see the SystemMessage branch in send()), so
+    there is no way to special-case around it at options-build time. OFF
+    therefore means "DOXA stops asking to SEE it", not "thinking is
+    guaranteed free" -- on a model where thinking is mandatory it still
+    runs, and is still billed, independent of this toggle. See config.py's
+    show_reasoning Setting.note for the same caveat surfaced in the
+    settings modal."""
+    raw = config_mod.raw("DOXA_SHOW_REASONING").strip()
+    if not raw:
+        return True
+    return raw.lower() not in ("0", "false", "no", "off")
+
+
 def derive_interval() -> float | None:
     """The streaming-deriver debounce interval from ``DOXA_DERIVE_SECS``
     (LORE_REVIEW_SECS-style: seconds, positive number). Default OFF -- the
@@ -175,9 +203,12 @@ class EngineEvent:
     """One typed event out of :meth:`SessionEngine.send` /
     :meth:`SessionEngine.start` / :meth:`SessionEngine.finalize`.
 
-    ``type`` is one of: turn_started, text_delta, tool_call, tool_result,
-    turn_done, session_done -- the six event kinds the TUI (doxa/app.py)
-    switches on to build/update blocks -- plus peer_joined, peer_left,
+    ``type`` is one of: turn_started, text_delta, reasoning_delta, tool_call,
+    tool_result, turn_done, session_done -- the seven event kinds the TUI
+    (doxa/app.py) switches on to build/update blocks (reasoning_delta,
+    v0.25.0: the model's own summarized reasoning, routed like text_delta
+    -- see doxa.app.ReasoningSection and show_reasoning() above) -- plus
+    peer_joined, peer_left,
     peer_message, tool_disabled, needs_input and needs_input_resolved,
     which arrive out-of-band on the same EngineEvent type via
     :meth:`SessionEngine.peer_events` (a turn generator can only yield
@@ -760,11 +791,18 @@ class SessionEngine:
         # in force, and the chip hides itself exactly like every other
         # hide-at-zero status-bar chip.
         self.effort = effort
+        # Connect-time only -- see show_reasoning(). Same conditional-
+        # inclusion shape as effort above: OFF omits the key entirely
+        # rather than asserting "disabled" (which some models reject
+        # outright -- see show_reasoning()'s docstring).
+        reasoning = show_reasoning()
         return ClaudeAgentOptions(
             model=self.model,
             # Connect-time only -- see effort_level(). None leaves the CLI's
             # own default alone rather than asserting a level we made up.
             **({"effort": effort} if effort else {}),
+            **({"thinking": {"type": "adaptive", "display": "summarized"}}
+               if reasoning else {}),
             cwd=self.cwd,
             system_prompt={
                 "type": "preset",
@@ -949,12 +987,32 @@ class SessionEngine:
                 ev = message.event
                 if ev.get("type") == "content_block_delta":
                     delta = ev.get("delta", {})
-                    text = delta.get("text") or ""
-                    if text:
-                        data: dict[str, Any] = {"text": text}
-                        if parent:
-                            data = {"text": _scrub_text(text), "parent_id": parent}
-                        yield EngineEvent("text_delta", data)
+                    delta_type = delta.get("type")
+                    if delta_type == "thinking_delta":
+                        # Summarized reasoning (DOXA_SHOW_REASONING /
+                        # show_reasoning() -- see _build_options): the raw
+                        # Anthropic stream event shape is
+                        # {"delta": {"type": "thinking_delta", "thinking":
+                        # "..."}}, confirmed against the installed SDK
+                        # (StreamEvent.event is the passthrough raw dict --
+                        # claude_agent_sdk/types.py) and Anthropic's own
+                        # streaming docs. Before this branch existed, a
+                        # thinking_delta reached here and was silently
+                        # dropped -- `delta.get("text")` is never set on a
+                        # thinking delta, only `delta.get("thinking")` is.
+                        thinking_text = delta.get("thinking") or ""
+                        if thinking_text:
+                            data = {"text": thinking_text}
+                            if parent:
+                                data = {"text": _scrub_text(thinking_text), "parent_id": parent}
+                            yield EngineEvent("reasoning_delta", data)
+                    else:
+                        text = delta.get("text") or ""
+                        if text:
+                            data = {"text": text}
+                            if parent:
+                                data = {"text": _scrub_text(text), "parent_id": parent}
+                            yield EngineEvent("text_delta", data)
 
             elif isinstance(message, AssistantMessage):
                 parent = getattr(message, "parent_tool_use_id", None)
