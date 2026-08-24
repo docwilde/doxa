@@ -4,6 +4,121 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.20.0 — 2026-08-24
+
+- **Branch switch, explicit branch selection** (queue item S) — this
+  item's spec text was lost; what ships here is RE-DERIVED from the
+  item's name plus the v0.19.0 codebase, following existing conventions
+  wherever a call had to be made (each flagged in its own bullet below).
+  Since v0.17, worktree-per-session forks every session's own branch
+  (`doxa/<id>`) from whatever the launch cwd happened to have checked
+  out — implicit, and un-overridable mid-session. This makes that
+  selection explicit, both at spawn and live.
+  - **Spawn-time** — `doxa new --branch <name>` forks the session's
+    worktree from `<name>` instead of the launch checkout. New
+    `doxa.worktrees.resolve_ref(main_root, ref)` validates it as a local
+    branch, or a remote-tracking ref (`origin/foo`) resolved to local
+    semantics (a local `foo` if one exists, else the remote-tracking ref
+    itself) — `cli.py` checks this BEFORE ever spawning a daemon, with an
+    actionable `doxa: no such branch: 'foo'` rather than silently falling
+    back to `worktrees.create()`'s own permissive "cwd is fine too"
+    contract. Threaded through `spawn_daemon` (a subprocess arg, `--base-
+    branch`, since the daemon is a separate process) → `SessionDaemon`
+    → `worktrees.create(base_branch=...)`. With `worktree_per_session`
+    OFF, `--branch` refuses by default — silently moving the user's REAL
+    checkout is exactly what this feature must never do — unless
+    `--checkout` is also given, and even then only on a clean tree.
+  - **In-session** — `/branch` (no args: every local branch, current base
+    marked; an argument switches) joins the registry
+    (`doxa/commands.py`) and the palette (`Branch: switch`, not
+    prefilled — judgment call: it runs directly like `/model`, not like
+    `/msg`'s prefill, since the no-arg form is itself a useful answer).
+    Switching is FREE (a fast-forward rebase, no history to replay) only
+    when the session's worktree is clean and carries zero commits ahead
+    of its CURRENT base — the exact test `worktrees.finalize` already
+    applies at session end, reused rather than reinvented. Anything else
+    refuses in that same voice: `"... has uncommitted changes ... same
+    rule as 'kept doxa/<id> — merge when ready' at session end."` The
+    engine's cwd never moves; only the worktree's branch pointer does.
+    Judgment call: with NO session worktree at all (`worktree_per_session`
+    off, or a cwd that never got one) `/branch` refuses a switch outright
+    rather than falling back to a real `git checkout` — same "never move
+    the real checkout silently" rule the spawn-time flag follows, applied
+    symmetrically in-session; listing still works there (harmless,
+    read-only), reading whatever real repo the cwd sits in.
+  - **Daemon protocol** — a `"branch"` RPC, same shape as `set_model`/
+    `answer_needs_input`: the daemon owns the git operation
+    (`doxa.worktrees.branch_status`/`switch_base`, run off the loop), a
+    successful SWITCH broadcasts a `base_changed` event to every attached
+    client (not just whichever one asked), same "everyone learns it"
+    rule `model_changed` already follows. `doxa.engine.SessionEngine`
+    gets a matching `switch_branch` for `--in-process` mode, delegating
+    to the identical `doxa.worktrees` functions so the two paths share
+    one implementation and one set of refusal messages.
+  - **Status bar and tab label** — VERIFIED the existing
+    `GitLine`/`branch_label()` path updates in place rather than being
+    rebuilt: a new `GitLine.base_branch()` re-reads the worktree
+    sidecar's `base_ref`, mtime-guarded exactly like the branch/sha
+    fields beside it, so a live `/branch` switch (which rewrites that
+    sidecar, new `worktrees.update_base`) is visible on the next event-
+    driven render with no polling and no reconstructing the pane's
+    `GitLine`.
+  - **Two pre-existing regressions, found and fixed while wiring this
+    in** (operator-reported, folded into this release rather than
+    shipped separately since both sit in the exact file region this item
+    already touches):
+    - **The repo slot named the worktree, not the repo.** Since v0.17,
+      every session's cwd IS a linked worktree, and
+      `GitLine.repo = Path(repo_root).name` read `git rev-parse
+      --show-toplevel`'s answer — the WORKTREE's own directory
+      (`doxa-f13526d4`), not the repo (`doxa`). The tab read
+      `Opus@doxa-f13526d4:doxa/f13526d4` and the `/about` `repo` row
+      matched: the session id printed twice. Fixed by resolving the repo
+      name through `GitLine._commondir` instead (already computed, pure
+      filesystem reads, for the sha fix `_read_sha` needed for the same
+      reason back in v0.17) — its parent IS the main repo root, worktree
+      or not, costing no additional subprocess call.
+    - **The tab label showed the session's OWN branch, not what it was
+      based on.** A second-order effect of the same v0.17 change: once
+      the repo slot was fixed, the branch half still read
+      `branch_label()` — the worktree's own throwaway branch
+      (`doxa/f13526d4`) — which is session IDENTITY, not the base the
+      operator actually orients by (`main`, or whatever `doxa new
+      --branch` forked from). `GitLine.tab_branch()` now answers that
+      question instead (falling back to `branch_label()` when there is
+      no worktree sidecar — `worktree_per_session` off reads exactly as
+      it always did); `branch_label()` itself is untouched and keeps
+      backing the status bar and `/about`, where session identity
+      belongs. A worktree-isolated tab gets one more character saying so
+      (`TAB_ISOLATION_MARKER`, the same `⎇` glyph `render()` already
+      uses) appended ONLY when it fits the existing width budget for
+      free — the base branch itself never gives up a character to make
+      room for it, and the four-tabs-at-80-columns invariant
+      (`TAB_LABEL_MAX`) is unchanged.
+  - Tests: real git worktrees throughout (house pattern, no mocking of
+    git) — `resolve_ref`/`list_local_branches`/`branch_status`/
+    `switch_base` in `tests/test_worktrees.py`; `--branch`/`--checkout`
+    (alternate-branch spawn, invalid-ref message, toggle-off refusal, the
+    checkout path on clean and dirty trees) in the new
+    `tests/test_cli_branch.py`; the `branch` RPC round-trip, its cross-
+    client broadcast, and spawn-time `base_branch` threading in
+    `tests/test_daemon.py`; the tab label showing the base (not the
+    session branch), the status bar keeping the session branch, and the
+    label following a live switch without rebuilding `GitLine`, in
+    `tests/test_tab_labels.py`; the command surface and the non-repo
+    message in the new `tests/test_branch_command.py`; the repo-name and
+    tab-label regression fixes (and their now-corrected dedup behavior)
+    in `tests/test_statusline.py`/`tests/test_tab_labels.py`. 604 tests
+    green (567 baseline + 37).
+  - README: the daemon/worktree paragraph gains the base-branch/isolation
+    framing, `--branch`/`--checkout` and `/branch` semantics; the
+    Quickstart command block gains `doxa new --branch <name>`.
+    `palette.gif` regenerated (`/branch` is a new row in the palette's
+    Session group, shifting which command a fixed sequence of arrow-down
+    presses lands on) — every other shot drives `DoxaApp` directly
+    against a plain repo checkout with no worktree in play, so nothing
+    else in the gallery could have moved.
+
 ## 0.19.0 — 2026-08-24
 
 - **Interactive permission** (queue item 5, the last feature item) —

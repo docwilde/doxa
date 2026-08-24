@@ -95,6 +95,7 @@ uv run doxa
 ```sh
 uv run doxa          # spawn a session here, or attach this repo's most recent one
 uv run doxa new      # force a fresh session instead of attaching
+uv run doxa new --branch <name>   # fork the session's worktree from <name>, not the launch checkout
 uv run doxa attach   # reattach by session id / title prefix
 uv run doxa stop     # finalize now (LORE review + index), daemon exits
 uv run doxa doctor   # read-only health checks, no TUI: pass/fail + fix per check
@@ -115,12 +116,28 @@ off) — `git worktree add ~/.doxa/worktrees/<repo>-<id> -b doxa/<id>` off
 the branch you were on, so two sessions on the same repo, even the same
 branch, never stomp each other's edits (git itself refuses the same branch
 checked out twice, which is exactly the constraint two sessions sharing one
-checkout would otherwise hit). The status bar's git chip and the session's
-tab both show the worktree you're actually in; `/peers` and `/sessions`
-still group every worktree of a repo as one project. A session that ends
-cleanly (no uncommitted changes, nothing committed beyond its base) leaves
-no trace; anything you actually wrote is kept, never auto-merged — the
-closing message names the branch to merge by hand.
+checkout would otherwise hit). The status bar's git chip shows the
+worktree's own session branch (`doxa/<id>`, plus a short sha); the tab
+shows what you're actually *working off* — the base branch it forked from
+(`Opus@doxa:main`) rather than that session handle — so a glance at the
+tab bar answers "what am I based on", not "which throwaway branch is
+this". `/peers` and `/sessions` still group every worktree of a repo as
+one project. A session that ends cleanly (no uncommitted changes, nothing
+committed beyond its base) leaves no trace; anything you actually wrote is
+kept, never auto-merged — the closing message names the branch to merge
+by hand.
+
+The base is explicit, not just inherited. `doxa new --branch <name>`
+forks the session's worktree from `<name>` instead of whatever the launch
+directory has checked out (fails with an actionable message if `<name>`
+doesn't resolve); with `worktree_per_session` off, `--branch` refuses by
+default rather than silently moving your real checkout — pass `--checkout`
+on a clean tree to allow that explicitly. Mid-session, `/branch` lists
+local branches with the current base marked, and `/branch <name>` switches
+it: free (a fast-forward rebase, no history to replay) when the session's
+worktree is clean and carries no commits of its own yet, refused — same
+voice as the "kept `doxa/<id>` — merge when ready" message above — the
+moment there's real work switching a base would silently carry across.
 
 Once you're in: type a prompt, press enter. `ctrl+p` opens the command
 palette, `ctrl+t` opens a new tab, `/help` lists every command and key
