@@ -382,19 +382,24 @@ async def test_status_line_chip_order(monkeypatch, tmp_path):
                 break
             await pilot.pause(0.02)
         sha = _short_sha(repo)
-        # Status-chips (item Y): the model chip and the git chip's branch
-        # span are now click-action spans (`[@click=...][accent]...[/][/]`)
-        # -- `.renderable` is the RAW string handed to `Static.update`,
-        # markup and all, so the chunks below match that literal wire
-        # format rather than the pre-chips plain text.
+        # Status-chips (item Y, widened by v0.24.0's item 4): the model
+        # chip and BOTH halves of the git chip (repo name AND branch) are
+        # click-action spans (`[@click=...][accent]...[/][/]`) -- `.
+        # renderable` is the RAW string handed to `Static.update`, markup
+        # and all, so the chunks below match that literal wire format
+        # rather than the pre-chips plain text. The beliefs chip is a
+        # click-action span too now (v0.24.0 item 3).
         accent = CLICKABLE_CHIP_ACCENT
+        repo_span = f"[@click=open_repo_picker][{accent}]myrepo[/][/]"
+        branch_span = f"[@click=open_branch_picker][{accent}]trunk[/][/]"
+        beliefs_span = f"[@click=open_beliefs_picker][{accent}]3 beliefs[/][/]"
         order = [
             f"[@click=open_model_picker][{accent}]{fake.model}[/][/]",
-            f"myrepo ⎇ [@click=open_branch_picker][{accent}]trunk[/][/] @{sha}",
+            f"{repo_span} ⎇ {branch_span} @{sha}",
             "sub:max",
             "s:9% w:48%",
             f"[@click=compact_now][{accent}]{ctx_chip(74.0)}[/][/]",
-            "3 beliefs",
+            beliefs_span,
         ]
         positions = [status.index(chunk) for chunk in order]
         assert positions == sorted(positions), status

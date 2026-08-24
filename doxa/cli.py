@@ -85,11 +85,20 @@ def _run_attached(
         _sid, dsock = spawn_daemon(cwd, model=model, linger_secs=linger)
         return EngineClient(dsock)
 
+    def new_session_factory_at(path: str) -> EngineClient:
+        # The repo picker's own spawn call (doxa/app.py's item 4,
+        # DoxaApp.open_tab_at): the SAME spawn_daemon call above, just
+        # parametrized by an operator-chosen path instead of this
+        # process's own launch cwd -- not a second daemon-spawning path.
+        _sid, dsock = spawn_daemon(path, model=model, linger_secs=linger)
+        return EngineClient(dsock)
+
     app = DoxaApp(
         cwd=cwd,
         model=model,
         engine_factory=lambda: EngineClient(socket_path),
         new_session_factory=new_session_factory,
+        new_session_factory_at=new_session_factory_at,
     )
     app.run()
     _maybe_restart(app)
@@ -129,6 +138,16 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
 
     report = _restore_report_text(len(resolved.tabs), resolved.skipped)
 
+    def new_session_factory_at(path: str) -> EngineClient:
+        # Repo picker (item 4): same spawn primitive as every
+        # new_session_factory closure in this module, parametrized by an
+        # explicit path -- threaded into BOTH restore call sites below so
+        # a tab opened from the picker during a RESTORED launch is a real
+        # daemon-backed session like every other tab in the window, not a
+        # silent fallback to an in-process one (DoxaApp's own default).
+        _sid, dsock = spawn_daemon(path, model=model, linger_secs=linger)
+        return EngineClient(dsock)
+
     if not resolved.tabs:
         _sid, dsock = spawn_daemon(launch_cwd, model=model, linger_secs=linger)
         app = DoxaApp(
@@ -137,6 +156,7 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
             new_session_factory=lambda: EngineClient(
                 spawn_daemon(launch_cwd, model=model, linger_secs=linger)[1]
             ),
+            new_session_factory_at=new_session_factory_at,
             restore_report=report,
         )
         app.run()
@@ -168,6 +188,7 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
     app = DoxaApp(
         cwd=app_cwd, model=model,
         new_session_factory=new_session_factory,
+        new_session_factory_at=new_session_factory_at,
         restore_tabs=specs,
         restore_active_id=resolved.active_session_id,
         restore_report=report,

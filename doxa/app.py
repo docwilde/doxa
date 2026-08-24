@@ -54,6 +54,7 @@ from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.content import Content
 from textual.fuzzy import Matcher
 from textual.message import Message
 from textual.screen import ModalScreen
@@ -338,6 +339,33 @@ def ctx_chip(percentage: "float | None") -> str:
     return text
 
 
+def _belief_scope_label(subject: str) -> str:
+    """Which GROUP a belief's row falls under in the beliefs chip's picker
+    (item 3) -- derived from lore_core's own subject vocabulary
+    (``lore_core.beliefs.belief_subject``: ``"user"``, ``"user-model"``, or
+    ``"project:<slug>"`` -- verified against the installed lore_core, there
+    is no separate ``scope`` column), data-driven rather than a hardcoded
+    two-way branch so a future subject prefix (LORE issue #41's proposed
+    ``machine:<id>``, still an open, unimplemented proposal -- NOT built
+    here) slots into its own group the moment lore_core starts writing one,
+    with no change to this function. ``"user-model"`` stays its own group
+    (interaction-model beliefs, never folded into plain "user") -- the same
+    distinction belief_subject's own docstring draws."""
+    if subject == "user-model":
+        return "user model"
+    if ":" in subject:
+        return subject.split(":", 1)[0]  # "project:<slug>" -> "project"
+    return subject or "user"
+
+
+def _fmt_belief_row(belief: dict) -> str:
+    """One beliefs-picker row: the claim text, ellipsized -- filtering
+    (ChipPicker's type-to-filter) matches against exactly this string, so
+    the claim has to be IN it, not just referenced by an id."""
+    claim = _one_line(str(belief.get("claim") or ""), 200)
+    return ellipsize(claim, 72)
+
+
 def app_bindings() -> "list[tuple[str, str]]":
     """``(key, description)`` for every app-level binding, read off
     ``DoxaApp.BINDINGS`` itself -- the thing Textual actually dispatches.
@@ -612,21 +640,26 @@ class GitLine:
         it qualifies, not at the far end of the bar. Omitted when it would
         merely repeat the branch label (detached HEAD).
 
-        `clickable` (status-chips, item Y): wraps ONLY the branch segment
-        in the click-action span that opens the branch picker -- the repo
-        name and the sha are information, not selectors, and stay plain
-        even here (see the operator's three-tier clickability answer in
-        the release notes). Default False keeps every other caller (the
-        identity block's `/about`-style dump, every pre-chips test that
-        asserts this string verbatim) exactly as it was; only
+        `clickable` (status-chips, item Y; widened in v0.24.0's item 4)
+        wraps the branch segment in the click-action span that opens the
+        branch picker AND the repo-name segment in the one that opens the
+        repo/path picker -- v0.22.0 called the repo name INERT; the
+        operator's own follow-up report overrides that (see
+        StatusBar.action_open_repo_picker and SessionPane.open_repo_picker
+        for what selecting a row there actually does). The sha stays
+        information, never a selector -- there is nothing to pick from one
+        commit id. Default False keeps every other caller (the identity
+        block's `/about`-style dump, every pre-chips test that asserts
+        this string verbatim) exactly as it was; only
         `SessionPane._refresh_status` passes True."""
         if not self.repo:
             return None
         branch = self.branch_label()
+        repo_text = _chip_span(self.repo, "open_repo_picker") if clickable else self.repo
         if not branch:
-            return self.repo
+            return repo_text
         branch_text = _chip_span(branch, "open_branch_picker") if clickable else branch
-        chip = f"{self.repo} {git_branch_symbol()} {branch_text}"
+        chip = f"{repo_text} {git_branch_symbol()} {branch_text}"
         sha = self._read_sha()
         if sha and not branch.startswith(sha):
             # "@" marks this hex string as a COMMIT. The status bar also
@@ -636,6 +669,30 @@ class GitLine:
             # that). Neither is dropped -- both are labelled instead.
             chip += f" @{sha}"
         return chip
+
+    def chip_hints(self) -> "list[tuple[str, str]]":
+        """(plain_text, tooltip) for each segment :meth:`render` prints, in
+        the SAME left-to-right order -- item 5's tooltip machinery reads
+        this alongside the markup `render` builds, rather than re-parsing
+        that markup back apart."""
+        if not self.repo:
+            return []
+        hints = [(
+            self.repo,
+            "repo this session is rooted in -- click to open a "
+            "different repo in a new tab",
+        )]
+        branch = self.branch_label()
+        if not branch:
+            return hints
+        hints.append((
+            branch,
+            "branch checked out here -- click to switch this session's base",
+        ))
+        sha = self._read_sha()
+        if sha and not branch.startswith(sha):
+            hints.append((f"@{sha}", "short commit id of the branch tip"))
+        return hints
 
     def branch_label(self) -> str | None:
         """The branch actually checked out HERE: `main`, or `main@featureX`
@@ -1576,7 +1633,20 @@ class ChipPicker(OptionList):
     disabled heading (same "label, never a destination" convention
     NeedsInputPopup's own row 0 follows) for the one caller that needs an
     honesty caveat: the effort picker, whose selection cannot take effect
-    on the CURRENT session (connect-time only, same as `/effort` itself)."""
+    on the CURRENT session (connect-time only, same as `/effort` itself).
+
+    ``groups`` (item 3, the beliefs picker) is the same disabled-separator-
+    row convention doxa.palette.DoxaPalette._refresh_command_list already
+    established for the command palette's own section headers: an optional
+    `rid -> group label` map, rendered as a dim `▎ <group>` row (the same
+    `▎` marker CloseWithTurnRunning and the belief-inspector stub already
+    use for a section lead-in) whenever the group changes, walking `rows`
+    in the ORDER THE CALLER GAVE THEM -- grouping is the caller's job
+    (sorting/bucketing its own rows), this widget only inserts the
+    headers. A typed filter COLLAPSES the groups, same as the palette's
+    own filtered search drops its section headers: once a fuzzy match is
+    doing the ranking, a header contributes nothing a hit doesn't already
+    say better."""
 
     can_focus = True
     BINDINGS = [Binding("escape", "close_picker", "Close", show=False)]
@@ -1588,9 +1658,11 @@ class ChipPicker(OptionList):
         self._all_rows: list[tuple[str, str]] = []
         # Row-by-row map onto what the OptionList shows -- SAME
         # convention SlashComplete._rows follows, including the note
-        # heading occupying index 0 as `("", note_text)` when present.
+        # heading occupying index 0 as `("", note_text)` when present, and
+        # any group header row inserted by `groups` (also `("", header)`).
         self._rows: list[tuple[str, str]] = []
         self._note = ""
+        self._groups: "dict[str, str] | None" = None
         self._filter_text = ""
         self._current_id: "str | None" = None
         self._on_select: "Callable[[str], Any] | None" = None
@@ -1607,15 +1679,19 @@ class ChipPicker(OptionList):
         *,
         note: str = "",
         title: str = "",
+        groups: "dict[str, str] | None" = None,
     ) -> None:
         """Configure and show. Reopening (a click on a DIFFERENT chip
-        while this one is already up) just reconfigures the same instance
-        -- there is only ever one picker, so no prior-close bookkeeping is
-        needed here."""
+        while this one is already up -- or the SAME chip re-rendering
+        itself with new candidates, see the repo picker's descend-a-
+        directory callback) just reconfigures the same instance -- there
+        is only ever one picker, so no prior-close bookkeeping is needed
+        here."""
         self._all_rows = list(rows)
         self._current_id = current_id
         self._on_select = on_select
         self._note = note
+        self._groups = groups
         self._filter_text = ""
         self.border_title = title
         self._render_rows()
@@ -1629,6 +1705,7 @@ class ChipPicker(OptionList):
             self.add_option(Option(self._note, disabled=True))
             self._rows.append(("", self._note))
         candidates = self._all_rows
+        grouped = self._groups and not self._filter_text
         if self._filter_text:
             matcher = Matcher(self._filter_text)
             scored = [
@@ -1641,15 +1718,19 @@ class ChipPicker(OptionList):
         if not candidates:
             self.add_option(Option("  (no match)", disabled=True))
         else:
+            current_group = None
             for rid, label in candidates:
+                if grouped:
+                    group = self._groups.get(rid, "")
+                    if group != current_group:
+                        current_group = group
+                        self.add_option(Option(f"▎ {group}", disabled=True))
+                        self._rows.append(("", f"▎ {group}"))
                 mark = "▸" if rid == self._current_id else " "
                 self.add_option(Option(f" {mark} {_escape_markup(label)}"))
                 self._rows.append((rid, label))
-        first = 1 if self._note else 0
-        if len(self._rows) > first and self._rows[first][0]:
-            self.highlighted = first
-        else:
-            self.highlighted = None
+        first = next((i for i, (rid, _l) in enumerate(self._rows) if rid), None)
+        self.highlighted = first
         self.border_subtitle = f"/{self._filter_text}" if self._filter_text else ""
 
     def _on_key(self, event: events.Key) -> None:
@@ -2126,6 +2207,71 @@ class CloseWithTurnRunning(ModalScreen[str]):
         self.dismiss("cancel")
 
 
+class CompactConfirm(ModalScreen[bool]):
+    """The ctx% chip's click target used to fire ``/compact`` on a single
+    click, no warning -- reported, and a real defect: compaction is lossy
+    and there is no undo, so a misclick silently throws conversation detail
+    away. This is the confirm that closes it.
+
+    House precedent for the SHAPE: CloseWithTurnRunning above, not
+    NeedsInputPopup. NeedsInputPopup is PROMPT-driven (``can_focus =
+    False``, answered through PromptInput's own key protocol because
+    typing owns focus at that point) for a reason that does not apply here
+    -- it exists to answer an ask_user/permission request the ENGINE is
+    genuinely waiting on. A compact confirm has nothing on the other end
+    waiting; it is a plain UI yes/no, exactly CloseWithTurnRunning's own
+    shape (a focused ``ModalScreen``, pushed with ``push_screen_wait`` from
+    a worker, Esc/a letter key/a click all dismiss it) -- just two doors
+    instead of three.
+
+    The body states what is actually at stake -- the CURRENT context
+    percentage, and that compacting summarizes and discards the earlier
+    detail -- not a bare "are you sure?": the whole point of asking is to
+    say what the click is about to do."""
+
+    BINDINGS = [("escape", "pick_cancel", "Cancel")]
+
+    def __init__(self, percentage: "float | None") -> None:
+        super().__init__()
+        self._percentage = percentage
+
+    def compose(self) -> ComposeResult:
+        pct_text = (
+            f"{self._percentage:.0f}%" if self._percentage is not None
+            else "an unknown amount"
+        )
+        with Vertical(id="compact-confirm"):
+            yield Static("▎ compact this session's context?", id="compact-confirm-title")
+            yield Static(
+                f"context is {pct_text} full. compacting summarizes the "
+                "conversation so far and DISCARDS the earlier detail -- "
+                "there is no undo.",
+                id="compact-confirm-body",
+            )
+            with Horizontal(id="compact-confirm-buttons"):
+                yield Static("[ compact ]", id="compact-confirm-yes")
+                yield Static("[ cancel ]", id="compact-confirm-no")
+
+    def action_pick_cancel(self) -> None:
+        self.dismiss(False)
+
+    def on_key(self, event: events.Key) -> None:
+        choice = {"y": True, "c": False, "n": False}.get(event.key)
+        if choice is not None:
+            event.stop()
+            self.dismiss(choice)
+
+    @on(events.Click, "#compact-confirm-yes")
+    def _click_yes(self, event: events.Click) -> None:
+        event.stop()
+        self.dismiss(True)
+
+    @on(events.Click, "#compact-confirm-no")
+    def _click_no(self, event: events.Click) -> None:
+        event.stop()
+        self.dismiss(False)
+
+
 class TabRename(Input):
     """The inline editor a double-clicked tab header turns into.
 
@@ -2169,23 +2315,72 @@ class StatusBar(Static):
     method just needs to live on this class and delegate to the owning
     pane.
 
-    Three tiers of chip live in one status-bar string (`_refresh_status`
-    builds it) but only two carry a click action at all -- the operator's
-    own "for every chip?" question, answered explicitly in the release
-    notes: SELECTORS open the shared :class:`ChipPicker` (model, branch,
-    effort), ACTIONABLE chips run something that already exists with no
-    picker (peers -> /sessions, ctx% -> /compact, the session handle ->
-    clipboard), and everything else (cost, repo name, sha, usage headroom)
-    stays plain -- giving every chip the same affordance would make the
-    affordance stop meaning anything, the same defect class as the
-    original "the whole bar looks interactive and isn't" report. One
-    action per chip rather than a single dispatcher taking an argument:
-    simpler markup (no `json.dumps`-escaped action params to get wrong),
-    and every action here is a fixed, known operation anyway."""
+    v0.24.0 widened the tiers the release-notes' "for every chip?" answer
+    drew: model/branch/effort/the repo name (item 4 -- overrides v0.22.0's
+    "repo name is INERT") open the shared :class:`ChipPicker`; peers/ctx%/
+    the session handle/beliefs are ACTIONABLE (peers -> /sessions, ctx% ->
+    a confirm THEN /compact -- see :class:`CompactConfirm`, the session
+    handle -> a sessions picker, beliefs -> a beliefs picker); cost, sha
+    and usage headroom stay plain -- INERT never meant "unexplained", see
+    :meth:`set_chip_hints` below. One action per chip rather than a single
+    dispatcher taking an argument: simpler markup (no `json.dumps`-escaped
+    action params to get wrong), and every action here is a fixed, known
+    operation anyway.
+
+    Tooltips (item 5): Textual's ``Widget.tooltip`` is read fresh by the
+    screen's own hover timer every time the mouse moves over a widget
+    (``Screen._handle_tooltip_timer`` re-reads ``widget.tooltip``, and the
+    setter re-triggers ``Screen._update_tooltip`` immediately if this
+    widget is already the one being shown) -- so ONE ``Static`` can serve a
+    DIFFERENT tooltip for different chips under the cursor, the same way it
+    already serves a different click action for different chips, without
+    splitting the bar into N widgets. That would have been the "clean"
+    fix if the bar were not already built this way, but it would also mean
+    rewriting every existing click-span action into a real per-widget click
+    handler and re-pinning every markup/order assertion in
+    tests/test_status_chips.py for a purely mechanical reason -- this is
+    the smaller, evidence-backed diff for the SAME requirement (every chip,
+    including the inert ones, gets a one-sentence hover explanation), and
+    it changes nothing about `_refresh_status`'s string-building, so chip
+    order/spacing/colors are untouched by construction, not by discipline."""
 
     def __init__(self, pane: "SessionPane") -> None:
         super().__init__("doxa · connecting…", id="status-bar")
         self.pane = pane
+        # (plain_chip_text, tooltip) in DISPLAY order -- rebuilt by
+        # SessionPane._refresh_status alongside the markup string itself,
+        # so the two can never drift out of sync with each other.
+        self._chip_hints: "list[tuple[str, str]]" = []
+
+    def set_chip_hints(self, hints: "list[tuple[str, str]]") -> None:
+        self._chip_hints = hints
+
+    def _tooltip_for_x(self, x: int) -> "str | None":
+        """Which chip's tooltip covers status-bar-relative `x` -- the SAME
+        `#status-bar { padding: 0 2 }` left offset
+        tests/test_status_chips.py's own `_offset_of` helper already
+        subtracts for click coordinates; a MouseMove event's `x` is
+        region-relative the identical way (`Screen._translate_mouse_move_
+        event`), so one constant serves both."""
+        if not self._chip_hints:
+            return None
+        pos = x - 2
+        if pos < 0:
+            return None
+        plain = Content.from_markup(str(self.renderable)).plain
+        cursor = 0
+        for text, hint in self._chip_hints:
+            idx = plain.find(text, cursor)
+            if idx == -1:
+                continue
+            end = idx + len(text)
+            if idx <= pos < end:
+                return hint
+            cursor = end
+        return None
+
+    def _on_mouse_move(self, event: events.MouseMove) -> None:
+        self.tooltip = self._tooltip_for_x(event.x)
 
     async def action_open_model_picker(self) -> None:
         await self.pane.open_model_picker()
@@ -2196,14 +2391,20 @@ class StatusBar(Static):
     async def action_open_effort_picker(self) -> None:
         await self.pane.open_effort_picker()
 
+    def action_open_repo_picker(self) -> None:
+        self.pane.open_repo_picker()
+
     def action_open_sessions(self) -> None:
         self.pane.run_status_command("/sessions")
 
     def action_compact_now(self) -> None:
         self.pane.run_compact_now()
 
-    def action_copy_session_handle(self) -> None:
-        self.pane.copy_session_handle()
+    def action_open_sessions_picker(self) -> None:
+        self.pane.open_sessions_picker()
+
+    async def action_open_beliefs_picker(self) -> None:
+        await self.pane.open_beliefs_picker()
 
 
 class SubagentLine(Static):
@@ -2893,22 +3094,38 @@ class SessionPane(TabPane):
         tier = identity_mod.account_tier(account)
         if tier:
             cost = f"sub:{tier} (≈${self.engine.total_cost_usd:.4f} if API)"
+            cost_hint = (
+                f"subscription plan ({tier}) -- no API dollars are actually "
+                "spent; the ≈$ figure is the list-price what-if"
+            )
         else:
             cost = f"${self.engine.total_cost_usd:.4f}"
+            cost_hint = "actual API spend billed for this session so far"
         beliefs = self.engine.belief_count()
-        # Three tiers of chip, per the operator's own "for every chip?"
-        # question (release notes): SELECTOR chips (model, branch, effort)
-        # open the shared ChipPicker; ACTIONABLE chips (peers, ctx%, the
-        # session handle) run something that already exists with no
-        # picker; everything else (cost, repo name, sha, usage headroom,
-        # beliefs -- no `/beliefs`-ish surface exists to route to, see the
-        # release notes) stays plain. Only the first two tiers get
-        # _chip_span's click markup / accent color.
+        # Tiers of chip, per the operator's own "for every chip?" question
+        # (v0.22.0 release notes), widened in v0.24.0: SELECTOR chips
+        # (model, branch, effort, and -- item 4, overriding v0.22.0's
+        # "repo name is INERT" -- the repo name) open the shared
+        # ChipPicker; ACTIONABLE chips (peers, ctx%, the session handle,
+        # beliefs) run something that already exists, or open a picker of
+        # their own; everything else (cost, sha, usage headroom) stays
+        # plain -- plain never meant unexplained, see StatusBar's own
+        # tooltip docstring (item 5): every chip below, including the
+        # plain ones, gets a `hints` entry.
         parts = [_chip_span(model, "open_model_picker")]
+        hints: "list[tuple[str, str]]" = [(
+            model,
+            "model handling this session's turns -- click to switch "
+            "(takes effect on the NEXT turn, transcript kept)",
+        )]
         if self.needs_input:  # hide-at-zero, same convention as every
             # other chip below -- visible only while a question or
             # permission request is actually pending on THIS pane.
             parts.append("⚑ needs input")
+            hints.append((
+                "⚑ needs input",
+                "a question or permission request is waiting on this session",
+            ))
         effort = getattr(self.engine, "effort", None)
         if effort:  # hide-at-zero: omitted when the CLI default is in
             # force (no level asserted at connect) -- same convention as
@@ -2916,39 +3133,79 @@ class SessionPane(TabPane):
             # too, but its picker can only ever affect a FUTURE session
             # (connect-time only, same as /effort) -- the picker itself
             # says so rather than silently no-opping.
-            parts.append(_chip_span(f"effort:{effort}", "open_effort_picker"))
+            effort_text = f"effort:{effort}"
+            parts.append(_chip_span(effort_text, "open_effort_picker"))
+            hints.append((
+                effort_text,
+                "reasoning effort for NEW sessions only (connect-time) -- "
+                "click to change the default; this session keeps its own",
+            ))
         git_chip = self._git.render(clickable=True) if self._git is not None else None
         if git_chip:  # hidden entirely outside a repo
             parts.append(git_chip)
+            hints.extend(self._git.chip_hints())
         parts.append(cost)
+        hints.append((cost, cost_hint))
         if self._usage_chip:  # only when real numbers exist -- see below
             parts.append(self._usage_chip)
-        # ctx% is ACTIONABLE (click -> /compact) but its own markup is
-        # already trusted, code-generated pressure coloring (ctx_chip's
-        # amber/red escalation) -- wrapping it through _chip_span would
-        # escape THOSE brackets as if they were arbitrary text, same
-        # defect a literal `[` in a model-chosen label would risk the
-        # other way. So the click span is built directly here, no
+            hints.append((
+                self._usage_chip,
+                "subscription utilization cached by the claude CLI -- "
+                "session (5h) and weekly limits used so far",
+            ))
+        # ctx% is ACTIONABLE (click -> confirm, then /compact -- item 1)
+        # but its own markup is already trusted, code-generated pressure
+        # coloring (ctx_chip's amber/red escalation) -- wrapping it through
+        # _chip_span would escape THOSE brackets as if they were arbitrary
+        # text, same defect a literal `[` in a model-chosen label would
+        # risk the other way. So the click span is built directly here, no
         # _escape_markup: the accent shows through at the "normal" tier
         # (no inner color) and yields to the pressure color once one
         # applies -- the pressure signal outranks the click affordance.
         ctx_text = ctx_chip(self.engine.last_ctx_percentage)
+        beliefs_text = f"{beliefs} beliefs"
         parts += [
             f"[@click=compact_now][{CLICKABLE_CHIP_ACCENT}]{ctx_text}[/][/]",
-            f"{beliefs} beliefs",
+            _chip_span(beliefs_text, "open_beliefs_picker"),
+        ]
+        hints += [
+            (
+                ctx_text,
+                "percentage of the context window consumed -- click to "
+                "compact (asks first: compacting summarizes and discards "
+                "earlier detail)",
+            ),
+            (
+                beliefs_text,
+                "active beliefs LORE holds for this session -- click to "
+                "browse them, grouped by scope",
+            ),
         ]
         subagent_count = len(self._subagents)
         if subagent_count:  # hidden at 0 -- same convention as peers below
             noun = "agent" if subagent_count == 1 else "agents"
-            parts.append(f"⧉ {subagent_count} {noun}")
+            subagents_text = f"⧉ {subagent_count} {noun}"
+            parts.append(subagents_text)
+            hints.append((
+                subagents_text,
+                "subagent tasks running right now -- see the row below "
+                "to open one's own transcript",
+            ))
         if getattr(self.engine, "detachable", False):
             sid = str(getattr(self.engine, "session_id", "") or "")
             if sid:  # attached to a daemon: show the reattach handle --
-                # ACTIONABLE (copies it to the clipboard); the accent
+                # ACTIONABLE (item 2 -- opens a sessions picker; a plain
+                # copy-to-clipboard is still one row inside it). The accent
                 # color replaces the old #8A8073 dim treatment, since a
                 # clickable chip wears the SAME affordance every other one
                 # does rather than staying visually "quiet".
-                parts.append(_chip_span(f"⌁ session {sid[:8]}", "copy_session_handle"))
+                handle_text = f"⌁ session {sid[:8]}"
+                parts.append(_chip_span(handle_text, "open_sessions_picker"))
+                hints.append((
+                    handle_text,
+                    "this session's reattach handle -- click to see every "
+                    "session in scope, including detached ones",
+                ))
         peer_count = self.engine.peer_count()
         if peer_count:  # hidden at 0 -- a solo session has no peers chip
             # Under detach-by-default a bare count is ambiguous: four live
@@ -2964,11 +3221,23 @@ class SessionPane(TabPane):
                 f"peers {peer_count}" + (f" ({detached}⌁)" if detached else "")
             )
             parts.append(_chip_span(peers_text, "open_sessions"))
+            hints.append((
+                peers_text,
+                "other DOXA sessions working on this repo -- click for the "
+                "full list; (N⌁) counts how many are detached",
+            ))
         disabled = self.engine.disabled_tools()
         if disabled:  # two-strikes containment note -- hidden when empty
-            parts.append(" ".join(f"⊘ {name}" for name in disabled))
+            disabled_text = " ".join(f"⊘ {name}" for name in disabled)
+            parts.append(disabled_text)
+            hints.append((
+                disabled_text,
+                "tool disabled after repeated failures this session "
+                "(two-strikes containment)",
+            ))
         bar = self.query_one("#status-bar", StatusBar)
         bar.update("  ·  ".join(parts))
+        bar.set_chip_hints(hints)
 
     @on(TextArea.Changed, "#prompt-input")
     def _on_prompt_changed(self, event: TextArea.Changed) -> None:
@@ -3154,10 +3423,11 @@ class SessionPane(TabPane):
         *,
         note: str = "",
         title: str = "",
+        groups: "dict[str, str] | None" = None,
     ) -> None:
-        """Shared entry point for all three SELECTOR chips -- guards
-        against opening UNDER a pending needs-input request (same "the
-        question owns this row" rule ``_on_prompt_changed`` already
+        """Shared entry point for every chip that opens :class:`ChipPicker`
+        -- guards against opening UNDER a pending needs-input request (same
+        "the question owns this row" rule ``_on_prompt_changed`` already
         applies to the two prompt-driven popups) and closes those two
         popups first, so at most one of the four ever shows at once."""
         if self.query_one("#needs-input-popup", NeedsInputPopup).is_open:
@@ -3165,7 +3435,7 @@ class SessionPane(TabPane):
         self.query_one("#slash-complete", SlashComplete).close()
         self.query_one("#session-search", SessionSearch).close()
         self.query_one("#chip-picker", ChipPicker).open(
-            rows, current_id, on_select, note=note, title=title,
+            rows, current_id, on_select, note=note, title=title, groups=groups,
         )
 
     @staticmethod
@@ -3272,24 +3542,282 @@ class SessionPane(TabPane):
         self.run_worker(self._run_command(name), group="command")
 
     def run_compact_now(self) -> None:
-        """The ctx% chip's click target -- ``/compact`` is a PASSTHROUGH
-        row (doxa/commands.py: the literal prompt text is what triggers
-        compaction and fires the PreCompact hook), so its dispatch is a
-        turn, not a command -- the same ``run_worker(self._run_turn(...))``
-        call ``on_prompt_submitted`` would make for that same text."""
+        """The ctx% chip's click target (item 1) -- v0.22.0 sent
+        ``/compact`` on the FIRST click, no warning. That was a real
+        defect, not a preference: compaction is lossy (the transcript
+        itself gets summarized away; the PreCompact review that runs first
+        does not change that) and there is no undo, so one misclick
+        silently discarded conversation detail. This now asks first
+        (:class:`CompactConfirm`) and only fires the turn on acceptance --
+        ``/compact`` is still a PASSTHROUGH row (doxa/commands.py: the
+        literal prompt text is what triggers compaction and fires the
+        PreCompact hook), so accepted dispatch is still a turn, not a
+        command, the same ``run_worker(self._run_turn(...))`` call
+        ``on_prompt_submitted`` would make for that same text."""
         if self.engine is None:
             return
+        self.run_worker(self._confirm_and_compact(), group="compact-confirm")
+
+    async def _confirm_and_compact(self) -> None:
+        engine = self.engine
+        if engine is None:
+            return
+        accepted = await self.app.push_screen_wait(
+            CompactConfirm(engine.last_ctx_percentage)
+        )
+        if not accepted:
+            return  # Esc / decline: no compaction, no turn sent, status
+            # bar unchanged -- exactly item 1's own contract.
         self.run_worker(self._run_turn("/compact"), exclusive=True, group="turn")
 
     def copy_session_handle(self) -> None:
-        """The session-handle chip's click target -- only ever visible
-        (hide-at-zero) on an attached, detachable session, so ``sid`` here
-        is never empty in practice; the guard is defensive only."""
+        """The clipboard capability the session-handle chip's click used to
+        BE, on its own, through v0.22.0 -- kept as the first row of the
+        sessions picker it opens now (item 2), rather than silently
+        dropped: a modifier-click would be less discoverable than a real
+        row in the same dropdown every other selection already uses."""
         sid = str(getattr(self.engine, "session_id", "") or "")
         if not sid:
             return
         self.app.copy_to_clipboard(sid)
         self.run_worker(self._system(f"copied session handle: {sid[:8]}…"), group="command")
+
+    def open_sessions_picker(self) -> None:
+        """The session-handle chip's click target (item 2) -- v0.22.0 just
+        copied the handle. The operator wants a dropdown of every session
+        IN SCOPE instead, detached ones clearly marked, the current one
+        marked too -- only ever reachable when the chip itself is showing
+        (hide-at-zero: an attached, detachable session), so
+        ``engine.session_id`` is never empty here in practice.
+
+        Scope key: the SAME ``main_repo_root_of(cwd) or cwd`` PeerHost
+        itself computes for presence (doxa.peers) -- read here rather than
+        re-derived differently, via the SAME "engine cwd wins over the
+        pane's own" fallback ``_boot``/``_cmd_search``/``_identity_text``
+        already use (attach can land a pane in another project).
+
+        Detached marker: ``list_daemons`` returns ``PeerInfo`` rows whose
+        ``clients`` field is exactly what the peers chip already reduces to
+        its own ``(N⌁)`` suffix (0 clients == detached, see
+        ``PeerInfo.clients``'s own docstring) -- reused here, not
+        re-derived, and rendered with the SAME ⌁ glyph."""
+        engine = self.engine
+        if engine is None:
+            return
+        cwd = str(getattr(engine, "cwd", None) or self.cwd)
+        scope = peers_mod.main_repo_root_of(cwd) or cwd
+        daemons = peers_mod.list_daemons(scope_key=scope)
+        current_sid = str(getattr(engine, "session_id", "") or "")
+        open_by_sid = {
+            str(getattr(p.engine, "session_id", "") or ""): p
+            for p in self.app.panes()
+        }
+        rows: "list[tuple[str, str]]" = [("__copy__", "⧉ copy this session's handle")]
+        for entry in daemons:
+            marker = "  ⌁ detached" if entry.clients == 0 else ""
+            rows.append((
+                entry.session_id, f"{entry.title}  {entry.session_id[:8]}{marker}",
+            ))
+        self._open_chip_picker(
+            rows, current_sid,
+            lambda rid: self._select_session_row(rid, daemons, open_by_sid),
+            title="sessions",
+        )
+
+    def _select_session_row(
+        self,
+        rid: str,
+        daemons: "list[peers_mod.PeerInfo]",
+        open_by_sid: "dict[str, Any]",
+    ) -> None:
+        """Item 2's own spec, verbatim: the current session's row is a
+        no-op; a detached (or otherwise not-open-HERE) daemon is attached
+        to via the SAME path `doxa attach` and the palette's own
+        "Attach: ..." entries use (``DoxaApp._cmd_attach`` -- never a
+        second attach implementation). One judgment call not in that spec:
+        a session already open in ANOTHER tab of this window switches to
+        that tab (``DoxaApp._switch_to_tab``, the same path Ctrl+Left/
+        Right and the palette's tab entries use) instead of attaching a
+        SECOND client to it from here -- the palette's own Attach section
+        makes the identical exclusion for the identical reason."""
+        if rid == "__copy__":
+            self.copy_session_handle()
+            return
+        current_sid = str(getattr(self.engine, "session_id", "") or "")
+        if rid == current_sid:
+            return
+        other_pane = open_by_sid.get(rid)
+        if other_pane is not None and other_pane is not self:
+            self.app._switch_to_tab(getattr(other_pane, "id", None) or "")
+            return
+        entry = next((e for e in daemons if e.session_id == rid), None)
+        if entry is None:
+            return
+        self.app._cmd_attach(entry)
+
+    async def open_beliefs_picker(self) -> None:
+        """The beliefs chip's click target (item 3) -- v0.22.0 left it
+        plain ("no `/beliefs`-ish surface exists to route to", per its own
+        release notes). This is a LIGHTWEIGHT viewer, not lettered item V
+        (the full beliefs browser -- evidence trails, approve/reject); a
+        row's selection surfaces its full claim + confidence inline (a
+        SystemBlock) -- the least-surprising small thing a claim-summary
+        row can do, and a deliberately narrow judgment call (see
+        CHANGELOG: item V still owns the real browser).
+
+        Cost discipline: ``belief_count()`` (the chip's own number) runs on
+        EVERY status refresh and must stay free of the belief BODIES --
+        this calls ``list_beliefs()`` instead, the heavier claim-text
+        query, and only ever from a click, never from `_refresh_status`
+        (asserted by tests/test_status_chips.py)."""
+        engine = self.engine
+        if engine is None:
+            return
+        lister = getattr(engine, "list_beliefs", None)
+        if lister is None:
+            await self._system("beliefs: this session's handle cannot list beliefs")
+            return
+        try:
+            beliefs = await lister()
+        except Exception as exc:  # noqa: BLE001 -- a refusal is information
+            await self._system(f"beliefs: {type(exc).__name__}: {exc}")
+            return
+        if not beliefs:
+            await self._system("beliefs: none active")
+            return
+        # Sorted by GROUP first (stable -- ties keep list_beliefs' own
+        # updated-DESC order) so ChipPicker's group-header insertion (which
+        # walks rows in the order given, per its own docstring) produces
+        # clean contiguous blocks rather than a header reappearing every
+        # time two subjects happen to interleave.
+        ordered = sorted(
+            beliefs,
+            key=lambda b: _belief_scope_label(str(b.get("subject") or "")),
+        )
+        rows: "list[tuple[str, str]]" = []
+        groups: "dict[str, str]" = {}
+        by_id: "dict[str, dict]" = {}
+        for belief in ordered:
+            rid = f"belief:{belief.get('id')}"
+            rows.append((rid, _fmt_belief_row(belief)))
+            groups[rid] = _belief_scope_label(str(belief.get("subject") or ""))
+            by_id[rid] = belief
+        self._open_chip_picker(
+            rows, None,
+            lambda rid: self._show_belief_detail(by_id.get(rid)),
+            title="beliefs", groups=groups,
+        )
+
+    def _show_belief_detail(self, belief: "dict | None") -> None:
+        if belief is None:
+            return
+        subject = str(belief.get("subject") or "")
+        confidence = belief.get("confidence")
+        conf_text = (
+            f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "?"
+        )
+        self.run_worker(
+            self._system(
+                f"belief · {_belief_scope_label(subject)} ({subject}) · "
+                f"confidence {conf_text}\n\n{belief.get('claim') or ''}"
+            ),
+            group="command",
+        )
+
+    def open_repo_picker(self) -> None:
+        """The repo-name chip's click target (item 4, overriding v0.22.0's
+        "repo name is INERT"): a directory-walking picker, starting at
+        this session's own cwd -- typing filters the CURRENT listing
+        (ChipPicker's own type-to-filter, unchanged), selecting a plain
+        directory DESCENDS into it (the picker re-opens itself at the new
+        listing -- see ChipPicker.open's own "reopening" docstring: a
+        second ``open()`` call mid-display just reconfigures the same
+        instance), and selecting a directory that IS a git repo root opens
+        it in a NEW TAB."""
+        cwd = str(getattr(self.engine, "cwd", None) or self.cwd)
+        self._open_repo_picker_at(cwd)
+
+    def _repo_picker_rows(
+        self, directory: str
+    ) -> "tuple[list[tuple[str, str]], str | None]":
+        """Directory entries of ``directory`` as ChipPicker rows, each rid
+        prefixed ``dir:`` (descend) or ``repo:`` (a git repo root -- open
+        in a new tab): repo-ness is ``peers.main_repo_root_of``, reused
+        rather than re-derived (same function PeerHost's own scope key and
+        the spawn-or-attach reuse path already call). Returns
+        ``(rows, error)`` -- ``error`` set (rows still whatever could be
+        built, usually just the parent row) on an unreadable/nonexistent
+        directory, so a stale race between listing and clicking degrades
+        to a message, never a crash."""
+        rows: "list[tuple[str, str]]" = []
+        parent = os.path.dirname(directory.rstrip(os.sep) or os.sep)
+        if parent and parent != directory:
+            rows.append((f"dir:{parent}", ".. (up)"))
+        if peers_mod.main_repo_root_of(directory) == directory:
+            rows.append((f"repo:{directory}", f"· open here ({Path(directory).name}) ⎇"))
+        try:
+            entries = sorted(
+                (e for e in os.scandir(directory)
+                 if e.is_dir(follow_symlinks=False) and not e.name.startswith(".")),
+                key=lambda e: e.name.lower(),
+            )
+        except OSError as exc:
+            return rows, f"cannot list {directory}: {exc}"
+        for entry in entries:
+            path = entry.path
+            if peers_mod.main_repo_root_of(path) == path:
+                rows.append((f"repo:{path}", f"{entry.name} ⎇"))
+            else:
+                rows.append((f"dir:{path}", f"{entry.name}/"))
+        return rows, None
+
+    def _open_repo_picker_at(self, directory: str) -> None:
+        if not os.path.isdir(directory):
+            self.run_worker(
+                self._system(f"repo: not a directory: {directory}"), group="command",
+            )
+            return
+        rows, err = self._repo_picker_rows(directory)
+        if err:
+            self.run_worker(self._system(f"repo: {err}"), group="command")
+            if not rows:
+                return
+        self._open_chip_picker(
+            rows, None, self._select_repo_row, title=f"repo · {directory}",
+        )
+
+    def _select_repo_row(self, rid: str) -> None:
+        kind, _, path = rid.partition(":")
+        if kind == "dir":
+            # Deferred one refresh cycle, deliberately: ChipPicker.
+            # select_row has ALREADY called close() (display=False) and is
+            # about to hand focus back to the prompt by the time this
+            # callback runs -- reopening the SAME instance synchronously,
+            # right here, races that hand-off (Textual's own Blur delivery
+            # for the picker's just-lost focus is queued, not immediate,
+            # and would land AFTER a synchronous reopen and close it right
+            # back). call_after_refresh runs this once that whole
+            # close/blur/focus cycle has actually settled.
+            self.app.call_after_refresh(partial(self._open_repo_picker_at, path))
+        elif kind == "repo":
+            self._spawn_tab_at(path)
+
+    def _spawn_tab_at(self, path: str) -> None:
+        """A CHOSEN repo opens in a NEW TAB (spawn-or-attach at that path)
+        -- a judgment call, flagged: this session's cwd is fixed once
+        connected, so picking a different repo here must not mutate the
+        running session out from under it. The least-surprising reading is
+        the same one Ctrl+T / `doxa` in that directory already gives, so
+        this calls the SAME spawn primitive (``DoxaApp.open_tab_at``,
+        itself a thin wrapper over ``doxa.daemon.spawn_daemon``/
+        ``SessionEngine`` -- the ONE spawn implementation every existing
+        factory closure already wraps), never a second one."""
+        self.run_worker(self._do_spawn_tab_at(path), group="tabs")
+
+    async def _do_spawn_tab_at(self, path: str) -> None:
+        error = await self.app.open_tab_at(path)
+        if error:
+            await self._system(f"repo: {error}")
 
     async def _cmd_model(self, args: str) -> None:
         """/model -- switch the model for subsequent turns, in place.
@@ -4125,6 +4653,7 @@ class DoxaApp(App):
         model: str | None = None,
         engine_factory: "Callable[[], Any] | None" = None,
         new_session_factory: "Callable[[], Any] | None" = None,
+        new_session_factory_at: "Callable[[str], Any] | None" = None,
         restore_tabs: "list[RestoreTabSpec] | None" = None,
         restore_active_id: "str | None" = None,
         restore_report: "str | None" = None,
@@ -4142,6 +4671,20 @@ class DoxaApp(App):
             lambda: SessionEngine(cwd=self.cwd, model=self.model)
         )
         self._new_session_factory = new_session_factory or self._engine_factory
+        # v0.24.0's item 4 (repo picker): the SAME spawn primitive as
+        # new_session_factory above, just parametrized by an EXPLICIT path
+        # instead of this app's own launch cwd -- doxa.cli's own
+        # new_session_factory/engine_factory closures already wrap
+        # spawn_daemon/EngineClient this identically for the fixed-cwd
+        # case; this is that SAME wrapping shape with one more argument,
+        # not a second spawn implementation. Defaults to an in-process
+        # SessionEngine at the given path, mirroring _engine_factory's own
+        # default, so `--in-process` mode (and every existing test's
+        # DoxaApp(...) call, which passes neither) gets the repo picker's
+        # "open in a new tab" for free rather than a silent dead end.
+        self._new_session_factory_at = new_session_factory_at or (
+            lambda path: SessionEngine(cwd=path, model=self.model)
+        )
         # Item D: tabs doxa.cli already resolved to LIVE daemons (never a
         # raw saved record -- see doxa.tabsets.resolve), opened in compose()
         # instead of the single default pane below. Empty/None for every
@@ -4215,8 +4758,12 @@ class DoxaApp(App):
 
     # -- pane plumbing -----------------------------------------------
 
-    def _tab_title(self) -> str:
+    def _tab_title(self, cwd: "str | None" = None) -> str:
         """The label a pane is BORN with -- model plus directory, no git.
+        Defaults to this app's own ``cwd``; the repo picker's "open in a
+        new tab" (item 4) passes the CHOSEN path instead, via
+        :meth:`_make_pane_at`, so that tab is never born labelled with the
+        wrong directory for one boot.
 
         The pane replaces it with its own ``auto_label`` the moment its
         engine and GitLine exist (one boot later); this exists so a tab
@@ -4225,13 +4772,39 @@ class DoxaApp(App):
         they ARE alike, and the palette's tab section carries the session
         id that tells them apart."""
         self._tab_serial += 1
-        name = Path(self.cwd).name or "session"
+        name = Path(cwd or self.cwd).name or "session"
         return ellipsize(f"{short_model(self.model)} · {name}")
 
     def _make_pane(self, engine_factory: "Callable[[], Any]") -> SessionPane:
         return SessionPane(
             self._tab_title(), self.cwd, self.model, engine_factory,
         )
+
+    def _make_pane_at(
+        self, path: str, engine_factory: "Callable[[], Any]"
+    ) -> SessionPane:
+        """Item 4's own ``_make_pane``: same shape, an explicit ``path``
+        standing in for this app's own ``cwd`` everywhere it matters (the
+        born-title AND the pane's own ``cwd`` fallback -- see SessionPane.
+        _boot's "engine cwd wins over the pane's own" comment for why the
+        engine's real cwd is still what ultimately decides the GitLine/tab
+        label once it boots; this is only the correct BEFORE-boot guess)."""
+        return SessionPane(self._tab_title(path), path, self.model, engine_factory)
+
+    async def open_tab_at(self, path: str) -> "str | None":
+        """The repo picker's own spawn call (item 4): a fresh session tab
+        rooted at an EXPLICIT path, via ``_new_session_factory_at`` -- the
+        SAME spawn primitive Ctrl+T (:meth:`action_new_tab`) uses, just
+        parametrized by path instead of this app's own launch cwd. Returns
+        an error string on a bad path (never raises, never half-creates a
+        tab); None on success."""
+        if not os.path.isdir(path):
+            return f"not a directory: {path}"
+        tabbed = self.query_one("#session-tabs", TabbedContent)
+        pane = self._make_pane_at(path, lambda: self._new_session_factory_at(path))
+        await tabbed.add_pane(pane)
+        tabbed.active = pane.id or tabbed.active
+        return None
 
     @property
     def active_pane(self) -> SessionPane | None:
@@ -4277,7 +4850,22 @@ class DoxaApp(App):
         its pane is actually unmounted) and _detached_this_run (sessions
         Ctrl+W'd out of the strip earlier this run, which keeps running
         and therefore STAYS in the set per item D #4 -- see that dict's
-        own docstring)."""
+        own docstring).
+
+        Cross-repo exclusion (item 4's repo picker, reconciled against
+        this method): every tab used to share ONE scope by construction
+        (Ctrl+T only ever spawned in THIS app's own cwd) -- the repo
+        picker's "open in a new tab" is the first way a single window
+        can host a tab rooted in a DIFFERENT repo. Such a pane's own
+        session is scoped elsewhere already (its daemon's PeerHost wrote
+        ITS OWN registry entry under ITS OWN scope key), so writing its
+        id into THIS window's tabset file would be dead weight at best --
+        doxa.tabsets.resolve cross-checks a saved id against
+        list_daemons(scope_key=<this file's own scope>), and a daemon
+        registered under a DIFFERENT scope key is invisible to that
+        check, so the entry could only ever resolve to "gone" and get
+        silently skipped, never to the wrong session. Excluded here
+        rather than relying on that safe-but-wasteful fallback."""
         if self._restore_pending > 0:
             return
         scope = peers_mod.main_repo_root_of(self.cwd) or self.cwd
@@ -4290,6 +4878,10 @@ class DoxaApp(App):
                 continue
             sid = pane._session_id
             if not sid or sid in seen:
+                continue
+            pane_cwd = str(getattr(pane.engine, "cwd", None) or pane.cwd)
+            pane_scope = peers_mod.main_repo_root_of(pane_cwd) or pane_cwd
+            if pane_scope != scope:
                 continue
             seen.add(sid)
             tabs.append(tabsets_mod.TabRecord(sid, pane.custom_name))
@@ -4588,11 +5180,20 @@ class DoxaApp(App):
             # Item D #4: this session STAYS in the persisted tab set even
             # though its tab is about to leave the strip below -- record it
             # here, before remove_pane takes pane._session_id out of
-            # panes()'s own scan with it.
+            # panes()'s own scan with it. Scope-checked (item 4's repo
+            # picker reconciliation, same reasoning as _persist_tabset's
+            # own exclusion): a cross-repo tab (opened via the repo
+            # picker, never possible before it existed) was never part of
+            # THIS window's own repo-scoped persisted set, so detaching it
+            # must not add it there either.
             if pane._session_id:
-                self._detached_this_run[pane._session_id] = tabsets_mod.TabRecord(
-                    pane._session_id, pane.custom_name,
-                )
+                pane_cwd = str(getattr(pane.engine, "cwd", None) or pane.cwd)
+                pane_scope = peers_mod.main_repo_root_of(pane_cwd) or pane_cwd
+                app_scope = peers_mod.main_repo_root_of(self.cwd) or self.cwd
+                if pane_scope == app_scope:
+                    self._detached_this_run[pane._session_id] = tabsets_mod.TabRecord(
+                        pane._session_id, pane.custom_name,
+                    )
         self._persist_tabset()
         if len(self.panes()) == 1:
             await App.action_quit(self)

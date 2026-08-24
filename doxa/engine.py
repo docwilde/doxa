@@ -1186,6 +1186,36 @@ class SessionEngine:
         except Exception:
             return 0
 
+    async def list_beliefs(self, limit: int = 500) -> list[dict]:
+        """Active belief BODIES -- the beliefs chip's picker (item 3), never
+        the status bar refresh: :meth:`belief_count` above is the cheap
+        COUNT(*) that runs on every refresh, this is the heavier SELECT of
+        the actual claim text, called lazily on click only. async for
+        symmetry with :meth:`switch_branch` (also a "list, then let the
+        picker render it" call the app awaits from a chip's open_* method) --
+        the query itself is a fast local sqlite read, same un-threaded
+        posture as belief_count's own call.
+
+        ``subject`` is lore_core's own belief-store vocabulary (beliefs.py:
+        ``belief_subject``) -- ``"user"``, ``"user-model"``, or
+        ``"project:<slug>"`` -- there is no separate ``scope`` column; the
+        chip's grouping (doxa.app._belief_scope_label) derives the group
+        from this string so a future subject prefix (LORE issue #41's
+        proposed ``machine:<id>``) slots in without a code change here."""
+        try:
+            conn = lore_store.db_connect()
+            rows = conn.execute(
+                "SELECT id, subject, claim, confidence FROM beliefs "
+                "WHERE status = 'active' ORDER BY updated DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        except Exception:
+            return []
+        return [
+            {"id": r[0], "subject": r[1], "claim": r[2], "confidence": r[3]}
+            for r in rows
+        ]
+
     async def finalize(self) -> EngineEvent:
         """Host-driven session-end finalization (PHASE0 redesign item 1 --
         no SessionEnd hook exists; the host's own teardown path is the only

@@ -104,6 +104,31 @@ def test_start_captures_effort_asserted_at_connect(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_list_beliefs_returns_active_belief_bodies(tmp_path):
+    """Item 3's beliefs picker: list_beliefs() is a SEPARATE call from
+    belief_count() (the status bar's own cheap COUNT(*)) -- this pins its
+    shape (id/subject/claim/confidence per active belief) against a real
+    lore_core store, no engine start() required (it never touches
+    self._client)."""
+    from lore_core import beliefs as beliefs_mod
+    from lore_core import store as lore_store
+
+    conn = lore_store.db_connect()
+    beliefs_mod.belief_insert(
+        conn, "user", "prefers terse commits", 0.9, None, None, None,
+    )
+    conn.commit()
+
+    engine = SessionEngine(cwd=str(tmp_path))
+    result = await engine.list_beliefs()
+    match = next((b for b in result if b["claim"] == "prefers terse commits"), None)
+    assert match is not None
+    assert match["subject"] == "user"
+    assert 0.0 <= match["confidence"] <= 1.0
+    assert isinstance(match["id"], int)
+
+
+@pytest.mark.asyncio
 async def test_start_without_server_info_leaves_identity_empty(tmp_path):
     """No initialize payload (fakes, older SDKs, API-key non-streaming):
     the identity surface stays empty -- never guessed."""

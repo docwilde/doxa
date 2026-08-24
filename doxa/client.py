@@ -2,11 +2,11 @@
 
 :class:`EngineClient` presents the SAME surface doxa.app consumes from
 ``SessionEngine`` (start / send / peer_events / list_peers / peer_count /
-send_peer_message / belief_count / disabled_tools / finalize, plus the
-model/total_cost_usd/last_ctx_percentage attributes) -- the app swaps one
-handle for the other behind a factory and barely notices. Underneath, every
-call is a line-JSON frame over the daemon's Unix socket (protocol sketch in
-doxa/daemon.py's docstring).
+send_peer_message / belief_count / list_beliefs / disabled_tools /
+finalize, plus the model/total_cost_usd/last_ctx_percentage attributes) --
+the app swaps one handle for the other behind a factory and barely notices.
+Underneath, every call is a line-JSON frame over the daemon's Unix socket
+(protocol sketch in doxa/daemon.py's docstring).
 
 Semantics that differ from the in-process engine, deliberately:
 
@@ -379,6 +379,17 @@ class EngineClient:
 
     def belief_count(self) -> int:
         return self._belief_count
+
+    async def list_beliefs(self) -> list[dict]:
+        """Engine parity for :meth:`SessionEngine.list_beliefs` (item 3's
+        beliefs picker) -- a round trip, not a cache: unlike belief_count
+        (refreshed on every status reply and read synchronously), the
+        chip's picker only ever calls this on click, so a socket hop here
+        is the whole cost discipline the status bar itself is exempt from."""
+        reply = await self._call("beliefs")
+        if not reply.get("ok"):
+            raise EngineClientError(reply.get("error") or "beliefs call failed")
+        return list(reply.get("beliefs") or [])
 
     def disabled_tools(self) -> list[str]:
         return list(self._disabled)

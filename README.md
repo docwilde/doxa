@@ -403,17 +403,38 @@ while one was asserted at connect) · `repo ⎇ branch @sha` · subscription
 headroom (`s:9% w:48%`, session/week) or a `$` cost estimate on API-key
 auth · context-window percentage (escalates normal → amber ≥70% → red
 ≥90%, percentage always shown) · belief count · `⌁ session <id>` reattach
-handle · peers. Three chips are **clickable**, Claude-orange to say so:
-the model chip and the branch half of the git chip open the same dropdown
-picker — type to filter, arrows or a click to choose, Enter/click applies
-it through the exact `/model` / `/branch` switch path, Esc or a click
-elsewhere closes it — and the effort chip opens the same picker with an
-upfront note that a pick only ever reaches a *future* session (the SDK
-sets effort at connect time; nothing can make it live on this one). Three
-more run something that already exists with no popup: click `peers N` for
-`/sessions`, the context chip for `/compact`, the session handle to copy
-it to the clipboard. Cost, repo name, sha and headroom stay plain — not
-every chip is a button, only the ones that are:
+handle · peers. Every chip has a one-line hover tooltip explaining what it
+means, INERT ones included (cost, sha, headroom) — hovering answers "what
+is this number" even where there is nothing to click.
+
+Six chips are **clickable**, Claude-orange to say so. Four open the same
+dropdown picker — type to filter, arrows or a click to choose, Enter/click
+applies it: the model chip and the branch half of the git chip switch
+through the exact `/model` / `/branch` path; the effort chip opens the same
+picker with an upfront note that a pick only ever reaches a *future*
+session (the SDK sets effort at connect time; nothing can make it live on
+this one); the **repo name** now opens a directory-walking picker too —
+type to narrow, pick a plain directory to descend into it, pick one marked
+as a git repo (`⎇`) to open it in a **new tab** (the same spawn-or-attach
+path `ctrl+t` takes, just at a chosen path instead of this session's own
+cwd — the running session's own cwd never moves under it).
+
+The remaining two run something that already exists, through a picker of
+their own: `peers N` still runs `/sessions` directly, but the **context
+chip** now asks first — compacting is lossy and irreversible, so a click
+opens a confirm stating the current percentage and that accepting discards
+earlier detail, and only an explicit accept sends `/compact`; the
+**session handle** opens a dropdown of every session in scope, live and
+detached (`⌁`) alike, the current one marked — pick a detached one to
+attach to it (the same path `doxa attach` uses), pick one already open in
+another tab to switch to that tab, or use the picker's own top row to copy
+the handle to the clipboard (the old click-to-copy behavior, kept as a row
+rather than dropped). The **belief count** is clickable too now — it opens
+a filterable list grouped by scope (`user`, `project`, and `user model`),
+picking one shows its full claim and confidence inline; this is a light
+viewer, not the full beliefs browser with evidence trails and approve/
+reject flows, which is still to come. Cost and sha stay plain — not every
+chip is a button, only the ones that are:
 
 <p align="center"><img src="assets/shots/chip-picker.gif" width="780" alt="Clicking the branch chip in the status bar opens a dropdown listing local branches with the current one marked, typing narrows it, and selecting one switches the session's base"></p>
 

@@ -4,6 +4,222 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.27.0 — 2026-08-24
+
+- **Status-bar chip revisions** (operator-reported, three wrong or missing
+  actions from v0.22.0's chip work, plus two follow-up asks in the same
+  region) — one unit, all five in the shared status-bar/`ChipPicker`
+  surface.
+  - **ctx% chip now CONFIRMS before compacting — a real defect fix, not a
+    preference.** THE DEFECT: through v0.22.0 a single click on the
+    context-window chip sent `/compact` immediately. Compaction is lossy
+    (the transcript is summarized; the PreCompact review that runs first
+    does not change that) and there is no undo, so one misclick silently
+    discarded conversation detail with no warning at all — the same class
+    of harm CloseWithTurnRunning (v0.19.0-era Ctrl+W-with-a-turn-running
+    confirm) exists to prevent for a running turn. THE FIX:
+    `doxa.app.CompactConfirm`, a new `ModalScreen[bool]`, pushed via
+    `push_screen_wait` from a worker (`SessionPane._confirm_and_compact`)
+    before the turn is ever sent. Esc / "cancel" / a click elsewhere on
+    the two buttons declines — no compaction, no turn sent, status bar
+    unchanged; only an explicit "compact" sends `/compact`, unchanged from
+    before. **House precedent chosen, and why**: `CloseWithTurnRunning`,
+    not `NeedsInputPopup` — the latter is PROMPT-driven (`can_focus =
+    False`, answered through `PromptInput`'s own key protocol) because it
+    exists to answer an `ask_user`/permission request the ENGINE is
+    genuinely waiting on; a compact confirm has nothing on the other end
+    waiting, so it is a plain UI yes/no, the exact shape
+    `CloseWithTurnRunning` already established (a focused `ModalScreen`,
+    two doors instead of three). The body states what is actually at
+    stake — the CURRENT ctx% and that compacting discards earlier detail
+    — not a bare "are you sure?".
+  - **Session-handle chip opens a SESSIONS dropdown instead of copying.**
+    v0.22.0 made it ACTIONABLE by copying the handle to the clipboard on a
+    bare click; the operator wants the full picture — every session in
+    SCOPE, including detached ones, clearly marked. `SessionPane.
+    open_sessions_picker` reads `doxa.peers.list_daemons(scope_key=...)`
+    (the same `main_repo_root_of(cwd) or cwd` scope key `PeerHost` itself
+    computes) and renders one `ChipPicker` row per live daemon-hosted
+    session, `⌁ detached` appended when `PeerInfo.clients == 0` — the SAME
+    field the peers chip's own `(N⌁)` suffix already reduces to, reused,
+    not re-derived. The current session is marked with `ChipPicker`'s own
+    `▸` current-id marker (no new marking mechanism). Selecting: the
+    current row is a no-op (per spec); a detached daemon is attached to
+    via `DoxaApp._cmd_attach` — the SAME path `doxa attach` and the
+    palette's own "Attach: …" entries already use, no second attach
+    implementation. **Judgment call, flagged**: a session already open in
+    ANOTHER tab of this window switches to that tab
+    (`DoxaApp._switch_to_tab`) instead of attaching a second client to it
+    from here — the palette's own Attach section makes the identical
+    exclusion for the identical reason (a session with a tab already open
+    gets a tab-switch entry, not a second "Attach:" row). **Clipboard
+    capability kept, not dropped**: the picker's first row is
+    `⧉ copy this session's handle`, calling the SAME `copy_session_handle`
+    method the old bare click used — a real row rather than a
+    modifier-click, which would be less discoverable and does not fit the
+    picker's existing mouse+keyboard model.
+  - **Beliefs chip is clickable — filtered, scope-grouped.** v0.22.0 left
+    it plain ("no `/beliefs`-ish surface exists to route to", its own
+    release notes said). **Scope vocabulary, verified against the
+    installed `lore_core` (0.32.0) rather than assumed**: the `beliefs`
+    table has no `scope` column — `lore_core.beliefs.belief_subject`
+    writes one of `"user"`, `"user-model"`, or `"project:<slug>"` into
+    `subject`. `doxa.app._belief_scope_label` derives the picker's GROUP
+    from that string (`"user-model"` → `"user model"`, its own group,
+    never folded into plain "user" — the same distinction
+    `belief_subject`'s own docstring draws; `"project:<slug>"` →
+    `"project"`; anything else falls through to its own prefix) — data-
+    driven, not a hardcoded two-way branch, so LORE issue #41's proposed
+    (open, UNIMPLEMENTED) `machine` scope would slot into its own group
+    the day `lore_core` starts writing a `"machine:<id>"` subject, with NO
+    change to this function. No `machine` group is fabricated here — there
+    is nothing behind one yet. **`ChipPicker` grew group-header support**
+    (`open(..., groups=...)`) rather than a second widget: an optional
+    `rid -> group label` map renders a dim `▎ <group>` disabled separator
+    row whenever the group changes, walking rows in caller-given order —
+    the SAME disabled-separator-row convention `doxa.palette.
+    DoxaPalette._refresh_command_list` already established for the
+    command palette's own section headers, reused rather than invented
+    twice. A typed filter collapses the groups, same as the palette's own
+    filtered search drops its headers. **Selection**: shows the belief's
+    full claim + confidence inline (a `SystemBlock`) — the least-
+    surprising small thing a claim-summary row can do. **Judgment call,
+    flagged, and scope-bounded on purpose**: this is a LIGHTWEIGHT viewer,
+    NOT lettered item V (the full beliefs browser — evidence trails,
+    approve/reject flows), which stays unbuilt; item V still owns that
+    surface. **Cost discipline, asserted by a test**: `belief_count()`
+    (the chip's own number, called on EVERY status refresh) is unchanged
+    and stays free; belief BODIES are a new `list_beliefs()` method
+    (`SessionEngine` — direct sqlite read; `EngineClient` — a new
+    `"beliefs"` daemon RPC method; both async, mirroring `switch_branch`'s
+    own "list, then let the picker render it" shape) called ONLY from
+    `open_beliefs_picker`, never from `_refresh_status`
+    (`tests/test_status_chips.py::test_beliefs_chip_never_loads_bodies_on_status_refresh`
+    pins it).
+  - **Repo-name chip becomes a SELECTOR — overrides v0.22.0's "repo name
+    is INERT" call.** A directory-walking `ChipPicker`
+    (`SessionPane.open_repo_picker`/`_repo_picker_rows`), starting at the
+    session's own cwd: typing filters the CURRENT listing (`ChipPicker`'s
+    existing type-to-filter, unchanged); selecting a plain directory
+    DESCENDS into it; selecting a directory marked as a git repo (`⎇`,
+    via `peers.main_repo_root_of(path) == path` — reused, not
+    re-derived, the SAME function `PeerHost`'s own scope key and the
+    spawn-or-attach reuse path already call) opens it in a NEW TAB. An
+    unreadable/nonexistent directory (a stale race between listing and
+    clicking) reports a plain message, never a crash, never a
+    half-created tab. **Descend mechanics, a real ordering bug found and
+    fixed along the way**: `ChipPicker.select_row` already closes the
+    picker and hands focus to the prompt BEFORE calling the row's
+    callback, and Textual's own Blur delivery for the picker's just-lost
+    focus is QUEUED, not immediate — reopening the same instance
+    synchronously from inside the callback raced that queued Blur, which
+    then landed after the reopen and closed it right back (observed,
+    reproduced in a test, not theoretical). Fixed by deferring the
+    reopen one refresh cycle (`app.call_after_refresh`), which lets the
+    close/blur/focus cycle fully settle first. **Semantics, a judgment
+    call, flagged**: a running session's cwd is fixed once connected, so
+    picking a different repo must not mutate the session underneath it —
+    the least-surprising reading is that it opens the SAME spawn-or-
+    attach path `ctrl+t` / `doxa` in that directory would take, in a NEW
+    tab, never the current one. **No second spawn implementation**:
+    `DoxaApp.open_tab_at` is a thin wrapper over a NEW, path-parametrized
+    `_new_session_factory_at` — the exact same closure SHAPE
+    `doxa.cli._run_attached`'s existing `new_session_factory` (spawn at a
+    FIXED cwd) already used, just taking the path as an argument instead
+    of closing over one; `doxa.daemon.spawn_daemon`/`SessionEngine`
+    remain the one underlying spawn primitive either way. Defaults to an
+    in-process `SessionEngine` at the chosen path when no daemon-flavored
+    factory was supplied (`--in-process` mode, and every existing test's
+    bare `DoxaApp(...)` construction), so the repo picker works rather
+    than silently dead-ending there. **Rebase-time gap closed**: tab
+    restore's `_run_restored` (item D, v0.23.0) builds `DoxaApp` at TWO
+    call sites, neither of which passed `new_session_factory_at` — the
+    common case now that `restore_tabs` defaults on, meaning the picker
+    would have silently fallen back to an IN-PROCESS engine (not a real,
+    detachable daemon) on a restored launch specifically, the one case
+    most likely to have several tabs open already. `doxa/cli.py` now
+    threads a `new_session_factory_at` closure through both.
+  - **Tooltips on every chip, INERT ones included.** **Design choice,
+    with evidence, and a deliberate departure from the suggested
+    default**: a per-chip-widget refactor (splitting the one `Static`
+    status bar into N widgets, each carrying Textual's native
+    `tooltip` property) was considered and rejected in favor of keeping
+    the SINGLE `Static` and adding a dynamic resolver instead.
+    Evidence: `Widget.tooltip` is a plain attribute Textual's OWN hover
+    timer (`Screen._handle_tooltip_timer`) re-reads on every mouse move,
+    and the setter re-triggers `Screen._update_tooltip` immediately when
+    the widget is already the one being shown — so ONE widget can serve a
+    DIFFERENT tooltip for different chips under the cursor, the identical
+    trick the bar already uses to serve a different CLICK action per
+    chip (`[@click=...]` markup spans). `StatusBar._on_mouse_move` maps
+    the region-relative `x` (padding-adjusted, the SAME `- 2` convention
+    `tests/test_status_chips.py`'s own `_offset_of` established for click
+    coordinates) against `(plain_text, tooltip)` pairs
+    `SessionPane._refresh_status` now builds alongside the markup string
+    itself, in the SAME order, so the two can never drift apart. This
+    changes NOTHING about how the bar's markup is built — chip order,
+    spacing, hide-at-zero rules and existing colors are untouched by
+    construction, not by discipline, and every pre-existing click/order
+    test in `tests/test_status_chips.py` and `tests/test_statusline.py`
+    needed no changes at all. Content: one sentence per chip in house
+    voice, stating what the number MEANS (the cost chip's
+    subscription-vs-API distinction, ctx% as percentage of the context
+    window, the peers chip's `(N⌁)` detached-count basis, effort's
+    connect-time-only scope) rather than restating the chip's own text —
+    including the INERT chips (cost, sha, headroom), which get exactly
+    the same treatment; a chip that cannot be clicked can still be
+    explained.
+  - **Overlap with the tab-restore item (`feat/tab-restore`, landed as
+    v0.23.0 below, ahead of this branch)**: both branches touch
+    `doxa/app.py`'s session/tab/daemon-attach region and `doxa/peers.py`,
+    and this branch was rebased onto v0.23.0's own `app.py` changes
+    (`doxa.tabsets`, `RestoreTabSpec`, restore-aware `compose()`/
+    `on_mount`, the `_detached_this_run` side-map) — reconciled by hand
+    at rebase time, not resolved by taking either side wholesale (see the
+    rebase note in this session's own report for exactly what that
+    touched). This branch adds `DoxaApp._new_session_factory_at`/
+    `_make_pane_at`/`open_tab_at` (new methods, additive) and calls the
+    EXISTING `_cmd_attach`/`_switch_to_tab` for the sessions picker's own
+    attach/switch rows rather than adding a second implementation of
+    either.
+  - Tests: `tests/test_status_chips.py` — ctx-click opens the confirm and
+    sends nothing until accepted (decline via button AND Esc send
+    nothing), the confirm body states the live percentage; the sessions
+    picker lists live + detached with the correct markers, marks the
+    current session via `ChipPicker`'s own `▸`, the copy row still
+    copies, a detached row's selection asserts the `_cmd_attach` CALL
+    (not just the UI); the beliefs picker groups by the REAL verified
+    scopes, filters on claim text, and asserts `list_beliefs()` is never
+    called by a status refresh; the repo picker lists directories from
+    cwd, marks real repos (reusing `main_repo_root_of`, not re-deriving
+    it), filters on type, descends without closing, reports an invalid
+    path cleanly, and asserts the spawn call through `open_tab_at`
+    without spawning a real subprocess; every chip's tooltip is asserted
+    non-empty and chip order/click behavior is re-asserted unchanged.
+    Also updated: the v0.22.0 repo-name/sha test (now the repo half opens
+    the picker; the sha half is still pinned inert).
+  - Assets: `chip-picker.gif` NOT regenerated — its own scene (a click on
+    the BRANCH chip) shows behavior this release did not touch; none of
+    the five changes above are visible in that specific recording.
+  - **Version/sequencing note**: prepared against pre-v0.23.0 `main`
+    (`233ed81`, 627 tests) on `feat/chip-actions`, originally targeting
+    v0.24.0. Renumbered to v0.27.0 mid-flight (spawning-session
+    instruction) and rebased twice as `main` moved ahead of it: first
+    tab restore landed as v0.23.0, then reasoning stream (below) as
+    v0.25.0 — v0.24.0 and v0.26.0 are DELIBERATE gaps (0.26.0 belongs to
+    a still-unmerged transparency branch), not renumbered to close them.
+    Also reconciled against tab restore's `_persist_tabset`/`_close_pane`
+    (item D, v0.23.0): a repo-picker-opened tab can now be the FIRST tab
+    in this app's history rooted in a DIFFERENT repo than the window's
+    own scope, an invariant `doxa.tabsets`' persistence assumed always
+    held — both methods now exclude a cross-scope pane/detach record
+    rather than writing an entry `doxa.tabsets.resolve` could only ever
+    silently skip (its own scope cross-check already made this safe, not
+    wrong, just dead weight; excluded outright instead of relying on
+    that fallback). 670 tests on `main` at rebase time (`be46893`,
+    v0.25.0) plus this branch's own 21 = 691 green, full suite, post-
+    rebase.
+
 ## 0.25.0 — 2026-08-24
 
 - **Reasoning stream: the model's own summarized thinking, in a collapsed

@@ -6,8 +6,8 @@ doxa.engine.SessionEngine at the doxa.app layer, so the Textual pilot test
 can drive a scripted turn without a real engine (and therefore without a
 real SDK client) underneath it -- app.py only ever touches the small surface
 reproduced here (start/send/finalize/model/total_cost_usd/
-last_ctx_percentage/effort/belief_count), so the fake is a narrow, honest
-stand-in rather than a reimplementation of the engine.
+last_ctx_percentage/effort/belief_count/list_beliefs), so the fake is a
+narrow, honest stand-in rather than a reimplementation of the engine.
 
 reasoning_delta (v0.25.0) needs NO change here: FakeEngine.send() replays
 whatever EngineEvent script it was given verbatim, so a script that
@@ -145,6 +145,12 @@ class FakeEngine:
         self.branch_switch_result: dict = {
             "ok": True, "base": None, "message": "switched",
         }
+        # Item 3 (beliefs picker): scriptable list_beliefs() result, plus a
+        # call counter -- what the cost-discipline test asserts stays at 0
+        # across ordinary status refreshes and only grows once the picker
+        # itself is opened.
+        self.list_beliefs_result: list[dict] = []
+        self.list_beliefs_calls = 0
 
     async def answer_needs_input(self, req_id: str, answer: dict) -> bool:
         self.needs_input_answers.append((req_id, dict(answer or {})))
@@ -216,6 +222,14 @@ class FakeEngine:
 
     def belief_count(self) -> int:
         return 3
+
+    async def list_beliefs(self) -> list[dict]:
+        """Engine parity for item 3's beliefs picker. ``list_beliefs_result``
+        is what a test scripts (defaults to empty); every call is recorded
+        in ``list_beliefs_calls`` so a test can assert this is NEVER called
+        by a status refresh, only by the picker's own open_beliefs_picker."""
+        self.list_beliefs_calls += 1
+        return list(self.list_beliefs_result)
 
     async def finalize(self) -> EngineEvent:
         self.finalized = True

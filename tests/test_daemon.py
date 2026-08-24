@@ -328,6 +328,31 @@ async def test_status_carries_identity_surface_to_the_client(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_beliefs_call_round_trips_active_belief_bodies(tmp_path, monkeypatch):
+    """Item 3's beliefs picker, one layer down: the new "beliefs" call
+    round-trips SessionEngine.list_beliefs()'s own result over the socket
+    -- a SEPARATE call from "status" (which only ever carries the cheap
+    belief_count(), see test_status_carries_identity_surface_to_the_client
+    above for that same status-cache path)."""
+    from lore_core import beliefs as beliefs_mod
+    from lore_core import store as lore_store
+
+    conn = lore_store.db_connect()
+    beliefs_mod.belief_insert(
+        conn, "project:doxa", "uses uv for deps", 0.8, None, None, None,
+    )
+    conn.commit()
+
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        result = await client.list_beliefs()
+        claims = [b["claim"] for b in result]
+        assert "uses uv for deps" in claims
+        await client.finalize()
+
+
+@pytest.mark.asyncio
 async def test_sigint_finalizes_gracefully(tmp_path, monkeypatch):
     """Ctrl+C aimed at the daemon process (SIGINT) runs the same graceful
     finalize as SIGTERM: engine finalized (SDK client exited), socket and

@@ -32,7 +32,7 @@ client -> server
                                                on the event stream tagged with
                                                the reply's "turn" id
   {"type": "call", "id": N, "method": "status"|"peers"|"msg"|"stop"|
-   "set_model"|"answer_needs_input", "params": {...}}
+   "set_model"|"branch"|"answer_needs_input"|"beliefs", "params": {...}}
 
 Interactive permission (queue item 5): a pending ``AskUserQuestion`` or
 permission request (``doxa.engine.SessionEngine._on_can_use_tool``) rides
@@ -562,6 +562,14 @@ class SessionDaemon:
                     worktrees_mod.branch_status, self.cwd
                 )
             await self._reply(writer, req_id, ok=True, result=result)
+        elif method == "beliefs":
+            # Item 3's beliefs-picker chip: lazy, click-only -- the status
+            # bar's own belief_count() already rides in every "status"
+            # reply above and must stay free; this is the heavier claim-
+            # text SELECT, a separate call so a session that never opens
+            # the picker never pays for it.
+            beliefs = await self.engine.list_beliefs()
+            await self._reply(writer, req_id, ok=True, beliefs=beliefs)
         elif method == "answer_needs_input":
             # The resolution's own needs_input_resolved broadcast comes
             # from the ENGINE side (SessionEngine._wait_for_answer's
