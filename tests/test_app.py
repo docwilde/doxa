@@ -12,6 +12,7 @@ import pytest
 from doxa.app import ClockChip, DoxaApp, SystemBlock, ToolChip, TurnBlock
 from doxa.engine import EngineEvent
 from tests.fakes import FakeEngine
+from textual.content import Content
 
 SCRIPT = [
     EngineEvent("turn_started", {}),
@@ -280,7 +281,11 @@ async def test_status_line_shows_repo_and_branch(monkeypatch, tmp_path):
             if app._git is not None:
                 break
             await pilot.pause(0.02)
-        status = str(app.query_one("#status-bar").renderable)
+        # `.renderable` is the RAW markup string (status-chips, item Y: the
+        # branch half is now a click-action span) -- Content.from_markup(
+        # ...).plain is the VISIBLE text, which is what "shows repo and
+        # branch" actually means here.
+        status = Content.from_markup(str(app.query_one("#status-bar").renderable)).plain
         assert "myrepo ⎇ trunk" in status
 
         # Branch switch: .git/HEAD changes; the next refresh must see it.
@@ -290,7 +295,7 @@ async def test_status_line_shows_repo_and_branch(monkeypatch, tmp_path):
         )
         app._git._mtime = None  # defeat same-second mtime granularity
         app._refresh_status()
-        status = str(app.query_one("#status-bar").renderable)
+        status = Content.from_markup(str(app.query_one("#status-bar").renderable)).plain
         assert "myrepo ⎇ feature/x" in status
 
 

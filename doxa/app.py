@@ -79,6 +79,7 @@ from . import naming as naming_mod
 from . import notify as notify_mod
 from . import paste as paste_mod
 from . import peers as peers_mod
+from . import providers as providers_mod
 from . import version as version_mod
 from . import worktrees as worktrees_mod
 from .engine import EngineEvent, SessionEngine
@@ -100,8 +101,13 @@ CTRL_C_DOUBLE_SECS = 2.0
 # for the latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's
 # full name"). /model accepts any string -- these are what it OFFERS, and
 # the list is short because a stale menu of full model ids is worse than
-# an alias that always resolves to the current one.
-MODEL_ALIASES = ("haiku", "sonnet", "opus", "fable")
+# an alias that always resolves to the current one. Status-chips (item Y):
+# this now POINTS AT doxa.providers.FALLBACK_MODEL_ALIASES rather than
+# keeping its own copy -- the model picker's static-fallback tier reads
+# the same tuple, so there is one list, not two that happen to agree today
+# (see that module's docstring for the full resolution order and the
+# empirical finding on why the live Models-API tier is unreachable here).
+MODEL_ALIASES = providers_mod.FALLBACK_MODEL_ALIASES
 
 # Tab labels: `Model@repo:branch`, e.g. `Opus@doxa:main`. No provider
 # segment: model names are distinct across providers anyway (`Opus` vs
@@ -143,6 +149,14 @@ TAB_ISOLATION_MARKER = "⎇"
 # the display logic.
 PROVIDER_GLYPHS: dict[str, str] = {"claude": "✳"}
 PROVIDER_GLYPH_COLOR = "#D97757"  # Claude/Anthropic orange -- theme.tcss's own
+
+# Status-chips (item Y): the SAME accent, under its own name -- not a new
+# color, the one this house already uses for every interactive/highlighted
+# span (the active tab, palette matches, #slash-complete's highlighted
+# row -- see theme.tcss). Chips that OPEN something (the model chip, the
+# git chip's branch span, the new picker's rows) wear it; chips that are
+# just information (cost, repo name, sha, usage headroom) do not.
+CLICKABLE_CHIP_ACCENT = PROVIDER_GLYPH_COLOR
 
 
 def provider_glyph(provider: str = "claude", *, colored: bool = True) -> str:
@@ -400,6 +414,17 @@ def _escape_markup(text: str) -> str:
     return text.replace("[", "\\[")
 
 
+def _chip_span(text: str, action: str) -> str:
+    """A whole status-bar chip as a clickable, accent-colored span --
+    `[@click=<action>][accent]text[/][/]` -- for the two tiers that get an
+    affordance at all (SELECTORS: model, branch, effort; ACTIONABLE: peers,
+    ctx%, the session handle). `action` names a zero-argument action
+    method on the clicked widget (StatusBar) -- see that class's own
+    docstring for why a dedicated action per chip, rather than one
+    generic dispatcher taking an argument, was the simpler choice here."""
+    return f"[@click={action}][{CLICKABLE_CHIP_ACCENT}]{_escape_markup(text)}[/][/]"
+
+
 def _fmt_age(secs: float) -> str:
     if secs < 60:
         return f"{int(secs)}s"
@@ -547,7 +572,7 @@ class GitLine:
             common = (gitdir / common).resolve()
         return common
 
-    def render(self) -> str | None:
+    def render(self, *, clickable: bool = False) -> str | None:
         """`repo ⎇ branch sha`, or None outside a repo (no chip at all).
 
         The branch half is :meth:`branch_label` -- the SAME string a tab
@@ -558,13 +583,23 @@ class GitLine:
         The short sha sits immediately right of the branch, because that is
         where "which commit am I actually on" belongs -- next to the branch
         it qualifies, not at the far end of the bar. Omitted when it would
-        merely repeat the branch label (detached HEAD)."""
+        merely repeat the branch label (detached HEAD).
+
+        `clickable` (status-chips, item Y): wraps ONLY the branch segment
+        in the click-action span that opens the branch picker -- the repo
+        name and the sha are information, not selectors, and stay plain
+        even here (see the operator's three-tier clickability answer in
+        the release notes). Default False keeps every other caller (the
+        identity block's `/about`-style dump, every pre-chips test that
+        asserts this string verbatim) exactly as it was; only
+        `SessionPane._refresh_status` passes True."""
         if not self.repo:
             return None
         branch = self.branch_label()
         if not branch:
             return self.repo
-        chip = f"{self.repo} {git_branch_symbol()} {branch}"
+        branch_text = _chip_span(branch, "open_branch_picker") if clickable else branch
+        chip = f"{self.repo} {git_branch_symbol()} {branch_text}"
         sha = self._read_sha()
         if sha and not branch.startswith(sha):
             # "@" marks this hex string as a COMMIT. The status bar also
@@ -1392,6 +1427,167 @@ class NeedsInputPopup(OptionList):
         self._rows = []
 
 
+class ChipPicker(OptionList):
+    """The ONE dropdown every clickable status-bar chip opens (status-
+    chips, item Y) -- model, branch, effort -- reused rather than one
+    widget per chip, since the "list candidates, mark the current one,
+    navigate, filter, select" shape is identical across all three.
+
+    Unlike the three PROMPT-driven popups above (SlashComplete,
+    NeedsInputPopup, SessionSearch -- all `can_focus = False`, driven
+    entirely through PromptInput's own key protocol because typing owns
+    focus at that point), this one takes REAL focus the instant it opens:
+    nothing else needs the caret while a chip menu is up, and taking focus
+    is what lets OptionList's OWN bindings (up/down/home/end/enter, and
+    its built-in mouse-click-to-select -- confirmed in
+    `_option_list.py`: `action_cursor_up`/`action_cursor_down` already
+    skip disabled rows via `find_next_enabled`) work completely unchanged
+    -- this widget adds only what OptionList does NOT already have: Esc to
+    close, and type-to-filter. Type-to-filter follows the exact pattern
+    `textual.widgets.Input._on_key` uses for printable characters
+    (`event.is_printable` / `event.character`, `event.stop()`) layered on
+    top of the inherited bindings rather than replacing them.
+
+    Rows are `(id, label)` pairs; `id` is what actually gets handed to the
+    same `_cmd_*` coroutine the matching slash command uses (`open()`'s
+    `on_select` callback) -- the picker is UI only, never a second
+    implementation of a switch. An optional `note` occupies row 0 as a
+    disabled heading (same "label, never a destination" convention
+    NeedsInputPopup's own row 0 follows) for the one caller that needs an
+    honesty caveat: the effort picker, whose selection cannot take effect
+    on the CURRENT session (connect-time only, same as `/effort` itself)."""
+
+    can_focus = True
+    BINDINGS = [Binding("escape", "close_picker", "Close", show=False)]
+
+    def __init__(self, pane: "SessionPane") -> None:
+        super().__init__(id="chip-picker")
+        self.pane = pane
+        self.display = False
+        self._all_rows: list[tuple[str, str]] = []
+        # Row-by-row map onto what the OptionList shows -- SAME
+        # convention SlashComplete._rows follows, including the note
+        # heading occupying index 0 as `("", note_text)` when present.
+        self._rows: list[tuple[str, str]] = []
+        self._note = ""
+        self._filter_text = ""
+        self._current_id: "str | None" = None
+        self._on_select: "Callable[[str], Any] | None" = None
+
+    @property
+    def is_open(self) -> bool:
+        return bool(self.display)
+
+    def open(
+        self,
+        rows: "list[tuple[str, str]]",
+        current_id: "str | None",
+        on_select: "Callable[[str], Any]",
+        *,
+        note: str = "",
+        title: str = "",
+    ) -> None:
+        """Configure and show. Reopening (a click on a DIFFERENT chip
+        while this one is already up) just reconfigures the same instance
+        -- there is only ever one picker, so no prior-close bookkeeping is
+        needed here."""
+        self._all_rows = list(rows)
+        self._current_id = current_id
+        self._on_select = on_select
+        self._note = note
+        self._filter_text = ""
+        self.border_title = title
+        self._render_rows()
+        self.display = True
+        self.focus()
+
+    def _render_rows(self) -> None:
+        self.clear_options()
+        self._rows = []
+        if self._note:
+            self.add_option(Option(self._note, disabled=True))
+            self._rows.append(("", self._note))
+        candidates = self._all_rows
+        if self._filter_text:
+            matcher = Matcher(self._filter_text)
+            scored = [
+                (matcher.match(label), rid, label) for rid, label in self._all_rows
+            ]
+            candidates = [
+                (rid, label) for score, rid, label in
+                sorted((s for s in scored if s[0] > 0), key=lambda s: (-s[0], s[2]))
+            ]
+        if not candidates:
+            self.add_option(Option("  (no match)", disabled=True))
+        else:
+            for rid, label in candidates:
+                mark = "▸" if rid == self._current_id else " "
+                self.add_option(Option(f" {mark} {_escape_markup(label)}"))
+                self._rows.append((rid, label))
+        first = 1 if self._note else 0
+        if len(self._rows) > first and self._rows[first][0]:
+            self.highlighted = first
+        else:
+            self.highlighted = None
+        self.border_subtitle = f"/{self._filter_text}" if self._filter_text else ""
+
+    def _on_key(self, event: events.Key) -> None:
+        """Type-to-filter -- the "autocomplete" a status-bar dropdown is
+        expected to have. Backspace/printable only; every other key
+        (arrows, enter, home/end, escape) is left untouched so OptionList's
+        own bindings (and this class's own Esc binding) keep handling it."""
+        if event.is_printable:
+            event.stop()
+            event.prevent_default()
+            assert event.character is not None
+            self._filter_text += event.character
+            self._render_rows()
+        elif event.key == "backspace" and self._filter_text:
+            event.stop()
+            event.prevent_default()
+            self._filter_text = self._filter_text[:-1]
+            self._render_rows()
+
+    def _on_blur(self, event: events.Blur) -> None:
+        """Focus genuinely moving to another widget (a tab switch, a click
+        on something else focusable) closes the picker too -- click-away
+        onto something NON-focusable is handled separately, at the pane
+        level (see SessionPane._on_click_away_closes_chip_picker), since a
+        click there never generates a Blur in the first place."""
+        if self.display:
+            self.close()
+
+    def action_close_picker(self) -> None:
+        self.close()
+        self.pane.query_one("#prompt-input").focus()
+
+    def select_row(self, index: int) -> None:
+        """OptionSelected's `option_index` -- fired by Enter (OptionList's
+        own `action_select`) or a mouse click on a row (OptionList's own
+        `_on_click`), indistinguishably; both already skip disabled rows,
+        so `index` here is always a real, selectable candidate."""
+        if not (0 <= index < len(self._rows)):
+            return
+        rid, _label = self._rows[index]
+        if not rid:
+            return
+        callback = self._on_select
+        self.close()
+        self.pane.query_one("#prompt-input").focus()
+        if callback is not None:
+            callback(rid)
+
+    def close(self) -> None:
+        if self.display:
+            self.display = False
+        self._on_select = None
+        self._all_rows = []
+        self._rows = []
+        self._filter_text = ""
+        self.border_title = ""
+        self.border_subtitle = ""
+
+
 class PromptInput(TextArea):
     """The prompt: a multi-line editor, plus the key protocols of the two
     popups above it (item N -- clipboard paste).
@@ -1844,6 +2040,51 @@ class TabRenameCancelled(Message):
         self.pane_id = pane_id
 
 
+class StatusBar(Static):
+    """The top status row -- SAME click-action-span pattern SubagentLine
+    (below) already established for its own row: an unprefixed
+    `[@click=...]` markup span resolves against the CLICKED widget itself
+    (`Widget.broker_event`, confirmed empirically there), so each action
+    method just needs to live on this class and delegate to the owning
+    pane.
+
+    Three tiers of chip live in one status-bar string (`_refresh_status`
+    builds it) but only two carry a click action at all -- the operator's
+    own "for every chip?" question, answered explicitly in the release
+    notes: SELECTORS open the shared :class:`ChipPicker` (model, branch,
+    effort), ACTIONABLE chips run something that already exists with no
+    picker (peers -> /sessions, ctx% -> /compact, the session handle ->
+    clipboard), and everything else (cost, repo name, sha, usage headroom)
+    stays plain -- giving every chip the same affordance would make the
+    affordance stop meaning anything, the same defect class as the
+    original "the whole bar looks interactive and isn't" report. One
+    action per chip rather than a single dispatcher taking an argument:
+    simpler markup (no `json.dumps`-escaped action params to get wrong),
+    and every action here is a fixed, known operation anyway."""
+
+    def __init__(self, pane: "SessionPane") -> None:
+        super().__init__("doxa · connecting…", id="status-bar")
+        self.pane = pane
+
+    async def action_open_model_picker(self) -> None:
+        await self.pane.open_model_picker()
+
+    async def action_open_branch_picker(self) -> None:
+        await self.pane.open_branch_picker()
+
+    async def action_open_effort_picker(self) -> None:
+        await self.pane.open_effort_picker()
+
+    def action_open_sessions(self) -> None:
+        self.pane.run_status_command("/sessions")
+
+    def action_compact_now(self) -> None:
+        self.pane.run_compact_now()
+
+    def action_copy_session_handle(self) -> None:
+        self.pane.copy_session_handle()
+
+
 class SubagentLine(Static):
     """Second status row: one clickable ``⧉ <label>`` per RUNNING Task-
     spawned subagent, mounted directly below ``#status-bar`` -- and ONLY
@@ -2055,11 +2296,17 @@ class SessionPane(TabPane):
         # _sync_subagent_line); None at every other time, deliberately, so
         # an idle pane carries neither the widget nor its layout cost.
         self._subagent_line: "SubagentLine | None" = None
+        # Status-chips (item Y): one provider seam instance per pane,
+        # cached for the pane's whole life -- list_models() itself caches
+        # its result too (see doxa.providers), but this is what makes THAT
+        # cache actually persist across picker opens instead of being
+        # rebuilt (and re-probing the network) every time.
+        self._model_provider = providers_mod.ClaudeProvider()
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="block-list")
-        yield Static("doxa · connecting…", id="status-bar")
-        # All three popups sit directly ABOVE the prompt (the last
+        yield StatusBar(self)
+        # All four popups sit directly ABOVE the prompt (the last
         # children): in a terminal the block list simply gives up the rows
         # while one is open, which reads as an overlay without the layer
         # bookkeeping a floating panel would need over a TabbedContent. The
@@ -2067,12 +2314,16 @@ class SessionPane(TabPane):
         # closes at the first space, which is exactly the keystroke that
         # opens the search popup. The needs-input dialog (queue item 5) is
         # independent of both -- see PromptInput.on_key's priority order.
+        # The chip picker (status-chips, item Y) is independent of all
+        # three too -- it opens from a status-bar click, never from
+        # anything typed in the prompt.
         search = SessionSearch(self.cwd)
         yield search
         dropdown = SlashComplete()
         yield dropdown
         needs_input = NeedsInputPopup()
         yield needs_input
+        yield ChipPicker(self)
         # No ``placeholder=`` -- TextArea has no built-in placeholder text
         # (Input did); a deliberate drop, not an oversight, see item N.
         yield PromptInput(dropdown, search, needs_input, id="prompt-input")
@@ -2468,7 +2719,15 @@ class SessionPane(TabPane):
         else:
             cost = f"${self.engine.total_cost_usd:.4f}"
         beliefs = self.engine.belief_count()
-        parts = [model]
+        # Three tiers of chip, per the operator's own "for every chip?"
+        # question (release notes): SELECTOR chips (model, branch, effort)
+        # open the shared ChipPicker; ACTIONABLE chips (peers, ctx%, the
+        # session handle) run something that already exists with no
+        # picker; everything else (cost, repo name, sha, usage headroom,
+        # beliefs -- no `/beliefs`-ish surface exists to route to, see the
+        # release notes) stays plain. Only the first two tiers get
+        # _chip_span's click markup / accent color.
+        parts = [_chip_span(model, "open_model_picker")]
         if self.needs_input:  # hide-at-zero, same convention as every
             # other chip below -- visible only while a question or
             # permission request is actually pending on THIS pane.
@@ -2476,25 +2735,43 @@ class SessionPane(TabPane):
         effort = getattr(self.engine, "effort", None)
         if effort:  # hide-at-zero: omitted when the CLI default is in
             # force (no level asserted at connect) -- same convention as
-            # the git/usage/peers/disabled-tools chips below.
-            parts.append(f"effort:{effort}")
-        git_chip = self._git.render() if self._git is not None else None
+            # the git/usage/peers/disabled-tools chips below. A SELECTOR
+            # too, but its picker can only ever affect a FUTURE session
+            # (connect-time only, same as /effort) -- the picker itself
+            # says so rather than silently no-opping.
+            parts.append(_chip_span(f"effort:{effort}", "open_effort_picker"))
+        git_chip = self._git.render(clickable=True) if self._git is not None else None
         if git_chip:  # hidden entirely outside a repo
             parts.append(git_chip)
         parts.append(cost)
         if self._usage_chip:  # only when real numbers exist -- see below
             parts.append(self._usage_chip)
-        parts += [ctx_chip(self.engine.last_ctx_percentage), f"{beliefs} beliefs"]
+        # ctx% is ACTIONABLE (click -> /compact) but its own markup is
+        # already trusted, code-generated pressure coloring (ctx_chip's
+        # amber/red escalation) -- wrapping it through _chip_span would
+        # escape THOSE brackets as if they were arbitrary text, same
+        # defect a literal `[` in a model-chosen label would risk the
+        # other way. So the click span is built directly here, no
+        # _escape_markup: the accent shows through at the "normal" tier
+        # (no inner color) and yields to the pressure color once one
+        # applies -- the pressure signal outranks the click affordance.
+        ctx_text = ctx_chip(self.engine.last_ctx_percentage)
+        parts += [
+            f"[@click=compact_now][{CLICKABLE_CHIP_ACCENT}]{ctx_text}[/][/]",
+            f"{beliefs} beliefs",
+        ]
         subagent_count = len(self._subagents)
         if subagent_count:  # hidden at 0 -- same convention as peers below
             noun = "agent" if subagent_count == 1 else "agents"
             parts.append(f"⧉ {subagent_count} {noun}")
         if getattr(self.engine, "detachable", False):
             sid = str(getattr(self.engine, "session_id", "") or "")
-            if sid:  # attached to a daemon: show the reattach handle
-                # Labelled and dimmed for the same reason the git sha wears
-                # an "@": this is a SESSION id, not a commit id.
-                parts.append(f"[#8A8073]⌁ session {sid[:8]}[/]")
+            if sid:  # attached to a daemon: show the reattach handle --
+                # ACTIONABLE (copies it to the clipboard); the accent
+                # color replaces the old #8A8073 dim treatment, since a
+                # clickable chip wears the SAME affordance every other one
+                # does rather than staying visually "quiet".
+                parts.append(_chip_span(f"⌁ session {sid[:8]}", "copy_session_handle"))
         peer_count = self.engine.peer_count()
         if peer_count:  # hidden at 0 -- a solo session has no peers chip
             # Under detach-by-default a bare count is ambiguous: four live
@@ -2506,13 +2783,14 @@ class SessionPane(TabPane):
             detached = sum(
                 1 for peer in self.engine.list_peers() if peer.clients == 0
             )
-            parts.append(
+            peers_text = (
                 f"peers {peer_count}" + (f" ({detached}⌁)" if detached else "")
             )
+            parts.append(_chip_span(peers_text, "open_sessions"))
         disabled = self.engine.disabled_tools()
         if disabled:  # two-strikes containment note -- hidden when empty
             parts.append(" ".join(f"⊘ {name}" for name in disabled))
-        bar = self.query_one("#status-bar", Static)
+        bar = self.query_one("#status-bar", StatusBar)
         bar.update("  ·  ".join(parts))
 
     @on(TextArea.Changed, "#prompt-input")
@@ -2542,6 +2820,32 @@ class SessionPane(TabPane):
         prompt.dropdown.highlighted = event.option_index
         prompt.complete()
         prompt.focus()
+
+    @on(OptionList.OptionSelected, "#chip-picker")
+    def _on_chip_picker_selected(self, event: OptionList.OptionSelected) -> None:
+        """Enter (OptionList's own ``action_select``) and a mouse click on
+        a row (OptionList's own ``_on_click``) both post this SAME
+        message -- one handler covers keyboard and mouse selection."""
+        event.stop()
+        self.query_one("#chip-picker", ChipPicker).select_row(event.option_index)
+
+    @on(events.Click)
+    def _on_click_away_closes_chip_picker(self, event: events.Click) -> None:
+        """A click ANYWHERE in this pane other than the picker itself
+        closes it -- clicking one of the status-bar's own `[@click=...]`
+        spans never reaches here (``Widget.broker_event`` calls
+        ``event.stop()`` the moment it resolves an action, before the
+        event would bubble up to this pane-level handler), and a click on
+        the picker's own rows is handled by ``_on_chip_picker_selected``
+        above (OptionList's ``_on_click`` does not itself stop the event,
+        so it still bubbles here too -- the ``event.widget is picker``
+        check below is what keeps that harmless). Focus genuinely moving
+        elsewhere (a tab switch, clicking another focusable widget) is
+        handled separately by ChipPicker's own ``_on_blur``, since that
+        case never fires a Click that bubbles through this pane at all."""
+        picker = self.query_one("#chip-picker", ChipPicker)
+        if picker.is_open and event.widget is not picker:
+            picker.close()
 
     @on(OptionList.OptionSelected, "#needs-input-popup")
     def _on_needs_input_selected(self, event: OptionList.OptionSelected) -> None:
@@ -2661,6 +2965,154 @@ class SessionPane(TabPane):
 
         checks = await asyncio.to_thread(doctor_mod.run_checks)
         await self._system(doctor_mod.report(checks))
+
+    # -- status-chips: the shared picker, and what each chip opens it with
+    # (item Y) -------------------------------------------------------
+
+    def _open_chip_picker(
+        self,
+        rows: "list[tuple[str, str]]",
+        current_id: "str | None",
+        on_select: "Callable[[str], Any]",
+        *,
+        note: str = "",
+        title: str = "",
+    ) -> None:
+        """Shared entry point for all three SELECTOR chips -- guards
+        against opening UNDER a pending needs-input request (same "the
+        question owns this row" rule ``_on_prompt_changed`` already
+        applies to the two prompt-driven popups) and closes those two
+        popups first, so at most one of the four ever shows at once."""
+        if self.query_one("#needs-input-popup", NeedsInputPopup).is_open:
+            return
+        self.query_one("#slash-complete", SlashComplete).close()
+        self.query_one("#session-search", SessionSearch).close()
+        self.query_one("#chip-picker", ChipPicker).open(
+            rows, current_id, on_select, note=note, title=title,
+        )
+
+    @staticmethod
+    def _match_current_model(current: str, rows: "list[tuple[str, str]]") -> "str | None":
+        """Which row is "the current one" for the ``▸`` marker.
+        ``engine.model`` holds whatever raw string the last switch used --
+        an alias (``sonnet``) OR a resolved full id
+        (``claude-sonnet-4-5``) -- so an exact match is tried first, then
+        a substring match either direction (the same looseness
+        ``short_model`` already uses for the tab label's tier word)."""
+        current_l = current.lower()
+        for rid, _label in rows:
+            if rid.lower() == current_l:
+                return rid
+        for rid, _label in rows:
+            if rid.lower() in current_l or current_l in rid.lower():
+                return rid
+        return None
+
+    async def open_model_picker(self) -> None:
+        """The model chip's click target -- lists whatever
+        ``doxa.providers.ClaudeProvider.list_models()`` resolves (see that
+        module for the full tier order and the empirical finding on why
+        tier 1, the live Models API, is unreachable under DOXA's normal
+        OAuth auth), marks the current one, and on selection calls the
+        SAME ``_cmd_model`` coroutine ``/model <name>`` uses -- one switch
+        path, two ways to reach it."""
+        if self.engine is None:
+            return
+        models = await self._model_provider.list_models()
+        note = ""
+        if models and models[0].source == "fallback":
+            note = (
+                "model catalog: static fallback -- the Anthropic Models "
+                "API is not reachable under this session's OAuth auth"
+            )
+        rows = [(m.id, m.display_name) for m in models]
+        current = str(getattr(self.engine, "model", None) or "")
+        current_id = self._match_current_model(current, rows)
+        self._open_chip_picker(
+            rows, current_id,
+            lambda chosen: self.run_worker(self._cmd_model(chosen), group="command"),
+            note=note, title="model",
+        )
+
+    async def open_branch_picker(self) -> None:
+        """The git chip's branch span -- lists local branches (the SAME
+        no-argument listing ``/branch`` itself uses, ``engine.
+        switch_branch(None)``), marks the current base, and on selection
+        calls the SAME ``_cmd_branch`` coroutine ``/branch <name>`` uses
+        (identical refusal messages: dirty tree, commits ahead, no
+        worktree here -- none of that is reimplemented here)."""
+        engine = self.engine
+        git = self._git
+        if engine is None or git is None or not git.repo:
+            await self._system("branch: no repo here")
+            return
+        switcher = getattr(engine, "switch_branch", None)
+        if switcher is None:
+            await self._system("branch: this session's handle cannot switch branches")
+            return
+        try:
+            result = await switcher(None)
+        except Exception as exc:  # noqa: BLE001 -- same refusal-is-information
+            # posture _cmd_branch itself follows.
+            await self._system(f"branch: {type(exc).__name__}: {exc}")
+            return
+        rows = [(name, name) for name in (result.get("branches") or [])]
+        self._open_chip_picker(
+            rows, result.get("base"),
+            lambda chosen: self.run_worker(self._cmd_branch(chosen), group="command"),
+            title="branch",
+        )
+
+    async def open_effort_picker(self) -> None:
+        """The effort chip -- only ever reachable when the chip itself is
+        showing (hide-at-zero, same as the status bar's own convention),
+        i.e. a connect-time effort was actually asserted on THIS session.
+        Selecting a level here does exactly what ``/effort <level>`` does:
+        saves it for NEW sessions and says, honestly, that this one keeps
+        its own -- the note row says so BEFORE a choice is even made,
+        rather than only after."""
+        from . import engine as engine_mod
+
+        if self.engine is None:
+            return
+        current = getattr(self.engine, "effort", None)
+        rows = [(level, level) for level in engine_mod.EFFORT_LEVELS]
+        note = (
+            "applies to NEW sessions only (connect-time) -- this one "
+            f"keeps {current or 'its own'}"
+        )
+        self._open_chip_picker(
+            rows, current,
+            lambda chosen: self.run_worker(self._cmd_effort(chosen), group="command"),
+            note=note, title="effort",
+        )
+
+    def run_status_command(self, name: str) -> None:
+        """The peers chip's click target -- runs a slash command exactly
+        as if it had been typed and submitted (``_run_command`` is the
+        SAME dispatch ``on_prompt_submitted`` uses for a non-passthrough
+        row)."""
+        self.run_worker(self._run_command(name), group="command")
+
+    def run_compact_now(self) -> None:
+        """The ctx% chip's click target -- ``/compact`` is a PASSTHROUGH
+        row (doxa/commands.py: the literal prompt text is what triggers
+        compaction and fires the PreCompact hook), so its dispatch is a
+        turn, not a command -- the same ``run_worker(self._run_turn(...))``
+        call ``on_prompt_submitted`` would make for that same text."""
+        if self.engine is None:
+            return
+        self.run_worker(self._run_turn("/compact"), exclusive=True, group="turn")
+
+    def copy_session_handle(self) -> None:
+        """The session-handle chip's click target -- only ever visible
+        (hide-at-zero) on an attached, detachable session, so ``sid`` here
+        is never empty in practice; the guard is defensive only."""
+        sid = str(getattr(self.engine, "session_id", "") or "")
+        if not sid:
+            return
+        self.app.copy_to_clipboard(sid)
+        self.run_worker(self._system(f"copied session handle: {sid[:8]}…"), group="command")
 
     async def _cmd_model(self, args: str) -> None:
         """/model -- switch the model for subsequent turns, in place.

@@ -4,6 +4,155 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.22.0 — 2026-08-24
+
+- **Clickable status-bar chips: a shared dropdown picker, model and
+  branch (queue item Y)** — THE DEFECT (operator-reported): "the branch
+  selector is just a command, if i click the branch in the status line,
+  no dropdown autocomplete menu opens as specced." v0.20.0 shipped
+  `/branch` (list + switch) and a palette entry; the status bar itself
+  stayed inert text the whole bar LOOKED clickable next to, which is the
+  same defect class as a button that doesn't respond to a click. Same
+  request for a model picker (item Y), delivered here alongside it since
+  the two share one implementation.
+  - **Three tiers of chip, not one "everything is a button" pass** — the
+    operator's own follow-up ("for every chip?") answered explicitly, and
+    enforced in code, not just in this note: **SELECTORS** (model,
+    branch, effort) open the new shared picker; **ACTIONABLE** chips run
+    something that already exists with no popup (`peers N` → `/sessions`,
+    the context-window chip → `/compact`, the session handle → clipboard);
+    everything else (cost, repo name, sha, subscription headroom) stays
+    plain. Giving every chip the same affordance would make the
+    affordance stop meaning anything — the same defect the report named,
+    just moved one level down. Only the git chip's BRANCH segment is
+    clickable, never the repo name or the sha beside it.
+  - **Affordance color** — the click spans (`[@click=...]` markup,
+    `doxa.app.GitLine.render`/`SubagentLine`'s own precedent from v0.18)
+    wear `#D97757`, Claude-orange — NOT a new color: the same accent
+    theme.tcss already uses for the active tab, palette matches and
+    `#slash-complete`'s highlighted row. `doxa.app.CLICKABLE_CHIP_ACCENT`
+    names it under its own alias so the intent ("this opens something")
+    reads at the call site without re-deriving it from
+    `PROVIDER_GLYPH_COLOR`.
+  - **`doxa.app.ChipPicker`** — ONE reusable `OptionList` popup for all
+    three selector chips, mounted in the same "above the prompt" slot the
+    three prompt-driven popups (`SlashComplete`/`SessionSearch`/
+    `NeedsInputPopup`) already use. Judgment call, and a departure from
+    those three: this one takes REAL focus the moment it opens (nothing
+    else needs the caret while a chip menu is up), which is what lets
+    `OptionList`'s OWN bindings (arrows, home/end, enter, and its built-in
+    mouse-click-to-select — confirmed: `action_cursor_up`/`_down` already
+    skip disabled rows via `find_next_enabled`) work completely
+    unmodified; the class adds only Esc-to-close and type-to-filter (the
+    "autocomplete" the report asked for), the latter via the exact
+    pattern `textual.widgets.Input._on_key` uses for printable characters.
+    Closes on Esc, on a row selected (mouse or Enter — both post the same
+    `OptionList.OptionSelected`), or on a click anywhere else in the pane
+    (`SessionPane`'s new pane-level `Click` handler; a click ON one of
+    the status bar's own `[@click=...]` spans never reaches it —
+    `Widget.broker_event` stops the event first) or a focus change away
+    from it (`ChipPicker._on_blur`, for a tab switch or another focusable
+    widget — deliberately does NOT refocus the prompt in that case,
+    unlike Esc/selection, which do: focus already went somewhere real).
+  - **No second switch implementation** — every picker's `on_select`
+    callback calls the SAME coroutine the matching slash command already
+    uses (`_cmd_model`/`_cmd_branch`/`_cmd_effort`), so the refusal
+    messages, the settings-file write, the `base_changed`/`model_changed`
+    broadcast — none of it is reimplemented for the click path. The
+    branch picker's candidate list comes from the SAME no-argument
+    listing call `/branch` makes (`engine.switch_branch(None)`), not a
+    second query.
+  - **Model list source (the provider seam)** — new `doxa/providers.py`:
+    a `ModelProvider` Protocol (`list_models`, `provider_display_name`,
+    `default_model`) and one `ClaudeProvider` implementation, so a second
+    provider (DeepSeek, Codex — the planned multi-provider engines) is a
+    new Protocol implementation later, never a change to the picker's own
+    code. Resolution order, most authoritative first: (1) the Anthropic
+    Models API (`client.models.list()`) — **VERIFIED EMPIRICALLY
+    UNREACHABLE** under DOXA's normal auth posture: DOXA authenticates
+    through the `claude` CLI's own OAuth session and deliberately never
+    reads that token out of the CLI's keychain (`doxa/auth.py`: "DOXA
+    never handles a credential" — the same posture that rejected
+    `--bare`'s forced `ANTHROPIC_API_KEY` auth back in v0.10.0's
+    `cli_isolation.py`). A live probe (`anthropic.Anthropic()`, no key
+    configured, this repo's own venv) fails at CLIENT CONSTRUCTION,
+    before any network call: `TypeError: Could not resolve authentication
+    method. Expected one of api_key, auth_token, or credentials to be
+    set...`. This tier is written defensively (guarded import, guarded
+    `ANTHROPIC_API_KEY` presence check, guarded call) and used
+    opportunistically — DOXA's own process env is untouched by
+    `cli_isolation.py` (which isolates only the SPAWNED engine
+    subprocess), so an operator whose shell happens to export the key
+    gets it live; the documented posture skips the attempt entirely
+    rather than guaranteeing a failed round trip on every picker open.
+    (2) whatever the installed `claude-agent-sdk` advertises — CHECKED:
+    no model catalog anywhere in the package, `set_model` accepts an
+    arbitrary string; a structural no-op today, kept as its own method so
+    a future SDK release only needs one method body filled in. (3) a
+    small STATIC fallback, clearly marked (`ModelInfo.source ==
+    "fallback"`) both in code and in the picker itself (a note-row
+    caveat) — the same four aliases `doxa.app.MODEL_ALIASES` already
+    used pre-chips (`haiku`/`sonnet`/`opus`/`fable`, from the installed
+    `claude` CLI's own `--model` help text). `MODEL_ALIASES` now POINTS
+    AT `providers.FALLBACK_MODEL_ALIASES` instead of keeping its own
+    copy — one list, not two that happen to agree today. `anthropic` is
+    deliberately NOT a `pyproject.toml` dependency (judgment call: lazy,
+    guarded import only) — pulling real weight into every install for a
+    tier that is structurally unreachable for DOXA's primary
+    (subscription/OAuth) audience would be the wrong trade; `pip install
+    anthropic` into this venv is how an operator who genuinely wants it
+    live gets it.
+  - **Model-switch timing, verified (not assumed)**: `/model` is a REAL,
+    LIVE control request (`ClaudeSDKClient.set_model` — no reconnect,
+    confirmed against the existing v0.12.0-era test coverage and
+    `SessionEngine.set_model`'s own docstring) — unlike `/effort`, which
+    the SDK sets at connect time only. The model picker therefore applies
+    immediately, same as `/model` always has; the EFFORT picker (included
+    here too, judgment call — it is a SELECTOR by the same three-tier
+    rule and shares the picker at near-zero marginal cost, hide-at-zero
+    same as its status-bar chip already was) carries an upfront note-row
+    caveat instead of silently no-opping: "applies to NEW sessions only
+    (connect-time) — this one keeps `<level>`."
+  - **Session-handle chip** — the `⌁ session <id>` chip is now
+    ACTIONABLE (copies the full id via `App.copy_to_clipboard`, an OSC 52
+    write); its dim `#8A8073` treatment is replaced with the same click
+    accent every other actionable/selector chip wears, since a clickable
+    chip needs to look like the others, not stay deliberately quiet.
+  - Tests: `tests/test_status_chips.py` (new) — click-opens-picker for
+    model and branch, click on repo name/sha opens nothing, keyboard nav
+    + type-to-filter narrowing, Enter/click-select invoking the SAME
+    `_cmd_model`/`_cmd_branch` coroutine (assert the call, not just the
+    UI), Esc closing, a dirty-worktree branch-switch refusal surfacing
+    through the picker, the effort picker's honesty note, the three
+    ACTIONABLE chips (peers/ctx/handle), and `doxa.providers.
+    ClaudeProvider`'s fallback + caching + no-key-no-probe behavior.
+    Two pre-existing tests updated for the new click-markup wire format
+    (`tests/test_statusline.py::test_status_line_chip_order`,
+    `tests/test_app.py::test_status_line_shows_repo_and_branch` — both
+    asserted the OLD plain-text chip format directly; `.renderable` on a
+    `Static` is the RAW string handed to `update()`, so either the exact
+    new markup or `Content.from_markup(...).plain` is needed now). 627
+    tests green (612 baseline, post-v0.21.0 + 15 new).
+  - Assets: `assets/shots/chip-picker.gif` (new, via
+    `scripts/record_gif.py chip-picker` — a REAL click on the branch
+    chip, same "exercise the actual trigger" choice the v0.16.0 `rename`
+    scene already made with its double-click; 1482×831, 1.783 vs. the
+    16:9 target's 1.778, 4 frames, 167 KiB) plus every OTHER gallery
+    GIF regenerated (`tab-lifecycle`/`tool-calls`/`markdown-stream`/
+    `rename`/`palette`/`search`/`attention-blink`/`needs-input`): the
+    model chip is the FIRST chip in every scene's status bar, so its
+    color/underline changed in all of them — a real visible-content
+    change, not a no-op regeneration. `search.gif` in particular carries
+    BOTH this item's chip color AND v0.21.0's result-tree content in the
+    one regeneration, rather than fighting over which change "owns" the
+    file.
+  - **Version note**: this branch (`feat/status-chips`) was prepared
+    against pre-v0.21.0 `main` and rebased onto `origin/main` once
+    `v0.21.0` (the concurrently-developed search-tree item) landed there
+    — this CHANGELOG entry was reordered above 0.21.0's during that
+    rebase, and the test count above already reflects the post-rebase
+    612-test baseline, not the pre-rebase 604 the branch started from.
+
 ## 0.21.0 — 2026-08-24
 
 - **Search result tree + excerpt insertion** (queue items I/J — always

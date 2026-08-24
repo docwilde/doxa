@@ -50,6 +50,7 @@ sys.path.insert(0, str(ROOT))
 from PIL import Image  # noqa: E402
 
 from doxa.app import (  # noqa: E402
+    ChipPicker,
     DoxaApp,
     NeedsInputPopup,
     PromptInput,
@@ -63,6 +64,7 @@ from doxa.engine import EngineEvent  # noqa: E402
 from scripts.screenshot import _fake_identity, _peer, _settle  # noqa: E402
 from tests.fakes import FakeEngine  # noqa: E402
 from textual.containers import VerticalScroll  # noqa: E402
+from textual.content import Content  # noqa: E402
 from textual.widgets import TabbedContent  # noqa: E402
 
 SHOTS = ROOT / "assets" / "shots"
@@ -523,6 +525,65 @@ async def _drive_needs_input(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> No
 
 
 # --------------------------------------------------------------------- #
+# Scene: chip-picker -- status-chips (item Y): a real click on the branch
+# chip opens the shared dropdown, typing narrows it, Enter switches
+# --------------------------------------------------------------------- #
+
+
+def _status_plain(app: DoxaApp) -> str:
+    bar = app.query_one("#status-bar")
+    return Content.from_markup(str(bar.renderable)).plain
+
+
+async def _drive_chip_picker(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
+    """The status bar stopped being inert text (the operator's own report):
+    the branch chip opens the SAME shared :class:`ChipPicker` the model
+    chip does. The status bar's OWN branch text still comes from the REAL
+    git repo this script runs in (via the real ``GitLine`` -- unscripted,
+    same as every other scene here); only the picker's CANDIDATE list is
+    scripted on the FakeEngine (``switch_branch``), same separation
+    tests/test_status_chips.py's branch tests already draw, so the demo
+    branch names are legible regardless of which real branch this
+    checkout happens to be on."""
+    await pilot.pause()
+    pane = app.active_pane
+    assert pane is not None
+    assert await _wait_until(pilot, lambda: pane._git is not None)
+    assert await _wait_until(pilot, lambda: "⎇" in _status_plain(app))
+    fake = pane.engine
+    fake.branch_list_result = {
+        "branches": ["main", "feature/observability", "hotfix/timeout"],
+        "base": "main", "checked_out": "main",
+    }
+    fake.branch_switch_result = {
+        "ok": True, "base": "feature/observability",
+        "message": "doxa/f13526d4 now based on feature/observability",
+    }
+    rec.snap(900, "status bar before: the branch chip reads like ordinary text")
+
+    # A REAL click, same "exercise the actual trigger" choice _drive_rename
+    # makes with its double-click -- landing just past the "⎇" glyph is
+    # enough (any x inside the branch span opens the SAME picker).
+    plain = _status_plain(app)
+    offset = (2 + plain.index("⎇") + 2, 0)
+    await pilot.click("#status-bar", offset=offset)
+    picker = pane.query_one("#chip-picker", ChipPicker)
+    assert await _wait_until(pilot, lambda: picker.is_open)
+    await pilot.pause()
+    rec.snap(1100, "click opens the picker: branches listed, current one marked")
+
+    await pilot.press("f", "e", "a")
+    await pilot.pause()
+    rec.snap(900, "typing 'fea' narrows to feature/observability")
+
+    await pilot.press("enter")
+    assert await _wait_until(pilot, lambda: not picker.is_open)
+    assert await _wait_until(pilot, lambda: "feature/observability" in fake.branch_calls)
+    await pilot.pause()
+    rec.snap(1100, "Enter selects it -- the SAME /branch switch path, status bar updates")
+
+
+# --------------------------------------------------------------------- #
 
 @dataclass
 class Scene:
@@ -582,6 +643,11 @@ SCENES: list[Scene] = [
     Scene(
         "needs-input", _drive_needs_input, size=SIZE_WIDE, min_frames=3,
         widgets=(NeedsInputPopup, TabbedContent),
+        engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
+    ),
+    Scene(
+        "chip-picker", _drive_chip_picker, size=SIZE_TAB_BAR, min_frames=4,
+        widgets=(ChipPicker,),
         engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
     ),
 ]

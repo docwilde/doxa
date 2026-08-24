@@ -367,11 +367,24 @@ usually hasn't changed:
 <p align="center"><img src="assets/shots/clock.png" width="780" alt="The upper-right clock reading '2026-08-24 14:32:07' at the far right of the tab bar, past two open tabs, never overlapping either label"></p>
 
 **Status bar**, left to right: model · `⚑ needs input` (only while a
-question or permission request is pending on this pane) · `repo ⎇ branch
-@sha` · subscription headroom (`s:9% w:48%`, session/week) or a `$` cost
-estimate on API-key auth · context-window percentage (escalates normal →
-amber ≥70% → red ≥90%, percentage always shown) · belief count · `⌁
-session <id>` reattach handle · peers.
+question or permission request is pending on this pane) · effort (only
+while one was asserted at connect) · `repo ⎇ branch @sha` · subscription
+headroom (`s:9% w:48%`, session/week) or a `$` cost estimate on API-key
+auth · context-window percentage (escalates normal → amber ≥70% → red
+≥90%, percentage always shown) · belief count · `⌁ session <id>` reattach
+handle · peers. Three chips are **clickable**, Claude-orange to say so:
+the model chip and the branch half of the git chip open the same dropdown
+picker — type to filter, arrows or a click to choose, Enter/click applies
+it through the exact `/model` / `/branch` switch path, Esc or a click
+elsewhere closes it — and the effort chip opens the same picker with an
+upfront note that a pick only ever reaches a *future* session (the SDK
+sets effort at connect time; nothing can make it live on this one). Three
+more run something that already exists with no popup: click `peers N` for
+`/sessions`, the context chip for `/compact`, the session handle to copy
+it to the clipboard. Cost, repo name, sha and headroom stay plain — not
+every chip is a button, only the ones that are:
+
+<p align="center"><img src="assets/shots/chip-picker.gif" width="780" alt="Clicking the branch chip in the status bar opens a dropdown listing local branches with the current one marked, typing narrows it, and selecting one switches the session's base"></p>
 
 ## Configuration
 

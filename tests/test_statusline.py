@@ -23,6 +23,7 @@ import pytest
 
 from doxa import identity
 from doxa.app import (
+    CLICKABLE_CHIP_ACCENT,
     CTX_AMBER,
     CTX_AMBER_PCT,
     CTX_RED,
@@ -381,12 +382,18 @@ async def test_status_line_chip_order(monkeypatch, tmp_path):
                 break
             await pilot.pause(0.02)
         sha = _short_sha(repo)
+        # Status-chips (item Y): the model chip and the git chip's branch
+        # span are now click-action spans (`[@click=...][accent]...[/][/]`)
+        # -- `.renderable` is the RAW string handed to `Static.update`,
+        # markup and all, so the chunks below match that literal wire
+        # format rather than the pre-chips plain text.
+        accent = CLICKABLE_CHIP_ACCENT
         order = [
-            fake.model,
-            f"myrepo ⎇ trunk @{sha}",
+            f"[@click=open_model_picker][{accent}]{fake.model}[/][/]",
+            f"myrepo ⎇ [@click=open_branch_picker][{accent}]trunk[/][/] @{sha}",
             "sub:max",
             "s:9% w:48%",
-            "ctx 74%",
+            f"[@click=compact_now][{accent}]{ctx_chip(74.0)}[/][/]",
             "3 beliefs",
         ]
         positions = [status.index(chunk) for chunk in order]

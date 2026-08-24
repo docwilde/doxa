@@ -443,6 +443,37 @@ CommandList > .option-list--option-disabled {
     margin: 0 1 1 1;
 }
 
+/* Chip picker (status-chips, item Y): the ONE shared dropdown every
+   clickable status-bar chip opens -- model, branch, effort -- same
+   block-surface/ramp-border/orange-highlight treatment as #slash-complete
+   directly above, so the app reads as one dropdown language rather than
+   two. Mounted in the SAME "above the prompt" slot the three prompt-
+   driven popups use (doxa/app.py's compose()), which is also why it needs
+   no extra CSS for its `:focus` border -- unlike those three (can_focus
+   False, driven entirely through PromptInput's key protocol because
+   typing owns focus at that point), THIS popup takes real focus the
+   moment it opens (nothing else needs the caret while a chip menu is up),
+   so OptionList's own DEFAULT_CSS `:focus` rule already applies. */
+#chip-picker {
+    height: auto;
+    max-height: 10;
+    background: #221F1A;
+    color: #D8CDBB;
+    border: round #3A3429;
+    margin: 0 1;
+}
+
+#chip-picker > .option-list--option-disabled {
+    color: #8A8073;
+    text-style: bold;
+}
+
+#chip-picker > .option-list--option-highlighted {
+    color: #D97757;
+    background: #2A251E;
+    text-style: bold;
+}
+
 /* Belief inspector -- Phase 2 stub pane (palette-toggled, hidden by
    default). Docked right so toggling never reflows the block list's
    scroll anchor; real content lands in Phase 3. Wears the house panel
