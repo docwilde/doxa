@@ -227,9 +227,18 @@ the moment you type `/search `. Debounced and sequence-guarded, so a slow
 query can never repaint over a newer one's results; an empty query lists
 recent sessions. This is the one search path — `ctrl+r` opens it too. The
 matched terms are FTS5's own `snippet()` output, highlighted rather than
-re-matched:
+re-matched. A result set spanning more than one session groups into a
+tree — a collapsed session header (title, date, hit count) over its
+matching snippets; a single-session result set has nothing to fold
+against and stays flat. `↑`/`↓` move through the visible rows, `→`/`←`
+open and close a session's fold (or, from a snippet, close its parent),
+and `enter` toggles a header — the same convention the trace tree's own
+folds use — or, on a snippet, inserts its excerpt into the prompt: one
+citation line (which session, when) plus the text, collapsed to a
+`⧉ pasted …` placeholder past the same size threshold a clipboard paste
+uses, `ctrl+g` expandable, sent in full on submit either way:
 
-<p align="center"><img src="assets/shots/search.gif" width="780" alt="Typing '/search deploy' opens the popup on one result; completing the query to '/search deploy checklist' brings up three, matched words highlighted; arrowing down moves the selection through row 2 and row 3"></p>
+<p align="center"><img src="assets/shots/search.gif" width="780" alt="Typing '/search deploy' opens the popup on one session, flat; completing the query to '/search deploy checklist' brings up three sessions, collapsed to headers; arrowing to the second and pressing right expands it, revealing a highlighted snippet; enter inserts the excerpt above the prompt as a cited excerpt"></p>
 
 **Trace tree.** A subagent spawned by the `Task` tool streams its own text
 and tool calls, which nest as a foldable tree under the parent chip rather

@@ -406,7 +406,9 @@ async def _drive_palette(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
 
 
 # --------------------------------------------------------------------- #
-# Scene: search -- /search query, popup, arrow selection
+# Scene: search -- /search query, the tree (item I), excerpt insertion
+# (item J) -- both fit in one recording, so this is the only GIF item I/J
+# needs (search.gif; see CHANGELOG.md's 0.21.0 entry).
 # --------------------------------------------------------------------- #
 
 
@@ -424,21 +426,29 @@ async def _drive_search(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
         await pilot.pause()
         _show_search_hits(popup, "deploy", SEARCH_HITS[:1])
         await pilot.pause()
-        rec.snap(700, "typing '/search deploy'")
+        rec.snap(700, "typing '/search deploy': one session, flat")
 
         prompt.value = "/search deploy checklist"
         await pilot.pause()
         _show_search_hits(popup, "deploy checklist", SEARCH_HITS)
         await pilot.pause()
-        rec.snap(700, "full query: 3 hits, matches highlighted")
+        rec.snap(800, "full query: 3 sessions -- item I groups into headers")
 
         popup.move(1)
         await pilot.pause()
-        rec.snap(600, "arrow down: row 2 selected")
+        rec.snap(600, "arrow down: second session header selected")
+
+        popup.expand_current()
+        await pilot.pause()
+        rec.snap(800, "right arrow expands it: its snippet appears")
 
         popup.move(1)
         await pilot.pause()
-        rec.snap(1000, "arrow down: row 3 selected")
+        rec.snap(600, "arrow down onto the snippet, matches still highlighted")
+
+        await pilot.press("enter")
+        await pilot.pause()
+        rec.snap(1200, "item J: enter inserts the excerpt -- provenance line, then the snippet")
 
 
 # --------------------------------------------------------------------- #
@@ -560,7 +570,7 @@ SCENES: list[Scene] = [
         new_session_factory=lambda: FakeEngine([], model="claude-sonnet-4-5"),
     ),
     Scene(
-        "search", _drive_search, size=SIZE_SEARCH, min_frames=3,
+        "search", _drive_search, size=SIZE_SEARCH, min_frames=6,
         widgets=(SessionSearch, PromptInput),
         engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
     ),

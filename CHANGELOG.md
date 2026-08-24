@@ -4,6 +4,78 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.21.0 — 2026-08-24
+
+- **Search result tree + excerpt insertion** (queue items I/J — always
+  queued as a pair, shipped as one) — this item's spec text was lost
+  before it reached this session; what ships here is RE-DERIVED from two
+  surviving fragments (the queue's own "search tree (I/J)" label, and
+  `doxa/paste.py`'s 0.9.0 docstring already naming item J as a second
+  caller of its placeholder/expansion machinery — it was built for this
+  before this existed) plus the current `/search` popup, `paste.py`, and
+  the trace tree's own `Collapsible` fold, following existing conventions
+  wherever a call had to be made (each flagged below).
+  - **I — tree, not a flat list.** `SessionSearch` (`doxa/history.py`)
+    restructures a result set into a two-level tree the moment it spans
+    MORE than one session: a session header (title, date, hit count),
+    collapsed by default, over its matching snippets. A single-session
+    result set has nothing to fold against and stays exactly the flat
+    list this popup has always shown — no pointless fold. Judgment call:
+    this applies uniformly to BOTH a real search and the empty-query
+    "recent sessions" listing (same code path, one behavior) rather than
+    special-casing recents to stay flat even when it spans several
+    sessions — a header's hit-count (matches in this session) and a
+    recents child row's "N messages" (the session's total size) are
+    different numbers, so the fold is not pure redundancy even there, and
+    two visually different behaviors for the same widget depending on
+    invisible internal state (was a term typed) would be the more
+    surprising choice.
+  - **Keyboard.** ↑/↓ move through VISIBLE rows only (a collapsed
+    session's hidden snippets are not skipped over — they are not rows).
+    Judgment call, flagged: the surviving spec fragment asks for
+    "left/right collapse/expand… match the trace tree's existing key
+    handling" — but the trace tree's ONLY convention (Textual's
+    `Collapsible`, confirmed in the current codebase) is Enter-toggles;
+    there is no left/right anywhere in this app to match. Resolved by
+    doing both readings honestly rather than picking one silently: Enter
+    on a header toggles it (the trace tree's actual, sole convention,
+    reused rather than inventing a second one), while → explicitly opens
+    a collapsed header and ← closes one — or, from a snippet row,
+    collapses its parent and lands the highlight back on the header (the
+    usual tree "go up a level" move). Enter on a snippet activates it
+    (item J, below); a header is never itself an excerpt, so Enter can
+    only mean "fold" there.
+  - **J — excerpt insertion.** Enter on a snippet inserts its excerpt in
+    place of the `/search …` line that found it: one provenance line
+    (`[lore session <id> · <ts>]`) naming which session and when, then the
+    de-marked snippet — an excerpt with no origin is a quote with no
+    citation. Staged through the SAME collapse decision a real clipboard
+    paste uses (`PromptInput._stage_pasteable`, factored out of the
+    existing `_on_paste` so item N and item J share the one seam
+    `paste.py`'s own docstring already expected): past the threshold it
+    collapses to the `⧉ pasted N lines (X KB)` placeholder, Ctrl+G
+    expands it in place, and the full text goes out on submit either way
+    — no new machinery, the item N path exactly. Supersedes the old
+    one-line quoted `hit_reference()` (removed; nothing else called it).
+    Judgment call: the excerpt is two lines (provenance, then body)
+    rather than one long quoted run-on, so paste.py's LINE-count trigger
+    sees a large excerpt the same way it sees a large paste, instead of
+    a single line that could dodge the threshold by construction.
+  - Tests: tree grouping vs. flat single-session, ↑/↓ over visible rows
+    only, →/← expand/collapse (including the snippet-row "collapse
+    parent" case), Enter-toggle on a header, highlighting surviving into
+    a nested snippet, small-excerpt-inserts-literally vs.
+    large-excerpt-collapses, Ctrl+G expansion, and full-text-on-submit
+    regardless of whether it was ever expanded — all in
+    `tests/test_history.py`. 612 tests green (604 baseline + 8 net new).
+  - README: the `/search` section gains the tree/excerpt-insertion
+    behavior. `assets/shots/search.gif` regenerated
+    (`scripts/record_gif.py`) — the old scene showed a flat three-hit
+    list; it now shows the same three (now three-SESSION) hits collapsed
+    to headers, one expanded, a snippet highlighted and inserted as an
+    excerpt — item J is visible in the same recording, so no second GIF
+    was needed.
+
 ## 0.20.0 — 2026-08-24
 
 - **Branch switch, explicit branch selection** (queue item S) — this
