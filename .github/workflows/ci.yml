@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One 785-test suite is ~9 minutes of wall clock per matrix leg, so a second
+# push to the same PR should retire the first run rather than race it.
+# Pushes to main are deliberately NOT cancelled: each one is the only run that
+# will ever attest to that commit, and they are rare enough not to be the cost
+# problem PR iteration is.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  # doxa/_lore_bootstrap.py puts lore_core on sys.path from the LORE plugin
+  # checkout; DOXA_LORE_CORE_PATH overrides the default marketplace location.
+  # lore_core is NOT a pyproject dependency (it ships inside the LORE plugin
+  # and is not on PyPI), so without this checkout `import doxa.peers` -- and
+  # therefore 41 of the 52 test modules -- fails at collection.
+  #
+  # Tracking LORE main mirrors what a real machine runs: the plugin
+  # marketplace tracks main, so DOXA imports whatever LORE main is today.
+  # The cost is that a LORE change can turn DOXA red. Pin this to a SHA if
+  # that trade stops being worth it -- it is a one-line change.
+  LORE_REF: main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # The suite measured 8m34s locally; runners are slower, and some tests
+    # spawn daemons over Unix sockets that could in principle hang. 25
+    # minutes leaves ~2.5x headroom over the measured time while capping a
+    # wedged daemon well short of burning a runner hour.
+    timeout-minutes: 25
+
+    strategy:
+      # One leg's failure is worth seeing next to the other's result, and
+      # each leg is ~9 minutes -- not worth re-running to learn the second answer.
+      fail-fast: false
+      matrix:
+        # Deliberately two legs, not five. pyproject declares
+        # requires-python = ">=3.11", so 3.11 is tested to keep that claim
+        # honest; .python-version pins 3.12, which is what contributors and
+        # releases actually run. 3.13/3.14 are claimed nowhere in the project
+        # metadata, and each extra leg costs another ~9 runner-minutes. Add
+        # legs when the project starts claiming those versions, not before.
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Check out doxa
+        uses: actions/checkout@v7
+
+      - name: Check out LORE (provides lore_core)
+        uses: actions/checkout@v7
+        with:
+          repository: docwilde/LORE
+          ref: ${{ env.LORE_REF }}
+          path: .lore-plugin
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10
+        with:
+          # Keyed on uv.lock by default: a lockfile change busts it, an
+          # unrelated source change reuses it.
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync dependencies
+        # --frozen: install exactly uv.lock, never silently re-resolve it.
+        # The dev group (pytest, pytest-asyncio) is included by default.
+        run: uv sync --frozen --python ${{ matrix.python-version }}
+
+      - name: Run test suite
+        env:
+          DOXA_LORE_CORE_PATH: ${{ github.workspace }}/.lore-plugin
+        # -rf prints a "FAILED <nodeid> - <reason>" line per failure, which
+        # the summary step lifts verbatim; --tb=short keeps the log readable.
+        # The flaky test below is deselected here and run on its own.
+        run: |
+          set -o pipefail
+          uv run --no-sync python -m pytest -q -rf --tb=short \
+            --deselect "tests/test_tab_status.py::test_done_unseen_marks_a_background_tab_and_clears_on_activation" \
+            2>&1 | tee pytest.log
+
+      # Scoped retry -- ONLY this one test, never the suite.
+      #
+      # Diagnosed race: SessionPane focuses its prompt in on_mount, and
+      # focusing a widget inside a TabPane activates that pane, so a
+      # newly-mounted pane can asynchronously steal active_pane from the tab
+      # this test is asserting about. Measured 1 failure in 20 standalone runs
+      # (~5%) on a quiet machine; a CI runner is noisier, and across two matrix
+      # legs that is a ~10% spurious-red rate per push.
+      #
+      # Three attempts take the residual to ~0.01% while leaving the other 784
+      # tests with zero retry budget, so a genuine regression anywhere else is
+      # still a hard, first-attempt failure. The underlying focus fix is a
+      # queued decision and is deliberately not made here.
+      - name: Run known-flaky tab-status test (scoped retry)
+        env:
+          DOXA_LORE_CORE_PATH: ${{ github.workspace }}/.lore-plugin
+        run: |
+          test_id="tests/test_tab_status.py::test_done_unseen_marks_a_background_tab_and_clears_on_activation"
+          for attempt in 1 2 3; do
+            echo "::group::attempt $attempt"
+            if uv run --no-sync python -m pytest -q -rf --tb=short "$test_id"; then
+              echo "::endgroup::"
+              [ "$attempt" -gt 1 ] && echo "::warning::known-flaky test passed on attempt $attempt"
+              exit 0
+            fi
+            echo "::endgroup::"
+          done
+          echo "::error::known-flaky test failed 3/3 attempts -- this is no longer flake, investigate"
+          exit 1
+
+      - name: Summarize result
+        # Runs even when the suite failed -- that is the case it exists for.
+        if: always()
+        run: |
+          {
+            echo "### Python ${{ matrix.python-version }}"
+            echo
+            if [ -f pytest.log ]; then
+              # pytest's own one-line tally, e.g. "784 passed in 513.85s".
+              tail -n 5 pytest.log | grep -E '(passed|failed|error)' | tail -n 1 || true
+              echo
+              # The point of the whole step: name the failures in the summary
+              # so nobody has to expand a 500-line log to learn what broke.
+              if grep -q '^FAILED' pytest.log; then
+                echo "#### Failed tests"
+                echo
+                grep '^FAILED' pytest.log | sed 's/^FAILED /- `/; s/ - /` - /'
+              fi
+            else
+              echo "Suite did not produce a log (setup failed before pytest ran)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Inline annotations on the run itself, same information.
+          if [ -f pytest.log ]; then
+            grep '^FAILED' pytest.log | while IFS= read -r line; do
+              echo "::error::${line#FAILED }"
+            done
+          fi
+
+      - name: Upload pytest log
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pytest-log-py${{ matrix.python-version }}
+          path: pytest.log
+          if-no-files-found: ignore

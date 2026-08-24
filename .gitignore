@@ -1,3 +1,6 @@
 .venv/
 __pycache__/
 *.pyc
+# CI tees the suite here so the summary step can name the failures; the same
+# file appears when reproducing the workflow's command locally.
+pytest.log
