@@ -157,7 +157,26 @@ is disabled for the rest of the run — one bad hook must not wedge every turn.
 the honest test of whether the interface is real: if the built-in notifier
 cannot be expressed as a hook, the hook design is wrong.
 
-### 6. Settings
+### 6. LORE access — read-only, by design
+
+DOXA holds `lore_core` in-process, and the belief snapshot is injected into the
+model's context. **A plugin that can write beliefs can steer the model** — not
+for one turn, but persistently and across sessions, in a surface the user reads
+as trustworthy precisely because LORE's premise is that everything steering the
+agent is human-approved or outcome-calibrated.
+
+Plugins therefore get **read access only**: query beliefs, read the snapshot,
+read curated memory. There is no plugin-facing write API — not gated, not
+behind a capability flag, not present. A plugin wanting to contribute a belief
+does what everything else does: it stages a proposal for the user to approve
+through the existing `pending`/`approve` path. Staging is the whole mechanism;
+a plugin write API would be a second door into the room that door guards.
+
+The same principle applies to how DOXA itself is packaged as a Claude Code
+plugin, and to Claude Code plugins generally — see LORE issue on gating the
+belief/memory write path.
+
+### 7. Settings
 
 Plugins contribute `config.Setting` rows, namespaced `plugin.<name>.<key>`,
 appearing in the settings modal exactly like built-in knobs. No new storage
@@ -191,10 +210,7 @@ not the structural one:
 
 ## Open questions
 
-1. **Should plugins reach `lore_core`?** DOXA holds beliefs in-process. A
-   plugin that can write beliefs can steer the model. Read-only seems right;
-   write access via a distinct, separately-toggled capability, or not at all.
-2. **Per-repo enablement?** Useful ("this plugin only for work repos"), but the
+1. **Per-repo enablement?** Useful ("this plugin only for work repos"), but the
    config must stay in `~/.doxa/`, never in the repo, or it reopens the
    execution hole above.
 3. **Do plugins get their own tabs?** `SubagentTranscriptTab` is the existing
