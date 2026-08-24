@@ -153,6 +153,65 @@ def _base_ref(cwd: str) -> "str | None":
     return proc.stdout.strip() or None
 
 
+def current_branch(cwd: str) -> "str | None":
+    """Public wrapper on :func:`_base_ref` -- the branch checked out at
+    ``cwd`` right now (or the commit, detached). :func:`create` uses the
+    private name for its own default; :func:`branch_status` uses this one
+    for its "no session worktree" case, where the checked-out branch simply
+    IS the base -- same as every session before v0.17."""
+    return _base_ref(cwd)
+
+
+def resolve_ref(main_root: str, ref: str) -> "str | None":
+    """Validate ``ref`` as a spawn-time or switch-time base (item S): a
+    local branch (checked directly), or a remote-tracking ref (``origin/
+    foo``) resolved to the LOCAL semantics ``git worktree add``/``git
+    rebase`` actually want.
+
+    A bare ``origin/foo`` is a fine committish on its own, but basing a
+    session off it directly forks from a detached, unnamed point with no
+    branch to come back to later -- so when a LOCAL branch of the same
+    short name already exists (``foo``), that is what gets returned
+    instead. Only when no local branch exists at all does the
+    remote-tracking ref itself come back, so the caller still has a real
+    committish to hand to git rather than nothing.
+
+    Returns the ref to actually use, or ``None`` when nothing matches --
+    the caller's job is to fail with a message naming exactly what was
+    tried, never to guess."""
+    def _exists(candidate: str) -> bool:
+        try:
+            proc = subprocess.run(
+                ["git", "show-ref", "--verify", "--quiet", candidate],
+                cwd=main_root, capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return proc.returncode == 0
+
+    if _exists(f"refs/heads/{ref}"):
+        return ref
+    if _exists(f"refs/remotes/{ref}"):
+        short = ref.split("/", 1)[1] if "/" in ref else ref
+        return short if _exists(f"refs/heads/{short}") else ref
+    return None
+
+
+def list_local_branches(main_root: str) -> list[str]:
+    """Local branch names in display order (``git branch --format`` is
+    already alphabetical) -- what ``/branch`` with no argument lists."""
+    try:
+        proc = subprocess.run(
+            ["git", "branch", "--format=%(refname:short)"],
+            cwd=main_root, capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
 def _existing_worktree_path(main_root: str, branch: str) -> "str | None":
     """`git worktree list`'s own answer to "does a worktree for this
     branch already exist". Checked before -- and again after a failed --
@@ -178,13 +237,25 @@ def _existing_worktree_path(main_root: str, branch: str) -> "str | None":
     return None
 
 
-def create(cwd: str, session_name: str) -> "str | None":
+def create(
+    cwd: str, session_name: str, base_branch: "str | None" = None
+) -> "str | None":
     """Give a session its own git worktree. Returns the worktree path to
     use as the session's cwd, or ``None`` -- the setting is off, ``cwd``
-    is not a git repo (a worktree only means something inside one), or
-    ``git worktree add`` itself failed for a reason reuse doesn't already
-    explain. ``None`` is always safe: the caller's fallback is running the
-    session directly in ``cwd``, today's unchanged behavior."""
+    is not a git repo (a worktree only means something inside one),
+    ``base_branch`` was given but does not resolve (item S: ``doxa new
+    --branch``), or ``git worktree add`` itself failed for a reason reuse
+    doesn't already explain. ``None`` is always safe: the caller's
+    fallback is running the session directly in ``cwd``, today's
+    unchanged behavior -- ``doxa new --branch`` therefore validates the
+    ref itself, up front, with its own actionable message BEFORE ever
+    reaching this function (see doxa/cli.py), rather than relying on this
+    permissive "None is safe" contract to explain an explicit flag's
+    failure.
+
+    ``base_branch``, when given, forks the worktree from THAT ref
+    (resolved through :func:`resolve_ref`) instead of whatever ``cwd`` has
+    checked out -- explicit spawn-time branch selection, item S #1."""
     if not enabled():
         return None
     main_root = peers_mod.main_repo_root_of(cwd)
@@ -199,7 +270,10 @@ def create(cwd: str, session_name: str) -> "str | None":
     if existing is not None:
         return existing
 
-    base = _base_ref(cwd)
+    if base_branch:
+        base = resolve_ref(main_root, base_branch)
+    else:
+        base = _base_ref(cwd)
     if base is None:
         return None
 
@@ -262,6 +336,128 @@ def commits_ahead(worktree_path: str, base_ref: str) -> "int | None":
         return int(proc.stdout.strip())
     except ValueError:
         return None
+
+
+def update_base(worktree_path: str, base_ref: str) -> bool:
+    """Rewrite the sidecar's ``base_ref`` after a successful ``/branch``
+    switch (item S #2) -- same atomic tmp+replace write :func:`_write_meta`
+    already uses for ``create``, preserving every other field. Returns
+    whether the write succeeded; a failure here just means the tab label
+    lags until the sidecar is next touched -- never a reason to undo the
+    git side, which has already landed by the time this is called."""
+    meta = read_meta(worktree_path)
+    if meta is None:
+        return False
+    meta["base_ref"] = base_ref
+    _write_meta(Path(worktree_path), **meta)
+    return True
+
+
+def branch_status(cwd: str) -> dict:
+    """``/branch`` with no argument (item S #2): every local branch, and
+    which one is the CURRENT BASE -- the worktree sidecar's ``base_ref``
+    inside a worktree-per-session session, or simply the checked-out
+    branch otherwise (worktree_per_session off, or this cwd was never a
+    doxa worktree: the checked-out branch just IS the base, same as every
+    session before v0.17). Read-only; never mutates anything."""
+    main_root = peers_mod.main_repo_root_of(cwd)
+    if not main_root:
+        return {"branches": [], "base": None, "checked_out": None}
+    meta = read_meta(cwd)
+    base_ref = str(meta.get("base_ref") or "") if meta else ""
+    checked_out = current_branch(cwd)
+    return {
+        "branches": list_local_branches(main_root),
+        "base": base_ref or checked_out,
+        "checked_out": checked_out,
+    }
+
+
+def switch_base(worktree_path: str, new_base: str) -> dict:
+    """``/branch <name>`` (item S #2): rebase the session's OWN worktree
+    branch onto ``new_base``.
+
+    FREE (a fast-forward, no history to replay) only when the worktree is
+    CLEAN and carries ZERO commits ahead of its CURRENT base -- the exact
+    same test :func:`finalize` already applies at session end, reused here
+    for the same reason: dirty or committed-but-unmerged work is real
+    work, and this command must never silently carry it across a base
+    switch any more than finalize silently discards it. Both refusals
+    point at that convention by name (``kept <branch> — merge when
+    ready``) rather than inventing a second vocabulary for the same rule.
+
+    Returns ``{"ok": bool, "message": str, "base": str | None}`` --
+    ``message`` is always something the caller can show verbatim, success
+    or refusal; ``base`` carries the new base ref only on success."""
+    meta = read_meta(worktree_path)
+    if meta is None:
+        return {
+            "ok": False, "base": None,
+            "message": (
+                "no doxa worktree here (worktree_per_session is off, or "
+                "this session never got one) -- switching branch would "
+                "move your ACTUAL checkout, which this command refuses "
+                "to do silently; use `git checkout` directly instead"
+            ),
+        }
+    main_root = str(meta.get("main_root") or "")
+    branch = str(meta.get("branch") or "")
+    old_base = str(meta.get("base_ref") or "")
+    if not (main_root and branch and old_base):
+        return {
+            "ok": False, "base": None,
+            "message": "worktree metadata incomplete -- cannot switch safely",
+        }
+    resolved = resolve_ref(main_root, new_base)
+    if resolved is None:
+        return {
+            "ok": False, "base": None,
+            "message": f"no such branch: {new_base!r}",
+        }
+    if not is_clean(worktree_path):
+        return {
+            "ok": False, "base": None,
+            "message": (
+                f"{branch} has uncommitted changes -- switching base would "
+                "carry them across silently. Commit or stash first (dirty "
+                f"work is always kept, never carried -- same rule as "
+                f"'kept {branch} — merge when ready' at session end)."
+            ),
+        }
+    ahead = commits_ahead(worktree_path, old_base)
+    if ahead != 0:
+        note = "an unmeasurable number of commits" if ahead is None else f"{ahead} commit(s)"
+        return {
+            "ok": False, "base": None,
+            "message": (
+                f"{branch} is {note} ahead of {old_base} -- switching base "
+                "would rebase real work without being asked. Merge it "
+                f"first (same rule as 'kept {branch} — merge when ready' "
+                "at session end)."
+            ),
+        }
+    try:
+        proc = subprocess.run(
+            ["git", "rebase", resolved],
+            cwd=worktree_path, capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "base": None, "message": f"rebase failed: {exc}"}
+    if proc.returncode != 0:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                ["git", "rebase", "--abort"], cwd=worktree_path,
+                capture_output=True, text=True, timeout=10,
+            )
+        return {
+            "ok": False, "base": None,
+            "message": f"rebase onto {resolved} failed: {proc.stderr.strip()[:300]}",
+        }
+    update_base(worktree_path, resolved)
+    return {
+        "ok": True, "base": resolved,
+        "message": f"{branch} now based on {resolved}",
+    }
 
 
 def _remove(main_root: str, worktree_path: str, branch: str) -> None:
