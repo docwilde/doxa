@@ -104,16 +104,30 @@ def _run_attached(
     _maybe_restart(app)
 
 
-def _restore_report_text(restored: int, skipped: int) -> "str | None":
-    """"restored 3 tabs, skipped 1 session no longer running." -- None when
-    there is nothing to say (no saved record at all; see _run_restored's
-    only caller). Both counts get their own clause only when nonzero, so a
-    clean restore (skipped=0) never mentions skipping at all."""
-    if not restored and not skipped:
+def _restore_report_text(
+    restored: int, skipped: int, archived: int = 0
+) -> "str | None":
+    """"restored 3 tabs, 1 read-only transcript (session ended), skipped 1
+    session no longer running." -- None when there is nothing to say (no
+    saved record at all; see _run_restored's only caller). Each count gets a clause only
+    when nonzero, so a clean restore never mentions the other two.
+
+    The middle clause is v0.32.0's and it is the one the user must not
+    miss: a read-only tab looks like a session until you try to type in
+    it, so the difference between "this is attached" and "this is a
+    transcript" is said out loud at the moment the window opens, not left
+    to be discovered."""
+    if not restored and not skipped and not archived:
         return None
     parts = []
     if restored:
         parts.append(f"restored {restored} tab{'s' if restored != 1 else ''}")
+    if archived:
+        parts.append(
+            f"{archived} read-only "
+            f"{'transcript' if archived == 1 else 'transcripts'} "
+            "(session ended)"
+        )
     if skipped:
         parts.append(
             f"skipped {skipped} session{'s' if skipped != 1 else ''} "
@@ -128,15 +142,26 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
     cross-checked each saved session id against the peer registry), in
     saved order, with saved pinned names, landing on the saved active tab.
 
-    ``resolved.tabs`` empty means every saved session is gone -- this
-    still spawns exactly one fresh daemon (the same outcome as "nothing
-    live in this scope" below) rather than leaving the user with no TUI at
-    all, but the report ("skipped N, restored 0") still reaches them, on
-    that one fresh tab, so a silently different startup never happens."""
+    v0.32.0 restores two KINDS of tab from that one saved order: a live
+    one reattaches its daemon, and one whose session has ended comes back
+    read-only over its transcript (``resolved.archived`` -- see
+    doxa.tabsets.resolve and doxa.app.ArchivedSessionTab). Both are built
+    here from ``resolved.ordered()``, which is the saved strip order with
+    the two interleaved; splitting them would silently reorder the user's
+    tabs, which is not a restore.
+
+    Nothing live AND nothing archived means every saved session is gone
+    without a trace -- this still spawns exactly one fresh daemon (the
+    same outcome as "nothing live in this scope" below) rather than
+    leaving the user with no TUI at all, but the report ("skipped N,
+    restored 0") still reaches them, on that one fresh tab, so a silently
+    different startup never happens."""
     from .app import RestoreTabSpec
     from .client import EngineClient
 
-    report = _restore_report_text(len(resolved.tabs), resolved.skipped)
+    report = _restore_report_text(
+        len(resolved.tabs), resolved.skipped, len(resolved.archived),
+    )
 
     def new_session_factory_at(path: str) -> EngineClient:
         # Repo picker (item 4): same spawn primitive as every
@@ -148,7 +173,7 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
         _sid, dsock = spawn_daemon(path, model=model, linger_secs=linger)
         return EngineClient(dsock)
 
-    if not resolved.tabs:
+    if not resolved.tabs and not resolved.archived:
         _sid, dsock = spawn_daemon(launch_cwd, model=model, linger_secs=linger)
         app = DoxaApp(
             cwd=launch_cwd, model=model,
@@ -168,25 +193,52 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
     # OWN reported cwd, not necessarily where `doxa` was invoked from --
     # with worktree_per_session on, that is the FIRST restored tab's
     # linked worktree, not the main checkout.
-    app_cwd = resolved.tabs[0][1].cwd
+    app_cwd = resolved.tabs[0][1].cwd if resolved.tabs else launch_cwd
 
     def new_session_factory() -> EngineClient:
         _sid, dsock = spawn_daemon(app_cwd, model=model, linger_secs=linger)
         return EngineClient(dsock)
 
-    specs = [
-        RestoreTabSpec(
+    specs = []
+    for tab, entry in resolved.ordered():
+        if entry is None:
+            # Archived: no daemon, so no factory -- DoxaApp builds an
+            # ArchivedSessionTab and reads the transcript itself. The cwd
+            # is the SAVED one (its own worktree, with
+            # worktree_per_session on), which is what names the project
+            # the transcript lives under.
+            specs.append(RestoreTabSpec(
+                session_id=tab.session_id,
+                pinned_name=tab.pinned_name,
+                cwd=tab.cwd or launch_cwd,
+                archived=True,
+            ))
+            continue
+        specs.append(RestoreTabSpec(
             session_id=entry.session_id,
-            engine_factory=(lambda sock=entry.daemon_socket: EngineClient(sock)),
+            # skip_backlog: the pane renders this session's conversation
+            # from its persisted transcript (complete), so replaying the
+            # daemon's 512-frame ring on top of it would double every turn
+            # the ring still holds. See SessionPane._restore_transcript.
+            engine_factory=(
+                lambda sock=entry.daemon_socket: EngineClient(
+                    sock, skip_backlog=True
+                )
+            ),
             pinned_name=tab.pinned_name,
-        )
-        for tab, entry in resolved.tabs
-    ]
+            cwd=tab.cwd or entry.cwd,
+        ))
     print(
         f"doxa: restoring {len(specs)} tab(s) in {launch_cwd}…", file=sys.stderr,
     )
     app = DoxaApp(
         cwd=app_cwd, model=model,
+        # An all-archived restore has no live tab of its own; DoxaApp's
+        # compose() adds ONE fresh session beside the archives so the
+        # window is usable, and this is what it spawns against.
+        engine_factory=lambda: EngineClient(
+            spawn_daemon(app_cwd, model=model, linger_secs=linger)[1]
+        ),
         new_session_factory=new_session_factory,
         new_session_factory_at=new_session_factory_at,
         restore_tabs=specs,

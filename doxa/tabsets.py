@@ -29,15 +29,37 @@ Never raises: a missing, unreadable or malformed record reads as "nothing
 to restore" to every caller, exactly like a broken config.toml costs the
 user their settings, never their session (doxa.config.load's own rule).
 
+**The layout node** (v0.32.0): the record ALSO carries ``{"layout":
+{"kind": "tabs", "tabs": [...]}}`` -- the same tab list, one level down.
+It buys nothing today and is not read in preference to anything: DOXA has
+a tab strip and no split layout at all (``SessionPane`` is a ``TabPane``;
+there is no vertical or horizontal split to persist, which is why the
+reported "prior vertical or horizontal panel split" is NOT restored here
+and cannot be until splits exist). It costs one dict on write and one
+branch on read, and it means the day a split tree does exist the record
+grows a ``{"kind": "split", "orientation": ..., "children": [...]}`` node
+in the same slot instead of needing a format version and a migration.
+``tabs`` stays at the TOP level as the only thing v0.23.0-v0.31.0 knew
+how to read, so a record this version writes still restores under an
+older DOXA -- and :func:`load` still prefers it, so a record an older
+DOXA writes (no layout node at all) restores here.
+
 **Restore is a cross-check, not a replay**: :func:`resolve` reads the
 saved record, then filters it against the LIVE daemon registry
 (``doxa.peers.list_daemons``) for the same scope. A saved session id with
-no live daemon behind it (finalized since, killed, machine rebooted) is
-dropped SILENTLY and counted -- it must never spawn a replacement session
-(that would not be the session the user left) and must never block
-startup. The caller (doxa.cli) reports the (restored, skipped) counts so
-a startup that quietly differs from what the user left is never silent
-about it.
+no live daemon behind it (finalized since, killed, machine rebooted) can
+never be REATTACHED -- it must never spawn a replacement session (that
+would not be the session the user left) and must never block startup.
+
+Since v0.32.0 such a tab is no longer simply dropped: if the session left
+a transcript behind (``doxa.transcript.exists``) it comes back ARCHIVED
+-- read-only, its conversation rendered from disk, no engine behind it --
+because "the tab and its content came back" is the point of the feature,
+and a session that finalized on its linger timer while the window was
+shut is the commonest way to lose one. Only a saved id with no daemon AND
+no transcript is still dropped, and counted. The caller (doxa.cli)
+reports all three counts, so a startup that quietly differs from what the
+user left is never silent about it.
 
 **Stopped vs. detached** (v0.17's ``detached_on_purpose`` / stop-path
 distinction, carried into the record): a session the user explicitly
@@ -55,11 +77,12 @@ import contextlib
 import hashlib
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config as config_mod
 from . import peers as peers_mod
+from . import transcript as transcript_mod
 
 
 def _bool(env_name: str, default: bool) -> bool:
@@ -82,12 +105,25 @@ def enabled() -> bool:
 
 @dataclass(frozen=True)
 class TabRecord:
-    """One tab in the saved set: which session, and the name the user
-    pinned on it (``None`` for an automatic label -- that is derived fresh
-    at restore time from the live engine/GitLine, never stored)."""
+    """One tab in the saved set: which session, the name the user pinned
+    on it (``None`` for an automatic label -- that is derived fresh at
+    restore time from the live engine/GitLine, never stored), and the
+    session's own working directory.
+
+    ``cwd`` is new in v0.32.0 and exists for exactly one reason: a saved
+    tab whose daemon is GONE has no registry entry left to ask where it
+    ran, and ``doxa.transcript`` needs that path to find the session's
+    transcript file (the project slug is derived from it). With
+    ``worktree_per_session`` on, a session's cwd is its own linked
+    worktree, NOT the scope key -- so guessing the scope would look in the
+    wrong project. ``None`` on every record written before v0.32.0, which
+    restore falls back to the scope key for; a wrong guess costs an
+    archived tab, never a wrong transcript (the file is keyed by session
+    id, so a miss is a miss, never a mix-up)."""
 
     session_id: str
     pinned_name: "str | None" = None
+    cwd: "str | None" = None
 
 
 @dataclass(frozen=True)
@@ -99,15 +135,39 @@ class TabSetRecord:
 
 @dataclass(frozen=True)
 class ResolvedRestore:
-    """:func:`resolve`'s answer: the saved tabs that are still live, paired
-    with the peer registry entry to reattach through, IN SAVED ORDER --
-    never the order their daemons happen to answer in -- plus how many of
-    the saved tabs were skipped (dead), and which live session (if any)
-    was the saved active tab."""
+    """:func:`resolve`'s answer, in SAVED ORDER throughout -- never the
+    order daemons happen to answer in.
+
+    ``tabs``: saved tabs whose daemon is still live, paired with the peer
+    registry entry to reattach through. ``archived``: saved tabs whose
+    daemon is gone but whose transcript is still on disk -- they come back
+    read-only rather than not at all (v0.32.0). ``skipped``: saved tabs
+    with neither, the only ones that silently disappear. ``active_session_id``
+    is the saved active tab if it survived as EITHER kind."""
 
     tabs: "list[tuple[TabRecord, peers_mod.PeerInfo]]"
     skipped: int
     active_session_id: "str | None"
+    archived: "list[TabRecord]" = field(default_factory=list)
+    entries: "list[tuple[TabRecord, peers_mod.PeerInfo | None]]" = field(
+        default_factory=list
+    )
+
+    def ordered(self) -> "list[tuple[TabRecord, peers_mod.PeerInfo | None]]":
+        """Every surviving tab in SAVED ORDER, live and archived
+        interleaved exactly as the strip had them -- ``None`` for the
+        registry entry means archived. ``tabs`` and ``archived`` are the
+        same set split by kind, for callers that only care about one; this
+        is what the tab strip itself is rebuilt from, because a restore
+        that reorders the user's tabs is not a restore.
+
+        Falls back to live-then-archived when ``entries`` was not supplied
+        (a ResolvedRestore built by hand rather than by :func:`resolve`)."""
+        if self.entries:
+            return list(self.entries)
+        return [(tab, entry) for tab, entry in self.tabs] + [
+            (tab, None) for tab in self.archived
+        ]
 
 
 def tabsets_dir() -> Path:
@@ -139,14 +199,20 @@ def save(
     files."""
     if not scope_key:
         return
+    rows = [
+        {"session_id": t.session_id, "pinned_name": t.pinned_name, "cwd": t.cwd}
+        for t in tabs
+        if t.session_id
+    ]
     payload = {
         "scope_key": scope_key,
         "active_session_id": active_session_id or None,
-        "tabs": [
-            {"session_id": t.session_id, "pinned_name": t.pinned_name}
-            for t in tabs
-            if t.session_id
-        ],
+        # Written TWICE, on purpose -- see the module docstring's "layout
+        # node". The top-level list is the only shape v0.23.0-v0.31.0 can
+        # read and stays authoritative; the layout node is the slot a
+        # split tree would grow into without a breaking format change.
+        "tabs": rows,
+        "layout": {"kind": "tabs", "tabs": rows},
     }
     path = _file_for(scope_key)
     try:
@@ -156,6 +222,28 @@ def save(
         os.replace(tmp, path)
     except OSError:
         return
+
+
+def _layout_tabs(data: dict) -> "list | None":
+    """The tab rows out of a raw record, top-level list FIRST.
+
+    That order is the compatibility rule, not an accident: the top-level
+    ``tabs`` list is the shape every DOXA since v0.23.0 writes and reads,
+    so it is what a record from any version is guaranteed to have. The
+    ``layout`` node is only consulted when the top-level list is absent or
+    malformed -- which today can only happen for a record some FUTURE
+    version wrote as a pure layout tree. A layout node whose ``kind`` this
+    version does not recognise (``"split"``, when splits exist) reads as
+    "nothing this version can lay out", which is the honest answer: better
+    no restore than a split flattened into tabs behind the user's back."""
+    raw = data.get("tabs")
+    if isinstance(raw, list):
+        return raw
+    layout = data.get("layout")
+    if not isinstance(layout, dict) or layout.get("kind") != "tabs":
+        return None
+    raw = layout.get("tabs")
+    return raw if isinstance(raw, list) else None
 
 
 def load(scope_key: str) -> "TabSetRecord | None":
@@ -176,8 +264,8 @@ def load(scope_key: str) -> "TabSetRecord | None":
         return None
     if not isinstance(data, dict):
         return None
-    raw_tabs = data.get("tabs")
-    if not isinstance(raw_tabs, list):
+    raw_tabs = _layout_tabs(data)
+    if raw_tabs is None:
         return None
     tabs: list[TabRecord] = []
     for entry in raw_tabs:
@@ -187,10 +275,12 @@ def load(scope_key: str) -> "TabSetRecord | None":
         if not session_id:
             continue
         pinned = entry.get("pinned_name")
+        cwd = entry.get("cwd")
         tabs.append(
             TabRecord(
                 session_id=session_id,
                 pinned_name=str(pinned) if pinned else None,
+                cwd=str(cwd) if cwd else None,
             )
         )
     if not tabs:
@@ -210,26 +300,45 @@ def resolve(scope_key: str) -> "ResolvedRestore | None":
     :class:`ResolvedRestore` so the caller can report the skip count
     rather than silently falling back to nothing.
 
-    A session id the registry no longer knows about is dropped here,
-    silently, and counted -- it must never spawn a replacement (that
-    would not be the session the user left) and must never block
-    startup on a daemon that is provably gone."""
+    A session id the registry no longer knows about is never REATTACHED
+    (that daemon is provably gone, and spawning a replacement would not be
+    the session the user left). Since v0.32.0 it is looked up on disk
+    instead: with a transcript behind it the tab comes back ARCHIVED,
+    without one it is dropped and counted in ``skipped``. Neither path
+    ever blocks startup and neither ever raises -- ``doxa.transcript``
+    answers "no" to everything it cannot read."""
     record = load(scope_key)
     if record is None:
         return None
     live_by_id = {p.session_id: p for p in peers_mod.list_daemons(scope_key=scope_key)}
     live: "list[tuple[TabRecord, peers_mod.PeerInfo]]" = []
+    archived: "list[TabRecord]" = []
+    entries: "list[tuple[TabRecord, peers_mod.PeerInfo | None]]" = []
     skipped = 0
     for tab in record.tabs:
         entry = live_by_id.get(tab.session_id)
-        if entry is None:
-            skipped += 1
+        if entry is not None:
+            live.append((tab, entry))
+            entries.append((tab, entry))
             continue
-        live.append((tab, entry))
+        # No daemon. The transcript is keyed by session id under the
+        # session's OWN project slug, so the saved cwd is what finds it --
+        # falling back to the scope key only for records written before
+        # v0.32.0 started saving one.
+        if transcript_mod.exists(tab.session_id, tab.cwd or scope_key):
+            archived.append(tab)
+            entries.append((tab, None))
+        else:
+            skipped += 1
     active = record.active_session_id
-    if active is not None and active not in live_by_id:
-        active = None  # the saved active tab is itself dead -- no forced pick
-    return ResolvedRestore(tabs=live, skipped=skipped, active_session_id=active)
+    if active is not None:
+        survivors = {t.session_id for t, _ in live} | {t.session_id for t in archived}
+        if active not in survivors:
+            active = None  # the saved active tab is gone -- no forced pick
+    return ResolvedRestore(
+        tabs=live, skipped=skipped, active_session_id=active,
+        archived=archived, entries=entries,
+    )
 
 
 def clear(scope_key: str) -> None:

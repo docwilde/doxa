@@ -105,15 +105,24 @@ uv run doxa doctor   # read-only health checks, no TUI: pass/fail + fix per chec
 attaches the TUI to it as a thin client over a Unix socket. Closing the TUI
 (`ctrl+q`, or the palette's "Quit: detach") leaves the daemon running with
 no tmux involved; running `doxa` again in the same repo restores the WHOLE
-tab set you left (order, pinned names, which tab was active — `restore_tabs`,
-**on** by default), reattaching every session still alive and reporting how
-many it skipped, rather than just the single most recent one. A saved
-session that finalized in the meantime (`doxa stop`, or its own `--linger`
-expiring) is skipped silently — restore never spawns a replacement for a
-tab that's actually gone — and shows up in that report instead
-(`tab restore: restored 2 tabs, skipped 1 session no longer running.`); a
-tab you closed with `ctrl+w` stays in the set (it only detached, it's
-still running), but one you explicitly stopped does not. `doxa new` always
+tab set you left — order, pinned names, which tab was active, **and the
+conversation that was on each tab** (`restore_tabs`, **on** by default) —
+reattaching every session still alive and reporting what it did, rather
+than just the single most recent one. The scrollback is read back from the
+session's own transcript on disk, so it is the whole conversation and not
+just whatever still fit in the daemon's replay buffer; a restore that had
+to leave earlier turns out says so where they would have been. A saved
+session that finalized in the meantime (its `--linger` expiring while the
+window was shut) comes back **read-only** over that same transcript,
+marked `⏺` and saying so in its first block — restore never spawns a
+replacement for a session that's actually gone, and never lets a
+transcript pass for a live tab. Only a saved tab with no session AND no
+transcript is skipped, and the report says which is which
+(`tab restore: restored 2 tabs, 1 read-only transcript (session ended),
+skipped 1 session no longer running.`); a tab you closed with `ctrl+w`
+stays in the set (it only detached, it's still running), but one you
+explicitly stopped does not. Vertical/horizontal split layouts are not
+restored, because DOXA doesn't have any — it's a tab strip. `doxa new` always
 starts exactly one fresh tab and never restores; `doxa attach <prefix>`
 stays the single-session path either way; `$DOXA_RESTORE_TABS=0` turns the
 whole thing off and returns to attaching only the single most recent
@@ -191,7 +200,7 @@ green the moment that turn finishes unseen, clearing the instant you look
 popup to say so either. The whole set is remembered across restarts too
 (`restore_tabs`, see Quickstart above): quit and run `doxa` again in the
 same repo and every tab that's still running comes back, in order, named
-the way you left it:
+the way you left it, showing the conversation it had:
 
 <p align="center"><img src="assets/shots/tab-lifecycle.gif" width="780" alt="A second tab starts a turn and turns amber (-working); switching to the first tab leaves it amber in the background; the turn finishes there and the tab turns green (-done-unseen); switching back clears it"></p>
 
@@ -494,7 +503,7 @@ survives being opened by an older one.
 | `derive_secs` | `DOXA_DERIVE_SECS` | off | streaming-deriver interval; unset runs review only at session end |
 | `linger_secs` | `DOXA_LINGER_SECS` | 120 | seconds a daemon outlives its last detached client |
 | `worktree_per_session` | `DOXA_WORKTREE` | **on** | give each session its own git worktree instead of sharing the launch directory |
-| `restore_tabs` | `DOXA_RESTORE_TABS` | **on** | plain `doxa` restores the whole saved tab set for this repo instead of just the most recent session |
+| `restore_tabs` | `DOXA_RESTORE_TABS` | **on** | plain `doxa` restores this repo's whole saved tab set — order, names, active tab and each tab's conversation — instead of just the most recent session |
 | `consult_floor` | `DOXA_CONSULT_FLOOR` | 1.0 | act-time belief-consult threshold; 0 disables it |
 | `background` | `DOXA_BACKGROUND` | `opaque` | `opaque` paints DOXA's own base (today's look); `transparent` stops painting it so an already-transparent terminal shows through — the terminal itself still has to be configured that way |
 | `nerd_font` | `DOXA_NERD_FONT` | off | use a Nerd Font glyph for the branch chip |

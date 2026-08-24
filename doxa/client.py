@@ -58,9 +58,26 @@ class EngineClient:
 
     detachable = True  # the app's status bar shows the attach chip on this
 
-    def __init__(self, socket_path: str, cursor: int | None = None) -> None:
+    def __init__(
+        self,
+        socket_path: str,
+        cursor: int | None = None,
+        *,
+        skip_backlog: bool = False,
+    ) -> None:
         self.socket_path = str(socket_path)
         self.cursor = cursor  # next seq we have NOT seen; None = replay all
+        # v0.32.0, tab restore: attach at the ring's CURRENT head instead of
+        # replaying it, because this client's pane is about to render the
+        # same conversation from the session's persisted transcript
+        # (doxa.transcript) -- which is complete, where the 512-frame ring
+        # is only ever a tail. Replaying both would double every turn the
+        # ring still happens to hold. The head seq comes from the daemon's
+        # own hello ("next_seq"), read in start() before attach is sent; a
+        # daemon too old to send one leaves this a no-op and the pane falls
+        # back to the v0.31.0 replay-only behavior rather than duplicating.
+        self.skip_backlog = bool(skip_backlog)
+        self.backlog_skipped: "int | None" = None
         self.session_id: str | None = None
         self.model: str | None = None
         self.cwd: str | None = None
@@ -111,6 +128,16 @@ class EngineClient:
         self.session_id = hello.get("session_id")
         self.model = hello.get("model")
         self.cwd = hello.get("cwd")
+        if self.skip_backlog:
+            # The daemon has advertised its ring head since the protocol's
+            # first version; treat a missing/odd value as "cannot skip"
+            # and replay as before -- a duplicated transcript is a worse
+            # failure than an un-skipped one, and the pane checks
+            # backlog_skipped before deciding to render from disk.
+            head = hello.get("next_seq")
+            if isinstance(head, int) and head >= 0:
+                self.cursor = head
+                self.backlog_skipped = head
         self._write_frame({"type": "attach", "cursor": self.cursor})
         self._reader_task = asyncio.create_task(self._read_loop())
         with contextlib.suppress(Exception):

@@ -83,6 +83,7 @@ from . import paste as paste_mod
 from . import peers as peers_mod
 from . import providers as providers_mod
 from . import tabsets as tabsets_mod
+from . import transcript as transcript_mod
 from . import version as version_mod
 from . import worktrees as worktrees_mod
 from .engine import (
@@ -115,11 +116,22 @@ class RestoreTabSpec:
     UP FRONT (from the registry entry the record resolved to), not learned
     from the engine after boot, which is what lets DoxaApp give the pane a
     deterministic id and pick the saved active tab before anything has
-    connected."""
+    connected.
+
+    ``cwd`` and ``archived`` are v0.32.0's half of the same idea. ``cwd``
+    is the session's OWN working directory (its linked worktree, with
+    worktree_per_session on) -- what ``doxa.transcript`` needs to find the
+    session's persisted conversation and put it back on screen, which is
+    the whole of the reported defect. ``archived`` marks a tab whose
+    session is GONE: there is nothing to attach to, ``engine_factory`` is
+    never called, and DoxaApp builds an :class:`ArchivedSessionTab`
+    (read-only, transcript from disk) instead of a SessionPane."""
 
     session_id: str
-    engine_factory: "Callable[[], Any]"
+    engine_factory: "Callable[[], Any] | None" = None
     pinned_name: "str | None" = None
+    cwd: "str | None" = None
+    archived: bool = False
 
 
 def _restore_pane_id(session_id: str) -> str:
@@ -128,6 +140,102 @@ def _restore_pane_id(session_id: str) -> str:
     (doxa.tabsets.TabSetRecord.active_session_id) before any pane has
     booted far enough to report its own session_id back."""
     return f"restore-{session_id}"
+
+
+async def _composed(*widgets: Any) -> bool:
+    """Wait until every one of ``widgets`` is really mounted.
+
+    ``mount()`` resolves when the widget it was given is mounted; the
+    children that widget yields from its own ``compose`` land a
+    message-pump cycle later. A LIVE turn never notices -- its first
+    ``text_delta`` arrives over a socket, cycles after the mount. A
+    RESTORE writes into the block immediately, and hit exactly this:
+    "Can't mount widget(s) before Markdown(classes='turn-body') is
+    mounted", intermittently, because whether the pump had run yet was a
+    matter of luck.
+
+    Bounded: a widget that never composes costs one skipped turn, never a
+    hung restore."""
+    for _ in range(200):
+        if all(widget.is_mounted for widget in widgets):
+            return True
+        await asyncio.sleep(0)
+    return all(widget.is_mounted for widget in widgets)
+
+
+async def mount_transcript(
+    block_list: "VerticalScroll", snapshot: "transcript_mod.Transcript",
+) -> int:
+    """Render a persisted conversation into a block list, oldest turn
+    first, and return how many turns were mounted.
+
+    The SAME widgets a live turn builds -- ``TurnBlock`` for the prompt and
+    the answer, ``ToolChip`` for each call -- so a restored tab is not a
+    lookalike of the session it restores, it is the session's own view
+    rebuilt. Every turn is closed with ``mark_done`` (no cost, no
+    duration: those are turn-time measurements this file never claimed to
+    keep), which also stops the Markdown stream each one opens -- a
+    restore that left forty live streams behind would reintroduce exactly
+    the idle-CPU leak ThinkingMarker's docstring exists to warn about.
+
+    Mounted in batches with a yield between them: a forty-turn restore is
+    forty Markdown parses, and doing them in one uninterrupted burst
+    freezes the first paint of every OTHER tab in the window.
+
+    Truncation is never silent -- ``dropped_turns`` gets a leading
+    SystemBlock, a cut answer gets a trailing marker line, dropped tool
+    chips get a counted one. A restored transcript may be shorter than the
+    session; it may never LOOK complete when it is not."""
+    mounted = 0
+    if snapshot.dropped_turns:
+        noun = "turn" if snapshot.dropped_turns == 1 else "turns"
+        await block_list.mount(SystemBlock(
+            f"⤒ {snapshot.dropped_turns} earlier {noun} not shown — "
+            f"the full transcript is on disk (/search)"
+        ))
+    for index, turn in enumerate(snapshot.turns):
+        block = TurnBlock(turn.prompt)
+        await block_list.mount(block)
+        if not await _composed(block.body, block.tools):
+            continue
+        if turn.text:
+            await block.append_text(turn.text)
+        if turn.text_truncated:
+            await block.append_text(
+                "\n\n*…answer truncated for restore — full text on disk*"
+            )
+        tools = list(turn.tools)
+        if turn.tools_dropped:
+            tools.append(transcript_mod.ToolRecord(
+                call_id=f"restore-dropped-{index}",
+                name="…more tool calls not shown",
+                tool_input={"dropped": turn.tools_dropped},
+            ))
+        if tools:
+            # The section is built and settled ONCE per turn rather than
+            # lazily inside add_tool_chip, because its own chip holder is
+            # a compose child too -- adding a chip the same cycle it is
+            # created raised "Can't mount widget(s) before Vertical(classes=
+            # 'tool-calls-list') is mounted".
+            section = ToolCallsSection()
+            block.tool_section = section
+            await block.tools.mount(section)
+            if await _composed(section.chips):
+                for tool in tools:
+                    chip = ToolChip(tool.call_id, tool.name, tool.tool_input)
+                    await section.add_chip(chip)
+                    if tool.result is not None:
+                        # duration_ms None: the transcript records what a
+                        # tool ANSWERED, never how long it took, and
+                        # inventing a number here would be the one thing a
+                        # restore must not do.
+                        chip.update_result(tool.result[:280], tool.is_error, None)
+        await block.mark_done(None, None, False)
+        mounted += 1
+        if mounted % 6 == 0:
+            await asyncio.sleep(0)
+    block_list.scroll_end(animate=False)
+    return mounted
 
 
 # Model aliases the installed CLI documents for --model ("provide an alias
@@ -2652,6 +2760,95 @@ class SubagentTranscriptTab(TabPane):
         _write_tab_class(self.app, self.id or "", class_name, value)
 
 
+class ArchivedSessionTab(TabPane):
+    """A restored tab whose SESSION IS GONE: its conversation, read-only.
+
+    v0.32.0. Restore has always cross-checked the saved tab set against
+    the live daemon registry and dropped whatever no longer answered
+    (doxa.tabsets.resolve) -- correct, because a dead session must never
+    be replaced by a fresh one wearing its tab. But a daemon finalizing on
+    its linger timer while the window is shut is the ORDINARY way a
+    session ends, so "the tabs and their content come back" quietly meant
+    "some of them do", and the user got one line of arithmetic about the
+    rest.
+
+    So a saved tab with no daemon but a transcript on disk comes back
+    HERE instead: same strip, same order, same pinned name, the whole
+    conversation rendered by the same ``mount_transcript`` a live restore
+    uses -- and no engine, no prompt, no way to type into a session that
+    does not exist. Deliberately NOT a ``SessionPane``, exactly like
+    :class:`SubagentTranscriptTab` before it: a pane with a prompt box
+    that refuses every prompt is a worse answer than a pane that visibly
+    has none.
+
+    The user can always tell which they got. The tab label carries a
+    ``⏺`` archive mark, the first block says the session ended and where
+    the text came from, and the palette/Ctrl+T remain the way to start a
+    real session in the same repo."""
+
+    ARCHIVE_MARK = "⏺"
+
+    def __init__(
+        self,
+        session_id: str,
+        cwd: str,
+        label: str,
+        *,
+        pinned_name: "str | None" = None,
+        id: str | None = None,
+    ) -> None:
+        self.session_id = session_id
+        self.cwd = cwd
+        self.custom_name = pinned_name
+        self.base_label = pinned_name or label
+        self.turns_restored = 0
+        self.scroll = VerticalScroll(id=f"archive-blocks-{session_id}")
+        super().__init__(f"{self.ARCHIVE_MARK} {self.base_label}", id=id)
+
+    def compose(self) -> ComposeResult:
+        yield self.scroll
+
+    async def on_mount(self) -> None:
+        self.run_worker(self._render_archive(), exclusive=True, group="archive")
+
+    async def _render_archive(self) -> None:
+        """Read the transcript off-loop, then mount it. Never raises: an
+        archived tab that cannot read its own file still says what it is,
+        which is strictly more than the tab that used to silently not
+        exist.
+
+        Not named ``_render``: that is ``textual.widget.Widget``'s own
+        synchronous paint hook, and a coroutine in that slot is handed
+        straight to the compositor as if it were a visual."""
+        await self.scroll.mount(SystemBlock(
+            f"⏺ this session has ended — transcript restored from disk, "
+            f"read-only.\nsession  {self.session_id}\ncwd      {self.cwd}\n"
+            f"Ctrl+T starts a new session here."
+        ))
+        try:
+            snapshot = await asyncio.to_thread(
+                transcript_mod.read, self.session_id, self.cwd,
+            )
+        except Exception:  # noqa: BLE001 -- see the docstring
+            return
+        if not snapshot:
+            await self.scroll.mount(SystemBlock(
+                "no transcript could be read for this session."
+            ))
+            return
+        self.turns_restored = await mount_transcript(self.scroll, snapshot)
+
+    def _set_tab_class(self, class_name: str, value: bool) -> None:
+        _write_tab_class(self.app, self.id or "", class_name, value)
+
+    def as_record(self) -> "tabsets_mod.TabRecord":
+        """What this tab contributes to the persisted set. An archived tab
+        STAYS in the record: it is still one of the tabs the user has
+        open, and dropping it here would mean a session survived one
+        restart and vanished on the next."""
+        return tabsets_mod.TabRecord(self.session_id, self.custom_name, self.cwd)
+
+
 class SessionPane(TabPane):
     """One session's whole surface: engine handle, block list, status bar,
     prompt input, and the boot/pump workers that drive them.
@@ -2695,6 +2892,30 @@ class SessionPane(TabPane):
         # skipped M"). Both None for every ordinarily-created tab.
         self._initial_pinned_name: "str | None" = None
         self._boot_report: "str | None" = None
+        # v0.32.0 restore-only: put this session's PRIOR CONVERSATION back
+        # on screen. True means _boot renders doxa.transcript's reading of
+        # the session's persisted transcript before handing over to the
+        # live stream -- see _restore_transcript for why that is disk and
+        # not the daemon's replay ring. False (every ordinary tab, and a
+        # restore whose daemon is too old to let us skip its backlog)
+        # leaves v0.31.0's replay-only behavior exactly as it was.
+        self._restore_transcript_wanted = False
+        # The session's OWN cwd, from the saved tab record -- the engine's
+        # reported cwd wins once it boots, this is the before-boot answer
+        # (and the ONLY answer an archived tab ever has).
+        self._restore_cwd: "str | None" = None
+        # Does this pane grab the keyboard when it mounts? Every ordinary
+        # tab does -- it is the only tab, or it is the one Ctrl+T just
+        # opened. A RESTORE is the exception, and getting this wrong is a
+        # defect that shipped in v0.23.0 and was measured here: focusing a
+        # prompt inside a TabPane ACTIVATES that pane, so three restored
+        # panes each focusing on mount left the LAST one active no matter
+        # what DoxaApp.on_mount had set from the saved record. (Two panes
+        # hid it -- the saved active tab in that test happened to be the
+        # last one, so the wrong mechanism produced the right answer.) So
+        # during a restore exactly one pane -- the saved active one --
+        # arms this, and _on_tab_activated does the focusing for the rest.
+        self._focus_on_mount = True
         # Out-of-band turn rendering state (replayed history after reattach,
         # or a turn another attached client drives) -- see _peer_pump.
         self._oob_turn: TurnBlock | None = None
@@ -2804,7 +3025,8 @@ class SessionPane(TabPane):
             # header, and it only needs the DOM (already mounted here),
             # never the engine.
             self.set_custom_name(self._initial_pinned_name)
-        self.query_one("#prompt-input", PromptInput).focus()
+        if self._focus_on_mount:
+            self.query_one("#prompt-input", PromptInput).focus()
         self.run_worker(self._boot(), exclusive=True, group="engine")
         self.run_worker(self._peer_pump(), exclusive=True, group="peers")
 
@@ -2889,9 +3111,62 @@ class SessionPane(TabPane):
             await block_list.mount(SystemBlock(self._boot_report))
             self._boot_report = None
         block_list.scroll_end(animate=False)
+        if self._restore_transcript_wanted:
+            self._restore_transcript_wanted = False
+            # Suppressed here as well as inside: _note_pane_booted below is
+            # what releases DoxaApp's mid-restore persistence guard, so a
+            # scrollback that failed to draw must not also cost the user
+            # their saved tab set on the NEXT launch.
+            with contextlib.suppress(Exception):
+                await self._restore_transcript(session_id, git_cwd)
         app = self.app
         if isinstance(app, DoxaApp):
             app._note_pane_booted(self)
+
+    async def _restore_transcript(self, session_id: str, cwd: str) -> None:
+        """Put this reattached session's PRIOR CONVERSATION back on screen.
+
+        The defect this closes, measured against a real daemon over a real
+        socket before anything was changed: v0.23.0's restore reattaches
+        and lets the daemon replay its event ring, which works only while
+        the whole session still fits in 512 frames. One ``text_delta`` is
+        one frame, so a single 700-delta answer pushed ``turn_started``
+        off the ring; ``_peer_pump`` then had no TurnBlock to render the
+        surviving deltas into and dropped every one -- the restored tab
+        came up EMPTY, beside a live daemon that held the entire
+        conversation, and said nothing about it.
+
+        So the content comes from the session's persisted transcript
+        instead (doxa.transcript): complete, already scrubbed, written at
+        the engine's own persistence choke point, and on the same machine
+        as this TUI. Nothing crosses the socket, so the 64KB frame cap
+        that forced v0.28.0 to page the beliefs RPC is not on this path at
+        all; what IS capped is the render (turn count and per-turn text,
+        both reported on screen when they bite -- see mount_transcript).
+
+        The live tail still comes from the daemon: this pane's client
+        attached with ``skip_backlog``, so the ring is NOT replayed on top
+        of what we just drew and no turn is rendered twice. A daemon too
+        old to advertise its ring head refuses that skip
+        (``backlog_skipped is None``), and then this method does nothing
+        at all -- v0.31.0's replay-only behavior, unchanged, rather than a
+        doubled transcript.
+
+        Never fatal: an unreadable transcript costs the scrollback, never
+        the session -- the pane is attached and usable either way."""
+        engine = self.engine
+        if getattr(engine, "backlog_skipped", None) is None:
+            return
+        block_list = self.query_one("#block-list", VerticalScroll)
+        try:
+            snapshot = await asyncio.to_thread(
+                transcript_mod.read, session_id, cwd,
+            )
+        except Exception:  # noqa: BLE001 -- scrollback is never worth a crash
+            return
+        if not snapshot:
+            return
+        await mount_transcript(block_list, snapshot)
 
     def _identity_text(self, cwd: str) -> str:
         """The session-start identity summary. Every line renders a REAL
@@ -3027,6 +3302,29 @@ class SessionPane(TabPane):
             elif ev.type in (
                 "text_delta", "reasoning_delta", "tool_call", "tool_result", "turn_done",
             ):
+                if self._oob_turn is None and ev.type != "turn_done":
+                    # An ORPHANED turn event: something is streaming for a
+                    # turn whose turn_started this client never saw. Two
+                    # ways to get here, both real -- a reattach that landed
+                    # mid-turn, and (before v0.32.0's transcript restore,
+                    # still possible for a daemon whose ring head we could
+                    # not skip) a replay whose turn_started had already
+                    # fallen off the 512-frame ring.
+                    #
+                    # This used to fall through the `is not None` guard and
+                    # DROP the event, silently, which is how a restored tab
+                    # rendered as empty next to a live session holding the
+                    # whole conversation. An unattributed turn block is a
+                    # far smaller lie than no turn at all -- and it says so
+                    # in its own header rather than inventing a prompt.
+                    block_list = self.query_one("#block-list", VerticalScroll)
+                    self._oob_turn = TurnBlock("(turn already in progress)")
+                    self._oob_chips = {}
+                    await block_list.mount(self._oob_turn)
+                    # Same compose wait mount_transcript needs: an event
+                    # arriving in the same cycle as the mount would find
+                    # the block's Markdown body not yet there.
+                    await _composed(self._oob_turn.body, self._oob_turn.tools)
                 if self._oob_turn is not None:
                     await self._handle_event(ev, self._oob_turn, self._oob_chips)
                     self.query_one("#block-list", VerticalScroll).scroll_end(
@@ -3035,7 +3333,16 @@ class SessionPane(TabPane):
                     if ev.type == "turn_done":
                         self._oob_turn = None
                         self._oob_chips = {}
-            self._refresh_status()
+            with contextlib.suppress(Exception):
+                # A status-bar repaint must never take the pump down with
+                # it. This loop is the ONLY renderer of out-of-band traffic
+                # (replayed history, a peer's turn, needs_input): an event
+                # that lands before this pane's chrome has finished
+                # composing used to raise NoMatches here and kill the
+                # worker for the life of the tab -- one unlucky moment and
+                # the pane went deaf. The refresh is a repaint; skipping
+                # one is invisible, and the next event does it again.
+                self._refresh_status()
 
     def _refresh_usage_chip(self) -> None:
         """Recompute the subscription-headroom chip (``s:9% w:48%``).
@@ -5049,7 +5356,16 @@ class DoxaApp(App):
         # actually writes -- one consolidated save reflecting every
         # restored tab, rather than one truncated save per tab in whatever
         # order their daemons happen to answer in.
-        self._restore_pending = len(self._restore_tabs)
+        # Counted over the tabs that actually BOOT: an ArchivedSessionTab
+        # has no engine and never reports in, so counting it here would
+        # leave the guard permanently armed and the restored set never
+        # persisted at all. An all-archived restore still boots the one
+        # fresh pane compose() adds beside them, which is why the floor is
+        # 1 rather than 0 whenever there is anything to restore.
+        live_specs = sum(1 for spec in self._restore_tabs if not spec.archived)
+        self._restore_pending = (
+            live_specs if live_specs or not self._restore_tabs else 1
+        )
         # Sessions detached (Ctrl+W / "/detach") THIS run: no longer a
         # mounted pane (its _session_id would drop out of panes() once
         # removed), but still running -- item D #4 says a detached session
@@ -5200,6 +5516,34 @@ class DoxaApp(App):
     def panes(self) -> list[SessionPane]:
         return list(self.query(SessionPane))
 
+    def archived_tabs(self) -> "list[ArchivedSessionTab]":
+        """Restored tabs whose session is gone (v0.32.0) -- read-only
+        transcript tabs, deliberately NOT part of :meth:`panes`, which
+        every caller in this file reads as "tabs with a session behind
+        them" and must keep reading that way."""
+        return list(self.query(ArchivedSessionTab))
+
+    def _active_tab(self) -> "SessionPane | ArchivedSessionTab | None":
+        """The active tab when it is one restore CARES about -- either
+        kind. ``active_pane`` stays SessionPane-only on purpose (every
+        engine-touching caller depends on that); this is the one question
+        that spans both."""
+        try:
+            tab = self.query_one("#session-tabs", TabbedContent).active_pane
+        except Exception:
+            return None
+        return tab if isinstance(tab, (SessionPane, ArchivedSessionTab)) else None
+
+    def _restorable_tabs(self) -> "list[Any]":
+        """Every tab the persisted set is about, IN STRIP ORDER -- session
+        panes and archived tabs interleaved exactly as the user sees them,
+        because the record's order IS the tab-bar order it will restore
+        to. Subagent transcript tabs are not sessions and never appear."""
+        return [
+            tab for tab in self.query(TabPane)
+            if isinstance(tab, (SessionPane, ArchivedSessionTab))
+        ]
+
     # -- item D: persisted tab set ------------------------------------
 
     def _note_pane_booted(self, pane: "SessionPane") -> None:
@@ -5252,11 +5596,24 @@ class DoxaApp(App):
         if self._restore_pending > 0:
             return
         scope = peers_mod.main_repo_root_of(self.cwd) or self.cwd
-        active_pane = self.active_pane
+        active_tab = self._active_tab()
         tabs: "list[tabsets_mod.TabRecord]" = []
         seen: set[str] = set()
         active_id: "str | None" = None
-        for pane in self.panes():
+        # Tab-strip order, and BOTH kinds of restorable tab: a live
+        # SessionPane, and (v0.32.0) an ArchivedSessionTab, which is one of
+        # the user's open tabs too and must not evaporate on the next
+        # restart just because the session behind it already has.
+        for tab in self._restorable_tabs():
+            if isinstance(tab, ArchivedSessionTab):
+                if tab.session_id in seen:
+                    continue
+                seen.add(tab.session_id)
+                tabs.append(tab.as_record())
+                if tab is active_tab:
+                    active_id = tab.session_id
+                continue
+            pane = tab
             if getattr(pane, "_stopped", False):
                 continue
             sid = pane._session_id
@@ -5267,8 +5624,8 @@ class DoxaApp(App):
             if pane_scope != scope:
                 continue
             seen.add(sid)
-            tabs.append(tabsets_mod.TabRecord(sid, pane.custom_name))
-            if pane is active_pane:
+            tabs.append(tabsets_mod.TabRecord(sid, pane.custom_name, pane_cwd))
+            if pane is active_tab:
                 active_id = sid
         for record in self._detached_this_run.values():
             if record.session_id not in seen:
@@ -5300,18 +5657,63 @@ class DoxaApp(App):
         yield ClockChip()  # upper-right, own layer -- see theme.tcss
         with TabbedContent(id="session-tabs"):
             if self._restore_tabs:
-                # Item D: one pane per already-live resolved tab, IN SAVED
-                # ORDER -- never the single default pane below. The report
-                # block (if any) rides on the FIRST one only.
-                for index, spec in enumerate(self._restore_tabs):
+                # Item D: one tab per resolved saved tab, IN SAVED ORDER --
+                # never the single default pane below. v0.32.0 mixes two
+                # kinds in that one order: a live spec reattaches its
+                # daemon (SessionPane), an archived one has no daemon left
+                # to reattach and renders its transcript read-only
+                # (ArchivedSessionTab). The report block (if any) rides on
+                # the first LIVE pane -- an archived tab already opens with
+                # a block of its own explaining what it is.
+                report_placed = False
+                # Exactly one restored pane may grab focus on mount, and
+                # it has to be the SAVED ACTIVE one: a mounting pane's
+                # prompt focus activates its tab, so every pane focusing
+                # left whichever mounted LAST active regardless of the
+                # record (v0.23.0 defect, measured with three tabs). With
+                # no saved active tab the first restored one wins, which
+                # is where Textual would have landed anyway.
+                focus_id = self._restore_active_id
+                if not focus_id:
+                    focus_id = next(
+                        (s.session_id for s in self._restore_tabs if not s.archived),
+                        None,
+                    )
+                for spec in self._restore_tabs:
+                    if spec.archived:
+                        yield ArchivedSessionTab(
+                            spec.session_id,
+                            spec.cwd or self.cwd,
+                            self._tab_title(spec.cwd or self.cwd),
+                            pinned_name=spec.pinned_name,
+                            id=_restore_pane_id(spec.session_id),
+                        )
+                        continue
                     pane = SessionPane(
                         self._tab_title(), self.cwd, self.model,
                         spec.engine_factory, id=_restore_pane_id(spec.session_id),
                     )
                     if spec.pinned_name:
                         pane._initial_pinned_name = spec.pinned_name
-                    if index == 0:
+                    # v0.32.0: this pane's scrollback comes from the
+                    # session's persisted transcript, not the daemon's
+                    # 512-frame ring (see SessionPane._restore_transcript).
+                    pane._restore_transcript_wanted = True
+                    pane._restore_cwd = spec.cwd
+                    pane._focus_on_mount = spec.session_id == focus_id
+                    if not report_placed:
                         pane._boot_report = self._restore_report
+                        report_placed = True
+                    yield pane
+                if not report_placed:
+                    # Every resolved tab was archived: the window would
+                    # otherwise have no session in it at all -- no prompt,
+                    # nothing Ctrl+W could close without closing the app.
+                    # One fresh tab alongside the archives, carrying the
+                    # report, is the same answer doxa.cli's own "everything
+                    # is dead" branch gives.
+                    pane = self._make_pane(self._engine_factory)
+                    pane._boot_report = self._restore_report
                     yield pane
             else:
                 pane = self._make_pane(self._engine_factory)
@@ -5496,6 +5898,23 @@ class DoxaApp(App):
             active = self.query_one("#session-tabs", TabbedContent).active_pane
             if isinstance(active, SubagentTranscriptTab):
                 await self._close_transcript_tab(active)
+            elif isinstance(active, ArchivedSessionTab):
+                await self._close_archived_tab(active)
+
+    async def _close_archived_tab(self, tab: "ArchivedSessionTab") -> None:
+        """Ctrl+W on an archived tab (v0.32.0): nothing to detach, nothing
+        to stop -- the session ended before this window opened. It closes,
+        and closing it is the ONE way to take it out of the persisted set:
+        an archived tab the user leaves open comes back at the next launch
+        exactly like a live one, which is the whole point.
+
+        Never the last tab: compose() guarantees a SessionPane beside any
+        archive, so this never reaches the close-the-app branch."""
+        with contextlib.suppress(Exception):
+            await self.query_one("#session-tabs", TabbedContent).remove_pane(
+                tab.id or ""
+            )
+        self._persist_tabset()
 
     def action_end_session(self) -> None:
         """Ctrl+Q: END this tab's session -- finalize NOW (LORE review +

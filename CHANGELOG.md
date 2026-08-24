@@ -4,6 +4,146 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.32.0 — 2026-08-24
+
+Restore brings back the VIEW, not just the tab list. Reported: "i meant to
+restore the view, also any prior vertical or horizontal panel split and
+amount of opened tabs and their content, after it was closed". Written
+defect-then-fix, with the measurement that identified each cause.
+
+- **A restored tab came back EMPTY when the session was longer than the
+  daemon's replay ring.** THE DEFECT: v0.23.0's tab restore reattached
+  every saved tab to its still-live daemon and let the daemon replay its
+  event ring (`doxa/daemon.py`, `EventRing.since`) to the fresh client.
+  That worked for a SHORT session, which is why it read as "content
+  restores" and shipped. THE CAUSE, measured against a real daemon over a
+  real Unix socket before anything was changed: the ring holds
+  `RING_CAPACITY` = 512 frames and one `text_delta` is one frame, so a
+  single 700-delta answer pushes `turn_started` off the far end. Once it
+  is gone, `SessionPane._peer_pump`'s `if self._oob_turn is not None`
+  guard has no `TurnBlock` to render the survivors into and drops every
+  one of them on the floor. The numbers from that run: ring `next_seq`
+  702, oldest buffered seq 190, restored tab rendered **zero** turn
+  blocks — beside a live daemon that still held the whole conversation —
+  and said nothing about it. THE FIX, in two parts. (1) A restored pane's
+  scrollback now comes from the session's own persisted transcript
+  (`doxa/transcript.py`, new): `$LORE_PROJECTS_DIR/<slug>/<session_id>.
+  jsonl`, the file `SessionEngine._persist` already writes at the scrub
+  choke point and `lore_store.index_live` already indexes for `/search`.
+  It is complete where the ring is a tail, it is already scrubbed, it
+  outlives the daemon, and it is on the same machine as the TUI. (2) The
+  orphan case is no longer silent anyway: a turn event with no
+  `turn_started` in front of it (a reattach landing mid-turn) opens an
+  unattributed turn block that says `(turn already in progress)` instead
+  of vanishing.
+
+- **How the 64KB frame cap is handled here: by not putting a transcript
+  on the wire at all.** `doxa.daemon.encode_frame` enforces
+  `peers.MAX_FRAME_BYTES` (64KB) and v0.28.0 had to page the beliefs RPC
+  for exactly that reason (500 beliefs measured at 230KB, 3.6x the cap);
+  v0.31.0 then generalized that into the shared `_fit_page` byte budget
+  and put the new `pending` RPC through it too. A transcript is far bigger
+  than either, so a `transcript` RPC would have needed the same paging —
+  and would have been a THIRD caller of that budget, for bytes that never
+  had to move at all. The daemon socket is a Unix socket: client and
+  daemon are the same user on the same machine, so the TUI reads the file
+  directly. There is no frame on this path, so `_fit_page` is deliberately
+  not involved and gains no third caller: one implementation, one budget,
+  for the things that really do cross the wire. What IS capped here is the
+  RENDER, and every cut says so on screen: 40 turns
+  (`transcript.DEFAULT_TURN_LIMIT`, earlier ones announced as "N earlier
+  turns not shown — the full transcript is on disk (/search)"), 20,000
+  characters of prose per turn (marked "…answer truncated for restore"),
+  30 tool chips per turn (a counted chip for the rest). A truncated
+  transcript never renders as if it were complete. Turns mount in batches
+  of six with a yield between them so a long restore cannot freeze the
+  first paint of the other tabs.
+
+- **The ring is no longer replayed on top of what was just drawn.**
+  `EngineClient(sock, skip_backlog=True)` attaches at the daemon's CURRENT
+  ring head, read from the `next_seq` the hello frame has advertised since
+  the protocol's first version — so no protocol change, no version bump,
+  and no `doxa stop` forced on anyone. A daemon that does not advertise a
+  head refuses the skip, and a pane that could not skip renders nothing
+  from disk: v0.31.0's replay-only behaviour, unchanged, rather than a
+  doubled transcript.
+
+- **A session whose daemon had ended did not come back at all.** THE
+  DEFECT: `tabsets.resolve` cross-checked every saved tab against the live
+  daemon registry and dropped whatever no longer answered, leaving the
+  user one line of arithmetic ("skipped 1 session no longer running") in
+  place of the tab and everything in it. Correct as far as it went — a
+  dead session must never be replaced by a fresh one wearing its tab — but
+  a daemon finalizing on its linger timer while the window is shut is the
+  ORDINARY way a session ends, so "the tabs come back" quietly meant "some
+  of them do". THE FIX: a saved tab with no daemon but a transcript on
+  disk now comes back as an `ArchivedSessionTab` — same strip, same order,
+  same pinned name, the whole conversation rendered by the same code path
+  a live restore uses, and no engine, no prompt, no way to type into a
+  session that does not exist. Deliberately not a `SessionPane`, exactly
+  like `SubagentTranscriptTab` before it: a prompt box that refuses every
+  prompt is worse than no prompt box. **The user can always tell which
+  they got** — the report distinguishes "restored 2 tabs" from "1
+  read-only transcript (session ended)", the tab wears a `⏺`, and the
+  tab's first block says the session has ended and where the text came
+  from. An archived tab stays in the persisted set (it survived one
+  restart, it survives the next); Ctrl+W closes it and takes it out. A
+  saved id with neither a daemon nor a transcript is still dropped and
+  still counted. An all-archived restore always opens one live session
+  beside the archives, so the window is never left with nothing to type
+  into.
+
+- **With three or more restored tabs, the saved ACTIVE tab lost to
+  whichever pane mounted last.** THE DEFECT, latent since v0.23.0 and
+  found while measuring this work: `SessionPane.on_mount` focuses its
+  prompt, and focusing a widget inside a `TabPane` activates that pane —
+  so every restored pane doing it left the LAST one active whatever
+  `DoxaApp.on_mount` had set from the record. The existing two-tab test
+  never caught it because its saved active tab happened to BE the last
+  one, so the wrong mechanism produced the right answer. Measured with
+  three tabs and a middle active id: landed on tab three every time. THE
+  FIX: during a restore exactly one pane — the saved active one — focuses
+  on mount; `_on_tab_activated` focuses the rest when they are activated,
+  as it always did.
+
+- **An event arriving before a pane finished composing killed its
+  out-of-band pump for the life of the tab.** Found the same way: the
+  trailing `self._refresh_status()` in `_peer_pump` raised `NoMatches` on
+  `#status-bar` and took the worker down with it. That loop is the ONLY
+  renderer of replayed history, another client's turn, and `needs_input`,
+  so one unlucky moment left the pane deaf. A status-bar repaint is now
+  never allowed to end the pump — skipping one is invisible and the next
+  event does it again.
+
+- **Splits are NOT restored, because DOXA has no splits.** The report
+  asked for "any prior vertical or horizontal panel split" too. There is
+  no vertical or horizontal split layout in DOXA to restore: `SessionPane`
+  is a `TabPane` and the window is a tab strip. Recursive split panes are
+  a separate, unspecced feature, and **split restore waits on split panes
+  existing**. What this release does do is make the record able to carry
+  one later without a breaking change: alongside the flat `tabs` list it
+  now writes `{"layout": {"kind": "tabs", "tabs": [...]}}`, the slot a
+  `{"kind": "split", ...}` node would grow into. The flat list stays at
+  the top level and stays authoritative, so a record written here still
+  restores under v0.23.0–v0.31.0, and `load` still prefers it, so a record
+  written there restores here. A `layout` node whose `kind` this version
+  does not recognise reads as "nothing to restore" rather than a split
+  silently flattened into tabs. Cost: one dict on write, one branch on
+  read.
+
+- Saved tab records now carry the session's own `cwd`. A dead session has
+  no registry entry left to ask where it ran, and its transcript lives
+  under the project slug of that directory — which, with
+  `worktree_per_session` on, is its linked worktree and not the repo root.
+  Absent on every record written before this version, which falls back to
+  the scope key; a wrong guess costs an archived tab, never a wrong
+  transcript (the file is keyed by session id, so a miss is a miss).
+
+- Startup behaviour is unchanged for existing users: `restore_tabs` still
+  defaults ON and still gates whether a launch reads the record at all,
+  and an ordinary launch in a directory that HAS a transcript still opens
+  an empty pane. Restore is the only thing that reads a transcript back.
+
 ## 0.31.0 — 2026-08-24
 
 The streaming background reviewer had been staging memory proposals into
