@@ -80,6 +80,62 @@ async def test_turn_block_and_tool_chip_appear_live(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_status_bar_effort_chip_hidden_at_cli_default(monkeypatch, tmp_path):
+    """No level asserted at connect (engine.effort is None, the CLI-default
+    case) -- the chip is omitted entirely, same hide-at-zero convention as
+    the git/usage/peers/disabled-tools chips (item T)."""
+    monkeypatch.setattr(
+        "doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine(SCRIPT)
+    )
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        status = str(app.query_one("#status-bar").renderable)
+        assert "effort:" not in status
+
+
+@pytest.mark.asyncio
+async def test_status_bar_effort_chip_shows_asserted_level(monkeypatch, tmp_path):
+    """A level WAS asserted at connect -- the chip names it, alongside
+    model/ctx/cost."""
+    monkeypatch.setattr(
+        "doxa.app.SessionEngine",
+        lambda cwd, model=None: FakeEngine(SCRIPT, effort="xhigh"),
+    )
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        status = str(app.query_one("#status-bar").renderable)
+        assert "effort:xhigh" in status
+
+
+@pytest.mark.asyncio
+async def test_turn_done_cost_line_is_subscription_aware(monkeypatch, tmp_path):
+    """Item T: the per-turn cost line in the TurnBlock title follows the
+    SAME subscription-vs-API rule the status bar and /usage already apply
+    to the session total -- a bare ``$`` figure next to a status bar that
+    just said this account pays no dollars is exactly the divergence the
+    audit found. Subscription auth demotes to an explicit what-if; API-key
+    (or no account info) keeps the plain ``$`` figure."""
+    fake = FakeEngine(SCRIPT)
+    fake.account = {"subscriptionType": "Claude Max"}
+    monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: fake)
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#prompt-input").value = "what is 2+2?"
+        await pilot.press("enter")
+        for _ in range(100):
+            blocks = list(app.query(TurnBlock))
+            if blocks and blocks[0].assistant_text == "The answer is 4.":
+                break
+            await pilot.pause(0.02)
+        block = list(app.query(TurnBlock))[0]
+        assert "≈$0.0020 if API" in str(block.title)
+        assert "$0.0020" not in str(block.title).replace("≈$0.0020 if API", "")
+
+
+@pytest.mark.asyncio
 async def test_no_live_animation_timers_after_turns(monkeypatch, tmp_path):
     """Idle-CPU regression: a finished turn's hidden LoadingIndicator must
     not keep its 16Hz auto-refresh timer alive -- one leaked timer per turn

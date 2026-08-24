@@ -81,6 +81,28 @@ async def test_start_captures_account_and_init_names_the_model(tmp_path):
     await engine.finalize()
 
 
+def test_start_captures_effort_asserted_at_connect(monkeypatch, tmp_path):
+    """Item T's status-bar chip needs THIS session's actual connect-time
+    effort, not a re-read of live config (which /effort can change after
+    connect without touching the running session -- see its own docstring).
+    _build_options() is what asserts effort onto ClaudeAgentOptions; self.
+    effort must capture the SAME value it asserted, once, right there."""
+    monkeypatch.setenv("DOXA_EFFORT", "xhigh")
+    eng = SessionEngine(cwd=str(tmp_path))
+    assert eng.effort is None  # nothing asserted before connect
+    options = eng._build_options()
+    assert options.effort == "xhigh"
+    assert eng.effort == "xhigh"
+
+    monkeypatch.delenv("DOXA_EFFORT", raising=False)
+    import doxa.config as config_mod
+
+    config_mod.invalidate()
+    unset = SessionEngine(cwd=str(tmp_path))
+    unset._build_options()
+    assert unset.effort is None  # CLI default -- the chip hides itself
+
+
 @pytest.mark.asyncio
 async def test_start_without_server_info_leaves_identity_empty(tmp_path):
     """No initialize payload (fakes, older SDKs, API-key non-streaming):

@@ -1,8 +1,95 @@
 # Changelog
 
 Newest first. Versions are annotated git tags on the commit that shipped
-them (`v0.1.0` … `v0.10.0`); the ranges below are derived from that history,
+them (`v0.1.0` … `v0.12.0`); the ranges below are derived from that history,
 not written from memory.
+
+## 0.12.0 — 2026-08-24
+
+- **Cost display audit, then build** (item T) — measured DOXA's cost
+  numbers against real API usage before touching the display code, per
+  0.10.0's own note that item T owes item AA a byte-priced isolated-vs-
+  unisolated comparison. THE AUDIT (real subscription-OAuth turns, Claude
+  Haiku 4.5, one-off scratchpad scripts, never committed):
+  - **Hand-priced reconciliation.** A cold-cache, no-env-override turn
+    (`ClaudeAgentOptions.env` unset — the pre-item-AA shape) reconciled
+    to the cent: `usage` reported input 10 + cache_creation 23,297 (1h
+    TTL) + output 79 tokens; at Haiku 4.5's published $1/$5 per MTok with
+    the documented 2× 1h-cache-write multiplier, hand-priced arithmetic
+    gives $0.046999 — `ResultMessage.total_cost_usd` reported exactly
+    $0.046999. Repeated on DOXA's real, isolated engine path
+    (`SessionEngine._build_options()`, LORE snapshot + native tools +
+    hooks) at full cache warmth (cache_read 26,755, cache_creation 0,
+    output 38–48 across four separate turns): hand-priced arithmetic
+    (input $1 + cache-read 0.1× + output $5 per MTok) undershoots
+    `total_cost_usd` by a consistent ~32–34% ($0.0029 hand-priced vs.
+    $0.0038–0.0039 reported, every time) — small in absolute terms
+    (under a tenth of a cent) but reproducible across all four isolated
+    runs, while the SAME formula matched the unisolated path exactly on
+    two further warm-cache turns. No corrupted or nonsensical values were
+    observed anywhere (no negative costs, no missing fields) — the
+    divergence looks like the published "cache reads are ~0.1× input"
+    figure being an approximation, not a bug in what the SDK reports.
+    **Conclusion: `total_cost_usd` is authoritative and kept as-is** —
+    it is computed server-side from metered usage, not from a
+    client-side guess, and hand-priced arithmetic is not a more correct
+    number to substitute in.
+  - **Isolated vs. unisolated, controlled and byte-priced** (the
+    comparison 0.10.0 deferred to this item, superseding that release's
+    own uncontrolled number). Same `SessionEngine._build_options()` —
+    same system-prompt append, same native LORE MCP tools, same hooks —
+    with `env` as the ONLY variable (item AA's real fix vs. `env={}`,
+    the pre-fix shape that inherits the operator's own `~/.claude`).
+    Cache effects controlled for by repeating each side to full warmth:
+    unisolated settled at 26,779 total prompt tokens (cache_read +
+    cache_creation), isolated at 26,755 — a 0.09% difference, i.e.
+    isolation's byte/cost impact on THIS prompt is a rounding error, not
+    a saving. (An earlier, uncontrolled comparison — a bare
+    `ClaudeSDKClient` with no system-prompt append at all against the
+    full DOXA engine — swung by double digits in both directions
+    depending on cache state; it is not reported as a finding because it
+    wasn't holding the prompt constant.) This confirms 0.10.0's own
+    caveat in code: item AA's value is closing the foreign hook/plugin/
+    command channel (5 plugins, 16 hooks, 28 commands, one external MCP
+    server, structurally to zero) and the LORE-citation-contamination
+    defect it caused — not a token-cost saving.
+  - **Subscription-vs-API discriminator verified, not rebuilt** — per
+    the item's own constraint. `engine.account` (captured at `start()`
+    via `get_server_info()`) and `doxa.identity`'s
+    `organizationRateLimitTier` reads were exercised live: on this
+    account (`Claude Max`, `organizationRateLimitTier:
+    default_claude_max_20x`), `identity.account_tier()` correctly
+    resolves the precise `"max 20x"` label ahead of the SDK's coarser
+    `"Claude Max"` string, exactly as designed. Left untouched.
+  - **One real divergence found and fixed**: the status bar
+    (`sub:<tier> (≈$X if API)`) and `/usage` (`plan  tier  (≈$X if
+    API)`) already demoted subscription cost to an explicit what-if —
+    audited and confirmed correct, no change needed. The per-turn cost
+    line in each `TurnBlock`'s title (`doxa.app.TurnBlock.mark_done`)
+    did NOT: it rendered a bare `$0.0043` unconditionally, subscription
+    or not — a real-looking per-turn bill sitting directly under a
+    status bar that just said the account pays no dollars. Fixed to
+    take the same `account_tier` lookup the other two surfaces already
+    use and render `≈$0.0043 if API` on subscription auth, unchanged
+    `$0.0043` on API-key auth (or before account info arrives).
+  - **Amendment — effort status-bar chip.** `/effort` (`doxa/
+    commands.py`) has always been able to set the CLI's `--effort`
+    level, but nothing showed what a RUNNING session actually asserted
+    at connect. `SessionEngine._build_options()` now records what it
+    asserts as `self.effort` (mirrors `self.account`/`self.model`'s
+    connect-time-capture shape) — deliberately the CONNECT-TIME value,
+    not a live re-read of `/effort`'s config, since a mid-session
+    `/effort` change is explicit that it never reaches the already-
+    running session. `_refresh_status` renders it as an `effort:<level>`
+    chip beside model/ctx/cost, hidden entirely when no level was
+    asserted (the CLI-default case) — the same hide-at-zero convention
+    every other optional chip on that line already follows.
+  - `tests/fakes.py::FakeEngine` gained the matching `effort` attribute
+    (constructor kwarg, default `None`) in lockstep, per the engine-
+    surface-parity rule the fake's own docstring states. 476 tests green
+    (was 472 on `main` post-0.11.0, itself up from 430 at 099edca): 4
+    new here — connect-time effort capture, the chip's hidden/shown
+    states, and the turn-cost-line fix.
 
 ## 0.11.0 — 2026-08-24
 

@@ -662,13 +662,25 @@ class TurnBlock(Collapsible):
         self.assistant_text += chunk
         self.body.update(self.assistant_text)
 
-    def mark_done(self, cost_usd: float | None, duration_ms: int | None, is_error: bool) -> None:
+    def mark_done(
+        self,
+        cost_usd: float | None,
+        duration_ms: int | None,
+        is_error: bool,
+        tier: str | None = None,
+    ) -> None:
+        """``tier`` (item T): the SAME subscription-vs-API rule the status
+        bar and /usage already apply to the session TOTAL applies here to
+        the per-turn figure too -- a bare ``$`` on subscription auth reads
+        as a real per-turn bill next to a status bar that just said this
+        account pays no dollars. ``None`` (API-key auth, or no account info
+        yet) keeps the plain ``$`` figure unchanged."""
         self.hide_thinking()
         bits = []
         if duration_ms is not None:
             bits.append(f"{duration_ms}ms")
         if cost_usd is not None:
-            bits.append(f"${cost_usd:.4f}")
+            bits.append(f"≈${cost_usd:.4f} if API" if tier else f"${cost_usd:.4f}")
         if is_error:
             bits.append("✗ error")
         suffix = f"  ·  {'  ·  '.join(bits)}" if bits else ""
@@ -1734,6 +1746,11 @@ class SessionPane(TabPane):
             cost = f"${self.engine.total_cost_usd:.4f}"
         beliefs = self.engine.belief_count()
         parts = [model]
+        effort = getattr(self.engine, "effort", None)
+        if effort:  # hide-at-zero: omitted when the CLI default is in
+            # force (no level asserted at connect) -- same convention as
+            # the git/usage/peers/disabled-tools chips below.
+            parts.append(f"effort:{effort}")
         git_chip = self._git.render() if self._git is not None else None
         if git_chip:  # hidden entirely outside a repo
             parts.append(git_chip)
@@ -2350,7 +2367,14 @@ class SessionPane(TabPane):
                     ev.data["duration_ms"], image_path=ev.data.get("image_path"),
                 )
         elif ev.type == "turn_done":
-            block.mark_done(ev.data.get("cost_usd"), ev.data.get("duration_ms"), ev.data.get("is_error", False))
+            # Same tier lookup _refresh_status/_usage_text already do --
+            # keeps the per-turn figure consistent with both (item T).
+            account = getattr(self.engine, "account", None) or {}
+            tier = identity_mod.account_tier(account)
+            block.mark_done(
+                ev.data.get("cost_usd"), ev.data.get("duration_ms"),
+                ev.data.get("is_error", False), tier,
+            )
             # The one place the headroom chip is recomputed: a turn just
             # spent budget, and the CLI may have refreshed its own cache.
             self._refresh_usage_chip()

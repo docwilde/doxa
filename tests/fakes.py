@@ -6,8 +6,8 @@ doxa.engine.SessionEngine at the doxa.app layer, so the Textual pilot test
 can drive a scripted turn without a real engine (and therefore without a
 real SDK client) underneath it -- app.py only ever touches the small surface
 reproduced here (start/send/finalize/model/total_cost_usd/
-last_ctx_percentage/belief_count), so the fake is a narrow, honest stand-in
-rather than a reimplementation of the engine.
+last_ctx_percentage/effort/belief_count), so the fake is a narrow, honest
+stand-in rather than a reimplementation of the engine.
 """
 
 from __future__ import annotations
@@ -97,11 +97,16 @@ class FakeEngine:
         script: list[EngineEvent],
         model: str = "claude-haiku-4-5",
         peers: list[PeerInfo] | None = None,
+        effort: "str | None" = None,
     ) -> None:
         self._script = script
         self.model = model
         self.total_cost_usd = 0.0
         self.last_ctx_percentage: float | None = None
+        # Engine parity (item T): connect-time effort, asserted once and
+        # never mutated for the life of a session -- same shape as the real
+        # engine's self.effort.
+        self.effort = effort
         self.started = False
         self.finalized = False
         self._peers = peers or []

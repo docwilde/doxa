@@ -271,6 +271,10 @@ class SessionEngine:
         self._tool_started: dict[str, float] = {}  # tool_use_id -> monotonic start
         self.total_cost_usd = 0.0
         self.last_ctx_percentage: float | None = None
+        # Reasoning-effort level asserted at connect (item T's status-bar
+        # chip) -- None until _build_options runs, same as every other
+        # connect-time field here (server_info, account).
+        self.effort: str | None = None
         # Session token accounting for /usage: summed from every
         # ResultMessage's own usage block -- the CLI's numbers, not an
         # estimate of our own. Cache reads/creates are kept separate
@@ -565,6 +569,15 @@ class SessionEngine:
             ctx={"belief_store": lore_store.db_connect, "lore_root": str(lore_core.ROOT)},
         )
         effort = effort_level()
+        # Captured on self (not just the local var) so the status bar's
+        # effort chip (item T) shows what THIS session actually asserted at
+        # connect, not whatever /effort's config says right now -- /effort
+        # is explicit that a mid-session change never reaches the running
+        # session (see its own docstring), and the chip must tell the same
+        # true story. None means no level was asserted -- the CLI default is
+        # in force, and the chip hides itself exactly like every other
+        # hide-at-zero status-bar chip.
+        self.effort = effort
         return ClaudeAgentOptions(
             model=self.model,
             # Connect-time only -- see effort_level(). None leaves the CLI's
