@@ -165,6 +165,50 @@ def test_notify_turn_done_is_gated_like_any_other_trigger(monkeypatch):
     assert len(calls) == 1
 
 
+def test_notify_needs_input_includes_the_summary(monkeypatch):
+    config.save({"notify": "always"})
+    calls = []
+    monkeypatch.setattr(notify_mod, "notify", lambda title, body: calls.append((title, body)))
+    notify_mod.notify_needs_input(True, "Sonnet@doxa:main", "which environment?")
+    assert calls == [("Sonnet@doxa:main", "which environment?")]
+
+
+def test_notify_needs_input_falls_back_when_summary_is_empty(monkeypatch):
+    config.save({"notify": "always"})
+    calls = []
+    monkeypatch.setattr(notify_mod, "notify", lambda title, body: calls.append((title, body)))
+    notify_mod.notify_needs_input(True, "Sonnet@doxa:main", "")
+    assert calls == [("Sonnet@doxa:main", "needs your input")]
+
+
+def test_notify_needs_input_truncates_a_long_summary(monkeypatch):
+    config.save({"notify": "always"})
+    calls = []
+    monkeypatch.setattr(notify_mod, "notify", lambda title, body: calls.append((title, body)))
+    notify_mod.notify_needs_input(True, "tab", "x" * 200)
+    body = calls[0][1]
+    assert len(body) == 121  # 120 chars + the ellipsis
+    assert body.endswith("…")
+
+
+def test_notify_needs_input_is_gated_like_any_other_trigger(monkeypatch):
+    config.save({"notify": "auto"})
+    calls = []
+    monkeypatch.setattr(notify_mod, "notify", lambda title, body: calls.append((title, body)))
+    notify_mod.notify_needs_input(True, "tab", "q")  # focused, auto: silent
+    assert calls == []
+    notify_mod.notify_needs_input(False, "tab", "q")  # unfocused: speaks
+    assert len(calls) == 1
+
+
+def test_notify_needs_input_toggle_off_silences_it_even_when_unfocused(monkeypatch):
+    config.save({"notify": "always", "notify_needs_input": "0"})
+    calls = []
+    monkeypatch.setattr(notify_mod, "notify", lambda title, body: calls.append((title, body)))
+    notify_mod.notify_needs_input(False, "tab", "q")
+    assert calls == []
+
+
 def test_notify_update_available_message(monkeypatch):
     config.save({"notify": "always"})
     calls = []

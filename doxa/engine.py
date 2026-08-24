@@ -29,6 +29,26 @@ Boundaries used, and why:
   "this stage may only use these tools" has to become "gate individual tool
   calls via a PreToolUse hook" instead. The gate also owns two-strikes
   containment and the OperatorContext sidecar -- see doxa/gate.py.
+* Interactive permission -- ``ClaudeAgentOptions.can_use_tool`` (queue item
+  5, phase 2 of the v0.11 attention-blink/notify_needs_input plumbing).
+  The gate above stays the CONTAINMENT layer (deny-or-allow, decided
+  server-side, no human in the loop); this callback's job is narrower --
+  the two cases the CLI would otherwise show interactive UI for, which a
+  headless SDK run with no callback at all silently auto-denies:
+  (a) an ``AskUserQuestion`` tool call, surfaced to the pane as a
+  question/options dialog; (b) a tool call the CLI's own permission
+  system wants a human decision on -- recognized by the
+  ``ToolPermissionContext`` fields (``title``/``display_name``/
+  ``decision_reason``) the CLI only populates for a call it would
+  genuinely have prompted on. Every OTHER call reaching this callback
+  (the common case -- nothing in ``context`` populated, nothing the gate
+  already denied) returns a bare allow, unchanged from today's silent
+  pass-through -- the callback is invoked for every tool call the PreToolUse
+  hook didn't deny, so defaulting to allow is what keeps this addition
+  zero-regression rather than a new prompt on every tool call. See
+  ``_on_can_use_tool`` below and the queue item 5 task report for the
+  exact SDK source this reads (installed ``claude_agent_sdk`` package,
+  ``_internal/query.py``/``types.py``).
 * Native tools -- ``doxa.operators``' registry, projected to an IN-PROCESS
   SDK MCP server (``create_sdk_mcp_server``, PHASE0 SS6: the SDK's own
   custom-tool mechanism, no subprocess/IPC per call) registered under
@@ -75,10 +95,14 @@ from claude_agent_sdk import (
     ClaudeSDKClient,
     HookMatcher,
     create_sdk_mcp_server,
+    PermissionResult,
+    PermissionResultAllow,
+    PermissionResultDeny,
     ResultMessage,
     StreamEvent,
     SystemMessage,
     TextBlock,
+    ToolPermissionContext,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
@@ -154,11 +178,22 @@ class EngineEvent:
     ``type`` is one of: turn_started, text_delta, tool_call, tool_result,
     turn_done, session_done -- the six event kinds the TUI (doxa/app.py)
     switches on to build/update blocks -- plus peer_joined, peer_left,
-    peer_message and tool_disabled, which arrive out-of-band on the same
-    EngineEvent type via :meth:`SessionEngine.peer_events` (a turn generator
-    can only yield while a turn runs; peer activity doesn't wait for one,
-    and a two-strikes disable fires from inside the SDK's tool dispatch,
+    peer_message, tool_disabled, needs_input and needs_input_resolved,
+    which arrive out-of-band on the same EngineEvent type via
+    :meth:`SessionEngine.peer_events` (a turn generator can only yield
+    while a turn runs; peer activity doesn't wait for one, and a
+    two-strikes disable -- or a can_use_tool callback blocked on a
+    question -- fires from inside the SDK's own control-request dispatch,
     outside our generator's yield points).
+
+    ``needs_input`` (data: ``id``, ``kind`` -- ``"ask_user"`` or
+    ``"permission"`` --, ``tool_name``, plus ``questions`` for ask_user or
+    ``input_summary``/``title``/``display_name``/``description`` for
+    permission) is queued by :meth:`_on_can_use_tool` and answered by
+    :meth:`answer_needs_input`; ``needs_input_resolved`` (data: ``id``)
+    follows once it is, so every attached client -- not just the one that
+    answered -- can drop its own copy of the dialog (same "everyone
+    learns" convention ``model_changed`` already follows for /model).
     """
 
     type: str
@@ -239,6 +274,25 @@ def _tool_result_image_path(tool_use_id: str, content: Any, result_text: str) ->
     return None
 
 
+def _permission_summary(tool_name: str, tool_input: dict) -> str:
+    """A one-line ``tool_name arg-json`` summary for the permission
+    dialog -- SCRUBBED (see the module docstring's secret-scrub choke
+    point): unlike a transcript-derived string this one is never
+    persisted, but it does reach two audiences that string is not vetted
+    for either -- a desktop notification (queue item 5's detached-daemon
+    case) and, in principle, a screen someone else can see over your
+    shoulder -- so it gets the same treatment before either ever sees
+    it. Truncated hard: this is a decision prompt, not a pretty-printer."""
+    try:
+        raw = json.dumps(tool_input or {}, ensure_ascii=False)
+    except Exception:
+        raw = str(tool_input)
+    raw = _scrub_text(" ".join(raw.split()))
+    if len(raw) > 200:
+        raw = raw[:200] + "…"
+    return f"{tool_name} {raw}" if raw not in ("{}", "") else tool_name
+
+
 class SessionEngine:
     """One session, one Claude Agent SDK client, one LORE-compatible
     transcript. ``client_factory`` is injectable so the test suite can hand
@@ -317,6 +371,17 @@ class SessionEngine:
             ),
             on_disable=self._on_tool_disabled,
         )
+
+        # Interactive permission (queue item 5): one pending asyncio.Future
+        # per outstanding AskUserQuestion/permission request, keyed by the
+        # id the needs_input event carried -- the SAME id answer_needs_input
+        # takes back. Never more than a handful in flight (a session can
+        # have several tool calls awaiting can_use_tool concurrently, one
+        # per sub-agent branch); nothing here is persisted -- a session
+        # that ends with one still pending just lets the coroutine that
+        # was awaiting it die with the connection, same as any other
+        # in-flight control request would.
+        self._pending_needs_input: dict[str, asyncio.Future] = {}
 
         # Streaming deriver (opt-in via DOXA_DERIVE_SECS): a debounced
         # background review of the transcript-so-far, reusing the exact
@@ -474,6 +539,123 @@ class SessionEngine:
     def disabled_tools(self) -> list[str]:
         return self.tool_gate.disabled_tools()
 
+    # -- interactive permission (can_use_tool, queue item 5) -----------
+
+    async def _on_can_use_tool(
+        self, tool_name: str, tool_input: dict, context: ToolPermissionContext,
+    ) -> PermissionResult:
+        """The ``can_use_tool`` callback -- see the module docstring's
+        "Interactive permission" bullet for the two cases this actually
+        handles and why every other call defaults to allow. Never denies
+        via a raised exception: a bug in here must degrade to "let the
+        call through" (the SDK's own default when the callback errors is
+        to fail the tool call outright, which would turn a UI bug into a
+        stuck session), so both branches are wrapped."""
+        if tool_name == "AskUserQuestion":
+            try:
+                return await self._ask_user_question(tool_input, context)
+            except Exception:
+                return PermissionResultAllow()
+        if context.title or context.display_name or context.decision_reason:
+            # The CLI only populates these for a call it would genuinely
+            # have shown its own interactive permission prompt for --
+            # everything else (the common case) never reaches this branch,
+            # which is what keeps this callback zero-regression: nothing
+            # that flows through silently today gains a new prompt.
+            try:
+                return await self._request_permission(tool_name, tool_input, context)
+            except Exception:
+                return PermissionResultAllow()
+        return PermissionResultAllow()
+
+    async def _wait_for_answer(self, kind: str, data: dict) -> dict:
+        """Queue one needs_input event (out-of-band -- same queue
+        tool_disabled uses, for the same reason: this runs from inside the
+        SDK's own control-request dispatch, not from send()'s yield
+        points) and block until :meth:`answer_needs_input` resolves it, or
+        forever if nobody ever does -- queue item 5 is explicit that a
+        parked question must not time out on its own; the SDK forcing one
+        would show up as this await simply never returning, which is the
+        correct behavior to inherit, not something to paper over with a
+        local timeout."""
+        req_id = uuid.uuid4().hex[:12]
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._pending_needs_input[req_id] = fut
+        self._peer_queue.put_nowait(
+            EngineEvent("needs_input", {"id": req_id, "kind": kind, **data})
+        )
+        try:
+            return await fut
+        finally:
+            self._pending_needs_input.pop(req_id, None)
+            self._peer_queue.put_nowait(
+                EngineEvent("needs_input_resolved", {"id": req_id})
+            )
+
+    async def _ask_user_question(
+        self, tool_input: dict, context: ToolPermissionContext,
+    ) -> PermissionResult:
+        """AskUserQuestion, discovered from the installed SDK's own
+        bundled CLI (not the Python SDK, which is silent on this tool --
+        see the task report): its input schema carries an optional
+        ``answers`` field described as "User answers collected by the
+        permission component" -- exactly this callback -- keyed by each
+        question's own text, valued by the chosen label (multi-select
+        joined with ", " by the CLI's own transform; this callback always
+        hands back a single string per question, so that join, if any,
+        happens pane-side). Declining (Esc, per the SDK contract for a
+        tool the model asked to run) is an ordinary graceful deny, not an
+        error -- the model sees a refused call and can adapt, same as any
+        other declined permission."""
+        answer = await self._wait_for_answer("ask_user", {
+            "tool_name": "AskUserQuestion",
+            "questions": _scrub_json(tool_input.get("questions") or []),
+        })
+        if not isinstance(answer, dict) or answer.get("declined"):
+            return PermissionResultDeny(
+                message="the user declined to answer", interrupt=False,
+            )
+        answers = answer.get("answers")
+        updated_input = dict(tool_input)
+        updated_input["answers"] = answers if isinstance(answers, dict) else {}
+        return PermissionResultAllow(updated_input=updated_input)
+
+    async def _request_permission(
+        self, tool_name: str, tool_input: dict, context: ToolPermissionContext,
+    ) -> PermissionResult:
+        """The plain allow/deny case: a tool call the CLI would have shown
+        its own permission prompt for. ``title`` is the CLI's own full
+        prompt sentence when it gave us one ("Claude wants to read
+        foo.txt") -- preferred verbatim over reconstructing one from the
+        tool name and a JSON blob, per its own docstring."""
+        answer = await self._wait_for_answer("permission", {
+            "tool_name": tool_name,
+            "input_summary": _permission_summary(tool_name, tool_input),
+            "title": context.title,
+            "display_name": context.display_name,
+            "description": context.description,
+        })
+        decision = answer.get("decision") if isinstance(answer, dict) else None
+        if decision == "allow":
+            return PermissionResultAllow()
+        return PermissionResultDeny(message="the user denied this tool call")
+
+    async def answer_needs_input(self, req_id: str, answer: dict) -> bool:
+        """Resolve one pending needs_input request -- the daemon's
+        ``answer_needs_input`` RPC and the in-process app both funnel
+        here. Async for engine/EngineClient call-site parity (see
+        doxa/client.py's module docstring); the body has no await of its
+        own. Idempotent: answering an id twice (a race between two
+        attached clients) or one nobody is waiting on (already resolved,
+        or never existed) is a no-op that reports False rather than
+        raising -- this is an RPC handler's input, never trusted."""
+        fut = self._pending_needs_input.get(req_id)
+        if fut is None or fut.done():
+            return False
+        fut.set_result(dict(answer or {}))
+        return True
+
     def _run_review_sync(self, older: bool) -> None:
         """Blocking: build the deriver job for the transcript so far and run
         it. Called off the event loop (see _on_pre_compact / finalize).
@@ -594,6 +776,11 @@ class SessionEngine:
                 "PreCompact": [HookMatcher(hooks=[self._on_pre_compact])],
                 "PreToolUse": [HookMatcher(hooks=[self._on_pre_tool_use])],
             },
+            # Interactive permission (queue item 5) -- see the module
+            # docstring and _on_can_use_tool. The gate above still denies
+            # everything it denies today (a PreToolUse "deny" wins outright,
+            # this callback is never reached for it); this is additive.
+            can_use_tool=self._on_can_use_tool,
             mcp_servers={
                 operators_mod.SDK_SERVER_NAME: create_sdk_mcp_server(
                     operators_mod.SDK_SERVER_NAME, version="0.1.0", tools=native_tools,

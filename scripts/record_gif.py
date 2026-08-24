@@ -51,6 +51,7 @@ from PIL import Image  # noqa: E402
 
 from doxa.app import (  # noqa: E402
     DoxaApp,
+    NeedsInputPopup,
     PromptInput,
     SessionSearch,
     TabRename,
@@ -469,6 +470,49 @@ async def _drive_attention_blink(app: DoxaApp, pilot: Any, rec: FrameRecorder) -
 
 
 # --------------------------------------------------------------------- #
+# Scene: needs-input -- queue item 5's AskUserQuestion dialog
+# --------------------------------------------------------------------- #
+
+
+async def _drive_needs_input(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
+    """Same fake-event injection _drive_attention_blink already uses
+    (push_peer_event, the out-of-band queue every FakeEngine exposes) --
+    but pushing a REAL needs_input payload this time, so the dialog it
+    drives is the actual doxa.app.NeedsInputPopup, not just the bare
+    tab-blink mechanism the attention-blink scene demos on its own."""
+    await pilot.pause()
+    pane = app.active_pane
+    assert pane is not None
+    pane.engine.push_peer_event(EngineEvent("needs_input", {
+        "id": "demo-1", "kind": "ask_user", "tool_name": "AskUserQuestion",
+        "questions": [{
+            "question": "Which environment should the migration run against?",
+            "header": "Target environment",
+            "options": [
+                {"label": "staging", "description": "safe to re-run"},
+                {"label": "production", "description": "one-way -- needs the maintenance window"},
+            ],
+            "multiSelect": False,
+        }],
+    }))
+    popup = pane.query_one("#needs-input-popup", NeedsInputPopup)
+    for _ in range(50):
+        if popup.is_open:
+            break
+        await pilot.pause(0.02)
+    await pilot.pause()
+    rec.snap(1200, "AskUserQuestion: the tab blinks, the dialog opens above the prompt")
+
+    await pilot.press("down")
+    await pilot.pause()
+    rec.snap(700, "arrow down highlights 'production'")
+
+    await pilot.press("enter")
+    await pilot.pause()
+    rec.snap(1000, "Enter answers it -- dialog clears, blink stops")
+
+
+# --------------------------------------------------------------------- #
 
 @dataclass
 class Scene:
@@ -523,6 +567,11 @@ SCENES: list[Scene] = [
     Scene(
         "attention-blink", _drive_attention_blink, size=SIZE_TAB_BAR, min_frames=4,
         widgets=(TabbedContent,),
+        engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
+    ),
+    Scene(
+        "needs-input", _drive_needs_input, size=SIZE_WIDE, min_frames=3,
+        widgets=(NeedsInputPopup, TabbedContent),
         engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
     ),
 ]

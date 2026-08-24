@@ -220,9 +220,12 @@ SETTINGS: tuple[Setting, ...] = (
         label="notify: needs input", category="Notifications",
         kind="bool_on", default="1",
         help="Notify when a session is waiting on you",
-        note="Reserved: the trigger (can_use_tool / AskUserQuestion "
-             "plumbing) is phase 2 -- this row exists but nothing fires it "
-             "yet.",
+        note="Fires on an AskUserQuestion or a permission request the CLI "
+             "would have prompted on (doxa.engine's can_use_tool "
+             "callback) -- while it's attached, gated like every other "
+             "trigger above; a fully detached session (nobody attached at "
+             "all) always notifies, since there is no window to blink "
+             "instead.",
     ),
     Setting(
         key="", env="DOXA_HOME", label="doxa home", category="Paths",

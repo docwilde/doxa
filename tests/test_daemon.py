@@ -29,8 +29,11 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
+from claude_agent_sdk import ToolPermissionContext
+
 from doxa import __version__, peers
 from doxa import config as config_mod
+from doxa import daemon as daemon_mod
 from doxa import worktrees as worktrees_mod
 from doxa.client import EngineClient, EngineClientError
 from doxa.daemon import PROTOCOL_VERSION, EventRing, SessionDaemon
@@ -486,3 +489,132 @@ async def test_detach_leaves_the_worktree_intact(tmp_path, monkeypatch):
         await asyncio.sleep(0.1)
         assert not serve_task.done()  # daemon still lingering
         assert Path(worktree_path).exists()
+
+
+# -- queue item 5: needs_input over the daemon split -----------------------
+
+
+@pytest.mark.asyncio
+async def test_needs_input_round_trips_over_the_socket_to_an_attached_client(
+    tmp_path, monkeypatch,
+):
+    """An attached client sees the needs_input frame the moment the
+    engine's can_use_tool callback queues one, answers it over the
+    socket, and gets back the SAME PermissionResult an in-process caller
+    would (protocol serialization proven both directions)."""
+    async with running_daemon(tmp_path, monkeypatch, linger=30.0) as (daemon, _, _):
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+
+        task = asyncio.ensure_future(daemon.engine._on_can_use_tool(
+            "AskUserQuestion",
+            {"questions": [{
+                "question": "which env?", "header": "Pick one",
+                "options": [{"label": "staging"}, {"label": "prod"}],
+            }]},
+            ToolPermissionContext(),
+        ))
+        events = await _drain_oob(client, "needs_input")
+        ev = events[-1]
+        assert ev.type == "needs_input"
+        assert ev.data["kind"] == "ask_user"
+        req_id = ev.data["id"]
+
+        ok = await client.answer_needs_input(
+            req_id, {"answers": {"which env?": "staging"}}
+        )
+        assert ok is True
+
+        from claude_agent_sdk import PermissionResultAllow
+
+        result = await asyncio.wait_for(task, 5)
+        assert isinstance(result, PermissionResultAllow)
+        assert result.updated_input["answers"] == {"which env?": "staging"}
+        await client.finalize()
+
+
+@pytest.mark.asyncio
+async def test_needs_input_parks_and_replays_on_reattach_with_no_client(
+    tmp_path, monkeypatch,
+):
+    """The detached-session case queue item 5 calls out explicitly: a
+    needs_input fired with NO client attached at all must not hang
+    silently -- it parks in the ring (replayed to whoever attaches next)
+    and fires the desktop notification (always the unfocused gate --
+    there is no window to be focused) since nobody is here to see a
+    blink."""
+    notified = []
+    monkeypatch.setattr(
+        daemon_mod.notify_mod, "notify_needs_input",
+        lambda focus, label, summary: notified.append((focus, label, summary)),
+    )
+    async with running_daemon(tmp_path, monkeypatch, linger=30.0) as (daemon, _, _):
+        assert daemon._clients == set()  # nobody attached yet
+
+        task = asyncio.ensure_future(daemon.engine._on_can_use_tool(
+            "Bash", {"command": "rm -rf /tmp/x"},
+            ToolPermissionContext(title="Claude wants to run rm -rf /tmp/x"),
+        ))
+        await asyncio.sleep(0.05)  # let the pump publish + notify
+
+        assert len(notified) == 1
+        focus, label, summary = notified[0]
+        assert focus is False
+        assert "rm -rf" in summary
+
+        # A later attach replays the parked question from the ring.
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        events = await _drain_oob(client, "needs_input")
+        ev = next(e for e in events if e.type == "needs_input")
+        assert ev.data["kind"] == "permission"
+
+        await client.answer_needs_input(ev.data["id"], {"decision": "deny"})
+        from claude_agent_sdk import PermissionResultDeny
+
+        result = await asyncio.wait_for(task, 5)
+        assert isinstance(result, PermissionResultDeny)
+        await client.finalize()
+
+
+@pytest.mark.asyncio
+async def test_answer_needs_input_resolution_broadcasts_to_every_attached_client(
+    tmp_path, monkeypatch,
+):
+    """Two clients attached to the same daemon (two windows on one
+    session): one answers, and the OTHER also sees needs_input_resolved
+    -- the same "everyone learns" convention model_changed already
+    follows for /model."""
+    async with running_daemon(tmp_path, monkeypatch, linger=30.0) as (daemon, _, _):
+        first = EngineClient(str(daemon.socket_path))
+        await first.start()
+        second = EngineClient(str(daemon.socket_path))
+        await second.start()
+
+        task = asyncio.ensure_future(daemon.engine._on_can_use_tool(
+            "AskUserQuestion",
+            {"questions": [{"question": "q", "options": [{"label": "A"}]}]},
+            ToolPermissionContext(),
+        ))
+        events = await _drain_oob(first, "needs_input")
+        req_id = events[-1].data["id"]
+
+        await second.answer_needs_input(req_id, {"answers": {"q": "A"}})
+        await asyncio.wait_for(task, 5)
+
+        resolved = await _drain_oob(first, "needs_input_resolved")
+        assert resolved[-1].data["id"] == req_id
+        await first.finalize()
+        await second.finalize()
+
+
+@pytest.mark.asyncio
+async def test_answer_needs_input_unknown_id_is_a_graceful_rpc_failure(
+    tmp_path, monkeypatch,
+):
+    async with running_daemon(tmp_path, monkeypatch, linger=30.0) as (daemon, _, _):
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        ok = await client.answer_needs_input("no-such-id", {"decision": "allow"})
+        assert ok is False
+        await client.finalize()

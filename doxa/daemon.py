@@ -31,8 +31,31 @@ client -> server
   {"type": "prompt", "id": N, "text": ...}  -- run one turn; its events arrive
                                                on the event stream tagged with
                                                the reply's "turn" id
-  {"type": "call", "id": N, "method": "status"|"peers"|"msg"|"stop",
-   "params": {...}}
+  {"type": "call", "id": N, "method": "status"|"peers"|"msg"|"stop"|
+   "set_model"|"answer_needs_input", "params": {...}}
+
+Interactive permission (queue item 5): a pending ``AskUserQuestion`` or
+permission request (``doxa.engine.SessionEngine._on_can_use_tool``) rides
+the SAME out-of-band ``needs_input``/``needs_input_resolved`` events every
+other peer-layer signal does -- queued through ``engine.peer_events()``,
+fanned out by ``_peer_pump`` below like ``tool_disabled`` already is, and
+landing in the ring like anything else :meth:`_publish` touches. That
+ring is therefore ALSO the parking mechanism for a fully detached session
+(no client attached at all when the question is asked): nothing special
+has to happen for the question to survive until someone attaches --
+``EventRing.since()`` replays it like any other buffered frame -- but
+nobody is here to see the tab blink or hear a beep either, so
+:meth:`_peer_pump` fires the desktop notification itself (focus is moot
+with zero clients -- always the "unfocused" gate) in exactly that one
+case, leaving the attached-client case to the TUI's own real
+``app_has_focus``-gated call, the same division of labor ``notify_lore``
+already has between lore_core and doxa.notify. The client answers with
+``{"type": "call", "method": "answer_needs_input", "params": {"id", "answer"}}``;
+the engine's own resolution fires ``needs_input_resolved`` back out on the
+SAME out-of-band stream (see ``SessionEngine._wait_for_answer``), so every
+attached client -- not just whichever one answered -- drops its own copy
+of the dialog, same as ``model_changed`` already keeps every tab's cached
+model in sync after one of them calls ``set_model``.
 
 Replay ring: every published event gets a monotonically increasing ``seq``
 and lands in a bounded ring (the ask_buffers idea reused: seq-numbered ring,
@@ -65,6 +88,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
+from . import notify as notify_mod
 from . import worktrees as worktrees_mod
 from .engine import EngineEvent, SessionEngine
 from .peers import MAX_FRAME_BYTES, registry_dir, runtime_dir
@@ -322,7 +346,30 @@ class SessionDaemon:
     async def _peer_pump(self) -> None:
         assert self.engine is not None
         async for ev in self.engine.peer_events():
+            if ev.type == "needs_input" and not self._clients:
+                # Parked with nobody attached at all: the ring below still
+                # carries it for a later attach to replay, but a fully
+                # detached session has no window to blink and no operator
+                # watching it -- the desktop notification is the one signal
+                # available, so it fires here rather than waiting on a TUI
+                # that may not exist for hours. Always the "unfocused" gate
+                # -- there is no focus concept with zero clients.
+                notify_mod.notify_needs_input(
+                    False, self._notify_label(), self._needs_input_summary(ev.data),
+                )
             self._publish(None, ev)
+
+    def _notify_label(self) -> str:
+        return Path(self.cwd).name or self.session_id[:8]
+
+    @staticmethod
+    def _needs_input_summary(data: dict) -> str:
+        if data.get("kind") == "ask_user":
+            questions = data.get("questions") or []
+            if questions and isinstance(questions[0], dict):
+                return str(questions[0].get("question") or "question")
+            return "question"
+        return str(data.get("input_summary") or data.get("tool_name") or "")
 
     def _publish(self, turn_id: str | None, event: EngineEvent) -> None:
         frame = self.ring.append(turn_id, event)
@@ -480,6 +527,15 @@ class SessionDaemon:
             # that asked -- two tabs on one daemon must not disagree.
             self._publish(None, EngineEvent("model_changed", {"model": model}))
             await self._reply(writer, req_id, ok=True, model=model)
+        elif method == "answer_needs_input":
+            # The resolution's own needs_input_resolved broadcast comes
+            # from the ENGINE side (SessionEngine._wait_for_answer's
+            # finally), over the same peer_events stream _peer_pump
+            # already fans out -- nothing extra to publish here.
+            ok = await self.engine.answer_needs_input(
+                str(params.get("id") or ""), dict(params.get("answer") or {}),
+            )
+            await self._reply(writer, req_id, ok=ok)
         elif method == "stop":
             # Worktree cleanup runs BEFORE the ack (fast, git-only) so a
             # "kept" note can ride in the SAME reply -- unlike

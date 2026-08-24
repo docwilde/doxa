@@ -123,6 +123,15 @@ class FakeEngine:
         # tests check to prove a submitted turn carried the FULL resolved
         # text (pending pastes expanded), not a collapsed placeholder.
         self.received_prompts: list[str] = []
+        # Queue item 5: every (id, answer) handed to answer_needs_input --
+        # what the UI-level tests check to prove a key/click resolved the
+        # RIGHT request with the RIGHT payload, engine-parity style (the
+        # same surface SessionEngine.answer_needs_input exposes).
+        self.needs_input_answers: list[tuple[str, dict]] = []
+
+    async def answer_needs_input(self, req_id: str, answer: dict) -> bool:
+        self.needs_input_answers.append((req_id, dict(answer or {})))
+        return True
 
     def disabled_tools(self) -> list[str]:
         return list(self.disabled)

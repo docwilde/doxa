@@ -16,10 +16,12 @@ Semantics that differ from the in-process engine, deliberately:
   "finalize NOW" path (`doxa stop`, the palette's quit-stop).
 * Events the client did not initiate -- replayed history after a reattach,
   turns driven by another attached client, peer traffic, two-strikes
-  disables -- all arrive on :meth:`peer_events`, the same out-of-band
-  stream the app already pumps. Turn events are told apart from the
-  client's own live turn by the ``turn`` tag the daemon stamps on every
-  event frame.
+  disables, a pending AskUserQuestion/permission request (queue item 5's
+  ``needs_input``, and ``needs_input_resolved`` once ANY attached client
+  answers it via :meth:`answer_needs_input`) -- all arrive on
+  :meth:`peer_events`, the same out-of-band stream the app already pumps.
+  Turn events are told apart from the client's own live turn by the
+  ``turn`` tag the daemon stamps on every event frame.
 * Status values (belief count, peers, disabled tools, cost) are CACHED from
   the daemon's status replies -- the app reads them synchronously mid-render
   exactly like it reads the engine's attributes, so a socket round-trip per
@@ -293,6 +295,18 @@ class EngineClient:
             raise EngineClientError(reply.get("error") or "model switch refused")
         self.model = reply.get("model") or model
         return str(self.model)
+
+    async def answer_needs_input(self, req_id: str, answer: dict) -> bool:
+        """Queue item 5: resolve one pending AskUserQuestion/permission
+        request over the socket. False (rather than an exception) for a
+        stale/unknown id or a daemon that is already gone -- the pane
+        that sent it either raced another attached client's answer or is
+        closing anyway, neither of which is worth surfacing as an error."""
+        try:
+            reply = await self._call("answer_needs_input", id=req_id, answer=answer)
+        except EngineClientError:
+            return False
+        return bool(reply.get("ok"))
 
     def usage_summary(self) -> dict:
         """Engine-parity surface for /usage -- the daemon's own numbers,

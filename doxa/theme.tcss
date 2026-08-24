@@ -530,6 +530,34 @@ CommandPalette > .command-palette--highlight {
     text-style: bold;
 }
 
+/* The needs-input dialog (doxa/app.py's NeedsInputPopup, queue item 5):
+   same slab and mount position as the slash dropdown and /search popup --
+   an AskUserQuestion or a permission request the CLI would have prompted
+   on both land here, above the prompt, via doxa.engine's can_use_tool
+   callback. The heading row (the question, or the tool + input summary)
+   wears the SAME red the tab's own -attention blink does, so the popup
+   and the tab agree about what is asking for you. */
+#needs-input-popup {
+    height: auto;
+    max-height: 12;
+    background: #221F1A;
+    color: #D8CDBB;
+    border: round #B23B32;
+    margin: 0 1;
+}
+
+#needs-input-popup > .option-list--option-disabled {
+    color: #F2E9DD;
+    background: #B23B32;
+    text-style: bold;
+}
+
+#needs-input-popup > .option-list--option-highlighted {
+    color: #D97757;
+    background: #2A251E;
+    text-style: bold;
+}
+
 /* Settings (Ctrl+, / /settings): same modal treatment again -- dimmed
    screen wash, block surface, ramp-top border. Rows are label / field /
    help, deliberately plain: nothing in this panel animates. */

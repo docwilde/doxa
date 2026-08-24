@@ -4,6 +4,110 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.19.0 — 2026-08-24
+
+- **Interactive permission** (queue item 5, the last feature item) —
+  `ClaudeAgentOptions.can_use_tool` wired on `doxa.engine.SessionEngine`,
+  closing the gap 0.11.0's entry named outright: "the engine has no
+  `can_use_tool`/permission-prompt path today, so the trigger lands with
+  that plumbing (phase 2)." It has now landed — the attention-blink timer
+  that shipped dormant in 0.11.0, and the `notify_needs_input` setting
+  reserved in the same release, both fire for real as of this version.
+  - **What was actually missing**: without a `can_use_tool` callback, the
+    SDK auto-denies anything the `claude` CLI would otherwise show
+    interactive UI for — an `AskUserQuestion` call, or a permission
+    prompt for a tool call it isn't sure about — silently, with no signal
+    DOXA could act on. `doxa.gate.ToolGate`'s own `PreToolUse` hook stays
+    the containment layer (its allow/deny decisions are unchanged by any
+    of this); the callback's job is narrower, covering only the two
+    genuinely interactive cases.
+  - **The SDK contract, read from the installed package, not guessed**:
+    `claude_agent_sdk` 0.2.144's `CanUseTool` is
+    `Callable[[str, dict, ToolPermissionContext], Awaitable[PermissionResult]]`,
+    invoked by `_internal/query.py`'s control-request dispatch for EVERY
+    tool call a `PreToolUse` hook didn't deny and `allowed_tools`/
+    `permission_mode` doesn't shadow (`types.py`'s own
+    `_get_can_use_tool_shadowed_warning` documents the shadowing rules) —
+    which is also exactly why the callback defaults to allow rather than
+    prompting on everything: it fires for calls that flow through
+    silently today too, and a bare `PermissionResultAllow()` is what
+    keeps those unchanged. `ToolPermissionContext.title`/`display_name`/
+    `decision_reason` are populated by the CLI specifically for a call it
+    would have shown its OWN interactive prompt for (`title`'s own
+    docstring: "the full permission prompt sentence... use this instead
+    of reconstructing one") — the signal this callback reads to tell
+    "would have prompted" apart from "flows through silently," with no
+    local reimplementation of the CLI's own dangerous-action classifier.
+    `AskUserQuestion` itself is undocumented in the Python SDK (a CLI-side
+    tool, not an SDK type) — confirmed instead from the installed
+    `claude` binary: its input schema carries an optional `answers` field
+    described as "User answers collected by the permission component"
+    (this callback), keyed by each question's own text; the model sees
+    its answer back as an ordinary allowed tool call with `updated_input`
+    carrying that map.
+  - **Engine**: `_on_can_use_tool` routes `AskUserQuestion` to
+    `_ask_user_question` and everything else with a populated
+    title/display_name/decision_reason to `_request_permission`; both
+    queue a `needs_input` `EngineEvent` on the SAME out-of-band queue
+    `tool_disabled` already uses (this runs from inside the SDK's own
+    control-request dispatch, never from `send()`'s yield points) and
+    block on an `asyncio.Future` until `answer_needs_input(id, answer)`
+    resolves it — no local timeout; a parked question waits exactly as
+    long as nobody answers it, per the task's own no-auto-deny-on-timeout
+    call. Resolution fires a matching `needs_input_resolved` event.
+  - **Daemon protocol**: `needs_input`/`needs_input_resolved` ride the
+    existing out-of-band event stream (`_peer_pump`, the ring, replay —
+    nothing new there); the client answers with a `{"type": "call",
+    "method": "answer_needs_input", "params": {"id", "answer"}}` RPC,
+    matching `set_model`'s own shape. **Detached-session case**: a
+    `needs_input` fired with NO client attached at all parks in the ring
+    for free (`EventRing`/`_publish` already buffer everything regardless
+    of who's listening) and fires the desktop notification itself
+    (`doxa.daemon._peer_pump`, always the unfocused gate — there is no
+    window to be focused) rather than waiting on a TUI that may not
+    exist for hours; an attached client's own `app_has_focus` handles the
+    common case as usual. Answering broadcasts `needs_input_resolved` to
+    EVERY attached client, the same "everyone learns" convention
+    `model_changed` already follows for `/model`.
+  - **UI**: `NeedsInputPopup`, mounted above the prompt at the same
+    position and under the same "never takes focus" discipline as
+    `SlashComplete`/`SessionSearch` — checked FIRST in `PromptInput.
+    on_key`, ahead of both. Up/down + Enter, number keys 1-9, Esc
+    declines gracefully (a real `PermissionResultDeny`, never a silent
+    hang). While pending: the tab blinks red (`set_needs_input(True)`,
+    the exact mechanism 0.11.0 shipped dormant), `notify_needs_input`
+    fires (focus-gated like every other trigger), and the status bar
+    shows `⚑ needs input`. The blink (and its timer) clears on tab
+    activation, the SAME existing convention `-done-unseen` already
+    follows — the dialog itself does NOT auto-close on activation; only
+    an actual answer or decline does.
+  - **Zero-regression discipline**: every existing fake-engine-driven
+    test still passes unmodified (543 baseline, none touched) — proof
+    nothing that flowed through silently before gained a new prompt. New
+    tests additionally assert the negative directly: an ordinary tool
+    call with nothing in `ToolPermissionContext` populated is a bare
+    allow with nothing queued.
+  - 24 new tests (567 total: 543 baseline + 24) —
+    `tests/test_needs_input.py` (engine-level: the zero-regression
+    default, `AskUserQuestion` surfacing + answer/decline round-trip,
+    permission-request surfacing + allow/deny round-trip, the
+    scrubbed-summary assertion, idempotent/unknown-id `answer_needs_input`,
+    a bare `decision_reason` alone triggering the permission path),
+    `tests/test_daemon.py` (socket round-trip, detached-parking +
+    notification + replay-on-reattach, multi-client resolution broadcast,
+    unknown-id RPC failure), `tests/test_notify.py` (the same gating
+    matrix every other trigger gets), `tests/test_needs_input_ui.py`
+    (popup open/answer/decline via key and click, cross-client
+    `needs_input_resolved` closing a stale dialog without re-answering,
+    tab-activation clearing the blink but leaving the dialog open).
+  - **Assets**: `attention-blink.gif` (built dormant in 0.16.0) finally
+    embedded in the README, alongside a new `needs-input.gif`
+    (`scripts/record_gif.py`'s `needs-input` scene, same fake-event-
+    injection technique the attention-blink scene already used, driving
+    the REAL dialog this time) showing the question opening, an arrow-key
+    highlight move, and Enter resolving it — the other six GIFs and five
+    stills are untouched.
+
 ## 0.18.0 — 2026-08-24
 
 - **Subagent tracker** (queue item 4) — live view of Task-spawned

@@ -353,6 +353,21 @@ def _subagent_label(chip: "ToolChip") -> str:
     return ellipsize(_one_line(description, 200) or chip.tool_name, 24)
 
 
+def _needs_input_summary(data: dict) -> str:
+    """The notification body for one needs_input event: the first
+    question's own text for an ask_user request (already scrubbed --
+    doxa.engine's own choke point, see _scrub_json in _ask_user_question),
+    the tool's input summary for a permission request (same, via
+    _permission_summary). Never the full payload -- a desktop banner is a
+    headline, the popup itself is where the detail lives."""
+    if data.get("kind") == "ask_user":
+        questions = data.get("questions") or []
+        if questions and isinstance(questions[0], dict):
+            return str(questions[0].get("question") or "question")
+        return "question"
+    return str(data.get("input_summary") or data.get("tool_name") or "")
+
+
 def _escape_markup(text: str) -> str:
     """Rich markup escape for text interpolated INTO a markup string this
     app builds itself (as opposed to the display-only chip/tab titles
@@ -1149,6 +1164,142 @@ class SlashComplete(OptionList):
         return None
 
 
+# Number-key selection for the needs-input popup, 1-9 (Textual reports a
+# bare digit keystroke's own key name as the digit itself).
+_NEEDS_INPUT_DIGIT_KEYS = frozenset("123456789")
+
+
+class NeedsInputPopup(OptionList):
+    """The needs-input dialog (queue item 5): same mount position, same
+    "never takes focus" discipline as SlashComplete/SessionSearch -- above
+    the prompt, driven entirely through :class:`PromptInput`'s key
+    protocol. It serves BOTH interactive cases ``doxa.engine``'s
+    ``needs_input`` event carries: an ``AskUserQuestion`` (one or more
+    questions, answered one at a time -- multi-select collapses to the
+    single highlighted/numbered choice; a model asking for more than one
+    pick per question is rare enough that the SDK's own comma-joined-
+    answer convention degrades gracefully to "just that one") and a plain
+    permission request (tool name + input summary, Allow/Deny).
+
+    Row 0 is always a disabled heading (the question text, or the
+    tool+summary) -- same "label, never a destination" convention
+    :meth:`SlashComplete._first_command_row` established; real choices
+    start at row 1, numbered from 1 in the label text itself so the
+    number keys this widget answers to are visible, not just implied.
+
+    Esc always DECLINES the WHOLE request -- politely, a graceful
+    ``PermissionResultDeny``, never a silent hang -- per the SDK's own
+    contract for a tool call nobody answered. There is no plain "cancel
+    and leave the agent waiting" gesture: the agent really is waiting."""
+
+    can_focus = False
+
+    def __init__(self) -> None:
+        super().__init__(id="needs-input-popup")
+        self.display = False
+        self.request_id: str | None = None
+        self.kind: str | None = None
+        # ask_user: the remaining questions to walk through, and the
+        # answers collected so far (question text -> chosen label).
+        # permission: neither is used -- one step, Allow/Deny.
+        self._questions: list[dict] = []
+        self._answers: dict[str, str] = {}
+        self._decision: str | None = None
+        self._rows: list[dict] = []  # rows for the CURRENT step
+
+    @property
+    def is_open(self) -> bool:
+        return bool(self.display)
+
+    def ask(self, data: dict) -> None:
+        """Open on a fresh needs_input event's data (see doxa/engine.py's
+        _ask_user_question/_request_permission for the exact shape)."""
+        self.request_id = data.get("id")
+        self.kind = data.get("kind")
+        self._answers = {}
+        self._decision = None
+        if self.kind == "ask_user":
+            self._questions = list(data.get("questions") or [])
+            self._show_next_question()
+        else:
+            self._questions = []
+            heading = str(data.get("title") or data.get("tool_name") or "permission request")
+            summary = str(data.get("input_summary") or "")
+            if summary and summary != heading:
+                heading = f"{heading} — {summary}"
+            self._rows = [{"label": "Allow"}, {"label": "Deny"}]
+            self._render(heading, self._rows)
+
+    def _show_next_question(self) -> None:
+        if not self._questions:
+            self.close()
+            return
+        question = self._questions[0]
+        self._rows = list(question.get("options") or [])
+        heading = str(question.get("header") or question.get("question") or "")
+        self._render(heading, self._rows)
+
+    def _render(self, heading: str, options: list[dict]) -> None:
+        self.clear_options()
+        self.add_option(Option(heading, disabled=True))
+        for index, opt in enumerate(options, start=1):
+            label = str(opt.get("label") or "")
+            description = str(opt.get("description") or "")
+            text = f"  {index}. {label}" + (f" — {description}" if description else "")
+            self.add_option(Option(text))
+        self.highlighted = 1 if options else 0
+        self.display = True
+
+    def move(self, delta: int) -> None:
+        """Arrow navigation, skipping row 0 (the heading) -- same
+        convention SlashComplete.move follows for its own group headers."""
+        if not self._rows:
+            return
+        index = (self.highlighted if self.highlighted is not None else 1) - 1
+        index = (index + delta) % len(self._rows)
+        self.highlighted = index + 1
+
+    def choose_index(self, index: int) -> bool:
+        """0-based option index (the heading row never reaches here).
+        Returns True once THIS request is fully answered -- the caller
+        (SessionPane) then reads :meth:`answer_payload` and calls
+        :meth:`close`. False means an ask_user request with more
+        questions still to go; this re-rendered itself in place and stays
+        open."""
+        if not (0 <= index < len(self._rows)):
+            return False
+        label = str(self._rows[index].get("label") or "")
+        if self.kind == "ask_user":
+            question = self._questions.pop(0)
+            self._answers[str(question.get("question") or "")] = label
+            if self._questions:
+                self._show_next_question()
+                return False
+            return True
+        self._decision = "allow" if index == 0 else "deny"
+        return True
+
+    def choose_highlighted(self) -> bool:
+        return self.choose_index((self.highlighted if self.highlighted is not None else 1) - 1)
+
+    def answer_payload(self) -> dict:
+        """What ``engine.answer_needs_input`` wants -- call once, right
+        after :meth:`choose_index`/:meth:`choose_highlighted` returns
+        True, before :meth:`close` (which does not touch these -- only
+        :meth:`ask` resets them, for exactly this ordering)."""
+        if self.kind == "ask_user":
+            return {"answers": dict(self._answers)}
+        return {"decision": self._decision or "deny"}
+
+    def close(self) -> None:
+        if self.display:
+            self.display = False
+        self.request_id = None
+        self.kind = None
+        self._questions = []
+        self._rows = []
+
+
 class PromptInput(TextArea):
     """The prompt: a multi-line editor, plus the key protocols of the two
     popups above it (item N -- clipboard paste).
@@ -1185,16 +1336,23 @@ class PromptInput(TextArea):
     special-case reaches us as an ordinary (now harmless) keystroke.
 
     While a popup is open, up/down/tab/enter/escape belong to IT. With
-    both popups closed, bare Enter submits (see :class:`Submitted`) and
-    Shift+Enter/Alt+Enter insert a literal newline -- whichever a given
-    terminal actually distinguishes from bare Enter; item O's keyboard-
-    protocol detection is what will one day tell the operator which of the
-    two their terminal grants, but both are bound here regardless so
-    neither terminal family is left without a deliberate-newline key.
+    all three popups closed, bare Enter submits (see :class:`Submitted`)
+    and Shift+Enter/Alt+Enter insert a literal newline -- whichever a
+    given terminal actually distinguishes from bare Enter; item O's
+    keyboard-protocol detection is what will one day tell the operator
+    which of the two their terminal grants, but both are bound here
+    regardless so neither terminal family is left without a
+    deliberate-newline key.
 
-    The search popup is checked FIRST because it is the one that can be
-    open while a command name is fully typed (``/search ...``); the two are
-    mutually exclusive in practice, and this settles the order anyway."""
+    The needs-input dialog (queue item 5) is checked FIRST, ahead of
+    search and the slash dropdown: a pending AskUserQuestion/permission
+    request represents something ELSE actually waiting on you, not a UI
+    convenience you opened yourself, so it wins any (in practice
+    vanishingly rare) contention for the same keystroke. The search popup
+    is checked next because it is the one that can be open while a
+    command name is fully typed (``/search ...``); the two ordinary
+    popups are mutually exclusive in practice, and this settles the order
+    anyway."""
 
     MIN_ROWS = 1
     MAX_ROWS = 10
@@ -1232,8 +1390,31 @@ class PromptInput(TextArea):
             self.mime = mime
             super().__init__()
 
+    class NeedsInputChoice(Message):
+        """Enter, or a number key 1-9, while the needs-input popup is
+        open: which option (0-based -- the heading row never reaches
+        here). SessionPane runs the actual (async) engine round-trip;
+        this widget only knows keys, not how to await one."""
+
+        def __init__(self, popup: "NeedsInputPopup", index: int) -> None:
+            self.popup = popup
+            self.index = index
+            super().__init__()
+
+    class NeedsInputDecline(Message):
+        """Esc while the needs-input popup is open -- a graceful decline,
+        see :class:`NeedsInputPopup`'s own docstring."""
+
+        def __init__(self, popup: "NeedsInputPopup") -> None:
+            self.popup = popup
+            super().__init__()
+
     def __init__(
-        self, dropdown: SlashComplete, search: SessionSearch, **kwargs: Any
+        self,
+        dropdown: SlashComplete,
+        search: SessionSearch,
+        needs_input: "NeedsInputPopup",
+        **kwargs: Any,
     ) -> None:
         kwargs.setdefault("tab_behavior", "focus")
         kwargs.setdefault("soft_wrap", True)
@@ -1242,6 +1423,7 @@ class PromptInput(TextArea):
         super().__init__(**kwargs)
         self.dropdown = dropdown
         self.search = search
+        self.needs_input_popup = needs_input
         # (placeholder text, original text) for every paste collapsed in
         # THIS message -- resolved back into the real content at submit
         # time regardless of whether the operator ever expanded it to
@@ -1386,6 +1568,24 @@ class PromptInput(TextArea):
             self.post_message(self.ClipboardImageNotice(mime))
 
     def on_key(self, event: events.Key) -> None:
+        if self.needs_input_popup.is_open:
+            popup = self.needs_input_popup
+            if event.key == "escape":
+                self.post_message(self.NeedsInputDecline(popup))
+            elif event.key == "down":
+                popup.move(1)
+            elif event.key == "up":
+                popup.move(-1)
+            elif event.key == "enter":
+                index = (popup.highlighted if popup.highlighted is not None else 1) - 1
+                self.post_message(self.NeedsInputChoice(popup, index))
+            elif event.key in _NEEDS_INPUT_DIGIT_KEYS:
+                self.post_message(self.NeedsInputChoice(popup, int(event.key) - 1))
+            else:
+                return
+            event.stop()
+            event.prevent_default()
+            return
         if self.search.is_open:
             if event.key == "escape":
                 # Close, but KEEP what was typed: the query is prompt text
@@ -1744,19 +1944,23 @@ class SessionPane(TabPane):
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="block-list")
         yield Static("doxa · connecting…", id="status-bar")
-        # Both popups sit directly ABOVE the prompt (the last children):
-        # in a terminal the block list simply gives up the rows while one
-        # is open, which reads as an overlay without the layer bookkeeping
-        # a floating panel would need over a TabbedContent. They are never
-        # open at once -- the slash dropdown closes at the first space,
-        # which is exactly the keystroke that opens the search popup.
+        # All three popups sit directly ABOVE the prompt (the last
+        # children): in a terminal the block list simply gives up the rows
+        # while one is open, which reads as an overlay without the layer
+        # bookkeeping a floating panel would need over a TabbedContent. The
+        # two ordinary ones are never open at once -- the slash dropdown
+        # closes at the first space, which is exactly the keystroke that
+        # opens the search popup. The needs-input dialog (queue item 5) is
+        # independent of both -- see PromptInput.on_key's priority order.
         search = SessionSearch(self.cwd)
         yield search
         dropdown = SlashComplete()
         yield dropdown
+        needs_input = NeedsInputPopup()
+        yield needs_input
         # No ``placeholder=`` -- TextArea has no built-in placeholder text
         # (Input did); a deliberate drop, not an oversight, see item N.
-        yield PromptInput(dropdown, search, id="prompt-input")
+        yield PromptInput(dropdown, search, needs_input, id="prompt-input")
 
     async def on_mount(self) -> None:
         self.engine = self._engine_factory()
@@ -1931,6 +2135,18 @@ class SessionPane(TabPane):
                     f" — {ev.data.get('reason')}"
                 ))
                 block_list.scroll_end(animate=False)
+            elif ev.type == "needs_input":
+                self._open_needs_input(ev.data)
+            elif ev.type == "needs_input_resolved":
+                # Some attached client (possibly a DIFFERENT one -- the
+                # daemon fans this to everyone, see doxa/client.py) just
+                # answered this pane's own pending request. If the popup
+                # here is still showing that SAME id, drop it -- it is no
+                # longer this pane's to answer.
+                popup = self.query_one("#needs-input-popup", NeedsInputPopup)
+                if popup.request_id and popup.request_id == ev.data.get("id"):
+                    popup.close()
+                    self.set_needs_input(False)
             elif ev.type == "derive_done":
                 # Streaming deriver (engine-side, DOXA_DERIVE_SECS): newly
                 # staged proposals await the SAME human review gate as ever
@@ -2132,6 +2348,10 @@ class SessionPane(TabPane):
             cost = f"${self.engine.total_cost_usd:.4f}"
         beliefs = self.engine.belief_count()
         parts = [model]
+        if self.needs_input:  # hide-at-zero, same convention as every
+            # other chip below -- visible only while a question or
+            # permission request is actually pending on THIS pane.
+            parts.append("⚑ needs input")
         effort = getattr(self.engine, "effort", None)
         if effort:  # hide-at-zero: omitted when the CLI default is in
             # force (no level asserted at connect) -- same convention as
@@ -2184,6 +2404,11 @@ class SessionPane(TabPane):
         (box-height resize) has already run by the time this bubbles here
         -- it deliberately does not stop the event."""
         event.stop()
+        if self.query_one("#needs-input-popup", NeedsInputPopup).is_open:
+            # A pending question owns this row while it is up -- typing
+            # still works (composing a note is fine), but the two ordinary
+            # popups must not pop up underneath/instead of it.
+            return
         text = event.text_area.text
         self.query_one("#slash-complete", SlashComplete).sync(text)
         self.query_one("#session-search", SessionSearch).sync(text)
@@ -2196,6 +2421,37 @@ class SessionPane(TabPane):
         prompt.dropdown.highlighted = event.option_index
         prompt.complete()
         prompt.focus()
+
+    @on(OptionList.OptionSelected, "#needs-input-popup")
+    def _on_needs_input_selected(self, event: OptionList.OptionSelected) -> None:
+        """Clicking a row answers it, same as a number key or Enter would.
+        ``event.option_index`` is offset by the disabled heading row at 0
+        -- see :class:`NeedsInputPopup`'s own row convention."""
+        event.stop()
+        popup = self.query_one("#needs-input-popup", NeedsInputPopup)
+        index = event.option_index - 1
+        if index < 0:
+            return
+        self.run_worker(
+            self._resolve_needs_input(popup, index, False),
+            exclusive=True, group="needs-input",
+        )
+
+    @on(PromptInput.NeedsInputChoice)
+    def _on_needs_input_key_choice(self, event: "PromptInput.NeedsInputChoice") -> None:
+        event.stop()
+        self.run_worker(
+            self._resolve_needs_input(event.popup, event.index, False),
+            exclusive=True, group="needs-input",
+        )
+
+    @on(PromptInput.NeedsInputDecline)
+    def _on_needs_input_key_decline(self, event: "PromptInput.NeedsInputDecline") -> None:
+        event.stop()
+        self.run_worker(
+            self._resolve_needs_input(event.popup, None, True),
+            exclusive=True, group="needs-input",
+        )
 
     @on(OptionList.OptionSelected, "#session-search")
     def _on_search_selected(self, event: OptionList.OptionSelected) -> None:
@@ -2894,6 +3150,66 @@ class SessionPane(TabPane):
                     image_path=chip.tool_image_path,
                 )
                 break
+
+    # -- needs-input dialog (queue item 5) -----------------------------
+
+    def _open_needs_input(self, data: dict) -> None:
+        """A fresh needs_input event: open the dialog, blink the tab
+        (cleared on answer or on activating this tab -- set_needs_input's
+        own, already-tested convention, unchanged here), and notify --
+        gated exactly like notify_turn_done, by THIS pane's real
+        app_has_focus (the detached-daemon case, no client at all
+        attached, is handled separately, daemon-side -- see
+        doxa/daemon.py's _peer_pump)."""
+        popup = self.query_one("#needs-input-popup", NeedsInputPopup)
+        popup.ask(data)
+        self.set_needs_input(True)
+        notify_mod.notify_needs_input(
+            getattr(self.app, "app_has_focus", True),
+            self.display_name(),
+            _needs_input_summary(data),
+        )
+
+    async def _resolve_needs_input(
+        self, popup: "NeedsInputPopup", index: "int | None", decline: bool,
+    ) -> None:
+        """Answer (or decline) whatever the popup currently holds, and
+        tell the engine -- SessionEngine and EngineClient both expose
+        ``answer_needs_input`` (see doxa/client.py's engine-parity note),
+        so this reads the same regardless of the daemon split. A stale
+        popup (already closed -- e.g. a needs_input_resolved from another
+        client beat this keystroke) is a silent no-op, same discipline
+        every other "the widget might already be gone" call site in this
+        pane follows."""
+        if not popup.is_open:
+            return
+        request_id = popup.request_id
+        if decline:
+            answer = (
+                {"declined": True} if popup.kind == "ask_user"
+                else {"decision": "deny"}
+            )
+            popup.close()
+        else:
+            assert index is not None
+            if not popup.choose_index(index):
+                return  # ask_user: more questions to go -- stays open
+            answer = popup.answer_payload()
+            popup.close()
+        self.set_needs_input(False)
+        # Refresh NOW: this path runs off a key/click worker, never
+        # through _peer_pump's own trailing _refresh_status() call -- the
+        # engine's matching needs_input_resolved event will ALSO loop back
+        # through that pump shortly (in-process, or fanned out by the
+        # daemon), but the status-bar hint and tab class must not wait on
+        # that round-trip to catch up.
+        self._refresh_status()
+        engine = self.engine
+        if engine is not None and request_id:
+            answerer = getattr(engine, "answer_needs_input", None)
+            if answerer is not None:
+                with contextlib.suppress(Exception):
+                    await answerer(request_id, answer)
 
     def _on_turn_done_status(self, duration_ms: "float | None") -> None:
         """Tab-status + desktop-notification side effects of ONE finished

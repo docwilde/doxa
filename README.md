@@ -170,6 +170,31 @@ Enter commits, Esc cancels, an empty name restores the automatic label:
 
 <p align="center"><img src="assets/shots/rename.gif" width="780" alt="Double-clicking the second tab opens an inline editor seeded with its old label; typing 'kg-stats refi' and pressing Enter commits the new name to the tab strip"></p>
 
+**Interactive permission.** A `can_use_tool` callback closes the gap a
+headless SDK run otherwise has: without one, anything the `claude` CLI
+would normally show its own interactive UI for — an `AskUserQuestion`
+call, a permission prompt for a tool call it isn't sure about — gets
+silently auto-denied. DOXA's own `PreToolUse` gate stays the containment
+layer (its allow/deny decisions are unchanged); this callback handles
+only the two genuinely interactive cases, surfacing a dialog above the
+prompt — question and options for `AskUserQuestion` (number keys 1-9,
+up/down + Enter, Esc to decline), tool name and input summary with
+Allow/Deny for a permission request. While one is open the tab blinks
+red and the status bar reads `⚑ needs input`, both clearing the moment
+you answer (or the instant you look at the tab, for the blink alone —
+the dialog itself waits for an actual answer):
+
+<p align="center"><img src="assets/shots/needs-input.gif" width="780" alt="An AskUserQuestion dialog opens above the prompt asking which environment a migration should target; arrowing down highlights 'production'; Enter answers it and the dialog and tab blink both clear"></p>
+
+A session you are not watching still tells you: a desktop notification
+(`notify-send`, `notify_needs_input`, gated like every other trigger
+below) fires whenever the window is unfocused, and a session with no
+attached client at all — closed the TUI, left the daemon running —
+notifies unconditionally rather than blinking a tab nobody can see, and
+parks the question for whenever `doxa attach` picks it back up:
+
+<p align="center"><img src="assets/shots/attention-blink.gif" width="780" alt="A tab alternates every 0.5s between its normal color and a solid red -attention state while a question is pending"></p>
+
 **Command palette and `/` autocomplete.** `ctrl+p` opens a palette listing
 new-tab, the open tabs (in tab-bar order, active one marked), every
 registered command grouped (Session · Memory · Panes & tabs · Tools &
@@ -315,11 +340,12 @@ usually hasn't changed:
 
 <p align="center"><img src="assets/shots/clock.png" width="780" alt="The upper-right clock reading '2026-08-24 14:32:07' at the far right of the tab bar, past two open tabs, never overlapping either label"></p>
 
-**Status bar**, left to right: model · `repo ⎇ branch @sha` · subscription
-headroom (`s:9% w:48%`, session/week) or a `$` cost estimate on API-key
-auth · context-window percentage (escalates normal → amber ≥70% → red
-≥90%, percentage always shown) · belief count · `⌁ session <id>` reattach
-handle · peers.
+**Status bar**, left to right: model · `⚑ needs input` (only while a
+question or permission request is pending on this pane) · `repo ⎇ branch
+@sha` · subscription headroom (`s:9% w:48%`, session/week) or a `$` cost
+estimate on API-key auth · context-window percentage (escalates normal →
+amber ≥70% → red ≥90%, percentage always shown) · belief count · `⌁
+session <id>` reattach handle · peers.
 
 ## Configuration
 

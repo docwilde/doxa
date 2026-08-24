@@ -131,6 +131,21 @@ def notify_turn_done(
     notify_if("DOXA_NOTIFY_TURN_DONE", app_has_focus, tab_label, body)
 
 
+def notify_needs_input(app_has_focus: bool, tab_label: str, summary: str) -> None:
+    """A session is waiting on you -- queue item 5's ``can_use_tool``
+    plumbing: an ``AskUserQuestion`` question, or a tool call the CLI
+    would have shown its own permission prompt on. ``summary`` is already
+    scrubbed by the caller (``doxa.engine``'s secret-scrub choke point,
+    or ``doxa.daemon``'s own detached-session call site) before it ever
+    reaches here -- this function trusts it, same as ``notify`` trusts
+    every other body it is handed. Truncated: a desktop banner is not the
+    place for a full question or tool-call payload."""
+    body = (summary or "").strip() or "needs your input"
+    if len(body) > 120:
+        body = body[:120] + "…"
+    notify_if("DOXA_NOTIFY_NEEDS_INPUT", app_has_focus, tab_label, body)
+
+
 def notify_update_available(app_has_focus: bool) -> None:
     """A fast-forward is sitting on the remote, unpulled. Fires at most
     once per app run (the caller owns that -- this function is stateless)."""
