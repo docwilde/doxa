@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT))
 
 from datetime import datetime, timezone  # noqa: E402
 
-from doxa.app import DoxaApp, PromptInput, SessionSearch, ToolChip  # noqa: E402
+from doxa.app import DoxaApp, PromptInput, SessionSearch, ToolChip, TurnBlock  # noqa: E402
 from doxa.engine import EngineEvent  # noqa: E402
 from doxa.identity import Usage, UsageLimit  # noqa: E402
 from doxa.peers import PeerInfo  # noqa: E402
@@ -83,8 +83,14 @@ async def _settle(pilot, turns: int = 40, step: float = 0.02) -> None:
 
 HERO_SCRIPT = [
     EngineEvent("turn_started", {}),
-    EngineEvent("text_delta", {"text": "Two beliefs about this repo are relevant here — one "}),
-    EngineEvent("text_delta", {"text": "is calibrated (12 outcomes so far), one is cite-only "}),
+    # Split mid-table-row and mid-bold-span deliberately -- the real shape
+    # of an LLM text_delta stream, and the shape the streaming Markdown
+    # widget (v0.13.0, item c) has to survive intact. Also the one shot
+    # that has to show a rendered table + bold text, not just prose.
+    EngineEvent("text_delta", {"text": "Two beliefs about this repo are relevant here:\n\n"}),
+    EngineEvent("text_delta", {"text": "| id | status | outcomes |\n|----|--------|----------|\n"}),
+    EngineEvent("text_delta", {"text": "| **#184** | STEER | 12 |\n| #201 | CITE | 0 |\n\n"}),
+    EngineEvent("text_delta", {"text": "**#184** is calibrated; #201 is cite-only "}),
     EngineEvent("text_delta", {"text": "until it earns a track record of its own."}),
     EngineEvent("tool_call", {"id": "t1", "name": "lore_belief_search",
                               "input": {"query": "deploy checklist", "scope": "project"}}),
@@ -225,6 +231,13 @@ async def _drive_trace(app: DoxaApp, pilot) -> None:
             break
         await pilot.pause(0.02)
     task, sub = chips["task-1"], chips["sub-1"]
+    # Chips now nest inside the turn's ONE "Tool calls (N)" section (item
+    # b); expanding a chip does nothing VISIBLE while that section is
+    # still collapsed (Collapsible hides its whole Contents, nested
+    # chips included) -- open the section first, same as a real user
+    # would have to before ever seeing the chips beneath it.
+    app.query_one(TurnBlock).tool_section.collapsed = False
+    await pilot.pause()
     task.collapsed = False
     await pilot.pause()
     sub.collapsed = False
@@ -247,6 +260,8 @@ async def _drive_memory(app: DoxaApp, pilot) -> None:
             break
         await pilot.pause(0.02)
     chip = list(app.query(ToolChip))[0]
+    app.query_one(TurnBlock).tool_section.collapsed = False
+    await pilot.pause()
     chip.collapsed = False
     await pilot.pause()
 
