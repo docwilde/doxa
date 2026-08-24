@@ -1,0 +1,431 @@
+"""doxa.ui.labels -- the small formatters, and the constants they read.
+
+Extracted from ``doxa/app.py`` unchanged. Everything in this module is a
+pure function of its arguments (or a module constant): tab labels, the
+context chip's escalation, the belief/pending row text, ``/help``. The rest
+of :mod:`doxa.ui` depends on this module; this module depends on no other
+part of it, which is what keeps the import graph a tree.
+
+The two exceptions each carry their reason in their own docstring:
+:func:`_write_tab_label` / :func:`_write_tab_class` take an app and write
+onto a Tab header (they are shared by two widgets that are not each
+other's parent), and :func:`app_bindings` reads ``DoxaApp.BINDINGS``
+through a deferred import, because /help documents the bindings Textual
+actually dispatches and there is no second place to read them from.
+"""
+
+from __future__ import annotations
+
+import contextlib
+from typing import Any
+
+from textual.widgets import TabbedContent
+
+from .. import commands as commands_mod
+from .. import config as config_mod
+from .. import providers as providers_mod
+
+
+# Model aliases the installed CLI documents for --model ("provide an alias
+# for the latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's
+# full name"). /model accepts any string -- these are what it OFFERS, and
+# the list is short because a stale menu of full model ids is worse than
+# an alias that always resolves to the current one. Status-chips (item Y):
+# this now POINTS AT doxa.providers.FALLBACK_MODEL_ALIASES rather than
+# keeping its own copy -- the model picker's static-fallback tier reads
+# the same tuple, so there is one list, not two that happen to agree today
+# (see that module's docstring for the full resolution order and the
+# empirical finding on why the live Models-API tier is unreachable here).
+MODEL_ALIASES = providers_mod.FALLBACK_MODEL_ALIASES
+
+
+# Tab labels: `Model@repo:branch`, e.g. `Opus@doxa:main`. No provider
+# segment: model names are distinct across providers anyway (`Opus` vs
+# `deepseek-chat`), so the model already says who is answering, and a
+# prefix repeated on every tab of the strip is width spent saying nothing.
+#
+# Widths: 34 columns total, which fits `Sonnet@re_ab_harness:kg-stats` and
+# keeps four tabs on an 80-column terminal. When it does not fit, the MODEL
+# is trimmed first (down to 4 columns: `Son…`), then the repo (down to 6),
+# and the BRANCH last of all -- across several open tabs the model is
+# usually identical and the branch is usually what differs, so trimming the
+# branch would destroy exactly the information the label exists to carry.
+#
+# The 34 is the budget for THIS text -- what compose_tab_label returns and
+# what auto_label/display_name carry around as the tab's identity (seeding
+# the rename field, sorting the palette, and so on). What actually paints
+# onto the tab header adds a 2-cell prefix on top (the provider glyph plus
+# its separating space, set in SessionPane.set_tab_label) that is NOT part
+# of that identity string, so TAB_LABEL_MAX is trimmed to 32 here -- glyph
+# + space + 32 lands back on the original 34-column, four-tabs-at-80
+# budget instead of quietly blowing past it.
+TAB_LABEL_MAX = 32
+
+
+TAB_MODEL_MIN = 4
+
+
+TAB_REPO_MIN = 6
+
+
+# Item S: a worktree-isolated session earns one more character saying so --
+# the SAME glyph render() already uses between repo and branch, trailing
+# the tab's branch half instead. It is appended AFTER the trim algorithm
+# above has already run, and ONLY when there is a free character left at
+# TAB_LABEL_MAX -- the base branch itself never gives up a character to
+# make room for it, and a label already at the limit just goes without.
+TAB_ISOLATION_MARKER = "⎇"
+
+
+# Provider identity: one glyph, prepended to every tab label ahead of the
+# model tier. Multi-provider engines (a second SessionPane driving a
+# non-Claude CLI) are planned but not shipped -- every model DOXA drives
+# today is Claude/Anthropic's (see MODEL_ALIASES) -- so this table has
+# exactly one row. A future provider is a second row here, not a branch in
+# the display logic.
+PROVIDER_GLYPHS: dict[str, str] = {"claude": "✳"}
+
+
+PROVIDER_GLYPH_COLOR = "#D97757"  # Claude/Anthropic orange -- theme.tcss's own
+
+
+# Status-chips (item Y): the SAME accent, under its own name -- not a new
+# color, the one this house already uses for every interactive/highlighted
+# span (the active tab, palette matches, #slash-complete's highlighted
+# row -- see theme.tcss). Chips that OPEN something (the model chip, the
+# git chip's branch span, the new picker's rows) wear it; chips that are
+# just information (cost, repo name, sha, usage headroom) do not.
+CLICKABLE_CHIP_ACCENT = PROVIDER_GLYPH_COLOR
+
+
+def provider_glyph(provider: str = "claude", *, colored: bool = True) -> str:
+    """The provider glyph for `provider`, Claude-orange via Textual markup
+    when `colored`. Defaults to "claude" because that is the only engine
+    DOXA drives today; an unrecognised provider (should never happen while
+    there is one row) degrades to no glyph rather than a broken label.
+
+    Textual 5's Tab renders its label through ``Content.from_markup`` by
+    default (confirmed empirically: ``Tab("[#D97757]x[/] y").label.spans``
+    carries the color span, and ``.plain`` strips the markup cleanly) --
+    so the color tag below is real color, not a literal bracket leaking
+    into the tab bar."""
+    glyph = PROVIDER_GLYPHS.get(provider, "")
+    if not glyph:
+        return ""
+    return f"[{PROVIDER_GLYPH_COLOR}]{glyph}[/]" if colored else glyph
+
+
+def short_model(model: "str | None") -> str:
+    """The tier word out of a model name: claude-sonnet-4-5 -> `Sonnet`.
+
+    A tab label has room for the thing that actually varies between tabs,
+    and that is the tier, not the vendor prefix or the point release. An
+    unrecognised name keeps its first dash-segment verbatim (deepseek-chat
+    -> deepseek) rather than being truncated mid-word or title-cased into
+    something that looks like a tier it is not; an unset model is
+    "default", the same word the status bar and identity block use."""
+    name = (model or "").strip().lower()
+    if not name:
+        return "default"
+    for tier in MODEL_ALIASES:
+        if tier in name:
+            return tier.capitalize()
+    return name.split("-", 1)[0] or name
+
+
+def _shrink(text: str, width: int) -> str:
+    """`Sonnet` -> `Son…` at width 4. Never returns more than ``width``."""
+    if width <= 0:
+        return ""
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def compose_tab_label(
+    model: str,
+    repo: str,
+    branch: "str | None" = None,
+    limit: int = TAB_LABEL_MAX,
+    *,
+    isolated: bool = False,
+) -> str:
+    """`Model@repo:branch`, trimmed model-first when it must be.
+
+    Outside a repo there is no branch and therefore NO colon: a dangling
+    separator is a label saying "something is missing here", which is worse
+    than the shorter label it replaced.
+
+    ``isolated=True`` (item S: a worktree-per-session session, ``branch``
+    then being the BASE the worktree forked from -- see GitLine.tab_branch)
+    appends :data:`TAB_ISOLATION_MARKER` when -- and only when -- there is
+    a free character left at ``limit`` after everything else has already
+    been fit; never at the cost of shrinking the branch further to make
+    room for it."""
+
+    def build(m: str, r: str, b: "str | None") -> str:
+        return f"{m}@{r}" + (f":{b}" if b else "")
+
+    model_s, repo_s = model, repo
+    text = build(model_s, repo_s, branch)
+    for segment, floor in (("model", TAB_MODEL_MIN), ("repo", TAB_REPO_MIN)):
+        overflow = len(text) - limit
+        if overflow <= 0:
+            break
+        current = model_s if segment == "model" else repo_s
+        room = len(current) - floor
+        if room > 0:
+            shrunk = _shrink(current, len(current) - min(room, overflow))
+            if segment == "model":
+                model_s = shrunk
+            else:
+                repo_s = shrunk
+        text = build(model_s, repo_s, branch)
+    # Only now, with the model and the repo already at their floors, does
+    # the branch give ground.
+    text = ellipsize(text, limit)
+    if isolated and branch and len(text) < limit:
+        text += TAB_ISOLATION_MARKER
+    return text
+
+
+def ellipsize(text: str, limit: int = TAB_LABEL_MAX) -> str:
+    """Truncate with a real ellipsis. A tab that grows without bound pushes
+    its neighbours off the bar, which costs more than the tail of a branch
+    name is worth."""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+# Subagent tracker (queue item 4): the second status row and the transcript
+# tabs it opens both need to write onto a #session-tabs Tab header that is
+# NOT their own widget's tab (SubagentLine lives inside a SessionPane but
+# targets whichever Tab a click named; SubagentTranscriptTab is a plain
+# TabPane, no engine, that still carries -done-unseen like any other tab).
+# These two module functions are the shared write path: SessionPane's own
+# set_tab_label/_set_tab_class keep their existing names (set_tab_label
+# does a little more -- it also prepends the provider glyph and keeps
+# self._title in sync) but _set_tab_class calls straight through to
+# _write_tab_class below, and SubagentTranscriptTab uses both directly.
+def _write_tab_label(app: Any, tab_id: str, text: str) -> None:
+    """Write `text` straight onto one Tab's label -- no provider glyph.
+    SessionPane.set_tab_label prepends one deliberately (every SESSION is
+    Claude/Anthropic's); a subagent transcript tab is not a session, so it
+    never goes through that path at all -- this is its own, glyph-free,
+    door onto the same tab strip."""
+    with contextlib.suppress(Exception):
+        tabbed = app.query_one("#session-tabs", TabbedContent)
+        tabbed.get_tab(tab_id).label = text
+
+
+def _write_tab_class(app: Any, tab_id: str, class_name: str, value: bool) -> None:
+    """Toggle one status class on one #session-tabs Tab header. Shared by
+    SessionPane (-working/-done-unseen/-attention) and
+    SubagentTranscriptTab (-done-unseen only) -- same contextlib.suppress
+    discipline either caller needs: the tab may not exist yet this early,
+    or may already be mid-teardown."""
+    with contextlib.suppress(Exception):
+        tabbed = app.query_one("#session-tabs", TabbedContent)
+        tabbed.get_tab(tab_id).set_class(value, class_name)
+
+
+# Context-pressure escalation. The README calls this out as "a containment
+# signal, not decoration": the chip changes COLOR as the window fills, and
+# keeps showing the percentage throughout -- a color that replaced the
+# number would be decoration. Amber is "start thinking about /compact",
+# red is "the next long tool result may not fit".
+CTX_AMBER_PCT = 70.0
+
+
+CTX_RED_PCT = 90.0
+
+
+CTX_AMBER = "#E8A33D"
+
+
+CTX_RED = "#D9534F"
+
+
+def ctx_chip(percentage: "float | None") -> str:
+    """The context chip, escalating normal -> amber -> red. Markup only:
+    the percentage is always present, in every tier."""
+    if percentage is None:
+        return "ctx —"
+    text = f"ctx {percentage:.0f}%"
+    if percentage >= CTX_RED_PCT:
+        return f"[{CTX_RED}]{text}[/]"
+    if percentage >= CTX_AMBER_PCT:
+        return f"[{CTX_AMBER}]{text}[/]"
+    return text
+
+
+def _belief_scope_label(subject: str) -> str:
+    """Which GROUP a belief's row falls under in the beliefs chip's picker
+    (item 3) -- derived from lore_core's own subject vocabulary
+    (``lore_core.beliefs.belief_subject``: ``"user"``, ``"user-model"``, or
+    ``"project:<slug>"`` -- verified against the installed lore_core, there
+    is no separate ``scope`` column), data-driven rather than a hardcoded
+    two-way branch so a future subject prefix (LORE issue #41's proposed
+    ``machine:<id>``, still an open, unimplemented proposal -- NOT built
+    here) slots into its own group the moment lore_core starts writing one,
+    with no change to this function. ``"user-model"`` stays its own group
+    (interaction-model beliefs, never folded into plain "user") -- the same
+    distinction belief_subject's own docstring draws."""
+    if subject == "user-model":
+        return "user model"
+    if ":" in subject:
+        return subject.split(":", 1)[0]  # "project:<slug>" -> "project"
+    return subject or "user"
+
+
+def _fmt_belief_row(belief: dict) -> str:
+    """One beliefs-picker row: the claim text, ellipsized -- filtering
+    (ChipPicker's type-to-filter) matches against exactly this string, so
+    the claim has to be IN it, not just referenced by an id."""
+    claim = _one_line(str(belief.get("claim") or ""), 200)
+    return ellipsize(claim, 72)
+
+
+def _fmt_pending_row(text: str) -> str:
+    """One ``/pending`` row: the staged proposal's own text, ellipsized --
+    same rule :func:`_fmt_belief_row` follows and for the same reason,
+    ChipPicker's type-to-filter matches this string. A staged proposal has
+    no id, title or subject to fall back on (``lore_deriver.pending_texts``
+    returns text and nothing else), so the text is not merely the best row
+    label available, it is the only one."""
+    return ellipsize(_one_line(str(text or ""), 200), 72)
+
+
+def app_bindings() -> "list[tuple[str, str]]":
+    """``(key, description)`` for every app-level binding, read off
+    ``DoxaApp.BINDINGS`` itself -- the thing Textual actually dispatches.
+    /help renders this, so a binding cannot exist without being documented
+    and cannot be documented without existing."""
+    # Deferred: doxa.app imports this package, so the arrow only points
+    # back at call time. /help is the only caller and it runs long after
+    # the app class exists, so the cycle never has to be resolved at
+    # import -- and reading BINDINGS off any COPY of it would be the
+    # hand-maintained list this function exists to avoid.
+    from ..app import DoxaApp
+
+    rows: list[tuple[str, str]] = []
+    for binding in DoxaApp.BINDINGS:
+        if isinstance(binding, tuple):
+            key, _action, description = (list(binding) + ["", "", ""])[:3]
+        else:
+            key, description = binding.key, binding.description
+        if key and description:
+            rows.append((key, description))
+    return rows
+
+
+def _pretty_key(key: str) -> str:
+    """`ctrl+comma` is what Textual dispatches; `Ctrl+,` is what a keyboard
+    has written on it."""
+    parts = key.split("+")
+    names = {"comma": ",", "left": "←", "right": "→", "ctrl": "Ctrl", "shift": "Shift"}
+    return "+".join(names.get(p, p.upper() if len(p) == 1 else p.capitalize())
+                    for p in parts)
+
+
+def help_text() -> str:
+    """``/help``, generated from the command registry AND the live binding
+    list -- never a hand-maintained list, because a hand-maintained list is
+    wrong by the second command anyone adds.
+
+    Two columns for commands (call form + what it does, with its key
+    binding where one reaches the same place), then a hotkeys section for
+    the bindings that have no slash form at all."""
+    lines = ["commands", ""]
+    width = max(len(cmd.call_form()) for cmd in commands_mod.REGISTRY)
+    bound: set[str] = set()
+    # Same grouping and the same order the dropdown and the palette use --
+    # commands.grouped() is the single sequence (see doxa/commands.py).
+    for group, group_commands in commands_mod.grouped():
+        lines.append(f"  {group}")
+        for command in group_commands:
+            note = ""
+            if command.binding:
+                bound.add(command.binding)
+                note = f"   [{_pretty_key(command.binding)}]"
+            if command.passthrough:
+                note += "  (sent to the CLI, not intercepted)"
+            lines.append(
+                f"    {command.call_form():<{width}}  {command.summary}{note}"
+            )
+        lines.append("")
+    while lines and lines[-1] == "":
+        lines.pop()
+
+    hotkeys = [(k, d) for k, d in app_bindings() if k not in bound]
+    if hotkeys:
+        lines += ["", "hotkeys (no slash form)", ""]
+        key_width = max(len(_pretty_key(k)) for k, _d in hotkeys)
+        for key, description in hotkeys:
+            lines.append(f"  {_pretty_key(key):<{key_width}}  {description}")
+    return "\n".join(lines)
+
+
+def _one_line(text: str, limit: int = 70) -> str:
+    return " ".join(text.split())[:limit]
+
+
+def _subagent_label(chip: "ToolChip") -> str:
+    """The running label for one Task-spawned subagent: its own
+    `description` input field (the model's own name for the subtask),
+    collapsed to one line and ellipsized to ~24 cells -- short enough that
+    a handful of concurrently running subagents still fit one status row.
+    Falls back to the tool name in the (should-never-happen) case of a
+    Task call with no description at all."""
+    description = str(chip.tool_input.get("description") or "").strip()
+    return ellipsize(_one_line(description, 200) or chip.tool_name, 24)
+
+
+def _needs_input_summary(data: dict) -> str:
+    """The notification body for one needs_input event: the first
+    question's own text for an ask_user request (already scrubbed --
+    doxa.engine's own choke point, see _scrub_json in _ask_user_question),
+    the tool's input summary for a permission request (same, via
+    _permission_summary). Never the full payload -- a desktop banner is a
+    headline, the popup itself is where the detail lives."""
+    if data.get("kind") == "ask_user":
+        questions = data.get("questions") or []
+        if questions and isinstance(questions[0], dict):
+            return str(questions[0].get("question") or "question")
+        return "question"
+    return str(data.get("input_summary") or data.get("tool_name") or "")
+
+
+def _escape_markup(text: str) -> str:
+    """Rich markup escape for text interpolated INTO a markup string this
+    app builds itself (as opposed to the display-only chip/tab titles
+    elsewhere, which are cosmetic and already tolerate a stray bracket) --
+    the subagent line embeds a `[@click=...]` action span per label, so an
+    unescaped `[` in a model-chosen description must not be able to swallow
+    or corrupt the click target that follows it."""
+    return text.replace("[", "\\[")
+
+
+def _chip_span(text: str, action: str) -> str:
+    """A whole status-bar chip as a clickable, accent-colored span --
+    `[@click=<action>][accent]text[/][/]` -- for the two tiers that get an
+    affordance at all (SELECTORS: model, branch, effort; ACTIONABLE: peers,
+    ctx%, the session handle). `action` names a zero-argument action
+    method on the clicked widget (StatusBar) -- see that class's own
+    docstring for why a dedicated action per chip, rather than one
+    generic dispatcher taking an argument, was the simpler choice here."""
+    return f"[@click={action}][{CLICKABLE_CHIP_ACCENT}]{_escape_markup(text)}[/][/]"
+
+
+def _fmt_age(secs: float) -> str:
+    if secs < 60:
+        return f"{int(secs)}s"
+    if secs < 3600:
+        return f"{int(secs // 60)}m"
+    return f"{int(secs // 3600)}h{int((secs % 3600) // 60)}m"
+
+
+def git_branch_symbol() -> str:
+    """The nerd-font branch glyph (U+E0A0) when the user opted in via
+    DOXA_NERD_FONT (a TUI cannot detect font glyph coverage itself);
+    the universally-rendering ⎇ otherwise. Read through doxa.config, so
+    the settings modal's stored value works exactly like the env var --
+    env first, file second (doxa/config.py's one precedence rule)."""
+    return "\ue0a0" if config_mod.raw("DOXA_NERD_FONT").strip() else "⎇"

@@ -1,6 +1,6 @@
 """doxa.providers -- model-catalog seam: ONE Protocol between the UI (the
-model picker, doxa/app.py) and however a provider's catalog gets resolved,
-so a second provider (DeepSeek, Codex -- the vault addendum 6 multi-
+model picker, doxa/session/chips.py) and however a provider's catalog gets
+resolved, so a second provider (DeepSeek, Codex -- the vault addendum 6 multi-
 provider engines) is a new Protocol implementation later, never a UI
 change now. This module does ONLY model listing -- nothing about running
 turns, spawning engines, or anything else the name might tempt it to grow
@@ -42,12 +42,13 @@ authoritative first --
    and a future SDK release that DOES advertise a catalog only has to fill
    in one method body.
 3. A small STATIC fallback, clearly marked as such (``ModelInfo.source ==
-   "fallback"``) -- the same four aliases ``doxa.app.MODEL_ALIASES``
+   "fallback"``) -- the same four aliases ``doxa.ui.labels.MODEL_ALIASES``
    already used before this feature (``haiku``, ``sonnet``, ``opus``,
    ``fable``), sourced from the installed ``claude`` CLI's own ``--model``
    help text ("provide an alias for the latest model (e.g. 'fable',
-   'opus', or 'sonnet')"). ``doxa.app`` now imports THIS tuple rather than
-   keeping a second copy -- one list, not two that happen to agree today.
+   'opus', or 'sonnet')"). ``doxa.ui.labels`` now imports THIS tuple rather
+   than keeping a second copy -- one list, not two that happen to agree
+   today.
 
 NOT a dependency: ``anthropic`` is intentionally absent from pyproject.toml
 -- it is imported lazily, inside a ``try``, only when an API key is
@@ -71,7 +72,7 @@ from typing import Protocol
 
 # The CLI's own documented `--model` aliases (`claude --help`: "provide an
 # alias for the latest model (e.g. 'fable', 'opus', or 'sonnet')") -- the
-# static-fallback tier, and also doxa.app.MODEL_ALIASES's one source now
+# static-fallback tier, and also doxa.ui.labels.MODEL_ALIASES's one source
 # (see that name's own comment).
 FALLBACK_MODEL_ALIASES: tuple[str, ...] = ("haiku", "sonnet", "opus", "fable")
 
@@ -96,7 +97,19 @@ class ModelInfo:
 class ModelProvider(Protocol):
     """What the model picker needs from a provider -- listing only. A
     second provider (DeepSeek, Codex) is a new class satisfying this
-    Protocol, never a branch inside the picker's own code."""
+    Protocol, never a branch inside the picker's own code.
+
+    ASSESSED against docs/plugin-api.md's fourth extension point (v0.34.0)
+    and found to be the right shape for HALF of it. The catalog half is
+    complete: the picker asks a provider what it can offer and never
+    branches on who the provider is. The SESSION half is not here at all
+    -- spawn, send, interrupt and the event stream are what
+    :class:`doxa.engine.SessionEngine` and :class:`doxa.client.EngineClient`
+    already agree on informally, by both exposing the same async-iterator
+    surface, and there is no Protocol naming it. That is a second Protocol
+    (this module's own docstring says it should stop at listing and grow a
+    second module rather than swell), and writing it is feature work for
+    the multi-provider engines, not something a refactor gets to invent."""
 
     def provider_display_name(self) -> str:
         ...
@@ -109,8 +122,9 @@ class ModelProvider(Protocol):
 
 
 class ClaudeProvider:
-    """The only provider DOXA drives today -- see doxa.app.PROVIDER_GLYPHS'
-    own one-row comment for the parallel note on the tab-label side."""
+    """The only provider DOXA drives today -- see
+    doxa.ui.labels.PROVIDER_GLYPHS' own one-row comment for the parallel
+    note on the tab-label side."""
 
     def __init__(self) -> None:
         self._cache: "list[ModelInfo] | None" = None

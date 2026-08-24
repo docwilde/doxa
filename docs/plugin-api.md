@@ -1,22 +1,24 @@
 # DOXA plugin API — specification
 
-Status: **draft for review**. Nothing here is implemented yet. This spec is
-written before the `app.py` split so the split can land directly in its final
-shape rather than being redone once extension points appear.
+Status: **draft for review**. No loader exists and none is planned for this
+release. What v0.34.0 shipped is the *shape*: the `app.py` split landed along
+these seams, so each extension point below now names a real structure rather
+than a place in a long method. Everything about discovery, the allowlist,
+`Plugin`/`PLUGIN` and third-party loading is still unwritten, deliberately.
 
 ## Why this exists
 
-`doxa/app.py` is 5,737 lines, 36% of the package. Every feature shipped in
-v0.11–v0.28 landed in it, and the last two rebases both conflicted there. The
-file is not merely large — it hardcodes the four things a plugin would most
-obviously want to add:
+`doxa/app.py` was 6,415 lines, 36% of the package, larger than the next six
+modules combined. Every feature shipped in v0.11–v0.33 landed in it, and three
+consecutive rebases conflicted there. The file was not merely large — it
+hardcoded the four things a plugin would most obviously want to add:
 
-| what a plugin would add | where it is hardcoded today |
-|---|---|
-| a slash command | `SessionPane._command_handlers`, a literal dict, kept in sync with `doxa/commands.py` by a test |
-| a status-line chip | `SessionPane._refresh_status`, 157 lines of literal chip construction |
-| a transcript block | `SessionPane._handle_event`, an `if/elif` chain over six event types |
-| a model backend | `doxa/providers.py`, which already has the right shape |
+| what a plugin would add | where it was hardcoded | where the seam is now (v0.34.0) |
+|---|---|---|
+| a slash command | `SessionPane._command_handlers`, a literal dict, kept in sync with `doxa/commands.py` by a test | `doxa.session.commands.PANE_COMMANDS`, an ordered tuple of `CommandBinding` records the pane binds against itself |
+| a status-line chip | `SessionPane._refresh_status`, 157 lines of literal chip construction | `doxa.session.chips.StatusChip` + `PaneChipsMixin._status_chips()`, an ordered sequence DOXA renders |
+| a transcript block | `SessionPane._handle_event`, an `if/elif` chain over six event types | `doxa.session.runtime.EVENT_RENDERERS`, a dispatch map, one method per event type |
+| a model backend | `doxa/providers.py`, which already has the right shape | `ModelProvider` — right shape for the *catalog* half only; see extension point 4 |
 
 The split and the plugin API are the same work: each extension point is the
 seam the split follows.
@@ -107,9 +109,14 @@ The existing test that asserts `_command_handlers.keys() == commands.interactive
 must be extended to account for plugin-contributed names rather than deleted.
 That test is the reason the registry and the executor have never drifted.
 
+*Shipped in v0.34.0:* the executor half is now `PANE_COMMANDS`, an ordered
+tuple of `CommandBinding(name, method, args)` records that
+`_command_handlers()` binds against the pane. Plugin-contributed commands fold
+into that same build step. The closure test is unchanged and still passes.
+
 ### 2. Status-line chips
 
-The prize, and the reason `_refresh_status` needs breaking up. A chip is a
+The prize, and the reason `_refresh_status` needed breaking up. A chip is a
 protocol, not a widget — DOXA owns rendering, the plugin owns content:
 
 ```python
@@ -128,6 +135,13 @@ I/O in `text()` will do it several times a second. The loader wraps `text()`
 with a timing guard and disables — loudly — any chip that exceeds its budget.
 Slow work belongs in `on_click`.
 
+*Shipped in v0.34.0:* `_refresh_status` is four lines over
+`_status_chips()`, which returns `list[StatusChip]` in paint order. Each
+record carries its own markup **and** its own tooltip rows, so the two
+parallel lists the old method kept in step by hand across twelve conditional
+appends can no longer drift. The protocol above is the *plugin-facing* form of
+that record; the internal one exists and is what DOXA renders today.
+
 ### 3. Transcript blocks
 
 `_handle_event`'s `if/elif` over `turn_started`, `text_delta`,
@@ -139,6 +153,11 @@ Plugins may **add** event types. They may not replace the renderer for a
 built-in type: a plugin that can silently redraw `tool_result` can lie to the
 user about what a tool did.
 
+*Shipped in v0.34.0:* `EVENT_RENDERERS` maps event type to method name, one
+method per type. It is a module constant and not pane state, which is where
+the no-replacing-a-built-in rule will be enforced. An event type with no row
+is ignored, exactly as the old chain's missing `else` did.
+
 ### 4. Engine providers
 
 `doxa/providers.py` already defines `ModelProvider(Protocol)` and
@@ -146,6 +165,17 @@ user about what a tool did.
 session lifecycle (spawn, send, interrupt, event stream) and registered by
 name. This is the interface multi-provider engines (vault addendum 6) needs
 regardless of whether plugins ever ship.
+
+*Assessed in v0.34.0, and the only one of the four that came back short.*
+`ModelProvider` is exactly right for the **catalog** half — the picker asks a
+provider what it can offer and never branches on who the provider is. The
+**session** half is not in it at all: spawn/send/interrupt/event-stream are
+what `SessionEngine` and `EngineClient` agree on informally, by both exposing
+the same async-iterator surface, with no Protocol naming it. That is a second
+Protocol (`providers.py`'s own docstring says it should stop at listing rather
+than swell), and writing it is feature work for multi-provider engines — not
+something a refactor gets to invent. Left as it is, with the finding recorded
+in the Protocol's docstring.
 
 ### 5. Lifecycle hooks
 

@@ -4,6 +4,129 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.34.0 — 2026-08-24
+
+`doxa/app.py` came apart. It was 6,415 lines — 36% of the package, larger
+than the next six modules combined, and the file every feature of the last
+several releases landed in, which is also why three consecutive rebases
+conflicted there. It is now 1,403 lines: `DoxaApp` and a facade.
+
+This is a refactor and nothing else. No feature, no defect fix, no renamed
+user-visible string. The proof is the suite it did not touch: **785 tests
+green, the same 785, unchanged** — no test was edited to accommodate the
+split, and the one place where that was a live risk is called out below.
+
+The shape is not arbitrary. `docs/plugin-api.md` was written *before* this
+split for exactly this reason: the four things that spec says a plugin
+would most obviously want to add were the four things `app.py` hardcoded,
+so each extension point is the seam the split follows. The file came apart
+along the lines a later plugin API would attach to, rather than along
+whatever boundary happened to be convenient this week.
+
+- **Where things went.** Widgets to `doxa/ui/`, one module per surface:
+  `labels.py` (431 lines — the ~20 pure formatters and the constants they
+  read; imports nothing else in the package's UI layer, which is what
+  keeps the graph a tree), `transcript.py` (811 — the blocks a turn
+  renders into, plus `mount_transcript`, which builds a restored tab out
+  of exactly those same classes), `dialogs.py` (716 — every surface the
+  user answers), `statusline.py` (535 — `StatusBar`, `GitLine`,
+  `ClockChip`), `prompt.py` (396 — `PromptInput` alone, because it is the
+  single arbiter of what a keystroke means with three popups open above
+  it, and filing the arbiter under one of the things it arbitrates
+  between would be the wrong shelf). `SessionPane`'s 2,404 lines went to
+  `doxa/session/`: `commands.py` (653), `chips.py` (833), `runtime.py`
+  (659), and `pane.py` (634) for what remains.
+- **Mixins, not helper objects.** All 95 of `SessionPane`'s methods read
+  and write pane state through `self`. Three plain mixins move that code
+  with **zero call-site churn**; helper objects would have meant rewriting
+  hundreds of call sites, which is how a refactor stops being reviewable.
+  `SessionPane` is still one class with one name. Textual's own machinery
+  is untouched by the extra bases: `_css_bases` walks `__bases__` for the
+  first `DOMNode` subclass and these mixins are plain objects, so the
+  pane's CSS type names are byte-for-byte what they were.
+- **`theme.tcss` needed no edit, and that was checked rather than hoped.**
+  Textual matches CSS TYPE selectors on the class NAME, never the module
+  path, so moving `SessionPane`, `TurnBlock`, `ToolChip`, `CompactConfirm`
+  and the rest between files is CSS-safe by construction. The file is
+  unchanged in this release.
+- **`@on`-decorated handlers stayed in `pane.py`, for a mechanical
+  reason.** Textual's `MessagePumpMeta` collects decorated handlers out of
+  the class body it is *constructing*, so a decorated handler written in a
+  plain mixin would never be dispatched. Handlers found by naming
+  convention do work from anywhere in the MRO, but "handlers live in
+  pane.py" is a rule worth having whole rather than half.
+- **The facade is the contract.** 39 modules, scripts and tests import
+  from `doxa.app` by name — 49 distinct names between them — and 54 files
+  reference the module in one form or another. Not one of them was edited.
+  `doxa/app.py` re-exports every name it exported before, and its import
+  block is kept whole for the same reason: a module namespace other
+  modules read is a compatibility surface, and trimming it to "what
+  `DoxaApp` still uses" would break importers this file has no business
+  knowing about. Verified mechanically rather than by eye — `dir()` of the
+  post-split module is compared against `dir()` of the pre-split one and
+  is identical, and every imported name is resolved against it.
+- **Seam 1, slash commands.** `_command_handlers`'s literal 20-row dict is
+  now `session.commands.PANE_COMMANDS`, an ordered tuple of frozen
+  `CommandBinding(name, method, args)` records the method binds against
+  the pane. `/login` and `/logout` being one handler with two spellings is
+  now written down as data instead of two `partial` calls in a dict
+  literal. The closure test — `_command_handlers().keys() ==
+  commands.interactive_names()` — is as true of a built dict as it was of
+  a literal one, and is unchanged.
+- **Seam 2, status chips.** `_refresh_status` was 157 lines appending
+  markup to one list and tooltip rows to another, keeping the two in step
+  by hand across twelve conditional appends. It is now four lines over
+  `_status_chips()`, which returns `list[StatusChip]` in paint order. Each
+  record carries its own markup **and** its own hints, so the two cannot
+  drift; a chip that owns pre-built markup (the git chip, the
+  pressure-colored ctx chip) says so through `StatusChip.raw` rather than
+  being wrapped in an escaper that would mangle its own brackets. Every
+  chip's tier, hide-at-zero rule and hint text is character-for-character
+  what it was.
+- **Seam 3, transcript blocks.** `_handle_event`'s `if/elif` over six
+  event types is now `EVENT_RENDERERS`, a module-level dispatch map, one
+  method per type. Module-level and not pane state deliberately: that is
+  where the spec's rule that a plugin may *add* an event type but never
+  *replace* a built-in renderer will be enforced — a plugin that can
+  silently redraw `tool_result` can lie to the user about what a tool did.
+  An unknown event type is still ignored, exactly as the old chain's
+  missing `else` did.
+- **Seam 4 came back short, and is reported rather than papered over.**
+  `providers.ModelProvider` is the right shape for the *catalog* half of
+  the engine-provider point: the picker asks a provider what it can offer
+  and never branches on who the provider is. The *session* half is not in
+  it at all — spawn, send, interrupt and the event stream are what
+  `SessionEngine` and `EngineClient` agree on informally, by both exposing
+  the same async-iterator surface, with no Protocol naming it. That is a
+  second Protocol and it is feature work for multi-provider engines, not
+  something a refactor gets to invent. The finding is recorded in the
+  Protocol's own docstring.
+- **No loader, and no groundwork for one.** Entry-point discovery, the
+  allowlist, `Plugin`/`PLUGIN`, third-party loading, plugin settings rows:
+  none of it shipped, none of it is stubbed. This release gained no way to
+  load code it did not already load. What it gained is four structures
+  such a loader would attach to, each useful on its own terms today.
+- **Judgment call: `_stop_session` did not move.** Its only caller did
+  (`/sessions kill`), but it is the app-scope stop primitive — the same
+  one quit-stop and `doxa stop` reach — and the suite swaps it by patching
+  `doxa.app._stop_session`. Moving the definition would have left that
+  patch pointing at a name nothing reads, and a monkeypatch that silently
+  stops applying does not fail loudly, it fails as a test that still
+  passes while testing nothing. It stays in `doxa/app.py`; `_kill_sessions`
+  imports it per call, so the patch keeps working. Three other deferred
+  imports back onto `doxa.app` exist for the same class of reason and are
+  each commented where they sit (`app_bindings` reading the live
+  `DoxaApp.BINDINGS`, and two `isinstance(app, DoxaApp)` checks).
+- **Docs.** `docs/plugin-api.md`'s status line no longer says nothing is
+  implemented — the four extension points now each name the structure that
+  exists, and the "where it is hardcoded today" table gained a column
+  saying where the seam is instead.
+- **Tests: 785 green, zero edited.** Every definition that moved was
+  diffed by AST against its pre-split self — 359 of them, of which 13
+  differ, and every one of the 13 is named above or is a relative-import
+  depth fix (`from . import doctor` reads one package deeper now). Nothing
+  moved silently.
+
 ## 0.33.0 — 2026-08-24
 
 A session's own branch was on the list of branches it could be based on,

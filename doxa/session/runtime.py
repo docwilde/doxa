@@ -1,0 +1,659 @@
+"""doxa.session.runtime -- boot, the turn loop, the event dispatch, stop.
+
+Everything a pane does that is driven by something other than a keystroke:
+connecting the engine, running a turn, rendering the events that come back,
+the peer pump that renders turns another attached client is driving, the
+subagent tracker, and the two ways a session ends.
+
+docs/plugin-api.md's third extension point is :data:`EVENT_RENDERERS`. The
+``if/elif`` chain over six event types that used to be
+:meth:`PaneRuntimeMixin._handle_event`'s whole body is now a dispatch map
+from event type to the method that renders it, one method per type. An
+event type with no entry is ignored, exactly as it was before -- the old
+chain had no ``else`` either. A plugin adding an event type would add a
+row; the spec's rule that it may not REPLACE a built-in row (a plugin that
+can silently redraw ``tool_result`` can lie to the user about what a tool
+did) is the reason this map is a module constant and not pane state.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+
+from textual.containers import VerticalScroll
+from textual.widgets import Static, TabbedContent
+
+from .. import identity as identity_mod
+from .. import naming as naming_mod
+from .. import notify as notify_mod
+from ..engine import EngineEvent
+from ..history import SessionSearch
+from ..ui.dialogs import NeedsInputPopup
+from ..ui.labels import _escape_markup, _needs_input_summary, _subagent_label
+from ..ui.statusline import GitLine
+from ..ui.transcript import (
+    PeerMessageBlock,
+    SubagentLine,
+    SubagentTranscriptTab,
+    SystemBlock,
+    ToolChip,
+    TurnBlock,
+    _composed,
+)
+
+
+# Event type -> the method on the pane that renders it. See the module
+# docstring: this is the dispatch map docs/plugin-api.md's transcript-block
+# extension point attaches to, and it is a module constant so a built-in
+# row cannot be swapped out per pane.
+EVENT_RENDERERS: "dict[str, str]" = {
+    "turn_started": "_render_turn_started",
+    "text_delta": "_render_text_delta",
+    "reasoning_delta": "_render_reasoning_delta",
+    "tool_call": "_render_tool_call",
+    "tool_result": "_render_tool_result",
+    "turn_done": "_render_turn_done",
+}
+
+
+class PaneRuntimeMixin:
+    """SessionPane's engine-driven half. Mixed into the pane, never used
+    standalone: every method here reads pane state through ``self``."""
+
+    async def stop(self) -> "str | None":
+        """Finalize this pane's session NOW (daemon included). Returns the
+        worktree-per-session (#3) closing note -- `kept doxa/<id> — merge
+        when ready` -- when the daemon kept an unfinished worktree instead
+        of removing it; None otherwise (in-process engines never have
+        one; a cleanly-removed or non-worktree session doesn't either)."""
+        # Item D: marked BEFORE the engine handle is even cleared -- a
+        # stopped session must leave the persisted tab set, and this flag
+        # (not "engine is None", which detach() also produces) is what
+        # tells _persist_tabset the difference between "gone for good" and
+        # "merely detached, still running".
+        self._stopped = True
+        engine, self.engine = self.engine, None
+        if engine is None:
+            return None
+        stop = getattr(engine, "stop", None)
+        note: "str | None" = None
+        with contextlib.suppress(Exception):
+            if stop is not None:
+                event = await stop()
+                data = getattr(event, "data", None) or {}
+                value = data.get("note") if isinstance(data, dict) else None
+                note = str(value) if value else None
+            else:
+                await engine.finalize()
+        return note
+
+    async def _boot(self) -> None:
+        assert self.engine is not None
+        await self.engine.start()
+        # Engine cwd wins over the pane's own (attach may cross projects);
+        # GitLine's constructor runs one git subprocess -- off the loop.
+        git_cwd = str(getattr(self.engine, "cwd", None) or self.cwd)
+        self._git = await asyncio.to_thread(GitLine, git_cwd)
+        # /search scopes "this project first" by cwd, and attach can land
+        # this pane in another project: the engine's cwd wins here too.
+        with contextlib.suppress(Exception):
+            self.query_one("#session-search", SessionSearch).cwd = git_cwd
+        # A session named on an earlier run keeps that name across restarts
+        # -- the cache IS the persistence, and reusing it is what stops a
+        # restore from re-spending a call per restored tab.
+        session_id = str(getattr(self.engine, "session_id", "") or "")
+        # Item D: cache the id where detach()/stop() clearing self.engine
+        # cannot take it with them -- see the attribute's own docstring.
+        # Set on EVERY boot, not just the first: switch_engine (an attach
+        # or a fresh /model session landing in this same tab) re-runs
+        # _boot, and the persisted record has to follow which session this
+        # tab actually holds now, not the one it opened with.
+        self._session_id = session_id
+        if session_id and not self.generated_name:
+            cached = await asyncio.to_thread(naming_mod.cached_name, session_id)
+            if cached:
+                self.generated_name = cached
+                self._naming_done = True
+        self._refresh_usage_chip()
+        self._engine_ready.set()
+        self._refresh_status()
+        # Initial identity block: who/where this session actually is --
+        # only fields the CLI/config really reported, never guesses.
+        block_list = self.query_one("#block-list", VerticalScroll)
+        identity = SystemBlock(self._identity_text(git_cwd))
+        identity.id = "identity-block"
+        await block_list.mount(identity)
+        if self._boot_report:
+            # Item D restore: "restored N tabs, skipped M" -- once, on
+            # whichever pane carried the report (doxa.cli picks exactly
+            # one), never repeated on a later switch_engine re-boot.
+            await block_list.mount(SystemBlock(self._boot_report))
+            self._boot_report = None
+        block_list.scroll_end(animate=False)
+        if self._restore_transcript_wanted:
+            self._restore_transcript_wanted = False
+            # Suppressed here as well as inside: _note_pane_booted below is
+            # what releases DoxaApp's mid-restore persistence guard, so a
+            # scrollback that failed to draw must not also cost the user
+            # their saved tab set on the NEXT launch.
+            with contextlib.suppress(Exception):
+                await self._restore_transcript(session_id, git_cwd)
+        # Deferred: doxa.app imports this package, so the arrow only
+        # points back at call time -- the pane never needs the app
+        # class before there is an app.
+        from ..app import DoxaApp
+
+        app = self.app
+        if isinstance(app, DoxaApp):
+            app._note_pane_booted(self)
+
+    async def _peer_pump(self) -> None:
+        """Consume the engine's out-of-band stream for the life of the pane:
+        peer_message mounts a block immediately (display path only -- the
+        model sees it on the next user turn, engine-side); joins/leaves just
+        move the status-bar chip; tool_disabled (the gate's two-strikes
+        containment) mounts a system block and adds the status-bar
+        `⊘ toolname` note. Since the daemon split, TURN events can arrive
+        here too -- replayed history right after a reattach, or a turn that
+        another attached client of the same daemon is driving -- and render
+        into the same TurnBlock/ToolChip widgets a local turn uses."""
+        await self._engine_ready.wait()
+        assert self.engine is not None
+        async for ev in self.engine.peer_events():
+            if ev.type == "peer_message":
+                block_list = self.query_one("#block-list", VerticalScroll)
+                await block_list.mount(PeerMessageBlock(ev.data))
+                block_list.scroll_end(animate=False)
+            elif ev.type == "tool_disabled":
+                block_list = self.query_one("#block-list", VerticalScroll)
+                await block_list.mount(SystemBlock(
+                    f"⊘ tool disabled for this session: {ev.data.get('name')}"
+                    f" — {ev.data.get('reason')}"
+                ))
+                block_list.scroll_end(animate=False)
+            elif ev.type == "needs_input":
+                self._open_needs_input(ev.data)
+            elif ev.type == "needs_input_resolved":
+                # Some attached client (possibly a DIFFERENT one -- the
+                # daemon fans this to everyone, see doxa/client.py) just
+                # answered this pane's own pending request. If the popup
+                # here is still showing that SAME id, drop it -- it is no
+                # longer this pane's to answer.
+                popup = self.query_one("#needs-input-popup", NeedsInputPopup)
+                if popup.request_id and popup.request_id == ev.data.get("id"):
+                    popup.close()
+                    self.set_needs_input(False)
+            elif ev.type == "derive_done":
+                # Streaming deriver (engine-side, DOXA_DERIVE_SECS): newly
+                # staged proposals await the SAME human review gate as ever
+                # -- this is a notification, never an auto-apply.
+                await self._announce_staged(ev.data)
+            elif ev.type == "turn_started":
+                block_list = self.query_one("#block-list", VerticalScroll)
+                self._oob_turn = TurnBlock(str(ev.data.get("prompt") or ""))
+                self._oob_chips = {}
+                await block_list.mount(self._oob_turn)
+                block_list.scroll_end(animate=False)
+                # A new turn starting (even one another client is driving)
+                # is itself "seen" -- the same stale-dot clear _run_turn
+                # does for a locally-driven turn.
+                self._set_tab_class("-done-unseen", False)
+            elif ev.type in (
+                "text_delta", "reasoning_delta", "tool_call", "tool_result", "turn_done",
+            ):
+                if self._oob_turn is None and ev.type != "turn_done":
+                    # An ORPHANED turn event: something is streaming for a
+                    # turn whose turn_started this client never saw. Two
+                    # ways to get here, both real -- a reattach that landed
+                    # mid-turn, and (before v0.32.0's transcript restore,
+                    # still possible for a daemon whose ring head we could
+                    # not skip) a replay whose turn_started had already
+                    # fallen off the 512-frame ring.
+                    #
+                    # This used to fall through the `is not None` guard and
+                    # DROP the event, silently, which is how a restored tab
+                    # rendered as empty next to a live session holding the
+                    # whole conversation. An unattributed turn block is a
+                    # far smaller lie than no turn at all -- and it says so
+                    # in its own header rather than inventing a prompt.
+                    block_list = self.query_one("#block-list", VerticalScroll)
+                    self._oob_turn = TurnBlock("(turn already in progress)")
+                    self._oob_chips = {}
+                    await block_list.mount(self._oob_turn)
+                    # Same compose wait mount_transcript needs: an event
+                    # arriving in the same cycle as the mount would find
+                    # the block's Markdown body not yet there.
+                    await _composed(self._oob_turn.body, self._oob_turn.tools)
+                if self._oob_turn is not None:
+                    await self._handle_event(ev, self._oob_turn, self._oob_chips)
+                    self.query_one("#block-list", VerticalScroll).scroll_end(
+                        animate=False
+                    )
+                    if ev.type == "turn_done":
+                        self._oob_turn = None
+                        self._oob_chips = {}
+            with contextlib.suppress(Exception):
+                # A status-bar repaint must never take the pump down with
+                # it. This loop is the ONLY renderer of out-of-band traffic
+                # (replayed history, a peer's turn, needs_input): an event
+                # that lands before this pane's chrome has finished
+                # composing used to raise NoMatches here and kill the
+                # worker for the life of the tab -- one unlucky moment and
+                # the pane went deaf. The refresh is a repaint; skipping
+                # one is invisible, and the next event does it again.
+                self._refresh_status()
+
+    async def _run_turn(self, prompt: str) -> None:
+        assert self.engine is not None
+        await self._engine_ready.wait()
+        self.turn_in_flight = True
+        self._set_tab_class("-working", True)
+        # A fresh turn starting is itself "seen" -- clear any stale
+        # done-unseen dot from a PREVIOUS turn the user has not looked at
+        # yet, rather than letting it sit there through a whole new one.
+        self._set_tab_class("-done-unseen", False)
+        block = TurnBlock(prompt)
+        block_list = self.query_one("#block-list", VerticalScroll)
+        await block_list.mount(block)
+        block_list.scroll_end(animate=False)
+
+        chips: dict[str, ToolChip] = {}
+
+        try:
+            async for ev in self.engine.send(prompt):
+                await self._handle_event(ev, block, chips)
+                block_list.scroll_end(animate=False)
+        except Exception as exc:  # noqa: BLE001 -- a refused/broken turn must
+            # not take the shell down (e.g. the daemon is busy with another
+            # client's turn, or the connection dropped mid-stream).
+            await block.mark_done(None, None, True)
+            await block_list.mount(SystemBlock(f"turn failed: {exc}"))
+            block_list.scroll_end(animate=False)
+
+        self.turn_in_flight = False
+        self._set_tab_class("-working", False)
+        self._refresh_status()
+        # First completed turn of a repo-less session: name the tab from it.
+        self._maybe_name_tab(prompt)
+
+    async def _handle_event(
+        self, ev: EngineEvent, block: TurnBlock, chips: dict[str, ToolChip],
+    ) -> None:
+        """Render one engine event into ``block``.
+
+        Dispatch, not a chain (v0.34.0): :data:`EVENT_RENDERERS` maps an
+        event type to the method that draws it, one method per type. An
+        event type with no row is ignored -- exactly what the ``if/elif``
+        this replaced did, which had no ``else`` either, because an engine
+        that learns a new event type must not be able to crash a client
+        that has not learned it yet."""
+        renderer = EVENT_RENDERERS.get(ev.type)
+        if renderer is None:
+            return
+        await getattr(self, renderer)(ev, block, chips)
+
+    async def _render_turn_started(
+        self, ev: EngineEvent, block: TurnBlock, chips: dict[str, ToolChip],
+    ) -> None:
+        """Nothing to draw: the block the turn streams into was already
+        mounted by whoever opened the turn. The row exists so the event
+        type is DECLARED handled rather than falling into the same silence
+        an unknown type gets."""
+        return
+
+    async def _render_text_delta(
+        self, ev: EngineEvent, block: TurnBlock, chips: dict[str, ToolChip],
+    ) -> None:
+        parent_id = ev.data.get("parent_id") or ""
+        parent = chips.get(parent_id)
+        if parent is not None:
+            # A subagent narrating: trace material, nested under its
+            # Task chip -- never mixed into the turn's own prose.
+            parent.append_subagent_text(ev.data["text"])
+            # Live routing: an open transcript tab for THIS parent gets
+            # the same narration, alongside (not instead of) the chip.
+            self._route_transcript_text(parent_id, ev.data["text"])
+        else:
+            await block.append_text(ev.data["text"])
+
+    async def _render_reasoning_delta(
+        self, ev: EngineEvent, block: TurnBlock, chips: dict[str, ToolChip],
+    ) -> None:
+        parent_id = ev.data.get("parent_id") or ""
+        parent = chips.get(parent_id)
+        if parent is not None:
+            # A subagent's own thinking: no separate reasoning fold
+            # exists on a ToolChip (out of scope for this feature --
+            # see ReasoningSection's docstring), so it joins the SAME
+            # trace buffer its spoken text already uses rather than
+            # being dropped on the floor.
+            parent.append_subagent_text(ev.data["text"])
+            self._route_transcript_text(parent_id, ev.data["text"])
+        else:
+            await block.append_reasoning(ev.data["text"])
+
+    async def _render_tool_call(
+        self, ev: EngineEvent, block: TurnBlock, chips: dict[str, ToolChip],
+    ) -> None:
+        block.hide_thinking()
+        chip = ToolChip(ev.data["id"], ev.data["name"], ev.data["input"])
+        chips[ev.data["id"]] = chip
+        parent_id = ev.data.get("parent_id") or ""
+        parent = chips.get(parent_id)
+        if parent is not None:
+            # Trace tree: a subagent's call nests under the Task chip
+            # that spawned it, foldable at every level. An unknown
+            # parent (ring truncation on replay) degrades to top level
+            # -- the call is never dropped.
+            await parent.subcalls.mount(chip)
+            await self._route_transcript_chip(parent_id, chip)
+        else:
+            # Top-level chip: compacted behind the turn's ONE "Tool
+            # calls (N)" section (see ToolCallsSection/add_tool_chip).
+            await block.add_tool_chip(chip)
+        if ev.data["name"] == "Task":
+            # Subagent tracker: a Task call (top-level or nested -- a
+            # subagent's own Task is tracked exactly like a top-level
+            # one) starts a new entry in the running registry.
+            await self._register_subagent(chip)
+
+    async def _render_tool_result(
+        self, ev: EngineEvent, block: TurnBlock, chips: dict[str, ToolChip],
+    ) -> None:
+        chip = chips.get(ev.data["id"])
+        if chip is not None:
+            chip.update_result(
+                ev.data["result_summary"], ev.data["is_error"],
+                ev.data["duration_ms"], image_path=ev.data.get("image_path"),
+            )
+            self._route_transcript_result(chip)
+        if ev.data["id"] in self._subagents:
+            await self._unregister_subagent(ev.data["id"])
+
+    async def _render_turn_done(
+        self, ev: EngineEvent, block: TurnBlock, chips: dict[str, ToolChip],
+    ) -> None:
+        # Same tier lookup _refresh_status/_usage_text already do --
+        # keeps the per-turn figure consistent with both (item T).
+        account = getattr(self.engine, "account", None) or {}
+        tier = identity_mod.account_tier(account)
+        await block.mark_done(
+            ev.data.get("cost_usd"), ev.data.get("duration_ms"),
+            ev.data.get("is_error", False), tier,
+        )
+        # The one place the headroom chip is recomputed: a turn just
+        # spent budget, and the CLI may have refreshed its own cache.
+        self._refresh_usage_chip()
+        self._refresh_status()
+        self._on_turn_done_status(ev.data.get("duration_ms"))
+
+    # -- subagent tracker (queue item 4) ------------------------------
+
+    async def _register_subagent(self, chip: "ToolChip") -> None:
+        """One Task call started: add it to the running registry, then
+        sync the second line and the status chip -- both read len() of
+        the same dict, so this one write keeps them both correct."""
+        self._subagents[chip.call_id] = chip
+        await self._sync_subagent_line()
+        self._refresh_status()
+
+    async def _unregister_subagent(self, call_id: str) -> None:
+        """That Task call's own tool_result just landed: it drops out of
+        the running registry (the second line and the status chip shrink
+        by one, possibly to zero) -- but an OPEN transcript tab for it
+        stays open, just marked done."""
+        self._subagents.pop(call_id, None)
+        await self._sync_subagent_line()
+        self._refresh_status()
+        tab = self._transcript_tabs.get(call_id)
+        if tab is not None:
+            tab.mark_done()
+
+    async def _sync_subagent_line(self) -> None:
+        """Mount the second line on the first running subagent, unmount it
+        on the last one finishing -- mount/unmount, never a display toggle,
+        so an idle pane (the common case) carries zero cost for a feature
+        it isn't using right now. While mounted its content is rewritten
+        on every registry change (cheap: one markup string, no repaint
+        storm any worse than a status-bar update already is)."""
+        if self._subagents and self._subagent_line is None:
+            self._subagent_line = SubagentLine(self)
+            with contextlib.suppress(Exception):
+                status_bar = self.query_one("#status-bar", Static)
+                await self.mount(self._subagent_line, after=status_bar)
+        elif not self._subagents and self._subagent_line is not None:
+            line, self._subagent_line = self._subagent_line, None
+            with contextlib.suppress(Exception):
+                await line.remove()
+        if self._subagent_line is not None:
+            self._subagent_line.refresh_labels([
+                (call_id, _subagent_label(chip))
+                for call_id, chip in self._subagents.items()
+            ])
+
+    async def open_transcript(self, call_id: str) -> None:
+        """Open (or, if it is already open, just focus) the read-only
+        transcript tab for one RUNNING subagent -- the only way in here is
+        a click on the second line, which only ever offers ids currently
+        in ``self._subagents``, so a miss (finished and dropped between
+        the click and this running) degrades to a silent no-op rather than
+        a crash.
+
+        Focus moves to the new tab's own scroll container (it is
+        focusable, so the arrow keys/PageUp/PageDown a reader would reach
+        for just work) -- load-bearing, not just nicety: TabbedContent's
+        own ``_on_tab_pane_focused`` snaps ``.active`` back to whichever
+        pane holds the CURRENTLY focused widget, and this pane's own
+        ``#prompt-input`` stays focused (its tab merely hides, focus does
+        not move on its own) unless something claims focus in the pane
+        being switched to -- exactly what SessionPane's own boot already
+        does for itself by focusing its prompt input on mount."""
+        try:
+            tabbed = self.app.query_one("#session-tabs", TabbedContent)
+        except Exception:  # noqa: BLE001 -- app mid-teardown; nothing to open
+            return
+        existing = self._transcript_tabs.get(call_id)
+        if existing is not None:
+            tabbed.active = existing.id or tabbed.active
+            existing.scroll.focus()
+            return
+        chip = self._subagents.get(call_id)
+        if chip is None:
+            return
+        label = _subagent_label(chip)
+        tab = SubagentTranscriptTab(
+            call_id, label, self, id=f"trace-{self.id}-{call_id}",
+        )
+        self._transcript_tabs[call_id] = tab
+        await tabbed.add_pane(tab)
+        await tab.replay(chip)
+        tabbed.active = tab.id or tabbed.active
+        tab.scroll.focus()
+
+    def _route_transcript_text(self, parent_id: str, text: str) -> None:
+        tab = self._transcript_tabs.get(parent_id)
+        if tab is not None:
+            tab.append_narration(text)
+
+    async def _route_transcript_chip(self, parent_id: str, chip: "ToolChip") -> None:
+        tab = self._transcript_tabs.get(parent_id)
+        if tab is not None:
+            await tab.mirror_chip(chip)
+
+    def _route_transcript_result(self, chip: "ToolChip") -> None:
+        """A tool_result may belong to a chip mirrored inside some open
+        transcript tab (a direct child of the tab's own subagent) -- find
+        it by call id and bring the mirror's own result up to date too.
+        At most one tab can hold a mirror for a given id in practice (ids
+        are the SDK's own tool_use ids), so the first match wins."""
+        for tab in self._transcript_tabs.values():
+            mirror = tab.mirror_chips.get(chip.call_id)
+            if mirror is not None:
+                mirror.update_result(
+                    chip.tool_result, chip.is_error, chip.duration_ms,
+                    image_path=chip.tool_image_path,
+                )
+                break
+
+    # -- needs-input dialog (queue item 5) -----------------------------
+
+    def _open_needs_input(self, data: dict) -> None:
+        """A fresh needs_input event: open the dialog, blink the tab
+        (cleared on answer or on activating this tab -- set_needs_input's
+        own, already-tested convention, unchanged here), and notify --
+        gated exactly like notify_turn_done, by THIS pane's real
+        app_has_focus (the detached-daemon case, no client at all
+        attached, is handled separately, daemon-side -- see
+        doxa/daemon.py's _peer_pump)."""
+        popup = self.query_one("#needs-input-popup", NeedsInputPopup)
+        popup.ask(data)
+        self.set_needs_input(True)
+        notify_mod.notify_needs_input(
+            getattr(self.app, "app_has_focus", True),
+            self.display_name(),
+            _needs_input_summary(data),
+        )
+
+    # -- staged proposals (v0.31.0) ------------------------------------
+
+    async def _announce_staged(self, data: dict) -> None:
+        """One ``derive_done`` event, made reachable from wherever the user
+        actually is. Before v0.31.0 this was a single count-only
+        :class:`SystemBlock` in ONE pane's block list, pointing at
+        ``/lore:pending`` -- a Claude Code plugin command that does not
+        exist inside DOXA -- so a background reviewer that found something
+        was invisible unless you happened to be looking at that pane, and
+        the hint it printed led nowhere. Three surfaces now, all fed by
+        the same event:
+
+        * the transcript block, which QUOTES what was staged (ellipsized
+          per row by ``doxa.engine.staged_event_payload``, which also
+          scrubs it and bounds it to a wire frame) and says how many rows
+          it left out, because a count alone cannot tell you whether a
+          batch is worth opening;
+        * the tab, via :meth:`set_staged` -- a calm steady tint, never the
+          needs-input blink (see that method for why);
+        * a desktop notification, focus-gated exactly like every other
+          trigger (``doxa.notify.notify_staged``) so it can only ever
+          reach you when you are NOT already looking at DOXA.
+
+        The block's trailing line is a live click target onto the same
+        ``/pending`` list the command opens -- an announcement that names a
+        destination should be able to take you there.
+        """
+        staged = int(data.get("staged") or 0)
+        if staged <= 0:
+            return
+        texts = [str(t) for t in (data.get("texts") or [])]
+        omitted = int(data.get("omitted") or 0)
+        noun = "proposal" if staged == 1 else "proposals"
+        lines = [f"{staged} {noun} staged by the background reviewer"]
+        # Model-derived text on a block that carries a click action: escape
+        # it, per SystemBlock's own contract and _escape_markup's docstring.
+        lines += [f"  • {_escape_markup(text)}" for text in texts]
+        if omitted > 0:
+            lines.append(f"  … and {omitted} more")
+        if not texts and staged > 0:
+            # The count is real but the preview is empty (an event that
+            # crossed the daemon socket from an older peer, or proposals
+            # that scrubbed down to nothing). Say so rather than showing a
+            # bare number as if that were the whole story.
+            lines.append("  (no preview available — open the list to read them)")
+        block_list = self.query_one("#block-list", VerticalScroll)
+        await block_list.mount(SystemBlock(
+            "\n".join(lines),
+            link_label="/pending — review them",
+            on_link=lambda: self.run_worker(
+                self.open_pending_picker(), group="command"
+            ),
+        ))
+        block_list.scroll_end(animate=False)
+        self.set_staged(True)
+        notify_mod.notify_staged(
+            getattr(self.app, "app_has_focus", True),
+            self.display_name(),
+            staged,
+            texts,
+        )
+
+    async def _resolve_needs_input(
+        self, popup: "NeedsInputPopup", index: "int | None", decline: bool,
+    ) -> None:
+        """Answer (or decline) whatever the popup currently holds, and
+        tell the engine -- SessionEngine and EngineClient both expose
+        ``answer_needs_input`` (see doxa/client.py's engine-parity note),
+        so this reads the same regardless of the daemon split. A stale
+        popup (already closed -- e.g. a needs_input_resolved from another
+        client beat this keystroke) is a silent no-op, same discipline
+        every other "the widget might already be gone" call site in this
+        pane follows."""
+        if not popup.is_open:
+            return
+        request_id = popup.request_id
+        if decline:
+            answer = (
+                {"declined": True} if popup.kind == "ask_user"
+                else {"decision": "deny"}
+            )
+            popup.close()
+        else:
+            assert index is not None
+            if not popup.choose_index(index):
+                return  # ask_user: more questions to go -- stays open
+            answer = popup.answer_payload()
+            popup.close()
+        self.set_needs_input(False)
+        # Refresh NOW: this path runs off a key/click worker, never
+        # through _peer_pump's own trailing _refresh_status() call -- the
+        # engine's matching needs_input_resolved event will ALSO loop back
+        # through that pump shortly (in-process, or fanned out by the
+        # daemon), but the status-bar hint and tab class must not wait on
+        # that round-trip to catch up.
+        self._refresh_status()
+        engine = self.engine
+        if engine is not None and request_id:
+            answerer = getattr(engine, "answer_needs_input", None)
+            if answerer is not None:
+                with contextlib.suppress(Exception):
+                    await answerer(request_id, answer)
+
+    def _on_turn_done_status(self, duration_ms: "float | None") -> None:
+        """Tab-status + desktop-notification side effects of ONE finished
+        turn. Reached for a turn THIS client drove (_run_turn) and for one
+        replayed in from another attached client of the same daemon
+        (_peer_pump's turn_started/turn_done forwarding) -- both funnel
+        through _handle_event's turn_done branch, and both are equally "a
+        turn just finished on a session you might not be looking at"."""
+        active = self.app.active_pane is self
+        if not active:
+            self._set_tab_class("-done-unseen", True)
+        notify_mod.notify_turn_done(
+            getattr(self.app, "app_has_focus", True),
+            self.display_name(),
+            duration_ms,
+        )
+
+    async def switch_engine(self, make_engine: "Callable[[], Any]") -> None:
+        """Swap this pane's live engine handle: detach/finalize the old one,
+        build the new one (off-loop -- a daemon spawn blocks on
+        subprocess+registry polling), reset the block list, and restart the
+        boot + pump workers (both exclusive in their pane-scoped groups, so
+        the old pump dies with its engine)."""
+        old, self.engine = self.engine, None
+        self._engine_ready = asyncio.Event()
+        self._oob_turn = None
+        self._oob_chips = {}
+        if old is not None:
+            with contextlib.suppress(Exception):
+                await old.finalize()
+        try:
+            self.engine = await asyncio.to_thread(make_engine)
+        except Exception as exc:  # noqa: BLE001 -- spawn/attach failure must surface, not crash
+            block_list = self.query_one("#block-list", VerticalScroll)
+            await block_list.mount(SystemBlock(f"session switch failed: {exc}"))
+            return
+        await self.query_one("#block-list", VerticalScroll).remove_children()
+        self.query_one("#status-bar", Static).update("doxa · connecting…")
+        self.run_worker(self._boot(), exclusive=True, group="engine")
+        self.run_worker(self._peer_pump(), exclusive=True, group="peers")
