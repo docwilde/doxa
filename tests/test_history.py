@@ -4,10 +4,17 @@ The queries run against a SEEDED tmp index (conftest points LORE_ROOT at a
 throwaway dir), so these are real FTS5 hits with real snippets, not mocks.
 What is pinned: the popup opens on the ``/search `` prefix and only on it,
 re-queries incrementally as the query grows, refuses to let a slow query
-overwrite a newer one's results, keeps the typed text on Esc, inserts the
-chosen session's reference on Enter, lists recents for an empty query and
-says "no matches" quietly for a query with none. Ctrl+R is a shortcut to
-the same surface -- there is no second search path left to test.
+overwrite a newer one's results, keeps the typed text on Esc, lists recents
+for an empty query and says "no matches" quietly for a query with none.
+Ctrl+R is a shortcut to the same surface -- there is no second search path
+left to test.
+
+Items I/J (v0.21.0, RE-DERIVED -- see CHANGELOG.md's 0.21.0 entry): a
+result set spanning several sessions groups into a session-header tree,
+collapsed by default, arrows/enter/left/right navigate and fold/unfold it
+the same way the trace tree's own ``Collapsible`` rows do; Enter on a
+snippet inserts its excerpt through ``doxa.paste``'s placeholder machinery
+instead of the old flat one-line quoted reference.
 """
 
 from __future__ import annotations
@@ -22,7 +29,9 @@ from doxa.app import DoxaApp
 from doxa.history import (
     SEARCH_PREFIX,
     SessionSearch,
-    hit_reference,
+    excerpt_provenance,
+    excerpt_text,
+    group_by_session,
     recent_sessions,
     row_label,
     search_sessions,
@@ -53,10 +62,33 @@ def _seed_index() -> None:
         (SESSION_ID, "some-project", "2026-08-20T10:00:00Z", "user",
          "the flux capacitor needs exactly 1.21 gigawatts to fire"),
     )
+    # A second SESSION_ID message, sharing "docking" with an OTHER_ID
+    # message below but no other seeded content: a query for "docking"
+    # gets ONE hit from SESSION_ID and one from OTHER_ID -- the
+    # tree-grouping case (two sessions, one hit each).
+    conn.execute(
+        "INSERT INTO msg(session_id, project, ts, role, content) VALUES(?,?,?,?,?)",
+        (SESSION_ID, "some-project", "2026-08-20T10:05:00Z", "assistant",
+         "docking clamp diagnostics ran clean after the retrofit"),
+    )
+    # A third SESSION_ID message sharing "diagnostics" ONLY with the one
+    # above (same session): a query for "diagnostics" gets TWO hits from
+    # this ONE session -- the "no pointless fold" case, several hits that
+    # must still render flat, no header.
+    conn.execute(
+        "INSERT INTO msg(session_id, project, ts, role, content) VALUES(?,?,?,?,?)",
+        (SESSION_ID, "some-project", "2026-08-20T10:06:00Z", "user",
+         "run the diagnostics suite once more before we ship"),
+    )
     conn.execute(
         "INSERT INTO msg(session_id, project, ts, role, content) VALUES(?,?,?,?,?)",
         (OTHER_ID, "some-project", "2026-08-21T11:00:00Z", "assistant",
          "unrelated chatter about breakfast"),
+    )
+    conn.execute(
+        "INSERT INTO msg(session_id, project, ts, role, content) VALUES(?,?,?,?,?)",
+        (OTHER_ID, "some-project", "2026-08-21T11:05:00Z", "user",
+         "docking bay chatter continued after breakfast"),
     )
     for sid, title, ts, count in (
         (SESSION_ID, "delorean wiring", "2026-08-20T10:00:00Z", 12),
@@ -96,15 +128,41 @@ def test_recent_sessions_are_the_empty_query_answer(tmp_path):
     assert "4 messages" in [r["snippet"] for r in recents]
 
 
-def test_hit_reference_carries_session_and_snippet():
-    ref = hit_reference({
+def test_excerpt_provenance_names_session_and_when():
+    """Item J: an inserted excerpt is a quote WITH a citation -- one
+    short line naming the session and when, ahead of the body."""
+    prov = excerpt_provenance({
         "session_id": SESSION_ID, "ts": "2026-08-20T10:00:00Z",
-        "role": "user", "snippet": "the [flux capacitor] needs…",
     })
-    assert SESSION_ID in ref
-    assert "2026-08-20T10:00:00" in ref
-    assert "flux capacitor" in ref
-    assert "[flux" not in ref  # FTS match markers stripped
+    assert prov == f"[lore session {SESSION_ID} · 2026-08-20T10:00:00]"
+    assert prov.count("\n") == 0  # ONE line, as specced
+
+
+def test_excerpt_text_is_provenance_then_demarked_snippet():
+    text = excerpt_text({
+        "session_id": SESSION_ID, "ts": "2026-08-20T10:00:00Z",
+        "snippet": "the [flux capacitor] needs…",
+    })
+    prov, body = text.split("\n", 1)
+    assert prov == excerpt_provenance({"session_id": SESSION_ID, "ts": "2026-08-20T10:00:00Z"})
+    assert body == "the flux capacitor needs…"
+    assert "[flux" not in text  # FTS match markers stripped
+
+
+# -- the tree (item I) ------------------------------------------------------
+
+
+def test_group_by_session_preserves_rank_order_within_and_across():
+    hits = [
+        {"session_id": "a", "title": "A", "ts": "2026-08-01", "snippet": "1"},
+        {"session_id": "b", "title": "B", "ts": "2026-08-02", "snippet": "2"},
+        {"session_id": "a", "title": "A", "ts": "2026-08-01", "snippet": "3"},
+    ]
+    groups = group_by_session(hits)
+    assert [g["session_id"] for g in groups] == ["a", "b"]  # first-seen order
+    assert [h["snippet"] for h in groups[0]["hits"]] == ["1", "3"]
+    assert [h["snippet"] for h in groups[1]["hits"]] == ["2"]
+    assert groups[0]["collapsed"] is True and groups[1]["collapsed"] is True
 
 
 def test_matched_terms_are_highlighted_from_the_index_markers():
@@ -263,7 +321,10 @@ async def test_a_slow_query_never_clobbers_a_newer_one(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_enter_inserts_the_selected_session(monkeypatch, tmp_path):
+async def test_enter_inserts_the_selected_excerpt(monkeypatch, tmp_path):
+    """Item J: Enter on a (single-session, flat) snippet inserts a small
+    excerpt inline -- provenance line, then the snippet -- not the old
+    one-line quoted reference."""
     _seed_index()
     app = await _app(monkeypatch, tmp_path)
     async with app.run_test() as pilot:
@@ -275,15 +336,218 @@ async def test_enter_inserts_the_selected_session(monkeypatch, tmp_path):
                 break
             await pilot.pause(0.02)
         assert popup.hits
+        assert popup.current_kind() == "hit"  # single session: flat, no header
 
         await pilot.press("enter")
         await pilot.pause()
-        value = app.query_one("#prompt-input").value
-        assert SESSION_ID in value
+        prompt = app.query_one("#prompt-input")
+        value = prompt.value
+        assert value.startswith(f"[lore session {SESSION_ID} · ")  # provenance
         assert "flux" in value
+        assert value.count("\n") == 1  # provenance line, then the snippet
+        assert prompt._pending_pastes == []  # short excerpt: not collapsed
         assert popup.is_open is False
         # Material for the next prompt -- nothing was sent to the model.
         assert not app.query("TurnBlock")
+
+
+@pytest.mark.asyncio
+async def test_single_session_result_set_stays_flat(monkeypatch, tmp_path):
+    """Item I: several hits, ONE session -- no pointless fold. Every row
+    is still a "hit" row, same as the pre-tree popup."""
+    _seed_index()
+    app = await _app(monkeypatch, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        popup = app.query_one("#session-search", SessionSearch)
+        await _type(pilot, SEARCH_PREFIX + "diagnostics")
+        for _ in range(200):
+            if popup.hits and popup.query_text == "diagnostics":
+                break
+            await pilot.pause(0.02)
+        assert len(popup.hits) == 2
+        assert {h["session_id"] for h in popup.hits} == {SESSION_ID}
+        assert popup.option_count == 2
+        assert [kind for kind, _p, _g in popup._rows] == ["hit", "hit"]
+
+
+@pytest.mark.asyncio
+async def test_multi_session_result_set_groups_collapsed(monkeypatch, tmp_path):
+    """Item I: hits spanning two sessions restructure into a tree,
+    collapsed to session headers by default."""
+    _seed_index()
+    app = await _app(monkeypatch, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        popup = app.query_one("#session-search", SessionSearch)
+        await _type(pilot, SEARCH_PREFIX + "docking")
+        for _ in range(200):
+            if popup.hits and popup.query_text == "docking":
+                break
+            await pilot.pause(0.02)
+        assert len(popup.hits) == 2
+        assert {h["session_id"] for h in popup.hits} == {SESSION_ID, OTHER_ID}
+        # Collapsed by default: two header rows, no snippets showing yet.
+        assert popup.option_count == 2
+        assert [kind for kind, _p, _g in popup._rows] == ["header", "header"]
+        assert popup.current_kind() == "header"
+        assert all(payload["collapsed"] for _kind, payload, _group in popup._rows)
+
+
+@pytest.mark.asyncio
+async def test_right_expands_left_collapses_a_header(monkeypatch, tmp_path):
+    """Item I keyboard: → opens a fold, ← closes it -- additive to the
+    trace tree's own Enter-toggles convention (below), not a replacement
+    for it."""
+    _seed_index()
+    app = await _app(monkeypatch, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        popup = app.query_one("#session-search", SessionSearch)
+        await _type(pilot, SEARCH_PREFIX + "docking")
+        for _ in range(200):
+            if popup.hits and popup.query_text == "docking":
+                break
+            await pilot.pause(0.02)
+        assert popup.option_count == 2  # both headers, collapsed
+
+        await pilot.press("right")
+        await pilot.pause()
+        assert popup.option_count == 3  # one header expanded: +1 snippet row
+        kinds = [kind for kind, _p, _g in popup._rows]
+        assert kinds.count("hit") == 1
+        # The highlight stayed on the header that was just expanded.
+        assert popup.current_kind() == "header"
+
+        await pilot.press("left")
+        await pilot.pause()
+        assert popup.option_count == 2  # closed again
+
+        # Right on an already-open header, then Left from ITS CHILD row,
+        # collapses the parent and lands back on the header.
+        await pilot.press("right")
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.pause()
+        assert popup.current_kind() == "hit"
+        await pilot.press("left")
+        await pilot.pause()
+        assert popup.option_count == 2
+        assert popup.current_kind() == "header"
+
+
+@pytest.mark.asyncio
+async def test_enter_toggles_a_header_matching_the_trace_tree(monkeypatch, tmp_path):
+    """Enter on a header row folds/unfolds it (the trace tree's own
+    ``Collapsible`` convention) rather than inserting anything -- a header
+    is not itself an excerpt."""
+    _seed_index()
+    app = await _app(monkeypatch, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        popup = app.query_one("#session-search", SessionSearch)
+        prompt = app.query_one("#prompt-input")
+        await _type(pilot, SEARCH_PREFIX + "docking")
+        for _ in range(200):
+            if popup.hits and popup.query_text == "docking":
+                break
+            await pilot.pause(0.02)
+
+        before = prompt.value
+        await pilot.press("enter")
+        await pilot.pause()
+        assert popup.option_count == 3  # expanded, not inserted
+        assert prompt.value == before  # the prompt line is untouched
+        assert popup.is_open is True  # still open -- a fold, not a choice
+
+        await pilot.press("enter")  # toggling back closes it again
+        await pilot.pause()
+        assert popup.option_count == 2
+
+
+@pytest.mark.asyncio
+async def test_matched_terms_stay_highlighted_in_a_nested_snippet(monkeypatch, tmp_path):
+    """Item I must not cost item highlighting: a snippet under a header
+    still carries FTS5's own match markers, painted the same way."""
+    _seed_index()
+    app = await _app(monkeypatch, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        popup = app.query_one("#session-search", SessionSearch)
+        await _type(pilot, SEARCH_PREFIX + "docking")
+        for _ in range(200):
+            if popup.hits and popup.query_text == "docking":
+                break
+            await pilot.pause(0.02)
+        await pilot.press("right")  # expand the highlighted header
+        await pilot.pause()
+        label = popup.get_option_at_index(1).prompt  # header, then its snippet
+        assert any(str(span.style) for span in label.spans)
+        assert "docking" in label.plain
+
+
+@pytest.mark.asyncio
+async def test_large_excerpt_collapses_ctrl_g_expands_and_submit_sends_full_text(
+    monkeypatch, tmp_path
+):
+    """Item J: an excerpt over paste.py's collapse threshold behaves
+    EXACTLY like a large clipboard paste -- placeholder, Ctrl+G expands
+    it, and the full text goes out on submit either way."""
+    from doxa import paste as paste_mod
+    from doxa.engine import EngineEvent
+
+    SCRIPT = [
+        EngineEvent("turn_started", {}),
+        EngineEvent("text_delta", {"text": "ok"}),
+        EngineEvent("turn_done", {"cost_usd": 0.0, "duration_ms": 5, "is_error": False}),
+    ]
+    fake = FakeEngine(SCRIPT)
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: fake)
+    app = DoxaApp(cwd=str(tmp_path))
+    big_snippet = "\n".join(f"line {i} of a long excerpt" for i in range(30))
+    big_hit = {
+        "session_id": SESSION_ID, "title": "delorean wiring",
+        "ts": "2026-08-20T10:00:00Z", "snippet": big_snippet,
+    }
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        popup = app.query_one("#session-search", SessionSearch)
+        prompt = app.query_one("#prompt-input")
+        prompt.value = SEARCH_PREFIX + "anything"
+        await pilot.pause()
+        # Paint the scripted hit directly and disarm whatever real query
+        # ``sync()`` already armed for "anything" -- same discipline
+        # scripts/record_gif.py's own ``_show_search_hits`` uses, so a
+        # real (empty) query can never race in and clobber this.
+        if popup._timer is not None:
+            popup._timer.stop()
+            popup._timer = None
+        popup._seq += 1
+        popup._render("anything", [big_hit])
+        await pilot.pause()
+        assert popup.current_kind() == "hit"
+
+        expected = history_mod.excerpt_text(big_hit)
+        assert paste_mod.should_collapse(expected)  # sanity: this scene IS large
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert prompt.value.startswith("⧉ pasted")  # collapsed, not the raw text
+        assert prompt._pending_pastes and prompt._pending_pastes[0][1] == expected
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert prompt.value == expected  # expanded in place
+        assert prompt._pending_pastes == []
+
+        await pilot.press("enter")  # submit
+        await pilot.pause()
+        for _ in range(50):
+            if fake.received_prompts:
+                break
+            await pilot.pause(0.02)
+        assert fake.received_prompts == [expected]  # full text sent regardless
 
 
 @pytest.mark.asyncio

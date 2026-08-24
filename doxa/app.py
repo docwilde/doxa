@@ -82,7 +82,8 @@ from . import peers as peers_mod
 from . import version as version_mod
 from . import worktrees as worktrees_mod
 from .engine import EngineEvent, SessionEngine
-from .history import SEARCH_PREFIX, SessionSearch, hit_reference
+from . import history as history_mod
+from .history import SEARCH_PREFIX, SessionSearch
 from .identity import tier_short  # noqa: F401 -- re-exported: the status
 # line's plan label lives in doxa.identity now (precise local tier first,
 # SDK subscriptionType second); app.py keeps the name callers already use.
@@ -1552,16 +1553,20 @@ class PromptInput(TextArea):
         self._pending_pastes = []
 
     def take_hit(self) -> bool:
-        """Enter inside the search popup: the chosen session's reference
-        REPLACES the ``/search …`` line that found it. The query was the
-        prompt; the answer takes its place, ready to send (or to type
-        around) -- the same insertion the Ctrl+R overlay used to do, minus
-        the overlay."""
+        """Enter on a matching SNIPPET row (never a session header -- see
+        PromptInput.on_key, which only calls this for a "hit" row): the
+        chosen excerpt REPLACES the ``/search …`` line that found it,
+        exactly like the pre-item-J session reference used to. What
+        replaces it is now item J's excerpt -- a provenance line plus the
+        de-marked snippet -- staged through the SAME collapse machinery a
+        real clipboard paste uses (:meth:`_stage_pasteable`), so a long
+        excerpt collapses to a placeholder, Ctrl+G expands it, and submit
+        sends the full text either way."""
         hit = self.search.chosen()
         if hit is None:
             return False
         self.search.dismiss_for_this_line()
-        self.value = hit_reference(hit)
+        self.value = self._stage_pasteable(history_mod.excerpt_text(hit))
         return True
 
     def complete(self) -> bool:
@@ -1644,14 +1649,24 @@ class PromptInput(TextArea):
             self.run_worker(self._check_clipboard_image(), group="clipboard-probe")
             return
         text = paste_mod.normalize_newlines(event.text)
+        insert = self._stage_pasteable(text)
+        if result := self._replace_via_keyboard(insert, *self.selection):
+            self.move_cursor(result.end_location)
+
+    def _stage_pasteable(self, text: str) -> str:
+        """Collapse ``text`` to a paste.py placeholder if it is large
+        enough to warrant one, bookkeeping it in :attr:`_pending_pastes`
+        so Ctrl+G (:meth:`_expand_pending_paste`) and submit-time
+        resolution (:meth:`_resolved_text`) pick it up exactly like a real
+        clipboard paste; otherwise returns it untouched. The one seam a
+        real paste (item N) and an inserted search excerpt (item J) share
+        -- see doxa/paste.py's own module docstring, written expecting
+        this second caller before item J existed to be it."""
         if paste_mod.should_collapse(text):
             placeholder = paste_mod.placeholder_for(text)
             self._pending_pastes.append((placeholder, text))
-            insert = placeholder
-        else:
-            insert = text
-        if result := self._replace_via_keyboard(insert, *self.selection):
-            self.move_cursor(result.end_location)
+            return placeholder
+        return text
 
     async def _check_clipboard_image(self) -> None:
         mime = await asyncio.to_thread(paste_mod.detect_clipboard_image_mime)
@@ -1687,8 +1702,17 @@ class PromptInput(TextArea):
                 self.search.move(1)
             elif event.key == "up":
                 self.search.move(-1)
+            elif event.key == "right":
+                self.search.expand_current()  # item I: open a session fold
+            elif event.key == "left":
+                self.search.collapse_current()  # item I: close it (or its parent)
             elif event.key == "enter":
-                if not self.take_hit():
+                if self.search.current_kind() == "header":
+                    # Match the trace tree's own convention: Enter toggles
+                    # a fold. A header row is never itself an excerpt, so
+                    # this is the ONLY thing Enter can mean here.
+                    self.search.toggle_current()
+                elif not self.take_hit():
                     self._submit()  # no hits: Enter submits, /search answers
             else:
                 return
@@ -2552,11 +2576,15 @@ class SessionPane(TabPane):
 
     @on(OptionList.OptionSelected, "#session-search")
     def _on_search_selected(self, event: OptionList.OptionSelected) -> None:
-        """Clicking a result takes it, same as Enter would."""
+        """Clicking a row does what Enter would: toggle a session header,
+        or take a snippet's excerpt."""
         event.stop()
         prompt = self.query_one("#prompt-input", PromptInput)
         prompt.search.highlighted = event.option_index
-        prompt.take_hit()
+        if prompt.search.current_kind() == "header":
+            prompt.search.toggle_current()
+        else:
+            prompt.search.take_hit()
         prompt.focus()
 
     @on(PromptInput.Submitted)
@@ -2963,14 +2991,13 @@ class SessionPane(TabPane):
         runs when someone submits the line anyway (no hits highlighted, or
         Enter on an empty result): it prints the same hits as a block, so
         the command is never a no-op."""
-        from . import history as history_mod
-
         term = args.strip()
         if not term:
             await self._system(
                 "search: type `/search ` and keep typing — results appear "
-                "above the prompt as you type (↑/↓ to pick, enter to insert "
-                "the reference, esc to close)"
+                "above the prompt as you type (↑/↓ to move, →/← to expand/"
+                "collapse a session, enter to insert the excerpt, esc to "
+                "close)"
             )
             return
         cwd = str(getattr(self.engine, "cwd", None) or self.cwd)
