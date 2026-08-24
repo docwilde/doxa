@@ -1,8 +1,84 @@
 # Changelog
 
 Newest first. Versions are annotated git tags on the commit that shipped
-them (`v0.1.0` … `v0.12.0`); the ranges below are derived from that history,
+them (`v0.1.0` … `v0.13.0`); the ranges below are derived from that history,
 not written from memory.
+
+## 0.13.0 — 2026-08-24
+
+- **Visual restyle: boxes to background tints, tool-call compaction,
+  markdown responses** (queue item 1). The transcript had grown three
+  separate legibility problems as sessions got longer, all traced to the
+  same root cause -- every `TurnBlock`/`SystemBlock`/`ToolChip` was a
+  bordered box, so a long session read as a stack of identical crates
+  rather than a conversation:
+  - **Boxes → tints.** `TurnBlock`/`SystemBlock` lose their round border
+    entirely; role is now carried by position on the existing surface
+    ramp instead of a border -- the turn's fold header (the user's
+    prompt) sits on the RAISED tint (`#221F1A`, one step up from the
+    screen), the agent's response sits on the screen's own BASE tint
+    (`#171512`, so a reply reads as written on the surface rather than
+    boxed on top of it), and doxa's own system/TUI-internal lines sit on
+    a DIMMER tint (`#1D1B17`, one step down -- the same step
+    `PeerMessageBlock` already used) with muted text. No new colors:
+    every value is an existing stop on the ramp. `ToolChip` keeps its
+    bordered chrome throughout -- a tool call reads as a nested artifact,
+    not a transcript entry, at every fold level of a trace tree.
+  - **Tool-call compaction.** A turn's top-level tool chips (the trace
+    tree's own subagent nesting is untouched) now compact behind ONE
+    `ToolCallsSection` fold, "Tool calls (N)", collapsed by default and
+    created lazily on the first chip -- a turn with none grows no section
+    at all (hide-at-zero, same convention as the status bar's optional
+    chips). N updates live as chips mount mid-turn, a cheap title
+    rewrite; if the user expands the section mid-turn it stays expanded
+    as further chips arrive -- nothing in `add_chip` ever touches
+    `.collapsed` itself.
+  - **Markdown responses.** The agent's streamed response now renders as
+    markdown -- tables, bold, fences, inline code -- via
+    `Markdown.get_stream` (textual 5's append-only path built for LLM
+    deltas: each `text_delta` chunk is fed straight to the stream, no
+    full-document re-parse). Verified against chunk boundaries that split
+    mid-table-row and mid-bold-span, the real shape of an LLM stream, not
+    just whole-message renders. The user's own prompt (the fold header)
+    and a subagent's trace narration are deliberately left as literal
+    plain text -- typed text must not reflow, and the trace tree stays
+    out of scope. `TurnBlock.mark_done` stops the stream's one background
+    task -- an event-driven `asyncio.Task`, not a Textual `auto_refresh`
+    timer, so it needed its own idle-CPU test alongside the existing
+    armed-timer guards: a finished turn must not leave it running any
+    more than it may leave a timer running.
+  - **DEFECT found regenerating the gallery, then fixed**: `.turn-tools`
+    (the `Vertical` holding a turn's tool chips) never set its own
+    height, so it inherited Textual's `Vertical` default of `height:
+    1fr` -- inside an auto-height `Contents`, inside a scrolling block
+    list, that resolves against the viewport and stretches the container
+    to fill it, padding every turn out with a screen's worth of empty
+    space below its real content. Pre-existing (not introduced by this
+    item), and invisible on `main` by coincidence: the old bordered
+    `TurnBlock` spent two extra rows on its own top/bottom border edges,
+    which happened to keep `scroll_end`'s math from clipping anything.
+    Once the border came off, that margin was gone and the fold header
+    of the `hero` scene's own turn scrolled a row past the fold on a
+    32-row terminal -- caught by eyeballing the regenerated screenshot,
+    not by any test. Fixed with an explicit `height: auto` on
+    `.turn-tools`.
+  - **Screenshots regenerated** (`scripts/screenshot.py`: `HERO_SCRIPT`
+    now streams a markdown table + bold text across deliberately awkward
+    chunk boundaries so the gallery actually shows (c) working, not just
+    prose; `_drive_trace`/`_drive_memory` now open the turn's
+    `ToolCallsSection` before expanding a chip inside it, since an
+    unopened section hides its whole `Contents` -- nested chips
+    included, same as any other collapsed `Collapsible`): all nine
+    `assets/shots/*.svg` + `.png` re-rendered against the restyled
+    chrome and reviewed by eye, not just regenerated.
+  - 484 tests green (was 476 pre-restyle): 8 new -- hide-at-zero for the
+    tool-calls section, live count + stays-expanded-on-mount, the trace
+    tree's nesting unaffected by compaction, markdown surviving chunked
+    table/fence/bold, the user prompt staying literal, no stream for a
+    text-free turn, and the stream's background task gone after
+    `mark_done`. Two existing trace-tree tests updated for the new
+    `TurnBlock.tool_section` structure (chips no longer mount directly
+    into `TurnBlock.tools`).
 
 ## 0.12.0 — 2026-08-24
 
