@@ -108,6 +108,20 @@ SETTINGS: tuple[Setting, ...] = (
              "auto-merged.",
     ),
     Setting(
+        key="restore_tabs", env="DOXA_RESTORE_TABS",
+        label="restore tabs", category="Session",
+        kind="bool_on", default="1",
+        help="Reattach this repo's whole saved tab set (order, pinned "
+             "names, active tab) on plain `doxa`, instead of the single "
+             "most-recent session (doxa.tabsets)",
+        note="`doxa new` always starts exactly one fresh tab and never "
+             "restores; `doxa attach <prefix>` stays the single-session "
+             "path either way. Off returns to today's single-most-recent "
+             "spawn-or-attach exactly -- the record is still WRITTEN "
+             "(so turning this back on later has something to restore "
+             "from), just never read on launch.",
+    ),
+    Setting(
         key="derive_secs", env="DOXA_DERIVE_SECS", label="derive secs",
         category="Memory", kind="number",
         help="Streaming-deriver debounce interval, seconds; empty = off "

@@ -44,6 +44,7 @@ import asyncio
 import contextlib
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -80,6 +81,7 @@ from . import notify as notify_mod
 from . import paste as paste_mod
 from . import peers as peers_mod
 from . import providers as providers_mod
+from . import tabsets as tabsets_mod
 from . import version as version_mod
 from . import worktrees as worktrees_mod
 from .engine import EngineEvent, SessionEngine
@@ -96,6 +98,31 @@ from .peers import PeerSendError, age_secs
 # Ctrl+C quit semantics: the first press arms this window and then detaches;
 # a second press inside it upgrades to quit-stop (finalize NOW).
 CTRL_C_DOUBLE_SECS = 2.0
+
+
+@dataclass(frozen=True)
+class RestoreTabSpec:
+    """Item D: one tab to open at startup, reattaching a session
+    doxa.tabsets.resolve() already cross-checked against the live peer
+    registry -- ``engine_factory`` builds an EngineClient against that
+    specific daemon socket, never a fresh session. ``session_id`` is known
+    UP FRONT (from the registry entry the record resolved to), not learned
+    from the engine after boot, which is what lets DoxaApp give the pane a
+    deterministic id and pick the saved active tab before anything has
+    connected."""
+
+    session_id: str
+    engine_factory: "Callable[[], Any]"
+    pinned_name: "str | None" = None
+
+
+def _restore_pane_id(session_id: str) -> str:
+    """A stable, valid Textual widget id for a restored tab, derived from
+    the session id it will hold -- so the app can set the saved ACTIVE tab
+    (doxa.tabsets.TabSetRecord.active_session_id) before any pane has
+    booted far enough to report its own session_id back."""
+    return f"restore-{session_id}"
+
 
 # Model aliases the installed CLI documents for --model ("provide an alias
 # for the latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's
@@ -2233,6 +2260,23 @@ class SessionPane(TabPane):
         self.engine: Any | None = None
         self._engine_factory = engine_factory
         self._engine_ready = asyncio.Event()
+        # Item D (tab restore): the session id this pane's boot() last
+        # reported, cached OUTSIDE self.engine so it survives detach()/
+        # stop() clearing that handle -- _persist_tabset reads THIS, never
+        # `self.engine.session_id`, so a just-detached tab still persists
+        # under the right id. "" until the first boot completes.
+        self._session_id: str = ""
+        # Set True at the top of stop() -- a session that was EXPLICITLY
+        # ended must never reappear in the persisted tab set, even in the
+        # brief window before its pane is actually unmounted (see
+        # DoxaApp._persist_tabset).
+        self._stopped: bool = False
+        # Item D restore-only: a pinned name to apply the moment this pane
+        # mounts (before boot), and a one-shot SystemBlock to mount right
+        # after the identity block on its first boot ("restored N tabs,
+        # skipped M"). Both None for every ordinarily-created tab.
+        self._initial_pinned_name: "str | None" = None
+        self._boot_report: "str | None" = None
         # Out-of-band turn rendering state (replayed history after reattach,
         # or a turn another attached client drives) -- see _peer_pump.
         self._oob_turn: TurnBlock | None = None
@@ -2330,6 +2374,13 @@ class SessionPane(TabPane):
 
     async def on_mount(self) -> None:
         self.engine = self._engine_factory()
+        if self._initial_pinned_name:
+            # Item D restore: pin the saved name BEFORE the boot worker
+            # starts, same as a user's own /rename -- set_custom_name is
+            # the one place that writes a pinned label onto the tab
+            # header, and it only needs the DOM (already mounted here),
+            # never the engine.
+            self.set_custom_name(self._initial_pinned_name)
         self.query_one("#prompt-input", PromptInput).focus()
         self.run_worker(self._boot(), exclusive=True, group="engine")
         self.run_worker(self._peer_pump(), exclusive=True, group="peers")
@@ -2351,6 +2402,12 @@ class SessionPane(TabPane):
         when ready` -- when the daemon kept an unfinished worktree instead
         of removing it; None otherwise (in-process engines never have
         one; a cleanly-removed or non-worktree session doesn't either)."""
+        # Item D: marked BEFORE the engine handle is even cleared -- a
+        # stopped session must leave the persisted tab set, and this flag
+        # (not "engine is None", which detach() also produces) is what
+        # tells _persist_tabset the difference between "gone for good" and
+        # "merely detached, still running".
+        self._stopped = True
         engine, self.engine = self.engine, None
         if engine is None:
             return None
@@ -2381,6 +2438,13 @@ class SessionPane(TabPane):
         # -- the cache IS the persistence, and reusing it is what stops a
         # restore from re-spending a call per restored tab.
         session_id = str(getattr(self.engine, "session_id", "") or "")
+        # Item D: cache the id where detach()/stop() clearing self.engine
+        # cannot take it with them -- see the attribute's own docstring.
+        # Set on EVERY boot, not just the first: switch_engine (an attach
+        # or a fresh /model session landing in this same tab) re-runs
+        # _boot, and the persisted record has to follow which session this
+        # tab actually holds now, not the one it opened with.
+        self._session_id = session_id
         if session_id and not self.generated_name:
             cached = await asyncio.to_thread(naming_mod.cached_name, session_id)
             if cached:
@@ -2395,7 +2459,16 @@ class SessionPane(TabPane):
         identity = SystemBlock(self._identity_text(git_cwd))
         identity.id = "identity-block"
         await block_list.mount(identity)
+        if self._boot_report:
+            # Item D restore: "restored N tabs, skipped M" -- once, on
+            # whichever pane carried the report (doxa.cli picks exactly
+            # one), never repeated on a later switch_engine re-boot.
+            await block_list.mount(SystemBlock(self._boot_report))
+            self._boot_report = None
         block_list.scroll_end(animate=False)
+        app = self.app
+        if isinstance(app, DoxaApp):
+            app._note_pane_booted(self)
 
     def _identity_text(self, cwd: str) -> str:
         """The session-start identity summary. Every line renders a REAL
@@ -2609,6 +2682,14 @@ class SessionPane(TabPane):
         else:
             self._tab_label = None
             self.refresh_tab_label()
+        # Item D: the pinned name is part of the persisted tab set --
+        # rename it, restore it named. Safe before boot (this pane may not
+        # have a session_id yet -- on_mount applies a restored pinned name
+        # before the boot worker starts) since DoxaApp._persist_tabset
+        # skips any pane whose session_id isn't known yet.
+        app = self.app
+        if isinstance(app, DoxaApp):
+            app._persist_tabset()
 
     def _maybe_name_tab(self, first_message: str) -> None:
         """After the FIRST completed turn of a repo-less session: ask Haiku
@@ -3935,6 +4016,9 @@ class DoxaApp(App):
         model: str | None = None,
         engine_factory: "Callable[[], Any] | None" = None,
         new_session_factory: "Callable[[], Any] | None" = None,
+        restore_tabs: "list[RestoreTabSpec] | None" = None,
+        restore_active_id: "str | None" = None,
+        restore_report: "str | None" = None,
     ) -> None:
         super().__init__()
         self.cwd = cwd or os.getcwd()
@@ -3949,6 +4033,26 @@ class DoxaApp(App):
             lambda: SessionEngine(cwd=self.cwd, model=self.model)
         )
         self._new_session_factory = new_session_factory or self._engine_factory
+        # Item D: tabs doxa.cli already resolved to LIVE daemons (never a
+        # raw saved record -- see doxa.tabsets.resolve), opened in compose()
+        # instead of the single default pane below. Empty/None for every
+        # ordinary launch -- attach, `doxa new`, spawn-new, in-process.
+        self._restore_tabs = list(restore_tabs or [])
+        self._restore_active_id = restore_active_id
+        self._restore_report = restore_report
+        # Guards _persist_tabset while a multi-tab restore is still
+        # connecting: each restored pane's boot() completion decrements
+        # this (see _note_pane_booted), and only the LAST one to finish
+        # actually writes -- one consolidated save reflecting every
+        # restored tab, rather than one truncated save per tab in whatever
+        # order their daemons happen to answer in.
+        self._restore_pending = len(self._restore_tabs)
+        # Sessions detached (Ctrl+W / "/detach") THIS run: no longer a
+        # mounted pane (its _session_id would drop out of panes() once
+        # removed), but still running -- item D #4 says a detached session
+        # STAYS in the persisted set. Keyed by session_id so a pane that
+        # gets detached twice (should never happen) doesn't duplicate.
+        self._detached_this_run: "dict[str, tabsets_mod.TabRecord]" = {}
         self._tab_serial = 0
         # Ctrl+C double-press window (see action_ctrl_c_quit): the armed
         # timer that will quit-detach when it fires; a second Ctrl+C while
@@ -4031,6 +4135,64 @@ class DoxaApp(App):
     def panes(self) -> list[SessionPane]:
         return list(self.query(SessionPane))
 
+    # -- item D: persisted tab set ------------------------------------
+
+    def _note_pane_booted(self, pane: "SessionPane") -> None:
+        """A pane's session id is stable now (first boot), or has just
+        CHANGED (switch_engine -- a fresh /model session or a palette
+        attach landing in this same tab). Either way the persisted set
+        needs to know -- except mid-restore, where every restored pane
+        boots concurrently and each one's session_id becomes known at an
+        unpredictable moment: persisting after the FIRST to finish would
+        write a truncated set missing every tab still connecting. This
+        counts restored panes down and only calls through once all of
+        them (if any) have reported in, so the very first write already
+        reflects the complete restored set."""
+        if self._restore_pending > 0:
+            self._restore_pending -= 1
+            if self._restore_pending > 0:
+                return
+        self._persist_tabset()
+
+    def _persist_tabset(self) -> None:
+        """Snapshot the CURRENT tab set to $DOXA_HOME/tabsets/<scope>.json
+        (doxa.tabsets.save) -- called on every tab-set change (open,
+        rename, close-detach, close-stop, app exit). Unconditional on the
+        restore_tabs SETTING (that only gates whether a later launch
+        READS this file, see doxa.tabsets.enabled/config's own note) --
+        gated only on a restore still being in flight (_restore_pending).
+
+        Two sources, merged: panes still mounted (in tab-bar order,
+        excluding any this run has already marked _stopped -- a stopped
+        session must never reappear here even in the brief window before
+        its pane is actually unmounted) and _detached_this_run (sessions
+        Ctrl+W'd out of the strip earlier this run, which keeps running
+        and therefore STAYS in the set per item D #4 -- see that dict's
+        own docstring)."""
+        if self._restore_pending > 0:
+            return
+        scope = peers_mod.main_repo_root_of(self.cwd) or self.cwd
+        active_pane = self.active_pane
+        tabs: "list[tabsets_mod.TabRecord]" = []
+        seen: set[str] = set()
+        active_id: "str | None" = None
+        for pane in self.panes():
+            if getattr(pane, "_stopped", False):
+                continue
+            sid = pane._session_id
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            tabs.append(tabsets_mod.TabRecord(sid, pane.custom_name))
+            if pane is active_pane:
+                active_id = sid
+        for record in self._detached_this_run.values():
+            if record.session_id not in seen:
+                seen.add(record.session_id)
+                tabs.append(record)
+        with contextlib.suppress(Exception):
+            tabsets_mod.save(scope, tabs, active_id)
+
     @property
     def engine(self) -> Any | None:
         """The ACTIVE tab's engine handle -- the single-session accessors
@@ -4053,7 +4215,29 @@ class DoxaApp(App):
         yield BeliefInspector()  # hidden stub, palette-toggled
         yield ClockChip()  # upper-right, own layer -- see theme.tcss
         with TabbedContent(id="session-tabs"):
-            yield self._make_pane(self._engine_factory)
+            if self._restore_tabs:
+                # Item D: one pane per already-live resolved tab, IN SAVED
+                # ORDER -- never the single default pane below. The report
+                # block (if any) rides on the FIRST one only.
+                for index, spec in enumerate(self._restore_tabs):
+                    pane = SessionPane(
+                        self._tab_title(), self.cwd, self.model,
+                        spec.engine_factory, id=_restore_pane_id(spec.session_id),
+                    )
+                    if spec.pinned_name:
+                        pane._initial_pinned_name = spec.pinned_name
+                    if index == 0:
+                        pane._boot_report = self._restore_report
+                    yield pane
+            else:
+                pane = self._make_pane(self._engine_factory)
+                # Item D fallback: every saved tab was dead (nothing to
+                # reattach), but doxa.cli still has a report to show --
+                # "restored 0, skipped N" -- on the one fresh tab it spawned
+                # instead. self._restore_report is None on every ordinary
+                # launch, so this is a no-op there.
+                pane._boot_report = self._restore_report
+                yield pane
 
     @on(TabbedContent.TabActivated)
     def _on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
@@ -4292,6 +4476,15 @@ class DoxaApp(App):
             # a later quit-stop leaves it running.
             pane.detached_on_purpose = True
             await pane.detach()
+            # Item D #4: this session STAYS in the persisted tab set even
+            # though its tab is about to leave the strip below -- record it
+            # here, before remove_pane takes pane._session_id out of
+            # panes()'s own scan with it.
+            if pane._session_id:
+                self._detached_this_run[pane._session_id] = tabsets_mod.TabRecord(
+                    pane._session_id, pane.custom_name,
+                )
+        self._persist_tabset()
         if len(self.panes()) == 1:
             await App.action_quit(self)
             return
@@ -4479,6 +4672,9 @@ class DoxaApp(App):
         note = await pane.stop()
         if note:
             self.notify(note, severity="information", timeout=10)
+        # Item D: stop() already marked the pane _stopped -- persisting now
+        # drops it from the saved tab set, same as any other stop path.
+        self._persist_tabset()
         if len(self.panes()) == 1:
             await App.action_quit(self)
             return
@@ -4560,6 +4756,16 @@ class DoxaApp(App):
         marker is written the moment this fires -- declining or Esc-ing
         out of the wizard must not make it reappear at the next launch;
         /setup still runs on demand any time."""
+        if self._restore_active_id:
+            # Item D: land on the tab that was active when the set was
+            # saved, not just whichever one Textual defaults to (the
+            # first). Both panes already exist (compose() built every
+            # restored tab up front) -- only which one is ACTIVE moves
+            # here, never the tab-bar order itself.
+            with contextlib.suppress(Exception):
+                self.query_one("#session-tabs", TabbedContent).active = (
+                    _restore_pane_id(self._restore_active_id)
+                )
         from . import setup as setup_mod
 
         if setup_mod.needs_first_run():
@@ -4662,6 +4868,10 @@ class DoxaApp(App):
                     # TUI, exactly the "headless" case worktrees.finalize's
                     # docstring calls out.
                     self.notify(note, severity="information", timeout=10)
+        # Item D: one snapshot after the loop -- every pane above is either
+        # still mounted-and-detached (included) or stop()-marked _stopped
+        # (excluded), which is exactly the set a later restore should see.
+        self._persist_tabset()
         await App.action_quit(self)
 
     async def action_quit(self) -> None:
@@ -4674,6 +4884,9 @@ class DoxaApp(App):
         SessionEnd hook exists)."""
         for pane in self.panes():
             await pane.detach()
+        # Item D: every pane stays mounted here (detach() only clears the
+        # engine handle) -- the snapshot picks all of them up on its own.
+        self._persist_tabset()
         await App.action_quit(self)
 
 

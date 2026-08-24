@@ -5,12 +5,20 @@ session a process of its own, so the CLI's job is matchmaking between TUIs
 and daemons through the ONE discovery surface that already exists -- the
 peer registry, whose entries carry the ``daemon_socket`` marker:
 
-* ``doxa``                -- spawn-or-attach: reattach to this project's most
-                             recent live session, or spawn a fresh daemon.
-* ``doxa new``            -- always spawn a fresh session daemon and attach.
+* ``doxa``                -- item D: restore this project's whole saved tab
+                             set (order, pinned names, active tab -- see
+                             doxa.tabsets), reattaching every session still
+                             live and reporting any that are gone; falls
+                             back to spawn-or-attach (this project's most
+                             recent live session, or a fresh daemon) when
+                             there is no saved set, or ``restore_tabs`` is
+                             off.
+* ``doxa new``            -- always spawn a fresh session daemon and attach,
+                             ignoring any saved tab set -- exactly one tab.
 * ``doxa attach [prefix]`` -- reattach to a live session anywhere (prefix
                              matches session id or title; recent history
-                             replays, then the live tail follows).
+                             replays, then the live tail follows). The
+                             single-session path, unaffected by item D.
 * ``doxa stop [prefix]``  -- finalize a session NOW (LORE review + index)
                              and stop its daemon. No TUI.
 * ``doxa doctor``         -- read-only health checks (doxa/doctor.py),
@@ -23,6 +31,10 @@ Quit semantics in the TUI, post-split: ctrl+q (and the palette's
 "Quit: detach") detaches -- the daemon keeps running and finalizes only
 after ``--linger`` seconds with no client attached; the palette's
 "Quit: stop session" finalizes immediately, like ``doxa stop``.
+
+Item D's spec text did not survive to the session that built it; see
+doxa/tabsets.py's own docstring and CHANGELOG.md's 0.23.0 entry for the
+re-derivation and the judgment calls it required.
 """
 
 from __future__ import annotations
@@ -33,7 +45,7 @@ import os
 import subprocess
 import sys
 
-from . import config, peers
+from . import config, peers, tabsets
 from .app import DoxaApp
 from .daemon import spawn_daemon
 
@@ -78,6 +90,87 @@ def _run_attached(
         model=model,
         engine_factory=lambda: EngineClient(socket_path),
         new_session_factory=new_session_factory,
+    )
+    app.run()
+    _maybe_restart(app)
+
+
+def _restore_report_text(restored: int, skipped: int) -> "str | None":
+    """"restored 3 tabs, skipped 1 session no longer running." -- None when
+    there is nothing to say (no saved record at all; see _run_restored's
+    only caller). Both counts get their own clause only when nonzero, so a
+    clean restore (skipped=0) never mentions skipping at all."""
+    if not restored and not skipped:
+        return None
+    parts = []
+    if restored:
+        parts.append(f"restored {restored} tab{'s' if restored != 1 else ''}")
+    if skipped:
+        parts.append(
+            f"skipped {skipped} session{'s' if skipped != 1 else ''} "
+            "no longer running"
+        )
+    return "tab restore: " + ", ".join(parts) + "."
+
+
+def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
+                   model: "str | None", linger: float) -> None:
+    """Item D: open every LIVE resolved tab (doxa.tabsets.resolve already
+    cross-checked each saved session id against the peer registry), in
+    saved order, with saved pinned names, landing on the saved active tab.
+
+    ``resolved.tabs`` empty means every saved session is gone -- this
+    still spawns exactly one fresh daemon (the same outcome as "nothing
+    live in this scope" below) rather than leaving the user with no TUI at
+    all, but the report ("skipped N, restored 0") still reaches them, on
+    that one fresh tab, so a silently different startup never happens."""
+    from .app import RestoreTabSpec
+    from .client import EngineClient
+
+    report = _restore_report_text(len(resolved.tabs), resolved.skipped)
+
+    if not resolved.tabs:
+        _sid, dsock = spawn_daemon(launch_cwd, model=model, linger_secs=linger)
+        app = DoxaApp(
+            cwd=launch_cwd, model=model,
+            engine_factory=lambda: EngineClient(dsock),
+            new_session_factory=lambda: EngineClient(
+                spawn_daemon(launch_cwd, model=model, linger_secs=linger)[1]
+            ),
+            restore_report=report,
+        )
+        app.run()
+        _maybe_restart(app)
+        return
+
+    # Same convention _run_attached uses: the app's shared cwd (what a
+    # LATER Ctrl+T spawns its own fresh daemon against) is the daemon's
+    # OWN reported cwd, not necessarily where `doxa` was invoked from --
+    # with worktree_per_session on, that is the FIRST restored tab's
+    # linked worktree, not the main checkout.
+    app_cwd = resolved.tabs[0][1].cwd
+
+    def new_session_factory() -> EngineClient:
+        _sid, dsock = spawn_daemon(app_cwd, model=model, linger_secs=linger)
+        return EngineClient(dsock)
+
+    specs = [
+        RestoreTabSpec(
+            session_id=entry.session_id,
+            engine_factory=(lambda sock=entry.daemon_socket: EngineClient(sock)),
+            pinned_name=tab.pinned_name,
+        )
+        for tab, entry in resolved.tabs
+    ]
+    print(
+        f"doxa: restoring {len(specs)} tab(s) in {launch_cwd}…", file=sys.stderr,
+    )
+    app = DoxaApp(
+        cwd=app_cwd, model=model,
+        new_session_factory=new_session_factory,
+        restore_tabs=specs,
+        restore_active_id=resolved.active_session_id,
+        restore_report=report,
     )
     app.run()
     _maybe_restart(app)
@@ -193,6 +286,19 @@ def main(argv: "list[str] | None" = None) -> int:
         # or the main checkout, rather than treating the worktree as its
         # own separate project.
         scope = peers.main_repo_root_of(cwd) or cwd
+        # Item D: restore the WHOLE saved tab set for this scope, when
+        # there is one and the setting allows it -- this REPLACES the
+        # single-most-recent-session attach below, not just precedes it.
+        # tabsets.resolve() returns None only when nothing was ever saved
+        # for this scope; every other outcome (including "every saved
+        # session is dead") still goes through _run_restored so the report
+        # reaches the user instead of silently falling through to a plain
+        # spawn-or-attach that differs from what they left.
+        if tabsets.enabled():
+            resolved = tabsets.resolve(scope)
+            if resolved is not None:
+                _run_restored(resolved, cwd, args.model, args.linger)
+                return 0
         live = peers.list_daemons(scope_key=scope)
         if live:
             entry = live[0]
