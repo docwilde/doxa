@@ -107,9 +107,10 @@ def main(argv: "list[str] | None" = None) -> int:
     )
     parser.add_argument(
         "command", nargs="?", default=None,
-        choices=["new", "attach", "stop", "doctor"],
+        choices=["new", "attach", "stop", "doctor", "launcher"],
         help="new: fresh session; attach [prefix]: reattach; stop [prefix]: "
-             "finalize now; doctor: read-only health checks, no TUI. "
+             "finalize now; doctor: read-only health checks, no TUI; "
+             "launcher install|uninstall: the XDG start-menu entry. "
              "Default: spawn-or-attach in this project.",
     )
     parser.add_argument("prefix", nargs="?", default=None,
@@ -135,6 +136,18 @@ def main(argv: "list[str] | None" = None) -> int:
 
     if args.in_process:
         DoxaApp(cwd=cwd, model=args.model).run()
+        return 0
+
+    if args.command == "launcher":
+        from . import launcher as launcher_mod
+
+        if args.prefix not in (None, "install", "uninstall"):
+            print(f"doxa launcher: unknown action {args.prefix!r} "
+                  "(install|uninstall)", file=sys.stderr)
+            return 2
+        action = (launcher_mod.uninstall if args.prefix == "uninstall"
+                  else launcher_mod.install)
+        print(action())
         return 0
 
     if args.command == "doctor":

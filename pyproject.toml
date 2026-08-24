@@ -26,6 +26,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["doxa"]
 
+# The launcher icon is the repo's own assets/icon.png, mapped into the
+# package at build time (doxa.launcher reads it via importlib.resources)
+# -- one file in git, no duplicate under doxa/.
+[tool.hatch.build.targets.wheel.force-include]
+"assets/icon.png" = "doxa/assets/icon.png"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = ["."]

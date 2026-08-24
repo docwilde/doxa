@@ -173,6 +173,15 @@ main() {
     _info "created ${doxa_home}"
   fi
 
+  # -- start-menu launcher (Linux/XDG only) ---------------------------
+  # `doxa launcher install` writes the per-user .desktop entry + icon;
+  # it prints its own skip message on macOS and is a best-effort step
+  # here for the same reason doctor is: the install already succeeded.
+  # DOXA_NO_LAUNCHER=1 opts out entirely.
+  if [ "${DOXA_NO_LAUNCHER:-0}" != "1" ] && _need doxa; then
+    doxa launcher install || true
+  fi
+
   # -- doctor ---------------------------------------------------------
   # Read-only report from the checkout `uv tool install` just placed on
   # PATH. `|| true`: a check FAILING (e.g. a stale presence file from an
