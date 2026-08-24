@@ -367,15 +367,24 @@ def branch_status(cwd: str) -> dict:
     inside a worktree-per-session session, or simply the checked-out
     branch otherwise (worktree_per_session off, or this cwd was never a
     doxa worktree: the checked-out branch just IS the base, same as every
-    session before v0.17). Read-only; never mutates anything."""
+    session before v0.17). Read-only; never mutates anything.
+
+    The session's OWN branch is NOT among the candidates: ``doxa/<id>`` is
+    session IDENTITY, never a base to fork from, and offering it was a
+    data-loss defect (see :func:`switch_base`'s own guard, which is the
+    load-bearing one -- this merely keeps the picker from showing a row
+    that can only ever be refused). Outside a worktree-per-session session
+    there is no such branch, so nothing is filtered and the checked-out
+    branch keeps appearing in its own listing, marked as the base."""
     main_root = peers_mod.main_repo_root_of(cwd)
     if not main_root:
         return {"branches": [], "base": None, "checked_out": None}
     meta = read_meta(cwd)
     base_ref = str(meta.get("base_ref") or "") if meta else ""
+    own = str(meta.get("branch") or "") if meta else ""
     checked_out = current_branch(cwd)
     return {
-        "branches": list_local_branches(main_root),
+        "branches": [b for b in list_local_branches(main_root) if b != own],
         "base": base_ref or checked_out,
         "checked_out": checked_out,
     }
@@ -421,6 +430,24 @@ def switch_base(worktree_path: str, new_base: str) -> dict:
         return {
             "ok": False, "base": None,
             "message": f"no such branch: {new_base!r}",
+        }
+    if resolved == branch:
+        # A branch is never "ahead" of ITSELF, so accepting this would
+        # write a sidecar whose base_ref can only ever measure zero --
+        # and finalize's "clean and zero ahead" test would then read real,
+        # unmerged commits as nothing to keep and `git branch -D` them at
+        # session end. The whole point of this command's refusals is that
+        # work is never lost silently; this is the one target that would
+        # disarm them all, so it is refused before the rebase, not after.
+        return {
+            "ok": False, "base": None,
+            "message": (
+                f"{branch} is this session's own branch, not a base to "
+                "fork from -- basing it on itself would leave nothing to "
+                "measure unmerged work against, and session end would "
+                "then delete that work as if it were already merged. Pick "
+                f"the branch you want to be based ON (currently {old_base})."
+            ),
         }
     if not is_clean(worktree_path):
         return {
@@ -501,7 +528,17 @@ def finalize(worktree_path: str) -> "str | None":
     if not (main_root and branch and base_ref):
         return f"kept {branch or worktree_path} — merge when ready"
     clean = is_clean(worktree_path)
-    ahead = commits_ahead(worktree_path, base_ref)
+    if base_ref == branch:
+        # A sidecar that already records the branch as its own base --
+        # written by the version that let /branch accept it. `rev-list
+        # branch..HEAD` is structurally 0 there, which would read as
+        # "nothing unmerged" and delete the branch outright. Unmeasurable
+        # is the honest answer, and this function already treats that as
+        # "keep", so an operator who hit the old bug still gets their work
+        # back instead of losing it on the next session end.
+        ahead = None
+    else:
+        ahead = commits_ahead(worktree_path, base_ref)
     if clean and ahead == 0:
         _remove(main_root, worktree_path, branch)
         _drop_meta(target)

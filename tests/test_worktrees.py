@@ -436,3 +436,92 @@ def test_switch_base_refuses_outside_a_worktree_session(tmp_path):
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert branch == "trunk"
+
+
+# -- the session's own branch is never a base ----------------------------
+#
+# Regression, v0.33.0. `/branch` listed every local branch, which inside a
+# worktree-per-session session includes the session's OWN `doxa/<id>`.
+# Picking it "succeeded" ("doxa/x now based on doxa/x") and wrote a sidecar
+# whose base_ref equals its branch -- and `rev-list branch..HEAD` is
+# structurally zero there, so finalize's "clean and zero ahead" test read
+# real unmerged commits as nothing to keep and `git branch -D`'d them.
+
+
+def test_branch_status_never_offers_the_sessions_own_branch(tmp_path):
+    """The picker's rows come from here, and a session's own throwaway
+    branch is IDENTITY, not a base anyone can fork from."""
+    repo = _repo(tmp_path)
+    subprocess.run(["git", "-C", str(repo), "branch", "feature"], check=True)
+    path = worktrees_mod.create(str(repo), "ownlist1")
+    assert path is not None
+    own = worktrees_mod.read_meta(path)["branch"]
+    status = worktrees_mod.branch_status(path)
+    assert own not in status["branches"]
+    # and the real bases are all still there
+    assert set(status["branches"]) == {"trunk", "feature"}
+
+
+def test_branch_status_still_lists_the_checked_out_branch_with_no_sidecar(tmp_path):
+    """The filter keys off the SIDECAR's branch, so a plain checkout (no
+    worktree-per-session) keeps listing the branch it is on -- which is
+    also the one it marks as the base."""
+    repo = _repo(tmp_path)
+    status = worktrees_mod.branch_status(str(repo))
+    assert "trunk" in status["branches"]
+    assert status["base"] == "trunk"
+
+
+def test_switch_base_refuses_the_sessions_own_branch(tmp_path):
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "ownsw001")
+    assert path is not None
+    own = worktrees_mod.read_meta(path)["branch"]
+    result = worktrees_mod.switch_base(path, own)
+    assert result["ok"] is False
+    assert "own branch" in result["message"]
+    # names the base it is keeping, so the refusal is actionable
+    assert "trunk" in result["message"]
+    # and the sidecar is untouched: the base is still the real one
+    assert worktrees_mod.read_meta(path)["base_ref"] == "trunk"
+
+
+def test_unmerged_work_survives_a_switch_attempt_onto_the_own_branch(tmp_path):
+    """The whole defect, at the outcome that matters: after the refused
+    switch, a real commit is still KEPT at session end rather than
+    force-deleted."""
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "ownloss1")
+    assert path is not None
+    own = worktrees_mod.read_meta(path)["branch"]
+    worktrees_mod.switch_base(path, own)  # refused
+    (Path(path) / "work.txt").write_text("unmerged", encoding="utf-8")
+    subprocess.run(["git", "-C", path, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", path, "commit", "-qm", "real work"], check=True)
+    sha = subprocess.run(
+        ["git", "-C", path, "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert worktrees_mod.finalize(path) == f"kept {own} — merge when ready"
+    assert own in _branches(repo)
+    contains = subprocess.run(
+        ["git", "-C", str(repo), "branch", "--contains", sha],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert own in contains
+
+
+def test_finalize_keeps_a_sidecar_that_records_its_own_branch_as_base(tmp_path):
+    """The safety net for sidecars the SHIPPED bug already wrote: a
+    base_ref equal to the branch cannot measure 'ahead', and unmeasurable
+    has always meant keep, never delete."""
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "ownold01")
+    assert path is not None
+    own = worktrees_mod.read_meta(path)["branch"]
+    worktrees_mod.update_base(path, own)  # what the old build left on disk
+    (Path(path) / "work.txt").write_text("unmerged", encoding="utf-8")
+    subprocess.run(["git", "-C", path, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", path, "commit", "-qm", "real work"], check=True)
+    assert worktrees_mod.finalize(path) == f"kept {own} — merge when ready"
+    assert own in _branches(repo)

@@ -160,6 +160,9 @@ it: free (a fast-forward rebase, no history to replay) when the session's
 worktree is clean and carries no commits of its own yet, refused — same
 voice as the "kept `doxa/<id>` — merge when ready" message above — the
 moment there's real work switching a base would silently carry across.
+The session's own `doxa/<id>` is not among the branches offered: it is
+this session's identity, not a base to fork from, and a session based on
+itself has nothing left to measure unmerged work against.
 
 Once you're in: type a prompt, press enter. `ctrl+p` opens the command
 palette, `ctrl+t` opens a new tab, `/help` lists every command and key

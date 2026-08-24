@@ -4,6 +4,89 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.33.0 — 2026-08-24
+
+A session's own branch was on the list of branches it could be based on,
+and picking it deleted work. Queue item S (branch switch / branch
+selection) is re-visited here: the item's original lettered spec was lost
+before this session and was re-derived a second time from the item name
+plus the shipped surface, which is worth saying out loud because the
+re-derivation is what found this — the spec text ships nothing new, the
+audit against it does.
+
+Item S shipped whole in 0.20.0 (`doxa new --branch <name>`, the `/branch`
+command and its daemon RPC), gained a status-bar picker in 0.27.0 and a
+label fix in 0.28.0. Everything that spec asks for was already in place
+and is unchanged here. What no version of it ever said is which branches
+are NOT bases, and that omission had teeth:
+
+- **A session could be based on itself, and then lose its commits.**
+  `/branch` (and the chip picker built from the same listing) offered
+  every local branch, which inside a worktree-per-session session
+  includes the session's OWN `doxa/<id>` — identity, never something to
+  fork from. Selecting it did not fail; it reported `doxa/<id> now based
+  on doxa/<id>` and wrote a sidecar whose `base_ref` equalled its
+  `branch`. From that moment the session's safety rail was disarmed:
+  `git rev-list <branch>..HEAD` is structurally zero when the two are the
+  same ref, so `commits_ahead` could only ever answer 0, and
+  `worktrees.finalize`'s "clean and zero commits ahead" test — the one
+  deciding between removing a spent worktree and keeping real work — read
+  genuine unmerged commits as nothing to keep and ran `git worktree
+  remove --force` plus `git branch -D` over them at session end. The
+  branch and its commits were unreachable, with `finalize` returning
+  `None` ("nothing to report") rather than the `kept doxa/<id> — merge
+  when ready` this exact situation exists to produce. Fixed in three
+  places, because the defect had three surfaces and only fixing the
+  visible one would leave the others live:
+  - `worktrees.switch_base` REFUSES a target that resolves to the
+    session's own branch, before the rebase — the load-bearing guard,
+    since it also covers a hand-typed `/branch doxa/<id>`, which no
+    amount of filtering the picker would catch. The refusal names the
+    base being kept, matching the actionable voice of the dirty-tree and
+    commits-ahead refusals beside it.
+  - `worktrees.branch_status` no longer OFFERS it, so the picker and the
+    no-argument `/branch` listing stop showing a row whose only possible
+    outcome is that refusal. The filter keys off the sidecar's `branch`,
+    so a session with no worktree (`worktree_per_session` off) is
+    untouched and still lists the branch it is on — there it IS the base,
+    and is marked as such.
+  - `worktrees.finalize` treats `base_ref == branch` as UNMEASURABLE
+    rather than zero. This is the one that matters to anyone who already
+    hit the bug: a corrupted sidecar is sitting on their disk right now,
+    and unmeasurable has always meant keep, so their next session end
+    returns their work instead of destroying it.
+- Judgment call: OTHER sessions' `doxa/<id>` branches stay in the
+  listing. Basing a session on what another session built is a real thing
+  to want, and it fails safe on its own — when that branch is later
+  removed, `commits_ahead` cannot measure and `finalize` keeps, which is
+  the correct end of the trade. Only the self-reference is unsound, and
+  only it is refused.
+- Judgment call: the `branch` RPC is still UNPAGED, deliberately, against
+  the `_fit_page` budget `beliefs` (0.28.0) and `pending` (0.31.0) share.
+  Measured rather than assumed: those two page because their rows are
+  free text and one real store blew the 64KB frame at ~517 rows. Branch
+  names are short and bounded, and a reply needs roughly 3,800 of them to
+  reach the same cap. A third budget implementation would be carried for
+  a frame that does not overflow.
+- VERIFIED, not rebuilt: 0.32.0 persists a `cwd` per restored tab and
+  nothing else about its base, and a base switch moves the worktree's
+  branch pointer without ever moving the worktree directory — so a
+  restored tab re-reads the new base from the same sidecar and needs no
+  change here.
+- Tests: real git repos and real worktrees throughout (house pattern, no
+  mocking of git) in `tests/test_worktrees.py` — the own-branch refusal
+  and that it leaves the sidecar's base intact, the listing dropping it
+  while a no-sidecar checkout keeps listing its own branch, and the two
+  outcome tests that state the actual stake: a real commit still KEPT at
+  session end after a refused self-switch, and a sidecar already recording
+  its own branch as base surviving finalize with its branch and commits
+  reachable. Each of the four regression tests was confirmed to FAIL
+  against the pre-change module. 785 tests green (780 baseline + 5).
+- README: the `/branch` line in the daemon/worktree section now says which
+  branches it offers. No screenshot changed — the palette gallery shot
+  drives a plain checkout with no worktree in play, where the listing is
+  exactly what it was.
+
 ## 0.32.0 — 2026-08-24
 
 Restore brings back the VIEW, not just the tab list. Reported: "i meant to
