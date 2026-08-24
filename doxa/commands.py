@@ -148,6 +148,13 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette="Model: switch",
     ),
     SlashCommand(
+        name="/branch",
+        group="Session",
+        summary="List local branches (current base marked), or switch this session's base",
+        usage="/branch [name]",
+        palette="Branch: switch",
+    ),
+    SlashCommand(
         name="/effort",
         group="Session",
         summary="Effort level for NEW sessions (the SDK sets it at connect only)",

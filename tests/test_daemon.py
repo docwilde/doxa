@@ -383,16 +383,20 @@ def _git_repo(path):
 
 
 @contextlib.asynccontextmanager
-async def running_daemon_at(cwd, tmp_path, monkeypatch, linger=30.0):
+async def running_daemon_at(cwd, tmp_path, monkeypatch, linger=30.0,
+                             base_branch=None):
     """running_daemon's twin, hosting a real git repo cwd instead of a
     plain tmp dir -- DOXA_HOME is isolated too, since worktrees.create()
-    makes worktrees_root() under it."""
+    makes worktrees_root() under it. ``base_branch`` (item S #1) threads
+    straight to SessionDaemon's own parameter -- the same wire this
+    module's ``spawn_daemon`` uses over a real subprocess, exercised
+    in-process here."""
     monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     monkeypatch.setenv("DOXA_HOME", str(tmp_path / "home"))
     config_mod.invalidate()
     factory, created = factory_with_script(list(TURN_SCRIPT))
     daemon = SessionDaemon(
-        cwd=str(cwd), linger_secs=linger,
+        cwd=str(cwd), linger_secs=linger, base_branch=base_branch,
         engine_factory=lambda cwd, sid, dsock: SessionEngine(
             cwd=cwd, session_id=sid, client_factory=factory, daemon_socket=dsock,
         ),
@@ -617,4 +621,86 @@ async def test_answer_needs_input_unknown_id_is_a_graceful_rpc_failure(
         await client.start()
         ok = await client.answer_needs_input("no-such-id", {"decision": "allow"})
         assert ok is False
+        await client.finalize()
+
+
+# -- item S: branch switch, the daemon RPC and spawn-time wiring -----------
+
+
+@pytest.mark.asyncio
+async def test_daemon_forks_the_worktree_from_an_explicit_base_branch(
+    tmp_path, monkeypatch,
+):
+    """Item S #1's daemon-side half: SessionDaemon(base_branch=...) reaches
+    worktrees.create the same way cli.py's --branch does over a real
+    subprocess -- exercised here in-process."""
+    repo = _git_repo(tmp_path / "repo")
+    subprocess.run(["git", "-C", str(repo), "branch", "alt"], check=True)
+    async with running_daemon_at(
+        repo, tmp_path, monkeypatch, base_branch="alt",
+    ) as (daemon, _, _):
+        meta = worktrees_mod.read_meta(daemon.cwd)
+        assert meta is not None and meta.get("base_ref") == "alt"
+
+
+@pytest.mark.asyncio
+async def test_branch_rpc_lists_local_branches_with_the_base_marked(
+    tmp_path, monkeypatch,
+):
+    repo = _git_repo(tmp_path / "repo")
+    subprocess.run(["git", "-C", str(repo), "branch", "develop"], check=True)
+    async with running_daemon_at(repo, tmp_path, monkeypatch) as (daemon, _, _):
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        result = await client.switch_branch(None)
+        assert result["base"] == "trunk"
+        assert set(result["branches"]) >= {"trunk", "develop"}
+        await client.finalize()
+
+
+@pytest.mark.asyncio
+async def test_branch_rpc_switch_round_trips_and_broadcasts_to_every_client(
+    tmp_path, monkeypatch,
+):
+    """The switch itself: the daemon does the git op (worktrees.switch_base
+    against its OWN cwd, the session's worktree), and every attached
+    client -- not just whichever one asked -- gets the base_changed echo,
+    same "everyone learns it" rule model_changed already follows."""
+    repo = _git_repo(tmp_path / "repo")
+    subprocess.run(["git", "-C", str(repo), "branch", "develop"], check=True)
+    async with running_daemon_at(repo, tmp_path, monkeypatch) as (daemon, _, _):
+        first = EngineClient(str(daemon.socket_path))
+        await first.start()
+        second = EngineClient(str(daemon.socket_path))
+        await second.start()
+
+        result = await second.switch_branch("develop")
+        assert result["ok"] is True
+        assert result["base"] == "develop"
+
+        events = await _drain_oob(first, "base_changed")
+        assert events[-1].data["base"] == "develop"
+
+        meta = worktrees_mod.read_meta(daemon.cwd)
+        assert meta is not None and meta.get("base_ref") == "develop"
+        await first.finalize()
+        await second.finalize()
+
+
+@pytest.mark.asyncio
+async def test_branch_rpc_switch_refusal_comes_back_without_raising(
+    tmp_path, monkeypatch,
+):
+    """A dirty worktree: the RPC transport succeeds (this IS a normal,
+    expected outcome, not a protocol failure), and the refusal rides in
+    result["ok"]/result["message"] for the caller to show verbatim."""
+    repo = _git_repo(tmp_path / "repo")
+    subprocess.run(["git", "-C", str(repo), "branch", "develop"], check=True)
+    async with running_daemon_at(repo, tmp_path, monkeypatch) as (daemon, _, _):
+        (Path(daemon.cwd) / "scratch.txt").write_text("wip", encoding="utf-8")
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        result = await client.switch_branch("develop")
+        assert result["ok"] is False
+        assert "uncommitted changes" in result["message"]
         await client.finalize()

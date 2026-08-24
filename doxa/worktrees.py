@@ -117,6 +117,14 @@ def read_meta(worktree_path: str) -> "dict | None":
     return data if isinstance(data, dict) else None
 
 
+def meta_file_path(worktree_path: str) -> Path:
+    """Public wrapper on :func:`_meta_path` -- for a caller (``doxa.app``'s
+    GitLine) that wants to mtime-guard its OWN re-reads of :func:`read_meta`
+    the same way it already guards HEAD/ref reads, without re-deriving the
+    sidecar path itself."""
+    return _meta_path(Path(worktree_path))
+
+
 def _drop_meta(target: Path) -> None:
     with contextlib.suppress(OSError):
         _meta_path(target).unlink()

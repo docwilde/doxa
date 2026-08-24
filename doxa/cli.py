@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import subprocess
 import sys
 
 from . import config, peers
@@ -125,6 +126,17 @@ def main(argv: "list[str] | None" = None) -> int:
                              "client before finalizing (default %(default)s)")
     parser.add_argument("--in-process", action="store_true",
                         help="Phase 1 mode: engine inside the TUI, no daemon")
+    parser.add_argument("--branch", default=None,
+                        help="item S: fork the new session's worktree from "
+                             "this ref instead of the launch cwd's own "
+                             "checkout (spawn-time only: `doxa new "
+                             "--branch <name>`, or plain `doxa` with "
+                             "nothing live in this project)")
+    parser.add_argument("--checkout", action="store_true",
+                        help="with --branch and worktree_per_session OFF: "
+                             "allow switching the ACTUAL checkout (refused "
+                             "by default, and even then only on a clean "
+                             "tree) instead of the default refusal")
     args = parser.parse_args(argv)
 
     cwd = os.getcwd()
@@ -190,9 +202,82 @@ def main(argv: "list[str] | None" = None) -> int:
             return 0
 
     # `doxa new`, or plain `doxa` with nothing live in this scope.
-    _sid, dsock = spawn_daemon(cwd, model=args.model, linger_secs=args.linger)
+    base_branch = _resolve_branch_flag(cwd, args)
+    if base_branch is _BRANCH_FLAG_FAILED:
+        return 2
+    _sid, dsock = spawn_daemon(
+        cwd, model=args.model, linger_secs=args.linger, base_branch=base_branch,
+    )
     _run_attached(dsock, cwd, args.model, args.linger)
     return 0
+
+
+_BRANCH_FLAG_FAILED = object()  # sentinel: --branch was given and refused
+
+
+def _resolve_branch_flag(cwd: str, args: argparse.Namespace):
+    """``--branch`` (item S #1), validated up front with an actionable
+    message -- worktrees.create()'s own contract stays permissive (``None``
+    is always a safe "just run in cwd" fallback, see its docstring), so an
+    explicit flag needs its OWN, stricter check here rather than silently
+    riding that fallback into ignoring what the user asked for.
+
+    Returns the base ref to hand to :func:`spawn_daemon`, ``None`` when
+    ``--branch`` was not given at all, or the sentinel
+    :data:`_BRANCH_FLAG_FAILED` after already printing why (the caller's
+    cue to exit 2)."""
+    from . import worktrees as worktrees_mod
+
+    branch = args.branch
+    if not branch:
+        return None
+    scope = peers.main_repo_root_of(cwd)
+    if scope is None:
+        print(f"doxa: --branch needs a git repo (none found at {cwd})",
+              file=sys.stderr)
+        return _BRANCH_FLAG_FAILED
+    if worktrees_mod.enabled():
+        resolved = worktrees_mod.resolve_ref(scope, branch)
+        if resolved is None:
+            print(f"doxa: no such branch: {branch!r}", file=sys.stderr)
+            return _BRANCH_FLAG_FAILED
+        return resolved
+    # worktree_per_session is OFF: there is no isolated worktree for
+    # --branch to fork -- it would move the ACTUAL checkout, which this
+    # feature must never do silently. Refused by default; --checkout is
+    # the explicit, narrower escape hatch (and even then only on a clean
+    # tree -- never discard real uncommitted work because a flag asked).
+    if not args.checkout:
+        print(
+            "doxa: worktree_per_session is off -- `--branch` would switch "
+            "your ACTUAL checkout, not an isolated session worktree, which "
+            "this refuses to do silently. Pass --checkout to allow that "
+            "explicitly (needs a clean working tree), or turn "
+            "worktree_per_session back on.",
+            file=sys.stderr,
+        )
+        return _BRANCH_FLAG_FAILED
+    if not worktrees_mod.is_clean(cwd):
+        print(
+            f"doxa: --checkout refuses on a dirty tree at {cwd} -- commit "
+            "or stash first.",
+            file=sys.stderr,
+        )
+        return _BRANCH_FLAG_FAILED
+    resolved = worktrees_mod.resolve_ref(scope, branch)
+    if resolved is None:
+        print(f"doxa: no such branch: {branch!r}", file=sys.stderr)
+        return _BRANCH_FLAG_FAILED
+    checkout = subprocess.run(
+        ["git", "checkout", resolved], cwd=cwd, capture_output=True, text=True,
+    )
+    if checkout.returncode != 0:
+        print(f"doxa: git checkout {resolved} failed: {checkout.stderr.strip()}",
+              file=sys.stderr)
+        return _BRANCH_FLAG_FAILED
+    print(f"doxa: checked out {resolved} (--checkout, worktree_per_session off)",
+          file=sys.stderr)
+    return None  # already switched in place -- no worktree left to fork
 
 
 if __name__ == "__main__":

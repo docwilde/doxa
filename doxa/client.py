@@ -247,6 +247,17 @@ class EngineClient:
             # the cached value follows immediately, not at the next status.
             if ev.data.get("model"):
                 self.model = str(ev.data["model"])
+        elif ev.type == "base_changed":
+            # Item S #4/#5: another client (or this one) switched the
+            # session's base. Unlike model_changed, nothing needs caching
+            # HERE -- GitLine re-reads the worktree sidecar fresh, mtime-
+            # guarded, on its own next render (see GitLine.base_branch);
+            # this event's only job is to be SOMETHING that reaches every
+            # attached client's out-of-band stream, so the trailing
+            # _refresh_status() doxa.app's _peer_pump already runs after
+            # every out-of-band event lands on the next event-driven
+            # render, same as it always has.
+            pass
         elif ev.type in ("peer_joined", "peer_left"):
             asyncio.ensure_future(self._refresh_status_quietly())
         if frame.get("turn") and frame["turn"] == self._active_turn:
@@ -295,6 +306,20 @@ class EngineClient:
             raise EngineClientError(reply.get("error") or "model switch refused")
         self.model = reply.get("model") or model
         return str(self.model)
+
+    async def switch_branch(self, target: "str | None") -> dict:
+        """/branch over the socket (item S #4): the daemon does the git op
+        either way (doxa.worktrees owns it), and on a successful SWITCH
+        every attached client -- not just this one -- gets the
+        ``base_changed`` echo (see :meth:`_handle_event`). Raises only on
+        a TRANSPORT failure; an ordinary refusal (dirty tree, no such
+        branch, ...) comes back as ``result["ok"] is False`` for the
+        caller to show verbatim, same shape doxa.worktrees.switch_base
+        itself returns."""
+        reply = await self._call("branch", target=target)
+        if not reply.get("ok"):
+            raise EngineClientError(reply.get("error") or "branch call failed")
+        return dict(reply.get("result") or {})
 
     async def answer_needs_input(self, req_id: str, answer: dict) -> bool:
         """Queue item 5: resolve one pending AskUserQuestion/permission

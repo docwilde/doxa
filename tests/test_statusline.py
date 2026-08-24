@@ -29,6 +29,7 @@ from doxa.app import (
     CTX_RED_PCT,
     DoxaApp,
     GitLine,
+    compose_tab_label,
     ctx_chip,
 )
 from doxa.engine import EngineEvent
@@ -277,12 +278,14 @@ def test_git_chip_is_plain_in_a_normal_checkout(tmp_path):
 
 def test_git_chip_carries_the_worktree_suffix(tmp_path):
     """Inside a linked worktree whose directory name says something the
-    branch does not: `repo ⎇ branch@worktree`. `git worktree add` names
-    the worktree after the directory it just created, so -- same
-    construction test_branch_label_names_a_linked_worktree uses in
-    test_tab_labels.py -- a worktree name that differs from BOTH the
-    branch and the repo slot is simulated the same way branch_label()'s
-    own tests do.
+    branch does not: `repo ⎇ branch@worktree`, repo being the MAIN
+    checkout's name (item S's fix: NOT this worktree directory's own name
+    -- see test_git_chip_repo_slot_is_the_main_checkout_not_the_worktree
+    below). `git worktree add` names the worktree after the directory it
+    just created, so -- same construction
+    test_branch_label_names_a_linked_worktree uses in test_tab_labels.py
+    -- a worktree name that differs from BOTH the branch and the repo
+    slot is simulated the same way branch_label()'s own tests do.
 
     The `@sha` DOES appear here (worktree-per-session, #3): a linked
     worktree's checked-out branch ref lives in the MAIN repo's
@@ -300,14 +303,38 @@ def test_git_chip_carries_the_worktree_suffix(tmp_path):
     )
     line = GitLine(str(work))
     line.worktree = "spike"
-    assert line.render() == f"elsewhere ⎇ feature@spike @{_short_sha(repo)}"
+    assert line.render() == f"myrepo ⎇ feature@spike @{_short_sha(repo)}"
+
+
+def test_git_chip_repo_slot_is_the_main_checkout_not_the_worktree(tmp_path):
+    """The reported regression (item S, folded in as a defect-then-fix):
+    `GitLine.repo` used to read `Path(repo_root).name`, and since v0.17
+    every session's cwd IS a linked worktree -- `git rev-parse
+    --show-toplevel` from inside one names the WORKTREE, not the repo, so
+    the chip read `doxa-f13526d4 ⎇ doxa/f13526d4`, the session id printed
+    twice. Fixed by resolving the repo slot through the worktree's
+    `commondir` pointer (already read for the sha above) instead."""
+    repo = _repo(tmp_path)
+    work = repo.parent / "elsewhere"
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-q", "-b", "feature",
+         str(work)],
+        check=True,
+    )
+    line = GitLine(str(work))
+    assert line.repo == "myrepo"
+    assert line.render() == f"myrepo ⎇ feature@elsewhere @{_short_sha(repo)}"
+    branch, isolated = line.tab_branch()
+    label = compose_tab_label("Opus", line.repo, branch, isolated=isolated)
+    # The session id (the worktree/branch's OWN name, "elsewhere"/
+    # "feature") no longer appears twice in one label.
+    assert label.count("elsewhere") <= 1
 
 
 def test_git_chip_dedups_when_the_worktree_name_repeats_branch_or_repo(tmp_path):
-    """`git worktree add ../foo -b foo` makes the worktree, the branch, and
-    the directory (repo slot) all "foo" -- the suffix is withheld because
-    it would say one fact three times, the same rule branch_label()
-    documents for the tab label."""
+    """The worktree name is withheld from branch_label() when it repeats
+    either the branch or the (now MAIN-checkout) repo slot beside it --
+    saying the same fact twice is worse than saying it once."""
     repo = _repo(tmp_path)
     work = repo.parent / "elsewhere"
     subprocess.run(
@@ -317,15 +344,20 @@ def test_git_chip_dedups_when_the_worktree_name_repeats_branch_or_repo(tmp_path)
     )
     line = GitLine(str(work))
     assert line.worktree == "elsewhere"
-    assert line.repo == "elsewhere"
+    assert line.repo == "myrepo"
     sha = _short_sha(repo)
-    # The worktree name repeats the repo slot beside it: withheld.
-    assert line.render() == f"elsewhere ⎇ feature @{sha}"
 
-    # And the branch-matches-worktree case, exercised directly the same
-    # way test_tab_labels.py exercises branch_label() itself.
+    # Matches the BRANCH: withheld.
     line.worktree = "feature"
-    assert line.render() == f"elsewhere ⎇ feature @{sha}"
+    assert line.render() == f"myrepo ⎇ feature @{sha}"
+
+    # Matches the REPO slot: withheld too.
+    line.worktree = "myrepo"
+    assert line.render() == f"myrepo ⎇ feature @{sha}"
+
+    # Matches neither: carries real information, so it IS appended.
+    line.worktree = "elsewhere"
+    assert line.render() == f"myrepo ⎇ feature@elsewhere @{sha}"
 
 
 @pytest.mark.asyncio

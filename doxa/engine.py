@@ -1070,6 +1070,28 @@ class SessionEngine:
         self.model = model
         return model or "default"
 
+    # -- branch switch (item S) ---------------------------------------
+
+    async def switch_branch(self, target: "str | None") -> dict:
+        """``/branch``, in-process (``--in-process``, no daemon between
+        this engine and the git worktree): the SAME ``doxa.worktrees``
+        operation the daemon's ``branch`` RPC calls, run directly against
+        ``self.cwd``, so the two paths share one implementation and one
+        set of refusal rules rather than growing two.
+
+        ``--in-process`` never gets a session worktree (worktree-per-
+        session is a daemon-only substitution, see
+        ``SessionDaemon._apply_worktree``), so a SWITCH here almost always
+        comes back with :func:`doxa.worktrees.switch_base`'s plain "no
+        worktree here" refusal -- listing still works, reading whatever
+        real repo ``self.cwd`` sits in. Off the loop: both are git
+        subprocess calls."""
+        from . import worktrees as worktrees_mod
+
+        if not target:
+            return await asyncio.to_thread(worktrees_mod.branch_status, self.cwd)
+        return await asyncio.to_thread(worktrees_mod.switch_base, self.cwd, target)
+
     def usage_summary(self) -> dict[str, Any]:
         """Everything /usage knows from the SESSION side: the CLI's own
         token counts, the turn count, and the cost figure (which is a

@@ -184,10 +184,18 @@ class SessionDaemon:
         linger_secs: float = DEFAULT_LINGER_SECS,
         engine_factory: Callable[[str, str, str], SessionEngine] | None = None,
         ring_capacity: int = RING_CAPACITY,
+        base_branch: str | None = None,
     ) -> None:
         self.cwd = str(cwd or os.getcwd())
         self.model = model
         self.session_id = session_id or str(uuid.uuid4())
+        # Item S #1 (`doxa new --branch <name>`): the ref the session's OWN
+        # worktree forks from, plumbed here from spawn_daemon's subprocess
+        # arg. cli.py has already validated it exists before ever spawning
+        # this process -- _apply_worktree still passes it through
+        # worktrees.create's own (permissive) resolution, never trusting
+        # the flag blindly.
+        self.base_branch = base_branch
         self.linger_secs = linger_secs
         self.socket_path = daemon_socket_path(self.session_id)
         self._engine_factory = engine_factory or (
@@ -224,7 +232,9 @@ class SessionDaemon:
         setting is off, ``cwd`` is not a git repo, or worktree creation
         fails for any reason: worktree-per-session is strictly additive,
         never a reason a session fails to start."""
-        path = worktrees_mod.create(self.cwd, self.session_id)
+        path = worktrees_mod.create(
+            self.cwd, self.session_id, base_branch=self.base_branch
+        )
         if path:
             self.cwd = path
 
@@ -527,6 +537,31 @@ class SessionDaemon:
             # that asked -- two tabs on one daemon must not disagree.
             self._publish(None, EngineEvent("model_changed", {"model": model}))
             await self._reply(writer, req_id, ok=True, model=model)
+        elif method == "branch":
+            # /branch over the daemon split (item S #4): the SAME shape as
+            # set_model above -- the daemon owns the git operation
+            # (doxa.worktrees, against self.cwd, the session's own
+            # worktree), the client gets a plain reply plus, on a
+            # successful SWITCH, a broadcast every attached client (not
+            # just whichever one asked) picks up -- same "everyone learns
+            # it" rule model_changed already keeps every tab in sync with.
+            # No arg lists (read-only, nothing to broadcast); an arg
+            # switches.
+            target = params.get("target")
+            target = str(target).strip() if target else None
+            if target:
+                result = await asyncio.to_thread(
+                    worktrees_mod.switch_base, self.cwd, target
+                )
+                if result.get("ok"):
+                    self._publish(
+                        None, EngineEvent("base_changed", {"base": result.get("base")})
+                    )
+            else:
+                result = await asyncio.to_thread(
+                    worktrees_mod.branch_status, self.cwd
+                )
+            await self._reply(writer, req_id, ok=True, result=result)
         elif method == "answer_needs_input":
             # The resolution's own needs_input_resolved broadcast comes
             # from the ENGINE side (SessionEngine._wait_for_answer's
@@ -587,6 +622,7 @@ def spawn_daemon(
     model: str | None = None,
     linger_secs: float = DEFAULT_LINGER_SECS,
     wait_secs: float = 60.0,
+    base_branch: str | None = None,
 ) -> "tuple[str, str]":
     """Spawn a detached daemon for ``cwd`` and wait for its registry entry.
 
@@ -594,7 +630,12 @@ def spawn_daemon(
     the spawner can poll the one registry surface for exactly its own entry
     -- no scanning race with concurrently spawned sessions. Daemon stdout/
     stderr go to a per-session log under the runtime dir (diagnostics only;
-    the engine never prints transcript text)."""
+    the engine never prints transcript text).
+
+    ``base_branch`` (item S #1, ``doxa new --branch``) rides along as a
+    subprocess arg -- the daemon is a separate process, so this is the
+    only way anything reaches ``SessionDaemon.__init__``'s own
+    ``base_branch`` parameter."""
     import subprocess
     import time as _time
 
@@ -608,6 +649,8 @@ def spawn_daemon(
     ]
     if model:
         cmd += ["--model", model]
+    if base_branch:
+        cmd += ["--base-branch", base_branch]
     with open(log_path, "ab") as log:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
@@ -655,6 +698,7 @@ async def _amain(args: argparse.Namespace) -> int:
         model=args.model,
         session_id=args.session_id,
         linger_secs=args.linger,
+        base_branch=args.base_branch,
     )
     install_signal_handlers(daemon)
     await daemon.serve()
@@ -667,6 +711,9 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument("--model", default=None)
     parser.add_argument("--session-id", default=None)
     parser.add_argument("--linger", type=float, default=DEFAULT_LINGER_SECS)
+    parser.add_argument("--base-branch", default=None,
+                        help="item S: fork the session worktree from this "
+                             "ref instead of the launch cwd's checkout")
     args = parser.parse_args(argv)
     return asyncio.run(_amain(args))
 

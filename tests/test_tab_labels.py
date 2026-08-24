@@ -17,6 +17,7 @@ import pytest
 from doxa.app import (
     DoxaApp,
     GitLine,
+    TAB_ISOLATION_MARKER,
     TAB_LABEL_MAX,
     ellipsize,
     short_model,
@@ -81,16 +82,21 @@ def test_branch_label_names_a_linked_worktree(tmp_path):
     )
     line = GitLine(str(work))
     assert line.worktree == "elsewhere"     # git's own name for it
-    assert line.repo == "elsewhere"
-    # The worktree name here repeats the repo slot, so it is not appended:
-    # `elsewhere ⎇ feature@elsewhere` says one fact three times.
-    assert line.branch_label() == "feature"
+    # The repo slot is the MAIN checkout's name, not this worktree
+    # directory's -- a session cwd IS a linked worktree since v0.17, and
+    # `Path(repo_root).name` there would print the session id twice
+    # alongside the branch chip beside it (item S's regression fix).
+    assert line.repo == "myrepo"
+    # "elsewhere" differs from both the branch and the (correct) repo
+    # slot, so it carries real information and IS appended.
+    assert line.branch_label() == "feature@elsewhere"
 
-    # A worktree directory whose name differs from both DOES get the
-    # suffix -- that is the case where it carries information.
-    line.worktree = "spike"
-    assert line.branch_label() == "feature@spike"
-    line.worktree = "feature"  # same as the branch: nothing to add
+    # A worktree directory whose name repeats the BRANCH has nothing to
+    # add...
+    line.worktree = "feature"
+    assert line.branch_label() == "feature"
+    # ...and neither does one that repeats the REPO slot.
+    line.worktree = "myrepo"
     assert line.branch_label() == "feature"
 
 
@@ -221,6 +227,115 @@ async def test_each_tab_carries_its_own_label(monkeypatch, tmp_path):
         await pilot.pause()
         assert _tab_label(app, first) == "Sonnet@myrepo:trunk"
         assert _tab_label(app, second) == "Opus@myrepo:trunk"
+
+
+# -- item S: the tab label inside a worktree-per-session session ----------
+#
+# v0.17's worktree-per-session made every session cwd a linked worktree
+# whose OWN checked-out branch is `doxa/<shortid>` -- the session's own
+# throwaway handle, not the branch it forked from. The tab label used to
+# show that session branch (a regression, reported: the session id ends up
+# printed twice, once as the tab's branch half and again as the daemon's
+# own handle elsewhere). Fixed: the tab shows the BASE (GitLine.tab_branch,
+# via the worktree sidecar's base_ref); the status bar keeps the session
+# branch + sha, unchanged, because that IS session identity.
+
+
+@pytest.mark.asyncio
+async def test_tab_label_inside_a_worktree_session_shows_the_base_not_the_session_branch(
+    monkeypatch, tmp_path,
+):
+    from doxa import worktrees as worktrees_mod
+
+    monkeypatch.setenv("DOXA_HOME", str(tmp_path / "doxa-home"))
+    from doxa import config as config_mod
+    config_mod.invalidate()
+    repo = _repo(tmp_path)
+    worktree = worktrees_mod.create(str(repo), "brlabel1")
+    assert worktree is not None
+    app, _engines = await _app(monkeypatch, worktree)
+    async with app.run_test() as pilot:
+        pane = app.active_pane
+        assert await _settled(pilot, app, pane)
+        # The base (trunk), not the session's own branch (doxa/brlabel1).
+        assert pane.auto_label() == f"Sonnet@myrepo:trunk{TAB_ISOLATION_MARKER}"
+        assert _tab_label(app, pane) == f"Sonnet@myrepo:trunk{TAB_ISOLATION_MARKER}"
+        assert "brlabel1" not in _tab_label(app, pane)
+    config_mod.invalidate()
+
+
+@pytest.mark.asyncio
+async def test_status_bar_keeps_the_session_branch_inside_a_worktree_session(
+    monkeypatch, tmp_path,
+):
+    from doxa import worktrees as worktrees_mod
+
+    monkeypatch.setenv("DOXA_HOME", str(tmp_path / "doxa-home"))
+    from doxa import config as config_mod
+    config_mod.invalidate()
+    repo = _repo(tmp_path)
+    worktree = worktrees_mod.create(str(repo), "brlabel2")
+    assert worktree is not None
+    app, _engines = await _app(monkeypatch, worktree)
+    async with app.run_test() as pilot:
+        pane = app.active_pane
+        assert await _settled(pilot, app, pane)
+        # The TAB shows the base...
+        assert _tab_label(app, pane) == f"Sonnet@myrepo:trunk{TAB_ISOLATION_MARKER}"
+        # ...but the STATUS BAR keeps the real session identity: the
+        # worktree's own branch, exactly as it always has.
+        status = str(pane.query_one("#status-bar").renderable)
+        assert "doxa/brlabel2" in status
+    config_mod.invalidate()
+
+
+@pytest.mark.asyncio
+async def test_tab_label_follows_a_base_switch_without_rebuilding_gitline(
+    monkeypatch, tmp_path,
+):
+    """GitLine is never reconstructed (item S #5's "verify the path
+    updates" instruction): base_branch() re-reads the sidecar mtime-guarded,
+    same discipline as the branch/sha fields, so a switch is visible on the
+    next event-driven refresh -- here simulated the same way
+    test_the_label_follows_a_branch_switch_without_polling defeats the
+    HEAD mtime guard."""
+    from doxa import worktrees as worktrees_mod
+
+    monkeypatch.setenv("DOXA_HOME", str(tmp_path / "doxa-home"))
+    from doxa import config as config_mod
+    config_mod.invalidate()
+    repo = _repo(tmp_path)
+    subprocess.run(["git", "-C", str(repo), "branch", "develop"], check=True)
+    worktree = worktrees_mod.create(str(repo), "brlabel3")
+    assert worktree is not None
+    app, _engines = await _app(monkeypatch, worktree)
+    async with app.run_test() as pilot:
+        pane = app.active_pane
+        assert await _settled(pilot, app, pane)
+        assert pane.auto_label() == f"Sonnet@myrepo:trunk{TAB_ISOLATION_MARKER}"
+
+        result = worktrees_mod.switch_base(worktree, "develop")
+        assert result["ok"] is True
+        pane._git._base_mtime = None  # defeat same-second mtime granularity
+        pane._refresh_status()
+        await pilot.pause()
+        assert pane.auto_label() == f"Sonnet@myrepo:develop{TAB_ISOLATION_MARKER}"
+        assert _tab_label(app, pane) == f"Sonnet@myrepo:develop{TAB_ISOLATION_MARKER}"
+    config_mod.invalidate()
+
+
+@pytest.mark.asyncio
+async def test_tab_label_toggle_off_is_unchanged(monkeypatch, tmp_path):
+    """worktree_per_session OFF: no sidecar at all, so tab_branch() falls
+    back to branch_label() -- the checked-out branch IS the base, exactly
+    as every tab label read before this feature existed."""
+    monkeypatch.setenv("DOXA_WORKTREE", "0")
+    repo = _repo(tmp_path)
+    app, _engines = await _app(monkeypatch, repo)
+    async with app.run_test() as pilot:
+        pane = app.active_pane
+        assert await _settled(pilot, app, pane)
+        assert pane.auto_label() == "Sonnet@myrepo:trunk"
 
 
 # -- renaming a tab -------------------------------------------------------
@@ -408,6 +523,47 @@ def test_the_worst_case_label_plus_glyph_still_fits_the_original_budget():
 
     worst_case = compose_tab_label(
         "Sonnet", "repo", "a-branch-name-so-long-it-alone-overflows"
+    )
+    assert glyph_width + len(worst_case) <= ORIGINAL_BUDGET
+
+
+# -- item S: the worktree-isolation marker ---------------------------------
+
+
+def test_isolation_marker_appends_when_it_fits():
+    from doxa.app import compose_tab_label
+
+    label = compose_tab_label("Opus", "doxa", "main", isolated=True)
+    assert label == f"Opus@doxa:main{TAB_ISOLATION_MARKER}"
+    assert len(label) <= TAB_LABEL_MAX
+    # And plainly absent when the session isn't isolated at all.
+    assert compose_tab_label("Opus", "doxa", "main") == "Opus@doxa:main"
+
+
+def test_isolation_marker_is_dropped_rather_than_shrinking_the_branch():
+    """The base branch never gives up a character to make room for the
+    marker -- a label already sitting at TAB_LABEL_MAX goes without it."""
+    from doxa.app import compose_tab_label
+
+    plain = compose_tab_label(
+        "Sonnet", "repo", "a-branch-name-so-long-it-alone-overflows"
+    )
+    marked = compose_tab_label(
+        "Sonnet", "repo", "a-branch-name-so-long-it-alone-overflows",
+        isolated=True,
+    )
+    assert plain == marked  # no room: marker silently dropped
+    assert len(marked) <= TAB_LABEL_MAX
+
+
+def test_isolation_marker_still_fits_the_glyph_plus_limit_budget():
+    from doxa.app import PROVIDER_GLYPHS, compose_tab_label
+
+    glyph_width = len(PROVIDER_GLYPHS["claude"]) + 1
+    ORIGINAL_BUDGET = 34
+    worst_case = compose_tab_label(
+        "Sonnet", "repo", "a-branch-name-so-long-it-alone-overflows",
+        isolated=True,
     )
     assert glyph_width + len(worst_case) <= ORIGINAL_BUDGET
 

@@ -80,6 +80,7 @@ from . import notify as notify_mod
 from . import paste as paste_mod
 from . import peers as peers_mod
 from . import version as version_mod
+from . import worktrees as worktrees_mod
 from .engine import EngineEvent, SessionEngine
 from .history import SEARCH_PREFIX, SessionSearch, hit_reference
 from .identity import tier_short  # noqa: F401 -- re-exported: the status
@@ -124,6 +125,14 @@ MODEL_ALIASES = ("haiku", "sonnet", "opus", "fable")
 TAB_LABEL_MAX = 32
 TAB_MODEL_MIN = 4
 TAB_REPO_MIN = 6
+
+# Item S: a worktree-isolated session earns one more character saying so --
+# the SAME glyph render() already uses between repo and branch, trailing
+# the tab's branch half instead. It is appended AFTER the trim algorithm
+# above has already run, and ONLY when there is a free character left at
+# TAB_LABEL_MAX -- the base branch itself never gives up a character to
+# make room for it, and a label already at the limit just goes without.
+TAB_ISOLATION_MARKER = "⎇"
 
 # Provider identity: one glyph, prepended to every tab label ahead of the
 # model tier. Multi-provider engines (a second SessionPane driving a
@@ -182,34 +191,46 @@ def compose_tab_label(
     repo: str,
     branch: "str | None" = None,
     limit: int = TAB_LABEL_MAX,
+    *,
+    isolated: bool = False,
 ) -> str:
     """`Model@repo:branch`, trimmed model-first when it must be.
 
     Outside a repo there is no branch and therefore NO colon: a dangling
     separator is a label saying "something is missing here", which is worse
-    than the shorter label it replaced."""
+    than the shorter label it replaced.
+
+    ``isolated=True`` (item S: a worktree-per-session session, ``branch``
+    then being the BASE the worktree forked from -- see GitLine.tab_branch)
+    appends :data:`TAB_ISOLATION_MARKER` when -- and only when -- there is
+    a free character left at ``limit`` after everything else has already
+    been fit; never at the cost of shrinking the branch further to make
+    room for it."""
 
     def build(m: str, r: str, b: "str | None") -> str:
         return f"{m}@{r}" + (f":{b}" if b else "")
 
     model_s, repo_s = model, repo
+    text = build(model_s, repo_s, branch)
     for segment, floor in (("model", TAB_MODEL_MIN), ("repo", TAB_REPO_MIN)):
-        text = build(model_s, repo_s, branch)
         overflow = len(text) - limit
         if overflow <= 0:
-            return text
+            break
         current = model_s if segment == "model" else repo_s
         room = len(current) - floor
-        if room <= 0:
-            continue
-        shrunk = _shrink(current, len(current) - min(room, overflow))
-        if segment == "model":
-            model_s = shrunk
-        else:
-            repo_s = shrunk
+        if room > 0:
+            shrunk = _shrink(current, len(current) - min(room, overflow))
+            if segment == "model":
+                model_s = shrunk
+            else:
+                repo_s = shrunk
+        text = build(model_s, repo_s, branch)
     # Only now, with the model and the repo already at their floors, does
     # the branch give ground.
-    return ellipsize(build(model_s, repo_s, branch), limit)
+    text = ellipsize(text, limit)
+    if isolated and branch and len(text) < limit:
+        text += TAB_ISOLATION_MARKER
+    return text
 
 
 def ellipsize(text: str, limit: int = TAB_LABEL_MAX) -> str:
@@ -437,8 +458,9 @@ class GitLine:
     would recreate the busy-idle bug this app just shed."""
 
     def __init__(self, cwd: str) -> None:
+        self._cwd = cwd
         self.repo_root = peers_mod.repo_root_of(cwd)
-        self.repo = Path(self.repo_root).name if self.repo_root else None
+        self.repo: str | None = None
         self._head: Path | None = None
         self._gitdir: Path | None = None
         self._mtime: float | None = None
@@ -475,6 +497,32 @@ class GitLine:
             self._gitdir = git
             self._head = git / "HEAD"
             self._commondir = self._resolve_commondir(git)
+        # The repo NAME is always the MAIN checkout's, never a linked
+        # worktree's own directory -- since v0.17 (worktree-per-session)
+        # every session's cwd IS such a worktree, and `Path(repo_root).name`
+        # there reads `doxa-<shortid>`, printing the session id twice
+        # alongside the `doxa/<shortid>` branch chip beside it (reported).
+        # self._commondir already resolves THROUGH the worktree's commondir
+        # pointer for the sha read above -- its parent is the main repo root
+        # in every case, worktree or not, and reusing it costs no extra
+        # subprocess (pure filesystem reads, same "one subprocess total"
+        # discipline this class already documents). Anything where that
+        # resolution doesn't land on a plain ".git" (a submodule, a bare
+        # repo) falls back to the worktree-root name, same as before.
+        if self._commondir is not None and self._commondir.name == ".git":
+            self.repo = self._commondir.parent.name
+        elif self.repo_root:
+            self.repo = Path(self.repo_root).name
+        # Item S / the tab-label regression it surfaced: the worktree
+        # sidecar's own base_ref (see doxa.worktrees), mtime-guarded the
+        # SAME way HEAD/the ref file above are -- a live `/branch` switch
+        # rewrites this file (worktrees.update_base), and the next event-
+        # driven render sees it with no polling and no reconstructing this
+        # GitLine. None outside a worktree-per-session session (no
+        # sidecar): callers fall back to branch_label().
+        self._base_meta_path = worktrees_mod.meta_file_path(cwd)
+        self._base_mtime: float | None = None
+        self._base_ref_cached: str | None = None
 
     @staticmethod
     def _resolve_commondir(gitdir: Path) -> Path:
@@ -527,8 +575,15 @@ class GitLine:
         return chip
 
     def branch_label(self) -> str | None:
-        """The branch as a TAB says it: `main`, or `main@featureX` inside a
-        linked worktree.
+        """The branch actually checked out HERE: `main`, or `main@featureX`
+        inside a linked worktree. SESSION identity -- what render() (the
+        status bar chip) and /about show, exactly what git has HEAD
+        pointed at right now. NOT what a tab shows; see :meth:`tab_branch`
+        for that (item S's fix for the v0.17 regression where the tab
+        label started showing this SAME string -- `doxa/f13526d4` -- which
+        is the session's own throwaway branch, not the base the operator
+        is orienting by, and which repeats the session id already visible
+        elsewhere).
 
         The worktree name is only added when it says something the label
         does not already carry -- `git worktree add ../foo -b foo` makes
@@ -542,6 +597,42 @@ class GitLine:
         if self.worktree and self.worktree not in (branch, self.repo):
             return f"{branch}@{self.worktree}"
         return branch
+
+    def base_branch(self) -> str | None:
+        """The worktree sidecar's recorded ``base_ref`` (doxa.worktrees),
+        re-read on the SAME mtime-guard discipline as HEAD/the ref file
+        above -- ``None`` outside a worktree-per-session session (no
+        sidecar at all), in which case :meth:`tab_branch` falls back to
+        :meth:`branch_label`, the checked-out branch, exactly as it always
+        was before v0.17."""
+        try:
+            mtime = self._base_meta_path.stat().st_mtime
+        except OSError:
+            return self._base_ref_cached
+        if mtime == self._base_mtime:
+            return self._base_ref_cached
+        self._base_mtime = mtime
+        meta = worktrees_mod.read_meta(self._cwd)
+        self._base_ref_cached = str(meta.get("base_ref") or "") or None if meta else None
+        return self._base_ref_cached
+
+    def tab_branch(self) -> "tuple[str | None, bool]":
+        """What the TAB label's branch half actually shows, and whether
+        this is a worktree-isolated session (the caller uses the second
+        value to decide whether compose_tab_label's isolation marker
+        earns its keep) -- item S / the v0.17 tab-label regression.
+
+        Orientation, not identity: a worktree session's tab says `main`
+        (what it is WORKING OFF), not `doxa/f13526d4` (branch_label's
+        session handle, which the status bar keeps -- see that method's
+        docstring). Falls back to branch_label() with no worktree sidecar,
+        so worktree_per_session OFF (or a cwd that was never a doxa
+        worktree) reads exactly as it did before this feature: the
+        checked-out branch IS the base there."""
+        base = self.base_branch()
+        if base:
+            return base, True
+        return self.branch_label(), False
 
     def _read_branch(self) -> str | None:
         if self._head is None:
@@ -2203,21 +2294,27 @@ class SessionPane(TabPane):
     # -- the tab's own label -----------------------------------------
 
     def auto_label(self) -> str:
-        """`Opus@doxa:main` -- which model is answering, and where.
+        """`Opus@doxa:main` -- which model is answering, and WHAT IT IS
+        WORKING OFF.
 
-        Both halves are tracked state already: the model is the engine's
-        (so a live /model switch moves it), and the repo/branch come from
-        the pane's GitLine, whose reads are event-driven stats -- this adds
-        no polling and no subprocess. OUTSIDE a repo there is nothing after
-        the `@` that would mean anything, so the session names itself from
-        its first turn (doxa/naming.py) and the directory name stands in
-        until it does."""
+        The branch half is GitLine.tab_branch(): the worktree-per-session
+        BASE (`main`) inside an isolated session, not the session's own
+        throwaway branch (`doxa/f13526d4`, branch_label()'s answer, kept
+        for the status bar/`/about` -- see that method's docstring for the
+        v0.17 regression this un-does). Both halves are tracked state
+        already: the model is the engine's (so a live /model switch moves
+        it), and the repo/branch come from the pane's GitLine, whose reads
+        are event-driven stats -- this adds no polling and no subprocess.
+        OUTSIDE a repo there is nothing after the `@` that would mean
+        anything, so the session names itself from its first turn
+        (doxa/naming.py) and the directory name stands in until it does."""
         engine = self.engine
         model = short_model(getattr(engine, "model", None) or self.model)
         cwd = str(getattr(engine, "cwd", None) or self.cwd)
         git = self._git
         if git is not None and git.repo:
-            return compose_tab_label(model, git.repo, git.branch_label())
+            branch, isolated = git.tab_branch()
+            return compose_tab_label(model, git.repo, branch, isolated=isolated)
         return compose_tab_label(
             model, self.generated_name or Path(cwd).name or cwd
         )
@@ -2510,6 +2607,7 @@ class SessionPane(TabPane):
             "/setup": self._cmd_setup,
             "/doctor": self._cmd_doctor,
             "/model": self._cmd_model,
+            "/branch": self._cmd_branch,
             "/effort": self._cmd_effort,
             "/usage": self._cmd_usage,
             "/clear": self._cmd_clear,
@@ -2574,6 +2672,56 @@ class SessionPane(TabPane):
             f"model: {current} → {resolved}  ·  transcript and session kept "
             "(SDK control request, no reconnect)"
         )
+
+    async def _cmd_branch(self, args: str) -> None:
+        """/branch -- no argument lists local branches (current base
+        marked); an argument switches this session's base (item S #2).
+
+        Only meaningful with worktree-per-session: a switch rebases the
+        session's OWN worktree branch onto the new base -- free (a fast-
+        forward, no history to replay) only when clean and zero commits
+        ahead of the CURRENT base, the same rule
+        doxa.worktrees.finalize's "kept doxa/<id> — merge when ready"
+        convention already applies at session end; a dirty or committed-
+        ahead worktree is refused in that same voice rather than silently
+        carrying the diff across (doxa.worktrees.switch_base owns the
+        exact wording). Without a session worktree at all (toggle off, or
+        this handle just cannot switch), this refuses too: switching the
+        ACTUAL checkout out from under a running session is exactly what
+        worktree-per-session exists to prevent, so there is no `git
+        checkout` fallback here."""
+        engine = self.engine
+        git = self._git
+        if git is None or not git.repo:
+            await self._system("branch: no repo here")
+            return
+        switcher = getattr(engine, "switch_branch", None)
+        if switcher is None:
+            await self._system(
+                "branch: this session's handle cannot switch branches"
+            )
+            return
+        target = args.split()[0] if args else None
+        try:
+            result = await switcher(target)
+        except Exception as exc:  # noqa: BLE001 -- a refusal is information
+            await self._system(f"branch: {type(exc).__name__}: {exc}")
+            return
+        if target is None:
+            base = result.get("base")
+            lines = [f"branch: {base or '(none)'}", ""]
+            for name in result.get("branches") or []:
+                mark = "▸" if name == base else " "
+                lines.append(f" {mark} {name}")
+            lines.append("")
+            lines.append("usage: /branch <name>")
+            await self._system("\n".join(lines))
+            return
+        if not result.get("ok"):
+            await self._system(f"branch: {result.get('message') or 'switch refused'}")
+            return
+        self._refresh_status()
+        await self._system(f"branch: {result.get('message') or 'switched'}")
 
     async def _cmd_effort(self, args: str) -> None:
         """/effort -- honest about a real SDK limit.

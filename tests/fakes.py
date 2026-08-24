@@ -128,6 +128,16 @@ class FakeEngine:
         # RIGHT request with the RIGHT payload, engine-parity style (the
         # same surface SessionEngine.answer_needs_input exposes).
         self.needs_input_answers: list[tuple[str, dict]] = []
+        # Item S (/branch): every target handed to switch_branch (None for
+        # a bare listing), and the canned results a test sets before
+        # calling it -- see switch_branch's own docstring below.
+        self.branch_calls: list["str | None"] = []
+        self.branch_list_result: dict = {
+            "branches": [], "base": None, "checked_out": None,
+        }
+        self.branch_switch_result: dict = {
+            "ok": True, "base": None, "message": "switched",
+        }
 
     async def answer_needs_input(self, req_id: str, answer: dict) -> bool:
         self.needs_input_answers.append((req_id, dict(answer or {})))
@@ -173,6 +183,16 @@ class FakeEngine:
         self.model = model
         self.model_switches.append(model)
         return model or "default"
+
+    async def switch_branch(self, target: "str | None") -> dict:
+        """Engine parity for /branch (item S). Scriptable via
+        ``branch_list_result``/``branch_switch_result`` -- the real
+        engines both delegate to doxa.worktrees, which is exercised with
+        real git in tests/test_worktrees.py; this fake only needs to prove
+        app.py's command handler dispatches and displays correctly."""
+        self.branch_calls.append(target)
+        return dict(self.branch_list_result if target is None
+                    else self.branch_switch_result)
 
     def usage_summary(self) -> dict:
         return {
