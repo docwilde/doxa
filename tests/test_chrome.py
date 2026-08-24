@@ -273,6 +273,36 @@ async def test_no_armed_timers_while_a_turn_is_in_flight(monkeypatch, tmp_path):
         assert _armed(app) == []
 
 
+@pytest.mark.asyncio
+async def test_markdown_stream_leaves_no_running_task_after_turn_done(
+    monkeypatch, tmp_path
+):
+    """v0.13.0's streaming Markdown body (item c) arms a background
+    asyncio.Task while a turn's text is in flight -- NOT a Textual
+    auto_refresh timer, so ``_armed()`` above cannot see it -- and
+    mark_done() must stop it the same way hide_thinking() already
+    guarantees no leaked timer. One completed turn, zero live tasks
+    behind its stream."""
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setattr(
+        "doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine(list(SCRIPT))
+    )
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#prompt-input").value = "go"
+        await pilot.press("enter")
+        for _ in range(100):
+            blocks = list(app.query(TurnBlock))
+            if blocks and "5ms" in str(blocks[0].title):  # SCRIPT's duration_ms
+                break
+            await pilot.pause(0.02)
+        block = app.query_one(TurnBlock)
+        assert block._stream is not None  # this turn DID stream text
+        assert block._stream._stopped is True
+        assert block._stream._task is None
+
+
 def _armed(app) -> list:
     """Every node with a live ``_auto_refresh_timer`` -- except
     :class:`ClockChip` (item M), the ONE permitted standing timer in this

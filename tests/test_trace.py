@@ -151,8 +151,13 @@ async def test_subagent_chips_nest_under_the_task_chip(monkeypatch, tmp_path):
         # subcalls container, not beside it in the turn's tool strip.
         assert sub in task.subcalls.children
         block = app.query_one(TurnBlock)
-        assert task in block.tools.children
-        assert sub not in block.tools.children
+        # Top-level chips compact behind the turn's ONE "Tool calls (N)"
+        # section (item (b)) -- the Task chip lives inside it, the
+        # subagent chip does not (it is nested under the Task chip
+        # instead, asserted above).
+        assert block.tool_section is not None
+        assert task in block.tool_section.chips.children
+        assert sub not in block.tool_section.chips.children
 
         # Timing/args/results on both levels.
         assert task.duration_ms == 90 and sub.duration_ms == 7
@@ -227,4 +232,8 @@ async def test_unknown_parent_degrades_to_top_level(monkeypatch, tmp_path):
                 break
             await pilot.pause(0.02)
         block = app.query_one(TurnBlock)
-        assert [c.call_id for c in block.tools.children if isinstance(c, ToolChip)] == ["sub-9"]
+        assert block.tool_section is not None
+        assert [
+            c.call_id for c in block.tool_section.chips.children
+            if isinstance(c, ToolChip)
+        ] == ["sub-9"]

@@ -23,11 +23,14 @@ keystroke); a second press inside the window stops EVERY tab's session
 (finalize NOW). Per-tab stopping remains available where deliberation
 lives: the palette's quit-stop and Ctrl+W.
 
-Each turn is a foldable Collapsible; tool calls inside a turn render as
-compact chips (name + one-line arg summary + duration + a check or cross)
-that lazily expand into full args/result on first click -- the expensive
-JSON pretty-printing only happens once, on demand, not for every tool call
-that streams past.
+Each turn is a foldable Collapsible; its response streams as markdown
+(Markdown.get_stream -- textual 5's append-only path for LLM deltas, no
+full re-parse per chunk). Tool calls inside a turn render as compact
+chips (name + one-line arg summary + duration + a check or cross) that
+lazily expand into full args/result on first click -- the expensive JSON
+pretty-printing only happens once, on demand, not for every tool call
+that streams past -- and compact further behind ONE per-turn "Tool calls
+(N)" fold (ToolCallsSection), created lazily on the first call.
 
 Asyncio/Textual coexistence follows PHASE0_FINDINGS.md §4 exactly:
 ``run_worker`` schedules the SDK-driving coroutine on Textual's own running
@@ -56,12 +59,14 @@ from textual.screen import ModalScreen
 from textual.widgets import (
     Collapsible,
     Input,
+    Markdown,
     OptionList,
     Static,
     TabbedContent,
     TabPane,
     TextArea,
 )
+from textual.widgets.markdown import MarkdownStream
 from textual.widgets.option_list import Option
 
 from . import auth as auth_mod
@@ -477,8 +482,10 @@ class GitLine:
 
 class SystemBlock(Static):
     """One block of doxa-generated (not model-generated) output -- slash
-    command results, peer-layer errors. Same ▎ accent as turns, secondary
-    color via .system-block in the theme."""
+    command results, peer-layer errors. Same ▎ accent as turns; v0.13.0's
+    restyle carries the role in the background tint instead of a border --
+    the dimmer step on the surface ramp, one below the screen, with muted
+    text (.system-block in the theme)."""
 
     def __init__(self, text: str) -> None:
         self.text = text
@@ -612,6 +619,41 @@ class ToolChip(Collapsible):
             )
 
 
+class ToolCallsSection(Collapsible):
+    """The turn's own top-level tool chips, compacted behind ONE fold:
+    "Tool calls (N)", collapsed by default. Created lazily -- on the
+    FIRST top-level tool_call event of a turn (see TurnBlock.add_chip) --
+    so a turn with no tool calls grows no section at all (hide-at-zero,
+    same convention as the git/usage/peers/disabled-tools status chips).
+
+    N updates live as chips mount mid-turn: a title rewrite only, as
+    cheap as ToolChip's own title update on every result -- no repaint
+    storm (see this app's idle-CPU comments elsewhere: ThinkingMarker,
+    the leaked-timer fix in TurnBlock.hide_thinking). If the user expands
+    this section mid-turn it STAYS expanded as further chips arrive --
+    nothing here ever writes ``self.collapsed`` itself, so only a click
+    (or a test poking the reactive directly) can change it; it never
+    auto-collapses out from under the cursor.
+
+    Chrome, not model content: this wraps chips, it does not replace
+    them -- each chip inside keeps its own ToolChip fold, args/result
+    formatting, and (for a Task call) its own nested subcalls tree,
+    unchanged by living inside this wrapper."""
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.chips = Vertical(classes="tool-calls-list")
+        super().__init__(self.chips, title=self._render_title(), collapsed=True)
+
+    def _render_title(self) -> str:
+        return f"⚒ Tool calls ({self.count})"
+
+    async def add_chip(self, chip: "ToolChip") -> None:
+        self.count += 1
+        self.title = self._render_title()
+        await self.chips.mount(chip)
+
+
 class ThinkingMarker(Static):
     """The in-flight marker on a running turn -- STATIC, deliberately.
 
@@ -630,16 +672,28 @@ class ThinkingMarker(Static):
 
 
 class TurnBlock(Collapsible):
-    """One user turn + the assistant's response, foldable. Streaming text
-    updates the body live; tool chips mount into `self.tools` as tool_call
-    events arrive."""
+    """One user turn + the assistant's response, foldable. The user's
+    prompt lives in the fold header (title) only -- it is never re-set
+    after construction, so it stays literal plain text no matter what the
+    response below does (typed text must not reflow). The response body
+    streams as MARKDOWN: ``self.body`` is a ``Markdown`` widget fed
+    through ``Markdown.get_stream`` (textual 5's append-only streaming
+    path, built for exactly this -- LLM deltas arriving chunk by chunk),
+    so tables/bold/fences/inline code render as they complete without a
+    full-document re-parse on every ``text_delta``. Top-level tool chips
+    compact into ``self.tool_section`` (a ``ToolCallsSection``, created
+    lazily on the first one -- see its own docstring); a Task call's
+    subagent chips still nest inside THAT chip's own ``subcalls``,
+    unaffected by any of this."""
 
     def __init__(self, prompt: str) -> None:
         self.prompt_text = prompt
         self.assistant_text = ""
         self.thinking = ThinkingMarker()
-        self.body = Static("", classes="turn-body")
+        self.body = Markdown("", classes="turn-body")
+        self._stream: MarkdownStream | None = None
         self.tools = Vertical(classes="turn-tools")
+        self.tool_section: ToolCallsSection | None = None
         super().__init__(self.thinking, self.body, self.tools, title=self._render_title(), collapsed=False)
 
     def _render_title(self, suffix: str = "") -> str:
@@ -657,12 +711,29 @@ class TurnBlock(Collapsible):
             # now guarantees the invariant rather than repairing a widget.
             self.thinking.auto_refresh = None
 
-    def append_text(self, chunk: str) -> None:
+    async def append_text(self, chunk: str) -> None:
         self.hide_thinking()
         self.assistant_text += chunk
-        self.body.update(self.assistant_text)
+        # Lazy, like everything else in this pane: the stream (and its one
+        # background asyncio task -- an event-driven coroutine, NOT a
+        # Textual auto-refresh timer) is only created once a turn actually
+        # has text to show, and mark_done() below stops it the moment the
+        # turn finishes, so nothing outlives the turn it belongs to.
+        if self._stream is None:
+            self._stream = Markdown.get_stream(self.body)
+        await self._stream.write(chunk)
 
-    def mark_done(
+    async def add_tool_chip(self, chip: "ToolChip") -> None:
+        """Mount one top-level tool chip (no ``parent_id`` -- a subagent's
+        own calls nest inside its Task chip instead, see ToolChip's
+        docstring) into this turn's ONE ``ToolCallsSection``, created on
+        first use so a turn with no tool calls grows no section at all."""
+        if self.tool_section is None:
+            self.tool_section = ToolCallsSection()
+            await self.tools.mount(self.tool_section)
+        await self.tool_section.add_chip(chip)
+
+    async def mark_done(
         self,
         cost_usd: float | None,
         duration_ms: int | None,
@@ -676,6 +747,11 @@ class TurnBlock(Collapsible):
         account pays no dollars. ``None`` (API-key auth, or no account info
         yet) keeps the plain ``$`` figure unchanged."""
         self.hide_thinking()
+        if self._stream is not None:
+            # Stops the stream's one background task and flushes anything
+            # still buffered -- a finished turn must not leave a live
+            # asyncio task behind any more than it may leave a timer.
+            await self._stream.stop()
         bits = []
         if duration_ms is not None:
             bits.append(f"{duration_ms}ms")
@@ -2325,7 +2401,7 @@ class SessionPane(TabPane):
         except Exception as exc:  # noqa: BLE001 -- a refused/broken turn must
             # not take the shell down (e.g. the daemon is busy with another
             # client's turn, or the connection dropped mid-stream).
-            block.mark_done(None, None, True)
+            await block.mark_done(None, None, True)
             await block_list.mount(SystemBlock(f"turn failed: {exc}"))
             block_list.scroll_end(animate=False)
 
@@ -2345,7 +2421,7 @@ class SessionPane(TabPane):
                 # Task chip -- never mixed into the turn's own prose.
                 parent.append_subagent_text(ev.data["text"])
             else:
-                block.append_text(ev.data["text"])
+                await block.append_text(ev.data["text"])
         elif ev.type == "tool_call":
             block.hide_thinking()
             chip = ToolChip(ev.data["id"], ev.data["name"], ev.data["input"])
@@ -2358,7 +2434,9 @@ class SessionPane(TabPane):
                 # -- the call is never dropped.
                 await parent.subcalls.mount(chip)
             else:
-                await block.tools.mount(chip)
+                # Top-level chip: compacted behind the turn's ONE "Tool
+                # calls (N)" section (see ToolCallsSection/add_tool_chip).
+                await block.add_tool_chip(chip)
         elif ev.type == "tool_result":
             chip = chips.get(ev.data["id"])
             if chip is not None:
@@ -2371,7 +2449,7 @@ class SessionPane(TabPane):
             # keeps the per-turn figure consistent with both (item T).
             account = getattr(self.engine, "account", None) or {}
             tier = identity_mod.account_tier(account)
-            block.mark_done(
+            await block.mark_done(
                 ev.data.get("cost_usd"), ev.data.get("duration_ms"),
                 ev.data.get("is_error", False), tier,
             )

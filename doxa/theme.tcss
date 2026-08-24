@@ -2,14 +2,21 @@
    spec lives in the private vault, this file implements the approved
    load-bearing subset).
 
-   Tokens: dark surface ramp #171512 (screen) -> #221F1A (blocks) -> #2A251E
-   (nested chips) -> #3A3429 (borders, top of the ramp); primary #D97757
-   (Claude orange); round borders everywhere; generous padding; warm
-   off-white text (#F2E9DD body / #D8CDBB secondary). The block accent is
-   the literal "▎" glyph doxa/app.py's TurnBlock/ToolChip prefix their
-   titles with -- a left-rule character, not a CSS border trick, so it reads
-   identically whether or not the terminal's border-drawing glyphs render
-   cleanly.
+   Tokens: dark surface ramp #171512 (screen) -> #1D1B17 (dimmer step,
+   system/doxa-chrome) -> #221F1A (blocks) -> #2A251E (nested chips) ->
+   #3A3429 (borders, top of the ramp); primary #D97757 (Claude orange);
+   generous padding; warm off-white text (#F2E9DD body / #D8CDBB secondary
+   / #8A8073 dim). The block accent is the literal "▎" glyph doxa/app.py's
+   TurnBlock/SystemBlock prefix their titles with -- a left-rule character,
+   not a CSS border trick, so it reads identically whether or not the
+   terminal's border-drawing glyphs render cleanly.
+
+   v0.13.0 visual restyle: round borders remain on genuinely BOXED chrome
+   -- ToolChip (and its ToolCallsSection wrapper), modals, panels, the
+   prompt input -- but the transcript's own turns and system lines carry
+   their role as a background TINT instead of a border (see the TurnBlock/
+   SystemBlock rules below for the full rationale). No new colors were
+   added for this -- every tint used is already a stop on the ramp above.
 
    NOTHING ANIMATES. No transitions, no pulsing borders, no spinners: the
    in-flight turn marker (`.thinking` below) is a static Static, having
@@ -178,27 +185,95 @@ CloseWithTurnRunning {
     padding: 1 2;
 }
 
-Collapsible {
-    background: #221F1A;
-    border: round #3A3429;
-    padding: 1 2;
+/* TurnBlock: unboxed -- no border, no block-level fill of its own. The
+   fold header (CollapsibleTitle, the user's prompt) is the ONE raised
+   band, one step up from the screen; Contents (the response + tools
+   below it) sits on the screen's own background, so the agent's reply
+   reads as written directly on the surface rather than boxed on top of
+   it. width:1fr on the title (Textual's own CollapsibleTitle defaults to
+   width:auto, sized to its label) is deliberate -- without it the raised
+   tint would only paint behind the prompt's own glyphs, not read as a
+   full-width band. */
+TurnBlock {
+    background: #171512;
+    border: none;
+    padding: 0;
     margin-bottom: 1;
 }
 
-Collapsible > CollapsibleTitle {
+TurnBlock > CollapsibleTitle {
+    width: 1fr;
+    background: #221F1A;
     color: #D97757;
     text-style: bold;
+    padding: 0 2;
+}
+
+TurnBlock > Contents {
+    background: #171512;
+    padding: 1 0 0 2;
 }
 
 .turn-body {
+    background: #171512;
     color: #F2E9DD;
-    padding: 1 1;
+    padding: 0 1 1 1;
 }
 
 .turn-tools {
+    /* height:auto is load-bearing, not decoration: Vertical's own
+       DEFAULT_CSS is height:1fr, which -- inside an auto-height Contents,
+       itself inside a scrolling #block-list -- resolves against the
+       viewport and stretches this container to fill it, padding every
+       turn out to a full screen of empty space below its real content.
+       That pre-existed the border removal (masked by the two extra
+       border rows the old boxed TurnBlock spent on top/bottom edges);
+       without the border to absorb the difference, the stretch was
+       enough to scroll the turn's OWN title a row past the fold on a
+       32-row terminal (measured while regenerating scripts/screenshot.py's
+       gallery). auto makes this hug its content -- zero rows with no
+       chips, one row for a collapsed ToolCallsSection -- like every
+       other auto-height container in this file. */
+    height: auto;
+    background: #171512;
     padding: 0 1;
 }
 
+/* Tool calls (N): doxa's own wrapper around a turn's top-level chips
+   (see doxa/app.py's ToolCallsSection), never model content -- so it
+   gets the SAME dimmer-step + muted-text treatment as SystemBlock below,
+   not a border. Created lazily, collapsed by default. Each chip inside
+   keeps ToolChip's own bordered chrome untouched. */
+ToolCallsSection {
+    background: #1D1B17;
+    border: none;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+ToolCallsSection > CollapsibleTitle {
+    width: 1fr;
+    background: #1D1B17;
+    color: #8A8073;
+    text-style: none;
+    padding: 0 1;
+}
+
+ToolCallsSection > Contents {
+    background: #1D1B17;
+    padding: 1 0 0 1;
+}
+
+.tool-calls-list {
+    background: #1D1B17;
+    height: auto;
+}
+
+/* ToolChip is the deliberate exception to the unboxed rule above: a tool
+   call reads as a nested artifact, not a transcript entry, and keeps its
+   bordered chrome at every fold level of a trace tree (unchanged by
+   v0.13.0 -- it lived inside .turn-tools before, it lives inside
+   ToolCallsSection now). */
 ToolChip {
     background: #2A251E;
     border: round #3A3429;
@@ -263,10 +338,15 @@ ToolChip > CollapsibleTitle {
     height: 1;
 }
 
+/* System/TUI-internal lines (doxa-generated, not model-generated): the
+   dimmer step on the ramp, one below the screen, with muted text -- the
+   same tint ToolCallsSection uses for the same reason (chrome, not a
+   transcript entry) and PeerMessageBlock already used for "another
+   session, dimmer than this one's own turns" below. No border. */
 .system-block {
-    background: #221F1A;
-    color: #D8CDBB;
-    border: round #3A3429;
+    background: #1D1B17;
+    color: #8A8073;
+    border: none;
     padding: 0 2;
     margin-bottom: 1;
 }
