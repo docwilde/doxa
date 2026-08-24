@@ -438,6 +438,28 @@ chip is a button, only the ones that are:
 
 <p align="center"><img src="assets/shots/chip-picker.gif" width="780" alt="Clicking the branch chip in the status bar opens a dropdown listing local branches with the current one marked, typing narrows it, and selecting one switches the session's base"></p>
 
+**Background.** DOXA paints its own `#171512` on the body by default —
+`opaque`, byte-identical to every release before it. Set `background`
+to `transparent` (`ctrl+,` → Appearance, or `DOXA_BACKGROUND=transparent`)
+and DOXA stops painting the base: the transcript, tab strip and clock chip
+leave their cells at the terminal's own color instead of an explicit RGB.
+**This alone does not make your terminal WINDOW see-through** — that is
+your terminal emulator's or compositor's job (kitty's `background_opacity`,
+WezTerm's `window_background_opacity`, a macOS Terminal profile, etc.).
+What DOXA controls is only whether *it* paints; if your terminal is opaque,
+`transparent` changes nothing visible. Every other rung of the surface
+ramp — the status bar, tool-calls section, tool chips, and every popup and
+modal (settings, palette, `/search`, the slash and chip dropdowns) — keeps
+its own painted, opaque background regardless, so role tints and floating
+surfaces stay legible against whatever the terminal shows through as. That
+palette is validated for a **dark** terminal background, same as the rest
+of DOXA's chrome; paired with a light terminal background, the base's own
+body text (built for a near-black backdrop) will be very low contrast —
+transparent mode is meant to sit over a dark desktop or dark terminal
+theme, not a light one.
+
+<p align="center"><img src="assets/shots/transparent.png" width="780" alt="The trace scene in transparent mode: a static screenshot can't show real terminal pass-through (Rich still bakes one concrete color for it), so this shows what it CAN prove -- the tool-calls section, tool chips and status bar still read as distinct, painted steps once the base itself stops painting"></p>
+
 ## Configuration
 
 Precedence is the same everywhere: **environment > `~/.doxa/config.toml` >
@@ -456,6 +478,7 @@ survives being opened by an older one.
 | `worktree_per_session` | `DOXA_WORKTREE` | **on** | give each session its own git worktree instead of sharing the launch directory |
 | `restore_tabs` | `DOXA_RESTORE_TABS` | **on** | plain `doxa` restores the whole saved tab set for this repo instead of just the most recent session |
 | `consult_floor` | `DOXA_CONSULT_FLOOR` | 1.0 | act-time belief-consult threshold; 0 disables it |
+| `background` | `DOXA_BACKGROUND` | `opaque` | `opaque` paints DOXA's own base (today's look); `transparent` stops painting it so an already-transparent terminal shows through — the terminal itself still has to be configured that way |
 | `nerd_font` | `DOXA_NERD_FONT` | off | use a Nerd Font glyph for the branch chip |
 | `image_mode` | `DOXA_IMAGE_MODE` | probe | force a rung of the image ladder (`kgp`/`sixel`/`halfblock`/`text`) |
 | `show_reasoning` | `DOXA_SHOW_REASONING` | **on** | stream the model's summarized reasoning into a collapsed per-turn fold; `0` stops DOXA asking to see it |

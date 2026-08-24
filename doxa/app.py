@@ -4884,6 +4884,38 @@ class DoxaApp(App):
         # stdin, which Textual's own reader thread will grab the moment
         # App.run() starts (doxa/images.py's detection discipline note).
         images_mod.detect_mode()
+        # background (v0.29.0): $doxa-base (theme.tcss) needs ansi_color
+        # True to actually reach the terminal as ESC[49m instead of being
+        # rewritten into an approximated opaque RGB by Textual's own
+        # ANSIToTruecolor filter -- see get_theme_variable_defaults below.
+        self._apply_background()
+
+    def get_theme_variable_defaults(self) -> dict[str, str]:
+        """Feeds theme.tcss's one custom variable, $doxa-base -- the
+        sanctioned extension point (App.get_theme_variable_defaults' own
+        docstring: "allows applications to define their own variables").
+        DOXA never registers a Theme of its own, so this default always
+        wins: "#171512", byte-identical to every release before it,
+        or the CSS keyword "ansi_default" -- Color(ansi=-1), which Rich
+        renders as the raw SGR "default background" reset rather than any
+        RGB, letting an already-transparent terminal show through (see the
+        background setting's note in doxa/config.py for the terminal-side
+        prerequisite this can't do alone)."""
+        transparent = config_mod.background_mode() == "transparent"
+        return {"doxa-base": "ansi_default" if transparent else "#171512"}
+
+    def _apply_background(self) -> None:
+        """The other half of $doxa-base: ansi_color must be True for
+        ansi_default to reach the terminal unconverted (confirmed against
+        the installed Textual -- with it False, the ANSIToTruecolor filter
+        silently substitutes an approximated OPAQUE rgb, the opposite of
+        what "transparent" promises). Safe to flip unconditionally: DOXA
+        never sets self.theme, so this cannot collide with Textual's own
+        "textual-ansi" built-in theme, and every widget theme.tcss already
+        styles explicitly keeps its own literal color regardless (a
+        DEFAULT_CSS `&:ansi` rule never outranks a CSS_PATH rule for the
+        same property -- verified empirically, not assumed)."""
+        self.ansi_color = config_mod.background_mode() == "transparent"
 
     # -- pane plumbing -----------------------------------------------
 
@@ -5561,6 +5593,8 @@ class DoxaApp(App):
                 pane._refresh_status()
             with contextlib.suppress(Exception):
                 self.query_one(ClockChip).reconfigure()
+            self._apply_background()
+            self.refresh_css(animate=False)  # re-reads $doxa-base -- live
 
         engine = self.engine
         self.push_screen(

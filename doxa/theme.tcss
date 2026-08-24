@@ -23,10 +23,32 @@
    replaced a LoadingIndicator whose 16 Hz auto-refresh was CPU spent on
    reassurance. The only interval left anywhere is Textual's own 2 Hz
    caret blink on the focused prompt input, which is load-bearing -- it is
-   how you find the caret -- and runs on exactly one widget. */
+   how you find the caret -- and runs on exactly one widget.
+
+   $doxa-base (v0.29.0, the `background` setting): every selector below
+   that used to hardcode the ramp's own #171512 now reads $doxa-base
+   instead -- DoxaApp.get_theme_variable_defaults resolves it to the
+   literal "#171512" (opaque, the default -- byte-identical to every
+   release before it), or, for "transparent", the CSS keyword
+   "ansi_default" -- which Rich renders as the raw SGR "default background"
+   reset (ESC[49m) instead of any RGB paint, letting an already-transparent
+   terminal show through. This requires App.ansi_color = True to reach the terminal
+   unconverted (DoxaApp sets it alongside the variable); without it,
+   Textual's own ANSIToTruecolor filter silently rewrites ansi_default
+   into an approximated opaque RGB, which would paint instead of clearing.
+   Only the BASE token moved -- every other rung of the ramp (#1D1B17
+   dimmer/system, #221F1A raised, #2A251E chips, #3A3429 borders) stays a
+   literal hex, unconditionally painted, so role tints keep reading as
+   distinct steps against whatever the terminal shows through as. The five
+   modal washes (CloseWithTurnRunning, CompactConfirm, CommandPalette,
+   SettingsScreen, SetupScreen -- all `#171512 60%`) are the deliberate
+   exception: Rich's "default" color has no RGB for Textual to blend a
+   percentage against, so pairing ansi_default with an alpha suffix is a
+   no-op that would drop the dimming wash entirely -- those five keep the
+   literal hex regardless of the setting, on purpose. */
 
 Screen {
-    background: #171512;
+    background: $doxa-base;
     color: #F2E9DD;
     /* Two layers, not one: "base" is everything that already existed
        (tabs, panes, docked panels), "overlay" is paint-only chrome that
@@ -49,7 +71,7 @@ SessionPane {
 }
 
 #session-tabs ContentTabs {
-    background: #171512;
+    background: $doxa-base;
     color: #D8CDBB;
 }
 
@@ -129,7 +151,7 @@ SessionPane {
     height: 2;
     content-align: center middle;
     color: #D8CDBB;
-    background: #171512;
+    background: $doxa-base;
     padding: 0 1;
 }
 
@@ -229,7 +251,7 @@ CompactConfirm {
 }
 
 #block-list {
-    background: #171512;
+    background: $doxa-base;
     padding: 1 2;
 }
 
@@ -243,7 +265,7 @@ CompactConfirm {
    tint would only paint behind the prompt's own glyphs, not read as a
    full-width band. */
 TurnBlock {
-    background: #171512;
+    background: $doxa-base;
     border: none;
     padding: 0;
     margin-bottom: 1;
@@ -258,12 +280,12 @@ TurnBlock > CollapsibleTitle {
 }
 
 TurnBlock > Contents {
-    background: #171512;
+    background: $doxa-base;
     padding: 1 0 0 2;
 }
 
 .turn-body {
-    background: #171512;
+    background: $doxa-base;
     color: #F2E9DD;
     padding: 0 1 1 1;
 }
@@ -274,7 +296,7 @@ TurnBlock > Contents {
    reasoning always reads above the answer it led to. */
 .turn-reasoning {
     height: auto;
-    background: #171512;
+    background: $doxa-base;
     padding: 0 1;
 }
 
@@ -323,7 +345,7 @@ ReasoningSection > Contents {
        chips, one row for a collapsed ToolCallsSection -- like every
        other auto-height container in this file. */
     height: auto;
-    background: #171512;
+    background: $doxa-base;
     padding: 0 1;
 }
 
@@ -477,7 +499,7 @@ PeerMessageBlock {
    turn of its own, so it reads directly on the surface. The narration
    line and the mirrored chip list share the one scrolling container. */
 .transcript-scroll {
-    background: #171512;
+    background: $doxa-base;
     padding: 1 2;
 }
 

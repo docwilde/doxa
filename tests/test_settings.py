@@ -65,6 +65,7 @@ def test_every_knob_in_the_menu_reaches_its_real_reader(monkeypatch):
     monkeypatch.delenv("DOXA_IMAGE_MODE", raising=False)
     monkeypatch.delenv("DOXA_MODEL", raising=False)
     monkeypatch.delenv("DOXA_LINGER_SECS", raising=False)
+    monkeypatch.delenv("DOXA_BACKGROUND", raising=False)
 
     config.save({
         "derive_secs": "30",
@@ -73,6 +74,7 @@ def test_every_knob_in_the_menu_reaches_its_real_reader(monkeypatch):
         "image_mode": "sixel",
         "model": "claude-haiku-4-5",
         "linger_secs": "9",
+        "background": "transparent",
     })
     assert engine.derive_interval() == 30.0
     assert engine.consult_floor() == 2.5
@@ -80,6 +82,7 @@ def test_every_knob_in_the_menu_reaches_its_real_reader(monkeypatch):
     assert images.detect_mode() == "sixel"
     assert config.model() == "claude-haiku-4-5"
     assert config.linger_secs() == 9.0
+    assert config.background_mode() == "transparent"
 
 
 def test_emptying_a_field_returns_the_knob_to_its_default(monkeypatch):

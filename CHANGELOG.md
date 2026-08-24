@@ -4,6 +4,167 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.29.0 — 2026-08-24
+
+- **Transparency-capable background (the `background` setting), default
+  `opaque` — today's look, byte-identical.** THE CONSTRAINT, stated
+  plainly because it is easy to overclaim: a terminal application cannot
+  make the terminal WINDOW transparent — that is the terminal emulator's
+  or compositor's job (kitty's `background_opacity`, WezTerm's
+  `window_background_opacity`, a macOS Terminal profile, and so on). What
+  an app controls is only whether it PAINTS its own background or leaves
+  cells at the terminal's default. DOXA has painted a literal `#171512`
+  on the screen since v0.13.0's restyle, which forces opacity no matter
+  what the terminal is configured to do. `background: transparent` (new
+  setting, Appearance category, `DOXA_BACKGROUND`) stops DOXA painting
+  that base, so a terminal already configured transparent shows through.
+  On an opaque terminal, this changes nothing visible — and the README
+  says so, not just this note.
+  - **What Textual 5 actually offers, checked against the installed
+    version rather than assumed.** CSS `background: transparent` (alpha
+    0) blends against the widget's own PARENT chain inside Textual's own
+    compositor — it never reaches the real terminal, because some
+    ancestor (Screen, by default) still resolves to an explicit painted
+    RGB. The mechanism that DOES reach the terminal is the CSS keyword
+    `ansi_default` (`Color(ansi=-1)`), which Rich renders as the raw SGR
+    "default background" reset — `ESC[49m` — instead of any RGB, letting
+    an already-transparent terminal show through underneath. This is not
+    a guess: `Style.parse("on default")` was rendered through a real Rich
+    console and the literal byte sequence checked. It is also not novel —
+    it is exactly the mechanism Textual's own built-in `&:ansi`
+    pseudo-class already uses on `App`/`Screen`, gated by the `ansi_color`
+    reactive that its own `"textual-ansi"` built-in theme flips on.
+  - **The non-obvious second half: `ansi_default` alone is not enough.**
+    With `App.ansi_color` left at its default `False`, Textual's own
+    `ANSIToTruecolor` filter rewrites an ansi-default background into an
+    *approximated opaque RGB* pulled from the active terminal theme
+    (confirmed empirically: it came back `on #0c0c0c`, near-black — the
+    opposite of transparent, and it would have painted silently). Setting
+    `App.ansi_color = True` disables that filter for anything carrying an
+    ANSI color, which is what actually lets `ansi_default` reach the
+    terminal unconverted (confirmed: `on default`, `ESC[49m`). DOXA never
+    touches `App.theme`, so flipping this reactive on its own doesn't pull
+    in Textual's `"textual-ansi"` theme or its 16-color palette — verified
+    directly against the installed Textual that a CSS_PATH rule for a
+    given widget+property always outranks the matching built-in `&:ansi`
+    DEFAULT_CSS rule regardless of pseudo-class specificity, so every
+    color theme.tcss already states explicitly stays exactly what it says.
+  - **No partial-alpha "semi-transparent" middle value.** Investigated and
+    rejected, not merely skipped: `Color.rich_color` never reads the alpha
+    channel for an ansi-type color — `ansi_default 60%` collapses to
+    exactly the same `ESC[49m` as `ansi_default` alone, ignoring the
+    percentage. SGR "default background" is a binary reset, not a
+    blendable value; there is no per-cell partial-alpha escape code for a
+    real terminal to composite against. Two values ship: `opaque` and
+    `transparent`.
+  - **The v0.13.0 restyle's role tints survive, on purpose.** That release
+    made background TINT carry role (raised prompt / base body / dimmer
+    system-chrome / bordered chip), replacing block borders. Only the
+    BASE token moved to the new `$doxa-base` CSS variable
+    (`DoxaApp.get_theme_variable_defaults`, theme.tcss's one indirection);
+    the other four rungs of the ramp (`#1D1B17` dimmer, `#221F1A` raised,
+    `#2A251E` chips, `#3A3429` borders) stay literal, unconditionally
+    painted hex — so a status bar, a tool-calls section or a tool chip
+    reads as its own step against whatever the terminal shows through as,
+    dark or light. The five modal washes (Ctrl+W confirm, v0.28.0's ctx%
+    compact confirm, command palette, settings, `/setup` — all
+    `#171512 60%`) are the deliberate
+    exception: since ansi colors ignore alpha entirely (previous point),
+    pairing `ansi_default` with a percentage would silently drop the
+    dimming veil behind a modal, so those five keep the literal hex
+    regardless of the setting. Every popup and dropdown in the house
+    (settings panel, command palette, `/search`, the slash and chip
+    pickers, the needs-input popup) already lived on the raised or dimmer
+    tint rather than the base, so none of them needed a code change to
+    stay opaque — audited selector by selector, not assumed.
+  - **Legibility, checked, not assumed — and disclosed honestly.**
+    DOXA's palette has never had a light-mode counterpart; that becomes
+    visible, not caused, once the base stops supplying its own dark
+    backdrop. Verified two ways: WCAG contrast computed for the body/
+    secondary text against representative dark (13–17:1, comfortably
+    above the AA floor) and light (1.1–1.6:1, effectively invisible)
+    terminal backgrounds; and a real render of the actual app in
+    transparent mode, with `ansi_default` cells forced through Textual's
+    own terminal-theme approximation to black and then to white to see
+    the two cases directly — role-tint chrome (status bar, tool-calls
+    section, chips, the prompt) stayed fully legible in both; base-level
+    body text was fully legible on the dark simulation and read as
+    near-invisible ghost text on the light one, exactly matching the
+    contrast numbers. Transparent mode is meant to sit over a dark
+    terminal background or desktop, same as the rest of DOXA's chrome —
+    the README says this plainly rather than leaving it to be discovered.
+  - **Live, not boot-only.** Saving the setting in the modal re-reads it
+    immediately (`DoxaApp._apply_background` + `refresh_css`), the same
+    "takes effect without a new session" contract the clock chip already
+    has — no restart needed either direction.
+  - One new gallery asset, `assets/shots/transparent.svg`/`.png` (the
+    trace scene, replayed through the live-toggle path, not a fresh app)
+    — added because a static SVG export cannot show genuine terminal
+    pass-through (Rich still has to bake SOME concrete color for a
+    "default" cell), so this shot exists to show the structural claim —
+    tool-calls section, tool chips and the status bar still read as
+    distinct, painted steps — rather than the pass-through itself. The
+    existing gallery stays on `opaque`, unchanged.
+  - **Version/sequencing note, and what four releases of drift actually
+    cost.** Prepared on `feat/transparent-bg` against v0.22.0 `main`
+    (`233ed81`, 627 tests), originally numbered v0.26.0. Renumbered to
+    v0.29.0 and rebased onto v0.28.0 `main` (`6a4ffa0`, 710 tests) —
+    v0.24.0 and v0.26.0 stay DELIBERATE gaps, not renumbered to close
+    them, so the v0.27.0 entry below still reads as what was true when it
+    shipped. Four conflicts, none resolved by taking a side: the
+    `background` and v0.25.0 `show_reasoning` Setting rows landed on the
+    same tuple slot in `doxa/config.py` (both kept), and
+    `pyproject.toml` / `uv.lock` / the CHANGELOG heading took the new
+    number.
+    - **Two defects the merge would have introduced silently, both caught
+      by test rather than by eye.** (1) `theme.tcss`'s `.turn-reasoning`
+      did not exist when this branch was cut — v0.25.0 added it,
+      hardcoding the same `#171512` this branch had just routed through
+      `$doxa-base` everywhere else. Auto-merged clean, and wrong: it would
+      have painted an opaque slab across the reasoning fold while the turn
+      body around it went transparent, a visible seam mid-transcript. It
+      reads `$doxa-base` now, like every other base-level surface. (2)
+      v0.28.0 fixed an operator-reported defect in this same file —
+      `#compact-confirm-buttons` / `#close-confirm-buttons` were
+      `height: 1; padding-top: 1`, which under Textual's border-box model
+      spent the whole declared row on padding and laid both confirm
+      dialogs' buttons out at zero rows, drawing nothing. This branch
+      rewrites `theme.tcss` underneath that fix, so `height: auto` is now
+      re-asserted from inside the transparency suite, in transparent mode,
+      instead of being trusted to the merge.
+    - **The mechanism re-verified on this tree, not carried forward on the
+      strength of the original write-up.** Against the installed Textual
+      5.3.0 / Rich 15.0.0: `ansi_default` parses to `Color(0, 0, 0,
+      ansi=-1)`, whose `rich_color` is `Color('default')`, which a real
+      truecolor console emits as `ESC[49m`; CSS `background:
+      ansi_default 60%` still parses to that same ansi color with the
+      percentage discarded (confirming the no-partial-alpha finding);
+      `background: transparent` is still alpha-0 RGB that never leaves the
+      compositor. `ANSIToTruecolor` is gated by `.enabled` at the CALL
+      site (`_styles_cache.py`), not inside `apply`, and with it enabled
+      an ansi-default background comes back as an opaque approximation —
+      so `App.ansi_color = True` remains load-bearing.
+    - **A new end-to-end check at the only layer that can settle it: the
+      bytes.** The suite previously stopped at Textual's style objects,
+      which cannot see the filter half at all. Two tests now render a
+      real base-tinted widget through `Widget.render_lines` (the path that
+      reaches `StylesCache.render_widget(filters=app._filters)`) out to a
+      truecolor Rich console and assert on the escape sequence: `opaque`
+      emits `ESC[48;2;23;21;18m` and never `ESC[49m`; `transparent` emits
+      `ESC[49m` and never any RGB paint. Both were mutation-checked —
+      removing `App.ansi_color = True`, reverting a base selector to the
+      literal hex, restoring `height: 1`, or restoring `.turn-reasoning`'s
+      literal each turn the relevant test red.
+    - Also re-checked across paths that did not exist when the branch was
+      cut: the setting holds on v0.23.0's session-restore launch (a
+      different `compose()` branch mounting N panes from
+      `RestoreTabSpec`s — `_apply_background` runs off `on_mount`, ahead
+      of both branches), and reaches the settings modal and
+      `config.py` round-trip the same way every other knob does.
+    724 tests green, full suite (710 on `main` at rebase time plus this
+    branch's own 14, plus 5 added for the reconciliation above and the
+    byte-level proof — 19 in `tests/test_background.py`).
+
 ## 0.28.0 — 2026-08-24
 
 Three operator-reported defects in v0.27.0's status-bar chip work, all

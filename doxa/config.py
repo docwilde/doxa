@@ -171,6 +171,22 @@ SETTINGS: tuple[Setting, ...] = (
              "this toggle; off only stops DOXA from asking to see it.",
     ),
     Setting(
+        key="background", env="DOXA_BACKGROUND", label="background",
+        category="Appearance", kind="choice",
+        choices=("", "opaque", "transparent"), default="opaque",
+        help="Paint the app's own background (opaque), or leave it "
+             "unpainted so the terminal's own background shows through "
+             "(transparent) (doxa.app.DoxaApp.get_theme_variable_defaults)",
+        note="DOXA can only stop PAINTING its background -- making the "
+             "terminal WINDOW itself see-through is your terminal "
+             "emulator's job (kitty's background_opacity, WezTerm's "
+             "window_background_opacity, etc.). On an opaque terminal "
+             "this setting changes nothing visible. Validated against "
+             "dark terminal backgrounds, same as the rest of DOXA's "
+             "palette -- a light terminal background will render body "
+             "text at very low contrast.",
+    ),
+    Setting(
         key="clock_show", env="DOXA_CLOCK_SHOW", label="clock: show",
         category="Appearance", kind="bool_on", default="1",
         help="Show the fixed-width clock at the right edge of the tab "
@@ -452,6 +468,17 @@ def linger_secs() -> float:
     except ValueError:
         return DEFAULT_LINGER_SECS
     return parsed if parsed >= 0 else DEFAULT_LINGER_SECS
+
+
+def background_mode() -> str:
+    """``"opaque"`` or ``"transparent"`` -- an unset or unrecognized value
+    (a typo'd env var, a hand-edited config, a future value an older DOXA
+    doesn't know) falls back to ``"opaque"`` rather than crashing the app:
+    the SAME rule :func:`_coerce`'s ``choices`` check already applies at
+    save time, applied again here for values that reached the file some
+    other way."""
+    value = raw("DOXA_BACKGROUND").strip()
+    return value if value in ("opaque", "transparent") else "opaque"
 
 
 def model() -> "str | None":

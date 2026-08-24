@@ -210,6 +210,35 @@ async def _drive_trace(app: DoxaApp, pilot) -> None:
 
 
 # --------------------------------------------------------------------- #
+# Scene: transparent (v0.29.0, the background setting) -- the trace
+# scene's own chips and tool-calls section, replayed with DOXA_BACKGROUND=
+# transparent live-flipped through the exact path the settings modal uses
+# (DoxaApp._apply_background + refresh_css), NOT a fresh app -- proving
+# the live-toggle path, not just the boot path. Textual's SVG exporter has
+# to bake SOME concrete color where the base is really the terminal's own
+# (a static image cannot show real pass-through -- see README), so this
+# shot exists to confirm the STRUCTURAL claim instead: the status bar, the
+# tool-calls dimmer step and ToolChip's own raised/bordered chrome still
+# read as distinct, painted steps once the base itself stops painting.
+# --------------------------------------------------------------------- #
+
+
+async def _drive_transparent(app: DoxaApp, pilot) -> None:
+    from doxa import config as config_mod
+
+    os.environ["DOXA_BACKGROUND"] = "transparent"
+    try:
+        config_mod.invalidate()
+        app._apply_background()
+        app.refresh_css(animate=False)
+        await pilot.pause()
+        await _drive_trace(app, pilot)
+    finally:
+        del os.environ["DOXA_BACKGROUND"]
+        config_mod.invalidate()
+
+
+# --------------------------------------------------------------------- #
 # Scene: subagent-tracker -- the second status row + an open transcript
 # tab, side by side with the trace tree the subagent will land in once it
 # finishes. The Task call is left deliberately UNRESOLVED (no tool_result
@@ -382,6 +411,8 @@ SCENES: list[Scene] = [
     Scene("hero", _drive_hero, size=(172, 47), engine_factory=_hero_engine,
           new_session_factory=_sibling_tab_factory()),
     Scene("trace", _drive_trace, size=(172, 47),
+          engine_factory=lambda: FakeEngine(TRACE_SCRIPT, model="claude-opus-4-5")),
+    Scene("transparent", _drive_transparent, size=(172, 47),
           engine_factory=lambda: FakeEngine(TRACE_SCRIPT, model="claude-opus-4-5")),
     Scene("subagent-tracker", _drive_subagent_tracker, size=(172, 47),
           engine_factory=lambda: FakeEngine(SUBAGENT_TRACKER_SCRIPT, model="claude-opus-4-5")),
