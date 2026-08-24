@@ -932,3 +932,397 @@ async def test_claude_provider_skips_the_api_probe_without_a_key(monkeypatch):
     provider = ClaudeProvider()
     result = await provider._try_api()
     assert result is None
+
+
+# =========================================================================
+# v0.28.0 -- three operator-reported defects in the v0.27.0 chip work.
+#
+# The tests above proved a CompactConfirm was PUSHED and that a synthetic
+# `pilot.click("#compact-confirm-yes")` reached its handler. Neither says
+# anything about whether the button OCCUPIES SCREEN, and it did not: the
+# operator saw "a modal message, but no button to continue, no OK, enter
+# does nothing". Every test below therefore asserts a user-visible fact --
+# rendered geometry, a real hit test, a key that actually resolves the
+# dialog, a status line that actually moves -- rather than that a message
+# was posted.
+# =========================================================================
+
+
+async def _wait_for(pilot, predicate, tries=200):
+    for _ in range(tries):
+        if predicate():
+            return True
+        await pilot.pause(0.02)
+    return bool(predicate())
+
+
+def _hit(app, widget):
+    """The widget the SCREEN reports at this widget's own centre -- the
+    hit test a mouse actually performs. A zero-height button passes every
+    query_one() in the suite and fails this."""
+    region = widget.region
+    if not region.area:
+        return None
+    x = region.x + region.width // 2
+    y = region.y + region.height // 2
+    try:
+        found, _region = app.screen.get_widget_at(x, y)
+    except Exception:
+        return None
+    return found
+
+
+# -- defect 1: the confirm dialogs had no visible buttons and no Enter ----
+
+
+@pytest.mark.asyncio
+async def test_compact_confirm_buttons_have_real_height_and_are_hittable(
+    monkeypatch, tmp_path,
+):
+    """The defect, measured: `#compact-confirm-buttons { height: 1;
+    padding-top: 1 }` under Textual's border-box model spent the whole
+    declared row on padding, leaving a 0-row content box -- the buttons
+    laid out at Size(width=58, height=0) / Size(width=0, height=0) and
+    nothing was drawn. This asserts the geometry directly, which is the
+    check the v0.27.0 tests were missing."""
+    fake = FakeEngine([])
+    fake.last_ctx_percentage = 42.0
+    app, _engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(120, 40)) as pilot:
+        assert await _wait_status(pilot, app, "ctx")
+        await pilot.click("#status-bar", offset=_offset_of(app, "ctx"))
+        assert await _wait_for(pilot, lambda: isinstance(app.screen, CompactConfirm))
+        await pilot.pause()
+
+        row = app.screen.query_one("#compact-confirm-buttons")
+        yes = app.screen.query_one("#compact-confirm-yes")
+        no = app.screen.query_one("#compact-confirm-no")
+        assert row.size.height > 0, f"button row collapsed: {row.size}"
+        for button in (yes, no):
+            assert button.size.height > 0, f"{button.id} collapsed: {button.size}"
+            assert button.size.width > 0, f"{button.id} collapsed: {button.size}"
+            assert _hit(app, button) is button, f"{button.id} is not hittable"
+
+        # Self-describing: each door names the key that opens it, because
+        # the operator's report was "no OK" -- they could not tell what to
+        # press even once something was on screen.
+        assert "enter" in str(yes.renderable).lower()
+        assert "esc" in str(no.renderable).lower()
+
+
+@pytest.mark.asyncio
+async def test_enter_confirms_the_compact_dialog(monkeypatch, tmp_path):
+    """"enter does nothing" -- CompactConfirm bound only escape, and
+    handled y/c/n in on_key. Enter now takes the action the click that
+    opened the dialog already asked for."""
+    fake = FakeEngine([])
+    fake.last_ctx_percentage = 88.0
+    app, engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test() as pilot:
+        assert await _wait_status(pilot, app, "ctx")
+        await pilot.click("#status-bar", offset=_offset_of(app, "ctx"))
+        assert await _wait_for(pilot, lambda: isinstance(app.screen, CompactConfirm))
+        await pilot.press("enter")
+        assert await _wait_for(
+            pilot, lambda: not isinstance(app.screen, CompactConfirm)
+        )
+        assert await _wait_for(pilot, lambda: engines[0].received_prompts)
+        assert engines[0].received_prompts == ["/compact"]
+
+
+@pytest.mark.asyncio
+async def test_esc_still_cancels_the_compact_dialog(monkeypatch, tmp_path):
+    """Enter taking the default must not have moved Esc off cancel."""
+    fake = FakeEngine([])
+    app, engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test() as pilot:
+        assert await _wait_status(pilot, app, "ctx")
+        await pilot.click("#status-bar", offset=_offset_of(app, "ctx"))
+        assert await _wait_for(pilot, lambda: isinstance(app.screen, CompactConfirm))
+        await pilot.press("escape")
+        assert await _wait_for(
+            pilot, lambda: not isinstance(app.screen, CompactConfirm)
+        )
+        await pilot.pause(0.1)
+        assert engines[0].received_prompts == []
+
+
+@pytest.mark.asyncio
+async def test_close_confirm_buttons_have_real_height_and_are_hittable(
+    monkeypatch, tmp_path,
+):
+    """`#close-confirm-buttons` carried the IDENTICAL css and therefore the
+    identical latent defect -- Ctrl+Q with a turn running showed three
+    invisible doors. Only the ctx% twin was reported; both are fixed."""
+    from doxa.app import CloseWithTurnRunning
+
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app.push_screen(CloseWithTurnRunning())
+        assert await _wait_for(
+            pilot, lambda: isinstance(app.screen, CloseWithTurnRunning)
+        )
+        await pilot.pause()
+        row = app.screen.query_one("#close-confirm-buttons")
+        assert row.size.height > 0, f"button row collapsed: {row.size}"
+        for wid in ("#close-terminate", "#close-detach", "#close-cancel"):
+            button = app.screen.query_one(wid)
+            assert button.size.height > 0, f"{wid} collapsed: {button.size}"
+            assert button.size.width > 0, f"{wid} collapsed: {button.size}"
+            assert _hit(app, button) is button, f"{wid} is not hittable"
+        # Same self-describing rule as the compact dialog.
+        assert "t" in str(app.screen.query_one("#close-terminate").renderable)
+        assert "enter" in str(app.screen.query_one("#close-detach").renderable)
+        assert "esc" in str(app.screen.query_one("#close-cancel").renderable)
+
+
+@pytest.mark.asyncio
+async def test_enter_on_the_close_confirm_detaches(monkeypatch, tmp_path):
+    """Consistency with CompactConfirm's Enter, argued the same way: Enter
+    takes the action the gesture that OPENED the dialog asked for. Ctrl+Q
+    means "close this tab", and the non-destructive reading of that is
+    detach -- terminate stays a deliberate `t`, never a default."""
+    from doxa.app import CloseWithTurnRunning
+
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        chosen: list = []
+        app.push_screen(CloseWithTurnRunning(), callback=chosen.append)
+        assert await _wait_for(
+            pilot, lambda: isinstance(app.screen, CloseWithTurnRunning)
+        )
+        await pilot.press("enter")
+        assert await _wait_for(pilot, lambda: bool(chosen))
+        assert chosen == ["detach"]
+
+
+# -- defect 3: a chosen branch / directory did not visibly apply ----------
+
+
+class _WorktreeBranchEngine(FakeEngine):
+    """switch_branch delegated to the REAL doxa.worktrees -- exactly what
+    both SessionEngine.switch_branch and the daemon's `branch` RPC do, so
+    this exercises the actual git operation the picker triggers rather
+    than a canned reply."""
+
+    def __init__(self, cwd: str) -> None:
+        super().__init__([])
+        self._cwd = cwd
+
+    async def switch_branch(self, target):
+        from doxa import worktrees as worktrees_mod
+
+        self.branch_calls.append(target)
+        if not target:
+            return worktrees_mod.branch_status(self._cwd)
+        return worktrees_mod.switch_base(self._cwd, target)
+
+
+async def _click_picker_row(pilot, app, rid: str) -> None:
+    """A REAL mouse click on the picker row carrying `rid` -- not
+    `select_row(i)`, which is what every v0.22.0 selection test called and
+    which therefore never proved a click reaches the callback at all. The
+    +1 skips the picker's own top border row."""
+    picker = app.query_one("#chip-picker", ChipPicker)
+    index = next(i for i, (r, _l) in enumerate(picker._rows) if r == rid)
+    await pilot.click(ChipPicker, offset=(4, index + 1))
+
+
+@pytest.mark.asyncio
+async def test_picking_a_branch_moves_the_status_line(monkeypatch, tmp_path):
+    """The defect, measured: clicking `develop` DID fire the callback, DID
+    run switch_base, DID rewrite the sidecar's base_ref -- and left the
+    status bar byte-identical, because the chip rendered branch_label()
+    (the checked-out `doxa/<id>`, which a base switch never renames)
+    while the picker changes the BASE. From the operator's seat that is
+    "i chose a branch and it is not changed"."""
+    from doxa import worktrees as worktrees_mod
+
+    monkeypatch.setenv("DOXA_WORKTREE", "1")
+    repo = _repo(tmp_path, branch="main")
+    subprocess.run(["git", "-C", str(repo), "branch", "develop"], check=True)
+    worktree = worktrees_mod.create(str(repo), "chipfix1")
+    assert worktree is not None
+
+    fake = _WorktreeBranchEngine(worktree)
+    app, _engines = await _app(monkeypatch, worktree, fake)
+    async with app.run_test(size=(140, 40)) as pilot:
+        pane = app.active_pane
+        assert await _settled(pilot, pane)
+        assert await _wait_status(pilot, app, "main")
+        before = _status_plain(app)
+        assert "main" in before
+
+        await pane.open_branch_picker()
+        await pilot.pause()
+        await _click_picker_row(pilot, app, "develop")
+
+        assert await _wait_for(pilot, lambda: "develop" in fake.branch_calls)
+        # The git side actually landed...
+        assert await _wait_for(
+            pilot,
+            lambda: (worktrees_mod.read_meta(worktree) or {}).get("base_ref")
+            == "develop",
+        )
+        # ...and -- the whole defect -- the status line says so.
+        assert await _wait_status(pilot, app, "develop")
+        after = _status_plain(app)
+        assert after != before
+        assert "main" not in after.split("·")[1]
+
+
+@pytest.mark.asyncio
+async def test_clicking_a_directory_row_descends_the_repo_picker(
+    monkeypatch, tmp_path,
+):
+    """Selection by REAL CLICK, the gesture the operator used. Descending
+    re-opens the same ChipPicker instance from a `call_after_refresh`
+    callback that runs after close/blur/focus have settled -- this pins
+    that the reopen actually survives that hand-off."""
+    repo = _repo(tmp_path)
+    (repo / "nested").mkdir()
+    app, _engines = await _app(monkeypatch, repo)
+    async with app.run_test(size=(140, 40)) as pilot:
+        pane = app.active_pane
+        assert await _settled(pilot, pane)
+        pane.open_repo_picker()
+        await pilot.pause()
+        picker = app.query_one("#chip-picker", ChipPicker)
+        assert picker.border_title == f"repo · {repo}"
+
+        await _click_picker_row(pilot, app, f"dir:{repo / 'nested'}")
+        assert await _wait_for(
+            pilot, lambda: picker.border_title == f"repo · {repo / 'nested'}"
+        )
+        assert picker.is_open
+
+
+@pytest.mark.asyncio
+async def test_clicking_a_repo_row_opens_it_in_a_new_tab(monkeypatch, tmp_path):
+    """The other half of the same gesture: a repo root is not a place to
+    descend into, it is a place to OPEN -- and by real click, not
+    select_row."""
+    repo = _repo(tmp_path)
+    other = _repo(tmp_path, name="otherrepo")
+    app, _engines = await _app(monkeypatch, repo)
+    async with app.run_test(size=(140, 40)) as pilot:
+        pane = app.active_pane
+        assert await _settled(pilot, pane)
+        assert len(app.panes()) == 1
+        pane._open_repo_picker_at(str(tmp_path))
+        await pilot.pause()
+
+        await _click_picker_row(pilot, app, f"repo:{other}")
+        assert await _wait_for(pilot, lambda: len(app.panes()) == 2)
+        assert any(p.cwd == str(other) for p in app.panes())
+
+
+@pytest.mark.asyncio
+async def test_a_plain_directory_can_be_opened_not_only_descended_into(
+    monkeypatch, tmp_path,
+):
+    """Before v0.28.0 the "· open here" row existed only when the current
+    directory WAS a git repo root, so descending into an ordinary
+    directory left a listing where every row went up or went deeper and
+    nothing opened anything -- a dead end, and part of "i chose a dir and
+    it is not changed". open_tab_at takes any directory; only the ⎇
+    marker was ever about repo-ness."""
+    plain = tmp_path / "notarepo"
+    plain.mkdir()
+    repo = _repo(tmp_path)
+    app, _engines = await _app(monkeypatch, repo)
+    async with app.run_test(size=(140, 40)) as pilot:
+        pane = app.active_pane
+        assert await _settled(pilot, pane)
+        pane._open_repo_picker_at(str(plain))
+        await pilot.pause()
+        picker = app.query_one("#chip-picker", ChipPicker)
+        labels = {rid: label for rid, label in picker._rows}
+        assert f"repo:{plain}" in labels
+        assert "⎇" not in labels[f"repo:{plain}"]  # honest: not a repo
+
+        await _click_picker_row(pilot, app, f"repo:{plain}")
+        assert await _wait_for(pilot, lambda: len(app.panes()) == 2)
+        assert any(p.cwd == str(plain) for p in app.panes())
+
+
+# -- defect 2's honesty half: a capped list must say it is capped --------
+
+
+class _CappedBeliefEngine(FakeEngine):
+    """A store with more active beliefs than list_beliefs will return --
+    what BELIEF_LIST_LIMIT does to a big store, in miniature."""
+
+    def __init__(self, shown: int, total: int) -> None:
+        super().__init__([])
+        self._total = total
+        self.list_beliefs_result = [
+            {"id": i, "subject": "user", "claim": f"claim {i}", "confidence": 0.5}
+            for i in range(shown)
+        ]
+
+    def belief_count(self) -> int:
+        return self._total
+
+
+@pytest.mark.asyncio
+async def test_a_capped_beliefs_list_says_so_in_its_own_row(monkeypatch, tmp_path):
+    """A short list shown as if it were the whole store is the one failure
+    the frame-cap fix must not trade itself for. belief_count() is the
+    SAME `status='active'` COUNT(*) list_beliefs selects over, so the
+    mismatch is exact, and ChipPicker's note row (already the place an
+    honesty caveat lives -- see the effort picker) carries it."""
+    fake = _CappedBeliefEngine(shown=500, total=517)
+    app, _engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test() as pilot:
+        pane = app.active_pane
+        await pane.open_beliefs_picker()
+        await pilot.pause()
+        picker = app.query_one("#chip-picker", ChipPicker)
+        assert picker.is_open
+        assert "500" in picker._note and "517" in picker._note
+        # The caveat is row 0 and is not selectable (rid "").
+        assert picker._rows[0][0] == ""
+        assert "capped" in picker._rows[0][1]
+
+
+@pytest.mark.asyncio
+async def test_a_complete_beliefs_list_carries_no_caveat(monkeypatch, tmp_path):
+    """...and equally, a list that IS complete must not grow a scary row
+    it has not earned."""
+    fake = _CappedBeliefEngine(shown=4, total=4)
+    app, _engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test() as pilot:
+        pane = app.active_pane
+        await pane.open_beliefs_picker()
+        await pilot.pause()
+        picker = app.query_one("#chip-picker", ChipPicker)
+        assert picker._note == ""
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_claim_says_so_in_the_detail_view(monkeypatch, tmp_path):
+    """The one belief too big for a single wire frame comes back cut and
+    flagged (doxa.daemon._fit_belief_page); the detail view must not show
+    the remnant as though it were the whole claim."""
+    fake = FakeEngine([])
+    fake.list_beliefs_result = [
+        {"id": 9, "subject": "user", "claim": "the beginning of a huge claim",
+         "confidence": 0.6, "claim_truncated": True},
+    ]
+    app, _engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test() as pilot:
+        pane = app.active_pane
+        await pane.open_beliefs_picker()
+        await pilot.pause()
+        picker = app.query_one("#chip-picker", ChipPicker)
+        index = next(i for i, (rid, _l) in enumerate(picker._rows) if rid == "belief:9")
+        picker.select_row(index)
+        for _ in range(100):
+            if _system_texts(app):
+                break
+            await pilot.pause(0.02)
+        assert "the beginning of a huge claim" in _system_texts(app)[-1]
+        assert "truncated" in _system_texts(app)[-1]

@@ -4,6 +4,126 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.28.0 — 2026-08-24
+
+Three operator-reported defects in v0.27.0's status-bar chip work, all
+found in the same click-a-chip-and-nothing-good-happens region. Each is
+written defect-then-fix, with the measurement that identified the cause.
+
+- **The confirm dialogs had no visible buttons, and Enter was dead.**
+  THE DEFECT, as reported: "clicking on ctx chip show a modal message, but
+  no button to continue, no OK, enter does nothing". Reproduced and
+  measured: `#compact-confirm-buttons` laid out at `Size(width=58,
+  height=0)` and the "[ compact ]" Static inside it at `Size(width=0,
+  height=0)`; the label never reached the screen; Enter did nothing and
+  only `y` dismissed the dialog. THE CAUSE, two independent bugs in one
+  sentence of the report. (1) `doxa/theme.tcss` styled the button row
+  `height: 1; padding-top: 1`. Textual's box model is border-box, so a
+  padded box spends its DECLARED height on the padding first — one row of
+  padding on a one-row box leaves a content box of exactly zero rows. The
+  buttons existed in the DOM and would have answered a click if one could
+  have landed on them, but they were drawn nowhere. (2) `CompactConfirm.
+  BINDINGS` bound only `escape`, and its `on_key` handled `y`/`c`/`n`;
+  Enter — the key anyone presses at a confirm — was bound to nothing.
+  THE FIX: the row is `height: auto` (padding PLUS content, so two real
+  rows), Enter now takes the action the click that OPENED the dialog
+  already asked for (the operator clicked "compact"), Esc still cancels,
+  and both labels name their own key — `[ compact · enter ]`,
+  `[ cancel · esc ]` — so the dialog says what to press instead of leaving
+  it to be guessed. `#close-confirm-buttons` (`CloseWithTurnRunning`,
+  Ctrl+Q with a turn running) carried the IDENTICAL css and therefore the
+  identical latent defect: three invisible doors, never reported because
+  the ctx% twin was hit first. Fixed the same way, with the same
+  self-describing labels and the same Enter rule — Ctrl+Q means "close
+  this tab", whose non-destructive reading is DETACH (the tab closes, the
+  turn survives, `/sessions` re-attaches it), so that is what Enter takes;
+  terminate stays a deliberate `t` and is never a default.
+
+- **The beliefs chip errored instead of opening its dropdown.** THE
+  DEFECT, as reported: "clicking on 'beliefs' chip leads to error message
+  'too much for a message'", and "it was supposed to be shown in an
+  autocomplete dropdown". THE CAUSE: `SessionEngine.list_beliefs` returns
+  beliefs WITH their claim bodies. In a DETACHED (daemon-backed) session
+  that whole list crossed the socket as ONE reply, and
+  `doxa.daemon.encode_frame` enforces `peers.MAX_FRAME_BYTES` (64KB) by
+  replacing an oversize NON-event reply wholesale with `{"ok": false,
+  "error": "reply exceeded the frame cap"}` — `EngineClient` raised that,
+  and `open_beliefs_picker`'s except-arm printed it as a system message
+  where the dropdown should have been. MEASURED against the reporting
+  operator's live store: 500 active beliefs serialize to 235,839 bytes
+  (230.3 KB), **3.6x the cap**, at an average claim of 201 chars. That
+  measurement also rules out the cheaper fix — trimming every claim to 120
+  chars still comes to 115,105 bytes, **1.75x the cap**. Trimming alone
+  cannot work here, so paging is not a preference. THE FIX: the `beliefs`
+  RPC is PAGED. The daemon serves a conservative 100 rows per frame (~472
+  bytes/row measured, so ~139 would have exactly filled 64KB — the smaller
+  page leaves real headroom for a store with longer claims), with a byte
+  budget as the backstop for claims that run long, plus the offset to
+  resume from; `EngineClient.list_beliefs` loops until the store is
+  exhausted and hands the app one complete list.
+  **Paged at the TRANSPORT, never at the scroll position** — the decision
+  that matters. Loading pages lazily as the list scrolls was considered and
+  rejected: `ChipPicker`'s type-to-filter matches across the entire row
+  set, so with only the first page resident, typing a term matching a
+  belief further down would show nothing and the picker would actively
+  assert that belief does not exist. A slow open beats a lying filter, and
+  230KB over a local unix socket in a handful of frames is imperceptible.
+  Every belief is therefore resident before the user can type — pinned by a
+  test that seeds a store LARGER than the real one and then filters for a
+  belief from the last page.
+  Ellipsizing claim text daemon-side was rejected for a second reason
+  besides the arithmetic: it would make the two engines return different
+  data for the same call, and `doxa.app` reaches both through one
+  `getattr(engine, "list_beliefs")` and cannot tell them apart — that
+  parity is now pinned by its own test.
+  Honesty, since a cap still exists: `engine.BELIEF_LIST_LIMIT` (raised
+  from an implicit 500, which would have silently dropped 17 of this
+  operator's beliefs, to 2000) is checked against `belief_count()` — the
+  SAME `status='active'` COUNT(*) the list selects over — and a list that
+  ended because of the cap SAYS so in the picker's own note row rather
+  than passing for the whole store. The one claim too large for a single
+  frame even alone goes out cut and flagged, and the detail view says
+  "claim truncated" rather than showing the remnant as if it were whole.
+  The in-process path never hit the cap and is unchanged.
+
+- **Picking a branch appeared to do nothing.** THE DEFECT, as reported:
+  "when i chose a branch/dir and click on one, it is not changed". THE
+  CAUSE, and it is not where the report points. Measured end to end
+  against real git: a real mouse click on the picker row DID reach the
+  callback, `worktrees.switch_base` DID run, the worktree WAS rebased and
+  the sidecar's `base_ref` rewritten from `main` to `develop`, and the tab
+  label DID follow. The status bar did not move one byte — before and
+  after, `myrepo ⎇ doxa/abc123de@myrepo-abc123de @5016a09`. `GitLine.
+  render` built its branch half from `branch_label()`, the branch actually
+  CHECKED OUT here, while the branch picker changes the BASE: inside a
+  worktree-per-session session those are different strings, and a base
+  switch rebases the session's throwaway `doxa/<id>` branch without ever
+  renaming what HEAD points at. So a switch that fully SUCCEEDED was
+  invisible in the one place the user was looking. THE FIX: the chip shows
+  the base — the same string the tab shows, which is what `render`'s own
+  docstring has claimed since item S moved tabs to `tab_branch()` and left
+  the status bar behind. This deliberately overrides v0.17's "the status
+  bar keeps the session branch, because that IS session identity": the
+  segment is a SELECTOR now, and a selector has to display the thing it
+  selects. Nothing is lost — the checked-out branch moves into that
+  segment's tooltip, and the status bar already carries the session handle
+  in its own chip (dropping a third printing of the session id from one
+  bar, the same argument item S applied to tab labels).
+  Both other halves of that report were investigated by test rather than
+  assumed, and both already worked under a real click: selecting a
+  directory descends the picker (the `call_after_refresh` reopen survives
+  the close/blur/focus hand-off), and selecting a repo root opens it in a
+  new tab (`new_session_factory_at` is threaded through every `doxa.cli`
+  launch path, and `DoxaApp` defaults it for `--in-process`). Both are now
+  pinned by real-click tests — every v0.22.0 selection test called
+  `select_row(i)` directly and so never proved a click reaches the
+  callback at all. One genuine dead end was found next to them and closed:
+  "· open here" was offered only when the current directory WAS a git repo
+  root, so descending into an ordinary directory left a listing in which
+  every row went up or went deeper and nothing opened anything. It is
+  offered for any directory now — `open_tab_at` always accepted one — with
+  the ⎇ marker still reserved for actual repo roots.
+
 ## 0.27.0 — 2026-08-24
 
 - **Status-bar chip revisions** (operator-reported, three wrong or missing

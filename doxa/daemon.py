@@ -90,7 +90,7 @@ from typing import Any, Callable
 from . import __version__
 from . import notify as notify_mod
 from . import worktrees as worktrees_mod
-from .engine import EngineEvent, SessionEngine
+from .engine import BELIEF_LIST_LIMIT, EngineEvent, SessionEngine
 from .peers import MAX_FRAME_BYTES, registry_dir, runtime_dir
 
 PROTOCOL_VERSION = 1
@@ -159,6 +159,63 @@ def encode_frame(frame: dict) -> bytes:
         slim = {"type": slim.get("type"), "id": slim.get("id"),
                 "ok": False, "error": "reply exceeded the frame cap"}
     return (json.dumps(slim, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+# Room left for the reply envelope around a belief page -- {"type":
+# "reply", "id": N, "ok": true, "beliefs": [...], "next_offset": N} plus
+# the JSON separators between rows. Generous on purpose: overshooting the
+# cap costs the whole reply (encode_frame replaces it with an error), while
+# undershooting costs one extra round trip on a click-only call.
+BELIEF_PAGE_OVERHEAD_BYTES = 2048
+# Row ceiling per page. Deliberately NOT tuned to fill a frame: measured
+# against the reporting operator's live store, a full belief row averages
+# ~472 bytes (avg claim 201 chars, max 300), so ~139 rows would fit 64KB
+# exactly -- 100 leaves real headroom for a store whose claims run longer
+# than that one's without ever depending on the byte budget below to save
+# it. That budget stays as the backstop for genuinely long claims;
+# whichever ceiling binds first ends the page. Cost of a smaller page is
+# one more round trip on a local unix socket, on a click-only call.
+BELIEF_PAGE_ROWS = 100
+
+
+def _fit_belief_page(
+    beliefs: "list[dict]", offset: int
+) -> "tuple[list[dict], int | None]":
+    """As many of ``beliefs`` as fit in one wire frame, and the offset to
+    resume from (``None`` when this page is the last one).
+
+    This is the BYTE backstop, applied to a slice the caller has already
+    capped at :data:`BELIEF_PAGE_ROWS`. The row ceiling is what normally
+    ends a page and is set well below what a frame holds; this exists
+    because claims are free text, so no row count alone can promise a fit
+    -- and an oversize reply is not degraded gracefully by encode_frame,
+    it is discarded entirely, which is the defect this whole change
+    removes. A single belief bigger than the entire frame budget would
+    otherwise page forever without ever emitting a row, so it is emitted
+    alone with its claim cut to fit and marked ``claim_truncated`` -- the
+    picker's row is ellipsized anyway, and the detail view says so out
+    loud rather than showing a short claim as if it were whole."""
+    budget = MAX_FRAME_BYTES - BELIEF_PAGE_OVERHEAD_BYTES
+    page: "list[dict]" = []
+    used = 0
+    for index, belief in enumerate(beliefs):
+        size = len(json.dumps(belief, ensure_ascii=False).encode("utf-8")) + 1
+        if size > budget:
+            if page:
+                return page, offset + len(page)
+            trimmed = dict(belief)
+            claim = str(trimmed.get("claim") or "")
+            # Bytes, not characters: the cap is a wire cap. Cut on the
+            # encoded form and decode back, dropping any partial rune.
+            keep = claim.encode("utf-8")[: max(0, budget - 512)]
+            trimmed["claim"] = keep.decode("utf-8", errors="ignore")
+            trimmed["claim_truncated"] = True
+            return [trimmed], offset + 1
+        if used + size > budget and page:
+            return page, offset + index
+        page.append(belief)
+        used += size
+    return page, None
 
 
 def daemon_socket_path(session_id: str) -> Path:
@@ -568,8 +625,36 @@ class SessionDaemon:
             # reply above and must stay free; this is the heavier claim-
             # text SELECT, a separate call so a session that never opens
             # the picker never pays for it.
-            beliefs = await self.engine.list_beliefs()
-            await self._reply(writer, req_id, ok=True, beliefs=beliefs)
+            #
+            # PAGED since v0.28.0, and that is a defect fix, not a
+            # refinement: reported as "clicking on 'beliefs' chip leads to
+            # error message 'too much for a message'". One reply carrying
+            # every active belief WITH its claim text runs past
+            # MAX_FRAME_BYTES the moment a store gets real (the operator's
+            # had ~517), and encode_frame's non-event branch replaces an
+            # oversize reply wholesale with {"ok": false, "error": "reply
+            # exceeded the frame cap"} -- so the picker did not open at
+            # all, it printed that. The client asks for a window and gets
+            # back however much of it FITS plus the offset to resume from
+            # (see EngineClient.list_beliefs, which loops until
+            # next_offset is None and hands the app one complete list --
+            # the parity SessionEngine.list_beliefs' unpaged return
+            # requires). Truncating claim text here instead was the other
+            # option and was rejected: it would make the two engines
+            # return different data for the same call.
+            offset = max(0, int(params.get("offset") or 0))
+            limit = max(1, int(params.get("limit") or BELIEF_LIST_LIMIT))
+            fetch = min(limit, BELIEF_PAGE_ROWS)
+            beliefs = await self.engine.list_beliefs(limit=fetch, offset=offset)
+            page, next_offset = _fit_belief_page(beliefs, offset)
+            if next_offset is None and len(beliefs) == fetch:
+                # The SQL window ended this page, not the store -- there may
+                # be more rows behind it, so say so rather than reporting a
+                # short list as complete.
+                next_offset = offset + len(page)
+            await self._reply(
+                writer, req_id, ok=True, beliefs=page, next_offset=next_offset,
+            )
         elif method == "answer_needs_input":
             # The resolution's own needs_input_resolved broadcast comes
             # from the ENGINE side (SessionEngine._wait_for_answer's

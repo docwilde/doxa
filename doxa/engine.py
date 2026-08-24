@@ -140,6 +140,16 @@ def consult_floor() -> float | None:
 
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
+# How many active beliefs the chip's picker will ever list in one open
+# (:meth:`SessionEngine.list_beliefs`, and EngineClient's paging loop over
+# the daemon's `beliefs` RPC, both default to this so the two paths agree
+# on where "the list" ends). v0.28.0 raised it from an implicit 500 after
+# an operator with ~517 active beliefs: at 500 the picker silently dropped
+# the tail, which is the one thing a belief list must not do. The cap has
+# to exist at all (this SELECTs every claim BODY), so the picker now SAYS
+# when it was reached -- see SessionPane.open_beliefs_picker's note row.
+BELIEF_LIST_LIMIT = 2000
+
 
 def effort_level() -> "str | None":
     """``DOXA_EFFORT`` / the config file's ``effort`` row, validated.
@@ -1186,7 +1196,9 @@ class SessionEngine:
         except Exception:
             return 0
 
-    async def list_beliefs(self, limit: int = 500) -> list[dict]:
+    async def list_beliefs(
+        self, limit: int = BELIEF_LIST_LIMIT, offset: int = 0
+    ) -> list[dict]:
         """Active belief BODIES -- the beliefs chip's picker (item 3), never
         the status bar refresh: :meth:`belief_count` above is the cheap
         COUNT(*) that runs on every refresh, this is the heavier SELECT of
@@ -1201,13 +1213,26 @@ class SessionEngine:
         ``"project:<slug>"`` -- there is no separate ``scope`` column; the
         chip's grouping (doxa.app._belief_scope_label) derives the group
         from this string so a future subject prefix (LORE issue #41's
-        proposed ``machine:<id>``) slots in without a code change here."""
+        proposed ``machine:<id>``) slots in without a code change here.
+
+        ``offset`` (v0.28.0) exists for ONE caller: the daemon's ``beliefs``
+        RPC, which cannot put an unbounded belief list in a single 64KB wire
+        frame and therefore serves the same query in pages (see
+        doxa.daemon's handler and EngineClient.list_beliefs, which
+        reassembles them). The ORDER BY gained an explicit ``id`` tiebreak
+        in the same change, which paging needs and a single unpaged SELECT
+        never did: without a total order, two windows over rows sharing an
+        ``updated`` timestamp can repeat or skip a belief. With it, the
+        pages concatenate to exactly the list one unpaged call returns --
+        the parity EngineClient.list_beliefs has to keep with this
+        method."""
         try:
             conn = lore_store.db_connect()
             rows = conn.execute(
                 "SELECT id, subject, claim, confidence FROM beliefs "
-                "WHERE status = 'active' ORDER BY updated DESC LIMIT ?",
-                (limit,),
+                "WHERE status = 'active' ORDER BY updated DESC, id "
+                "LIMIT ? OFFSET ?",
+                (limit, offset),
             ).fetchall()
         except Exception:
             return []

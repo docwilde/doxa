@@ -729,3 +729,228 @@ async def test_branch_rpc_switch_refusal_comes_back_without_raising(
         assert result["ok"] is False
         assert "uncommitted changes" in result["message"]
         await client.finalize()
+
+
+# -- v0.28.0 defect 2: the beliefs reply outgrew the 64KB frame -----------
+#
+# Reported: "clicking on 'beliefs' chip leads to error message 'too much
+# for a message'" / "it was supposed to be shown in an autocomplete
+# dropdown". SessionEngine.list_beliefs returns beliefs WITH claim bodies;
+# in a DETACHED session those crossed the socket in ONE reply, and
+# encode_frame answers an oversize non-event reply by replacing it whole
+# with {"ok": false, "error": "reply exceeded the frame cap"} -- which
+# EngineClient raised and doxa.app printed as a system message instead of
+# opening the picker. The operator has ~517 active beliefs; the fixtures
+# below synthesize a set that genuinely exceeds MAX_FRAME_BYTES, because a
+# test that stays under the cap proves nothing about this defect.
+
+
+# Sized from a MEASUREMENT of the reporting operator's live LORE store, not
+# from a guess: 500 active beliefs serialized to 235,839 bytes (230.3 KB) --
+# 3.6x the 64KB frame cap -- at an average claim of 201 chars, max 300. A
+# fixture that merely crossed 64KB would not have told paging apart from
+# trim-the-claim-and-hope, and trimming was measured to STILL exceed the cap
+# on that same store (115,105 bytes with claims cut to 120 chars, 1.75x
+# over). So this fixture deliberately exceeds the real payload on both axes,
+# rows and bytes, and asserts that it does.
+REAL_STORE_PAYLOAD_BYTES = 235_839
+
+
+def _seed_big_belief_store(count=600, claim_chars=400):
+    """`count` active beliefs whose serialized size exceeds the operator's
+    real store. Returns (conn, subject) -- the caller deletes them again,
+    since conftest.py's LORE_ROOT is shared by the whole session."""
+    from lore_core import beliefs as beliefs_mod
+    from lore_core import store as lore_store
+
+    subject = "project:framecap"
+    conn = lore_store.db_connect()
+    for i in range(count):
+        beliefs_mod.belief_insert(
+            conn, subject, f"belief {i:04d} " + ("x" * claim_chars),
+            0.7, None, None, None,
+        )
+    conn.commit()
+    rows = conn.execute(
+        "SELECT id, subject, claim, confidence FROM beliefs WHERE subject = ?",
+        (subject,),
+    ).fetchall()
+    payload = len(json.dumps(
+        [{"id": r[0], "subject": r[1], "claim": r[2], "confidence": r[3]}
+         for r in rows],
+        ensure_ascii=False,
+    ).encode("utf-8"))
+    assert payload > REAL_STORE_PAYLOAD_BYTES, (
+        f"fixture ({payload} bytes) must exceed the real store's measured "
+        f"{REAL_STORE_PAYLOAD_BYTES} bytes"
+    )
+    assert payload > peers.MAX_FRAME_BYTES * 3
+    return conn, subject
+
+
+def _drop_big_belief_store(conn, subject):
+    conn.execute("DELETE FROM beliefs WHERE subject = ?", (subject,))
+    conn.commit()
+
+
+def test_fit_belief_page_splits_on_the_byte_budget():
+    """Sizing by MEASUREMENT, not by a fixed row count: the page ends when
+    the bytes run out, and reports where to resume."""
+    beliefs = [
+        {"id": i, "subject": "project:x", "claim": "y" * 4096, "confidence": 0.5}
+        for i in range(200)
+    ]
+    page, next_offset = daemon_mod._fit_belief_page(beliefs, 0)
+    assert 0 < len(page) < len(beliefs)
+    assert next_offset == len(page)
+    encoded = daemon_mod.encode_frame(
+        {"type": "reply", "id": 1, "ok": True,
+         "beliefs": page, "next_offset": next_offset}
+    )
+    # The whole point: what comes back is a REAL page, not encode_frame's
+    # "reply exceeded the frame cap" substitute.
+    assert len(encoded) <= peers.MAX_FRAME_BYTES
+    assert b"exceeded the frame cap" not in encoded
+
+
+def test_fit_belief_page_ends_cleanly_on_a_short_list():
+    beliefs = [{"id": 1, "subject": "user", "claim": "short", "confidence": 0.5}]
+    page, next_offset = daemon_mod._fit_belief_page(beliefs, 7)
+    assert page == beliefs
+    assert next_offset is None
+
+
+def test_fit_belief_page_never_stalls_on_one_oversize_belief():
+    """A single claim larger than the entire frame budget would otherwise
+    page forever without emitting a row. It goes out alone, cut to fit,
+    and MARKED -- the offset still advances."""
+    huge = {"id": 1, "subject": "user", "claim": "z" * (peers.MAX_FRAME_BYTES * 2),
+            "confidence": 0.9}
+    page, next_offset = daemon_mod._fit_belief_page([huge, huge], 0)
+    assert len(page) == 1
+    assert next_offset == 1
+    assert page[0]["claim_truncated"] is True
+    assert len(page[0]["claim"]) < len(huge["claim"])
+    assert len(daemon_mod.encode_frame(
+        {"type": "reply", "id": 1, "ok": True, "beliefs": page}
+    )) <= peers.MAX_FRAME_BYTES
+
+
+@pytest.mark.asyncio
+async def test_beliefs_call_survives_a_store_bigger_than_one_frame(
+    tmp_path, monkeypatch,
+):
+    """The defect end to end: over a real socket, with a belief store whose
+    bodies exceed MAX_FRAME_BYTES, the client gets every belief back --
+    not EngineClientError("reply exceeded the frame cap")."""
+    conn, subject = _seed_big_belief_store()
+    try:
+        async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+            client = EngineClient(str(daemon.socket_path))
+            await client.start()
+            result = await client.list_beliefs()
+            mine = [b for b in result if b["subject"] == subject]
+            assert len(mine) == 600
+            # Whole claims, not ellipsized stand-ins -- the picker's rows
+            # are ellipsized by _fmt_belief_row, the DATA is not.
+            assert all(len(b["claim"]) > 200 for b in mine)
+            assert not any(b.get("claim_truncated") for b in mine)
+            await client.finalize()
+    finally:
+        _drop_big_belief_store(conn, subject)
+
+
+@pytest.mark.asyncio
+async def test_client_and_engine_list_beliefs_stay_in_parity(
+    tmp_path, monkeypatch,
+):
+    """Paging is an implementation detail of the transport and must not be
+    visible in the result: EngineClient.list_beliefs has to return exactly
+    what SessionEngine.list_beliefs returns, because doxa.app reaches both
+    through one `getattr(engine, "list_beliefs")` and cannot tell them
+    apart."""
+    conn, subject = _seed_big_belief_store()
+    try:
+        async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+            client = EngineClient(str(daemon.socket_path))
+            await client.start()
+            over_socket = await client.list_beliefs()
+            in_process = await SessionEngine(cwd=str(tmp_path)).list_beliefs()
+            assert [b["id"] for b in over_socket] == [b["id"] for b in in_process]
+            assert [b["claim"] for b in over_socket] == [
+                b["claim"] for b in in_process
+            ]
+            await client.finalize()
+    finally:
+        _drop_big_belief_store(conn, subject)
+
+
+@pytest.mark.asyncio
+async def test_beliefs_paging_honours_an_explicit_limit(tmp_path, monkeypatch):
+    """The limit is the caller's window, not a per-frame quota -- the loop
+    stops at it rather than draining the store."""
+    conn, subject = _seed_big_belief_store()
+    try:
+        async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+            client = EngineClient(str(daemon.socket_path))
+            await client.start()
+            assert len(await client.list_beliefs(limit=37)) == 37
+            await client.finalize()
+    finally:
+        _drop_big_belief_store(conn, subject)
+
+
+@pytest.mark.asyncio
+async def test_the_beliefs_picker_opens_complete_and_filterable_over_the_socket(
+    tmp_path, monkeypatch,
+):
+    """The user-visible end of defect 2, over a REAL daemon socket with a
+    belief payload larger than the operator's own store: the picker opens
+    (it used to print "reply exceeded the frame cap" instead), and every
+    belief is resident BEFORE the user can type.
+
+    Residency is the whole reason paging stops at the transport and never
+    reaches the scroll position. ChipPicker's type-to-filter matches across
+    the entire row set; if only the first page were loaded, typing a term
+    that matches a belief on a later page would show nothing -- the picker
+    would actively assert that belief does not exist. A slow open beats a
+    lying filter, so this asserts a LATE-page belief is findable by
+    filtering immediately after open."""
+    from doxa.app import ChipPicker, DoxaApp
+
+    conn, subject = _seed_big_belief_store()
+    try:
+        async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+            sock = str(daemon.socket_path)
+            app = DoxaApp(cwd=str(tmp_path), engine_factory=lambda: EngineClient(sock))
+            async with app.run_test(size=(140, 40)) as pilot:
+                pane = app.active_pane
+                for _ in range(400):
+                    if pane.engine is not None:
+                        break
+                    await pilot.pause(0.02)
+                assert isinstance(pane.engine, EngineClient)
+
+                await pane.open_beliefs_picker()
+                await pilot.pause()
+                picker = app.query_one("#chip-picker", ChipPicker)
+                assert picker.is_open, "the picker must OPEN, not raise"
+
+                # Complete: every seeded belief is resident, not just the
+                # first frame's worth.
+                labels = [label for _rid, label in picker._all_rows]
+                seeded = [l for l in labels if l.startswith("belief ")]
+                assert len(seeded) == 600
+                # ...and no caveat row, because nothing was actually capped.
+                assert picker._note == ""
+
+                # Filterable: a belief from the LAST page, reachable by
+                # typing, with no further round trip.
+                await pilot.press("0", "5", "9", "9")
+                await pilot.pause()
+                visible = [label for rid, label in picker._rows if rid]
+                assert any(l.startswith("belief 0599") for l in visible), (
+                    "a late-page belief must be findable by filtering"
+                )
+    finally:
+        _drop_big_belief_store(conn, subject)

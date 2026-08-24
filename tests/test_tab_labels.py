@@ -237,8 +237,18 @@ async def test_each_tab_carries_its_own_label(monkeypatch, tmp_path):
 # show that session branch (a regression, reported: the session id ends up
 # printed twice, once as the tab's branch half and again as the daemon's
 # own handle elsewhere). Fixed: the tab shows the BASE (GitLine.tab_branch,
-# via the worktree sidecar's base_ref); the status bar keeps the session
-# branch + sha, unchanged, because that IS session identity.
+# via the worktree sidecar's base_ref); the status bar kept the session
+# branch + sha, because that IS session identity.
+#
+# v0.28.0 OVERRIDES that second half, on the operator's own report ("when i
+# chose a branch and click on one, it is not changed"). The status bar's
+# branch segment is a SELECTOR now, and what it selects is the base: a
+# successful switch rebases doxa/<id> onto the new base and rewrites
+# base_ref, leaving the checked-out branch name untouched -- so a chip
+# rendering the checked-out branch stayed byte-identical across a switch
+# that had fully landed. The chip shows the base now (the same string the
+# tab shows, which is what GitLine.render's docstring always claimed), and
+# the checked-out branch moves into that segment's tooltip.
 
 
 @pytest.mark.asyncio
@@ -265,9 +275,13 @@ async def test_tab_label_inside_a_worktree_session_shows_the_base_not_the_sessio
 
 
 @pytest.mark.asyncio
-async def test_status_bar_keeps_the_session_branch_inside_a_worktree_session(
+async def test_status_bar_shows_the_base_inside_a_worktree_session(
     monkeypatch, tmp_path,
 ):
+    """v0.28.0's override of "the status bar keeps the session branch":
+    the branch segment is the thing the branch picker CHANGES, so it has
+    to be the base, or a landed switch is invisible (defect 3). The
+    session's own branch is not lost -- it moves to the tooltip."""
     from doxa import worktrees as worktrees_mod
 
     monkeypatch.setenv("DOXA_HOME", str(tmp_path / "doxa-home"))
@@ -282,10 +296,15 @@ async def test_status_bar_keeps_the_session_branch_inside_a_worktree_session(
         assert await _settled(pilot, app, pane)
         # The TAB shows the base...
         assert _tab_label(app, pane) == f"Sonnet@myrepo:trunk{TAB_ISOLATION_MARKER}"
-        # ...but the STATUS BAR keeps the real session identity: the
-        # worktree's own branch, exactly as it always has.
+        # ...and so does the STATUS BAR now: one string, one meaning.
         status = str(pane.query_one("#status-bar").renderable)
-        assert "doxa/brlabel2" in status
+        assert "myrepo[/][/] ⎇ " in status
+        assert "trunk" in status
+        assert "doxa/brlabel2" not in status
+        # The checked-out branch is still reachable -- in the tooltip that
+        # segment carries.
+        hints = dict(pane._git.chip_hints())
+        assert "doxa/brlabel2" in hints["trunk"]
     config_mod.invalidate()
 
 

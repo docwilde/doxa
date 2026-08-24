@@ -85,7 +85,7 @@ from . import providers as providers_mod
 from . import tabsets as tabsets_mod
 from . import version as version_mod
 from . import worktrees as worktrees_mod
-from .engine import EngineEvent, SessionEngine
+from .engine import BELIEF_LIST_LIMIT, EngineEvent, SessionEngine
 from . import history as history_mod
 from .history import SEARCH_PREFIX, SessionSearch
 from .identity import tier_short  # noqa: F401 -- re-exported: the status
@@ -630,10 +630,32 @@ class GitLine:
     def render(self, *, clickable: bool = False) -> str | None:
         """`repo ⎇ branch sha`, or None outside a repo (no chip at all).
 
-        The branch half is :meth:`branch_label` -- the SAME string a tab
+        The branch half is :meth:`tab_branch` -- the SAME string a tab
         shows -- so a linked worktree reads `repo ⎇ main@featureX @sha`
         here too: one source of truth for "how does a worktree spell its
         branch", inherited rather than re-derived.
+
+        v0.28.0 (reported: "when i chose a branch and click on one, it is
+        not changed") -- that invariant was BROKEN, and the broken half is
+        the whole defect. This used :meth:`branch_label`, the branch
+        actually checked out here, while the tab had moved to
+        :meth:`tab_branch`, the BASE, back in item S. Inside a
+        worktree-per-session session those are different strings and only
+        one of them is what the branch picker changes: picking a branch
+        runs ``doxa.worktrees.switch_base``, which rebases the session's
+        own throwaway ``doxa/<id>`` branch onto the new base and rewrites
+        the sidecar's ``base_ref`` -- it never renames what HEAD points
+        at. So a switch that fully SUCCEEDED left this chip byte-identical
+        (measured: `myrepo ⎇ doxa/abc123de@myrepo-abc123de @5016a09`
+        before and after), which reads exactly like nothing happened.
+        Showing the base restores the docstring's own promise, makes the
+        picker's effect visible immediately, and drops a third printing of
+        the session id from a bar that already carries it in its own
+        handle chip -- the same reasoning item S applied to tab labels.
+        The checked-out branch is not lost: it moves into this segment's
+        tooltip (see :meth:`chip_hints`), which is where "and what is HEAD
+        really on" belongs once the visible text answers "what am I
+        working off".
 
         The short sha sits immediately right of the branch, because that is
         where "which commit am I actually on" belongs -- next to the branch
@@ -654,7 +676,13 @@ class GitLine:
         `SessionPane._refresh_status` passes True."""
         if not self.repo:
             return None
-        branch = self.branch_label()
+        # branch_label() FIRST, unconditionally: it is what re-reads HEAD
+        # (mtime-guarded) and therefore what keeps `self._ref` -- and so
+        # _read_sha below -- alive. tab_branch()'s base half never touches
+        # HEAD, so taking the base without this leaves the sha unresolved
+        # on a worktree session's very first render.
+        checked_out = self.branch_label()
+        branch = self.base_branch() or checked_out
         repo_text = _chip_span(self.repo, "open_repo_picker") if clickable else self.repo
         if not branch:
             return repo_text
@@ -682,12 +710,21 @@ class GitLine:
             "repo this session is rooted in -- click to open a "
             "different repo in a new tab",
         )]
-        branch = self.branch_label()
+        # Same order and same reason as render() above -- one string pair
+        # per segment it prints, so this has to derive them the same way.
+        head = self.branch_label()
+        base = self.base_branch()
+        branch = base or head
         if not branch:
             return hints
+        # Inside a worktree-per-session session the visible text is the BASE
+        # (see render's own v0.28.0 note); the checked-out branch is the
+        # fact this tooltip still owes the reader, so it says both.
+        checked_out = head if base and head != base else None
         hints.append((
             branch,
-            "branch checked out here -- click to switch this session's base",
+            "base branch this session works off -- click to switch it"
+            + (f" (HEAD here is {checked_out})" if checked_out else ""),
         ))
         sha = self._read_sha()
         if sha and not branch.startswith(sha):
@@ -2164,7 +2201,19 @@ class CloseWithTurnRunning(ModalScreen[str]):
     The three-way choice is the point. Silently killing a running turn
     throws away work the user is waiting for; silently keeping it alive is
     the leak this whole change exists to end. So the one case where both
-    defaults are wrong asks, and every other close stays instant."""
+    defaults are wrong asks, and every other close stays instant.
+
+    v0.28.0 -- the same two fixes CompactConfirm below carries, because
+    this dialog had the SAME two defects and only the twin was reported:
+    its button row was styled `height: 1; padding-top: 1`, which under
+    Textual's border-box model renders every button at zero height (see
+    theme.tcss's own comment on #close-confirm-buttons), and Enter did
+    nothing. Enter now takes the action the keystroke that OPENED this
+    dialog already asked for -- Ctrl+W means "close this tab", and the
+    non-destructive reading of that is DETACH (the tab closes, the turn
+    survives, and `/sessions` can re-attach it); terminate stays a
+    deliberate `t`, never a default. Every label states its own key, so
+    the dialog says what to press instead of leaving it to be guessed."""
 
     BINDINGS = [("escape", "pick_cancel", "Cancel")]
 
@@ -2178,15 +2227,24 @@ class CloseWithTurnRunning(ModalScreen[str]):
                 id="close-confirm-body",
             )
             with Horizontal(id="close-confirm-buttons"):
-                yield Static("[ terminate ]", id="close-terminate")
-                yield Static("[ detach ]", id="close-detach")
-                yield Static("[ cancel ]", id="close-cancel")
+                yield Static("[ terminate · t ]", id="close-terminate")
+                yield Static("[ detach · enter ]", id="close-detach")
+                yield Static("[ cancel · esc ]", id="close-cancel")
 
     def action_pick_cancel(self) -> None:
         self.dismiss("cancel")
 
     def on_key(self, event: events.Key) -> None:
-        choice = {"t": "terminate", "d": "detach", "c": "cancel"}.get(event.key)
+        choice = {
+            "t": "terminate",
+            "d": "detach",
+            # Enter = the default door, the one the buttons label as such.
+            # "return" is listed alongside "enter" only for terminals whose
+            # key name Textual has not normalized; both mean one keycap.
+            "enter": "detach",
+            "return": "detach",
+            "c": "cancel",
+        }.get(event.key)
         if choice:
             event.stop()
             self.dismiss(choice)
@@ -2227,7 +2285,19 @@ class CompactConfirm(ModalScreen[bool]):
     The body states what is actually at stake -- the CURRENT context
     percentage, and that compacting summarizes and discards the earlier
     detail -- not a bare "are you sure?": the whole point of asking is to
-    say what the click is about to do."""
+    say what the click is about to do.
+
+    v0.28.0 -- reported: "clicking on ctx chip show a modal message, but no
+    button to continue, no OK, enter does nothing". Two defects in one
+    sentence. (1) `#compact-confirm-buttons` was `height: 1; padding-top:
+    1`; Textual's box model is border-box, so the padding consumed the
+    whole declared row and both Statics laid out at Size(width=0,
+    height=0) -- the dialog genuinely had no visible doors (theme.tcss
+    carries the fix and its reasoning). (2) Only Esc and y/c/n were bound;
+    Enter -- the key anyone presses at a confirm -- was dead. Enter now
+    takes the action the CLICK that opened this dialog already asked for
+    (the operator clicked "compact"), Esc still cancels, and both button
+    labels now name their own key so the dialog is self-describing."""
 
     BINDINGS = [("escape", "pick_cancel", "Cancel")]
 
@@ -2249,14 +2319,20 @@ class CompactConfirm(ModalScreen[bool]):
                 id="compact-confirm-body",
             )
             with Horizontal(id="compact-confirm-buttons"):
-                yield Static("[ compact ]", id="compact-confirm-yes")
-                yield Static("[ cancel ]", id="compact-confirm-no")
+                yield Static("[ compact · enter ]", id="compact-confirm-yes")
+                yield Static("[ cancel · esc ]", id="compact-confirm-no")
 
     def action_pick_cancel(self) -> None:
         self.dismiss(False)
 
     def on_key(self, event: events.Key) -> None:
-        choice = {"y": True, "c": False, "n": False}.get(event.key)
+        # "return" rides alongside "enter" only for terminals whose key name
+        # Textual has not normalized; both mean the one keycap the button
+        # label now names.
+        choice = {
+            "y": True, "enter": True, "return": True,
+            "c": False, "n": False,
+        }.get(event.key)
         if choice is not None:
             event.stop()
             self.dismiss(choice)
@@ -3669,7 +3745,23 @@ class SessionPane(TabPane):
         EVERY status refresh and must stay free of the belief BODIES --
         this calls ``list_beliefs()`` instead, the heavier claim-text
         query, and only ever from a click, never from `_refresh_status`
-        (asserted by tests/test_status_chips.py)."""
+        (asserted by tests/test_status_chips.py).
+
+        v0.28.0 -- reported: "clicking on 'beliefs' chip leads to error
+        message 'too much for a message'", with the follow-up "it was
+        supposed to be shown in an autocomplete dropdown". Two things had
+        to change and NEITHER of them is here: the daemon now serves this
+        list in frame-sized pages and EngineClient reassembles them (a
+        detached session's single reply carrying ~517 claim bodies was
+        being discarded by doxa.daemon.encode_frame and replaced with
+        "reply exceeded the frame cap", which the except-arm below then
+        printed as a system message -- the "error" the operator saw where
+        the dropdown should have been). What IS here is the honesty half:
+        a list that ends because it hit :data:`engine.BELIEF_LIST_LIMIT`
+        rather than because the store ran out now SAYS so, in the picker's
+        own note row, checked against the same ``belief_count()`` COUNT(*)
+        the chip itself displays. A short list must never be shown as if
+        it were the whole store."""
         engine = self.engine
         if engine is None:
             return
@@ -3706,6 +3798,26 @@ class SessionPane(TabPane):
             rows, None,
             lambda rid: self._show_belief_detail(by_id.get(rid)),
             title="beliefs", groups=groups,
+            note=self._belief_cap_note(engine, len(rows)),
+        )
+
+    @staticmethod
+    def _belief_cap_note(engine: "Any", shown: int) -> str:
+        """The picker's row-0 caveat when the list is SHORTER than the
+        store, and "" when it is complete -- ``belief_count()`` is the same
+        ``COUNT(*) WHERE status='active'`` predicate ``list_beliefs``
+        selects over, on both engines, so the two numbers are directly
+        comparable and a mismatch means exactly one thing: the cap bit."""
+        counter = getattr(engine, "belief_count", None)
+        try:
+            total = int(counter() or 0) if callable(counter) else 0
+        except Exception:  # noqa: BLE001 -- a caveat is never worth raising
+            return ""
+        if total <= shown:
+            return ""
+        return (
+            f"showing {shown} of {total} active beliefs -- this list is "
+            f"capped at {BELIEF_LIST_LIMIT}"
         )
 
     def _show_belief_detail(self, belief: "dict | None") -> None:
@@ -3716,10 +3828,18 @@ class SessionPane(TabPane):
         conf_text = (
             f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "?"
         )
+        claim = str(belief.get("claim") or "")
+        if belief.get("claim_truncated"):
+            # doxa.daemon._fit_belief_page cut this one to make it fit a
+            # single wire frame at all (a claim bigger than the 64KB cap by
+            # itself). Say so -- a silently shortened claim read as the
+            # whole belief is exactly the dishonesty the paging avoids
+            # everywhere else.
+            claim += "\n\n[claim truncated -- larger than one wire frame]"
         self.run_worker(
             self._system(
                 f"belief · {_belief_scope_label(subject)} ({subject}) · "
-                f"confidence {conf_text}\n\n{belief.get('claim') or ''}"
+                f"confidence {conf_text}\n\n{claim}"
             ),
             group="command",
         )
@@ -3753,8 +3873,17 @@ class SessionPane(TabPane):
         parent = os.path.dirname(directory.rstrip(os.sep) or os.sep)
         if parent and parent != directory:
             rows.append((f"dir:{parent}", ".. (up)"))
-        if peers_mod.main_repo_root_of(directory) == directory:
-            rows.append((f"repo:{directory}", f"· open here ({Path(directory).name}) ⎇"))
+        # "open here" is offered for ANY directory since v0.28.0, not only a
+        # git repo root. Before, descending into a plain directory left the
+        # picker with no row that DID anything -- every row either went
+        # deeper or went up, which is a dead end the operator hit ("when i
+        # chose a dir and click on one, it is not changed"). open_tab_at
+        # takes any directory; only the ⎇ marker is about repo-ness.
+        is_repo = peers_mod.main_repo_root_of(directory) == directory
+        rows.append((
+            f"repo:{directory}",
+            f"· open here ({Path(directory).name})" + (" ⎇" if is_repo else ""),
+        ))
         try:
             entries = sorted(
                 (e for e in os.scandir(directory)

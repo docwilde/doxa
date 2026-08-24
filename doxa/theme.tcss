@@ -158,8 +158,16 @@ CloseWithTurnRunning {
     color: #D8CDBB;
 }
 
+/* `height: auto`, NOT `height: 1` (v0.28.0, reported against the twin rule
+   below: "no button to continue, no OK"). Textual's box model is
+   border-box, so a padded row spends its declared height on the padding
+   FIRST: `height: 1` plus `padding-top: 1` left the content box exactly 0
+   rows tall and the Statics inside rendered at Size(width=0, height=0) --
+   present in the DOM, clickable in theory, invisible and unhittable on
+   screen. `auto` sizes to padding PLUS content, so the row is 2 rows and
+   the buttons are real. */
 #close-confirm-buttons {
-    height: 1;
+    height: auto;
     padding-top: 1;
 }
 
@@ -195,8 +203,11 @@ CompactConfirm {
     color: #D8CDBB;
 }
 
+/* Same border-box defect, same fix as #close-confirm-buttons above -- this
+   is the one the operator actually hit (clicking the ctx% chip showed the
+   dialog with no visible way out). See that rule's comment. */
 #compact-confirm-buttons {
-    height: 1;
+    height: auto;
     padding-top: 1;
 }
 

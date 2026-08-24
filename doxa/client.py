@@ -42,7 +42,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from .daemon import PROTOCOL_VERSION
-from .engine import EngineEvent
+from .engine import BELIEF_LIST_LIMIT, EngineEvent
 from .peers import MAX_FRAME_BYTES, PeerInfo, PeerSendError
 
 CALL_TIMEOUT_SECS = 15.0
@@ -380,16 +380,52 @@ class EngineClient:
     def belief_count(self) -> int:
         return self._belief_count
 
-    async def list_beliefs(self) -> list[dict]:
+    async def list_beliefs(
+        self, limit: int = BELIEF_LIST_LIMIT, offset: int = 0
+    ) -> list[dict]:
         """Engine parity for :meth:`SessionEngine.list_beliefs` (item 3's
         beliefs picker) -- a round trip, not a cache: unlike belief_count
         (refreshed on every status reply and read synchronously), the
         chip's picker only ever calls this on click, so a socket hop here
-        is the whole cost discipline the status bar itself is exempt from."""
-        reply = await self._call("beliefs")
-        if not reply.get("ok"):
-            raise EngineClientError(reply.get("error") or "beliefs call failed")
-        return list(reply.get("beliefs") or [])
+        is the whole cost discipline the status bar itself is exempt from.
+
+        PAGED since v0.28.0, and the paging is entirely inside this method
+        on purpose. Reported: "clicking on 'beliefs' chip leads to error
+        message 'too much for a message'" -- one reply carrying every
+        active belief WITH its claim body blows past MAX_FRAME_BYTES
+        (the operator has ~517 of them), and doxa.daemon.encode_frame
+        answers an oversize NON-event reply by discarding it entirely in
+        favour of {"ok": false, "error": "reply exceeded the frame cap"},
+        which this method then raised and the picker printed instead of
+        opening. So the daemon now serves whatever fits per frame plus a
+        resume offset, and this loops until it has the whole window.
+
+        The caller sees exactly what SessionEngine.list_beliefs returns for
+        the same arguments -- one complete list of full-text beliefs, no
+        truncation, no cursor to manage. That parity is the requirement:
+        doxa.app calls this through a plain ``getattr(engine,
+        "list_beliefs")`` and cannot tell the two engines apart."""
+        out: list[dict] = []
+        cursor = max(0, offset)
+        while len(out) < limit:
+            reply = await self._call(
+                "beliefs", offset=cursor, limit=limit - len(out),
+            )
+            if not reply.get("ok"):
+                raise EngineClientError(
+                    reply.get("error") or "beliefs call failed"
+                )
+            page = list(reply.get("beliefs") or [])
+            out.extend(page)
+            nxt = reply.get("next_offset")
+            if not isinstance(nxt, int) or nxt <= cursor:
+                # None (the store is exhausted) or a daemon that failed to
+                # advance -- either way this loop is done. The non-advancing
+                # guard is what keeps an old or buggy peer from spinning
+                # here forever instead of just returning a short list.
+                break
+            cursor = nxt
+        return out[:limit]
 
     def disabled_tools(self) -> list[str]:
         return list(self._disabled)
