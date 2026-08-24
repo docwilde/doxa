@@ -379,6 +379,9 @@ class GitLine:
         self._sha: str | None = None
         self._sha_mtime: float | None = None
         self.worktree: str | None = None
+        # The gitdir that holds refs/heads/<branch> and packed-refs -- see
+        # _read_sha's docstring for why this is NOT always self._gitdir.
+        self._commondir: Path | None = None
         if self.repo_root:
             git = Path(self.repo_root) / ".git"
             if git.is_file():
@@ -403,6 +406,29 @@ class GitLine:
                     self.worktree = git.name
             self._gitdir = git
             self._head = git / "HEAD"
+            self._commondir = self._resolve_commondir(git)
+
+    @staticmethod
+    def _resolve_commondir(gitdir: Path) -> Path:
+        """A linked worktree's private gitdir (``<main>/.git/worktrees/
+        <name>``) holds only its own HEAD, index and logs -- refs/heads/*
+        and packed-refs are SHARED, and live under the ``commondir`` file's
+        target (ordinarily ``../..``, i.e. the main repo's ``.git``). A
+        normal (non-worktree) repo has no ``commondir`` file and its
+        gitdir already IS the common one, so this returns it unchanged."""
+        commondir_file = gitdir / "commondir"
+        try:
+            text = commondir_file.read_text(
+                encoding="utf-8", errors="replace"
+            ).strip()
+        except OSError:
+            return gitdir
+        if not text:
+            return gitdir
+        common = Path(text)
+        if not common.is_absolute():
+            common = (gitdir / common).resolve()
+        return common
 
     def render(self) -> str | None:
         """`repo ⎇ branch sha`, or None outside a repo (no chip at all).
@@ -476,10 +502,18 @@ class GitLine:
     def _read_sha(self) -> str | None:
         """The short sha of the branch tip. A COMMIT moves the ref file,
         not HEAD, so this stats the ref in its own right -- still event-
-        driven (a stat per status refresh), still never polled."""
-        if self._gitdir is None or self._ref is None:
+        driven (a stat per status refresh), still never polled.
+
+        Reads from ``self._commondir``, NOT ``self._gitdir``: inside a
+        linked worktree the checked-out branch's ref file lives in the
+        MAIN repo's ``refs/heads/``, shared via the worktree's ``commondir``
+        pointer (see ``_resolve_commondir``) -- the worktree's own private
+        gitdir never has it, which is why this used to come back None for
+        every worktree session (pinned, then fixed, in
+        tests/test_statusline.py)."""
+        if self._commondir is None or self._ref is None:
             return self._sha
-        ref_path = self._gitdir / self._ref
+        ref_path = self._commondir / self._ref
         try:
             mtime = ref_path.stat().st_mtime
         except OSError:
@@ -497,10 +531,12 @@ class GitLine:
 
     def _read_packed_sha(self) -> str | None:
         """A freshly cloned or gc'd repo keeps its branch tips in
-        packed-refs and has no loose ref file. Same mtime discipline."""
-        if self._gitdir is None or self._ref is None:
+        packed-refs and has no loose ref file. Same mtime discipline, and
+        the same commondir redirection ``_read_sha`` needs -- packed-refs
+        is shared across a repo's worktrees exactly like refs/heads/*."""
+        if self._commondir is None or self._ref is None:
             return self._sha
-        packed = self._gitdir / "packed-refs"
+        packed = self._commondir / "packed-refs"
         try:
             mtime = packed.stat().st_mtime
         except OSError:
@@ -1525,16 +1561,26 @@ class SessionPane(TabPane):
             with contextlib.suppress(Exception):
                 await engine.finalize()
 
-    async def stop(self) -> None:
-        """Finalize this pane's session NOW (daemon included)."""
+    async def stop(self) -> "str | None":
+        """Finalize this pane's session NOW (daemon included). Returns the
+        worktree-per-session (#3) closing note -- `kept doxa/<id> — merge
+        when ready` -- when the daemon kept an unfinished worktree instead
+        of removing it; None otherwise (in-process engines never have
+        one; a cleanly-removed or non-worktree session doesn't either)."""
         engine, self.engine = self.engine, None
-        if engine is not None:
-            stop = getattr(engine, "stop", None)
-            with contextlib.suppress(Exception):
-                if stop is not None:
-                    await stop()
-                else:
-                    await engine.finalize()
+        if engine is None:
+            return None
+        stop = getattr(engine, "stop", None)
+        note: "str | None" = None
+        with contextlib.suppress(Exception):
+            if stop is not None:
+                event = await stop()
+                data = getattr(event, "data", None) or {}
+                value = data.get("note") if isinstance(data, dict) else None
+                note = str(value) if value else None
+            else:
+                await engine.finalize()
+        return note
 
     async def _boot(self) -> None:
         assert self.engine is not None
@@ -2914,7 +2960,14 @@ class DoxaApp(App):
         app on the same disposition -- a window with no tabs is not a
         window, and the session's fate must not depend on tab arithmetic."""
         if terminate:
-            await pane.stop()
+            note = await pane.stop()
+            if note:
+                # The pane itself is about to be removed (or the whole app
+                # quits, below) -- a toast is screen-level, not pane-level,
+                # so it survives the tab it was about -- unlike a SystemBlock
+                # mounted in the closing pane's own block list, which the
+                # user would never get a chance to see.
+                self.notify(note, severity="information", timeout=10)
         else:
             # Detached ON PURPOSE: it is no longer this window's to end, so
             # a later quit-stop leaves it running.
@@ -3104,7 +3157,9 @@ class DoxaApp(App):
         pane = self.active_pane
         if pane is None:
             return
-        await pane.stop()
+        note = await pane.stop()
+        if note:
+            self.notify(note, severity="information", timeout=10)
         if len(self.panes()) == 1:
             await App.action_quit(self)
             return
@@ -3279,7 +3334,15 @@ class DoxaApp(App):
             if pane.detached_on_purpose:
                 await pane.detach()
             else:
-                await pane.stop()
+                note = await pane.stop()
+                if note:
+                    # Best-effort: the app quits right after this loop, so
+                    # this toast may not get a paint frame -- the daemon's
+                    # own log line (doxa.daemon._finalize_worktree) is the
+                    # channel actually guaranteed to survive quitting the
+                    # TUI, exactly the "headless" case worktrees.finalize's
+                    # docstring calls out.
+                    self.notify(note, severity="information", timeout=10)
         await App.action_quit(self)
 
     async def action_quit(self) -> None:

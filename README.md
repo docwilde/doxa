@@ -109,6 +109,19 @@ client has been detached for `--linger` seconds (120 by default), or
 immediately on `doxa stop`. `doxa --in-process` runs the engine inside the
 TUI instead, with no daemon and no detach — quitting finalizes on the spot.
 
+Inside a git repo, each session also gets its own **git worktree** by
+default (`worktree_per_session`, `ctrl+,` or `$DOXA_WORKTREE=0` to turn it
+off) — `git worktree add ~/.doxa/worktrees/<repo>-<id> -b doxa/<id>` off
+the branch you were on, so two sessions on the same repo, even the same
+branch, never stomp each other's edits (git itself refuses the same branch
+checked out twice, which is exactly the constraint two sessions sharing one
+checkout would otherwise hit). The status bar's git chip and the session's
+tab both show the worktree you're actually in; `/peers` and `/sessions`
+still group every worktree of a repo as one project. A session that ends
+cleanly (no uncommitted changes, nothing committed beyond its base) leaves
+no trace; anything you actually wrote is kept, never auto-merged — the
+closing message names the branch to merge by hand.
+
 Once you're in: type a prompt, press enter. `ctrl+p` opens the command
 palette, `ctrl+t` opens a new tab, `/help` lists every command and key
 binding.
@@ -307,6 +320,7 @@ survives being opened by an older one.
 | `effort` | `DOXA_EFFORT` | CLI default | reasoning effort, new sessions only (connect-time SDK option) |
 | `derive_secs` | `DOXA_DERIVE_SECS` | off | streaming-deriver interval; unset runs review only at session end |
 | `linger_secs` | `DOXA_LINGER_SECS` | 120 | seconds a daemon outlives its last detached client |
+| `worktree_per_session` | `DOXA_WORKTREE` | **on** | give each session its own git worktree instead of sharing the launch directory |
 | `consult_floor` | `DOXA_CONSULT_FLOOR` | 1.0 | act-time belief-consult threshold; 0 disables it |
 | `nerd_font` | `DOXA_NERD_FONT` | off | use a Nerd Font glyph for the branch chip |
 | `image_mode` | `DOXA_IMAGE_MODE` | probe | force a rung of the image ladder (`kgp`/`sixel`/`halfblock`/`text`) |
@@ -356,11 +370,11 @@ checkout isn't at the default `~/.claude/plugins/marketplaces/lore`.
 ## Status
 
 DOXA is a working daily driver for its author, not a finished product.
-Shipped so far: the daemon/detach model, tabs, the command palette,
-`/search`, the trace tree, the image ladder, peer discovery, the settings
-modal described above, the `curl | sh` installer, `/setup`,
-`/doctor` / `doxa doctor`, and the clock — see [CHANGELOG.md](CHANGELOG.md) for the
-version-by-version history. Not yet built: session-history drill-in past
+Shipped so far: the daemon/detach model, worktree-per-session, tabs, the
+command palette, `/search`, the trace tree, the image ladder, peer
+discovery, the settings modal described above, the `curl | sh` installer,
+`/setup`, `/doctor` / `doxa doctor`, and the clock — see
+[CHANGELOG.md](CHANGELOG.md) for the version-by-version history. Not yet built: session-history drill-in past
 `/search`'s result list, customizable keybindings, and a graphical
 context-window map. Interfaces (config keys, socket protocol, command
 names) can still change between minor versions.

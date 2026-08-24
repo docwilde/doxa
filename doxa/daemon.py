@@ -65,6 +65,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
+from . import worktrees as worktrees_mod
 from .engine import EngineEvent, SessionEngine
 from .peers import MAX_FRAME_BYTES, registry_dir, runtime_dir
 
@@ -181,8 +182,46 @@ class SessionDaemon:
         self._linger_task: asyncio.Task | None = None
         self._pump_task: asyncio.Task | None = None
         self._stopping = False
+        # Worktree-per-session (#3, doxa.worktrees): computed once, before
+        # the engine is built, so the engine (and everything downstream --
+        # the "hello" frame, EngineClient.cwd, SessionPane's GitLine) just
+        # sees a cwd that happens to be a worktree. Cached so a headless
+        # shutdown (linger/signal) and an explicit "stop" reply (which
+        # needs the message inline, see _handle_call) never run the git
+        # cleanup twice.
+        self._worktree_note: "str | None" = None
+        self._worktree_done = False
 
     # -- lifecycle ---------------------------------------------------
+
+    def _apply_worktree(self) -> None:
+        """Substitute ``self.cwd`` for its own worktree BEFORE the engine
+        is built -- a no-op (returns None, leaves cwd alone) when the
+        setting is off, ``cwd`` is not a git repo, or worktree creation
+        fails for any reason: worktree-per-session is strictly additive,
+        never a reason a session fails to start."""
+        path = worktrees_mod.create(self.cwd, self.session_id)
+        if path:
+            self.cwd = path
+
+    def _finalize_worktree(self) -> "str | None":
+        """Worktree cleanup at REAL finalize (never at a mere detach --
+        see doxa.worktrees.finalize's docstring). Runs at most once;
+        later callers (a headless _shutdown after an RPC-driven one, or
+        vice versa) get the cached result. A "kept" message always also
+        goes to the daemon's own log -- the one channel guaranteed to
+        exist even when finalize runs with no client attached."""
+        if self._worktree_done:
+            return self._worktree_note
+        self._worktree_done = True
+        try:
+            note = worktrees_mod.finalize(self.cwd)
+        except Exception:  # noqa: BLE001 -- cleanup bookkeeping must never
+            note = None    # block a shutdown that is already underway
+        self._worktree_note = note
+        if note:
+            print(f"doxa: {note}", file=sys.stderr)
+        return note
 
     async def serve(self) -> None:
         """Start the engine, serve the socket, run until finalized (linger
@@ -190,6 +229,7 @@ class SessionDaemon:
         registry_dir()  # ensure runtime dirs exist with clamped perms
         with contextlib.suppress(OSError):
             self.socket_path.unlink()
+        self._apply_worktree()
         self.engine = self._engine_factory(
             self.cwd, self.session_id, str(self.socket_path)
         )
@@ -235,7 +275,8 @@ class SessionDaemon:
 
     async def _shutdown(self, reason: str) -> None:
         """Finalize exactly once (LORE review + index run inside the
-        engine's own finalize), then let serve() unwind."""
+        engine's own finalize, worktree remove-or-keep run inside
+        _finalize_worktree), then let serve() unwind."""
         if self._stopping:
             return
         self._stopping = True
@@ -246,6 +287,8 @@ class SessionDaemon:
         if self.engine is not None:
             with contextlib.suppress(Exception):
                 await self.engine.finalize()
+        self._finalize_worktree()  # cached: a no-op if the stop RPC below
+        # already ran it to embed the "kept" note in its reply.
         self._done.set()
 
     # -- linger ------------------------------------------------------
@@ -438,7 +481,13 @@ class SessionDaemon:
             self._publish(None, EngineEvent("model_changed", {"model": model}))
             await self._reply(writer, req_id, ok=True, model=model)
         elif method == "stop":
-            await self._reply(writer, req_id, ok=True, stopping=True)
+            # Worktree cleanup runs BEFORE the ack (fast, git-only) so a
+            # "kept" note can ride in the SAME reply -- unlike
+            # engine.finalize()'s LORE review below, which stays
+            # ack-first/finalize-after so a slow review can never make a
+            # `doxa stop` / quit-stop call itself time out.
+            note = self._finalize_worktree()
+            await self._reply(writer, req_id, ok=True, stopping=True, note=note)
             await self._shutdown("explicit stop")
         else:
             await self._reply(writer, req_id, ok=False,

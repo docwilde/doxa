@@ -32,6 +32,7 @@ import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from . import auth as auth_mod
@@ -290,6 +291,46 @@ def _keyboard_enhancement_check() -> Check:
     )
 
 
+def _worktrees_check() -> Check:
+    """worktree-per-session (#3): is the worktrees dir usable, and is
+    anything sitting there with no live session watching it -- either a
+    crash that never reached finalize, or a deliberately KEPT (dirty or
+    unmerged) worktree waiting to be merged by hand. Report-only, like
+    _registry_check's stale-presence-file count: neither case is fixed
+    here, only surfaced, with `git worktree prune` as the generic cleanup
+    command."""
+    from . import worktrees as worktrees_mod
+
+    root = worktrees_mod.worktrees_root()
+    if not worktrees_mod.enabled():
+        return Check(
+            id="worktrees", title="worktree per session", status=STATUS_PASS,
+            detail="disabled (worktree_per_session / DOXA_WORKTREE off)",
+        )
+    if not root.exists():
+        return Check(
+            id="worktrees", title="worktree per session", status=STATUS_PASS,
+            detail=f"{root} -- not created yet (made on first session)",
+        )
+    if not os.access(root, os.W_OK):
+        return Check(
+            id="worktrees", title="worktree per session", status=STATUS_FAIL,
+            detail=f"{root} exists but is not writable",
+            fix=f"fix permissions on {root}",
+        )
+    orphans = worktrees_mod.list_orphans()
+    detail = f"{root} -- writable"
+    fix = ""
+    if orphans:
+        listing = ", ".join(Path(o["path"]).name for o in orphans)
+        detail += f", {len(orphans)} worktree(s) with no live session: {listing}"
+        fix = "git worktree prune (from the repo) to clean up finished ones"
+    return Check(
+        id="worktrees", title="worktree per session", status=STATUS_PASS,
+        detail=detail, fix=fix,
+    )
+
+
 def _mcp_check() -> Check:
     # DOXA has no setting for an external MCP server yet -- only its own
     # in-process tool server (doxa.operators). Honest "nothing configured"
@@ -308,6 +349,7 @@ CHECKS: "tuple[Callable[[], Check], ...]" = (
     _lore_store_check,
     _config_check,
     _registry_check,
+    _worktrees_check,
     _image_protocol_check,
     _keyboard_enhancement_check,
     _mcp_check,

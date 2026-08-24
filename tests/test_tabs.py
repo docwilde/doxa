@@ -141,6 +141,30 @@ async def test_close_tab_detaches_only_that_session(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_end_session_surfaces_a_worktree_kept_note_as_a_toast(tmp_path):
+    """Worktree-per-session (#3): when the daemon kept a dirty/unmerged
+    worktree instead of removing it, stop()'s EngineEvent carries a note
+    -- the pane closes anyway (Ctrl+Q -- Ctrl+W merely detaches and never
+    calls stop()), but the note reaches the user as a screen-level toast
+    (the pane itself is gone by the time it would be seen if it were
+    mounted there)."""
+    class NotingEngine(FakeEngine):
+        async def stop(self):
+            return EngineEvent("session_done", {
+                "stopped": True, "note": "kept doxa/abcd1234 — merge when ready",
+            })
+
+    app = DoxaApp(cwd=str(tmp_path), engine_factory=lambda: NotingEngine([]))
+    notified: list[str] = []
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.notify = lambda msg, **kw: notified.append(msg)
+        await pilot.press("ctrl+q")
+        await pilot.pause()
+    assert notified == ["kept doxa/abcd1234 — merge when ready"]
+
+
+@pytest.mark.asyncio
 async def test_closing_the_last_tab_closes_the_app_detached(tmp_path):
     app, engines = _app(tmp_path)
     async with app.run_test() as pilot:

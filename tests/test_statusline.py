@@ -284,13 +284,13 @@ def test_git_chip_carries_the_worktree_suffix(tmp_path):
     branch and the repo slot is simulated the same way branch_label()'s
     own tests do.
 
-    No `@sha` here: a linked worktree's checked-out branch ref lives in
-    the MAIN repo's `.git/refs/heads/`, not under this worktree's own
-    `.git/worktrees/<name>/`, so `_read_sha`'s ref-path stat misses it and
-    the sha silently comes back None -- a PRE-EXISTING gap (reproduced
-    against unmodified GitLine, unrelated to branch_label() adoption
-    here) that this feature does not touch. Pinned as documentation, not
-    silently "fixed" by picking a different assertion."""
+    The `@sha` DOES appear here (worktree-per-session, #3): a linked
+    worktree's checked-out branch ref lives in the MAIN repo's
+    `.git/refs/heads/`, not under this worktree's own private gitdir
+    (`.git/worktrees/<name>/`) -- `_read_sha` used to stat the ref under
+    the wrong gitdir and silently come back None for every worktree
+    session. Fixed by resolving through the worktree's `commondir`
+    pointer (see GitLine._resolve_commondir) before reading the ref."""
     repo = _repo(tmp_path)
     work = repo.parent / "elsewhere"
     subprocess.run(
@@ -300,7 +300,7 @@ def test_git_chip_carries_the_worktree_suffix(tmp_path):
     )
     line = GitLine(str(work))
     line.worktree = "spike"
-    assert line.render() == "elsewhere ⎇ feature@spike"
+    assert line.render() == f"elsewhere ⎇ feature@spike @{_short_sha(repo)}"
 
 
 def test_git_chip_dedups_when_the_worktree_name_repeats_branch_or_repo(tmp_path):
@@ -318,13 +318,14 @@ def test_git_chip_dedups_when_the_worktree_name_repeats_branch_or_repo(tmp_path)
     line = GitLine(str(work))
     assert line.worktree == "elsewhere"
     assert line.repo == "elsewhere"
+    sha = _short_sha(repo)
     # The worktree name repeats the repo slot beside it: withheld.
-    assert line.render() == "elsewhere ⎇ feature"
+    assert line.render() == f"elsewhere ⎇ feature @{sha}"
 
     # And the branch-matches-worktree case, exercised directly the same
     # way test_tab_labels.py exercises branch_label() itself.
     line.worktree = "feature"
-    assert line.render() == "elsewhere ⎇ feature"
+    assert line.render() == f"elsewhere ⎇ feature @{sha}"
 
 
 @pytest.mark.asyncio

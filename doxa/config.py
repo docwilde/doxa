@@ -95,6 +95,19 @@ SETTINGS: tuple[Setting, ...] = (
              "(doxa.cli --linger default)",
     ),
     Setting(
+        key="worktree_per_session", env="DOXA_WORKTREE",
+        label="worktree per session", category="Session",
+        kind="bool_on", default="1",
+        help="Give each session its own git worktree (isolated edits, own "
+             "branch doxa/<id>) instead of sharing the launch directory "
+             "(doxa.worktrees.create)",
+        note="Off returns to today's behavior exactly: every session runs "
+             "directly in the launch directory. A clean, unmerged worktree "
+             "is removed with its branch when the session ends; anything "
+             "committed or dirty is kept for you to merge by hand -- never "
+             "auto-merged.",
+    ),
+    Setting(
         key="derive_secs", env="DOXA_DERIVE_SECS", label="derive secs",
         category="Memory", kind="number",
         help="Streaming-deriver debounce interval, seconds; empty = off "

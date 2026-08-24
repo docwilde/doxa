@@ -257,6 +257,59 @@ def test_registry_check_surfaces_stale_count_without_sweeping(tmp_path):
     assert entry_path.exists()
 
 
+# -- worktree-per-session ----------------------------------------------
+
+
+def test_worktrees_check_reports_disabled(monkeypatch):
+    monkeypatch.setenv("DOXA_WORKTREE", "0")
+    check = doctor_mod._worktrees_check()
+    assert check.status == doctor_mod.STATUS_PASS
+    assert "disabled" in check.detail
+    assert check.fix == ""
+
+
+def test_worktrees_check_passes_when_not_created_yet():
+    check = doctor_mod._worktrees_check()
+    assert check.status == doctor_mod.STATUS_PASS
+    assert "not created yet" in check.detail
+
+
+def test_worktrees_check_lists_orphans_without_failing(tmp_path):
+    """A worktree with no live daemon -- crashed, or deliberately kept for
+    merge -- is reported, never a FAIL: doctor observes, it doesn't judge
+    which case this is (worktrees.finalize's own docstring makes the same
+    call)."""
+    from doxa import worktrees as worktrees_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "trunk", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+    (repo / "f.txt").write_text("one", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "one"], check=True)
+
+    path = worktrees_mod.create(str(repo), "orphaned-session-id")
+    assert path is not None
+    # No live registry entry for this session id: an orphan by definition.
+
+    check = doctor_mod._worktrees_check()
+    assert check.status == doctor_mod.STATUS_PASS
+    assert "1 worktree(s) with no live session" in check.detail
+    assert "git worktree prune" in check.fix
+
+
+def test_worktrees_check_passes_clean_with_no_orphans(tmp_path):
+    from doxa import worktrees as worktrees_mod
+
+    worktrees_mod.worktrees_root().mkdir(parents=True)
+    check = doctor_mod._worktrees_check()
+    assert check.status == doctor_mod.STATUS_PASS
+    assert check.detail == f"{worktrees_mod.worktrees_root()} -- writable"
+    assert check.fix == ""
+
+
 # -- terminal capabilities --------------------------------------------------
 
 
@@ -288,7 +341,8 @@ def test_run_checks_returns_one_per_check():
     checks = doctor_mod.run_checks()
     assert [c.id for c in checks] == [
         "python", "doxa-version", "claude-cli", "cli-isolation", "lore-store",
-        "config", "registry", "image-protocol", "keyboard-enhancement", "mcp",
+        "config", "registry", "worktrees", "image-protocol",
+        "keyboard-enhancement", "mcp",
     ]
 
 

@@ -126,15 +126,25 @@ class EngineClient:
 
     async def stop(self) -> EngineEvent:
         """Explicit finalize-now: the daemon runs the LORE review + index
-        and exits; every attached client sees the socket close."""
+        and exits; every attached client sees the socket close.
+
+        ``note``, when present, is worktree-per-session's (#3) closing
+        word: `kept doxa/<id> — merge when ready` when the daemon kept a
+        dirty or unmerged worktree rather than removing it. The daemon
+        computes and embeds it in the "stop" reply itself (fast, git-only,
+        ahead of the potentially-slow LORE review) so it survives even
+        though this method closes the socket right after."""
         try:
             reply = await self._call("stop")
         except EngineClientError:
             reply = {}  # daemon already gone: stopped is what we wanted
         self._close()
-        return EngineEvent("session_done", {"stopped": True, **(
-            {} if reply.get("ok") else {"note": "daemon did not confirm"}
-        )})
+        data: dict[str, Any] = {"stopped": True}
+        if not reply.get("ok"):
+            data["note"] = "daemon did not confirm"
+        elif reply.get("note"):
+            data["note"] = reply["note"]
+        return EngineEvent("session_done", data)
 
     def _close(self) -> None:
         if self._closed:

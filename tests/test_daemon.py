@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -28,6 +30,8 @@ from claude_agent_sdk import (
 )
 
 from doxa import __version__, peers
+from doxa import config as config_mod
+from doxa import worktrees as worktrees_mod
 from doxa.client import EngineClient, EngineClientError
 from doxa.daemon import PROTOCOL_VERSION, EventRing, SessionDaemon
 from doxa.engine import SessionEngine
@@ -355,3 +359,130 @@ def test_event_ring_bounds_and_cursors():
     assert [f["seq"] for f in ring.since(None)] == [2, 3, 4, 5]
     assert [f["seq"] for f in ring.since(4)] == [4, 5]
     assert ring.since(99) == []
+
+
+# -- worktree-per-session (#3) --------------------------------------------
+#
+# Real git repos throughout: this wires doxa.worktrees into the daemon's
+# actual spawn/finalize path, which is exactly the git-behavior seam a
+# mock would not exercise honestly.
+
+
+def _git_repo(path):
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "-b", "trunk", str(path)], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "t"], check=True)
+    (path / "f.txt").write_text("one", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-qm", "one"], check=True)
+    return path
+
+
+@contextlib.asynccontextmanager
+async def running_daemon_at(cwd, tmp_path, monkeypatch, linger=30.0):
+    """running_daemon's twin, hosting a real git repo cwd instead of a
+    plain tmp dir -- DOXA_HOME is isolated too, since worktrees.create()
+    makes worktrees_root() under it."""
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setenv("DOXA_HOME", str(tmp_path / "home"))
+    config_mod.invalidate()
+    factory, created = factory_with_script(list(TURN_SCRIPT))
+    daemon = SessionDaemon(
+        cwd=str(cwd), linger_secs=linger,
+        engine_factory=lambda cwd, sid, dsock: SessionEngine(
+            cwd=cwd, session_id=sid, client_factory=factory, daemon_socket=dsock,
+        ),
+    )
+    serve_task = asyncio.create_task(daemon.serve())
+    await asyncio.wait_for(daemon.ready.wait(), 10)
+    try:
+        yield daemon, created, serve_task
+    finally:
+        if not serve_task.done():
+            with contextlib.suppress(Exception):
+                await daemon._shutdown("test teardown")
+                await asyncio.wait_for(serve_task, 5)
+        config_mod.invalidate()
+
+
+@pytest.mark.asyncio
+async def test_daemon_substitutes_cwd_for_a_worktree_by_default(tmp_path, monkeypatch):
+    """The wire-in point: by the time the engine is built, self.cwd (and
+    therefore engine.cwd, the hello frame, EngineClient.cwd, and
+    SessionPane's GitLine) already points at the session's OWN worktree."""
+    repo = _git_repo(tmp_path / "repo")
+    async with running_daemon_at(repo, tmp_path, monkeypatch) as (daemon, _, _):
+        assert daemon.cwd != str(repo)
+        assert daemon.cwd.startswith(str(worktrees_mod.worktrees_root()))
+        assert daemon.engine.cwd == daemon.cwd
+        branch = subprocess.run(
+            ["git", "-C", daemon.cwd, "branch", "--show-current"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert branch == f"doxa/{daemon.session_id[:8]}"
+
+
+@pytest.mark.asyncio
+async def test_daemon_worktree_toggle_off_keeps_original_cwd(tmp_path, monkeypatch):
+    """DOXA_WORKTREE=0 -> current behavior exactly: the daemon (and engine)
+    run directly in the launch directory."""
+    monkeypatch.setenv("DOXA_WORKTREE", "0")
+    repo = _git_repo(tmp_path / "repo")
+    async with running_daemon_at(repo, tmp_path, monkeypatch) as (daemon, _, _):
+        assert daemon.cwd == str(repo)
+        assert daemon.engine.cwd == str(repo)
+        assert not worktrees_mod.worktrees_root().exists()
+
+
+@pytest.mark.asyncio
+async def test_clean_stop_removes_the_worktree_with_no_trace(tmp_path, monkeypatch):
+    repo = _git_repo(tmp_path / "repo")
+    async with running_daemon_at(repo, tmp_path, monkeypatch) as (
+        daemon, _, serve_task,
+    ):
+        worktree_path = daemon.cwd
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        done = await client.stop()
+        assert done.data.get("stopped") is True
+        assert done.data.get("note") is None
+        await asyncio.wait_for(serve_task, 5)
+        assert not Path(worktree_path).exists()
+
+
+@pytest.mark.asyncio
+async def test_dirty_stop_keeps_the_worktree_and_returns_a_note(tmp_path, monkeypatch):
+    repo = _git_repo(tmp_path / "repo")
+    async with running_daemon_at(repo, tmp_path, monkeypatch) as (
+        daemon, _, serve_task,
+    ):
+        worktree_path = daemon.cwd
+        (Path(worktree_path) / "scratch.txt").write_text("wip", encoding="utf-8")
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        done = await client.stop()
+        assert done.data.get("stopped") is True
+        note = done.data.get("note")
+        assert note is not None
+        assert note.startswith(f"kept doxa/{daemon.session_id[:8]}")
+        assert "merge when ready" in note
+        await asyncio.wait_for(serve_task, 5)
+        assert Path(worktree_path).exists()  # kept, not destroyed
+
+
+@pytest.mark.asyncio
+async def test_detach_leaves_the_worktree_intact(tmp_path, monkeypatch):
+    """A mere detach (client closes, daemon lingers) must never trigger
+    the worktree cleanup that only real finalize runs."""
+    repo = _git_repo(tmp_path / "repo")
+    async with running_daemon_at(repo, tmp_path, monkeypatch, linger=30.0) as (
+        daemon, _, serve_task,
+    ):
+        worktree_path = daemon.cwd
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        await client.finalize()  # detach, not stop
+        await asyncio.sleep(0.1)
+        assert not serve_task.done()  # daemon still lingering
+        assert Path(worktree_path).exists()

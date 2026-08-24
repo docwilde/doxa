@@ -149,6 +149,42 @@ def repo_root_of(cwd: str) -> str | None:
     return proc.stdout.strip() or None
 
 
+def main_repo_root_of(cwd: str) -> str | None:
+    """Like :func:`repo_root_of`, but resolved to the repo's MAIN checkout
+    even when ``cwd`` sits inside a linked worktree (doxa.worktrees).
+
+    ``--show-toplevel`` answers "what directory is this" -- and a linked
+    worktree's own answer is the WORKTREE's root, correct for that
+    question but wrong for a SCOPE KEY (measured: from inside a linked
+    worktree, ``git rev-parse --show-toplevel`` returns the worktree's own
+    path, not the main repo's). Two sessions of one repo -- one in the
+    main checkout, one in a worktree -- must land on the SAME scope key or
+    peer discovery and the spawn-or-attach reuse path (doxa.cli) silently
+    fracture per worktree, one project reading as many.
+
+    ``--git-common-dir`` always names the ONE shared ``.git`` directory
+    regardless of which worktree asks, so its parent is the identity every
+    worktree of a repo has in common. A bare repo's common dir does not
+    end in ``.git`` and has no separate worktop to strip -- it IS the
+    identity there."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=cwd, capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    common = proc.stdout.strip()
+    if not common:
+        return None
+    common_path = Path(common)
+    if common_path.name == ".git":
+        return str(common_path.parent)
+    return str(common_path)
+
+
 @dataclass
 class PeerInfo:
     """One live registry entry, already validated by :func:`read_registry`.
@@ -427,7 +463,12 @@ class PeerHost:
         self.session_id = session_id
         self.cwd = str(cwd)
         self.title = title or (Path(self.cwd).name or "doxa")
-        self.repo_root = repo_root_of(self.cwd)
+        # main_repo_root_of, NOT repo_root_of: a worktree-per-session
+        # (doxa.worktrees) session's cwd is a linked worktree, and the
+        # scope key has to resolve to the SAME main repo root every other
+        # session of this repo uses -- see that function's docstring for
+        # the measured divergence this avoids.
+        self.repo_root = main_repo_root_of(self.cwd)
         self.scope_key = self.repo_root or self.cwd
         self.started_at = _iso_now()
         # Socket filename: session-id PREFIX + pid, not the full id -- an

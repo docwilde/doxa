@@ -4,6 +4,79 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.17.0 — 2026-08-24
+
+- **Worktree-per-session** (queue item 3) — every session started inside a
+  git repo now gets its own linked `git worktree`, so two sessions on the
+  same repo, even the same branch, never stomp each other's edits. New
+  `doxa/worktrees.py`: `create(cwd, session_id)` runs `git worktree add
+  ~/.doxa/worktrees/<repo>-<id> -b doxa/<id> <branch-checked-out-at-cwd>`
+  (`<id>` is the session id's own first 8 characters — stable from spawn,
+  unlike the Haiku-generated tab name, which would make renaming the
+  branch mid-session pure churn) and returns the worktree path; a non-repo
+  cwd, or the setting off, returns `None` and behavior is exactly today's.
+  Wired in at `doxa.daemon.SessionDaemon.serve()`, before the engine is
+  built, so the substitution is invisible downstream — the engine's own
+  `cwd`, the socket's `hello` frame, `EngineClient.cwd`, and the tab's
+  `GitLine` all just see a cwd that happens to be a worktree.
+  - New setting `worktree_per_session` (`DOXA_WORKTREE`, category
+    Session, **default ON** — the user's own framing: "whenever a session
+    starts in a repo branch"). `0` returns to today's behavior exactly.
+  - **Lifecycle**, all in `worktrees.finalize()`, run once at a session's
+    REAL end (never at a mere detach — a lingering daemon keeps its
+    worktree intact so it can still be reattached): a CLEAN tree with
+    ZERO commits ahead of the branch it forked from is removed with its
+    throwaway branch, no trace left; a dirty tree, or one carrying
+    unmerged commits, is kept — NEVER auto-merged — and the daemon's
+    `stop` reply carries a `kept doxa/<id> — merge when ready` note the
+    TUI surfaces as a toast (`self.notify`, since the tab that ended is
+    already gone by the time a block mounted inside it would be seen);
+    headless finalize (linger expiry, SIGTERM/SIGINT) logs the same line
+    to the daemon's own log instead.
+  - **Scope-key fix**: `git rev-parse --show-toplevel` from inside a
+    linked worktree names the WORKTREE, not the main repo — measured
+    against a real `git worktree add`. Left as-is, `doxa.peers.PeerHost`'s
+    scope key (what makes two sessions of one repo find each other, and
+    what `doxa`'s spawn-or-attach reuse path groups by) would fracture
+    per worktree, one project silently reading as many. New
+    `peers.main_repo_root_of()` resolves through `git rev-parse
+    --git-common-dir` instead (the one shared `.git` directory every
+    worktree of a repo agrees on) and now backs `PeerHost.repo_root` and
+    `doxa.cli`'s spawn-or-attach scope calc; `/peers` and `/sessions`
+    keep grouping one repo as one project across every worktree.
+  - **Pre-existing bug fixed**: `GitLine._read_sha()` (the status bar's
+    `@sha` chip) stated the checked-out branch's ref file under the
+    worktree's own PRIVATE gitdir (`.git/worktrees/<name>/refs/heads/…`),
+    which never has it — a linked worktree's branch ref lives in the MAIN
+    repo's `.git/refs/heads/`, reached only through the worktree's own
+    `commondir` pointer file. `_read_sha`/`_read_packed_sha` now resolve
+    through a new `GitLine._resolve_commondir` before reading the ref;
+    the pinning test in `tests/test_statusline.py` that documented the
+    gap (`None` sha in a worktree) now asserts the fixed, correct
+    behavior instead. With worktree-per-session default-on, this bug
+    would otherwise have blanked the sha for every session's status bar.
+  - `doxa doctor` gains a `worktrees` check: the worktrees dir
+    exists/writable when the setting is on, and any worktree with no live
+    daemon watching it (a crash before finalize, or one deliberately kept
+    for merge — doctor doesn't try to tell those apart) is listed,
+    report-only, with `git worktree prune` as the fix hint.
+  - Tests against real git repos throughout (`tmp_path` fixtures, real
+    `git worktree`/`git rev-parse` calls — this feature IS git behavior,
+    mocking it would test nothing): create/reuse, non-repo passthrough,
+    clean-finalize removal, dirty-finalize keep-with-note (both an
+    uncommitted change and a clean-but-unmerged commit), the toggle off,
+    scope-key agreement across a repo's worktrees, the `_read_sha` fix
+    inside a real linked worktree, the doctor check, and the daemon-level
+    wire-in (substitution on spawn, clean/dirty stop, detach leaves the
+    worktree untouched). 533 tests green (506 baseline + 27).
+  - README: the daemon section gains a paragraph describing the default
+    worktree, the branch naming, and the keep-vs-remove rule; the
+    settings table gains the `worktree_per_session` row. Screenshots
+    unchanged — none of the gallery's scenes run through the daemon path
+    `create()` is wired into (they drive `DoxaApp` directly against a
+    `FakeEngine`), so nothing in a shot's status bar or tab strip could
+    have moved.
+
 ## 0.16.0 — 2026-08-24
 
 - **Animated demos for the interactive features** (queue item 2.5). A

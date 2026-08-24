@@ -92,12 +92,14 @@ def _maybe_restart(app: DoxaApp) -> None:
     os.execv(sys.executable, [sys.executable, "-m", "doxa.cli", *sys.argv[1:]])
 
 
-async def _stop(socket_path: str) -> None:
+async def _stop(socket_path: str) -> "str | None":
     from .client import EngineClient
 
     client = EngineClient(socket_path)
     await client.start()
-    await client.stop()
+    event = await client.stop()
+    note = event.data.get("note")
+    return str(note) if note else None
 
 
 def main(argv: "list[str] | None" = None) -> int:
@@ -159,9 +161,11 @@ def main(argv: "list[str] | None" = None) -> int:
 
     if args.command == "stop":
         entry = _resolve(peers.list_daemons(), args.prefix)
-        asyncio.run(_stop(entry.daemon_socket))
+        note = asyncio.run(_stop(entry.daemon_socket))
         print(f"stopped {entry.title} ({entry.session_id[:8]}) -- "
               "session finalized (LORE review + index).")
+        if note:
+            print(f"doxa: {note}", file=sys.stderr)
         return 0
 
     if args.command == "attach":
@@ -171,7 +175,12 @@ def main(argv: "list[str] | None" = None) -> int:
 
     if args.command is None:
         # Spawn-or-attach: this project's scope only, newest session first.
-        scope = peers.repo_root_of(cwd) or cwd
+        # main_repo_root_of -- not repo_root_of -- so running `doxa` from
+        # inside a worktree-per-session worktree (doxa.worktrees) still
+        # discovers sessions of the SAME repo hosted from other worktrees
+        # or the main checkout, rather than treating the worktree as its
+        # own separate project.
+        scope = peers.main_repo_root_of(cwd) or cwd
         live = peers.list_daemons(scope_key=scope)
         if live:
             entry = live[0]
