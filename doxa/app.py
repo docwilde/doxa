@@ -71,6 +71,7 @@ from . import config as config_mod
 from . import identity as identity_mod
 from . import images as images_mod
 from . import naming as naming_mod
+from . import notify as notify_mod
 from . import paste as paste_mod
 from . import peers as peers_mod
 from . import version as version_mod
@@ -1350,6 +1351,17 @@ class SessionPane(TabPane):
         # (see _refresh_usage_chip). Cached as a plain string because
         # _refresh_status runs on every peer event and must stay free.
         self._usage_chip: str | None = None
+        # Attention-blink infra (tab status, item: per-status tab colors).
+        # Nothing sets this True yet -- the engine-side event that should
+        # (can_use_tool / AskUserQuestion plumbing, a session waiting on the
+        # user mid-turn) is phase 2. What exists here is the mechanism: a
+        # timer that blinks the -attention class on the tab, alive ONLY
+        # while needs_input is True (see set_needs_input) -- this app
+        # measures idle CPU and a timer nothing ever stops is exactly the
+        # busy-idle bug GitLine's docstring warns about, reintroduced.
+        self.needs_input = False
+        self._attention_timer: Any = None
+        self._attention_on = False
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="block-list")
@@ -1549,6 +1561,10 @@ class SessionPane(TabPane):
                 self._oob_chips = {}
                 await block_list.mount(self._oob_turn)
                 block_list.scroll_end(animate=False)
+                # A new turn starting (even one another client is driving)
+                # is itself "seen" -- the same stale-dot clear _run_turn
+                # does for a locally-driven turn.
+                self._set_tab_class("-done-unseen", False)
             elif ev.type in ("text_delta", "tool_call", "tool_result", "turn_done"):
                 if self._oob_turn is not None:
                     await self._handle_event(ev, self._oob_turn, self._oob_chips)
@@ -1665,6 +1681,41 @@ class SessionPane(TabPane):
         with contextlib.suppress(Exception):
             tabbed = self.app.query_one("#session-tabs", TabbedContent)
             tabbed.get_tab(self.id or "").label = text
+
+    def _set_tab_class(self, class_name: str, value: bool) -> None:
+        """Toggle one status class (``-working`` / ``-done-unseen`` /
+        ``-attention``) on this pane's own Tab header -- same
+        contextlib.suppress discipline as :meth:`set_tab_label`, and for
+        the same reasons: the tab may not exist yet this early in boot, or
+        this pane may already be mid-teardown (a closed tab's last event
+        landing after the Tab widget is gone)."""
+        with contextlib.suppress(Exception):
+            tabbed = self.app.query_one("#session-tabs", TabbedContent)
+            tabbed.get_tab(self.id or "").set_class(value, class_name)
+
+    def set_needs_input(self, value: bool) -> None:
+        """The attention-blink mechanism. Nothing calls this with True yet
+        -- see the ``needs_input`` note in ``__init__`` -- but the timer
+        discipline is real: a ``set_interval`` lives on this pane ONLY
+        between a True call and the next False (or tab activation, which
+        also clears it), never longer. That is what keeps an idle DOXA at
+        zero timers even after this feature is wired up in phase 2."""
+        if value == self.needs_input:
+            return
+        self.needs_input = value
+        if value:
+            self._attention_on = False
+            self._attention_timer = self.set_interval(0.5, self._blink_attention)
+        else:
+            if self._attention_timer is not None:
+                self._attention_timer.stop()
+                self._attention_timer = None
+            self._attention_on = False
+            self._set_tab_class("-attention", False)
+
+    def _blink_attention(self) -> None:
+        self._attention_on = not self._attention_on
+        self._set_tab_class("-attention", self._attention_on)
 
     def _refresh_status(self) -> None:
         if self.engine is None:
@@ -2238,6 +2289,11 @@ class SessionPane(TabPane):
         assert self.engine is not None
         await self._engine_ready.wait()
         self.turn_in_flight = True
+        self._set_tab_class("-working", True)
+        # A fresh turn starting is itself "seen" -- clear any stale
+        # done-unseen dot from a PREVIOUS turn the user has not looked at
+        # yet, rather than letting it sit there through a whole new one.
+        self._set_tab_class("-done-unseen", False)
         block = TurnBlock(prompt)
         block_list = self.query_one("#block-list", VerticalScroll)
         await block_list.mount(block)
@@ -2257,6 +2313,7 @@ class SessionPane(TabPane):
             block_list.scroll_end(animate=False)
 
         self.turn_in_flight = False
+        self._set_tab_class("-working", False)
         self._refresh_status()
         # First completed turn of a repo-less session: name the tab from it.
         self._maybe_name_tab(prompt)
@@ -2298,6 +2355,23 @@ class SessionPane(TabPane):
             # spent budget, and the CLI may have refreshed its own cache.
             self._refresh_usage_chip()
             self._refresh_status()
+            self._on_turn_done_status(ev.data.get("duration_ms"))
+
+    def _on_turn_done_status(self, duration_ms: "float | None") -> None:
+        """Tab-status + desktop-notification side effects of ONE finished
+        turn. Reached for a turn THIS client drove (_run_turn) and for one
+        replayed in from another attached client of the same daemon
+        (_peer_pump's turn_started/turn_done forwarding) -- both funnel
+        through _handle_event's turn_done branch, and both are equally "a
+        turn just finished on a session you might not be looking at"."""
+        active = self.app.active_pane is self
+        if not active:
+            self._set_tab_class("-done-unseen", True)
+        notify_mod.notify_turn_done(
+            getattr(self.app, "app_has_focus", True),
+            self.display_name(),
+            duration_ms,
+        )
 
     async def switch_engine(self, make_engine: "Callable[[], Any]") -> None:
         """Swap this pane's live engine handle: detach/finalize the old one,
@@ -2403,6 +2477,22 @@ class DoxaApp(App):
         # which is the only place that can -- exec'ing out from under a
         # running Textual app would leave the terminal in raw mode.
         self.restart_requested = False
+        # Terminal-window focus, for "auto" desktop notifications (only
+        # notify while you are NOT looking at the terminal). Init True: a
+        # window is assumed focused until an AppBlur says otherwise, which
+        # matters on a terminal with no focus-reporting -- see the
+        # AppFocus/AppBlur handlers below and doxa/notify.py's "auto"
+        # docstring for what that degrades to there.
+        self.app_has_focus = True
+        # One-shot "has this run already told you about an update" latch --
+        # the background checker in on_mount fires at most once per launch.
+        self._update_notified = False
+        # Bring lore_core's own in-process notification (staged-proposal
+        # review, fired synchronously from doxa.engine's review path) in
+        # line with the notify_lore toggle. Also re-run whenever the
+        # settings modal saves (action_settings) -- the knob is live, not
+        # boot-only.
+        notify_mod.sync_lore_notify_env()
         # One sweep of the registry per launch: a crash can always leave a
         # presence file behind, so the fleet needs a sweeper that does not
         # depend on anything shutting down cleanly. Here rather than in a
@@ -2489,8 +2579,24 @@ class DoxaApp(App):
         self._jump_tab_marker()
         pane = self.active_pane
         if pane is not None:
+            # Looking at this tab now clears both "you missed something"
+            # signals: the done-unseen dot from a turn that finished while
+            # you were elsewhere, and any attention blink (and its timer --
+            # set_needs_input(False) is what stops that).
+            pane._set_tab_class("-done-unseen", False)
+            pane.set_needs_input(False)
             with contextlib.suppress(Exception):
                 pane.query_one("#prompt-input", PromptInput).focus()
+
+    # -- window focus, for "auto" desktop notifications ---------------
+
+    @on(events.AppFocus)
+    def _on_app_focus(self, event: events.AppFocus) -> None:
+        self.app_has_focus = True
+
+    @on(events.AppBlur)
+    def _on_app_blur(self, event: events.AppBlur) -> None:
+        self.app_has_focus = False
 
     # -- renaming a tab in place -------------------------------------
 
@@ -2889,6 +2995,7 @@ class DoxaApp(App):
             if not saved:
                 return
             config_mod.invalidate()
+            notify_mod.sync_lore_notify_env()
             for pane in self.panes():
                 pane._refresh_status()
             with contextlib.suppress(Exception):
@@ -2913,6 +3020,7 @@ class DoxaApp(App):
 
         def _done(result: "str | None") -> None:
             config_mod.invalidate()
+            notify_mod.sync_lore_notify_env()
             for pane in self.panes():
                 pane._refresh_status()
             if result == ACTION_OPEN_SETTINGS:
@@ -2931,6 +3039,28 @@ class DoxaApp(App):
         if setup_mod.needs_first_run():
             setup_mod.mark_seen()
             self.call_after_refresh(self.action_setup)
+        # Non-blocking: a `git fetch` (even a quiet, local one) must never
+        # be on boot's critical path. Exclusive group of its own so a
+        # pathological double-mount cannot stack two of these.
+        self.run_worker(
+            self._check_for_update(), exclusive=True, group="update-check"
+        )
+
+    async def _check_for_update(self) -> None:
+        """Boot-time "is there something to pull" check -- see
+        doxa.update.check_for_update for the git-level detail and its
+        all-failures-are-silent posture. Notifies at most once per app run
+        (the latch, not the checker, owns "once": the checker itself is
+        stateless and could in principle be called again)."""
+        from . import update as update_mod
+
+        try:
+            available = await asyncio.to_thread(update_mod.check_for_update)
+        except Exception:  # noqa: BLE001 -- advisory only, never surfaces
+            return
+        if available and not self._update_notified:
+            self._update_notified = True
+            notify_mod.notify_update_available(self.app_has_focus)
 
     def action_toggle_inspector(self) -> None:
         """Belief-inspector stub: Phase 3 owns the real pane (live STEER/

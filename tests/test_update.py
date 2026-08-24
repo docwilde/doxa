@@ -216,3 +216,127 @@ async def test_the_restart_flag_is_opt_in(monkeypatch, tmp_path):
                 break
             await pilot.pause(0.02)
         assert app.restart_requested is True
+
+
+# -- boot-time update check (git level) -------------------------------------
+
+
+def test_check_for_update_true_when_upstream_is_ahead(tmp_path):
+    (tmp_path / ".git").mkdir()
+    git = FakeGit({"git fetch": ("", 0), "git rev-list": ("3\n", 0)})
+    assert update_mod.check_for_update(root=tmp_path, run=git) is True
+
+
+def test_check_for_update_false_when_already_current(tmp_path):
+    (tmp_path / ".git").mkdir()
+    git = FakeGit({"git fetch": ("", 0), "git rev-list": ("0\n", 0)})
+    assert update_mod.check_for_update(root=tmp_path, run=git) is False
+
+
+def test_check_for_update_silent_when_not_a_checkout(tmp_path):
+    assert update_mod.check_for_update(root=tmp_path, run=FakeGit({})) is False
+
+
+def test_check_for_update_silent_when_fetch_fails(tmp_path):
+    (tmp_path / ".git").mkdir()
+    git = FakeGit({"git fetch": ("fatal: unable to access", 1)})
+    assert update_mod.check_for_update(root=tmp_path, run=git) is False
+    # rev-list is never reached once fetch has already failed.
+    assert not any(c[:2] == ["git", "rev-list"] for c in git.calls)
+
+
+def test_check_for_update_silent_when_no_upstream_is_configured(tmp_path):
+    (tmp_path / ".git").mkdir()
+    git = FakeGit({
+        "git fetch": ("", 0),
+        "git rev-list": ("fatal: no upstream configured", 1),
+    })
+    assert update_mod.check_for_update(root=tmp_path, run=git) is False
+
+
+def test_check_for_update_silent_when_git_itself_is_unavailable(tmp_path):
+    (tmp_path / ".git").mkdir()
+
+    def boom(cmd, cwd, timeout):
+        raise FileNotFoundError("git: command not found")
+
+    assert update_mod.check_for_update(root=tmp_path, run=boom) is False
+
+
+# -- boot-time update check (app-worker level) -------------------------------
+
+
+@pytest.mark.asyncio
+async def test_boot_notifies_once_when_an_update_is_available(monkeypatch, tmp_path):
+    from doxa.app import DoxaApp
+    from doxa import notify as notify_mod
+    from tests.fakes import FakeEngine
+
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setattr(update_mod, "check_for_update", lambda *a, **k: True)
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        notify_mod, "notify_update_available", lambda focus: calls.append(focus)
+    )
+    engine = FakeEngine([])
+    app = DoxaApp(
+        cwd=str(tmp_path), engine_factory=lambda: engine,
+        new_session_factory=lambda: engine,
+    )
+    async with app.run_test() as pilot:
+        for _ in range(100):
+            if calls:
+                break
+            await pilot.pause(0.02)
+    assert calls == [True]  # app_has_focus starts True
+
+
+@pytest.mark.asyncio
+async def test_boot_stays_silent_when_nothing_is_available(monkeypatch, tmp_path):
+    from doxa.app import DoxaApp
+    from doxa import notify as notify_mod
+    from tests.fakes import FakeEngine
+
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setattr(update_mod, "check_for_update", lambda *a, **k: False)
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        notify_mod, "notify_update_available", lambda focus: calls.append(focus)
+    )
+    engine = FakeEngine([])
+    app = DoxaApp(
+        cwd=str(tmp_path), engine_factory=lambda: engine,
+        new_session_factory=lambda: engine,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_boot_check_failure_is_silent_and_never_crashes_startup(
+    monkeypatch, tmp_path
+):
+    from doxa.app import DoxaApp
+    from doxa import notify as notify_mod
+    from tests.fakes import FakeEngine
+
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+
+    def boom(*a, **k):
+        raise OSError("offline")
+
+    monkeypatch.setattr(update_mod, "check_for_update", boom)
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        notify_mod, "notify_update_available", lambda focus: calls.append(focus)
+    )
+    engine = FakeEngine([])
+    app = DoxaApp(
+        cwd=str(tmp_path), engine_factory=lambda: engine,
+        new_session_factory=lambda: engine,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        assert app.active_pane is not None  # boot completed normally
+    assert calls == []

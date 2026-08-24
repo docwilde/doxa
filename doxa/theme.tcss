@@ -55,6 +55,47 @@ SessionPane {
     text-style: bold;
 }
 
+/* Per-tab status, composed with -active rather than fighting it: a tab
+   answers "which session, and what is it doing right now" at a glance
+   without opening it. Single-class rules cascade in the order below (equal
+   selector specificity, later wins) so a tab carrying more than one status
+   class at once resolves to the state that matters most: done-unseen <
+   working < attention. -active is left OUT of that ladder -- its own rule
+   above still wins the FOREGROUND color on a plain active tab -- and the
+   two compound rules at the end explicitly restore the working/attention
+   color on top of it, because those two are the ones worth seeing even on
+   the tab you are already looking at (see doxa/app.py's
+   SessionPane._set_tab_class and the state-precedence note in the tab
+   status work item).
+
+   done-unseen never appears on the active tab (app-level invariant: it is
+   cleared the moment a tab activates), so it needs no compound rule of its
+   own -- there is nothing for it to lose a fight with. */
+#session-tabs Tab.-done-unseen {
+    color: #6FCF97;
+}
+
+#session-tabs Tab.-working {
+    color: #E0A83C;
+}
+
+#session-tabs Tab.-attention {
+    color: #F2E9DD;
+    background: #B23B32;
+    text-style: bold;
+}
+
+#session-tabs Tab.-active.-working {
+    color: #E0A83C;
+    text-style: bold;
+}
+
+#session-tabs Tab.-active.-attention {
+    color: #F2E9DD;
+    background: #B23B32;
+    text-style: bold;
+}
+
 #session-tabs Underline > .underline--bar {
     color: #D97757;
     background: #3A3429;
