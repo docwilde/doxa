@@ -35,7 +35,13 @@ from .. import peers as peers_mod
 from .. import version as version_mod
 from ..peers import PeerSendError, age_secs
 from ..ui.dialogs import AboutDialog
-from ..ui.labels import MODEL_ALIASES, _fmt_age, help_text
+from ..ui.labels import (
+    CONTEXT_UNAVAILABLE,
+    MODEL_ALIASES,
+    _fmt_age,
+    context_breakdown_text,
+    help_text,
+)
 from ..ui.transcript import ImageBlock
 
 
@@ -84,6 +90,7 @@ PANE_COMMANDS: "tuple[CommandBinding, ...]" = (
     CommandBinding("/branch", "_cmd_branch"),
     CommandBinding("/effort", "_cmd_effort"),
     CommandBinding("/usage", "_cmd_usage"),
+    CommandBinding("/context", "_cmd_context"),
     CommandBinding("/clear", "_cmd_clear"),
     CommandBinding("/detach", "_cmd_detach"),
     CommandBinding("/sessions", "_cmd_sessions"),
@@ -260,6 +267,34 @@ class PaneCommandsMixin:
 
     async def _cmd_usage(self, args: str) -> None:
         await self._system(self._usage_text())
+
+    async def _cmd_context(self, args: str) -> None:
+        """``/context`` (item K) -- what is in the window RIGHT NOW, by
+        component, so the ctx% chip stops being one opaque number.
+
+        Every figure comes from the claude CLI's own context accounting
+        (``ClaudeSDKClient.get_context_usage``, reached through the engine's
+        single measurement path -- :meth:`SessionEngine._safe_context_usage`,
+        the same call the ctx chip reads, so the two can never disagree).
+        DOXA counts nothing itself: there is no second tokenizer here and no
+        component whose size this command estimates. A session that cannot
+        be asked prints ``labels.CONTEXT_UNAVAILABLE`` and stops -- an
+        invented breakdown in a diagnostic surface is worse than a missing
+        one.
+
+        Takes no arguments; a stray one is ignored rather than refused, the
+        same way ``/usage`` and ``/help`` treat theirs."""
+        engine = self.engine
+        fetch = getattr(engine, "context_usage", None)
+        if fetch is None:
+            await self._system(CONTEXT_UNAVAILABLE)
+            return
+        try:
+            breakdown = await fetch()
+        except Exception as exc:  # noqa: BLE001 -- a refusal is information
+            await self._system(f"context: {type(exc).__name__}: {exc}")
+            return
+        await self._system(context_breakdown_text(breakdown))
 
     def _usage_text(self) -> str:
         """/usage: the session's REAL numbers, and the account's real

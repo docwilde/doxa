@@ -4,6 +4,177 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.36.0 — 2026-08-25
+
+Two things you can now do at the prompt: find out what is actually
+occupying the context window, and run a shell command without leaving the
+TUI or spending a model turn.
+
+**Provenance, stated up front.** The lettered specs for both items were
+lost before this work started. What shipped is re-derived from each item's
+name and from the codebase as it stood, and every place that required a
+judgment call is named below rather than presented as if a spec had settled
+it. Nothing here invents scope past what the two names plainly imply.
+
+**A collision with v0.35.0, and how it was resolved.** Items X and K were
+built in parallel and both noticed the same thing: `SessionEngine` was
+asking the CLI for a full context reply once a turn and discarding all but
+one float. Both widened it, to different depths — X to
+`(percentage, used, limit)` for the status chip, K to the entire breakdown
+for `/context`. Shipping both would have meant two calls and two caches of
+one measurement, which is exactly the duplication each item set out to
+remove and would let the chip and `/context` come to disagree about the
+same session. So there is now **one call and one cache**:
+`_safe_context_usage` measures and caches the whole reply,
+`_safe_ctx_usage` keeps its v0.35.0 name, signature and contract but reads
+the triple off that cache, and `_safe_ctx_percentage` is gone, superseded.
+Item X's `_as_tokens` rule — a non-numeric, negative or absent count is
+*unknown*, never a confident `0`, and an absent window size is never
+defaulted to 200000 — now governs `/context`'s figures too, so both
+surfaces apply one honesty rule rather than two similar ones. Every
+v0.35.0 test still passes unchanged, including the real-socket assertion
+that a reattaching client gets the absolute pair from the status reply
+alone; a new test counts control requests to prove a finished turn asks
+once, and asserts the chip's three numbers equal the three the breakdown
+carries. `labels.context_text` was renamed `context_breakdown_text` on the
+way in, because v0.35.0 landed `labels.ctx_text` for the chip's words and
+two near-identical names in one module is a trap.
+
+### `/context` — the number behind the number
+
+The status bar has shown a context percentage since v0.22.0, and it has
+been one opaque figure the whole time: 73% of *what*, spent on *what*.
+`/context` is the breakdown — categories in tokens (system prompt, tools,
+messages, free space), the window they sit in, the `CLAUDE.md` files that
+were loaded, and what each MCP tool costs, each with its share of the
+window. It is registered in `doxa/commands.py`, so `/help`, the Ctrl+P
+palette and the `/` autocomplete all got it for free, which is what that
+registry is for.
+
+- **Nothing on that screen is estimated, and that constraint shaped the
+  feature.** Every token figure is the `claude` CLI's own accounting of
+  its own request, taken from `ClaudeSDKClient.get_context_usage`. DOXA
+  runs no tokenizer, holds no per-component model, and prints no row it
+  was not given a number for — a category the CLI sends without a count
+  is omitted rather than rendered as `0`, and a session that cannot be
+  asked at all prints one sentence saying so and no digits whatsoever. An
+  invented number in a diagnostic surface is worse than a missing row: it
+  is a wrong answer that looks like a measurement.
+- **One accounting path, not two** — see the collision note above.
+  `_safe_context_usage` is the single place this session asks the CLI and
+  the single place the answer is cached; the chip's percentage, item X's
+  absolute pair and `/context`'s breakdown are all reads of that one
+  reply. A refactor of existing machinery, deliberately, rather than a
+  second call with its own failure modes.
+- **The one thing DOXA measures itself is reported in characters.** The
+  LORE snapshot is appended to the system prompt at connect, so the CLI
+  counts its tokens inside the system-prompt category and cannot separate
+  DOXA's appendix from the preset. DOXA knows the snapshot's exact length
+  in *characters* and nothing more, so that is what it says, with a note
+  about where the tokens landed. Dividing by four and printing a token
+  figure would have been the estimate this whole surface refuses.
+- **Judgment call — what the breakdown carries.** The SDK's reply also
+  offers per-agent, per-system-tool, per-system-prompt-section, slash
+  command and skill decompositions, plus `gridRows`, a pre-rendered pixel
+  grid of the categories. `/context` shows categories, memory files and
+  MCP tools; the rest is dropped. Reasons, not brevity: `gridRows` is by
+  far the largest field and duplicates data DOXA draws itself, and the
+  remaining lists are further decompositions of a category already shown
+  whole. Those three survive because they are the three an operator can
+  act on — what the window went to, which memory files loaded, and what
+  DOXA's own in-process LORE tools cost.
+- **Judgment call — a live call, not the cached one.** `/context` asks
+  the CLI fresh rather than serving the last turn's snapshot: tool results
+  have very likely landed since `turn_done`, and a user typing `/context`
+  is asking about *now*. The cached snapshot is the fallback when the live
+  request cannot be made.
+- **Over the daemon socket too.** Daemon mode is the mode DOXA ships in,
+  and only the daemon holds the SDK client, so there is a `context` RPC
+  and an `EngineClient.context_usage` beside it. It needs no pager (unlike
+  `beliefs` and `pending`): `engine.context_breakdown` drops `gridRows`
+  and caps every list, and a test encodes a full reply to prove it fits
+  `MAX_FRAME_BYTES`.
+
+### `!` — a shell command, from the prompt
+
+A prompt line starting with `!` runs as a shell command in the session's
+own directory and renders its output in the transcript. `!git status`
+reports on the worktree the agent is editing. The exit code and duration
+are always shown, including for a command that printed nothing.
+
+**This executes arbitrary commands with the user's full privileges. There
+is no sandbox, no allowlist and no confirmation step.** `!rm -rf ~` deletes
+the home directory. That is the intended semantics of a shell escape, and
+it is safe for exactly one reason, which is written into
+`doxa/shell.py`'s docstring as a rule rather than left as a convention:
+
+> Nothing the model can produce, and nothing that arrives from outside
+> this window, may reach the executor.
+
+- **It is not a slash command, and that is the security decision, not a
+  style one.** The slash registry is the one command surface dispatched
+  *by name* from somewhere other than a keystroke — a status-chip click
+  runs a registry row today, and docs/plugin-api.md §1 proposes
+  third-party rows tomorrow. A `/shell` row would put an arbitrary-command
+  executor behind a dispatcher that takes a string. So: `!`-prefixed only,
+  no `/shell`, no palette entry, no autocomplete entry, no name for
+  anything to pass. `/help` documents it in prose, in its own section,
+  precisely because the registry must not carry it as data.
+- **It is not a tool.** Absent from `doxa/operators.py`, so `to_sdk_tools`
+  cannot project it onto the in-process MCP server and the model has no
+  call that lands there.
+- **Exactly one module imports the executor**, `doxa/session/pane.py`,
+  which owns the prompt's submit handler. A test parses every module in
+  the package and asserts that set is exactly `{session/pane.py}`, so
+  wiring a second route in fails there rather than shipping quietly. A
+  companion test asserts `PromptInput.Submitted` has exactly one producer.
+  Both were checked against a deliberately unsafe build (a `/shell` row
+  plus a handler) and both went red.
+- **Judgment call — the output does NOT enter the model's context**, and
+  is not persisted to the session transcript either, so it does not
+  survive a tab restore and does not reach LORE's deriver. `!` is the
+  user's private side-channel; a user who wants the model to see the
+  output pastes it in. The alternative (feeding it back as context) would
+  have made a keystroke-only surface into a context-injection surface,
+  which is a strange thing to build directly beside the rule above.
+- **Its own block kind**, with its own theme rule: a green left rule and a
+  `❯` command line, and neither the `▎` accent a turn wears nor the
+  `▎ doxa` prefix a system block wears. Confusing shell output with the
+  assistant's words is the specific failure that styling exists to
+  prevent, and a test asserts the block is not a `SystemBlock` and does
+  not carry that prefix.
+- **Containment.** stdin is `/dev/null` (a TUI has no terminal to hand
+  over mid-command, so `!git commit` fails immediately instead of hanging
+  on an editor it can never get); stderr merges into stdout in order;
+  output is capped at 64 KB with the dropped byte count reported rather
+  than silently truncated; a command still alive after 120 seconds has its
+  whole process group killed, which is why the child gets
+  `start_new_session` — killing only the `sh` would orphan the pipeline
+  behind it. The reader keeps draining past the cap, because a reader that
+  stops reading turns "printed too much" into "hung".
+- **Judgment call — it waits for the session to boot** before running, the
+  same as every slash command does, so the cwd is the session's real
+  worktree rather than wherever DOXA was launched from. Correct directory
+  beat instant availability; in practice the wait is a no-op.
+
+### Tests
+
+42 new tests: 21 in `tests/test_shell.py`, 19 in `tests/test_context.py`,
+plus 2 daemon round-trips in `tests/test_daemon.py`. They assert what is on
+screen — the output rendered, the exit code shown, the category names and
+token counts in the block, the absence sentence with no digits in it — not
+that a function returned. The security assertions read as security
+assertions and were verified against an unsafe build rather than merely
+against the pre-change tree, where a "the model cannot reach it" test
+passes vacuously for want of anything to reach. No v0.35.0 test was
+changed to make the merge fit; two of the new ones exist specifically to
+pin the reconciliation described above.
+
+One defect was caught by its own test during development: the normalizer
+defaulted a missing token count to `0`, which would have rendered a row the
+CLI never measured as a measured zero. Defaults are `None` now, and the
+renderer drops a row it has no number for.
+
 ## 0.35.0 — 2026-08-25
 
 Two lettered items: **X (ctx absolute)** and **Z (about)**.
@@ -144,6 +315,7 @@ parity.
 `tests/test_tab_status.py::test_done_unseen_marks_a_background_tab_and_clears_on_activation`
 remains the known flake (mount-time prompt focus activates a tab
 asynchronously); focus ownership is a queued decision and was not touched.
+
 
 ## 0.34.0 — 2026-08-24
 

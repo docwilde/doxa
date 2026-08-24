@@ -411,7 +411,15 @@ def help_text() -> str:
 
     Two columns for commands (call form + what it does, with its key
     binding where one reaches the same place), then a hotkeys section for
-    the bindings that have no slash form at all."""
+    the bindings that have no slash form at all, and finally the ONE
+    prompt convention that is not a registry row at all (``!``, item Q).
+
+    That last section is hand-written for the reason ``!`` is not a
+    registry row in the first place (see :mod:`doxa.shell`): the registry
+    is a dispatch surface, and the shell executor must not be reachable
+    from one. A user still has to be able to find out the feature exists,
+    so /help says so in prose rather than the registry saying it in
+    data."""
     lines = ["commands", ""]
     width = max(len(cmd.call_form()) for cmd in commands_mod.REGISTRY)
     bound: set[str] = set()
@@ -439,6 +447,22 @@ def help_text() -> str:
         key_width = max(len(_pretty_key(k)) for k, _d in hotkeys)
         for key, description in hotkeys:
             lines.append(f"  {_pretty_key(key):<{key_width}}  {description}")
+    lines += [
+        "",
+        "shell (no slash form, deliberately)",
+        "",
+        "  !<command>   Run it in this session's directory and show the "
+        "output here",
+        "",
+        "  It runs with YOUR full privileges and there is no confirmation "
+        "step.",
+        "  Only a line you type at this prompt can reach it: it is not a "
+        "command,",
+        "  not a tool, and not something the model or a peer session can "
+        "trigger.",
+        "  Neither the command nor its output ever enters the model's "
+        "context.",
+    ]
     return "\n".join(lines)
 
 
@@ -499,6 +523,118 @@ def _fmt_age(secs: float) -> str:
     if secs < 3600:
         return f"{int(secs // 60)}m"
     return f"{int(secs // 3600)}h{int((secs % 3600) // 60)}m"
+
+
+CONTEXT_UNAVAILABLE = (
+    "context: this session cannot report a breakdown — its handle has no "
+    "get_context_usage (an older SDK, or a session that has not connected "
+    "yet). Nothing is estimated here in its place."
+)
+"""What ``/context`` prints when there is no measurement. Item K's whole
+rule in one string: a diagnostic surface that cannot measure something says
+so, rather than showing a plausible number in its place."""
+
+
+def context_breakdown_text(breakdown: "dict | None") -> str:
+    """``/context`` (item K), rendered from
+    :func:`doxa.engine.context_breakdown`.
+
+    EVERY token figure below was counted by the claude CLI itself, for this
+    session, against the request it actually sends -- DOXA runs no
+    tokenizer and holds no per-component estimate. The only arithmetic done
+    here is a share of the window (``tokens / max_tokens``), which is
+    division of two measured integers, and it is only shown when the CLI
+    reported the window size. A row whose number is absent is OMITTED; a
+    breakdown that is absent entirely prints
+    :data:`CONTEXT_UNAVAILABLE`."""
+    if not breakdown:
+        return CONTEXT_UNAVAILABLE
+    total = breakdown.get("total_tokens")
+    window = breakdown.get("max_tokens")
+    lines: list[str] = ["context"]
+    if breakdown.get("model"):
+        lines.append(f"model      {breakdown['model']}")
+    percent = breakdown.get("percentage")
+    if isinstance(total, (int, float)) and isinstance(window, (int, float)):
+        share = (
+            f"  ·  {float(percent):.1f}%" if isinstance(percent, (int, float)) else ""
+        )
+        lines.append(f"in use     {int(total):,} / {int(window):,} tokens{share}")
+    elif isinstance(total, (int, float)):
+        lines.append(f"in use     {int(total):,} tokens")
+    raw_window = breakdown.get("raw_max_tokens")
+    if (
+        isinstance(raw_window, (int, float))
+        and isinstance(window, (int, float))
+        and int(raw_window) != int(window)
+    ):
+        lines.append(
+            f"window     {int(window):,} usable of {int(raw_window):,} — the "
+            "difference is the autocompact buffer"
+        )
+    threshold = breakdown.get("autocompact_threshold")
+    if isinstance(threshold, (int, float)):
+        lines.append(
+            f"autocompact  at {int(threshold):,} tokens"
+            + ("" if breakdown.get("autocompact_enabled") else "  (disabled)")
+        )
+    lines += _context_section(
+        "", breakdown.get("categories"), breakdown.get("categories_dropped"),
+        lambda row: str(row.get("name") or "?"), window,
+    )
+    lines += _context_section(
+        "memory files", breakdown.get("memory_files"),
+        breakdown.get("memory_files_dropped"),
+        lambda row: str(row.get("path") or "?"), window,
+    )
+    lines += _context_section(
+        "mcp tools", breakdown.get("mcp_tools"), breakdown.get("mcp_tools_dropped"),
+        lambda row: (
+            f"{row.get('server')}: {row.get('name')}" if row.get("server")
+            else str(row.get("name") or "?")
+        ),
+        window,
+    )
+    lines.append("")
+    lines.append(
+        "every token count above is the claude CLI's own measurement of "
+        "THIS session's window — the same one the ctx% chip reads. Nothing "
+        "on this screen is estimated."
+    )
+    chars = breakdown.get("lore_snapshot_chars")
+    if isinstance(chars, int):
+        lines.append(
+            f"lore snapshot: {chars:,} characters appended to the system "
+            "prompt at connect. Its tokens are counted INSIDE the system-"
+            "prompt row above — the CLI cannot tell DOXA's appendix from the "
+            "preset, so no separate token figure is claimed for it."
+        )
+    return "\n".join(lines)
+
+
+def _context_section(
+    title: str, rows: Any, dropped: Any, label: Any, window: Any
+) -> list[str]:
+    """One indented block of ``label   tokens   share-of-window`` rows.
+    Empty list in, empty list out -- a heading with nothing under it is the
+    placeholder row doxa/commands.py already refuses to ship."""
+    if not isinstance(rows, list) or not rows:
+        return []
+    out = [""]
+    if title:
+        out.append(title)
+    width = min(max(max(len(label(row)) for row in rows), 12), 40)
+    for row in rows:
+        tokens = row.get("tokens")
+        if not isinstance(tokens, (int, float)):
+            continue  # no number, no row -- see this module's rule above
+        share = ""
+        if isinstance(window, (int, float)) and window:
+            share = f"  {float(tokens) / float(window) * 100:5.1f}% of window"
+        out.append(f"  {label(row)[:width]:<{width}}  {int(tokens):>9,}{share}")
+    if isinstance(dropped, int) and dropped > 0:
+        out.append(f"  … and {dropped:,} more not shown")
+    return out
 
 
 def git_branch_symbol() -> str:

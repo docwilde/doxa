@@ -165,7 +165,8 @@ this session's identity, not a base to fork from, and a session based on
 itself has nothing left to measure unmerged work against.
 
 Once you're in: type a prompt, press enter. `ctrl+p` opens the command
-palette, `ctrl+t` opens a new tab, `/help` lists every command and key
+palette, `ctrl+t` opens a new tab, a line starting with `!` runs as a
+shell command instead of a prompt, and `/help` lists every command and key
 binding.
 
 ## Features
@@ -267,6 +268,56 @@ input. Both read one registry (`doxa/commands.py`); a command cannot exist
 on one surface and not the other.
 
 <p align="center"><img src="assets/shots/palette.gif" width="780" alt="Ctrl+P opens the command palette on New tab; arrowing down moves the highlight through the open tabs and grouped commands; Esc closes it and returns focus to the prompt"></p>
+
+**`!` — a shell command, without leaving the TUI or spending a turn.**
+A prompt line beginning with `!` (`!git status`, `!ls -la`, `!pytest -q`)
+runs in **this session's own directory** — its linked worktree, so
+`!git status` reports on the tree the agent is actually editing — and its
+output lands in the transcript as its own kind of block: a green left rule
+and a `❯` command line, never the `▎` a turn wears, because shell output
+must not be mistakable for the assistant's words. The exit code and
+duration are always shown, including for a command that printed nothing.
+stdout and stderr interleave in order; stdin is `/dev/null`, so a command
+that wants an editor or a password fails immediately instead of hanging on
+a terminal it can never get. Output past 64 KB is capped and the block
+says how much it dropped; a command still running after 120 seconds has its
+whole process group killed, so a stray `!tail -f` cannot outlive the tab.
+It runs under a Textual worker, so the prompt stays live and the session
+keeps streaming while a slow command runs.
+
+Two things about `!` are deliberate and worth stating plainly.
+
+*It runs with your full privileges and there is no confirmation step.*
+`!rm -rf ~` deletes your home directory. That is the point of a shell
+escape, and it is safe for exactly one reason: **only a line you type at
+the prompt can reach it.** `!` is not a slash command (so nothing that
+dispatches a command *by name* — a status-chip click, a future plugin row —
+can name it), it is not a tool (so it is absent from the SDK tool surface
+and the model has no call that lands there), and text arriving from
+outside the window — another session's `/msg`, a tool result, a replayed
+transcript — is rendered as a block and never dispatched. Exactly one
+module in the package even imports the executor, and a test asserts that,
+so wiring a second route in fails loudly rather than shipping quietly.
+
+*Nothing about it enters the model's context.* Neither the command nor its
+output is sent as a turn or written to the session transcript, so neither
+survives a tab restore and neither reaches LORE's deriver. `!` is your
+private side-channel; if you want the model to see the output, paste it
+into a prompt yourself.
+
+**`/context`.** The breakdown behind the status bar's context-window
+percentage: which components are occupying the window right now, in tokens
+— system prompt, tools, messages, free space — plus the `CLAUDE.md` files
+that got loaded and what each MCP tool costs, each with its share of the
+window. Every figure is the `claude` CLI's own accounting of its own
+request (the same measurement the ctx% chip reads, so the two cannot
+disagree); DOXA runs no tokenizer of its own and estimates nothing. A
+component whose size can only be guessed at is either labelled for what is
+actually known about it or left out entirely — the LORE snapshot DOXA
+appends to the system prompt is reported as an exact **character** count,
+with a note saying its tokens are counted inside the system-prompt row,
+rather than a token number nobody measured. A session that cannot be asked
+prints one sentence saying so and no numbers at all.
 
 **`/search`.** Full-text search over LORE's session index, live in a popup
 the moment you type `/search `. Debounced and sequence-guarded, so a slow
@@ -389,7 +440,9 @@ what the chip costs the bar by default; `ctx_absolute` prints `24k/200k`
 beside it, and drops that segment again below 100 columns rather than
 pushing other chips off the row. A context limit the CLI never reported
 reads `?` and stays `?` — DOXA does not substitute a window size it did
-not measure. `/usage` prints the same numbers exactly, with separators.
+not measure. `/usage` prints the same numbers exactly, with separators,
+and `/context` breaks them down by component — all three are reads of one
+measurement of the session, so they cannot disagree with each other.
 
 **`/about`.** One screen with everything a bug report has to state: the
 DOXA version (with its sha, and a `+` when the checkout is dirty), whether
@@ -451,7 +504,8 @@ question or permission request is pending on this pane) · effort (only
 while one was asserted at connect) · `repo ⎇ branch @sha` · subscription
 headroom (`s:9% w:48%`, session/week) or a `$` cost estimate on API-key
 auth · context-window percentage (escalates normal → amber ≥70% → red
-≥90%, percentage always shown) · belief count · `⌁ session <id>` reattach
+≥90%, percentage always shown; `/context` breaks that one number down into
+what is actually occupying the window) · belief count · `⌁ session <id>` reattach
 handle · peers. Every chip has a one-line hover tooltip explaining what it
 means, INERT ones included (cost, sha, headroom) — hovering answers "what
 is this number" even where there is nothing to click.

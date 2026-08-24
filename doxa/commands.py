@@ -167,6 +167,19 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette="Usage",
     ),
     SlashCommand(
+        name="/context",
+        group="Session",
+        # The sibling of /usage, and deliberately a different question:
+        # /usage is what this session has SPENT (cumulative tokens, turns,
+        # cost), /context is what it is CARRYING right now. Every number
+        # behind this row is the claude CLI's own measurement of its own
+        # window -- see labels.context_breakdown_text on why nothing here
+        # is ever estimated. (The status bar's own ctx chip, item X, is the
+        # same measurement at a glance: labels.ctx_text builds its words.)
+        summary="What is occupying the context window right now, by component",
+        palette="Context breakdown",
+    ),
+    SlashCommand(
         name="/clear",
         group="Session",
         summary="Fresh session in THIS tab: finalize, rotate transcript, reset",

@@ -67,12 +67,13 @@ EXPECTED_TURN_TYPES = [
 
 @contextlib.asynccontextmanager
 async def running_daemon(tmp_path, monkeypatch, linger=30.0, script=None,
-                         server_info=None):
+                         server_info=None, ctx_usage=None):
     """A served SessionDaemon over a FakeClient in an isolated runtime dir.
     Yields (daemon, created) where created[0] is the FakeClient."""
     monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     factory, created = factory_with_script(
-        list(script or TURN_SCRIPT), server_info=server_info
+        list(script or TURN_SCRIPT), server_info=server_info,
+        ctx_usage=ctx_usage,
     )
     daemon = SessionDaemon(
         cwd=str(tmp_path),
@@ -349,6 +350,56 @@ async def test_beliefs_call_round_trips_active_belief_bodies(tmp_path, monkeypat
         result = await client.list_beliefs()
         claims = [b["claim"] for b in result]
         assert "uses uv for deps" in claims
+        await client.finalize()
+
+
+@pytest.mark.asyncio
+async def test_context_call_round_trips_the_breakdown_over_the_socket(
+    tmp_path, monkeypatch
+):
+    """Item K's `/context` in the mode DOXA actually ships in: the daemon
+    owns the SDK client, so it is the only side that can issue the CLI's
+    get_context_usage control request at all, and the client's engine-parity
+    method has to bring the whole breakdown back across the socket.
+
+    No pager, unlike `beliefs`/`pending`: doxa.engine.context_breakdown
+    drops the SDK's pre-rendered gridRows and caps every list, so one reply
+    fits MAX_FRAME_BYTES. That the reply SURVIVES the trip -- rather than
+    being replaced by encode_frame's oversize-reply error -- is the half of
+    this test that matters."""
+    from tests.test_context import CTX_USAGE
+
+    async with running_daemon(
+        tmp_path, monkeypatch, ctx_usage=CTX_USAGE,
+    ) as (daemon, _, _):
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        breakdown = await client.context_usage()
+        assert breakdown is not None
+        assert breakdown["total_tokens"] == 60_650
+        assert breakdown["percentage"] == pytest.approx(33.7)
+        assert [c["name"] for c in breakdown["categories"]] == [
+            c["name"] for c in CTX_USAGE["categories"]
+        ]
+        assert breakdown["mcp_tools"][0]["server"] == "doxa_lore"
+        # The daemon-side engine measured its own injected snapshot.
+        assert breakdown["lore_snapshot_chars"] > 0
+        assert "gridRows" not in breakdown
+        await client.finalize()
+
+
+@pytest.mark.asyncio
+async def test_context_call_reports_an_unmeasurable_session_as_absent(
+    tmp_path, monkeypatch
+):
+    """No ctx_usage scripted -> the FakeClient's control request raises ->
+    the daemon replies with a null breakdown and the client hands the pane
+    None. The pane then prints "cannot report a breakdown" rather than an
+    empty one, which is item K's whole rule."""
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        assert await client.context_usage() is None
         await client.finalize()
 
 

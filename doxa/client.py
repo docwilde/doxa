@@ -380,6 +380,23 @@ class EngineClient:
         contract as belief_count and the cost figure)."""
         return dict(self._usage)
 
+    async def context_usage(self) -> "dict | None":
+        """``/context`` (item K) over the socket -- engine parity with
+        :meth:`doxa.engine.SessionEngine.context_usage`.
+
+        ASYNC and un-cached, unlike :meth:`usage_summary` above: the
+        breakdown is a live control request to the CLI (only the daemon can
+        issue it), it is far larger than a status field, and a session that
+        has not been asked recently would otherwise report a stale picture
+        of its own window. None means "this session cannot report one" --
+        the same absence the in-process engine returns, so the pane's
+        rendering has one case to handle, not two."""
+        reply = await self._call("context")
+        if not reply.get("ok"):
+            raise EngineClientError(reply.get("error") or "context call failed")
+        usage = reply.get("usage")
+        return dict(usage) if isinstance(usage, dict) else None
+
     async def refresh_status(self) -> dict:
         reply = await self._call("status")
         status = reply.get("status") or {}

@@ -231,6 +231,61 @@ class ImageBlock(Vertical):
         yield images_mod.widget_for(self.path, self.path)
 
 
+class ShellBlock(Static):
+    """One ``!`` command and what it printed -- item Q's transcript block.
+
+    A KIND OF ITS OWN, and that is the requirement, not a decoration.
+    Shell output must never be mistakable for the assistant's words: it
+    carries neither the ``▎`` turn accent nor the ``▎ doxa`` prefix
+    :class:`SystemBlock` uses, but its own ``❯`` prompt glyph and its own
+    green left rule (theme.tcss ``ShellBlock``), a color no other block in
+    the transcript wears. The command line, the exit code and the duration
+    are always shown, including for a command that printed nothing at all
+    -- a shell surface that hides how a command ended is one you cannot
+    trust.
+
+    Mounted in the RUNNING state the moment the key is pressed and updated
+    in place by :meth:`complete`, so a slow command is visibly running
+    instead of looking like a prompt that swallowed a keystroke.
+
+    Everything interpolated here is escaped (:func:`_escape_markup`): the
+    body is bytes an arbitrary program wrote, and an unescaped ``[`` in it
+    would be read as Rich markup.
+
+    Nothing this block shows is in the model's context -- see
+    :mod:`doxa.shell`."""
+
+    def __init__(self, command: str, cwd: str) -> None:
+        self.command = command
+        self.cwd = cwd
+        self.result: "Any | None" = None
+        super().__init__(self._render_text(), classes="shell-block")
+
+    def _render_text(self, body: str = "", status: str = "running…") -> str:
+        head = f"❯ {_escape_markup(_one_line(self.command, 200))}"
+        parts = [head]
+        if body:
+            parts.append(_escape_markup(body.rstrip("\n")))
+        parts.append(status)
+        return "\n".join(parts)
+
+    def complete(self, result: "Any") -> None:
+        """Swap the running state for the finished one -- output, then the
+        exit code line the block always ends on."""
+        self.result = result
+        status = result.status_line()
+        if getattr(result, "truncated", False):
+            status = (
+                f"{status} · output capped, {result.dropped_bytes:,} more "
+                "bytes not shown"
+            )
+        body = result.output or ""
+        if not body.strip():
+            status = f"(no output) · {status}"
+            body = ""
+        self.update(self._render_text(body, status))
+
+
 class PeerMessageBlock(Static):
     """One incoming peer message. Visually distinct from turns (dim border,
     peer title in the header -- see PeerMessageBlock rules in theme.tcss);

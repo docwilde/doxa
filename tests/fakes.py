@@ -105,9 +105,16 @@ class FakeEngine:
         model: str = "claude-haiku-4-5",
         peers: list[PeerInfo] | None = None,
         effort: "str | None" = None,
+        cwd: str = "",
     ) -> None:
         self._script = script
         self.model = model
+        # Engine parity for the surfaces that ask an engine where its
+        # session actually lives (/search, and item Q's `!`, which must run
+        # in the session's own worktree). Empty by default so every
+        # pre-existing test keeps falling through to the pane's own cwd,
+        # exactly as it did before this attribute existed.
+        self.cwd = cwd
         self.total_cost_usd = 0.0
         self.last_ctx_percentage: float | None = None
         # Engine parity (item X): the absolute halves of the same context
@@ -164,6 +171,23 @@ class FakeEngine:
         self.list_pending_result: list[str] = []
         self.list_pending_calls = 0
         self.list_pending_error: "Exception | None" = None
+        # Item K (/context): what context_usage() hands back, plus a call
+        # counter. None is the REAL absence case (a session whose handle
+        # cannot report a breakdown), which is exactly what the "nothing is
+        # estimated" assertion needs to be able to script.
+        self.context_usage_result: "dict | None" = None
+        self.context_usage_calls = 0
+        self.context_usage_error: "Exception | None" = None
+
+    async def context_usage(self) -> "dict | None":
+        """Engine parity for /context. Both real engines normalize through
+        doxa.engine.context_breakdown before returning, so the fake returns
+        an already-normalized dict too -- the pane never sees the raw SDK
+        shape from either of them."""
+        self.context_usage_calls += 1
+        if self.context_usage_error is not None:
+            raise self.context_usage_error
+        return self.context_usage_result
 
     async def list_pending(self, limit: int = 500, offset: int = 0) -> list[str]:
         self.list_pending_calls += 1

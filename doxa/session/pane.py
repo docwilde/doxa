@@ -29,9 +29,11 @@ from textual.widgets import OptionList, TabbedContent, TabPane, TextArea
 
 from .. import commands as commands_mod
 from .. import naming as naming_mod
+from .. import shell as shell_mod
 from .. import providers as providers_mod
 from .. import transcript as transcript_mod
 from ..history import SessionSearch
+from ..shell import SHELL_PREFIX
 from ..ui.dialogs import ChipPicker, NeedsInputPopup, SlashComplete
 from ..ui.labels import (
     _write_tab_class,
@@ -43,6 +45,7 @@ from ..ui.labels import (
 from ..ui.prompt import PromptInput
 from ..ui.statusline import GitLine, StatusBar
 from ..ui.transcript import (
+    ShellBlock,
     SubagentLine,
     SubagentTranscriptTab,
     SystemBlock,
@@ -595,6 +598,17 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         if not prompt:
             return
         event.control.clear()
+        # `!` (item Q): the ONE place a shell command can be dispatched
+        # from, and it is reached only from PromptInput.Submitted, which
+        # the prompt posts only from its own submit key binding. Checked
+        # before the slash registry because `!` is deliberately NOT a
+        # registry row -- see doxa.shell's module docstring for why the
+        # executor must stay off every surface that dispatches by name.
+        if prompt.startswith(SHELL_PREFIX):
+            self.run_worker(
+                self._run_shell(prompt[len(SHELL_PREFIX):]), group="shell"
+            )
+            return
         # Only rows of the slash registry (doxa/commands.py) are
         # intercepted, and passthrough rows deliberately are not: the
         # literal "/compact" convention has to REACH the CLI to do anything.
@@ -616,7 +630,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
             "file DOXA can point at"
         )
 
-    # -- the two doors every command goes through --------------------
+    # -- the three doors a submitted line goes through ----------------
 
     async def _system(self, text: str) -> None:
         """Mount one doxa-generated block and stay scrolled to it."""
@@ -632,3 +646,43 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
             await self._system(f"unknown command: {name}")
             return
         await handler(args.strip())
+
+    async def _run_shell(self, command: str) -> None:
+        """Item Q's executor side. **Read doxa/shell.py's module docstring
+        before calling this from anywhere new** -- it runs an arbitrary
+        command with the user's full privileges, and it is safe only
+        because its single caller is a keystroke.
+
+        Deliberately NOT ``_run_command``: this method is not in the
+        handler dict, ``!`` is not in the slash registry, and there is
+        therefore no name a dispatcher (a status-chip click, a peer
+        message, a future plugin row) could pass to arrive here.
+
+        The command runs in the SESSION's directory -- its own worktree
+        when worktree-per-session is on -- which is why the engine is
+        awaited first: ``!git status`` must report on the tree the model is
+        editing, not on wherever DOXA was launched from. The block is
+        mounted before the process is even started, and updated in place
+        when it ends, so a slow command is visibly running rather than
+        looking like a swallowed keystroke; the Textual worker this runs
+        under is what keeps the prompt and the session live meanwhile.
+
+        Neither the command nor its output is sent to the model or
+        persisted to the session transcript."""
+        command = command.strip()
+        if not command:
+            await self._system(
+                "shell: `!<command>` runs a command in this session's "
+                "directory and shows its output here. It never reaches the "
+                "model — not the command, not the output."
+            )
+            return
+        await self._engine_ready.wait()
+        cwd = str(getattr(self.engine, "cwd", None) or self.cwd)
+        block_list = self.query_one("#block-list", VerticalScroll)
+        block = ShellBlock(command, cwd)
+        await block_list.mount(block)
+        block_list.scroll_end(animate=False)
+        result = await shell_mod.run(command, cwd)
+        block.complete(result)
+        block_list.scroll_end(animate=False)

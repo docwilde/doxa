@@ -518,6 +518,21 @@ ToolChip > CollapsibleTitle {
     margin-bottom: 1;
 }
 
+/* Shell output (item Q, the `!` prefix): its own kind, and the styling is
+   the requirement rather than a flourish -- the user must never confuse
+   what a command printed with what the model said. So: no `▎` turn accent,
+   no `▎ doxa` system prefix, but a green left rule (#7A9B6E) worn by
+   NOTHING else in this app, and the terminal's own text color on the
+   darkest surface. The block's own `❯` command line and its trailing exit
+   code come from ShellBlock. */
+ShellBlock {
+    background: #17150F;
+    color: #C9C0AE;
+    border-left: thick #7A9B6E;
+    padding: 0 2;
+    margin-bottom: 1;
+}
+
 /* Peer messages: deliberately dimmer than a turn -- border one step DOWN
    the surface ramp (#2A251E, the chip surface, instead of #3A3429) and
    secondary text only. Another session talking must never read as this

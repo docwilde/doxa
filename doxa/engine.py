@@ -160,6 +160,115 @@ BELIEF_LIST_LIMIT = 2000
 # already a signal to go review it, not to scroll further.
 PENDING_LIST_LIMIT = 500
 
+# -- /context (item K): the breakdown, normalized ----------------------
+#
+# ``ClaudeSDKClient.get_context_usage`` returns the CLI's OWN accounting of
+# what is in the window right now -- the same numbers the CLI's own
+# /context prints, counted with the CLI's tokenizer against the real
+# request. DOXA does not re-count anything: there is no second tokenizer
+# here, no estimate, and no row this function can produce that the CLI did
+# not measure. That is the whole design constraint of item K -- an invented
+# number in a diagnostic surface is worse than a missing row.
+#
+# What this DOES do is narrow the reply to what /context renders and to
+# what fits a 64KB daemon frame (``peers.MAX_FRAME_BYTES``). The dropped
+# keys are dropped for stated reasons, not for brevity:
+#   * ``gridRows`` -- a pre-rendered pixel grid of ``categories``, by far
+#     the largest field, and DOXA draws its own rows.
+#   * ``agents`` / ``systemTools`` / ``systemPromptSections`` /
+#     ``slashCommands`` / ``skills`` / ``deferredBuiltinTools`` -- all
+#     NotRequired, all a further decomposition of a category that is
+#     already shown whole. A breakdown nobody reads is noise in a block
+#     that has to be scannable.
+# ``categories``, ``memoryFiles`` and ``mcpTools`` survive because those
+# are the three the operator can act on: what the session spent the window
+# on, which CLAUDE.md files it loaded, and what DOXA's own in-process MCP
+# server (the native LORE tools) costs in tokens.
+CONTEXT_ROW_CAP = 60
+"""Most rows any one list in the breakdown carries across the socket.
+Whatever is over is COUNTED, not dropped -- same honesty rule the belief
+and pending pagers keep, and the same reason (a truncated list that does
+not say it was truncated is a lie about the session)."""
+
+
+def _context_rows(
+    raw: Any, fields: "tuple[tuple[str, str, Any], ...]"
+) -> "tuple[list[dict], int]":
+    """``(rows, dropped)`` for one list in the SDK's reply, keeping only
+    ``fields`` (as ``(out_key, in_key, default)``) and capping the length at
+    :data:`CONTEXT_ROW_CAP`."""
+    if not isinstance(raw, list):
+        return [], 0
+    rows = [
+        {out: entry.get(inp, default) for out, inp, default in fields}
+        for entry in raw
+        if isinstance(entry, dict)
+    ]
+    return rows[:CONTEXT_ROW_CAP], max(0, len(rows) - CONTEXT_ROW_CAP)
+
+
+def context_breakdown(
+    usage: dict, *, lore_snapshot_chars: "int | None" = None
+) -> dict:
+    """One ``get_context_usage`` reply, narrowed to what ``/context`` shows.
+
+    Pure and total: every value is copied from ``usage``, nothing is
+    derived that was not measured, and a key the CLI did not send comes
+    back absent rather than zero -- ``/context`` omits a row it has no
+    number for instead of printing a plausible one.
+
+    ``lore_snapshot_chars`` is the single field the CLI could NOT have
+    measured, and it is deliberately not a token count: DOXA knows exactly
+    how many CHARACTERS of LORE snapshot it appended to the system prompt
+    (:meth:`SessionEngine._build_options`), and knows that the CLI counted
+    those tokens inside its own "system prompt" category without being able
+    to tell the appendix from the preset. Reporting the exact character
+    count and saying where the tokens landed is the honest version of that;
+    dividing by four would not be."""
+    out: dict[str, Any] = {}
+    for out_key, in_key in (
+        ("model", "model"),
+        ("percentage", "percentage"),
+        ("autocompact_enabled", "isAutoCompactEnabled"),
+    ):
+        if usage.get(in_key) is not None:
+            out[out_key] = usage[in_key]
+    # Every token FIGURE goes through item X's :func:`_as_tokens`, so the
+    # two surfaces built on this one measurement apply one honesty rule:
+    # a non-numeric, negative or absent count is UNKNOWN, and an unknown
+    # key is simply absent here rather than present as a confident 0.
+    for out_key, in_key in (
+        ("total_tokens", "totalTokens"),
+        ("max_tokens", "maxTokens"),
+        ("raw_max_tokens", "rawMaxTokens"),
+        ("autocompact_threshold", "autoCompactThreshold"),
+    ):
+        tokens = _as_tokens(usage.get(in_key))
+        if tokens is not None:
+            out[out_key] = tokens
+    # Every `tokens` default is None, never 0: a row the CLI sent without a
+    # count must not come back saying "zero tokens", which is a claim DOXA
+    # was never given. The renderer drops a row it has no number for.
+    out["categories"], out["categories_dropped"] = _context_rows(
+        usage.get("categories"), (("name", "name", ""), ("tokens", "tokens", None)),
+    )
+    out["memory_files"], out["memory_files_dropped"] = _context_rows(
+        usage.get("memoryFiles"),
+        (("path", "path", ""), ("type", "type", ""), ("tokens", "tokens", None)),
+    )
+    out["mcp_tools"], out["mcp_tools_dropped"] = _context_rows(
+        usage.get("mcpTools"),
+        (
+            ("name", "name", ""),
+            ("server", "serverName", ""),
+            ("tokens", "tokens", None),
+        ),
+    )
+    if lore_snapshot_chars is not None:
+        out["lore_snapshot_chars"] = int(lore_snapshot_chars)
+    return out
+
+
 # -- what rides on ONE derive_done event ------------------------------
 #
 # A count is not information: "3 proposals staged" cannot tell you whether
@@ -455,17 +564,33 @@ class SessionEngine:
         # Item X (ctx absolute): the ABSOLUTE halves of the very same
         # measurement the percentage above comes from. ONE call to the
         # SDK's get_context_usage() already returns totalTokens/maxTokens
-        # alongside percentage (see :meth:`_safe_ctx_usage`), so this is
-        # that accounting path WIDENED, never a second one. Either may
+        # alongside percentage (see :meth:`_safe_context_usage`), so this
+        # is that accounting path WIDENED, never a second one. Either may
         # stay None -- a client with no get_context_usage at all, or a
         # reply that omits the limit -- and every surface then says so
         # rather than substituting a guessed window size.
         self.last_ctx_tokens: int | None = None
         self.last_ctx_max_tokens: int | None = None
+        # Item K (/context): the WHOLE reply the three fields above are
+        # three fields OF. Items X and K widened the same measurement
+        # independently, X to a triple and K to the entire breakdown; the
+        # breakdown is the more general shape, so it is the one thing
+        # cached and the triple is derived from it (see
+        # :meth:`_safe_context_usage`). Two caches of one measurement is
+        # exactly the drift both items set out to remove. None until the
+        # first turn ends, or when this client cannot report one at all.
+        self.last_context_usage: dict[str, Any] | None = None
         # Reasoning-effort level asserted at connect (item T's status-bar
         # chip) -- None until _build_options runs, same as every other
         # connect-time field here (server_info, account).
         self.effort: str | None = None
+        # Exact SIZE, in characters, of the LORE snapshot this session
+        # appended to its system prompt at connect (_build_options). The
+        # CLI's own context breakdown counts those tokens inside its
+        # "system prompt" row and cannot tell our appendix apart from the
+        # preset -- so /context reports the one thing about it that IS
+        # measured rather than estimating a token count for it.
+        self.lore_snapshot_chars: int | None = None
         # Session token accounting for /usage: summed from every
         # ResultMessage's own usage block -- the CLI's numbers, not an
         # estimate of our own. Cache reads/creates are kept separate
@@ -940,6 +1065,8 @@ class SessionEngine:
 
     def _build_options(self) -> ClaudeAgentOptions:
         snapshot = lore_context.build_context(self.cwd)
+        # /context reports this length verbatim -- see lore_snapshot_chars.
+        self.lore_snapshot_chars = len(snapshot)
         # Native LORE tools: the registry projected through the gate's
         # executor onto an in-process SDK MCP server. include_write=True is
         # deliberate -- lore_remember only STAGES a pending proposal, so the
@@ -1258,10 +1385,12 @@ class SessionEngine:
                         value = message.usage.get(field_name)
                         if isinstance(value, (int, float)):
                             self.usage_totals[field_name] += int(value)
+                # One measurement, read three ways. The caching happens
+                # inside _safe_context_usage (which _safe_ctx_usage reads),
+                # so there are no assignments to repeat here -- a second
+                # writer to the same fields is how the chip and /context
+                # would start disagreeing about one session.
                 ctx_percentage, ctx_tokens, ctx_max = await self._safe_ctx_usage()
-                self.last_ctx_percentage = ctx_percentage
-                self.last_ctx_tokens = ctx_tokens
-                self.last_ctx_max_tokens = ctx_max
                 yield EngineEvent("turn_done", {
                     "duration_ms": message.duration_ms,
                     "cost_usd": message.total_cost_usd,
@@ -1343,33 +1472,95 @@ class SessionEngine:
             **self.usage_totals,
         }
 
-    async def _safe_ctx_usage(self) -> "tuple[float | None, int | None, int | None]":
-        """``(percentage, used_tokens, limit_tokens)`` from ONE
-        ``get_context_usage()`` call -- the SDK returns all three keys
-        (``percentage`` / ``totalTokens`` / ``maxTokens``) in a single
-        reply, so item X's absolute numbers cost no extra round trip and,
-        more importantly, cannot disagree with the percentage beside them.
+    async def _safe_context_usage(self) -> "dict[str, Any] | None":
+        """The ONE place this session asks the CLI what is in its context,
+        and the ONE place the answer is cached.
 
-        Any missing or non-numeric field comes back None on its own: the
-        limit in particular is the one DOXA must never invent. A prior
-        measurement in this project found the Models API unreachable under
-        OAuth-only auth, so there is no second place to look it up -- an
-        absent ``maxTokens`` is reported as unknown, not defaulted to
-        200000, which would read as fact and be wrong the moment a
-        million-token window is in play."""
+        ``ClaudeSDKClient.get_context_usage`` is a control request that
+        comes back with the whole breakdown -- per-category token counts,
+        the memory files and MCP tools that are loaded, the window size and
+        the percentage of it in use. Through v0.34.0 this method existed as
+        ``_safe_ctx_percentage`` and threw all of that away except one
+        float.
+
+        v0.35.0 (item X) and v0.36.0 (item K) then widened it INDEPENDENTLY
+        and to different depths -- X to ``(percentage, used, limit)`` for
+        the status chip, K to the entire reply for ``/context``. This is
+        the reconciliation: the reply is the general shape, so the reply is
+        what is cached, and X's triple is derived from it by
+        :meth:`_safe_ctx_usage` rather than measured beside it. Two caches
+        of one measurement is precisely the drift both items set out to
+        remove; it would let the chip and ``/context`` disagree about the
+        same session, which is the failure X's tooltip fix and K's
+        omit-rather-than-zero rule each exist to prevent.
+
+        The absolute halves go through :func:`_as_tokens`, so item X's rule
+        survives intact: a missing or non-numeric field is UNKNOWN, never
+        coerced to 0, and an absent ``maxTokens`` is never defaulted to
+        200000 -- a prior measurement in this project found the Models API
+        unreachable under OAuth-only auth, so there is no second place to
+        look a window size up, and a guessed one would read as fact.
+
+        Never raises: a client that has no such method (a fake, an older
+        SDK), one that is not connected, or a control request that fails
+        leaves ``last_context_usage`` alone and returns None. An absent
+        breakdown is a surface that says so -- see ``_cmd_context``."""
         get_usage = getattr(self._client, "get_context_usage", None)
         if get_usage is None:
-            return None, None, None
+            return None
         try:
             usage = await get_usage()
         except Exception:
-            return None, None, None
+            return None
+        if not isinstance(usage, dict):
+            return None
+        self.last_context_usage = usage
         percentage = usage.get("percentage")
-        return (
-            float(percentage) if isinstance(percentage, (int, float)) else None,
-            _as_tokens(usage.get("totalTokens")),
-            _as_tokens(usage.get("maxTokens")),
+        self.last_ctx_percentage = (
+            float(percentage) if isinstance(percentage, (int, float)) else None
         )
+        self.last_ctx_tokens = _as_tokens(usage.get("totalTokens"))
+        self.last_ctx_max_tokens = _as_tokens(usage.get("maxTokens"))
+        return usage
+
+    async def _safe_ctx_usage(self) -> "tuple[float | None, int | None, int | None]":
+        """``(percentage, used_tokens, limit_tokens)`` -- item X's status
+        chip reading, now a READER over the one measurement above rather
+        than a second call of its own. Same signature, same contract, same
+        three independently-None fields; what changed is that the numbers
+        are read off the reply ``/context`` renders, so the chip and the
+        command cannot come apart.
+
+        All three go None together when the session could not be asked at
+        all -- a stale percentage left standing after a failed control
+        request would be the chip lying about a window it can no longer
+        see."""
+        if await self._safe_context_usage() is None:
+            self.last_ctx_percentage = None
+            self.last_ctx_tokens = None
+            self.last_ctx_max_tokens = None
+        return (
+            self.last_ctx_percentage,
+            self.last_ctx_tokens,
+            self.last_ctx_max_tokens,
+        )
+
+    async def context_usage(self) -> "dict[str, Any] | None":
+        """``/context``'s data: the CURRENT breakdown, normalized for
+        display and for the daemon socket (:func:`context_breakdown`).
+
+        Asks the CLI fresh rather than serving the last turn's cache --
+        a user typing ``/context`` wants what is in the window now, and
+        tool results have very likely landed since the last
+        ``turn_done``. Falls back to the cached snapshot when the live
+        call cannot be made (mid-turn control-request contention, a
+        disconnected client), and returns None when there has never been
+        one: the command reports the absence rather than inventing a
+        breakdown."""
+        usage = await self._safe_context_usage() or self.last_context_usage
+        if usage is None:
+            return None
+        return context_breakdown(usage, lore_snapshot_chars=self.lore_snapshot_chars)
 
     def belief_count(self) -> int:
         """Active belief count for the status bar -- same query

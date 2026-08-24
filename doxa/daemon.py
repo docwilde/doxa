@@ -32,7 +32,8 @@ client -> server
                                                on the event stream tagged with
                                                the reply's "turn" id
   {"type": "call", "id": N, "method": "status"|"peers"|"msg"|"stop"|
-   "set_model"|"branch"|"answer_needs_input"|"beliefs", "params": {...}}
+   "set_model"|"branch"|"answer_needs_input"|"beliefs"|"pending"|"context",
+   "params": {...}}
 
 Interactive permission (queue item 5): a pending ``AskUserQuestion`` or
 permission request (``doxa.engine.SessionEngine._on_can_use_tool``) rides
@@ -727,6 +728,20 @@ class SessionDaemon:
             await self._reply(
                 writer, req_id, ok=True, pending=page, next_offset=next_offset,
             )
+        elif method == "context":
+            # `/context` (item K) over the daemon split. The daemon owns the
+            # SDK client, so it is the only side that can issue the CLI's
+            # get_context_usage control request at all. The reply is already
+            # narrowed to what /context renders AND to what fits
+            # MAX_FRAME_BYTES (doxa.engine.context_breakdown drops the SDK's
+            # pre-rendered gridRows and caps every list at CONTEXT_ROW_CAP),
+            # so unlike `beliefs` and `pending` this one needs no pager.
+            #
+            # `usage` is null -- not {} -- when this session genuinely
+            # cannot be asked; the pane says so rather than rendering an
+            # empty breakdown as if it were a measured one.
+            usage = await self.engine.context_usage()
+            await self._reply(writer, req_id, ok=True, usage=usage)
         elif method == "answer_needs_input":
             # The resolution's own needs_input_resolved broadcast comes
             # from the ENGINE side (SessionEngine._wait_for_answer's
