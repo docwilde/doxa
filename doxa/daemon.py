@@ -762,6 +762,11 @@ class SessionDaemon:
             "lore_root": getattr(self.engine, "lore_root", None),
             "total_cost_usd": self.engine.total_cost_usd,
             "ctx_percentage": self.engine.last_ctx_percentage,
+            # Item X (ctx absolute): the absolute halves of that same
+            # reading, so a reattaching client's very first status refresh
+            # has them without waiting for a turn to end.
+            "ctx_tokens": getattr(self.engine, "last_ctx_tokens", None),
+            "ctx_max_tokens": getattr(self.engine, "last_ctx_max_tokens", None),
             # /usage over the split: the engine's own token accounting,
             # cached client-side like every other status value.
             "usage": self.engine.usage_summary(),

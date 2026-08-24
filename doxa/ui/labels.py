@@ -243,12 +243,91 @@ CTX_AMBER = "#E8A33D"
 CTX_RED = "#D9534F"
 
 
-def ctx_chip(percentage: "float | None") -> str:
+# Item X (ctx absolute): the inline `24k/200k` half of the ctx chip is
+# spent width, and the status bar is the most contended row in the app
+# (TAB_MODEL_MIN/TAB_REPO_MIN exist for the same reason one column over).
+# So it appears only when the terminal is at least this wide -- below it
+# the chip falls back to the percentage alone and the numbers stay in the
+# tooltip, which is where they live for every user who never turns the
+# setting on. 100 columns is measured against the widest ordinary chip
+# set (model · effort · git · sub · s/w · ctx · beliefs), which already
+# fills ~95 columns before this segment is added.
+CTX_ABSOLUTE_MIN_COLS = 100
+
+
+def fmt_tokens(count: "int | None") -> str:
+    """A token count for a status chip: `812`, `24k`, `1.2M`, and `—` for
+    a count nobody has reported. Rounded, because the chip answers "how
+    much room is left", not "how many tokens exactly" -- /usage and the
+    tooltip carry the exact figure, in full, with separators."""
+    if count is None:
+        return "—"
+    if count < 1000:
+        return str(int(count))
+    if count < 1_000_000:
+        return f"{count / 1000:.0f}k"
+    return f"{count / 1_000_000:.1f}M"
+
+
+def ctx_absolute_text(
+    used: "int | None", total: "int | None"
+) -> "str | None":
+    """`24k/200k` -- the inline absolute segment, or None when there is
+    nothing measured to print.
+
+    An unknown LIMIT is `?`, never a substituted 200000: DOXA drives
+    several models with very different windows, and a prior measurement in
+    this project found the Models API unreachable under OAuth-only auth,
+    so there is no second source to fall back on. Saying "unknown" is the
+    honest degradation; printing somebody else's window size is not."""
+    if used is None and total is None:
+        return None
+    return f"{fmt_tokens(used)}/{'?' if total is None else fmt_tokens(total)}"
+
+
+def ctx_text(
+    percentage: "float | None",
+    used: "int | None" = None,
+    total: "int | None" = None,
+    *,
+    absolute: bool = False,
+) -> str:
+    """The context chip's PLAIN text -- what a reader sees once the markup
+    is stripped, and therefore what the tooltip machinery has to match on.
+
+    Split out of :func:`ctx_chip` for item X because ``StatusBar``'s
+    per-chip tooltip resolves by finding the chip's text inside the bar's
+    markup-STRIPPED string (``StatusBar._tooltip_for_x``): handing it a
+    string with `[#D9534F]…[/]` still in it can never match, which is why
+    the ctx chip's hint used to go missing at exactly the amber and red
+    tiers where it matters most. One function builds the words, the other
+    colors them, and the two cannot say different things."""
+    tail = ctx_absolute_text(used, total) if absolute else None
+    base = "ctx —" if percentage is None else f"ctx {percentage:.0f}%"
+    return f"{base} {tail}" if tail else base
+
+
+def ctx_chip(
+    percentage: "float | None",
+    used: "int | None" = None,
+    total: "int | None" = None,
+    *,
+    absolute: bool = False,
+) -> str:
     """The context chip, escalating normal -> amber -> red. Markup only:
-    the percentage is always present, in every tier."""
+    the percentage is always present, in every tier.
+
+    Item X: ``absolute=True`` appends the `used/total` segment INSIDE the
+    same pressure-colored span, so the whole chip escalates as one thing
+    rather than half of it turning red. It is opt-in (``DOXA_CTX_ABSOLUTE``
+    / the settings modal) because the percentage alone is what this chip
+    has always cost the status bar in width, and the absolute numbers stay
+    reachable without it -- they are in this chip's tooltip
+    unconditionally (see ``PaneChipsMixin._status_chips``) and in
+    ``/usage``."""
+    text = ctx_text(percentage, used, total, absolute=absolute)
     if percentage is None:
-        return "ctx —"
-    text = f"ctx {percentage:.0f}%"
+        return text
     if percentage >= CTX_RED_PCT:
         return f"[{CTX_RED}]{text}[/]"
     if percentage >= CTX_AMBER_PCT:

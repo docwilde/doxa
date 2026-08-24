@@ -232,6 +232,12 @@ REGISTRY: tuple[SlashCommand, ...] = (
         summary="Every command and key binding, generated from this registry",
         palette="Help",
     ),
+    SlashCommand(
+        name="/about",
+        group="Maintenance",
+        summary="Version, dependencies, platform and config path — what a bug report needs",
+        palette="About DOXA",
+    ),
 )
 
 

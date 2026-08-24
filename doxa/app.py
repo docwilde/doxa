@@ -137,6 +137,7 @@ from .peers import PeerSendError, age_secs
 from .session.pane import SessionPane  # noqa: F401
 from .ui.dialogs import (  # noqa: F401
     _NEEDS_INPUT_DIGIT_KEYS,
+    AboutDialog,
     BeliefInspector,
     ChipPicker,
     CloseWithTurnRunning,
@@ -163,12 +164,16 @@ from .ui.labels import (  # noqa: F401
     app_bindings,
     CLICKABLE_CHIP_ACCENT,
     compose_tab_label,
+    ctx_absolute_text,
     ctx_chip,
+    ctx_text,
+    CTX_ABSOLUTE_MIN_COLS,
     CTX_AMBER,
     CTX_AMBER_PCT,
     CTX_RED,
     CTX_RED_PCT,
     ellipsize,
+    fmt_tokens,
     git_branch_symbol,
     help_text,
     MODEL_ALIASES,
@@ -379,6 +384,13 @@ class DoxaApp(App):
         # One-shot "has this run already told you about an update" latch --
         # the background checker in on_mount fires at most once per launch.
         self._update_notified = False
+        # Item Z (/about): what that SAME boot check found, kept so the
+        # about dialog can say "update available" without running a second
+        # `git fetch` of its own -- reuse, not a duplicate checker. Three
+        # states, and the third is load-bearing: True (something to pull),
+        # False (checked, nothing to pull), None (nobody has looked yet, or
+        # the check failed silently the way it is designed to).
+        self.update_available: "bool | None" = None
         # Bring lore_core's own in-process notification (staged-proposal
         # review, fired synchronously from doxa.engine's review path) in
         # line with the notify_lore toggle. Also re-run whenever the
@@ -1295,6 +1307,10 @@ class DoxaApp(App):
             available = await asyncio.to_thread(update_mod.check_for_update)
         except Exception:  # noqa: BLE001 -- advisory only, never surfaces
             return
+        # Item Z: record the ANSWER, not just the notification. /about
+        # reads this rather than fetching again -- one `git fetch` per
+        # launch, on a worker, is the whole budget for this question.
+        self.update_available = bool(available)
         if available and not self._update_notified:
             self._update_notified = True
             notify_mod.notify_update_available(self.app_has_focus)

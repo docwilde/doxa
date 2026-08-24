@@ -110,6 +110,12 @@ class FakeEngine:
         self.model = model
         self.total_cost_usd = 0.0
         self.last_ctx_percentage: float | None = None
+        # Engine parity (item X): the absolute halves of the same context
+        # reading. None by default -- an engine that has never finished a
+        # turn has measured nothing, and the chip/tooltip must survive that
+        # rather than assume a window size.
+        self.last_ctx_tokens: "int | None" = None
+        self.last_ctx_max_tokens: "int | None" = None
         # Engine parity (item T): connect-time effort, asserted once and
         # never mutated for the life of a session -- same shape as the real
         # engine's self.effort.
@@ -200,6 +206,10 @@ class FakeEngine:
             if ev.type == "turn_done":
                 self.total_cost_usd += ev.data.get("cost_usd") or 0.0
                 self.last_ctx_percentage = ev.data.get("ctx_percentage")
+                if ev.data.get("ctx_tokens") is not None:
+                    self.last_ctx_tokens = ev.data["ctx_tokens"]
+                if ev.data.get("ctx_max_tokens") is not None:
+                    self.last_ctx_max_tokens = ev.data["ctx_max_tokens"]
             yield ev
 
     async def set_model(self, model: "str | None") -> str:
@@ -227,6 +237,8 @@ class FakeEngine:
             "num_turns": self.num_turns,
             "total_cost_usd": self.total_cost_usd,
             "ctx_percentage": self.last_ctx_percentage,
+            "ctx_tokens": self.last_ctx_tokens,
+            "ctx_max_tokens": self.last_ctx_max_tokens,
             "input_tokens": 1200,
             "output_tokens": 340,
             "cache_read_input_tokens": 8000,

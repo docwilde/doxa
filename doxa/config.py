@@ -153,6 +153,18 @@ SETTINGS: tuple[Setting, ...] = (
              "the status line (doxa.app.git_branch_symbol)",
     ),
     Setting(
+        key="ctx_absolute", env="DOXA_CTX_ABSOLUTE", label="ctx: absolute tokens",
+        category="Appearance", kind="bool",
+        help="Print used/total tokens beside the ctx% chip "
+             "(doxa.ui.labels.ctx_chip)",
+        note="Off, the numbers are still one hover away -- the ctx chip's "
+             "tooltip carries them either way, and /usage prints them in "
+             "full. On, they are dropped again on a terminal narrower than "
+             "100 columns rather than pushing other chips off the bar. A "
+             "context limit the CLI never reported reads `?`; DOXA does not "
+             "guess a window size.",
+    ),
+    Setting(
         key="image_mode", env="DOXA_IMAGE_MODE", label="image mode",
         category="Appearance", kind="choice",
         choices=("", "kgp", "sixel", "halfblock", "text"),

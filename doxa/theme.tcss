@@ -253,6 +253,49 @@ CompactConfirm {
     color: #F2E9DD;
 }
 
+/* /about (item Z): the third member of the same modal family as
+   CloseWithTurnRunning and CompactConfirm above -- identical wash, surface
+   ramp, title treatment and button row. Wider (72) because its body is a
+   two-column table of version strings and paths rather than a sentence,
+   and a config path that wraps mid-path is a path nobody can paste. */
+AboutDialog {
+    align: center middle;
+    background: #171512 60%;
+}
+
+#about {
+    width: 72;
+    height: auto;
+    background: #221F1A;
+    border: round #3A3429;
+    padding: 1 2;
+}
+
+#about-title {
+    color: #D97757;
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+#about-body {
+    color: #D8CDBB;
+}
+
+/* `height: auto`, for the third time and for the v0.28.0 reason spelled
+   out on #close-confirm-buttons above: border-box means `height: 1` plus
+   `padding-top: 1` leaves a 0-row content box and draws nothing at all.
+   tests/test_about.py asserts this row's rendered height directly. */
+#about-buttons {
+    height: auto;
+    padding-top: 1;
+}
+
+#about-buttons > Static {
+    width: auto;
+    padding-right: 2;
+    color: #F2E9DD;
+}
+
 /* Inline tab rename (double-click a tab header): the field takes the
    tab's own slot in the strip -- one row high, no border of its own, so
    the strip does not jump while a name is being typed. */

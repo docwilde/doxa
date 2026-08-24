@@ -14,6 +14,7 @@ panel over a ``TabbedContent`` would need.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any, Callable  # noqa: F401 -- annotation-only
 
 from textual import events, on
@@ -27,6 +28,7 @@ from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from .. import commands as commands_mod
+from .. import version as version_mod
 from .labels import _escape_markup
 
 
@@ -679,6 +681,80 @@ class CompactConfirm(ModalScreen[bool]):
     def _click_no(self, event: events.Click) -> None:
         event.stop()
         self.dismiss(False)
+
+
+class AboutDialog(ModalScreen[None]):
+    """``/about`` (item Z): what DOXA this is, and what a bug report needs.
+
+    The SAME shape as :class:`CompactConfirm` and
+    :class:`CloseWithTurnRunning` above -- a focused ``ModalScreen``, a
+    title bar, a body, a row of Statics that each name their own key, Esc
+    closes -- because a third modal inventing a fourth shape is how a TUI
+    stops feeling like one program.
+
+    The rows are :func:`doxa.version.about_rows`, measured when the dialog
+    is constructed; the copy door puts :func:`doxa.version.about_text` --
+    the same string, from the same builder -- on the clipboard, so what
+    lands in an issue is what the user was reading rather than a
+    re-derivation of it.
+
+    v0.28.0's defect is why ``#about-buttons`` is ``height: auto`` in
+    theme.tcss and why this class ships with a test asserting real
+    rendered geometry: ``height: 1; padding-top: 1`` under Textual's
+    border-box model draws buttons at ZERO height; they pass every
+    ``query_one()`` a suite can write, and that shipped for a full release
+    because the tests asserted the modal was pushed, never that anything
+    was visible."""
+
+    BINDINGS = [("escape", "pick_close", "Close")]
+
+    def __init__(self, update_available: "bool | None" = None) -> None:
+        super().__init__()
+        # Built ONCE, here: the body and the copy door must be the same
+        # string, and re-deriving it per compose would let a `git status`
+        # landing between the two make them disagree.
+        self.text = version_mod.about_text(update_available)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="about"):
+            yield Static("▎ about DOXA", id="about-title")
+            yield Static(self.text, id="about-body")
+            with Horizontal(id="about-buttons"):
+                yield Static("[ copy · c ]", id="about-copy")
+                yield Static("[ close · esc ]", id="about-close")
+
+    def action_pick_close(self) -> None:
+        self.dismiss(None)
+
+    def _copy(self) -> None:
+        """Clipboard through the app's own OSC-52 door -- the SAME
+        ``copy_to_clipboard`` the sessions picker's copy row uses, so this
+        app has one clipboard path rather than two."""
+        with contextlib.suppress(Exception):
+            self.app.copy_to_clipboard(self.text)
+            self.notify("about: copied")
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "c":
+            event.stop()
+            self._copy()
+            return
+        # Esc is the binding; Enter and q are the two other keys anyone
+        # actually presses at a read-only panel, and a panel with nothing
+        # to confirm has no reason to treat them differently.
+        if event.key in ("enter", "return", "q"):
+            event.stop()
+            self.dismiss(None)
+
+    @on(events.Click, "#about-copy")
+    def _click_copy(self, event: events.Click) -> None:
+        event.stop()
+        self._copy()
+
+    @on(events.Click, "#about-close")
+    def _click_close(self, event: events.Click) -> None:
+        event.stop()
+        self.dismiss(None)
 
 
 class TabRename(Input):

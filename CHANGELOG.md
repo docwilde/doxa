@@ -4,6 +4,147 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.35.0 — 2026-08-25
+
+Two lettered items: **X (ctx absolute)** and **Z (about)**.
+
+**A note on provenance, because it changes how this entry should be
+read.** The written specs for both items were lost before the work
+started. What shipped is re-derived from each item's name plus the
+codebase as it stood at v0.34.0, and every place the name alone did not
+settle a question is a judgment call flagged below rather than presented
+as a requirement. Nothing here goes beyond what the two names plainly
+imply; two further letters (K, Q) were in flight elsewhere and W is on
+hold, and none of them are touched.
+
+### X — ctx absolute
+
+The `ctx` chip could only ever say a percentage, which cannot answer the
+one question anyone asks it: 12% of a 200k window and 12% of a 1M window
+are different situations, and DOXA drives models with both.
+
+- **One reading, not two.** The SDK's `get_context_usage()` already
+  returns `totalTokens` and `maxTokens` in the same reply the percentage
+  comes from, so `SessionEngine._safe_ctx_percentage` became
+  `_safe_ctx_usage` and returns all three from the one call it was already
+  making. No second accounting path, no extra round trip, and the three
+  numbers cannot disagree because nothing computes them separately.
+  `turn_done`, `usage_summary()`, the daemon's `status` reply and
+  `EngineClient`'s cache all carry the pair alongside the percentage, so a
+  detached session's status bar is not poorer than an in-process one.
+- **Judgment call: the tooltip is the guarantee, the inline segment is
+  opt-in.** The item's name says make the absolute numbers reachable; it
+  does not say where, and four readings were open (replace the percentage,
+  sit beside it, tooltip only, or a setting). The chip's tooltip now
+  carries `24,000 of 200,000 tokens used, 176,000 left`
+  **unconditionally**, because that costs the most contended row in the
+  app exactly zero columns; the inline `24k/200k` form is a new
+  `ctx_absolute` setting, off by default, so nobody's status bar changes
+  width without them asking for it. Replacing the percentage was rejected
+  outright — the README calls the escalating percentage "a containment
+  signal, not decoration", and a raw token count is a worse signal for
+  that job.
+- **Judgment call: degrade by dropping, not by truncating.** With the
+  setting on, the segment is omitted below 100 columns
+  (`CTX_ABSOLUTE_MIN_COLS`). The status bar does not scroll — overflow
+  pushes the chips to the right of it off the end of the row — so the
+  segment that is a convenience gives way to the chips that are
+  information. It is re-evaluated on the ordinary event-driven refreshes
+  (boot, turn done, peer events) and deliberately **not** from a resize
+  hook: `_refresh_status` runs a belief `COUNT(*)`, and hanging that off
+  every frame of a mouse-drag resize would recreate the idle-CPU
+  regression this app already paid to shed.
+- **Judgment call: an unknown limit stays unknown.** A window size the CLI
+  never reported prints `?` in the chip and "window size not reported" in
+  `/usage`, and the tooltip says the limit "is not something this
+  session's CLI reported". There is no fallback constant: a prior
+  measurement in this project found the Models API unreachable under
+  OAuth-only auth, so a hardcoded 200000 would be a number DOXA invented,
+  printed in the same sentence as two it measured.
+- **A defect found on the way in.** The ctx chip's tooltip was keyed by
+  its own **markup**, while `StatusBar._tooltip_for_x` resolves a hover by
+  finding the chip's text inside the bar's markup-*stripped* string — so
+  at the amber and red tiers, where the chip carries a color span, the
+  lookup could never match and the hint silently vanished. Exactly the
+  tiers where a reader most wants to know how many tokens are left. The
+  chip is now keyed by its plain text (`labels.ctx_text` builds the words,
+  `ctx_chip` colors them, one function each), with a test pinning the hint
+  at 93%.
+- `/usage` gained the exact figures, with separators, on the same row as
+  the percentage.
+
+### Z — about
+
+`/about`: a focused `ModalScreen` carrying the version and the rest of
+what a bug report has to state — Python, Textual, Claude Agent SDK, the
+LORE plugin version and store path, the platform, the config file in
+force, and the repo/licence line (public repo, Noncommercial 1.0). Esc
+closes. Registered in `doxa/commands.py`, so `/help`, the palette and
+autocomplete all get it from the one registry, and in `PANE_COMMANDS` on
+the executor side; the closure test that keeps those two honest passes
+unchanged.
+
+- **Heeding the v0.28.0 defect.** `#compact-confirm-buttons { height: 1;
+  padding-top: 1 }` under Textual's border-box model rendered buttons at
+  **zero** height — present in the DOM, drawn nowhere — and shipped that
+  way for a full release because the tests asserted the modal had been
+  *pushed*, never that anything was *visible*. `#about-buttons` is
+  `height: auto` for that reason, and `tests/test_about.py` asserts the
+  button row's rendered height, hit-tests both doors at their own centres,
+  and reads the body's text off the widget that actually drew.
+- **Judgment call: a modal, not a transcript block.** `/about` describes
+  the installation, not the conversation. A `SystemBlock` would scroll
+  away by the next turn and then be fed back to the model as context it
+  has no use for, and it has nowhere to put a copy door.
+- **Judgment call: reuse the boot-time update check, add nothing.**
+  `DoxaApp._check_for_update` already runs one `git fetch` per launch on a
+  worker; it now records its *answer* (`update_available`) as well as
+  firing its notification, and `/about` reads that. The dialog opens no
+  network call of its own — a modal that fetches on the UI thread is a
+  modal that hangs. Three states, and the third is load-bearing: `True`,
+  `False` (checked, nothing to pull) and `None` (nobody looked, or the
+  check failed the silent way it is designed to). `None` prints nothing,
+  because "up to date" and "unchecked" are different claims.
+- **Every row is measured.** The interpreter reports its own version, the
+  dependencies report theirs (`__version__` first, distribution metadata
+  second), the config path is resolved rather than assumed. `lore_core`
+  carries no `__version__` at all, so the LORE row reads the plugin
+  manifest beside it (`.claude-plugin/plugin.json`) rather than DOXA
+  inventing a version attribute in somebody else's read-only repo — and
+  the store path comes from `lore_core.ROOT` itself, not from re-reading
+  `LORE_ROOT`, which lore_core resolves once at its own import and which
+  could since have drifted. A row whose source cannot answer is
+  **omitted**, never filled with a plausible constant: the whole job of
+  this screen is to be quotable.
+- `c` copies the exact visible text to the clipboard through the app's own
+  `copy_to_clipboard`, the same door the sessions picker already uses.
+- **Judgment call: the sha is always shown here.** `version_line` hides it
+  when the surrounding view already carries it, because the identity block
+  sits directly above a git chip printing the same hex string. `/about` is
+  its own screen with no such neighbour, and "which commit is this code"
+  is the second thing a bug report needs after the version.
+- **Judgment call: the settings modal's "About" tab was left alone.** It
+  already existed and answers a different question — account, plan,
+  organization — and merging the two would be scope this item's name does
+  not imply. It gains one sentence pointing at `/about` for the build
+  report, so the app has two surfaces and one pointer rather than two
+  half-answers to "what am I running".
+
+### Tests
+
+**807 green** (785 before, 22 new: 13 for X, 9 for Z). Every new test was
+run against pre-change code first and fails there — the point of the bar
+v0.28.0 set is that a test which cannot fail is not evidence. The
+assertions are user-visible outcomes throughout: the status bar's
+markup-stripped text, the tooltip the bar hands back for a real hover
+coordinate, rendered widget height, the screen's own hit test, the
+generated `/help` text, and a real daemon socket for the engine/client
+parity.
+
+`tests/test_tab_status.py::test_done_unseen_marks_a_background_tab_and_clears_on_activation`
+remains the known flake (mount-time prompt focus activates a tab
+asynchronously); focus ownership is a queued decision and was not touched.
+
 ## 0.34.0 — 2026-08-24
 
 `doxa/app.py` came apart. It was 6,415 lines — 36% of the package, larger

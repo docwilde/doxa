@@ -17,10 +17,22 @@ must report 0.5.0 -- what is EXECUTING is the checkout.
 The git identity of a source checkout (short sha, plus ``+`` when the tree
 is dirty) is available too, and is shown only where it says something the
 status bar's git chip does not -- see ``SessionPane._identity_text``.
+
+Item Z widened this module from "the version" to "which install is this":
+:func:`about_rows` / :func:`about_text` are what ``/about`` renders, and
+they belong here because every one of those rows is the same kind of fact
+as the version itself -- measured off the running thing, never configured
+and never guessed. A row whose source cannot answer is omitted, on the
+same rule the identity block follows: a screen whose job is to be quoted
+into a bug report may not contain a plausible-looking constant.
 """
 
 from __future__ import annotations
 
+import importlib
+import json
+import os
+import platform
 import subprocess
 import tomllib
 from functools import lru_cache
@@ -138,6 +150,146 @@ def source_dirty() -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return proc.returncode == 0 and bool(proc.stdout.strip())
+
+
+def lore_core_version() -> "str | None":
+    """The LORE plugin's declared version, or None.
+
+    ``lore_core`` carries no ``__version__`` of its own (checked against
+    the installed package): it ships INSIDE the LORE Claude Code plugin,
+    whose ``.claude-plugin/plugin.json`` is the file that declares a
+    version, and that manifest sits beside the ``lore_core`` package
+    directory ``doxa._lore_bootstrap`` already resolves. So this reads the
+    manifest rather than inventing a version attribute in somebody else's
+    read-only repo. Any failure is None -- an /about row that cannot be
+    filled is omitted, never guessed."""
+    from . import _lore_bootstrap
+
+    manifest = (
+        _lore_bootstrap._lore_core_parent() / ".claude-plugin" / "plugin.json"
+    )
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    version = (data or {}).get("version") if isinstance(data, dict) else None
+    return str(version) if version else None
+
+
+def _dep_version(module_name: str, dist_name: str) -> "str | None":
+    """A dependency's version: its own ``__version__`` first, the installed
+    distribution metadata second, None if neither answers. Both tiers are
+    needed -- ``textual`` and ``claude_agent_sdk`` both expose the
+    attribute today, but a wheel that stops doing so should degrade to the
+    metadata rather than blanking the row of a bug-report screen."""
+    try:
+        module = importlib.import_module(module_name)
+    except Exception:  # noqa: BLE001 -- an unimportable dep is a row, not a crash
+        module = None
+    declared = getattr(module, "__version__", None) if module is not None else None
+    if declared:
+        return str(declared)
+    try:
+        from importlib.metadata import version as dist_version
+
+        return str(dist_version(dist_name))
+    except Exception:  # noqa: BLE001 -- PackageNotFoundError and friends
+        return None
+
+
+# The repository and licence a bug report needs to know it may quote code
+# at all. Public repo, and a NONCOMMERCIAL licence -- stating that on the
+# about screen is the same honesty the README's badge row already carries,
+# not a legal notice bolted on.
+REPO_URL = "https://github.com/docwilde/doxa"
+LICENCE = "DOXA Noncommercial License 1.0"
+
+
+def about_rows(
+    update_available: "bool | None" = None,
+) -> "list[tuple[str, str]]":
+    """``(label, value)`` for ``/about`` -- the version, and everything
+    else a bug report has to state before anyone can reproduce it.
+
+    Every row is MEASURED at call time from the thing itself: the running
+    interpreter, the imported packages, the resolved config path. A row
+    whose source cannot answer is omitted rather than filled with a
+    plausible-looking constant, on the same rule the identity block
+    follows -- an about screen that guesses is worse than one with a gap,
+    because its whole job is to be quotable.
+
+    The sha is ALWAYS shown here, unlike :func:`version_line`, which hides
+    it when the surrounding view already carries it. That suppression
+    exists because the identity block sits directly above a git chip
+    printing the same hex string; ``/about`` is its own screen with no
+    such neighbour, and "which commit is this code" is the second thing a
+    bug report needs after the version.
+
+    ``update_available`` is threaded in by the caller rather than checked
+    here: ``doxa.update.check_for_update`` runs a ``git fetch``, DoxaApp
+    already runs it once per boot off a worker
+    (``DoxaApp._check_for_update``), and a modal must not open a network
+    call on the UI thread to decorate one line. ``None`` means "nobody has
+    looked", which prints nothing at all -- distinct from "looked, nothing
+    to pull"."""
+    from . import config as config_mod
+
+    version = resolve_version()
+    sha = source_sha()
+    if sha:
+        version += f" ({sha}{'+' if source_dirty() else ''})"
+    if update_available:
+        version += "  · update available (/update)"
+    rows: "list[tuple[str, str]]" = [("doxa", version)]
+    rows.append((
+        "python",
+        f"{platform.python_version()} ({platform.python_implementation()})",
+    ))
+    for label, module_name, dist_name in (
+        ("textual", "textual", "textual"),
+        ("agent sdk", "claude_agent_sdk", "claude-agent-sdk"),
+    ):
+        found = _dep_version(module_name, dist_name)
+        if found:
+            rows.append((label, found))
+    # The store PATH comes from lore_core itself (``lore_core.ROOT``, the
+    # same attribute SessionEngine.lore_root reports), not from re-reading
+    # LORE_ROOT: lore_core resolves that variable once at ITS import and a
+    # later change to the environment would make this row disagree with
+    # the store actually in use. The env var is only the fallback for a
+    # machine where lore_core is not importable at all.
+    lore_version = lore_core_version()
+    lore_root = ""
+    try:
+        import lore_core
+
+        lore_root = str(lore_core.ROOT)
+    except Exception:  # noqa: BLE001 -- plugin absent: the row degrades
+        lore_root = os.environ.get("LORE_ROOT", "").strip()
+    lore_bits = [bit for bit in (lore_version, lore_root) if bit]
+    if lore_bits:
+        rows.append(("lore", "  ".join(lore_bits)))
+    rows.append((
+        "platform",
+        f"{platform.system()} {platform.release()} ({platform.machine()})",
+    ))
+    config_file = config_mod.config_path()
+    rows.append((
+        "config",
+        f"{config_file}" + ("" if config_file.exists() else "  (not written yet)"),
+    ))
+    rows.append(("repo", REPO_URL))
+    rows.append(("licence", LICENCE))
+    return rows
+
+
+def about_text(update_available: "bool | None" = None) -> str:
+    """:func:`about_rows` as the block of text the dialog shows and its
+    copy door puts on the clipboard -- one function, so what a user pastes
+    into an issue is byte-for-byte what they were looking at."""
+    rows = about_rows(update_available)
+    width = max(len(label) for label, _value in rows)
+    return "\n".join(f"{label:<{width}}  {value}" for label, value in rows)
 
 
 def version_line(head_sha: "str | None" = None) -> str:

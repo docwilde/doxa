@@ -380,6 +380,25 @@ terminal actually honored it. `doxa doctor` runs the same checks with no
 TUI at all (what `scripts/install.sh` runs at the end of a fresh install)
 and exits 1 if anything failed; `/setup` runs it too, as its last step.
 
+**Context headroom, in tokens.** The status bar's `ctx` chip escalates
+normal → amber → red as the window fills, and hovering it says how many
+tokens are in the window, how many the window holds, and how many are
+left — because 12% of a 200k window and 12% of a 1M window are different
+situations, and DOXA drives models with both. The percentage alone is
+what the chip costs the bar by default; `ctx_absolute` prints `24k/200k`
+beside it, and drops that segment again below 100 columns rather than
+pushing other chips off the row. A context limit the CLI never reported
+reads `?` and stays `?` — DOXA does not substitute a window size it did
+not measure. `/usage` prints the same numbers exactly, with separators.
+
+**`/about`.** One screen with everything a bug report has to state: the
+DOXA version (with its sha, and a `+` when the checkout is dirty), whether
+an update is waiting, the Python, Textual and Claude Agent SDK versions,
+the LORE plugin version and store path, the platform, and the config file
+actually in force. `c` copies the whole thing, so it gets pasted rather
+than retyped. No row is a constant — each is read off the thing it names,
+and one that cannot be filled is left out rather than guessed.
+
 **Identity and auth.** The session-start block and status line report the
 plan you actually have — DOXA prefers the precise tier the `claude` CLI
 keeps locally over the SDK's coarser `subscriptionType` string, and shows
@@ -510,6 +529,7 @@ survives being opened by an older one.
 | `consult_floor` | `DOXA_CONSULT_FLOOR` | 1.0 | act-time belief-consult threshold; 0 disables it |
 | `background` | `DOXA_BACKGROUND` | `opaque` | `opaque` paints DOXA's own base (today's look); `transparent` stops painting it so an already-transparent terminal shows through — the terminal itself still has to be configured that way |
 | `nerd_font` | `DOXA_NERD_FONT` | off | use a Nerd Font glyph for the branch chip |
+| `ctx_absolute` | `DOXA_CTX_ABSOLUTE` | off | print `24k/200k` beside the `ctx%` chip; dropped again below 100 columns, and the numbers are in the chip's tooltip either way |
 | `image_mode` | `DOXA_IMAGE_MODE` | probe | force a rung of the image ladder (`kgp`/`sixel`/`halfblock`/`text`) |
 | `show_reasoning` | `DOXA_SHOW_REASONING` | **on** | stream the model's summarized reasoning into a collapsed per-turn fold; `0` stops DOXA asking to see it |
 | `clock_show` | `DOXA_CLOCK_SHOW` | **on** | show the upper-right clock (the one bool here that defaults on — `0` turns it off) |

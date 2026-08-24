@@ -83,6 +83,12 @@ class EngineClient:
         self.cwd: str | None = None
         self.total_cost_usd = 0.0
         self.last_ctx_percentage: float | None = None
+        # Item X (ctx absolute): engine parity for the absolute halves of
+        # the same measurement -- SessionEngine carries these under the
+        # same names, and the status bar reads whichever object it has
+        # without knowing which side of the socket it is on.
+        self.last_ctx_tokens: int | None = None
+        self.last_ctx_max_tokens: int | None = None
         # Identity surface, cached from status replies -- same engine-parity
         # attributes SessionEngine carries (account fields the CLI actually
         # reported at connect; {} / None until the first status refresh).
@@ -265,6 +271,14 @@ class EngineClient:
                 self.total_cost_usd = ev.data["session_cost_usd"]
             if ev.data.get("ctx_percentage") is not None:
                 self.last_ctx_percentage = ev.data["ctx_percentage"]
+            # Item X: absolute halves of the same reading, cached the same
+            # way. Guarded individually rather than as a group -- a daemon
+            # too old to send them must leave the last known values alone
+            # rather than blanking them on every turn.
+            if ev.data.get("ctx_tokens") is not None:
+                self.last_ctx_tokens = ev.data["ctx_tokens"]
+            if ev.data.get("ctx_max_tokens") is not None:
+                self.last_ctx_max_tokens = ev.data["ctx_max_tokens"]
         elif ev.type == "tool_disabled":
             name = ev.data.get("name")
             if name and name not in self._disabled:
@@ -378,6 +392,8 @@ class EngineClient:
         if status.get("total_cost_usd") is not None:
             self.total_cost_usd = status["total_cost_usd"]
         self.last_ctx_percentage = status.get("ctx_percentage")
+        self.last_ctx_tokens = status.get("ctx_tokens")
+        self.last_ctx_max_tokens = status.get("ctx_max_tokens")
         self._belief_count = int(status.get("belief_count") or 0)
         if isinstance(status.get("usage"), dict):
             self._usage = status["usage"]

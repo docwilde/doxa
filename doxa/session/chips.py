@@ -32,6 +32,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable  # noqa: F401 -- annotation-only
 
+from .. import config as config_mod
 from .. import identity as identity_mod
 from .. import peers as peers_mod
 from ..engine import BELIEF_LIST_LIMIT, PENDING_LIST_LIMIT
@@ -39,13 +40,44 @@ from ..history import SessionSearch
 from ..ui.dialogs import ChipPicker, CompactConfirm, NeedsInputPopup, SlashComplete
 from ..ui.labels import (
     CLICKABLE_CHIP_ACCENT,
+    CTX_ABSOLUTE_MIN_COLS,
     _belief_scope_label,
     _chip_span,
     _fmt_belief_row,
     _fmt_pending_row,
     ctx_chip,
 )
+from ..ui.labels import ctx_text as ctx_text_of
 from ..ui.statusline import StatusBar
+
+
+def _ctx_tooltip_absolute(used: "int | None", limit: "int | None") -> str:
+    """The ctx chip's tooltip lead -- item X's actual guarantee.
+
+    The inline `24k/200k` segment is optional and width-gated; THIS is
+    not. Whatever the chip is painting, hovering it says how many tokens
+    are in the window and how many the window holds, in full, with
+    separators -- "12% of a 200k window" and "12% of a 1M window" are
+    different situations and the percentage alone cannot tell them apart.
+
+    An unreported limit is named as unreported. There is no fallback
+    constant to reach for: DOXA drives several models, and the Models API
+    was measured unreachable under OAuth-only auth in this project, so a
+    hardcoded 200000 here would be a number DOXA made up presented in the
+    same sentence as two it measured."""
+    if used is None and limit is None:
+        return "context window usage (the CLI has not reported any yet)"
+    if limit is None:
+        return (
+            f"{used:,} tokens in the context window; its limit is not "
+            "something this session's CLI reported"
+        )
+    if used is None:
+        return f"context window holds {limit:,} tokens"
+    return (
+        f"{used:,} of {limit:,} tokens used, {max(limit - used, 0):,} left "
+        "in the context window"
+    )
 
 
 @dataclass(frozen=True)
@@ -117,6 +149,41 @@ class PaneChipsMixin:
         bar = self.query_one("#status-bar", StatusBar)
         bar.update("  ·  ".join(chip.render() for chip in chips))
         bar.set_chip_hints([hint for chip in chips for hint in chip.hints])
+
+    def _ctx_absolute_inline(self) -> bool:
+        """Should the ctx chip print `24k/200k` beside its percentage?
+
+        Two conditions, and both are about width, which is the scarcest
+        thing on this row (:data:`~doxa.ui.labels.TAB_MODEL_MIN` and its
+        neighbour exist one widget over for the same reason):
+
+        1. the user asked for it -- ``DOXA_CTX_ABSOLUTE`` / the settings
+           modal's "ctx: absolute tokens", off by default, because the
+           tooltip already answers the question for free; and
+        2. the terminal is at least
+           :data:`~doxa.ui.labels.CTX_ABSOLUTE_MIN_COLS` wide.
+
+        The second is the graceful degradation the status bar needs: a
+        chip list that overflows does not scroll, it pushes the chips to
+        its right off the end of the row, so the segment that is a
+        convenience gives way to the chips that are information. An app
+        that cannot be measured (no screen yet, at construction) counts as
+        wide enough -- refusing to render something because the size is
+        not known yet would make the chip flicker on at first repaint.
+
+        Re-evaluated on the ordinary event-driven refreshes (boot, turn
+        done, peer events), never from a resize hook: this whole bar is
+        built under a documented no-timer, no-per-frame rule (see
+        :class:`~doxa.ui.statusline.GitLine`), and ``_refresh_status``
+        runs a belief COUNT(*) -- hanging that off every frame of a
+        mouse-drag resize is exactly the idle-CPU regression this app
+        already paid to shed. Narrowing a window therefore drops the
+        segment at the next refresh, not mid-drag."""
+        if not config_mod.raw("DOXA_CTX_ABSOLUTE").strip():
+            return False
+        width = getattr(getattr(self, "app", None), "size", None)
+        width = getattr(width, "width", 0)
+        return not width or width >= CTX_ABSOLUTE_MIN_COLS
 
     def _status_chips(self) -> "list[StatusChip]":
         """Every chip this pane's status line shows, in paint order.
@@ -209,13 +276,33 @@ class PaneChipsMixin:
         # _escape_markup: the accent shows through at the "normal" tier
         # (no inner color) and yields to the pressure color once one
         # applies -- the pressure signal outranks the click affordance.
-        ctx_text = ctx_chip(engine.last_ctx_percentage)
+        #
+        # Item X (ctx absolute): the percentage and the absolute token
+        # counts are ONE reading (SessionEngine._safe_ctx_usage), so they
+        # are one chip. The inline `24k/200k` half is opt-in and
+        # width-gated -- see _ctx_absolute_inline -- but the numbers
+        # themselves are UNCONDITIONAL in the tooltip below, which is what
+        # actually answers "12% of what?" without spending a column.
+        used = getattr(engine, "last_ctx_tokens", None)
+        limit = getattr(engine, "last_ctx_max_tokens", None)
+        inline = self._ctx_absolute_inline()
+        ctx_plain = ctx_text_of(
+            engine.last_ctx_percentage, used, limit, absolute=inline
+        )
+        ctx_markup = ctx_chip(
+            engine.last_ctx_percentage, used, limit, absolute=inline
+        )
         chips.append(StatusChip.raw(
-            ctx_text,
-            f"[@click=compact_now][{CLICKABLE_CHIP_ACCENT}]{ctx_text}[/][/]",
+            # The KEY (and the tooltip's match string) is the PLAIN text,
+            # never the colored markup: StatusBar._tooltip_for_x looks the
+            # chip up inside the bar's markup-stripped string, so a key
+            # still carrying `[#D9534F]…[/]` matched nothing and the ctx
+            # tooltip silently vanished at the amber and red tiers.
+            ctx_plain,
+            f"[@click=compact_now][{CLICKABLE_CHIP_ACCENT}]{ctx_markup}[/][/]",
             ((
-                ctx_text,
-                "percentage of the context window consumed -- click to "
+                ctx_plain,
+                f"{_ctx_tooltip_absolute(used, limit)} -- click to "
                 "compact (asks first: compacting summarizes and discards "
                 "earlier detail)",
             ),),

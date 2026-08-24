@@ -173,8 +173,17 @@ class SettingsScreen(ModalScreen["bool"]):
         local = identity_mod.local_account()
         yield Static("version", classes="setting-label")
         yield Static(f"DOXA {__version__}", classes="setting-value")
-        yield Static("Run /update to pull and apply the latest release.",
-                     classes="setting-help")
+        # This tab stays about the ACCOUNT (item Z deliberately did not
+        # merge the two): /about is the BUILD report -- sha, Python,
+        # Textual, Agent SDK, LORE, platform, config path -- and copies
+        # itself for a bug report. Two surfaces, one pointer, rather than
+        # two half-answers to "what am I running".
+        yield Static(
+            "Run /update to pull and apply the latest release; /about "
+            "reports the full build (sha, Python, Textual, Agent SDK, LORE, "
+            "platform, config path) and copies itself for a bug report.",
+            classes="setting-help",
+        )
         email = self.account.get("email") or local.get("emailAddress")
         if email:
             yield Static("account", classes="setting-label")

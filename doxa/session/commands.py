@@ -34,6 +34,7 @@ from .. import identity as identity_mod
 from .. import peers as peers_mod
 from .. import version as version_mod
 from ..peers import PeerSendError, age_secs
+from ..ui.dialogs import AboutDialog
 from ..ui.labels import MODEL_ALIASES, _fmt_age, help_text
 from ..ui.transcript import ImageBlock
 
@@ -91,6 +92,7 @@ PANE_COMMANDS: "tuple[CommandBinding, ...]" = (
     CommandBinding("/pending", "_cmd_pending"),
     CommandBinding("/update", "_cmd_update"),
     CommandBinding("/help", "_cmd_help"),
+    CommandBinding("/about", "_cmd_about"),
 )
 
 
@@ -283,9 +285,26 @@ class PaneCommandsMixin:
         ):
             if key in summary:
                 rows.append((label, f"{int(summary.get(key) or 0):,}"))
+        # Item X (ctx absolute): the percentage and its absolute halves are
+        # ONE reading (SessionEngine._safe_ctx_usage) and print as one row.
+        # An unreported window size says so out loud -- /usage is a surface
+        # people paste into bug reports, and a guessed 200000 pasted into a
+        # bug report is worse than a blank.
         ctx = summary.get("ctx_percentage")
+        ctx_used = summary.get("ctx_tokens")
+        ctx_limit = summary.get("ctx_max_tokens")
+        ctx_bits: list[str] = []
         if ctx is not None:
-            rows.append(("context", f"{float(ctx):.0f}%"))
+            ctx_bits.append(f"{float(ctx):.0f}%")
+        if ctx_used is not None or ctx_limit is not None:
+            used_text = f"{int(ctx_used):,}" if ctx_used is not None else "?"
+            ctx_bits.append(
+                f"{used_text} / {int(ctx_limit):,} tokens"
+                if ctx_limit is not None
+                else f"{used_text} tokens (window size not reported)"
+            )
+        if ctx_bits:
+            rows.append(("context", "  ".join(ctx_bits)))
         account = getattr(engine, "account", None) or {}
         tier = identity_mod.account_tier(account)
         cost = float(summary.get("total_cost_usd") or 0.0)
@@ -511,6 +530,24 @@ class PaneCommandsMixin:
 
     async def _cmd_help(self, args: str) -> None:
         await self._system(help_text())
+
+    async def _cmd_about(self, args: str) -> None:
+        """``/about`` (item Z) -- the version, and the rest of what a bug
+        report has to state, as a modal rather than a transcript block.
+
+        A modal, not a SystemBlock, for two reasons: it is a property of
+        the INSTALLATION rather than of this conversation (a block would
+        be scrolled away by the next turn and then quoted back to the
+        model as context it has no use for), and it needs a copy door,
+        which a block has nowhere to put.
+
+        The update flag is whatever the boot-time worker already found
+        (``DoxaApp._check_for_update``); this opens no network call of its
+        own, because a modal that fetches on the UI thread is a modal that
+        hangs."""
+        self.app.push_screen(
+            AboutDialog(getattr(self.app, "update_available", None))
+        )
 
     async def _cmd_img(self, args: str) -> None:
         # Debug render site for image support -- see ImageBlock.

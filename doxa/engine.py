@@ -344,6 +344,16 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _as_tokens(value: Any) -> "int | None":
+    """A token count out of an SDK reply field, or None. Item X: a
+    non-numeric, negative or absent field is UNKNOWN -- coerced to 0 it
+    would paint as "0 tokens used", which is a confident lie where None
+    paints as an honest em-dash."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value) if value >= 0 else None
+
+
 def _tool_result_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -442,6 +452,16 @@ class SessionEngine:
         self._tool_started: dict[str, float] = {}  # tool_use_id -> monotonic start
         self.total_cost_usd = 0.0
         self.last_ctx_percentage: float | None = None
+        # Item X (ctx absolute): the ABSOLUTE halves of the very same
+        # measurement the percentage above comes from. ONE call to the
+        # SDK's get_context_usage() already returns totalTokens/maxTokens
+        # alongside percentage (see :meth:`_safe_ctx_usage`), so this is
+        # that accounting path WIDENED, never a second one. Either may
+        # stay None -- a client with no get_context_usage at all, or a
+        # reply that omits the limit -- and every surface then says so
+        # rather than substituting a guessed window size.
+        self.last_ctx_tokens: int | None = None
+        self.last_ctx_max_tokens: int | None = None
         # Reasoning-effort level asserted at connect (item T's status-bar
         # chip) -- None until _build_options runs, same as every other
         # connect-time field here (server_info, account).
@@ -1238,8 +1258,10 @@ class SessionEngine:
                         value = message.usage.get(field_name)
                         if isinstance(value, (int, float)):
                             self.usage_totals[field_name] += int(value)
-                ctx_percentage = await self._safe_ctx_percentage()
+                ctx_percentage, ctx_tokens, ctx_max = await self._safe_ctx_usage()
                 self.last_ctx_percentage = ctx_percentage
+                self.last_ctx_tokens = ctx_tokens
+                self.last_ctx_max_tokens = ctx_max
                 yield EngineEvent("turn_done", {
                     "duration_ms": message.duration_ms,
                     "cost_usd": message.total_cost_usd,
@@ -1247,6 +1269,11 @@ class SessionEngine:
                     "num_turns": message.num_turns,
                     "is_error": message.is_error,
                     "ctx_percentage": ctx_percentage,
+                    # Item X: the same measurement's absolute halves, on
+                    # the same event, so an attached EngineClient caches
+                    # all three from one frame (doxa.client._handle_event).
+                    "ctx_tokens": ctx_tokens,
+                    "ctx_max_tokens": ctx_max,
                 })
                 # The transcript just grew: the streaming deriver's one
                 # trigger site (debounced + single-flight inside).
@@ -1311,18 +1338,38 @@ class SessionEngine:
             "num_turns": self.num_turns,
             "total_cost_usd": self.total_cost_usd,
             "ctx_percentage": self.last_ctx_percentage,
+            "ctx_tokens": self.last_ctx_tokens,
+            "ctx_max_tokens": self.last_ctx_max_tokens,
             **self.usage_totals,
         }
 
-    async def _safe_ctx_percentage(self) -> float | None:
+    async def _safe_ctx_usage(self) -> "tuple[float | None, int | None, int | None]":
+        """``(percentage, used_tokens, limit_tokens)`` from ONE
+        ``get_context_usage()`` call -- the SDK returns all three keys
+        (``percentage`` / ``totalTokens`` / ``maxTokens``) in a single
+        reply, so item X's absolute numbers cost no extra round trip and,
+        more importantly, cannot disagree with the percentage beside them.
+
+        Any missing or non-numeric field comes back None on its own: the
+        limit in particular is the one DOXA must never invent. A prior
+        measurement in this project found the Models API unreachable under
+        OAuth-only auth, so there is no second place to look it up -- an
+        absent ``maxTokens`` is reported as unknown, not defaulted to
+        200000, which would read as fact and be wrong the moment a
+        million-token window is in play."""
         get_usage = getattr(self._client, "get_context_usage", None)
         if get_usage is None:
-            return None
+            return None, None, None
         try:
             usage = await get_usage()
-            return usage.get("percentage")
         except Exception:
-            return None
+            return None, None, None
+        percentage = usage.get("percentage")
+        return (
+            float(percentage) if isinstance(percentage, (int, float)) else None,
+            _as_tokens(usage.get("totalTokens")),
+            _as_tokens(usage.get("maxTokens")),
+        )
 
     def belief_count(self) -> int:
         """Active belief count for the status bar -- same query
