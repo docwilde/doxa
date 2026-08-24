@@ -4,6 +4,106 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.23.0 — 2026-08-24
+
+- **Tab restore (queue item D)** — **this item's original spec text did
+  not survive to the session that built it.** What follows is RE-DERIVED
+  from the item's name plus the surviving codebase — most tellingly,
+  `doxa/naming.py` already forward-referenced it verbatim, from a much
+  earlier version: "a restart (item D's window restore) reuses the [tab]
+  name rather than spending a second call on the same session." Every
+  judgment call this re-derivation required is flagged below.
+  - **THE DEFECT**: sessions are daemons that outlive the TUI (the whole
+    point of the daemon split) — closing the window and reopening it does
+    NOT bring the tab set back. Plain `doxa` only ever reattaches to the
+    SINGLE most recent live session in a repo's scope
+    (`doxa.cli`'s spawn-or-attach), so a multi-tab working set was lost on
+    every restart even though every daemon behind it was still alive and
+    attachable.
+  - **New `doxa/tabsets.py`**: one small JSON record per repo scope under
+    `$DOXA_HOME/tabsets/<sha256-of-scope-key>.json` (the scope key is the
+    same `peers.main_repo_root_of` key spawn-or-attach and peer discovery
+    already group daemons by, hashed because a filesystem path is not a
+    safe filename) — ordered session ids, each with its pinned name (if
+    any), and which one was active. Atomic writes (tmp file + rename),
+    0600, same discipline as `doxa.config`'s settings file; a missing,
+    unreadable, or malformed record degrades to "nothing to restore,"
+    never a crash — `doxa.config.load`'s own rule, applied here.
+  - **Restore is a cross-check, not a replay**: `tabsets.resolve()` reads
+    the saved record and filters it against the LIVE daemon registry
+    (`peers.list_daemons`) for that scope. A saved session id the registry
+    no longer knows about (finalized, killed, machine rebooted) is dropped
+    SILENTLY and counted — it must never spawn a replacement (that would
+    not be the session the user left) and must never block startup.
+    `doxa.cli` reports the outcome in a `SystemBlock` on the first
+    restored tab ("tab restore: restored 3 tabs, skipped 1 session no
+    longer running.") rather than differing silently from what the user
+    left; when EVERY saved session turns out to be dead, `doxa` still
+    spawns exactly one fresh tab (never zero) and the report still lands
+    on it.
+  - **Stopped vs. detached, made consistent with the record**: v0.17's
+    `detached_on_purpose` / stop-path split already distinguished these; a
+    session the user explicitly STOPPED (`doxa stop`, Ctrl+Q, "Quit: stop
+    session") leaves the persisted set for good (`SessionPane.stop`
+    now marks the pane `_stopped` before anything else, and
+    `_persist_tabset` excludes it), while a session merely DETACHED
+    (Ctrl+W, Ctrl+C once, "Quit: detach") STAYS in the set even though its
+    tab leaves the strip — tracked in a small `DoxaApp._detached_this_run`
+    map so a closed-but-still-running tab does not silently drop out of
+    the file it is no longer mounted in.
+  - **New setting `restore_tabs`** (`DOXA_RESTORE_TABS`, category Session,
+    `bool_on`, default **ON** — the house pattern `worktree_per_session`
+    already established). **Judgment call**: the toggle gates only the
+    READ side — whether a launch RESTORES from the saved set. Persisting
+    the record happens unconditionally (same posture as `naming.py`'s
+    name cache), so turning the setting back on has real history to
+    restore from immediately, and turning it off never needs a separate
+    "forget my tabs" action.
+  - **Judgment call, flagged as asked**: whether a plain `doxa` with a
+    saved set restores the WHOLE set or still does today's
+    single-most-recent spawn-or-attach. This ships restore-the-set — that
+    IS the feature — with `doxa attach <prefix>` staying the single-session
+    path either way, and `doxa new` always forcing exactly one fresh tab
+    and never consulting the saved set at all (though its own tab
+    still gets persisted like any other, for the NEXT restore).
+  - **Judgment call**: "tab reordering" is named in the item's title but
+    there is no drag-or-move UI for tabs anywhere in DOXA today (Textual's
+    `Tabs` widget exposes no such affordance here) — the persisted order
+    is simply read from the live tab-bar order at each save point (open,
+    rename, close, exit), which already tracks any future reorder feature
+    for free without a dedicated hook.
+  - **Judgment call**: a multi-tab restore's saved order is guaranteed
+    even though the resolved daemons attach concurrently and in whatever
+    order they happen to answer — `DoxaApp._restore_pending` counts every
+    restored pane's boot down to zero before the FIRST persisted write,
+    so a mid-connect crash can never truncate the file to whichever tab
+    happened to answer first.
+  - **doxa.app wiring**: `SessionPane` gained `_session_id` (cached
+    outside `self.engine` so it survives `detach()`/`stop()` clearing that
+    handle — `_persist_tabset` reads this, never `engine.session_id`),
+    `_stopped`, and restore-only `_initial_pinned_name`/`_boot_report`.
+    `DoxaApp` gained `RestoreTabSpec`, `restore_tabs`/`restore_active_id`/
+    `restore_report` constructor params, and `_persist_tabset`/
+    `_note_pane_booted`, called from every tab-lifecycle site: boot
+    completion, `/rename`, `_close_pane`, `_stop_active`, `action_quit`,
+    `action_quit_stop`.
+  - **Tests**: `tests/test_tabsets.py` (22 — save/load round-trip, atomic
+    write + 0600, corrupt/missing/empty record all degrade to
+    "nothing to restore," `resolve()`'s dead-session filtering and
+    saved-order preservation, scope isolation, and the full `DoxaApp`
+    wiring: persist on open/rename/detach/stop/quit, detached-stays-
+    stopped-leaves, and a multi-tab restore's order/names/active tab/
+    report) plus `tests/test_cli_restore.py` (8 — `doxa`'s restore-vs-
+    single-attach decision, the toggle, `doxa new`/`doxa attach` bypassing
+    restore, and `_run_restored`'s own plumbing). 657 tests green (627
+    baseline + 30).
+  - **README**: the daemon/quickstart section gains a paragraph on
+    restore, and the configuration table gains the `restore_tabs` row.
+    **Assets**: no shot or GIF regenerated — nothing in the tab strip's
+    visual chrome (labels, colors, the rename editor) changed; the only
+    new visible surface is a one-line `SystemBlock` report on restore,
+    which is plain scrolled text, not a scene the existing gallery frames.
+
 ## 0.22.0 — 2026-08-24
 
 - **Clickable status-bar chips: a shared dropdown picker, model and

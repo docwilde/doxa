@@ -104,11 +104,24 @@ uv run doxa doctor   # read-only health checks, no TUI: pass/fail + fix per chec
 `uv run doxa` spawns a session **daemon** — a process of its own — and
 attaches the TUI to it as a thin client over a Unix socket. Closing the TUI
 (`ctrl+q`, or the palette's "Quit: detach") leaves the daemon running with
-no tmux involved; running `doxa` again in the same repo reattaches to it.
-The daemon finalizes the session (LORE's review + index pass) once every
-client has been detached for `--linger` seconds (120 by default), or
-immediately on `doxa stop`. `doxa --in-process` runs the engine inside the
-TUI instead, with no daemon and no detach — quitting finalizes on the spot.
+no tmux involved; running `doxa` again in the same repo restores the WHOLE
+tab set you left (order, pinned names, which tab was active — `restore_tabs`,
+**on** by default), reattaching every session still alive and reporting how
+many it skipped, rather than just the single most recent one. A saved
+session that finalized in the meantime (`doxa stop`, or its own `--linger`
+expiring) is skipped silently — restore never spawns a replacement for a
+tab that's actually gone — and shows up in that report instead
+(`tab restore: restored 2 tabs, skipped 1 session no longer running.`); a
+tab you closed with `ctrl+w` stays in the set (it only detached, it's
+still running), but one you explicitly stopped does not. `doxa new` always
+starts exactly one fresh tab and never restores; `doxa attach <prefix>`
+stays the single-session path either way; `$DOXA_RESTORE_TABS=0` turns the
+whole thing off and returns to attaching only the single most recent
+session. The daemon finalizes the session (LORE's review + index pass)
+once every client has been detached for `--linger` seconds (120 by
+default), or immediately on `doxa stop`. `doxa --in-process` runs the
+engine inside the TUI instead, with no daemon and no detach — quitting
+finalizes on the spot.
 
 Inside a git repo, each session also gets its own **git worktree** by
 default (`worktree_per_session`, `ctrl+,` or `$DOXA_WORKTREE=0` to turn it
@@ -175,7 +188,10 @@ running); `ctrl+←`/`ctrl+→` cycle tabs. A tab not currently in view still
 reports what it's doing by color: amber while a turn is running on it,
 green the moment that turn finishes unseen, clearing the instant you look
 — so a background tab never goes silently forgotten, and never demands a
-popup to say so either:
+popup to say so either. The whole set is remembered across restarts too
+(`restore_tabs`, see Quickstart above): quit and run `doxa` again in the
+same repo and every tab that's still running comes back, in order, named
+the way you left it:
 
 <p align="center"><img src="assets/shots/tab-lifecycle.gif" width="780" alt="A second tab starts a turn and turns amber (-working); switching to the first tab leaves it amber in the background; the turn finishes there and the tab turns green (-done-unseen); switching back clears it"></p>
 
@@ -402,6 +418,7 @@ survives being opened by an older one.
 | `derive_secs` | `DOXA_DERIVE_SECS` | off | streaming-deriver interval; unset runs review only at session end |
 | `linger_secs` | `DOXA_LINGER_SECS` | 120 | seconds a daemon outlives its last detached client |
 | `worktree_per_session` | `DOXA_WORKTREE` | **on** | give each session its own git worktree instead of sharing the launch directory |
+| `restore_tabs` | `DOXA_RESTORE_TABS` | **on** | plain `doxa` restores the whole saved tab set for this repo instead of just the most recent session |
 | `consult_floor` | `DOXA_CONSULT_FLOOR` | 1.0 | act-time belief-consult threshold; 0 disables it |
 | `nerd_font` | `DOXA_NERD_FONT` | off | use a Nerd Font glyph for the branch chip |
 | `image_mode` | `DOXA_IMAGE_MODE` | probe | force a rung of the image ladder (`kgp`/`sixel`/`halfblock`/`text`) |
@@ -451,10 +468,10 @@ checkout isn't at the default `~/.claude/plugins/marketplaces/lore`.
 ## Status
 
 DOXA is a working daily driver for its author, not a finished product.
-Shipped so far: the daemon/detach model, worktree-per-session, tabs, the
-command palette, `/search`, the trace tree, the image ladder, peer
-discovery, the settings modal described above, the `curl | sh` installer,
-`/setup`, `/doctor` / `doxa doctor`, and the clock — see
+Shipped so far: the daemon/detach model, worktree-per-session, tabs, tab
+restore, the command palette, `/search`, the trace tree, the image ladder,
+peer discovery, the settings modal described above, the `curl | sh`
+installer, `/setup`, `/doctor` / `doxa doctor`, and the clock — see
 [CHANGELOG.md](CHANGELOG.md) for the version-by-version history. Not yet built: session-history drill-in past
 `/search`'s result list, customizable keybindings, and a graphical
 context-window map. Interfaces (config keys, socket protocol, command
