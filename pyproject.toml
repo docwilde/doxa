@@ -1,6 +1,6 @@
 [project]
 name = "doxa"
-version = "0.15.0"
+version = "0.16.0"
 description = "A terminal for working with a Claude agent whose memory you can audit."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,6 +17,11 @@ doxa = "doxa.cli:main"
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
+    # scripts/record_gif.py's own frame-assembly step (rasterized SVG ->
+    # palette-quantized GIF) -- already on disk transitively via
+    # textual-image, but a script that imports `PIL.Image` directly earns
+    # its own line here rather than riding an app dependency's coattails.
+    "pillow>=11",
 ]
 
 [build-system]

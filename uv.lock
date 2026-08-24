@@ -234,7 +234,7 @@ wheels = [
 
 [[package]]
 name = "doxa"
-version = "0.15.0"
+version = "0.16.0"
 source = { editable = "." }
 dependencies = [
     { name = "claude-agent-sdk" },
@@ -245,6 +245,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "pillow" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -258,6 +259,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "pillow", specifier = ">=11" },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
 ]

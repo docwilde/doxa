@@ -3,16 +3,19 @@
 Drives DoxaApp headlessly, one Textual pilot session per SCENE, each scene
 scripting a FakeEngine (and, where a scene needs live-registry state the
 app would otherwise read from disk, patching doxa.peers for the duration)
-to put a real feature on screen: the shell mid-conversation, the /search
-popup, the command palette, the trace tree, a tab rename in progress, the
-settings modal, /sessions, and a belief-search tool call opened up. Saves
-each as assets/shots/<scene>.svg; convert to PNG with inkscape (CI does not
-need to -- the SVGs are committed too):
+to put a real feature on screen: the shell mid-conversation, the trace
+tree, the settings modal, /sessions, and a belief-search tool call opened
+up. Saves each as assets/shots/<scene>.svg; convert to PNG with inkscape
+(CI does not need to -- the SVGs are committed too):
 
     uv run python scripts/screenshot.py            # every scene
-    uv run python scripts/screenshot.py hero search # just these
+    uv run python scripts/screenshot.py hero trace  # just these
 
 One driver, so a UI change is one command away from a refreshed gallery.
+Interactive features (tab rename, the command palette, /search, tool-call
+compaction, markdown streaming, tab status colors) moved to ANIMATED demos
+instead -- see scripts/record_gif.py -- since a single still can't show an
+interaction; this file kept only the scenes a still genuinely suits.
 """
 from __future__ import annotations
 
@@ -29,7 +32,7 @@ sys.path.insert(0, str(ROOT))
 
 from datetime import datetime, timezone  # noqa: E402
 
-from doxa.app import DoxaApp, PromptInput, SessionSearch, ToolChip, TurnBlock  # noqa: E402
+from doxa.app import DoxaApp, ToolChip, TurnBlock  # noqa: E402
 from doxa.engine import EngineEvent  # noqa: E402
 from doxa.identity import Usage, UsageLimit  # noqa: E402
 from doxa.peers import PeerInfo  # noqa: E402
@@ -146,48 +149,6 @@ async def _drive_hero(app: DoxaApp, pilot) -> None:
 
 
 # --------------------------------------------------------------------- #
-# Scene: search -- the live /search popup, mid-query, snippets highlighted.
-# --------------------------------------------------------------------- #
-
-SEARCH_HITS = [
-    {"session_id": "f00dfeed01", "title": "deploy checklist rewrite",
-     "ts": "2026-08-19T14:02:00",
-     "snippet": "confirmed the [deploy] runbook now checks the [checklist] before tagging"},
-    {"session_id": "cafebabe02", "title": "kg-stats refactor",
-     "ts": "2026-08-17T09:41:00",
-     "snippet": "reused the same [deploy] gate from the [checklist] item for the batch job"},
-    {"session_id": "1234abcd03", "title": "onboarding notes",
-     "ts": "2026-08-11T18:20:00",
-     "snippet": "linked the release [checklist] from the team's [deploy] doc"},
-]
-
-
-async def _drive_search(app: DoxaApp, pilot) -> None:
-    await pilot.pause()
-    prompt = app.query_one("#prompt-input", PromptInput)
-    prompt.value = "/search deploy checklist"
-    await pilot.pause()
-    popup = app.query_one("#session-search", SessionSearch)
-    popup.display = True
-    popup._render("deploy checklist", SEARCH_HITS)
-    await pilot.pause()
-
-
-# --------------------------------------------------------------------- #
-# Scene: palette -- Ctrl+P, new tab / open tabs / grouped commands / attach.
-# --------------------------------------------------------------------- #
-
-async def _drive_palette(app: DoxaApp, pilot) -> None:
-    await pilot.pause()
-    await app.action_new_tab()
-    await pilot.pause()
-    daemons = [_peer("9988aabb04", "midnight repro session", clients=0)]
-    with mock.patch("doxa.peers.list_daemons", return_value=daemons):
-        await pilot.press("ctrl+p")
-        await _settle(pilot, 15)
-
-
-# --------------------------------------------------------------------- #
 # Scene: trace -- a Task call's subagent activity nested under its chip.
 # --------------------------------------------------------------------- #
 
@@ -263,24 +224,6 @@ async def _drive_memory(app: DoxaApp, pilot) -> None:
     app.query_one(TurnBlock).tool_section.collapsed = False
     await pilot.pause()
     chip.collapsed = False
-    await pilot.pause()
-
-
-# --------------------------------------------------------------------- #
-# Scene: rename -- a tab's inline editor, mid-edit.
-# --------------------------------------------------------------------- #
-
-async def _drive_rename(app: DoxaApp, pilot) -> None:
-    await pilot.pause()
-    await app.action_new_tab()
-    await pilot.pause()
-    await app.action_new_tab()
-    await pilot.pause()
-    pane = app.panes()[1]
-    await app._start_rename(pane)
-    await pilot.pause()
-    editor = app.query_one("#tab-rename")
-    editor.value = "kg-stats refi"
     await pilot.pause()
 
 
@@ -389,18 +332,10 @@ class Scene:
 SCENES: list[Scene] = [
     Scene("hero", _drive_hero, size=(172, 47), engine_factory=_hero_engine,
           new_session_factory=_sibling_tab_factory()),
-    Scene("search", _drive_search, size=(100, 26),
-          engine_factory=lambda: FakeEngine([], model="claude-opus-4-5")),
-    Scene("palette", _drive_palette, size=(120, 32),
-          engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
-          new_session_factory=lambda: FakeEngine([], model="claude-sonnet-4-5")),
     Scene("trace", _drive_trace, size=(172, 47),
           engine_factory=lambda: FakeEngine(TRACE_SCRIPT, model="claude-opus-4-5")),
     Scene("memory", _drive_memory, size=(172, 47),
           engine_factory=_hero_engine),
-    Scene("rename", _drive_rename, size=(120, 32),
-          engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
-          new_session_factory=_sibling_tab_factory()),
     Scene("settings", _drive_settings, size=(120, 32),
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5")),
     Scene("clock", _drive_clock, size=(120, 32),

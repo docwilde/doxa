@@ -127,17 +127,35 @@ exact arguments and the exact result text — here, one calibrated belief
 
 <p align="center"><img src="assets/shots/memory.png" width="780" alt="A lore_belief_search tool chip expanded, showing its JSON arguments and a result listing one STEER belief with an outcome count and one CITE-only belief"></p>
 
+**Markdown responses.** The agent's reply streams as real markdown, not
+literal text — tables, bold, fences, inline code — via `Markdown.get_stream`
+(Textual 5's append-only path built for LLM deltas), so a table or a bold
+span renders as it completes rather than waiting on the whole message.
+Chunk boundaries split mid-row and mid-span exactly like a real model
+stream does; the table below fills in row by row as the deltas that
+complete it arrive, then closes with a bold total and an inline-code tool
+name:
+
+<p align="center"><img src="assets/shots/markdown-stream.gif" width="780" alt="An agent reply streaming: prose appears first, then a three-row table fills in one row at a time, ending on a bold 'Total' line with an inline-code tool name"></p>
+
 **Tabs.** `SessionPane` widgets mount under a `TabbedContent`, one engine
 client per tab. `ctrl+t` opens a fresh session in a new tab (same repo
 scope); `ctrl+w` closes a tab and detaches its daemon (the session keeps
-running); `ctrl+←`/`ctrl+→` cycle tabs. Outside a git repo, or once a
-custom name is cleared, a tab names itself from its first turn with one
-cheap Haiku call, cached in `~/.doxa/names.toml` so a session is never
-renamed twice. Double-clicking a tab header (or `/rename`) opens an inline
-editor in the tab strip itself; Enter commits, Esc cancels, an empty name
-restores the automatic label:
+running); `ctrl+←`/`ctrl+→` cycle tabs. A tab not currently in view still
+reports what it's doing by color: amber while a turn is running on it,
+green the moment that turn finishes unseen, clearing the instant you look
+— so a background tab never goes silently forgotten, and never demands a
+popup to say so either:
 
-<p align="center"><img src="assets/shots/rename.png" width="780" alt="Three tabs in the tab strip; the second tab has become an inline text editor reading 'kg-stats refi', mid-rename"></p>
+<p align="center"><img src="assets/shots/tab-lifecycle.gif" width="780" alt="A second tab starts a turn and turns amber (-working); switching to the first tab leaves it amber in the background; the turn finishes there and the tab turns green (-done-unseen); switching back clears it"></p>
+
+Outside a git repo, or once a custom name is cleared, a tab names itself
+from its first turn with one cheap Haiku call, cached in
+`~/.doxa/names.toml` so a session is never renamed twice. Double-clicking a
+tab header (or `/rename`) opens an inline editor in the tab strip itself;
+Enter commits, Esc cancels, an empty name restores the automatic label:
+
+<p align="center"><img src="assets/shots/rename.gif" width="780" alt="Double-clicking the second tab opens an inline editor seeded with its old label; typing 'kg-stats refi' and pressing Enter commits the new name to the tab strip"></p>
 
 **Command palette and `/` autocomplete.** `ctrl+p` opens a palette listing
 new-tab, the open tabs (in tab-bar order, active one marked), every
@@ -147,7 +165,7 @@ at the start of the prompt opens the same list as a dropdown above the
 input. Both read one registry (`doxa/commands.py`); a command cannot exist
 on one surface and not the other.
 
-<p align="center"><img src="assets/shots/palette.png" width="780" alt="The Ctrl+P command palette open: a New tab entry, two open tabs with the active one marked, then grouped commands under dim section headers"></p>
+<p align="center"><img src="assets/shots/palette.gif" width="780" alt="Ctrl+P opens the command palette on New tab; arrowing down moves the highlight through the open tabs and grouped commands; Esc closes it and returns focus to the prompt"></p>
 
 **`/search`.** Full-text search over LORE's session index, live in a popup
 the moment you type `/search `. Debounced and sequence-guarded, so a slow
@@ -156,7 +174,7 @@ recent sessions. This is the one search path — `ctrl+r` opens it too. The
 matched terms are FTS5's own `snippet()` output, highlighted rather than
 re-matched:
 
-<p align="center"><img src="assets/shots/search.png" width="780" alt="The /search popup open over the prompt after typing '/search deploy checklist', showing three result rows with the matched words highlighted in each snippet"></p>
+<p align="center"><img src="assets/shots/search.gif" width="780" alt="Typing '/search deploy' opens the popup on one result; completing the query to '/search deploy checklist' brings up three, matched words highlighted; arrowing down moves the selection through row 2 and row 3"></p>
 
 **Trace tree.** A subagent spawned by the `Task` tool streams its own text
 and tool calls, which nest as a foldable tree under the parent chip rather
@@ -165,6 +183,16 @@ once a chip is opened, and subagent text passes the same secret-scrubber
 as everything else before it reaches a block:
 
 <p align="center"><img src="assets/shots/trace.png" width="780" alt="A Task tool chip expanded, showing its own arguments and result plus a SUBAGENT narration line and a nested Grep tool chip inside it"></p>
+
+**Tool-call compaction.** A turn's own top-level tool chips (the trace tree
+above is untouched — a subagent's calls still nest under its own Task
+chip) compact behind one "Tool calls (N)" fold, collapsed by default and
+created lazily on the first call, so a turn with none grows no section at
+all. N updates live as each call lands; opening the fold, then a chip
+inside it, shows that chip's exact arguments and result, formatted only
+on that first look:
+
+<p align="center"><img src="assets/shots/tool-calls.gif" width="780" alt="A turn's 'Tool calls (N)' count ticks from 1 to 3 as chips land; opening the fold reveals all three collapsed chips; opening the first shows its ARGS and RESULT"></p>
 
 **Terminal images.** A detection ladder — Kitty graphics protocol → sixel →
 half-block cells → a plain `[image: ...]` text line — so a tool result or

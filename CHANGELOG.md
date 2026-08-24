@@ -4,6 +4,85 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.16.0 — 2026-08-24
+
+- **Animated demos for the interactive features** (queue item 2.5). A
+  still can't show an interaction, and three of the gallery's stills were
+  standing in for exactly that: `scripts/record_gif.py` extends
+  `scripts/screenshot.py`'s own Pilot + FakeEngine approach one step
+  further -- each scene scripts a SEQUENCE of steps instead of one,
+  snapshotting an SVG per step (`app.save_screenshot`), rasterizing every
+  frame to PNG with the same `inkscape --export-type=png` the static
+  gallery already relies on, then assembling the sequence into a looping
+  GIF with Pillow (already on disk transitively via `textual-image`, now
+  also declared directly in the dev group -- a script that imports
+  `PIL.Image` earns its own line rather than riding an app dependency's
+  coattails). Six scenes ship, one deliberately unlisted:
+  - **tab-lifecycle.gif** -- a second tab starts a turn (amber
+    `-working`), switching away leaves it amber in the background, the
+    turn finishes there (green `-done-unseen`), switching back clears it
+    -- the same `_set_tab_class` toggles tests/test_tab_status.py already
+    exercises, now driven end to end through a real Pilot instead of
+    asserted in isolation.
+  - **tool-calls.gif** -- a turn's "Tool calls (N)" fold ticking 1 → 2 → 3
+    live as chips mount, the fold opening, then one chip opening onto its
+    ARGS/RESULT -- `TurnBlock.add_tool_chip`/`ToolChip` driven directly,
+    the same shape tests/test_restyle.py already exercises.
+  - **markdown-stream.gif** -- an agent reply's markdown assembling
+    incrementally: prose, then a three-row table filling in row by row
+    across deliberately awkward chunk boundaries, closing on a bold total
+    with an inline-code tool name -- `TurnBlock.append_text` fed the same
+    shape tests/test_restyle.py's own chunked-markdown test uses.
+  - **rename.gif** (replaces `rename.png`) -- a REAL double-click
+    (`pilot.click(tab, times=2)`, the actual `event.chain == 2` path, not
+    the direct `_start_rename` call the old static shot took), the inline
+    editor appearing seeded with the old label, typing a new one, Enter
+    committing it.
+  - **palette.gif** (replaces `palette.png`) -- Ctrl+P opening the
+    palette, arrowing down through New tab / open tabs / grouped
+    commands, Esc closing it.
+  - **search.gif** (replaces `search.png`) -- typing `/search deploy`
+    opens the popup on a partial match, completing the query brings up
+    all three hits, arrow keys move the highlighted row. The real session
+    index is never touched: the old static shot skipped straight to
+    `SessionSearch._render`; this scene additionally disarms the debounce
+    timer `sync()` arms and patches `search_sessions`/`recent_sessions`
+    as a second guard, since a multi-frame scene stays open long enough
+    for the real 0.13s debounce to actually fire, which the old
+    single-shot scene never risked.
+  - Byte budget: every GIF is palette-quantized to ONE shared adaptive
+    palette (built off every frame stacked into a strip, not just the
+    first, so a color that only shows up once a tab flips amber still
+    makes the 256-entry table) before Pillow writes the looping GIF. All
+    seven land between 143 KiB and 357 KiB, comfortably under the 1MB
+    target.
+  - **attention-blink.gif** built and tested (`pane.set_needs_input(True)`
+    driven directly, 4 alternating frames off the same timer
+    tests/test_tab_status.py's attention-blink tests cover) but NOT
+    embedded in the README: nothing in the shipped app calls
+    `set_needs_input(True)` yet -- it is dormant phase-2 infrastructure,
+    and documenting a demo of it would contradict the README's own "no
+    animated chrome, exactly two timers" claim for a feature nobody can
+    actually trigger.
+  - `scripts/record_gif.py`'s own scene run against every scene IS the
+    test, same footing as `scripts/screenshot.py`'s stills;
+    `tests/test_record_gif.py` adds six fast, render-free checks against
+    the scene registry itself -- unique non-empty names, every scene
+    declaring more than one frame, every declared widget a real class,
+    every scene sized within 2% of 16:9. 506 tests green (500 baseline +
+    6).
+  - `scripts/screenshot.py` lost the three scenes these GIFs superseded
+    (`rename`, `palette`, `search`) and their now-dead drive functions --
+    one source of truth per feature, so nobody re-generates a static PNG
+    the gallery no longer shows; `SEARCH_HITS` moved into
+    `scripts/record_gif.py`, its only remaining consumer.
+  - README: the hero/memory/trace stills stay static on purpose (a crisp
+    first impression, no autoplay noise at the top of the page); three
+    GIFs replace their static equivalents where those features are
+    already described, and two new bullets -- **Markdown responses** and
+    **Tool-call compaction** -- cover ground the README never documented
+    before, each with its own new demo.
+
 ## 0.15.0 — 2026-08-24
 
 - **A provider glyph on every tab** (queue item 2, part 1) — ✳, Claude-
