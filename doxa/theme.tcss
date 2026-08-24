@@ -370,6 +370,38 @@ PeerMessageBlock {
     padding: 0 2;
 }
 
+/* Subagent tracker (queue item 4): the second status row, mounted only
+   while at least one Task-spawned subagent is running (doxa/app.py's
+   SessionPane._sync_subagent_line) -- same surface and text color as the
+   status bar right above it, so the two read as one status area rather
+   than a bar plus an unrelated strip. Each `⧉ label` span is a click
+   target (SubagentLine.action_open_transcript); Textual paints its own
+   link style on @click markup, so the hover/active affordance is free. */
+#subagent-line {
+    background: #221F1A;
+    color: #D8CDBB;
+    height: 1;
+    padding: 0 2;
+}
+
+/* A subagent's own read-only transcript tab (SubagentTranscriptTab): same
+   unboxed treatment as a turn's body -- this is trace material, not a
+   turn of its own, so it reads directly on the surface. The narration
+   line and the mirrored chip list share the one scrolling container. */
+.transcript-scroll {
+    background: #171512;
+    padding: 1 2;
+}
+
+.transcript-narration {
+    color: #D8CDBB;
+    padding: 0 0 1 0;
+}
+
+.transcript-chips {
+    height: auto;
+}
+
 /* Slash autocomplete (doxa/app.py's SlashComplete): the dropdown above the
    prompt input. Same treatment as the palette's result list -- block
    surface, ramp-top border, Claude-orange on the highlighted row -- so the

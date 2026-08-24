@@ -219,6 +219,38 @@ def ellipsize(text: str, limit: int = TAB_LABEL_MAX) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+# Subagent tracker (queue item 4): the second status row and the transcript
+# tabs it opens both need to write onto a #session-tabs Tab header that is
+# NOT their own widget's tab (SubagentLine lives inside a SessionPane but
+# targets whichever Tab a click named; SubagentTranscriptTab is a plain
+# TabPane, no engine, that still carries -done-unseen like any other tab).
+# These two module functions are the shared write path: SessionPane's own
+# set_tab_label/_set_tab_class keep their existing names (set_tab_label
+# does a little more -- it also prepends the provider glyph and keeps
+# self._title in sync) but _set_tab_class calls straight through to
+# _write_tab_class below, and SubagentTranscriptTab uses both directly.
+def _write_tab_label(app: Any, tab_id: str, text: str) -> None:
+    """Write `text` straight onto one Tab's label -- no provider glyph.
+    SessionPane.set_tab_label prepends one deliberately (every SESSION is
+    Claude/Anthropic's); a subagent transcript tab is not a session, so it
+    never goes through that path at all -- this is its own, glyph-free,
+    door onto the same tab strip."""
+    with contextlib.suppress(Exception):
+        tabbed = app.query_one("#session-tabs", TabbedContent)
+        tabbed.get_tab(tab_id).label = text
+
+
+def _write_tab_class(app: Any, tab_id: str, class_name: str, value: bool) -> None:
+    """Toggle one status class on one #session-tabs Tab header. Shared by
+    SessionPane (-working/-done-unseen/-attention) and
+    SubagentTranscriptTab (-done-unseen only) -- same contextlib.suppress
+    discipline either caller needs: the tab may not exist yet this early,
+    or may already be mid-teardown."""
+    with contextlib.suppress(Exception):
+        tabbed = app.query_one("#session-tabs", TabbedContent)
+        tabbed.get_tab(tab_id).set_class(value, class_name)
+
+
 # Context-pressure escalation. The README calls this out as "a containment
 # signal, not decoration": the chip changes COLOR as the window fills, and
 # keeps showing the percentage throughout -- a color that replaced the
@@ -308,6 +340,27 @@ def help_text() -> str:
 
 def _one_line(text: str, limit: int = 70) -> str:
     return " ".join(text.split())[:limit]
+
+
+def _subagent_label(chip: "ToolChip") -> str:
+    """The running label for one Task-spawned subagent: its own
+    `description` input field (the model's own name for the subtask),
+    collapsed to one line and ellipsized to ~24 cells -- short enough that
+    a handful of concurrently running subagents still fit one status row.
+    Falls back to the tool name in the (should-never-happen) case of a
+    Task call with no description at all."""
+    description = str(chip.tool_input.get("description") or "").strip()
+    return ellipsize(_one_line(description, 200) or chip.tool_name, 24)
+
+
+def _escape_markup(text: str) -> str:
+    """Rich markup escape for text interpolated INTO a markup string this
+    app builds itself (as opposed to the display-only chip/tab titles
+    elsewhere, which are cosmetic and already tolerate a stray bracket) --
+    the subagent line embeds a `[@click=...]` action span per label, so an
+    unescaped `[` in a model-chosen description must not be able to swallow
+    or corrupt the click target that follows it."""
+    return text.replace("[", "\\[")
 
 
 def _fmt_age(secs: float) -> str:
@@ -693,6 +746,26 @@ class ToolChip(Collapsible):
             self._media.mount(
                 images_mod.widget_for(self.tool_image_path, self.tool_image_path)
             )
+
+
+async def _clone_chip(chip: "ToolChip") -> "ToolChip":
+    """A read-only COPY of one ToolChip's current state -- name, input,
+    result, error, duration, image, and (recursively) its own already-
+    mounted subcalls -- for a subagent transcript tab's mirror tree
+    (SubagentTranscriptTab, below). Never the live widget itself: a
+    widget has exactly one parent, and the original stays exactly where
+    the trace tree put it (inside its Task chip's ``subcalls``) whether or
+    not anyone ever opens a transcript tab to look at a copy of it."""
+    mirror = ToolChip(chip.call_id, chip.tool_name, chip.tool_input)
+    if chip.tool_result is not None:
+        mirror.update_result(
+            chip.tool_result, chip.is_error, chip.duration_ms,
+            image_path=chip.tool_image_path,
+        )
+    for sub in list(chip.subcalls.children):
+        if isinstance(sub, ToolChip):
+            await mirror.subcalls.mount(await _clone_chip(sub))
+    return mirror
 
 
 class ToolCallsSection(Collapsible):
@@ -1456,6 +1529,128 @@ class TabRenameCancelled(Message):
         self.pane_id = pane_id
 
 
+class SubagentLine(Static):
+    """Second status row: one clickable ``⧉ <label>`` per RUNNING Task-
+    spawned subagent, mounted directly below ``#status-bar`` -- and ONLY
+    while at least one is running (SessionPane._sync_subagent_line mounts
+    it on the first, unmounts it on the last, mirroring the house hide-at-
+    zero convention the peers/git/usage chips already use in the status
+    bar itself, just one level up: this is a whole ROW that costs nothing
+    at idle rather than a chip that reads empty).
+
+    Each span is Textual click-action markup, ``[@click=open_transcript
+    ('id')]⧉ label[/]`` -- ``Widget.broker_event`` resolves an unprefixed
+    action against the clicked widget itself (confirmed empirically, see
+    tests/test_subagent_tracker.py), so ``action_open_transcript`` lives
+    right here rather than needing an ``app.`` / ``screen.`` namespace
+    prefix on every span."""
+
+    def __init__(self, pane: "SessionPane") -> None:
+        super().__init__("", id="subagent-line")
+        self.pane = pane
+
+    def refresh_labels(self, entries: "list[tuple[str, str]]") -> None:
+        """`entries`: (call_id, label) pairs in arrival order -- the
+        registry (a plain dict) already keeps them in the order they
+        started, and that is the only ordering this row promises."""
+        spans = [
+            f"[@click=open_transcript({json.dumps(call_id)})]"
+            f"⧉ {_escape_markup(label)}[/]"
+            for call_id, label in entries
+        ]
+        self.update("  ·  ".join(spans))
+
+    async def action_open_transcript(self, call_id: str) -> None:
+        await self.pane.open_transcript(call_id)
+
+
+class SubagentTranscriptTab(TabPane):
+    """One running (or finished) subagent's OWN activity, read-only: a
+    plain ``TabPane`` -- deliberately NOT a ``SessionPane`` -- with no
+    engine and no prompt, living alongside the session tabs in the SAME
+    ``#session-tabs`` strip. Opened by clicking its row on a
+    :class:`SubagentLine`; titled from the subagent's own label.
+
+    Two content sources, both routed through ``SessionPane``: at OPEN time
+    :meth:`replay` mirrors whatever the live Task chip already buffered
+    (narration text + its direct subcall chips, via :func:`_clone_chip`)
+    without touching the original trace-tree widgets; from then on,
+    ``SessionPane._handle_event`` forwards further parent_id-matching
+    events here AS WELL AS to the live chip, one level of nesting deep --
+    a grandchild subagent (a Task spawned BY this one) gets its own
+    second-line row and its own transcript tab instead of recursing into
+    this one, exactly like a top-level Task would."""
+
+    def __init__(
+        self, call_id: str, label: str, owner: "SessionPane", *, id: str | None = None,
+    ) -> None:
+        self.call_id = call_id
+        self.base_label = label
+        self.owner = owner
+        self.done = False
+        self._narration_text = ""
+        self._narration = Static("", classes="transcript-narration")
+        self.chips_area = Vertical(classes="transcript-chips")
+        self.scroll = VerticalScroll(
+            self._narration, self.chips_area, classes="transcript-scroll",
+        )
+        # id, not call_id, keyed: mirror chips are fresh ToolChip instances
+        # (see _clone_chip) that happen to reuse the ORIGINAL call's id, so
+        # a tool_result event (matched by id) can find the right one here.
+        self.mirror_chips: dict[str, ToolChip] = {}
+        super().__init__(label, id=id)
+
+    def compose(self) -> ComposeResult:
+        yield self.scroll
+
+    def append_narration(self, text: str) -> None:
+        self._narration_text += text
+        self._narration.update(self._narration_text)
+
+    async def mirror_chip(self, chip: "ToolChip") -> "ToolChip":
+        """Add ONE cloned chip for a direct child call that just arrived
+        live (see SessionPane._route_transcript_chip) -- fresh, with
+        whatever the source chip already knows (usually nothing yet but
+        its name/input; a same-event tool_result lands right after)."""
+        mirror = await _clone_chip(chip)
+        self.mirror_chips[chip.call_id] = mirror
+        await self.chips_area.mount(mirror)
+        return mirror
+
+    async def replay(self, chip: "ToolChip") -> None:
+        """Open-time snapshot: the Task chip's buffered narration plus its
+        current direct subcalls (each cloned recursively, so nesting that
+        already happened by the time someone clicks is not lost) -- called
+        once, right after this tab mounts."""
+        if chip._sub_text:
+            self.append_narration(chip._sub_text)
+        for sub in list(chip.subcalls.children):
+            if isinstance(sub, ToolChip):
+                await self.mirror_chip(sub)
+
+    def _set_title(self, text: str) -> None:
+        self._title = self.render_str(text)
+        _write_tab_label(self.app, self.id or "", text)
+
+    def mark_done(self) -> None:
+        """The tracked subagent's own tool_result just landed: title gets
+        the ✓ suffix, and -- the same convention every other tab-status
+        signal in this app follows -- a -done-unseen dot if this tab is
+        not the one currently active (cleared on activation, see
+        DoxaApp._on_tab_activated)."""
+        if self.done:
+            return
+        self.done = True
+        self._set_title(f"{self.base_label} ✓")
+        with contextlib.suppress(Exception):
+            tabbed = self.app.query_one("#session-tabs", TabbedContent)
+            if tabbed.active != (self.id or ""):
+                self._set_tab_class("-done-unseen", True)
+
+    def _set_tab_class(self, class_name: str, value: bool) -> None:
+        _write_tab_class(self.app, self.id or "", class_name, value)
+
+
 class SessionPane(TabPane):
     """One session's whole surface: engine handle, block list, status bar,
     prompt input, and the boot/pump workers that drive them.
@@ -1526,6 +1721,25 @@ class SessionPane(TabPane):
         self.needs_input = False
         self._attention_timer: Any = None
         self._attention_on = False
+        # Subagent tracker (queue item 4): running Task-spawned subagents
+        # for THIS pane, tool_use_id -> the ToolChip already mounted in the
+        # trace tree -- a second INDEX into that same widget, not a copy of
+        # its state. Entries exist ONLY while running (added on a top-level
+        # or nested tool_call named "Task", popped on that same id's own
+        # tool_result), so len() IS the live count the status chip and the
+        # second line both read, arrival order (plain dict insertion order)
+        # is all either needs, and no wall clock is kept anywhere.
+        self._subagents: dict[str, ToolChip] = {}
+        # Open transcript tabs for THIS pane's subagents, call_id -> tab.
+        # Outlives the matching _subagents entry (a finished subagent's tab
+        # stays open, marked done, until the user closes it) but never
+        # outlives the tab itself -- popped in _close_transcript_tab.
+        self._transcript_tabs: dict[str, SubagentTranscriptTab] = {}
+        # The second status row -- mounted the moment _subagents stops
+        # being empty, unmounted the moment it is empty again (see
+        # _sync_subagent_line); None at every other time, deliberately, so
+        # an idle pane carries neither the widget nor its layout cost.
+        self._subagent_line: "SubagentLine | None" = None
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="block-list")
@@ -1872,10 +2086,10 @@ class SessionPane(TabPane):
         contextlib.suppress discipline as :meth:`set_tab_label`, and for
         the same reasons: the tab may not exist yet this early in boot, or
         this pane may already be mid-teardown (a closed tab's last event
-        landing after the Tab widget is gone)."""
-        with contextlib.suppress(Exception):
-            tabbed = self.app.query_one("#session-tabs", TabbedContent)
-            tabbed.get_tab(self.id or "").set_class(value, class_name)
+        landing after the Tab widget is gone). Delegates to the module-level
+        ``_write_tab_class``, the same door ``SubagentTranscriptTab`` uses
+        for its own (``-done-unseen``-only) status class."""
+        _write_tab_class(self.app, self.id or "", class_name, value)
 
     def set_needs_input(self, value: bool) -> None:
         """The attention-blink mechanism. Nothing calls this with True yet
@@ -1930,6 +2144,10 @@ class SessionPane(TabPane):
         if self._usage_chip:  # only when real numbers exist -- see below
             parts.append(self._usage_chip)
         parts += [ctx_chip(self.engine.last_ctx_percentage), f"{beliefs} beliefs"]
+        subagent_count = len(self._subagents)
+        if subagent_count:  # hidden at 0 -- same convention as peers below
+            noun = "agent" if subagent_count == 1 else "agents"
+            parts.append(f"⧉ {subagent_count} {noun}")
         if getattr(self.engine, "detachable", False):
             sid = str(getattr(self.engine, "session_id", "") or "")
             if sid:  # attached to a daemon: show the reattach handle
@@ -2511,28 +2729,39 @@ class SessionPane(TabPane):
         if ev.type == "turn_started":
             return
         if ev.type == "text_delta":
-            parent = chips.get(ev.data.get("parent_id") or "")
+            parent_id = ev.data.get("parent_id") or ""
+            parent = chips.get(parent_id)
             if parent is not None:
                 # A subagent narrating: trace material, nested under its
                 # Task chip -- never mixed into the turn's own prose.
                 parent.append_subagent_text(ev.data["text"])
+                # Live routing: an open transcript tab for THIS parent gets
+                # the same narration, alongside (not instead of) the chip.
+                self._route_transcript_text(parent_id, ev.data["text"])
             else:
                 await block.append_text(ev.data["text"])
         elif ev.type == "tool_call":
             block.hide_thinking()
             chip = ToolChip(ev.data["id"], ev.data["name"], ev.data["input"])
             chips[ev.data["id"]] = chip
-            parent = chips.get(ev.data.get("parent_id") or "")
+            parent_id = ev.data.get("parent_id") or ""
+            parent = chips.get(parent_id)
             if parent is not None:
                 # Trace tree: a subagent's call nests under the Task chip
                 # that spawned it, foldable at every level. An unknown
                 # parent (ring truncation on replay) degrades to top level
                 # -- the call is never dropped.
                 await parent.subcalls.mount(chip)
+                await self._route_transcript_chip(parent_id, chip)
             else:
                 # Top-level chip: compacted behind the turn's ONE "Tool
                 # calls (N)" section (see ToolCallsSection/add_tool_chip).
                 await block.add_tool_chip(chip)
+            if ev.data["name"] == "Task":
+                # Subagent tracker: a Task call (top-level or nested -- a
+                # subagent's own Task is tracked exactly like a top-level
+                # one) starts a new entry in the running registry.
+                await self._register_subagent(chip)
         elif ev.type == "tool_result":
             chip = chips.get(ev.data["id"])
             if chip is not None:
@@ -2540,6 +2769,9 @@ class SessionPane(TabPane):
                     ev.data["result_summary"], ev.data["is_error"],
                     ev.data["duration_ms"], image_path=ev.data.get("image_path"),
                 )
+                self._route_transcript_result(chip)
+            if ev.data["id"] in self._subagents:
+                await self._unregister_subagent(ev.data["id"])
         elif ev.type == "turn_done":
             # Same tier lookup _refresh_status/_usage_text already do --
             # keeps the per-turn figure consistent with both (item T).
@@ -2554,6 +2786,114 @@ class SessionPane(TabPane):
             self._refresh_usage_chip()
             self._refresh_status()
             self._on_turn_done_status(ev.data.get("duration_ms"))
+
+    # -- subagent tracker (queue item 4) ------------------------------
+
+    async def _register_subagent(self, chip: "ToolChip") -> None:
+        """One Task call started: add it to the running registry, then
+        sync the second line and the status chip -- both read len() of
+        the same dict, so this one write keeps them both correct."""
+        self._subagents[chip.call_id] = chip
+        await self._sync_subagent_line()
+        self._refresh_status()
+
+    async def _unregister_subagent(self, call_id: str) -> None:
+        """That Task call's own tool_result just landed: it drops out of
+        the running registry (the second line and the status chip shrink
+        by one, possibly to zero) -- but an OPEN transcript tab for it
+        stays open, just marked done."""
+        self._subagents.pop(call_id, None)
+        await self._sync_subagent_line()
+        self._refresh_status()
+        tab = self._transcript_tabs.get(call_id)
+        if tab is not None:
+            tab.mark_done()
+
+    async def _sync_subagent_line(self) -> None:
+        """Mount the second line on the first running subagent, unmount it
+        on the last one finishing -- mount/unmount, never a display toggle,
+        so an idle pane (the common case) carries zero cost for a feature
+        it isn't using right now. While mounted its content is rewritten
+        on every registry change (cheap: one markup string, no repaint
+        storm any worse than a status-bar update already is)."""
+        if self._subagents and self._subagent_line is None:
+            self._subagent_line = SubagentLine(self)
+            with contextlib.suppress(Exception):
+                status_bar = self.query_one("#status-bar", Static)
+                await self.mount(self._subagent_line, after=status_bar)
+        elif not self._subagents and self._subagent_line is not None:
+            line, self._subagent_line = self._subagent_line, None
+            with contextlib.suppress(Exception):
+                await line.remove()
+        if self._subagent_line is not None:
+            self._subagent_line.refresh_labels([
+                (call_id, _subagent_label(chip))
+                for call_id, chip in self._subagents.items()
+            ])
+
+    async def open_transcript(self, call_id: str) -> None:
+        """Open (or, if it is already open, just focus) the read-only
+        transcript tab for one RUNNING subagent -- the only way in here is
+        a click on the second line, which only ever offers ids currently
+        in ``self._subagents``, so a miss (finished and dropped between
+        the click and this running) degrades to a silent no-op rather than
+        a crash.
+
+        Focus moves to the new tab's own scroll container (it is
+        focusable, so the arrow keys/PageUp/PageDown a reader would reach
+        for just work) -- load-bearing, not just nicety: TabbedContent's
+        own ``_on_tab_pane_focused`` snaps ``.active`` back to whichever
+        pane holds the CURRENTLY focused widget, and this pane's own
+        ``#prompt-input`` stays focused (its tab merely hides, focus does
+        not move on its own) unless something claims focus in the pane
+        being switched to -- exactly what SessionPane's own boot already
+        does for itself by focusing its prompt input on mount."""
+        try:
+            tabbed = self.app.query_one("#session-tabs", TabbedContent)
+        except Exception:  # noqa: BLE001 -- app mid-teardown; nothing to open
+            return
+        existing = self._transcript_tabs.get(call_id)
+        if existing is not None:
+            tabbed.active = existing.id or tabbed.active
+            existing.scroll.focus()
+            return
+        chip = self._subagents.get(call_id)
+        if chip is None:
+            return
+        label = _subagent_label(chip)
+        tab = SubagentTranscriptTab(
+            call_id, label, self, id=f"trace-{self.id}-{call_id}",
+        )
+        self._transcript_tabs[call_id] = tab
+        await tabbed.add_pane(tab)
+        await tab.replay(chip)
+        tabbed.active = tab.id or tabbed.active
+        tab.scroll.focus()
+
+    def _route_transcript_text(self, parent_id: str, text: str) -> None:
+        tab = self._transcript_tabs.get(parent_id)
+        if tab is not None:
+            tab.append_narration(text)
+
+    async def _route_transcript_chip(self, parent_id: str, chip: "ToolChip") -> None:
+        tab = self._transcript_tabs.get(parent_id)
+        if tab is not None:
+            await tab.mirror_chip(chip)
+
+    def _route_transcript_result(self, chip: "ToolChip") -> None:
+        """A tool_result may belong to a chip mirrored inside some open
+        transcript tab (a direct child of the tab's own subagent) -- find
+        it by call id and bring the mirror's own result up to date too.
+        At most one tab can hold a mirror for a given id in practice (ids
+        are the SDK's own tool_use ids), so the first match wins."""
+        for tab in self._transcript_tabs.values():
+            mirror = tab.mirror_chips.get(chip.call_id)
+            if mirror is not None:
+                mirror.update_result(
+                    chip.tool_result, chip.is_error, chip.duration_ms,
+                    image_path=chip.tool_image_path,
+                )
+                break
 
     def _on_turn_done_status(self, duration_ms: "float | None") -> None:
         """Tab-status + desktop-notification side effects of ONE finished
@@ -2785,6 +3125,12 @@ class DoxaApp(App):
             pane.set_needs_input(False)
             with contextlib.suppress(Exception):
                 pane.query_one("#prompt-input", PromptInput).focus()
+        elif isinstance(event.pane, SubagentTranscriptTab):
+            # Same "you're looking at it now" clear, for a transcript tab
+            # that finished (and picked up -done-unseen) while it sat in
+            # the background -- it carries no -working/-attention, so
+            # -done-unseen is the only class it ever needs cleared.
+            event.pane._set_tab_class("-done-unseen", False)
 
     # -- window focus, for "auto" desktop notifications ---------------
 
@@ -2918,10 +3264,24 @@ class DoxaApp(App):
         attach`). The cheapest outcome to recover from is what a close key
         does; ENDING a session is Ctrl+Q, which says so.
 
-        Closing the last tab closes the app, on the same detach semantics."""
+        A subagent transcript tab (SubagentTranscriptTab) takes the SAME
+        key to a much simpler path: it is not a session (self.active_pane
+        -- SessionPane-only -- comes back None for one), so there is no
+        daemon to detach and no turn-in-flight question to ask; it just
+        closes. There is always at least one SessionPane, so a transcript
+        tab is never "the last tab" and never reaches the close-the-app
+        branch _close_pane below falls back to.
+
+        Closing the last SESSION tab closes the app, on the same detach
+        semantics."""
         pane = self.active_pane
         if pane is not None:
             await self._close_pane(pane, terminate=False)
+            return
+        with contextlib.suppress(Exception):
+            active = self.query_one("#session-tabs", TabbedContent).active_pane
+            if isinstance(active, SubagentTranscriptTab):
+                await self._close_transcript_tab(active)
 
     def action_end_session(self) -> None:
         """Ctrl+Q: END this tab's session -- finalize NOW (LORE review +
@@ -2955,10 +3315,26 @@ class DoxaApp(App):
         """`/detach` -- the named form of what Ctrl+W does."""
         await self.action_close_tab()
 
+    async def _close_transcript_tab(self, tab: "SubagentTranscriptTab") -> None:
+        """Ctrl+W (or the palette's Close tab) on a subagent transcript
+        tab: no engine to stop, no daemon to detach -- just remove it and
+        drop the owning pane's own reference to it."""
+        tab.owner._transcript_tabs.pop(tab.call_id, None)
+        with contextlib.suppress(Exception):
+            await self.query_one("#session-tabs", TabbedContent).remove_pane(
+                tab.id or ""
+            )
+
     async def _close_pane(self, pane: "SessionPane", terminate: bool) -> None:
         """One close path, two dispositions. Closing the LAST tab closes the
         app on the same disposition -- a window with no tabs is not a
-        window, and the session's fate must not depend on tab arithmetic."""
+        window, and the session's fate must not depend on tab arithmetic.
+
+        A closing session takes its OWN open transcript tabs down with it
+        first -- they have no engine and nothing left to route events into
+        once the session that spawned their subagents is gone."""
+        for tab in list(pane._transcript_tabs.values()):
+            await self._close_transcript_tab(tab)
         if terminate:
             note = await pane.stop()
             if note:

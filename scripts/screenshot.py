@@ -4,9 +4,10 @@ Drives DoxaApp headlessly, one Textual pilot session per SCENE, each scene
 scripting a FakeEngine (and, where a scene needs live-registry state the
 app would otherwise read from disk, patching doxa.peers for the duration)
 to put a real feature on screen: the shell mid-conversation, the trace
-tree, the settings modal, /sessions, and a belief-search tool call opened
-up. Saves each as assets/shots/<scene>.svg; convert to PNG with inkscape
-(CI does not need to -- the SVGs are committed too):
+tree, a still-running subagent's second status row and its own tab, the
+settings modal, /sessions, and a belief-search tool call opened up. Saves
+each as assets/shots/<scene>.svg; convert to PNG with inkscape (CI does
+not need to -- the SVGs are committed too):
 
     uv run python scripts/screenshot.py            # every scene
     uv run python scripts/screenshot.py hero trace  # just these
@@ -36,6 +37,7 @@ from doxa.app import DoxaApp, ToolChip, TurnBlock  # noqa: E402
 from doxa.engine import EngineEvent  # noqa: E402
 from doxa.identity import Usage, UsageLimit  # noqa: E402
 from doxa.peers import PeerInfo  # noqa: E402
+from textual.widgets import TabbedContent  # noqa: E402
 from tests.fakes import FakeEngine  # noqa: E402
 
 SHOTS = ROOT / "assets" / "shots"
@@ -208,6 +210,53 @@ async def _drive_trace(app: DoxaApp, pilot) -> None:
 
 
 # --------------------------------------------------------------------- #
+# Scene: subagent-tracker -- the second status row + an open transcript
+# tab, side by side with the trace tree the subagent will land in once it
+# finishes. The Task call is left deliberately UNRESOLVED (no tool_result
+# for it in the script) so the subagent is still "running" in the frozen
+# shot -- that is the state the second line and the status chip exist for.
+# --------------------------------------------------------------------- #
+
+SUBAGENT_TRACKER_SCRIPT = [
+    EngineEvent("turn_started", {}),
+    EngineEvent("tool_call", {
+        "id": "task-1", "name": "Task",
+        "input": {"description": "audit the retry backoff logic", "subagent_type": "Explore"},
+    }),
+    EngineEvent("text_delta", {"text": "checking every retry call site", "parent_id": "task-1"}),
+    EngineEvent("tool_call", {
+        "id": "sub-1", "name": "Grep", "input": {"pattern": "backoff"},
+        "parent_id": "task-1",
+    }),
+    EngineEvent("tool_result", {
+        "id": "sub-1", "name": "Grep", "result_summary": "4 hits in doxa/engine.py",
+        "is_error": False, "duration_ms": 9, "parent_id": "task-1",
+    }),
+    # task-1 itself never resolves -- the subagent is still running.
+]
+
+
+async def _drive_subagent_tracker(app: DoxaApp, pilot) -> None:
+    await pilot.pause()
+    pane = app.active_pane
+    app.query_one("#prompt-input").value = "how does the retry backoff work here?"
+    await pilot.press("enter")
+    for _ in range(150):
+        if "task-1" in pane._subagents and pane.query("#subagent-line"):
+            break
+        await pilot.pause(0.02)
+    await pane.open_transcript("task-1")
+    await pilot.pause()
+    # Back to the session tab: the tab STRIP still shows the open
+    # transcript tab (proving it exists, titled from the subagent's own
+    # label), while the visible pane is the one carrying the second
+    # status row this shot is really about.
+    tabbed = app.query_one("#session-tabs", TabbedContent)
+    tabbed.active = pane.id or tabbed.active
+    await pilot.pause()
+
+
+# --------------------------------------------------------------------- #
 # Scene: memory -- a lore tool chip opened up, showing STEER vs CITE.
 # --------------------------------------------------------------------- #
 
@@ -334,6 +383,8 @@ SCENES: list[Scene] = [
           new_session_factory=_sibling_tab_factory()),
     Scene("trace", _drive_trace, size=(172, 47),
           engine_factory=lambda: FakeEngine(TRACE_SCRIPT, model="claude-opus-4-5")),
+    Scene("subagent-tracker", _drive_subagent_tracker, size=(172, 47),
+          engine_factory=lambda: FakeEngine(SUBAGENT_TRACKER_SCRIPT, model="claude-opus-4-5")),
     Scene("memory", _drive_memory, size=(172, 47),
           engine_factory=_hero_engine),
     Scene("settings", _drive_settings, size=(120, 32),

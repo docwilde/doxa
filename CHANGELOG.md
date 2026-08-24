@@ -4,6 +4,81 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.18.0 — 2026-08-24
+
+- **Subagent tracker** (queue item 4) — live view of Task-spawned
+  subagents while they're still running, not just after they land in the
+  trace tree. Built on the engine's existing `parent_tool_use_id`
+  convention (every subagent event arrives tagged with the Task call's
+  own tool_use id; a Task chip without its `tool_result` yet is a running
+  subagent) — nothing new on the engine side, this is entirely a
+  `doxa/app.py` surface over events the trace tree already carries.
+  - **Registry**: `SessionPane._subagents`, a plain `dict[tool_use_id,
+    ToolChip]` — a second INDEX into the same chip widgets the trace tree
+    already mounts, not a copy of their state. Added on any `tool_call`
+    named `"Task"` (top-level or nested — a subagent's own Task is
+    tracked exactly like a top-level one), popped on that same id's own
+    `tool_result`. Arrival order (plain dict insertion order) is the only
+    ordering promised anywhere; no wall clock is kept.
+  - **Status chip**: `⧉ N agents` in the status bar, hidden at zero — the
+    same convention the peers chip already uses.
+  - **Second status row**: `SubagentLine`, mounted directly below the
+    status bar the moment the registry stops being empty, unmounted the
+    moment it empties again (mount/unmount, never a display toggle — zero
+    cost at idle). One `⧉ <label>` per running subagent (its own `description`
+    input, ellipsized to ~24 cells), each a Textual click-action span
+    (`[@click=open_transcript('id')]`) resolved against the row itself.
+  - **Transcript tab**: `SubagentTranscriptTab`, a plain `TabPane` — no
+    engine, no prompt — living alongside the session tabs in the same
+    `#session-tabs` strip. Opened by clicking a running subagent's row;
+    `replay()` mirrors whatever the live Task chip already buffered
+    (narration text + its direct subcall chips, cloned via a new
+    `_clone_chip`, never reparented out of the trace tree — the original
+    widgets stay exactly where they were), then `SessionPane._handle_event`
+    routes further matching events into the open tab AS WELL AS into the
+    live chip for as long as it stays open. Marks itself `✓` on
+    completion and, the same convention every other tab status follows,
+    picks up `-done-unseen` if it isn't the active tab when that happens.
+    No provider glyph (it never goes through `SessionPane.set_tab_label`
+    at all — its own `_set_title` is a separate, deliberately glyph-free
+    door onto the tab strip).
+  - **Ctrl+W** on a transcript tab just removes it — no engine to stop,
+    so `action_close_tab` now falls through to a `SubagentTranscriptTab`-only
+    branch when the active tab isn't a `SessionPane`, skipping the
+    detach/stop path entirely (`CloseWithTurnRunning` is Ctrl+Q-only and
+    was never reachable from Ctrl+W regardless). Closing a SESSION tab
+    takes its own still-open transcript tabs down with it — they have
+    nothing left to show once the session that spawned their subagents is
+    gone.
+  - **Fixed along the way**: opening any new non-`SessionPane` tab while
+    the previous tab's prompt input held focus tripped a genuine Textual
+    behavior — `TabbedContent._on_tab_pane_focused` snaps `.active` back
+    to whichever pane holds the currently-focused descendant, and a
+    read-only transcript tab claims nothing on its own the way a fresh
+    `SessionPane` claims its own prompt input on mount. Fixed by focusing
+    the transcript tab's own (focusable) scroll container right after
+    activating it — which also means the arrow keys/PageUp/PageDown a
+    reader would reach for just work.
+  - 10 new tests (`tests/test_subagent_tracker.py`): registry add/remove
+    on the Task call's own lifecycle, the status chip hidden-at-zero/
+    shown-at-N, the second line mounting and unmounting, a real pilot
+    click opening a transcript tab with replayed content (and the mirror
+    proven distinct from the live chip, still exactly where the trace
+    tree put it), re-clicking a running subagent focusing rather than
+    duplicating its tab, live events routing into an already-open tab,
+    completion marking `✓` + `-done-unseen` in the background (cleared on
+    activation), Ctrl+W closing a transcript tab with no stop dialog and
+    the underlying turn left running, no provider glyph on a transcript
+    tab, and closing a session tab cascading to its own open transcript
+    tabs. 543 tests green (533 baseline + 10).
+  - README: the trace tree section gains a paragraph on the tracker,
+    with a new still (`assets/shots/subagent-tracker.png`/`.svg`, via a
+    new `scripts/screenshot.py` scene) showing the second line, the
+    status chip, and the extra tab side by side with the running turn —
+    the existing trace assets only ever show a FINISHED subagent, so
+    nothing already in the gallery communicated the "still running"
+    state this feature is entirely about.
+
 ## 0.17.0 — 2026-08-24
 
 - **Worktree-per-session** (queue item 3) — every session started inside a

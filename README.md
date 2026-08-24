@@ -197,6 +197,22 @@ as everything else before it reaches a block:
 
 <p align="center"><img src="assets/shots/trace.png" width="780" alt="A Task tool chip expanded, showing its own arguments and result plus a SUBAGENT narration line and a nested Grep tool chip inside it"></p>
 
+**Subagent tracker.** The trace tree above is where a subagent's activity
+lands once its Task call finishes; while it's still RUNNING, a second
+status row appears directly under the status bar — `⧉ N agents` in the bar
+itself, hidden below one exactly like the peers chip — with one clickable
+`⧉ <label>` per subagent still in flight (its own `description`, the name
+it gave itself). Clicking one opens a read-only transcript tab: no engine,
+no prompt, just that subagent's narration and its own tool calls, seeded
+from whatever its Task chip already buffered and kept live from there —
+further calls and text keep landing in the open tab exactly as they land
+in the chip. The tab marks itself `✓` when the subagent finishes and, the
+same convention every other tab carries, picks up a green dot if you
+weren't looking. Closing it (`ctrl+w`) is instant — there is no session
+behind it to ask about:
+
+<p align="center"><img src="assets/shots/subagent-tracker.png" width="780" alt="A status row reading '⧉ 1 agent' under the status bar, a second '⧉ 1 agent' chip in the bar itself, and a second tab in the strip titled from the running subagent's own description"></p>
+
 **Tool-call compaction.** A turn's own top-level tool chips (the trace tree
 above is untouched — a subagent's calls still nest under its own Task
 chip) compact behind one "Tool calls (N)" fold, collapsed by default and
