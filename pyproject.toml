@@ -1,6 +1,6 @@
 [project]
 name = "doxa"
-version = "0.14.0"
+version = "0.15.0"
 description = "A terminal for working with a Claude agent whose memory you can audit."
 readme = "README.md"
 requires-python = ">=3.11"

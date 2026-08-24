@@ -1,8 +1,36 @@
 # Changelog
 
 Newest first. Versions are annotated git tags on the commit that shipped
-them (`v0.1.0` … `v0.14.0`); the ranges below are derived from that history,
+them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
+
+## 0.15.0 — 2026-08-24
+
+- **A provider glyph on every tab** (queue item 2, part 1) — ✳, Claude-
+  orange, prepended to every tab's label ahead of the model tier
+  (`✳ Sonnet@doxa:main`). Multi-provider engines are planned but not
+  shipped, so `PROVIDER_GLYPHS` is a one-row table (`"claude": "✳"`) built
+  so a future provider is a second row, not a branch in the display
+  logic. The glyph is display-only: it paints onto the actual tab header
+  and the palette's tab listing, but never becomes part of a tab's
+  IDENTITY string, so a pinned (user-renamed) tab still gets the glyph —
+  provider identity is orthogonal to the name — and the rename field
+  still seeds from the plain name, never `"✳ my old name"`.
+  Confirmed empirically before committing to color: Textual 5's `Tab`
+  renders its label through `Content.from_markup` by default, so
+  `[#D97757]✳[/]` paints real color rather than a literal bracket.
+  `TAB_LABEL_MAX` moves from 34 to 32 to make room — the glyph and its
+  separating space cost 2 cells that were not budgeted before, and the
+  cut keeps the four-tabs-at-80-columns target the constant always
+  documented.
+- **The status bar's git chip says which worktree you're in** (queue item
+  2, part 2) — `repo ⎇ branch@worktree @sha` inside a linked worktree,
+  the same `branch@worktree` a tab label already showed. `GitLine.render`
+  now builds its branch half from `branch_label()` instead of a raw HEAD
+  read, so the dedup rule (append the worktree suffix only when it says
+  something the branch and the repo slot beside it do not already say)
+  is inherited from one place rather than re-implemented for the status
+  bar. The `@sha` placement and its hex-collision handling are untouched.
 
 ## 0.14.0 — 2026-08-24
 

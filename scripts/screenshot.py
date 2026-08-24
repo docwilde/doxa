@@ -368,27 +368,45 @@ class Scene:
     new_session_factory: "Callable[[], FakeEngine] | None" = None
 
 
+# `size` is a (cols, rows) TERMINAL geometry, not a pixel one -- Textual's
+# SVG export renders each cell at a fixed pixel size, so the two only line
+# up once you know that size. Measured empirically off this checkout's
+# actual export (render at 80x24, 160x24 and 80x48, convert with inkscape,
+# read the PNGs back): width = 12.2*cols + 18, height = 24.375*rows + 51.
+# The 24.375/12.2 ~= 2.0 cell-height-to-width ratio is a terminal cell
+# being roughly twice as tall as it is wide, exactly as expected.
+#
+# Every shot targets 16:9 (chosen over 4:3 -- a terminal strip's own shape
+# is already landscape, so 16:9 is the smaller stretch from a tab bar's
+# natural aspect) within ~2%, picked by solving each formula for the ROW
+# count at the scene's existing COLUMN count and rounding. Never the other
+# way: shrinking cols to hit the ratio risks clipping the status bar and
+# tab strip, which are not width-budgeted the way tab LABELS are (see
+# TAB_LABEL_MAX in doxa/app.py) -- growing rows only ever adds blank
+# canvas below existing content, never cuts anything off. `settings` is
+# the one exception: its rows were already tall enough that shrinking them
+# to hit 16:9 would have clipped the modal, so its COLUMNS grew instead.
 SCENES: list[Scene] = [
-    Scene("hero", _drive_hero, size=(172, 32), engine_factory=_hero_engine,
+    Scene("hero", _drive_hero, size=(172, 47), engine_factory=_hero_engine,
           new_session_factory=_sibling_tab_factory()),
     Scene("search", _drive_search, size=(100, 26),
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5")),
     Scene("palette", _drive_palette, size=(120, 32),
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
           new_session_factory=lambda: FakeEngine([], model="claude-sonnet-4-5")),
-    Scene("trace", _drive_trace, size=(172, 40),
+    Scene("trace", _drive_trace, size=(172, 47),
           engine_factory=lambda: FakeEngine(TRACE_SCRIPT, model="claude-opus-4-5")),
-    Scene("memory", _drive_memory, size=(172, 30),
+    Scene("memory", _drive_memory, size=(172, 47),
           engine_factory=_hero_engine),
-    Scene("rename", _drive_rename, size=(120, 26),
+    Scene("rename", _drive_rename, size=(120, 32),
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
           new_session_factory=_sibling_tab_factory()),
-    Scene("settings", _drive_settings, size=(104, 32),
+    Scene("settings", _drive_settings, size=(120, 32),
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5")),
-    Scene("clock", _drive_clock, size=(120, 24),
+    Scene("clock", _drive_clock, size=(120, 32),
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
           new_session_factory=lambda: FakeEngine([], model="claude-sonnet-4-5")),
-    Scene("sessions", _drive_sessions, size=(172, 24),
+    Scene("sessions", _drive_sessions, size=(172, 47),
           engine_factory=_hero_engine),
 ]
 

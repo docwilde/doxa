@@ -109,10 +109,26 @@ async def _app(monkeypatch, cwd, model="claude-sonnet-4-5"):
     return app, engines
 
 
-def _tab_label(app, pane) -> str:
+def _raw_tab_label(app, pane) -> str:
+    """The tab header exactly as painted -- provider glyph and all."""
     from textual.widgets import TabbedContent
 
     return app.query_one("#session-tabs", TabbedContent).get_tab(pane.id).label.plain
+
+
+def _tab_label(app, pane) -> str:
+    """The tab header's IDENTITY half -- the provider glyph stripped off.
+
+    Every painted label carries the glyph (see test_the_provider_glyph_*
+    below), so stripping it here once keeps the rest of this file reading
+    exactly like it did before the glyph shipped: these assertions are
+    about what the label SAYS (model, repo, branch, or a pinned name), a
+    question the glyph -- constant across every tab -- has no bearing on."""
+    from doxa.app import PROVIDER_GLYPHS
+
+    prefix = PROVIDER_GLYPHS["claude"] + " "
+    raw = _raw_tab_label(app, pane)
+    return raw[len(prefix):] if raw.startswith(prefix) else raw
 
 
 async def _settled(pilot, app, pane, tries=200):
@@ -376,6 +392,94 @@ def test_truncation_sacrifices_model_first_then_repo_and_protects_branch():
     # And a short label is left exactly alone.
     assert compose_tab_label("Opus", "doxa", "main") == "Opus@doxa:main"
     assert compose_tab_label("Opus", "notes") == "Opus@notes"
+
+
+def test_the_worst_case_label_plus_glyph_still_fits_the_original_budget():
+    """TAB_LABEL_MAX was cut from 34 to 32 for exactly one reason: the
+    glyph (1 cell) plus its separating space (1 cell) painted ahead of it
+    must not blow past the width the tab bar was originally sized for.
+    Pin that relationship down as a test, not just a comment, so a future
+    edit to either constant has to notice the other."""
+    from doxa.app import PROVIDER_GLYPHS, compose_tab_label
+
+    glyph_width = len(PROVIDER_GLYPHS["claude"]) + 1  # glyph + separating space
+    ORIGINAL_BUDGET = 34
+    assert glyph_width + TAB_LABEL_MAX == ORIGINAL_BUDGET
+
+    worst_case = compose_tab_label(
+        "Sonnet", "repo", "a-branch-name-so-long-it-alone-overflows"
+    )
+    assert glyph_width + len(worst_case) <= ORIGINAL_BUDGET
+
+
+# -- the provider glyph -----------------------------------------------------
+
+
+def test_provider_glyphs_table_has_exactly_the_one_live_row():
+    """Multi-provider engines are planned, not shipped -- every model DOXA
+    drives today is Claude/Anthropic's, so the table has one row, and the
+    default lookup resolves to it without the caller naming a provider."""
+    from doxa.app import PROVIDER_GLYPHS, provider_glyph
+
+    assert PROVIDER_GLYPHS == {"claude": "✳"}
+    assert provider_glyph() == provider_glyph("claude")
+
+
+def test_provider_glyph_is_anthropic_orange_via_markup():
+    """Confirmed empirically (not assumed): Textual 5's Tab renders its
+    label through Content.from_markup by default, so a color tag here is
+    real color -- not a literal bracket painted into the tab bar. Building
+    an actual Tab from the glyph and inspecting its style spans is the
+    check that would have caught it if that were NOT true."""
+    from textual.widgets._tabs import Tab
+
+    from doxa.app import PROVIDER_GLYPH_COLOR, provider_glyph
+
+    markup = provider_glyph()
+    assert markup == f"[{PROVIDER_GLYPH_COLOR}]✳[/]"
+
+    tab = Tab(markup)
+    assert tab.label.plain == "✳"                     # no stray brackets
+    assert any(
+        span.style == PROVIDER_GLYPH_COLOR for span in tab.label.spans
+    )
+
+
+def test_provider_glyph_uncolored_is_a_plain_fallback():
+    """The escape hatch this feature would need if a future Textual (or a
+    non-ContentTab label site) stopped rendering markup: colored=False
+    hands back the bare glyph, no brackets at all."""
+    from doxa.app import provider_glyph
+
+    assert provider_glyph(colored=False) == "✳"
+
+
+def test_an_unknown_provider_degrades_to_no_glyph():
+    from doxa.app import provider_glyph
+
+    assert provider_glyph("some-future-vendor") == ""
+
+
+@pytest.mark.asyncio
+async def test_the_glyph_prepends_every_painted_tab_label(monkeypatch, tmp_path):
+    """The RAW tab header (not the identity string _tab_label helps read)
+    always starts with the glyph -- for an auto label AND for a pinned
+    (user-renamed) one, because provider identity is orthogonal to the
+    user's name for the tab."""
+    repo = _repo(tmp_path)
+    app, _engines = await _app(monkeypatch, repo)
+    async with app.run_test() as pilot:
+        pane = app.active_pane
+        assert await _settled(pilot, app, pane)
+        assert _raw_tab_label(app, pane) == "✳ Sonnet@myrepo:trunk"
+
+        pane.set_custom_name("pinned work")
+        await pilot.pause()
+        assert _raw_tab_label(app, pane) == "✳ pinned work"
+        # ...while the rename field seeds from the plain identity, glyph
+        # stripped -- renaming "✳ pinned work" back to itself must not
+        # hand the glyph back as part of the name.
+        assert pane.display_name() == "pinned work"
 
 
 # -- the Haiku namer, outside a repo --------------------------------------

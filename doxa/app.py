@@ -112,9 +112,44 @@ MODEL_ALIASES = ("haiku", "sonnet", "opus", "fable")
 # and the BRANCH last of all -- across several open tabs the model is
 # usually identical and the branch is usually what differs, so trimming the
 # branch would destroy exactly the information the label exists to carry.
-TAB_LABEL_MAX = 34
+#
+# The 34 is the budget for THIS text -- what compose_tab_label returns and
+# what auto_label/display_name carry around as the tab's identity (seeding
+# the rename field, sorting the palette, and so on). What actually paints
+# onto the tab header adds a 2-cell prefix on top (the provider glyph plus
+# its separating space, set in SessionPane.set_tab_label) that is NOT part
+# of that identity string, so TAB_LABEL_MAX is trimmed to 32 here -- glyph
+# + space + 32 lands back on the original 34-column, four-tabs-at-80
+# budget instead of quietly blowing past it.
+TAB_LABEL_MAX = 32
 TAB_MODEL_MIN = 4
 TAB_REPO_MIN = 6
+
+# Provider identity: one glyph, prepended to every tab label ahead of the
+# model tier. Multi-provider engines (a second SessionPane driving a
+# non-Claude CLI) are planned but not shipped -- every model DOXA drives
+# today is Claude/Anthropic's (see MODEL_ALIASES) -- so this table has
+# exactly one row. A future provider is a second row here, not a branch in
+# the display logic.
+PROVIDER_GLYPHS: dict[str, str] = {"claude": "✳"}
+PROVIDER_GLYPH_COLOR = "#D97757"  # Claude/Anthropic orange -- theme.tcss's own
+
+
+def provider_glyph(provider: str = "claude", *, colored: bool = True) -> str:
+    """The provider glyph for `provider`, Claude-orange via Textual markup
+    when `colored`. Defaults to "claude" because that is the only engine
+    DOXA drives today; an unrecognised provider (should never happen while
+    there is one row) degrades to no glyph rather than a broken label.
+
+    Textual 5's Tab renders its label through ``Content.from_markup`` by
+    default (confirmed empirically: ``Tab("[#D97757]x[/] y").label.spans``
+    carries the color span, and ``.plain`` strips the markup cleanly) --
+    so the color tag below is real color, not a literal bracket leaking
+    into the tab bar."""
+    glyph = PROVIDER_GLYPHS.get(provider, "")
+    if not glyph:
+        return ""
+    return f"[{PROVIDER_GLYPH_COLOR}]{glyph}[/]" if colored else glyph
 
 
 def short_model(model: "str | None") -> str:
@@ -372,13 +407,18 @@ class GitLine:
     def render(self) -> str | None:
         """`repo ⎇ branch sha`, or None outside a repo (no chip at all).
 
+        The branch half is :meth:`branch_label` -- the SAME string a tab
+        shows -- so a linked worktree reads `repo ⎇ main@featureX @sha`
+        here too: one source of truth for "how does a worktree spell its
+        branch", inherited rather than re-derived.
+
         The short sha sits immediately right of the branch, because that is
         where "which commit am I actually on" belongs -- next to the branch
         it qualifies, not at the far end of the bar. Omitted when it would
         merely repeat the branch label (detached HEAD)."""
         if not self.repo:
             return None
-        branch = self._read_branch()
+        branch = self.branch_label()
         if not branch:
             return self.repo
         chip = f"{self.repo} {git_branch_symbol()} {branch}"
@@ -1763,12 +1803,22 @@ class SessionPane(TabPane):
     def set_tab_label(self, text: str) -> None:
         """Write one label onto the tab header AND onto the pane's own
         title, which is what the palette's tab section and any later
-        re-add of the pane read."""
+        re-add of the pane read.
+
+        `text` is the tab's plain IDENTITY -- what the rename field seeds
+        from, what a later call compares against to skip a no-op render,
+        what the user typed if they pinned the tab. The provider glyph is
+        a display-only prefix layered on top HERE, never folded into that
+        identity string: a pinned (user-renamed) tab still gets the glyph
+        -- provider identity is orthogonal to the user's name for the tab
+        -- but renaming it back to itself must not hand back
+        "✳ my old name" as the seed."""
         self._tab_label = text
-        self._title = self.render_str(text)
+        displayed = f"{provider_glyph()} {text}"
+        self._title = self.render_str(displayed)
         with contextlib.suppress(Exception):
             tabbed = self.app.query_one("#session-tabs", TabbedContent)
-            tabbed.get_tab(self.id or "").label = text
+            tabbed.get_tab(self.id or "").label = displayed
 
     def _set_tab_class(self, class_name: str, value: bool) -> None:
         """Toggle one status class (``-working`` / ``-done-unseen`` /

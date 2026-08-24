@@ -258,6 +258,75 @@ def test_git_chip_omits_a_sha_that_would_repeat_the_branch(tmp_path):
     assert chip == f"myrepo ⎇ {sha[:8]}"
 
 
+# -- the git chip inside a linked worktree ---------------------------------
+#
+# render() builds its branch half from branch_label() -- the SAME method a
+# tab label uses -- so the worktree-suffix dedup rule (only append when the
+# worktree's name differs from BOTH the branch and the repo slot beside it)
+# is inherited here rather than re-implemented.
+
+
+def test_git_chip_is_plain_in_a_normal_checkout(tmp_path):
+    """No worktree at all: nothing for branch_label() to append, so the
+    chip reads exactly as it always did."""
+    repo = _repo(tmp_path)
+    line = GitLine(str(repo))
+    assert line.worktree is None
+    assert line.render() == f"myrepo ⎇ trunk @{_short_sha(repo)}"
+
+
+def test_git_chip_carries_the_worktree_suffix(tmp_path):
+    """Inside a linked worktree whose directory name says something the
+    branch does not: `repo ⎇ branch@worktree`. `git worktree add` names
+    the worktree after the directory it just created, so -- same
+    construction test_branch_label_names_a_linked_worktree uses in
+    test_tab_labels.py -- a worktree name that differs from BOTH the
+    branch and the repo slot is simulated the same way branch_label()'s
+    own tests do.
+
+    No `@sha` here: a linked worktree's checked-out branch ref lives in
+    the MAIN repo's `.git/refs/heads/`, not under this worktree's own
+    `.git/worktrees/<name>/`, so `_read_sha`'s ref-path stat misses it and
+    the sha silently comes back None -- a PRE-EXISTING gap (reproduced
+    against unmodified GitLine, unrelated to branch_label() adoption
+    here) that this feature does not touch. Pinned as documentation, not
+    silently "fixed" by picking a different assertion."""
+    repo = _repo(tmp_path)
+    work = repo.parent / "elsewhere"
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-q", "-b", "feature",
+         str(work)],
+        check=True,
+    )
+    line = GitLine(str(work))
+    line.worktree = "spike"
+    assert line.render() == "elsewhere ⎇ feature@spike"
+
+
+def test_git_chip_dedups_when_the_worktree_name_repeats_branch_or_repo(tmp_path):
+    """`git worktree add ../foo -b foo` makes the worktree, the branch, and
+    the directory (repo slot) all "foo" -- the suffix is withheld because
+    it would say one fact three times, the same rule branch_label()
+    documents for the tab label."""
+    repo = _repo(tmp_path)
+    work = repo.parent / "elsewhere"
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-q", "-b", "feature",
+         str(work)],
+        check=True,
+    )
+    line = GitLine(str(work))
+    assert line.worktree == "elsewhere"
+    assert line.repo == "elsewhere"
+    # The worktree name repeats the repo slot beside it: withheld.
+    assert line.render() == "elsewhere ⎇ feature"
+
+    # And the branch-matches-worktree case, exercised directly the same
+    # way test_tab_labels.py exercises branch_label() itself.
+    line.worktree = "feature"
+    assert line.render() == "elsewhere ⎇ feature"
+
+
 @pytest.mark.asyncio
 async def test_status_line_chip_order(monkeypatch, tmp_path):
     """Pinned ORDER: model · repo ⎇ branch sha · cost · headroom · ctx ·
