@@ -28,13 +28,19 @@ from textual.containers import VerticalScroll
 from textual.widgets import OptionList, TabbedContent, TabPane, TextArea
 
 from .. import commands as commands_mod
+from .. import history as history_mod
 from .. import naming as naming_mod
 from .. import shell as shell_mod
 from .. import providers as providers_mod
 from .. import transcript as transcript_mod
 from ..history import SessionSearch
 from ..shell import SHELL_PREFIX
-from ..ui.dialogs import ChipPicker, NeedsInputPopup, SlashComplete
+from ..ui.dialogs import (
+    ChipPicker,
+    NeedsInputPopup,
+    ResumeConfirm,
+    SlashComplete,
+)
 from ..ui.labels import (
     _write_tab_class,
     compose_tab_label,
@@ -117,6 +123,13 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         # reported cwd wins once it boots, this is the before-boot answer
         # (and the ONLY answer an archived tab ever has).
         self._restore_cwd: "str | None" = None
+        # v0.45.0 (/resume): this pane's engine CONTINUES an existing
+        # conversation. Set at construction by DoxaApp.resume_session, read
+        # once by _boot, which then reuses v0.32.0's own
+        # _restore_transcript to put the prior turns back on screen -- see
+        # that method's `require_backlog_skip` argument for the one thing
+        # a resume does differently from a reattach.
+        self._resume_from: "str | None" = None
         # NOTE (v0.38.0): a pane does NOT decide its own focus. It used to
         # -- on_mount focused this pane's prompt, guarded by a
         # _focus_on_mount flag -- and because focusing a widget inside a
@@ -259,8 +272,10 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
             with contextlib.suppress(Exception):
                 await engine.finalize()
 
-    async def _restore_transcript(self, session_id: str, cwd: str) -> None:
-        """Put this reattached session's PRIOR CONVERSATION back on screen.
+    async def _restore_transcript(
+        self, session_id: str, cwd: str, *, require_backlog_skip: bool = True,
+    ) -> None:
+        """Put this session's PRIOR CONVERSATION back on screen.
 
         The defect this closes, measured against a real daemon over a real
         socket before anything was changed: v0.23.0's restore reattaches
@@ -288,10 +303,21 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         at all -- v0.31.0's replay-only behavior, unchanged, rather than a
         doubled transcript.
 
+        ``require_backlog_skip=False`` is the RESUME caller (v0.45.0), and
+        it is the only difference between the two. A reattach shares a
+        daemon that has been running all along, so drawing from disk is
+        only safe once that daemon has agreed not to replay its ring on
+        top -- hence the guard. A resume has no such daemon: its process
+        was started seconds ago for exactly this conversation and has
+        nothing buffered to replay, so the guard would refuse the one case
+        where drawing from disk is unconditionally correct. Same reader,
+        same renderer, same file -- one precondition that only one of the
+        two callers has.
+
         Never fatal: an unreadable transcript costs the scrollback, never
-        the session -- the pane is attached and usable either way."""
+        the session -- the pane is usable either way."""
         engine = self.engine
-        if getattr(engine, "backlog_skipped", None) is None:
+        if require_backlog_skip and getattr(engine, "backlog_skipped", None) is None:
             return
         block_list = self.query_one("#block-list", VerticalScroll)
         try:
@@ -583,16 +609,77 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
 
     @on(OptionList.OptionSelected, "#session-search")
     def _on_search_selected(self, event: OptionList.OptionSelected) -> None:
-        """Clicking a row does what Enter would: toggle a session header,
-        or take a snippet's excerpt."""
+        """Clicking a row does what Enter would: offer to RESUME a session
+        header (v0.45.0 -- it used to toggle that header's fold), or take a
+        snippet's excerpt.
+
+        The two must not drift. Enter's meaning on a header changed in
+        ``PromptInput.on_key``, and a click that still toggled would leave
+        one popup with two answers to "activate this row" -- so this reads
+        the same :meth:`SessionSearch.chosen_session` and posts the same
+        message. Expanding and collapsing keep Right and Left, which is
+        what made Enter free to be repurposed at all."""
         event.stop()
         prompt = self.query_one("#prompt-input", PromptInput)
         prompt.search.highlighted = event.option_index
-        if prompt.search.current_kind() == "header":
-            prompt.search.toggle_current()
+        group = prompt.search.chosen_session()
+        if group is not None:
+            prompt.post_message(PromptInput.ResumeRequested(group))
         else:
             prompt.search.take_hit()
         prompt.focus()
+
+    @on(PromptInput.ResumeRequested)
+    def _on_resume_requested(self, event: "PromptInput.ResumeRequested") -> None:
+        """Enter (or a click) on a /search session header: confirm, then
+        resume. A worker because both halves must be awaited -- a modal's
+        answer (``push_screen_wait`` is legal only from one) and the tab
+        the app then opens. Exclusive in its own group so a second Enter
+        while the dialog is up cannot start a second resume."""
+        event.stop()
+        self.run_worker(
+            self._confirm_and_resume(event.group), exclusive=True, group="resume",
+        )
+
+    async def _confirm_and_resume(self, group: dict) -> None:
+        """Ask, then act -- or, when the conversation cannot be resumed at
+        all, say so in the same dialog and act on nothing.
+
+        Eligibility is decided BEFORE the dialog and off the loop
+        (:func:`doxa.history.resume_state` reads the peer registry and two
+        directories), so what the user sees already knows whether it is
+        offering a resume or explaining a refusal. Asking first and
+        failing after would move the discovery to one turn INTO a
+        conversation the user believed they had reopened, which is
+        precisely the failure that check exists to prevent.
+
+        A session that is still RUNNING never reaches the dialog: there is
+        nothing to confirm, because resuming is not the right verb for it
+        -- see :meth:`DoxaApp.resume_session`, which owns that decision so
+        this gesture and ``/resume`` cannot answer it differently."""
+        from ..app import DoxaApp  # deferred: doxa.app imports this package
+
+        session_id = str(group.get("session_id") or "")
+        cwd = str(group.get("cwd") or "")
+        state, reason = await asyncio.to_thread(
+            history_mod.resume_state, session_id, cwd
+        )
+        app = self.app
+        if not isinstance(app, DoxaApp):
+            return
+        if state != history_mod.RESUME_RUNNING:
+            dialog = ResumeConfirm(
+                str(group.get("title") or ""),
+                session_id,
+                when=history_mod.hit_age(group),
+                cwd=cwd,
+                reason=reason,
+            )
+            if not await app.push_screen_wait(dialog):
+                return
+        note = await app.resume_session(group)
+        if note:
+            await self._system(note)
 
     @on(PromptInput.Submitted)
     def on_prompt_submitted(self, event: "PromptInput.Submitted") -> None:

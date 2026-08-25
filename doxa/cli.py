@@ -44,9 +44,11 @@ import asyncio
 import os
 import subprocess
 import sys
+from typing import Any, Callable  # noqa: F401 -- annotation-only
 
 from . import config, peers, tabsets
-from .app import DoxaApp
+from .app import DoxaApp, RestoreTabSpec
+from . import history as history_mod
 from .daemon import spawn_daemon
 
 
@@ -93,19 +95,33 @@ def _run_attached(
         _sid, dsock = spawn_daemon(path, model=model, linger_secs=linger)
         return EngineClient(dsock)
 
+    def resume_session_factory(path: str, session_id: str) -> EngineClient:
+        # /resume (v0.45.0): the same spawn primitive again, except the
+        # daemon CONTINUES the conversation already recorded under
+        # session_id instead of minting a new one -- spawn_daemon's own
+        # `resume` argument, which also makes the resumed id the daemon's
+        # session id (a resume keeps its id; see that function's
+        # docstring). Threaded into every DoxaApp construction in this
+        # module so /resume is daemon-backed wherever the TUI is.
+        _sid, dsock = spawn_daemon(
+            path, model=model, linger_secs=linger, resume=session_id,
+        )
+        return EngineClient(dsock)
+
     app = DoxaApp(
         cwd=cwd,
         model=model,
         engine_factory=lambda: EngineClient(socket_path),
         new_session_factory=new_session_factory,
         new_session_factory_at=new_session_factory_at,
+        resume_session_factory=resume_session_factory,
     )
     app.run()
     _maybe_restart(app)
 
 
 def _restore_report_text(
-    restored: int, skipped: int, archived: int = 0
+    restored: int, skipped: int, archived: int = 0, resumed: int = 0
 ) -> "str | None":
     """"restored 3 tabs, 1 read-only transcript (session ended), skipped 1
     session no longer running." -- None when there is nothing to say (no
@@ -116,12 +132,24 @@ def _restore_report_text(
     miss: a read-only tab looks like a session until you try to type in
     it, so the difference between "this is attached" and "this is a
     transcript" is said out loud at the moment the window opens, not left
-    to be discovered."""
-    if not restored and not skipped and not archived:
+    to be discovered.
+
+    v0.45.0 adds the ``resumed`` clause and it carries the same duty in
+    the other direction: those tabs are LIVE sessions continuing a
+    conversation that had ended, which is a strictly bigger claim than
+    "restored" and must not hide inside it. Its counterpart is that the
+    read-only clause now means "could not be resumed", and each such tab
+    says which reason in its own first block."""
+    if not restored and not skipped and not archived and not resumed:
         return None
     parts = []
     if restored:
         parts.append(f"restored {restored} tab{'s' if restored != 1 else ''}")
+    if resumed:
+        parts.append(
+            f"resumed {resumed} ended "
+            f"{'conversation' if resumed == 1 else 'conversations'}"
+        )
     if archived:
         parts.append(
             f"{archived} read-only "
@@ -134,6 +162,60 @@ def _restore_report_text(
             "no longer running"
         )
     return "tab restore: " + ", ".join(parts) + "."
+
+
+def ended_tab_spec(
+    tab: "Any", launch_cwd: str, resume_factory: "Callable[[str, str], Any]",
+) -> RestoreTabSpec:
+    """One saved tab whose daemon no longer answers -> the spec that opens
+    it: RESUMED (a live session continuing that conversation) where that is
+    possible, read-only over its transcript where it is not.
+
+    Through v0.44.0 there was only the second outcome. Reported: *"as long
+    as a tab was open, when DOXA is started again, the tab should be
+    resumed automatically"*. A daemon finalizing on its linger timer while
+    the window is shut is the ORDINARY way a session ends, so the dead end
+    was the ordinary result of a restart -- restore meant *display*.
+
+    The question is answered from local file and registry reads only
+    (:func:`doxa.history.resume_state`): no subprocess, nothing that can
+    slow a launch measurably, and nothing that can fail a launch. It is
+    also what keeps this honest -- the CLI holds no history under any
+    session id DOXA minted before v0.45.0, when its ids and the CLI's were
+    two different id spaces (see ``SessionEngine._build_options``), so
+    those tabs come back exactly as they do today AND SAY WHY.
+
+    EAGER, not deferred, and the cost argument is why: a resumed tab costs
+    one process, not tokens. The CLI loads that conversation out of its
+    own store at connect and DOXA sends nothing until the user types. That
+    is the same per-tab cost restore ALREADY pays for every tab whose
+    daemon is alive (a spawn or an attach each), so deferring it would buy
+    a second, subtler tab lifecycle in exchange for a cost the existing
+    one already accepts. ``resume_restored`` is the switch for anyone who
+    would rather not pay it, and OFF is v0.32.0 exactly."""
+    tab_cwd = tab.cwd or launch_cwd
+    if not history_mod.resume_restored():
+        # The setting doing what it says is not a failure, so there is no
+        # reason to explain -- an unexplained read-only tab here is the
+        # user's own choice looking exactly like itself.
+        return RestoreTabSpec(
+            session_id=tab.session_id, pinned_name=tab.pinned_name,
+            cwd=tab_cwd, archived=True,
+        )
+    state, why = history_mod.resume_state(tab.session_id, tab_cwd)
+    if state == history_mod.RESUME_OK:
+        return RestoreTabSpec(
+            session_id=tab.session_id,
+            engine_factory=(
+                lambda sid=tab.session_id, c=tab_cwd: resume_factory(c, sid)
+            ),
+            pinned_name=tab.pinned_name, cwd=tab_cwd, resume=True,
+        )
+    return RestoreTabSpec(
+        session_id=tab.session_id, pinned_name=tab.pinned_name,
+        cwd=tab_cwd, archived=True,
+        resume_note=f"not resumed — {why}" if why else "",
+    )
 
 
 def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
@@ -156,7 +238,6 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
     leaving the user with no TUI at all, but the report ("skipped N,
     restored 0") still reaches them, on that one fresh tab, so a silently
     different startup never happens."""
-    from .app import RestoreTabSpec
     from .client import EngineClient
 
     report = _restore_report_text(
@@ -173,6 +254,19 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
         _sid, dsock = spawn_daemon(path, model=model, linger_secs=linger)
         return EngineClient(dsock)
 
+    def resume_session_factory(path: str, session_id: str) -> EngineClient:
+        # /resume (v0.45.0): the same spawn primitive again, except the
+        # daemon CONTINUES the conversation already recorded under
+        # session_id instead of minting a new one -- spawn_daemon's own
+        # `resume` argument, which also makes the resumed id the daemon's
+        # session id (a resume keeps its id; see that function's
+        # docstring). Threaded into every DoxaApp construction in this
+        # module so /resume is daemon-backed wherever the TUI is.
+        _sid, dsock = spawn_daemon(
+            path, model=model, linger_secs=linger, resume=session_id,
+        )
+        return EngineClient(dsock)
+
     if not resolved.tabs and not resolved.archived:
         _sid, dsock = spawn_daemon(launch_cwd, model=model, linger_secs=linger)
         app = DoxaApp(
@@ -182,6 +276,7 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
                 spawn_daemon(launch_cwd, model=model, linger_secs=linger)[1]
             ),
             new_session_factory_at=new_session_factory_at,
+            resume_session_factory=resume_session_factory,
             restore_report=report,
         )
         app.run()
@@ -202,16 +297,8 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
     specs = []
     for tab, entry in resolved.ordered():
         if entry is None:
-            # Archived: no daemon, so no factory -- DoxaApp builds an
-            # ArchivedSessionTab and reads the transcript itself. The cwd
-            # is the SAVED one (its own worktree, with
-            # worktree_per_session on), which is what names the project
-            # the transcript lives under.
-            specs.append(RestoreTabSpec(
-                session_id=tab.session_id,
-                pinned_name=tab.pinned_name,
-                cwd=tab.cwd or launch_cwd,
-                archived=True,
+            specs.append(ended_tab_spec(
+                tab, launch_cwd, resume_session_factory,
             ))
             continue
         specs.append(RestoreTabSpec(
@@ -228,6 +315,16 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
             pinned_name=tab.pinned_name,
             cwd=tab.cwd or entry.cwd,
         ))
+    # Recomputed HERE, not from resolved.archived above: the spec loop is
+    # where "its session ended" splits into resumed and read-only, and the
+    # report has to say which happened rather than lumping both under the
+    # count that was true before the question was asked.
+    resumed_n = sum(1 for sp in specs if sp.resume)
+    archived_n = sum(1 for sp in specs if sp.archived)
+    report = _restore_report_text(
+        len(specs) - resumed_n - archived_n, resolved.skipped,
+        archived_n, resumed_n,
+    )
     print(
         f"doxa: restoring {len(specs)} tab(s) in {launch_cwd}…", file=sys.stderr,
     )
@@ -241,6 +338,7 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
         ),
         new_session_factory=new_session_factory,
         new_session_factory_at=new_session_factory_at,
+        resume_session_factory=resume_session_factory,
         restore_tabs=specs,
         restore_active_id=resolved.active_session_id,
         restore_report=report,

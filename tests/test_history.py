@@ -448,10 +448,20 @@ async def test_right_expands_left_collapses_a_header(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_enter_toggles_a_header_matching_the_trace_tree(monkeypatch, tmp_path):
-    """Enter on a header row folds/unfolds it (the trace tree's own
-    ``Collapsible`` convention) rather than inserting anything -- a header
-    is not itself an excerpt."""
+async def test_enter_on_a_header_no_longer_toggles_the_fold(monkeypatch, tmp_path):
+    """v0.45.0 REPURPOSED this key, and this test is the old one rewritten
+    rather than deleted, so the change is legible where it happened.
+
+    Through v0.44.0 Enter on a session header toggled its fold, reasoning
+    that "a header row is never itself an excerpt, so this is the ONLY
+    thing Enter can mean here". It now means RESUME that conversation --
+    the fold keeps Right and Left (asserted directly above), which is what
+    made Enter free.
+
+    Asserted here: Enter does NOT fold, does NOT touch the prompt line,
+    and does NOT insert an excerpt. That it opens the confirm dialog is
+    tests/test_resume.py's job -- this file owns the popup's key protocol,
+    that one owns the resume."""
     _seed_index()
     app = await _app(monkeypatch, tmp_path)
     async with app.run_test() as pilot:
@@ -465,15 +475,15 @@ async def test_enter_toggles_a_header_matching_the_trace_tree(monkeypatch, tmp_p
             await pilot.pause(0.02)
 
         before = prompt.value
+        assert popup.current_kind() == "header"
+        assert popup.option_count == 2  # both headers, both collapsed
+
         await pilot.press("enter")
         await pilot.pause()
-        assert popup.option_count == 3  # expanded, not inserted
-        assert prompt.value == before  # the prompt line is untouched
-        assert popup.is_open is True  # still open -- a fold, not a choice
-
-        await pilot.press("enter")  # toggling back closes it again
-        await pilot.pause()
+        # Still two rows: the fold did not open. The prompt line is
+        # untouched, so nothing was inserted either.
         assert popup.option_count == 2
+        assert prompt.value == before
 
 
 @pytest.mark.asyncio

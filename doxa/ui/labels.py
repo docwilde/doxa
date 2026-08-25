@@ -1250,17 +1250,24 @@ def _chip_span(text: str, action: str) -> str:
 
 def _fmt_age(secs: float) -> str:
     """One age, one format, everywhere -- session uptime, cache staleness,
-    and (item V) how long a belief has sat untouched or a proposal has sat
-    unreviewed.
+    (item V) how long a belief has sat untouched or a proposal unreviewed,
+    and (v0.45.0) every row of the ``/search`` popup.
 
     The DAY tier is item V's addition and the reason there is still only
     one of these functions. Beliefs and staged proposals are months old,
     not hours: rendering a four-month-old belief as "2904h0m" is a number
     a reader has to do arithmetic on, which is the opposite of what an age
-    column is for. Everything under a day is unchanged, so every existing
-    caller renders exactly as it did."""
+    column is for. Session history has the same shape and hit the same
+    wall -- last Tuesday came out "168h0m" -- so /search reuses this
+    rather than spelling "how long ago" a second way.
+
+    Everything under a day is unchanged, so every existing caller renders
+    exactly as it did. What the tier's own ``days < 10`` cut-off buys is a
+    ceiling: nothing this returns exceeds five columns, which is what lets
+    /search park an age in a fixed gutter beside an excerpt without ever
+    costing that excerpt a column."""
     if secs < 60:
-        return f"{int(secs)}s"
+        return f"{int(max(0.0, secs))}s"
     if secs < 3600:
         return f"{int(secs // 60)}m"
     if secs < 86400:

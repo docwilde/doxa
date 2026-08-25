@@ -83,7 +83,17 @@ class PromptInput(TextArea):
     is checked next because it is the one that can be open while a
     command name is fully typed (``/search ...``); the two ordinary
     popups are mutually exclusive in practice, and this settles the order
-    anyway."""
+    anyway.
+
+    v0.45.0 changed exactly one meaning in that protocol: Enter on a
+    ``/search`` SESSION HEADER posts :class:`ResumeRequested` instead of
+    toggling the header's fold. The old comment on that branch reasoned
+    that toggling was "the ONLY thing Enter can mean here", which held
+    only while a header had nothing behind it worth activating. Right and
+    Left already expand and collapse (item I bound both), so the fold lost
+    nothing and Enter came to mean here what it means everywhere else in
+    this app. Enter on a HIT row is untouched -- ``take_hit`` still
+    replaces the query line with the chosen excerpt."""
 
     MIN_ROWS = 1
     MAX_ROWS = 10
@@ -119,6 +129,25 @@ class PromptInput(TextArea):
 
         def __init__(self, mime: str) -> None:
             self.mime = mime
+            super().__init__()
+
+    class ResumeRequested(Message):
+        """Enter (or a click) on a ``/search`` SESSION HEADER row: the
+        user wants that conversation back (v0.45.0).
+
+        Carries the header's whole group dict -- session id, title, cwd,
+        timestamp -- because everything downstream needs all four: the
+        confirm modal shows title/when/cwd, the eligibility check needs
+        id and cwd, and the resumed tab is born labelled from the title.
+        Passing the id alone would mean re-querying LORE for facts the row
+        was already holding.
+
+        Posted, not handled here, for the same reason NeedsInputChoice is:
+        answering a modal means ``push_screen_wait`` from a worker, and
+        opening a tab is the app's job, not a text widget's."""
+
+        def __init__(self, group: dict) -> None:
+            self.group = dict(group)
             super().__init__()
 
     class NeedsInputChoice(Message):
@@ -346,11 +375,30 @@ class PromptInput(TextArea):
             elif event.key == "left":
                 self.search.collapse_current()  # item I: close it (or its parent)
             elif event.key == "enter":
-                if self.search.current_kind() == "header":
-                    # Match the trace tree's own convention: Enter toggles
-                    # a fold. A header row is never itself an excerpt, so
-                    # this is the ONLY thing Enter can mean here.
-                    self.search.toggle_current()
+                group = self.search.chosen_session()
+                if group is not None:
+                    # v0.45.0 -- Enter on a session header REPURPOSED.
+                    #
+                    # It used to toggle the fold, on the reasoning that "a
+                    # header row is never itself an excerpt, so this is
+                    # the ONLY thing Enter can mean here". That was true
+                    # of the meanings available then. It is not true now:
+                    # a header names a CONVERSATION, and a conversation is
+                    # something you can reopen.
+                    #
+                    # Nothing is lost. Right already expands a fold and
+                    # Left already collapses it (item I bound both), so
+                    # the toggle keeps two keys of its own and Enter is
+                    # free to mean the thing Enter means everywhere else
+                    # in this app -- activate the highlighted row. On a
+                    # HIT row that still means take_hit(), unchanged and
+                    # deliberately so: the excerpt path is what most
+                    # /search traffic is.
+                    #
+                    # The pane runs it (a modal answer must be awaited
+                    # from a worker, and opening a tab is app-level work);
+                    # this widget only knows which row the caret is on.
+                    self.post_message(self.ResumeRequested(group))
                 elif not self.take_hit():
                     self._submit()  # no hits: Enter submits, /search answers
             else:

@@ -321,3 +321,43 @@ def spawn_env() -> dict[str, str]:
         "CLAUDE_CONFIG_DIR": str(cli_config_dir()),
         "LORE_SKIP": "1",
     }
+
+
+def cli_session_file(session_id: str) -> "Path | None":
+    """The isolated CLI's OWN transcript for ``session_id``, or ``None``
+    when it has never heard of that id.
+
+    The one question ``/resume`` has to answer before it offers anything:
+    ``--resume`` reads the CLI's session store, which is a DIFFERENT store
+    from the LORE transcript DOXA writes and ``/search`` indexes. Measured
+    (v0.45.0, against a real ``claude`` under this module's own
+    ``spawn_env``): resuming an id the store does not hold fails the turn
+    outright with ``No conversation found with session ID: <id>``, and
+    that is not an error worth discovering one prompt into a conversation
+    the user thought they had reopened.
+
+    Globbed across every project directory rather than encoding the cwd
+    ourselves. The CLI's ``projects/`` subdirectory names are ITS
+    encoding of a cwd, not ours, and a session id is a uuid: one glob
+    answers "does the CLI know this conversation" exactly, with no second
+    implementation of somebody else's path scheme to keep in step. Returns
+    the path (callers only need its truthiness today, but the file is what
+    the answer is ABOUT, and a bool would throw that away).
+
+    Never raises: an unreadable config directory reads as "not
+    resumable", which is the same answer the caller acts on anyway."""
+    if not session_id:
+        return None
+    try:
+        matches = sorted(
+            (cli_config_dir() / "projects").glob(f"*/{session_id}.jsonl")
+        )
+    except OSError:
+        return None
+    for path in matches:
+        try:
+            if path.is_file() and path.stat().st_size > 0:
+                return path
+        except OSError:
+            continue
+    return None
