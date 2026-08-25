@@ -97,6 +97,7 @@ PANE_COMMANDS: "tuple[CommandBinding, ...]" = (
     CommandBinding("/context", "_cmd_context"),
     CommandBinding("/clear", "_cmd_clear"),
     CommandBinding("/detach", "_cmd_detach"),
+    CommandBinding("/attach", "_cmd_attach"),
     CommandBinding("/sessions", "_cmd_sessions"),
     CommandBinding("/rename", "_cmd_rename"),
     CommandBinding("/search", "_cmd_search"),
@@ -668,6 +669,131 @@ class PaneCommandsMixin:
         it."""
         await self.app.action_detach_tab()
 
+    async def _cmd_attach(self, args: str) -> None:
+        """/attach [prefix] -- the door back in, symmetric with /detach:
+        /detach sends a session's tab OUT of the strip and it keeps
+        running; /attach brings one back IN. Always a NEW tab, never the
+        one /attach was typed in -- the same rule v0.45.0's /resume
+        settled (a pane holds a live conversation; /clear is the verb for
+        replacing one), and now the SAME rule the palette's "Attach: ..."
+        entries and the sessions chip's picker follow too
+        (:meth:`DoxaApp._cmd_attach`, fixed in this same release to reuse
+        :meth:`DoxaApp._attach_in_new_tab` instead of switching the
+        active pane's engine in place -- see that method's own docstring
+        for the measured defect that was). Once resolved, this command
+        hands its match to THAT same entry point (via :meth:`_attach_entry`
+        below) rather than to _attach_in_new_tab directly -- one shared
+        attach path for every surface that offers one, not a second
+        primitive reached a second way.
+
+        A PREFIX matches against every live, DAEMON-hosted session (id or
+        title, same shorthand `/sessions kill` and `doxa attach` already
+        take) regardless of whether some tab of this window already holds
+        it -- refused by NAMING what it found on both "nothing" and "more
+        than one", the same shape /resume's own prefix form uses, because
+        attaching the wrong conversation is not a mistake a user would
+        notice quickly either.
+
+        Bare, the candidates narrow to DETACHED sessions -- live, but not
+        open in any tab of this window (the same population
+        `/sessions kill-detached` reaps): exactly one attaches outright,
+        several open the SAME ChipPicker bare /resume opens onto its own
+        list, so a THIRD picker never gets invented for this one."""
+        from ..app import DoxaApp  # deferred: doxa.app imports this package
+
+        app = self.app
+        if not isinstance(app, DoxaApp):
+            return
+        open_by_sid = {
+            str(getattr(p.engine, "session_id", "") or ""): p
+            for p in app.panes()
+        }
+        term = args.strip()
+        if term:
+            matches = [
+                e for e in peers_mod.list_daemons()
+                if e.session_id.startswith(term) or e.title.startswith(term)
+            ]
+            if not matches:
+                await self._system(f"attach: no live session matches {term!r}")
+                return
+            if len(matches) > 1:
+                listed = "\n".join(
+                    f"  {e.session_id[:8]}  {e.title}  {e.cwd}" for e in matches
+                )
+                await self._system(
+                    f"attach: {term!r} matches {len(matches)} live sessions:"
+                    f"\n{listed}\ngive more of the id."
+                )
+                return
+            await self._attach_entry(matches[0], open_by_sid)
+            return
+        detached = [
+            e for e in peers_mod.list_daemons() if e.session_id not in open_by_sid
+        ]
+        if not detached:
+            await self._system(
+                "attach: nothing detached to attach to — /sessions lists "
+                "what is live"
+            )
+            return
+        if len(detached) == 1:
+            await self._attach_entry(detached[0], open_by_sid)
+            return
+        self._open_chip_picker(
+            [(e.session_id, f"{e.title}  {e.session_id[:8]}") for e in detached],
+            None,
+            lambda rid: self.run_worker(
+                self._attach_hit(rid, detached, open_by_sid), group="attach",
+            ),
+            title="attach",
+            note="attaches in a NEW tab; this one keeps running",
+        )
+
+    async def _attach_entry(
+        self, entry: "peers_mod.PeerInfo", open_by_sid: "dict[str, Any]",
+    ) -> None:
+        """One resolved live session -> :meth:`DoxaApp._cmd_attach`, the
+        SAME entry point the palette's "Attach: ..." rows and the sessions
+        chip's own picker use -- never a second attach primitive (see that
+        method's own docstring for the v0.57.0 defect fixed there, which
+        this command inherits the fix for by calling it rather than
+        _attach_in_new_tab directly).
+
+        Already open in ANOTHER tab of THIS window: switched to, never
+        attached a second time -- the ONE exclusion _cmd_attach's own
+        callers make BEFORE reaching it (the palette's Attach section
+        drops these from its candidate list outright; the sessions chip's
+        picker checks separately, same as here) rather than something
+        _cmd_attach re-derives itself. /attach's own WITH-A-PREFIX
+        candidates are not pre-filtered that way (a typed prefix can name
+        anything live), so this is the one caller that has to make the
+        check rather than rely on it having already been made."""
+        from ..app import DoxaApp  # deferred: doxa.app imports this package
+
+        app = self.app
+        if not isinstance(app, DoxaApp):
+            return
+        other = open_by_sid.get(entry.session_id)
+        if other is not None:
+            app._switch_to_tab(getattr(other, "id", None) or "")
+            return
+        app._cmd_attach(entry)
+
+    async def _attach_hit(
+        self,
+        rid: str,
+        entries: "list[peers_mod.PeerInfo]",
+        open_by_sid: "dict[str, Any]",
+    ) -> None:
+        """The bare-/attach ChipPicker's selection callback: resolve the
+        row back to its PeerInfo (the picker only ever hands back the id)
+        and hand it to the same path a resolved prefix takes."""
+        entry = next((e for e in entries if e.session_id == rid), None)
+        if entry is None:
+            return
+        await self._attach_entry(entry, open_by_sid)
+
     async def _cmd_sessions(self, args: str) -> None:
         """/sessions -- what is actually alive, and the way to end it.
 
@@ -757,7 +883,27 @@ class PaneCommandsMixin:
         for entry in targets:
             ok = await asyncio.to_thread(_stop_session, entry)
             (killed if ok else failed).append(entry.session_id[:8])
+            if ok:
+                # v0.57.0: reaping is the ONE gesture in this app that
+                # means "forget this conversation" -- a session Ctrl+W'd
+                # earlier this run (still sitting in _detached_this_run)
+                # or still attached in a tab of this very window must not
+                # resurrect at the next launch just because a stop path
+                # that keeps things resumable now exists. Vetoed by id
+                # rather than reached for and popped out of those two
+                # dicts: killing what a DIFFERENT window's tab is holding
+                # (this registry is not scoped to one window) has nothing
+                # local to pop, and the veto covers that case the same way.
+                self.app._killed_this_run.add(entry.session_id)
         swept = await asyncio.to_thread(peers_mod.sweep_stale)
+        if killed:
+            # Write the veto NOW rather than waiting for some later,
+            # unrelated tab change to trigger a persist -- a session
+            # already written into today's saved record (by an earlier
+            # detach, or simply because it was still open when the window
+            # last saved) must not survive on disk past the kill that was
+            # just asked for by name.
+            self.app._persist_tabset()
         lines = []
         if killed:
             lines.append(f"stopped: {', '.join(killed)}")

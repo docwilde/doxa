@@ -70,11 +70,18 @@ class PaneRuntimeMixin:
         when ready` -- when the daemon kept an unfinished worktree instead
         of removing it; None otherwise (in-process engines never have
         one; a cleanly-removed or non-worktree session doesn't either)."""
-        # Item D: marked BEFORE the engine handle is even cleared -- a
-        # stopped session must leave the persisted tab set, and this flag
-        # (not "engine is None", which detach() also produces) is what
-        # tells _persist_tabset the difference between "gone for good" and
-        # "merely detached, still running".
+        # Item D: marked BEFORE the engine handle is even cleared. Through
+        # v0.55.0 this flag (not "engine is None", which detach() also
+        # produces) was what told _persist_tabset to drop the pane from
+        # the persisted tab set outright -- ending a session meant losing
+        # the tab for good. v0.57.0: it no longer does (see
+        # DoxaApp._ended_this_run's docstring for why a FINALIZED session
+        # is now still a RESUMABLE one) -- nothing reads this flag to
+        # exclude anything any more. Kept and still set here anyway: it is
+        # the one place that records, honestly, that THIS engine handle's
+        # daemon was told to finalize for real (detach() only ever clears
+        # the handle, never asks the daemon to stop), which is worth
+        # keeping true even with no reader left today.
         self._stopped = True
         engine, self.engine = self.engine, None
         if engine is None:
