@@ -221,6 +221,31 @@ Plugins contribute `config.Setting` rows, namespaced `plugin.<name>.<key>`,
 appearing in the settings modal exactly like built-in knobs. No new storage
 format, no second config file.
 
+## Prerequisite: the error surface
+
+The failure policy below promises that a plugin failure is *visible* — not
+loaded, disabled for the run, over its time budget — and until v0.53.0 DOXA
+had nowhere legible to put any of that. An unhandled exception killed the app
+to a terminal traceback; a failed worker died quietly; a widget that raised
+while painting took the pane with it. All three were observed in one day of
+use, by using it rather than by the tests.
+
+So the in-app error surface is a **prerequisite for the loader**, in the same
+way the focus-ownership fix was a prerequisite for split panes: without it,
+"a plugin failure degrades that plugin, never the app" is a sentence with no
+mechanism behind it, and the first third-party crash would be indistinguishable
+from a DOXA bug.
+
+Three things the loader will need from it, and which the surface is shaped for:
+
+- **attribution** — a failure carries who caused it, so a traceback through
+  third-party frames reads as "disable that plugin", not "DOXA is broken"
+- **a failure RECORD, not just a message** — "disabled for the run" is state
+  the settings modal can read, not a widget scrolled off the top
+- **failures that are not exceptions** — a chip's `text()` overrunning its
+  budget is a policy violation with no raise behind it, and it has to land in
+  the same place
+
 ## Failure policy
 
 A plugin failure degrades **that plugin**, never the app:
