@@ -95,13 +95,14 @@ SETTINGS: tuple[Setting, ...] = (
         help="Permission mode NEW sessions connect in "
              "(doxa.engine.permission_mode_default); Shift+Tab cycles the "
              "running session, /mode sets it",
-        note="Only the three modes the hotkey cycles can be persisted here. "
-             "bypassPermissions, auto and dontAsk each stop DOXA asking you "
-             "about a tool call, so they are session-scoped: /mode <name> "
-             "sets one for the RUNNING session, behind a confirmation. A "
-             "standing setting that disarms the approval gate of every "
-             "future session -- in repositories you have not read yet -- "
-             "is not a knob this menu offers.",
+        note="Only default, acceptEdits and plan can be persisted -- "
+             "doxa.engine.PERSISTABLE_MODES, and NARROWER than what the "
+             "hotkey reaches. Shift+Tab can put the running session into "
+             "auto or bypassPermissions, where DOXA stops asking you about "
+             "tool calls; that is visible (a red chip, a transcript line) "
+             "and lasts one session. A stored one would be silent and "
+             "would apply to every future session, in repositories you "
+             "have not read yet. dontAsk needs /mode and a confirmation.",
     ),
     Setting(
         key="linger_secs", env="DOXA_LINGER_SECS", label="linger secs",

@@ -4,6 +4,131 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.50.0 — 2026-08-25
+
+**The permission-mode cycler now reaches `auto` and `bypassPermissions`,
+and the chip is Claude Code's, not DOXA's.** Three user decisions, taken
+in that order, two of which overrule what v0.42.0 shipped and argued for.
+
+**On the two that were overruled, plainly, because the reasoning should
+survive.** v0.42.0 kept `auto`, `bypassPermissions` and `dontAsk` off the
+hotkey and behind a confirmation, on the argument that a key you tap to
+move between conveniences must not be able to land on a mode where
+nothing asks you. The user read that and asked for `auto` on the cycler;
+then, separately, for `bypassPermissions` as well. Both are built. What
+they mean in practice:
+
+- **`auto`** — a model classifier approves or denies each tool call
+  instead of you. A gate still exists; the person behind it does not.
+- **`bypassPermissions`** — every tool call runs unapproved at your full
+  privileges. Nothing checks, and nothing asks.
+
+`dontAsk` was **not** requested and is **not** on the cycler. Two explicit
+decisions about two named modes are not a general licence over the sixth,
+and reading one into them would be inventing consent rather than
+following it. It stays on `/mode dontAsk` behind its confirmation. *If
+that inconsistency is unwanted, it is a one-line change — but it is the
+user's line, not this branch's.*
+
+**The invariant that used to say "no keystroke reaches a mode where
+nothing asks" is now false by design.** It was not deleted and it was not
+weakened into nothing; it was rewritten as what is still true and still
+worth guarding, which is a sharper claim than the old one:
+
+- the set a keystroke can reach is **exactly** `CYCLE_MODES` — not a
+  subset, not a superset — asserted both against the constant and against
+  the five names spelled out, so editing the constant alone cannot make
+  the test pass;
+- `dontAsk` is unreachable by any number of presses from any starting
+  point;
+- `next_cycle_mode` is a **total function** over that set: no input, state
+  or configuration produces anything outside it.
+
+That still stops a future edit from quietly putting a sixth mode on the
+keyboard, and it makes the set something somebody has to change on
+purpose. Cycle order is most-oversight-to-least and wraps home —
+`default → acceptEdits → plan → auto → bypassPermissions → default` — so
+one more press is always the way *out* of the most permissive mode rather
+than a dead end. The first four are, in that order, exactly Claude Code's
+own cycler; `bypassPermissions` is appended rather than inserted because
+the CLI's own permissiveness ranking puts it at the top.
+
+**The chip now uses Claude Code's glyphs and colours, and they were read
+out of the installed CLI rather than guessed.** A safety indicator whose
+colour means one thing in one client and something else in another is
+worse than no convention at all. `claude` 2.1.228 is a bun-compiled ELF;
+its canonical permission-mode table survives in the bundle as a plain
+object literal keyed by the same mode names the SDK uses, which makes
+this a lookup rather than an interpretation:
+
+| mode | glyph | colour name | dark-theme value |
+|---|---|---|---|
+| `default` | `⏸` U+23F8 | `inactive` | `#999999` |
+| `plan` | `⏸` U+23F8 | `planMode` | `#48968C` |
+| `acceptEdits` | `⏵⏵` U+23F5×2 | `autoAccept` | `#AF87FF` |
+| `auto` | `⏵⏵` | `warning` | `#FFC107` |
+| `bypassPermissions` | `⏵⏵` | `error` | `#FF6B80` |
+| `dontAsk` | `⏵⏵` | `error` | `#FF6B80` |
+
+The glyph division is the real one: `⏸` for the two modes that pause and
+ask, `⏵⏵` for the four that run something without stopping. The colour
+*names* resolve through four theme tables in the same bundle — light,
+light colour-blind, dark, dark colour-blind; the dark one is identifiable
+without guessing because its `text` is white and its `claude` is
+rgb(215,119,87), the orange DOXA's own accent already tracks. Contrast
+was measured, not assumed: against the status bar's `#221F1A` (which
+stays opaque in **both** background modes — the bar does not read
+`$doxa-base`) every value lands between **4.70 and 10.07**, all of them
+above WCAG AA and all better than DOXA's own `CTX_RED` at 4.14. A test
+pins each hex and each glyph literally, so a future `claude` changing its
+palette is something DOXA finds out about.
+
+**One deliberate divergence from what was measured, and it is a product
+difference rather than taste.** Claude Code's cycler has four entries and
+cannot reach `bypassPermissions` at all; DOXA's now can. An "error red"
+calibrated for a mode you had to go out of your way to select is not
+calibrated for one a mistyped keystroke lands on. So `bypassPermissions`
+and `dontAsk` keep the measured hue and glyph and gain one step of
+weight — **bold** — which costs no columns and survives every width.
+Everything else is the measured value untouched.
+
+- **The chip moved to first on the row, ahead of the model.** The status
+  bar has no overflow behaviour: a chip that does not fit is not
+  truncated or scrolled, it is *gone*. Position is therefore the only
+  real guarantee, and this is the one chip that must never be what falls
+  off the end. Verified down to 40 columns, where it shrinks to
+  `⏵⏵ mode:bypass` and stays put while everything to its right goes.
+- **Entering a mode that stops asking now writes a line in the
+  transcript**, not just a chip. The chip is persistent but peripheral,
+  and a user who did not mean to press the key is by definition not
+  looking at the corner of the screen; a transcript block is transient
+  but lands in the same column as the work. It names what *stopped* —
+  "there is nothing left to decline" — and says the mode was not saved.
+  A merely-narrowing switch stays a quiet one-liner.
+- **`/mode auto` and `/mode bypassPermissions` no longer confirm.** A
+  dialog in front of a mode a keystroke already reaches cannot prevent
+  anything, and after the second dismissal it teaches people to hit the
+  accepting key without reading. `dontAsk` still confirms.
+- **The persisted default did not move, and this is the one line held
+  against the trend.** `permission_mode` / `DOXA_PERMISSION_MODE` still
+  accepts only `default`, `acceptEdits` and `plan`. Cycling into bypass is
+  per-session, visible and announced, in a session someone is looking at.
+  A *stored* bypass is silent, unbounded in time, and applies to sessions
+  opened in repositories nobody has read yet, possibly by somebody who
+  never set it. Those are different decisions and only the first was
+  made. `PERSISTABLE_MODES` is now its own constant precisely because it
+  is no longer the same set as anything else.
+
+Four sets now name what used to be two, because the questions came apart:
+`CYCLE_MODES` (what a keystroke reaches), `GATED_MODES` (what confirms),
+`PERSISTABLE_MODES` (what a file may store), `UNASKED_MODES` (what the
+chip must shout about). Conflating any two would be a bug.
+
+41 tests in `tests/test_permission_mode.py`, of which **13 were verified
+failing** against v0.47.0 — every new or changed assertion. The rest are
+unchanged behaviour this release did not touch. Suite: **1132 passed** on the
+tree this lands on.
+
 ## 0.48.0 — 2026-08-25
 
 **The beliefs chip becomes a surface you can work in.** Five things the
@@ -171,6 +296,7 @@ test reads it back out of the store.
   right back. `_select_repo_row` documented this in v0.22.0 and fixes it
   with `call_after_refresh`; the belief action menu needed the same fix and
   now carries the same note pointing at it.
+
 ## 0.47.0 — 2026-08-25
 
 Three workstreams that finished together and ship as one release: the
