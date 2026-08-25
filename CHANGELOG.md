@@ -273,6 +273,182 @@ chip must shout about). Conflating any two would be a bug.
 failing** against v0.47.0 — every new or changed assertion. The rest are
 unchanged behaviour this release did not touch. Suite: **1132 passed** on the
 tree this lands on.
+
+## 0.51.0 — 2026-08-25
+
+Three refinements to what a session shows you, all reported from using
+it: the tool-calls fold was mostly chrome, a running turn had no sign of
+life once its first word arrived, and the opening block's `lore` line
+named a store without saying what was in it.
+
+### The tool-calls section, condensed — 2026-08-25
+
+Reported verbatim: *"condense the Tool calls collapsible section: remove
+the boxes around and remove the empty line in between."*
+
+**Measured before cutting, the way v0.44.0 measured the turn body.** An
+expanded three-call section cost **15 rows**, and four of them said
+anything:
+
+| rows | what they were |
+|---|---|
+| 1 | the `⚒ Tool calls (3)` header |
+| 1 | blank — `ToolCallsSection > Contents`' top padding |
+| 12 | three chips × (border top, title, border bottom, margin blank) |
+| 1 | blank — the section's own trailing `margin-bottom` |
+
+**It now costs 4**, one header and one line per call, and every one of
+the four carries text. `tests/test_transcript_density.py` pins the number
+by measuring `outer_size.height` and by reading the composited screen rows
+back as strings — not by checking that a CSS rule exists. Eleven rows of
+chrome removed from the commonest thing a turn contains; a twelve-call
+turn was spending 48 rows to show twelve lines.
+
+- **The border went because of its ratio, not its looks.** Two rows to
+  draw a frame around one row of text is 3:1 chrome-to-content. `ToolChip`
+  had been the deliberate exception to this transcript's unboxed rule
+  since v0.13.0 ("a tool call reads as a nested artifact"); the exception
+  is withdrawn, and the transcript is now unboxed all the way down.
+- **What separates one chip from the next, at zero rows:** the fold arrow
+  Textual already draws on every `CollapsibleTitle` (a leading glyph DOXA
+  did not have to invent), one cell of indentation under the header, and
+  the brightness step from the header's muted `#8A8073` to the chips'
+  `#D8CDBB`. **Indentation and a glyph were chosen over a blank row
+  deliberately**: a separator costing a row is paid once per chip, so a
+  twelve-call turn pays it twelve times, where indentation is free at any
+  count.
+- **The two blank rows are two different judgment calls, and both follow
+  v0.44.0's rule** — blank rows BETWEEN paragraphs are readability, blank
+  rows at the END are waste. The section's trailing `margin-bottom` is
+  waste: `.turn-tools` is the last thing in a turn and `TurnBlock`
+  already carries `margin-bottom: 1`, so it was a second blank row at the
+  end rather than a separator between anything. The `Contents` top
+  padding is the closer call, and it went too: **a fold and its list are
+  one unit, not two paragraphs**, and with one row per chip that pad read
+  as a hole under the header rather than as breathing room.
+- **One blank row inside an expanded chip is kept, and a different one is
+  removed.** The blank between `ARGS:` and `RESULT:` stays — that is
+  between paragraphs, and it is the whole reason the dump is legible. The
+  one that went was invisible in origin: `ToolChip`'s subagent-output
+  `Static` is empty on every chip that never spawned a subagent, and an
+  empty `Static` is still one row. It is now hidden at zero and mounts
+  itself back the moment there is narration to show, which is the same
+  hide-at-zero convention `ToolCallsSection`, `ReasoningSection` and the
+  status chips already follow.
+- **`ReasoningSection` was left alone.** It has the same `Contents` pad,
+  and cutting it would have been consistent — but reasoning is prose,
+  where a leading blank reads as a paragraph break rather than a hole,
+  and the report named one section. Consistency is not by itself a reason
+  to restyle a surface nobody complained about.
+
+### A spinner while reasoning or generating — 2026-08-25
+
+Reported: *"i would like to have a spinner while reasoning or generating
+the output."*
+
+**The naive version of this is a regression this app already paid to
+shed**, and saying so is the design. `ThinkingMarker` exists because it
+replaced a `LoadingIndicator` whose 16 Hz auto-refresh armed a repaint
+tick on every in-flight turn; `doxa/ui/statusline.py`'s `GitLine`
+documents a no-timer, no-per-frame rule; `tests/test_chrome.py` asserts
+that **zero** timers are armed while a turn is in flight. A `set_interval`
+spinner fails that test on the way in.
+
+**So the spinner is driven by the delta stream instead.** A token
+arriving *is* a tick: `text_delta` advances it into the `generating`
+phase, `reasoning_delta` into `reasoning`, a `tool_call` into `working`.
+When nothing is arriving nothing ticks — which is exactly the wanted
+behaviour, because an idle DOXA has no turn, no deltas and no repaints.
+There is no clock anywhere in it.
+
+- **Measured, both ends.** Idle, with 20 completed turns of scrollback
+  and a 20-second sampling window: **0.14–0.17 s CPU after** against
+  **0.18–0.22 s before** — the same range, noise-dominated, no measurable
+  idle cost, and `ClockChip` remains the only armed timer in the app on
+  both sides. In flight, a 700-delta answer: **0.39–0.41 s CPU after**
+  against **0.37–0.69 s before**, also within noise.
+- **The other failure mode was a repaint rate set by the model.** Ticking
+  on every delta would have traded a fixed 16 Hz for something worse — a
+  700-delta answer buying 700 repaints. `SPINNER_MIN_INTERVAL` floors it
+  at 0.1 s, and that same 700-delta answer measurably advances the glyph
+  **4 times**. A phase CHANGE always gets through the floor: the switch
+  from reasoning to generating is the information, not the motion.
+- **No third widget saying "working".** `ThinkingMarker` already said it;
+  it has been given the whole turn instead of its first second. **This
+  reverses a v0.25.0 decision**, deliberately: that release had the first
+  `reasoning_delta` hide the marker, on the grounds that a live
+  "Reasoning (N chars)" header is itself the sign of life. It is — but
+  only while reasoning is what is happening, and a header whose count has
+  stopped moving reads exactly like a finished one. The phase after it, a
+  streaming answer, offers no progress signal at all, because the text is
+  what the reader is trying to read.
+  `test_reasoning_arrival_hides_the_thinking_marker` was rewritten rather
+  than deleted, and carries the argument.
+- **The marker moved to the bottom of the turn.** A spinner nobody can
+  see is not a spinner: the block list scrolls to the end after every
+  event, so a marker pinned above a streaming answer leaves the viewport
+  inside a paragraph. It now trails the output — "here is what arrived,
+  and here is DOXA still working".
+- **Braille glyphs (`⠋⠙⠹…`), not one of DOXA's own marks.** `▎ ✻ ⚒ ⧉` all
+  *name a kind of block*; reusing one as motion would make a running turn
+  look like a section header. The braille cycle is also one cell wide in
+  every font in wide use, so the label does not jitter sideways on each
+  tick.
+- **It disappears on every exit.** turn_done, the error path in
+  `_run_turn` (a refused turn, a dropped daemon connection) and restore
+  all route through the same `mark_done` → `hide_thinking`, which also
+  reasserts `auto_refresh = None`. Each is asserted as a pair — that the
+  marker *ran*, and then went — because "gone" on its own also passes on
+  a marker that never showed.
+- **Gone means gone, and on a restore it means never-shown.** `advance()`
+  is a no-op on a hidden marker: the peer pump replays engine events, so a
+  delta can be routed at a turn *after* its turn_done, and that must not
+  raise a spinner on a turn which has already printed its cost. And
+  `mount_transcript` hides the marker *before* writing the first restored
+  word rather than only afterwards — restore replays a finished answer
+  through the same `append_text` a live turn uses, so without that the
+  scrollback would tick every restored turn into "generating" on the way
+  past.
+
+### The `lore` line says what LORE holds — 2026-08-25
+
+Reported: *"the 'lore' line in the status/welcome box on startup should
+also show how many pending, how many in user/project context and how full
+each one is."* It read `lore  /home/…/.claude/lore · 518 beliefs`; it now
+also carries `· 3 pending · user 14 entries 63% · project 9 entries 39%`.
+
+**Nothing here is newly derived.** The percentages are v0.44.0's
+`labels.memory_fill` — the exact character count read from the file
+`lore_core` itself writes, cached on mtime — so this line and the status
+bar's `mem u63% p39%` chip cannot quote different numbers at each other.
+The entry counts go through `lore_core`'s own `read_entries` over that
+same file, because counting `- ` lines in DOXA would be reimplementing
+LORE's storage format, which is how two readers of one file drift apart.
+The staged count is v0.31.0's paged `list_pending`.
+
+- **The project slug resolves through `peers.main_repo_root_of`**, not
+  the raw cwd. That is the v0.47.0 fix, and reproducing its bug in a new
+  place was the live risk here: every session runs in a worktree, a
+  worktree's own slug owns no `MEMORY.md`, and the project half would
+  have silently vanished for the normal case exactly as it did in the
+  memory chip. The guard is a real git repo with a real worktree, not a
+  stubbed mapping — a mocked one passes on the broken code.
+- **One socket round trip, at boot, and nowhere else.** The opening block
+  is drawn once, before the first prompt, on a pane that has just spent a
+  connect and a git subprocess; `_refresh_status` runs on every peer event
+  and every turn-done under the rule `GitLine` documents. So `_boot`
+  counts the staged proposals once into `_pending_count`, and the line
+  reads that. `test_derive.py`'s cost assertion was tightened rather than
+  relaxed: it now pins the count at exactly one after boot **and** that
+  five status refreshes do not add a sixth.
+- **`0 pending` is stated, not hidden.** Hide-at-zero is the status bar's
+  convention, where a chip competes for width. This is a boot report, and
+  a reader who cannot tell a clear queue from a failed lookup has been
+  told less than nothing. A scope with no file on disk is still omitted —
+  `project 0 entries 0%` would be a measurement nobody took, and this
+  block's own rule is that absent fields are omitted, never invented.
+- **A daemon that cannot answer costs the fact, never the boot.** The
+  count falls out of the line and everything else stays.
 ## 0.48.0 — 2026-08-25
 
 **The beliefs chip becomes a surface you can work in.** Five things the

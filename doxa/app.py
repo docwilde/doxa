@@ -245,6 +245,8 @@ from .ui.transcript import (  # noqa: F401
     ReasoningSection,
     RestoreTabSpec,
     ShellBlock,
+    SPINNER_FRAMES,
+    SPINNER_MIN_INTERVAL,
     SubagentLine,
     SubagentTranscriptTab,
     SystemBlock,

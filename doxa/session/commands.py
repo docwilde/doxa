@@ -42,6 +42,8 @@ from ..ui.labels import (
     _fmt_age,
     context_breakdown_text,
     help_text,
+    memory_entries,
+    memory_fill,
 )
 from ..ui.transcript import ImageBlock, ImageShowcaseBlock
 
@@ -843,9 +845,56 @@ class PaneCommandsMixin:
             lore_bits.append(str(engine.lore_root))
         if engine is not None:
             lore_bits.append(f"{engine.belief_count()} beliefs")
+        lore_bits.extend(self._lore_memory_bits())
         if lore_bits:
             lines.append(f"lore     {' · '.join(lore_bits)}")
         return "\n".join(lines)
+
+    def _lore_memory_bits(self) -> "list[str]":
+        """The rest of what LORE holds for this session, for the opening
+        block's `lore` line (v0.51.0, reported): how many proposals are
+        staged, how many entries each curated-memory scope holds, and how
+        full each scope is.
+
+        REUSED, not re-derived. The fill percentages come from
+        :func:`doxa.ui.labels.memory_fill` -- v0.44.0's exact character
+        count, read from the file lore_core itself writes and cached on
+        mtime, so this line and the status bar's `mem u63% p39%` chip can
+        never quote different numbers. The entry counts come from
+        :func:`doxa.ui.labels.memory_entries`, which reads the same file
+        through lore_core's own ``read_entries``. The pending count is
+        whatever :meth:`_boot` already fetched into ``_pending_count``;
+        see there for why the socket round trip is affordable at boot and
+        would not be here.
+
+        The project slug resolves through :meth:`_lore_slug`, which is the
+        one detail that must not be re-implemented: it maps this session's
+        WORKTREE back to its main checkout (``peers.main_repo_root_of``)
+        because a raw-cwd slug owns no MEMORY.md, which is the v0.47.0
+        defect that silently emptied the project half of the memory chip
+        for every worktree session -- i.e. for the normal case.
+
+        Absent means omitted, the same rule the rest of this block
+        follows. A count of ZERO is not absent: `0 pending` says the
+        review queue is clear, and a boot report that hides it leaves the
+        reader unable to tell a clear queue from a broken lookup."""
+        bits: list[str] = []
+        pending = getattr(self, "_pending_count", None)
+        if isinstance(pending, int):
+            bits.append(f"{pending} pending")
+        slug = self._lore_slug()
+        for scope, label, project in (
+            ("user", "user", None), ("project", "project", slug),
+        ):
+            fill = memory_fill(scope, project)
+            count = memory_entries(scope, project)
+            if fill is None or count is None:
+                continue
+            used, cap = fill
+            pct = round(100 * used / cap) if cap else 0
+            noun = "entry" if count == 1 else "entries"
+            bits.append(f"{label} {count} {noun} {pct}%")
+        return bits
 
     @staticmethod
     def _plan_line(account: dict, local: dict) -> str | None:

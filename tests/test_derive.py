@@ -470,7 +470,18 @@ async def test_pending_is_a_real_doxa_command_and_lists_the_proposals(
     async with app.run_test() as pilot:
         await pilot.pause()
         pane = app.active_pane
-        assert fake.list_pending_calls == 0  # click-only, never on refresh
+        # Exactly ONE call, and it is _boot's: v0.51.0 puts the staged
+        # count on the opening block's `lore` line, which is drawn once
+        # per session boot. The discipline this line has always pinned is
+        # unchanged, and re-asserted right below it -- an ordinary STATUS
+        # REFRESH must never reach for staged-proposal text, because
+        # _refresh_status runs on every peer event under the no-timer,
+        # no-per-frame rule GitLine documents.
+        assert fake.list_pending_calls == 1
+        for _ in range(5):
+            pane._refresh_status()
+        await pilot.pause()
+        assert fake.list_pending_calls == 1  # never on refresh
         pane.query_one("#prompt-input").value = "/pending"
         await pilot.press("enter")
         picker = pane.query_one("#chip-picker", ChipPicker)

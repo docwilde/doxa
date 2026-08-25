@@ -174,6 +174,14 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         # three above, written through the same _set_tab_class door -- see
         # set_staged for why it is a steady tint and never a blink.
         self.staged_pending = False
+        # How many proposals LORE has staged, counted ONCE at boot for the
+        # opening block's `lore` line (v0.51.0 -- see _lore_memory_bits).
+        # None means "not asked yet, or the engine could not answer", which
+        # that line renders as omission rather than as a zero nobody
+        # measured. Never refreshed on a status tick: the count costs a
+        # socket round trip to the daemon, and _refresh_status runs under
+        # the no-timer, no-per-frame rule GitLine documents.
+        self._pending_count: int | None = None
         # Subagent tracker (queue item 4): running Task-spawned subagents
         # for THIS pane, tool_use_id -> the ToolChip already mounted in the
         # trace tree -- a second INDEX into that same widget, not a copy of
