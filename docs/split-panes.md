@@ -135,16 +135,25 @@ Requirements:
   ctrl+comma, ctrl+t, ctrl+w, ctrl+q, ctrl+c and ctrl+left/right for tab
   cycling, so a vertical pair reads as size against a horizontal pair that
   already means "move between tabs").
-- **Ctrl+Up/Down resizes the FOCUSED region against its neighbour** — grow takes
-  space from the region below, shrink gives it back. This is what makes the
-  hotkey well-defined: a stacked pane has more than one horizontal boundary
-  (transcript/prompt, prompt/status) and a split tree has many, so a key with no
-  target either picks arbitrarily or does nothing. Keying it to focus needs no
-  "select a divider" mode and composes when splits land, because the focused
-  leaf always has an edge. Note keyboard resize is therefore only reachable for
-  a region that CAN hold focus; a boundary between two unfocusable regions is
-  mouse-only, and if that case exists it should be called out rather than left
-  silently unreachable.
+- **Inside one pane, the status bar IS the divider** — verified against
+  `SessionPane.compose`, which yields `VerticalScroll(#block-list)`, then
+  `StatusBar`, then the popups, then `PromptInput`. So the status line is
+  literally the boundary between the transcript above and the prompt area
+  below, and Ctrl+Up/Down moves it: up grows the transcript and shrinks the
+  prompt area, down does the reverse. This needs no notion of a "selected
+  divider" and no focus rule — the handle is a fixed, always-present piece of
+  furniture, which is why it beats the focused-region abstraction this
+  paragraph used to carry.
+- **Once splits exist there are dividers BETWEEN leaves too.** Those are not the
+  status bar, and Ctrl+Up/Down cannot mean two things. Resolve it when splits
+  land — the plausible reading is that the keys act on the focused leaf's own
+  status-bar divider (each leaf has one), with divider-between-leaves resize
+  getting its own gesture. Do not silently overload the pair.
+- **The binding must be app-level and `priority=True`.** `PromptInput` is a
+  `TextArea` and holds focus nearly always; without priority the widget can
+  swallow the keys before the app sees them. Every existing global in this
+  codebase that must survive a focused prompt (`ctrl+t`, `ctrl+comma`,
+  `ctrl+left/right`) is already declared that way.
 - A drag changes weights, and weights persist — so a drag is a state change with
   no keystroke behind it. It must survive restore like any other layout state,
   and it must respect the minimum sizes below rather than dragging a pane into
