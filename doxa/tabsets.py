@@ -61,14 +61,26 @@ no transcript is still dropped, and counted. The caller (doxa.cli)
 reports all three counts, so a startup that quietly differs from what the
 user left is never silent about it.
 
-**Stopped vs. detached** (v0.17's ``detached_on_purpose`` / stop-path
-distinction, carried into the record): a session the user explicitly
-STOPPED (``doxa stop``, Ctrl+Q, the palette's "Quit: stop session") is
-gone for good and must leave the set; a session merely DETACHED (Ctrl+W,
-Ctrl+C once, "Quit: detach") keeps running and STAYS in the set even
-though its tab closed -- doxa.app is the one place that knows which is
-which at the moment it happens, so this module stays a plain record store
-and never tries to infer that distinction from the outside.
+**Stopped vs. detached vs. killed** (v0.17's ``detached_on_purpose`` /
+stop-path distinction, carried into the record; revised v0.60.0): a
+session DETACHED (Ctrl+W, Ctrl+C once, "Quit: detach") keeps running and
+STAYS in the set, tab closed or not. A session STOPPED from inside this
+window (Ctrl+Q, the palette's "Quit: stop session", Ctrl+C twice) also
+STAYS -- through v0.55.0 it did not, because "the daemon is gone" and
+"the tab is gone" were the same fact. v0.56.0 broke that equivalence:
+DOXA now pins its own session id to the CLI's (``ClaudeAgentOptions.
+session_id``), so ``--resume`` can replay a conversation DOXA itself
+ended, and a saved id with no live daemon behind it is resolved by THIS
+function exactly like any other -- archived if the transcript survived,
+dropped if it did not, with no memory of which of Ctrl+Q, a linger
+timeout or ``doxa stop`` from another terminal put it there. Only an
+EXPLICIT reap (``/sessions kill <prefix>``, ``kill-detached``, the
+palette's kill path) leaves the set for good: reaping is the one gesture
+in this app that means "forget this conversation", so doxa.app vetoes
+those ids at write time (``DoxaApp._killed_this_run``) rather than
+letting them round-trip through here and get treated as just another
+dead daemon. doxa.app is still the one place that knows which of the
+three just happened; this module stays a plain record store either way.
 """
 
 from __future__ import annotations

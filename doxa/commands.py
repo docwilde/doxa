@@ -214,6 +214,17 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette="Detach tab",
     ),
     SlashCommand(
+        name="/attach",
+        group="Panes & tabs",
+        # "in a new tab" is in the one-liner for the same reason /resume's
+        # is: attach does not take over the pane it was typed in.
+        summary="Reattach a live detached session in a new tab (bare: pick one)",
+        usage="/attach [session prefix]",
+        palette="Attach a detached session",
+        # NOT prefilled: bare /attach already offers a picker when there is
+        # more than one candidate, same reasoning as bare /resume.
+    ),
+    SlashCommand(
         name="/sessions",
         group="Session",
         summary="Every live session: name, age, attached — and how to kill one",

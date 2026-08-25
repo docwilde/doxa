@@ -605,6 +605,60 @@ async def test_sessions_picker_detached_row_calls_the_existing_attach_path(
             sock.close()
 
 
+@pytest.mark.asyncio
+async def test_sessions_picker_detached_row_opens_a_new_tab(monkeypatch, tmp_path):
+    """v0.60.0: the real (un-stubbed) attach path, end to end. Through
+    v0.56.0 _cmd_attach switched the pane the picker was opened FROM in
+    place, so the tab the user was looking at went blank rather than a
+    new one appearing -- measured against a real SessionDaemon before
+    this changed: the socket connected, but switch_engine() never set
+    _restore_transcript_wanted, so the reattached content depended
+    entirely on the daemon's capped in-memory event ring. Now it opens a
+    new tab through _attach_in_new_tab, the same door /resume already
+    sends a running session through, and the ORIGINAL tab is left alone."""
+    class Detachable(FakeEngine):
+        detachable = True
+        session_id = "sess-abcdef01"
+        cwd = str(tmp_path)
+
+    fake = Detachable([])
+    app, _engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test() as pilot:
+        assert await _wait_status(pilot, app, "session sess-abc")
+        entry, sock = _daemon_entry(
+            tmp_path, "bbbb2222dead", "other-detached", clients=0,
+        )
+        try:
+            def _attached_engine(sock, **kw):
+                client = FakeEngine([], cwd=str(tmp_path))
+                client.session_id = "bbbb2222dead"
+                return client
+
+            monkeypatch.setattr("doxa.client.EngineClient", _attached_engine)
+            before = len(app.panes())
+            original = app.active_pane
+            pane = app.active_pane
+            pane.open_sessions_picker()
+            await pilot.pause()
+            picker = app.query_one("#chip-picker", ChipPicker)
+            index = next(
+                i for i, (rid, _l) in enumerate(picker._rows)
+                if rid == "bbbb2222dead"
+            )
+            picker.select_row(index)
+            for _ in range(200):
+                if len(app.panes()) > before:
+                    break
+                await pilot.pause(0.02)
+            assert len(app.panes()) == before + 1  # a NEW tab, not a swap
+            assert app.panes()[0] is original
+            assert original.engine is fake  # the original tab is untouched
+            new_pane = app.panes()[-1]
+            assert new_pane.engine.session_id == "bbbb2222dead"
+        finally:
+            sock.close()
+
+
 async def _show_belief(pilot, app, picker, rid):
     """Drive the picker to one belief's full claim.
 

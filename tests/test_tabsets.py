@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 
 import pytest
 
@@ -58,6 +59,20 @@ def _daemon_entry(session_id: str, scope: str, cwd: "str | None" = None) -> None
         "daemon_socket": str(reg / f"{session_id}-daemon.sock"),
     }
     (reg / f"{session_id}.json").write_text(json.dumps(entry), encoding="utf-8")
+
+
+def _listening_daemon_entry(session_id: str, scope: str) -> "socket.socket":
+    """A daemon entry that also PASSES probe=True (real listening unix
+    socket at the same path _daemon_entry writes) -- what /sessions kill
+    actually reads (``peers.read_registry(probe=True)``), unlike the
+    plain _daemon_entry helper above which only the non-probed
+    list_daemons() paths need. Caller closes the returned socket."""
+    _daemon_entry(session_id, scope)
+    reg = peers_mod.registry_dir()
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(str(reg / f"{session_id}.sock"))
+    sock.listen(1)
+    return sock
 
 
 # -- the record store --------------------------------------------------
@@ -289,7 +304,15 @@ async def test_ctrl_w_detach_keeps_the_session_in_the_record(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_stop_drops_the_session_from_the_record(tmp_path):
+async def test_stop_keeps_the_session_in_the_record(tmp_path):
+    """v0.60.0: through v0.55.0 this was test_stop_drops_the_session_from_
+    the_record and asserted the opposite. What changed underneath it is
+    v0.56.0's session-id pinning (SessionEngine._build_options sends
+    ClaudeAgentOptions.session_id) -- the daemon behind a stopped pane is
+    genuinely gone, but --resume can now replay the transcript DOXA itself
+    wrote, so "the session ended" stopped being the same fact as "the tab
+    is lost". The palette's "Quit: stop session" is Ctrl+Q under a
+    different door; both now leave the record alone."""
     where = tmp_path / "scratch"
     where.mkdir()
     ids = iter(["sid-a", "sid-b"])
@@ -310,14 +333,96 @@ async def test_stop_drops_the_session_from_the_record(tmp_path):
         assert await _wait(pilot, lambda: len(app.panes()) == 1)
         await pilot.pause()
     record = tabsets.load(str(where))
-    assert [t.session_id for t in record.tabs] == ["sid-a"]
+    assert {t.session_id for t in record.tabs} == {"sid-a", "sid-b"}
 
 
 @pytest.mark.asyncio
-async def test_quit_stop_leaves_only_the_detached_session_in_the_record(tmp_path):
-    """action_quit_stop: a pane already detached_on_purpose stays; every
-    other pane is stopped and drops out -- the whole-window mirror of the
-    single-tab tests above."""
+async def test_ctrl_q_keeps_the_ended_session_in_the_record(tmp_path):
+    """The exact defect reported from disk: a Ctrl+Q'd tab used to vanish
+    from the persisted set (record.tabs == ["sid-a"] only, pre-v0.60.0).
+    Ctrl+Q still ends the session -- the daemon is really gone -- it just
+    no longer erases the MEMORY of the tab having existed."""
+    where = tmp_path / "scratch"
+    where.mkdir()
+    ids = iter(["sid-a", "sid-b"])
+
+    def factory() -> FakeEngine:
+        engine = FakeEngine([])
+        engine.session_id = next(ids)
+        return engine
+
+    app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        await pilot.press("ctrl+t")
+        assert await _wait(
+            pilot, lambda: len(app.panes()) == 2 and app.panes()[1]._session_id
+        )
+        await pilot.press("ctrl+q")  # end the active (second) tab's session
+        assert await _wait(pilot, lambda: len(app.panes()) == 1)
+        await pilot.pause()
+    record = tabsets.load(str(where))
+    assert {t.session_id for t in record.tabs} == {"sid-a", "sid-b"}
+
+
+@pytest.mark.asyncio
+async def test_an_ended_session_resolves_as_archived_not_skipped(tmp_path):
+    """Closes the loop the two tests above only open: a record that
+    SURVIVED a Ctrl+Q must actually come back at the next launch, not just
+    sit in the file unread. No live daemon is registered for the ended
+    session (Ctrl+Q's whole point), so resolve() can only find it via its
+    on-disk transcript -- exactly the v0.32.0/v0.45.0 machinery an
+    ordinary linger-timeout restore already goes through, now fed a record
+    Ctrl+Q produced instead."""
+    from doxa import transcript as transcript_mod
+
+    where = tmp_path / "scratch"
+    where.mkdir()
+    ids = iter(["sid-a", "sid-b"])
+
+    def factory() -> FakeEngine:
+        engine = FakeEngine([])
+        engine.session_id = next(ids)
+        return engine
+
+    app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        await pilot.press("ctrl+t")
+        assert await _wait(
+            pilot, lambda: len(app.panes()) == 2 and app.panes()[1]._session_id
+        )
+        await pilot.press("ctrl+q")
+        assert await _wait(pilot, lambda: len(app.panes()) == 1)
+        await pilot.pause()
+    # A transcript for EACH session -- sid-a's because a FakeEngine never
+    # registers a real peer-registry entry either, so without one it would
+    # resolve as skipped for a reason that has nothing to do with this
+    # test (a unit-test artifact, not a live daemon DOXA lost track of);
+    # sid-b's is what Ctrl+Q's own finalize path would have written for
+    # real. resolve() only cares that a transcript exists
+    # (doxa.transcript.exists), never why.
+    for sid in ("sid-a", "sid-b"):
+        path = transcript_mod.transcript_path(sid, str(where))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '{"type": "user", "message": {"content": "hi"}}\n', encoding="utf-8"
+        )
+
+    resolved = tabsets.resolve(str(where))
+    assert resolved is not None
+    assert {t.session_id for t in resolved.archived} == {"sid-a", "sid-b"}
+    assert resolved.skipped == 0
+
+
+@pytest.mark.asyncio
+async def test_quit_stop_keeps_every_tab_in_the_record(tmp_path):
+    """action_quit_stop (Ctrl+C twice): the whole-window mirror of the
+    single-tab test above. Through v0.55.0 only the pane already
+    detached_on_purpose survived this; v0.60.0 keeps the stopped one too,
+    for the identical reason single-tab Ctrl+Q now does -- there is no
+    principled reason the ALL-tabs quit gesture should be the one way
+    left to lose the set for good."""
     where = tmp_path / "scratch"
     where.mkdir()
     ids = iter(["sid-a", "sid-b"])
@@ -338,7 +443,94 @@ async def test_quit_stop_leaves_only_the_detached_session_in_the_record(tmp_path
         first_pane.detached_on_purpose = True
         await app.action_quit_stop()
     record = tabsets.load(str(where))
+    assert {t.session_id for t in record.tabs} == {"sid-a", "sid-b"}
+
+
+# -- an explicit kill is the one veto ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_kill_evicts_a_session_already_recorded_as_detached(tmp_path):
+    """Ctrl+W THEN `/sessions kill <prefix>`: the record already carries
+    sid-b (detached, item D #4) by the time the kill lands. Reaping it on
+    purpose is the one gesture this app treats as "forget this
+    conversation" -- if the veto did not exist, this session would
+    resurrect at the next launch despite having been explicitly killed,
+    since /sessions kill stops a daemon over its own socket and never
+    goes anywhere near _detached_this_run."""
+    where = tmp_path / "scratch"
+    where.mkdir()
+    ids = iter(["sid-a", "sid-b"])
+
+    def factory() -> FakeEngine:
+        engine = FakeEngine([])
+        engine.session_id = next(ids)
+        return engine
+
+    app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        await pilot.press("ctrl+t")
+        assert await _wait(
+            pilot, lambda: len(app.panes()) == 2 and app.panes()[1]._session_id
+        )
+        await pilot.press("ctrl+w")  # detach tab two -- sid-b stays running
+        assert await _wait(pilot, lambda: len(app.panes()) == 1)
+        record = tabsets.load(str(where))
+        assert {t.session_id for t in record.tabs} == {"sid-a", "sid-b"}
+
+        sock = _listening_daemon_entry("sid-b", str(where))
+        pane = app.active_pane
+        try:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr("doxa.app._stop_session", lambda entry: True)
+                await pane._cmd_sessions("kill sid-b")
+                await pilot.pause()
+        finally:
+            sock.close()
+    record = tabsets.load(str(where))
     assert [t.session_id for t in record.tabs] == ["sid-a"]
+
+
+@pytest.mark.asyncio
+async def test_kill_evicts_a_session_still_attached_in_a_tab_of_this_window(
+    tmp_path,
+):
+    """`/sessions kill <prefix>` never excludes sessions attached HERE --
+    only kill-detached does (see _kill_sessions). Kill the ACTIVE pane's
+    own session by prefix: its pane stays mounted (nothing tears the tab
+    down), never marked _stopped, so without the veto _persist_tabset's
+    per-pane scan would still read it as an ordinary LIVE tab and persist
+    it as if nothing happened."""
+    where = tmp_path / "scratch"
+    where.mkdir()
+    engine = FakeEngine([])
+    engine.session_id = "sid-only"
+    app = DoxaApp(
+        cwd=str(where), engine_factory=lambda: engine,
+        new_session_factory=lambda: engine,
+    )
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        await pilot.pause()
+        record = tabsets.load(str(where))
+        assert [t.session_id for t in record.tabs] == ["sid-only"]
+
+        sock = _listening_daemon_entry("sid-only", str(where))
+        pane = app.active_pane
+        try:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr("doxa.app._stop_session", lambda entry: True)
+                await pane._cmd_sessions("kill sid-only")
+                await pilot.pause()
+        finally:
+            sock.close()
+        # Confirms the pane really is still sitting in the strip, unaware
+        # -- the veto is doing the work, not a teardown this command never
+        # performs on the pane that happened to hold the killed session.
+        assert len(app.panes()) == 1
+    record = tabsets.load(str(where))
+    assert record is None  # the only tab there ever was, killed and gone
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,151 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.60.0 — 2026-08-25
+
+### An ended session was erased from the tab set; `/attach` did not exist; the sessions-chip attach was already broken underneath
+
+Three reports from the same user, on the same surface, on the same day.
+
+**Ctrl+Q on the last tab of a window is how a saved tab set becomes
+`"tabs": []`.** Reproduced from disk, not guessed: a two-tab window,
+Ctrl+Q on each tab in turn, quit — `~/.doxa/tabsets/<scope>.json` came
+back on the next launch reading `{"active_session_id": null, "tabs": []}`.
+The mechanism was `_persist_tabset` excluding every pane `stop()` had
+marked `_stopped`, which was *correct* through v0.55.0: nothing survived
+Ctrl+Q but the transcript, so there was nothing left to restore a tab
+from. v0.56.0 changed the premise out from under that exclusion without
+anyone going back to update it — `SessionEngine._build_options` now pins
+`ClaudeAgentOptions.session_id`, so DOXA's own id is the id `--resume`
+takes, and a saved id with no live daemon behind it is resolved exactly
+like any other: archived if the transcript survived (which Ctrl+Q's own
+finalize path always writes), dropped only if it did not. **The daemon
+being gone stopped being the same fact as the tab being gone, and the
+exclusion kept enforcing the old equivalence anyway.**
+
+- **`_persist_tabset` no longer excludes a `_stopped` pane.** It builds
+  the same `TabRecord` a live pane gets (scope-checked the same way);
+  `_ended_this_run` is `_detached_this_run`'s v0.59.0 sibling, keeping the
+  record alive across a *later* persist once the ended tab's own pane has
+  actually left the strip — Ctrl+Q, the palette's "Quit: stop session"
+  and Ctrl+C-twice (`action_quit_stop`) all route through it now, not
+  only the single-key case that was reported. There is no principled
+  reason the all-tabs-at-once quit gesture should be the one way left to
+  lose the set for good when the one-tab-at-a-time gesture no longer is.
+- **`doxa/tabsets.py`'s own module docstring said the OLD rule as fact**
+  ("a session the user explicitly STOPPED … is gone for good and must
+  leave the set") — rewritten alongside the code, because a doc that
+  states a defect's own rationale as the design is worse than no doc.
+- **Judgment call, argued: an explicit `/sessions kill <prefix>` still
+  does NOT come back.** Reaping is the one gesture in this app that means
+  "I am done with this conversation" — Ctrl+Q pressed while trying to
+  close a tab plainly is not that, but a user who names a session and
+  kills it by prefix is unambiguous. `DoxaApp._killed_this_run` is the
+  one veto `_persist_tabset` applies over every other source (a mounted
+  pane still showing live, `_detached_this_run`, `_ended_this_run` alike)
+  — needed because `/sessions kill` stops a daemon over its own socket,
+  straight from the peer registry, and never goes anywhere near either
+  dict. Without the veto, a session detached earlier this run and killed
+  later would resurrect at the next launch despite being explicitly
+  killed; so would a session killed while still attached in a tab of
+  *this* window (kill does not exclude those — only `kill-detached`
+  does), since nothing else ever tears that pane's mount down. Both are
+  now pinned by tests.
+- **Ctrl+Q's own keycap risk is unchanged and worth restating:** it is
+  still the key a user reads as "quit," and the fix here is that pressing
+  it repeatedly no longer *destroys* the tab set — it now leaves every
+  ended tab exactly as resumable as a linger-timeout ever left one. The
+  key's name and its last-tab-closes-the-app disposition (v0.56.0's
+  `doxa/app.py` docstring) are unchanged in this release; a rename or a
+  confirmation is a separate, larger call this fix does not make for the
+  user.
+
+### `Ctrl+Q` doing nothing on a read-only tab — checked, already fixed
+
+The other Ctrl+Q report on file, separate from the tab-persistence defect
+above: *"CTRL+Q doesnt work with read-only session tabs…"*. Verified
+against the code this branch builds on rather than re-fixed blind —
+0.58.0 (above, `fix/launcher-and-window`) landed
+`DoxaApp._close_read_only_tab()` and wired Ctrl+Q through it while this
+work was in flight. Confirmed still true after this release's own Ctrl+Q
+changes: a `SubagentTranscriptTab`, an `ArchivedSessionTab` and the
+beliefs browser all close on Ctrl+Q now, same as Ctrl+W, and none of the
+three has a session to end so ending-vs-detaching draws no distinction
+worth making there. No separate action needed here.
+
+### `/attach [prefix]` — the door back in `/detach` never had a counterpart for
+
+**`/sessions` could list and kill; it could not bring anything back.**
+The only in-app door to a live, detached session was the sessions
+status-chip's own picker (item 2) or the Ctrl+P palette's "Attach: …"
+rows — both reached `DoxaApp._cmd_attach`, and see below for what was
+actually wrong with that. `/attach` is the command-line door the CLI's
+own `doxa attach [prefix]` already had no in-app analog for.
+
+- **Always a NEW tab, never the one `/attach` was typed in** — the same
+  rule v0.45.0's `/resume` settled (a pane holds a live conversation;
+  `/clear` is the verb for replacing one). Reached through
+  `DoxaApp._cmd_attach` (see next section), the same entry point the
+  palette and the sessions chip use — one shared attach primitive, not a
+  second one built beside it.
+- **With a prefix**, matched against every live daemon-hosted session by
+  id or title (the same shorthand `/sessions kill` and `doxa attach`
+  already take), refused by *naming what it found* on both "nothing" and
+  "more than one" — the same shape `/resume`'s own prefix form uses,
+  because attaching the wrong conversation is not a mistake a user
+  notices quickly either.
+- **Bare, with exactly one detached session, it attaches outright; with
+  several, it opens the same `ChipPicker` bare `/resume` opens onto its
+  own list** — a third picker was not invented for this one.
+- **Already open in another tab of this window: switched to, not attached
+  a second time** — one daemon, one client, per window, the same
+  exclusion the palette's own Attach section and the sessions chip's
+  picker already make.
+- Registered once, in `doxa/commands.py`'s `REGISTRY` and
+  `doxa/session/commands.py`'s `PANE_COMMANDS` — `/help`, the autocomplete
+  dropdown and Ctrl+P all read the one registry, so the binding is what
+  puts it on every surface at once.
+
+### The sessions-chip's own attach was broken underneath — measured, not assumed, before `/attach` was allowed to depend on it
+
+Told to reuse "the chip picker's existing attach path" for `/attach`
+rather than write a second one — so it was driven end to end against a
+real `SessionDaemon` over a real socket before anything was built on top
+of it. **The connection worked.** What did not: `DoxaApp._cmd_attach`
+switched the *active* pane's engine in place
+(`pane.switch_engine(lambda: EngineClient(socket_path))`) rather than
+opening a tab, and `switch_engine` never sets
+`_restore_transcript_wanted` — so a reattached pane's content came
+entirely from the daemon's in-memory event ring, the pre-v0.32.0
+mechanism that release's own `_restore_transcript` was written to stop
+depending on (capped at 512 frames; a session detached long enough to
+have scrolled its ring past the reattach point came back **blank**, in
+the tab the user was already looking at). Selecting a detached session
+in the picker and watching the tab you were already on go quiet reads as
+"nothing happened," even though a socket really had connected.
+
+- **`_cmd_attach` now reuses `_attach_in_new_tab`** — the same door
+  `/resume` already sends a still-running session through, which both
+  opens a fresh tab and sets `_restore_transcript_wanted`, so the prior
+  conversation is drawn from disk rather than gambled on the ring. Both
+  callers (the palette's Attach rows, the sessions chip's picker) needed
+  no change themselves; they call `_cmd_attach` exactly as before; the
+  fix is entirely inside it.
+- **Pinned by a real end-to-end test**, not a stub: the picker's row is
+  selected for real, a new tab is asserted to appear, and the *original*
+  tab's own engine is asserted untouched.
+- **Found, not fixed, in the course of measuring this:** driven against a
+  real daemon that had already completed one turn before the reattach, a
+  narrow, timing-sensitive crash surfaced inside `_peer_pump`'s
+  out-of-band event handling (`NoMatches('#status-bar')`) — reproducible
+  only through `ChipPicker.select_row`'s exact call shape, not through
+  hand-replayed equivalents of it, and not present when the same
+  underlying attach ran through `/resume` or a direct `_cmd_attach` call
+  against the same daemon. Left open: it did not reproduce under the
+  mocked-`EngineClient` harness this release's own tests use, so it is
+  not this fix's regression to carry, but it is real and deserves its own
+  investigation with a real daemon in the loop.
+
 ## 0.59.0 — 2026-08-25
 
 **CI was red on two shipped tags and a local suite was green on both, which

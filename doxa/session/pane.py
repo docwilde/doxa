@@ -100,10 +100,13 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         # `self.engine.session_id`, so a just-detached tab still persists
         # under the right id. "" until the first boot completes.
         self._session_id: str = ""
-        # Set True at the top of stop() -- a session that was EXPLICITLY
-        # ended must never reappear in the persisted tab set, even in the
-        # brief window before its pane is actually unmounted (see
-        # DoxaApp._persist_tabset).
+        # Set True at the top of stop(): this engine's daemon was told to
+        # finalize for real, as opposed to detach()'s "handle cleared, but
+        # nobody told the daemon to stop". Through v0.55.0 this also
+        # excluded the pane from the persisted tab set entirely -- v0.60.0
+        # dropped that (see DoxaApp._ended_this_run's docstring): a
+        # finalized session is a resumable one now, so nothing branches on
+        # this flag any more.
         self._stopped: bool = False
         # Item D restore-only: a pinned name to apply the moment this pane
         # mounts (before boot), and a one-shot SystemBlock to mount right
