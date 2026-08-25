@@ -1,4 +1,4 @@
-"""``/attach`` (v0.57.0): the door back in that ``/detach`` never had a
+"""``/attach`` (v0.59.0): the door back in that ``/detach`` never had a
 counterpart for.
 
 ``/sessions`` could only list and kill; the one way to REATTACH a live

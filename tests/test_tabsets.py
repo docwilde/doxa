@@ -305,7 +305,7 @@ async def test_ctrl_w_detach_keeps_the_session_in_the_record(tmp_path):
 
 @pytest.mark.asyncio
 async def test_stop_keeps_the_session_in_the_record(tmp_path):
-    """v0.57.0: through v0.55.0 this was test_stop_drops_the_session_from_
+    """v0.59.0: through v0.55.0 this was test_stop_drops_the_session_from_
     the_record and asserted the opposite. What changed underneath it is
     v0.56.0's session-id pinning (SessionEngine._build_options sends
     ClaudeAgentOptions.session_id) -- the daemon behind a stopped pane is
@@ -339,7 +339,7 @@ async def test_stop_keeps_the_session_in_the_record(tmp_path):
 @pytest.mark.asyncio
 async def test_ctrl_q_keeps_the_ended_session_in_the_record(tmp_path):
     """The exact defect reported from disk: a Ctrl+Q'd tab used to vanish
-    from the persisted set (record.tabs == ["sid-a"] only, pre-v0.57.0).
+    from the persisted set (record.tabs == ["sid-a"] only, pre-v0.59.0).
     Ctrl+Q still ends the session -- the daemon is really gone -- it just
     no longer erases the MEMORY of the tab having existed."""
     where = tmp_path / "scratch"
@@ -419,7 +419,7 @@ async def test_an_ended_session_resolves_as_archived_not_skipped(tmp_path):
 async def test_quit_stop_keeps_every_tab_in_the_record(tmp_path):
     """action_quit_stop (Ctrl+C twice): the whole-window mirror of the
     single-tab test above. Through v0.55.0 only the pane already
-    detached_on_purpose survived this; v0.57.0 keeps the stopped one too,
+    detached_on_purpose survived this; v0.59.0 keeps the stopped one too,
     for the identical reason single-tab Ctrl+Q now does -- there is no
     principled reason the ALL-tabs quit gesture should be the one way
     left to lose the set for good."""

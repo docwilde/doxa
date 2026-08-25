@@ -756,7 +756,7 @@ class PaneCommandsMixin:
         """One resolved live session -> :meth:`DoxaApp._cmd_attach`, the
         SAME entry point the palette's "Attach: ..." rows and the sessions
         chip's own picker use -- never a second attach primitive (see that
-        method's own docstring for the v0.57.0 defect fixed there, which
+        method's own docstring for the v0.59.0 defect fixed there, which
         this command inherits the fix for by calling it rather than
         _attach_in_new_tab directly).
 
@@ -884,7 +884,7 @@ class PaneCommandsMixin:
             ok = await asyncio.to_thread(_stop_session, entry)
             (killed if ok else failed).append(entry.session_id[:8])
             if ok:
-                # v0.57.0: reaping is the ONE gesture in this app that
+                # v0.59.0: reaping is the ONE gesture in this app that
                 # means "forget this conversation" -- a session Ctrl+W'd
                 # earlier this run (still sitting in _detached_this_run)
                 # or still attached in a tab of this very window must not

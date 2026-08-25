@@ -74,7 +74,7 @@ class PaneRuntimeMixin:
         # v0.55.0 this flag (not "engine is None", which detach() also
         # produces) was what told _persist_tabset to drop the pane from
         # the persisted tab set outright -- ending a session meant losing
-        # the tab for good. v0.57.0: it no longer does (see
+        # the tab for good. v0.59.0: it no longer does (see
         # DoxaApp._ended_this_run's docstring for why a FINALIZED session
         # is now still a RESUMABLE one) -- nothing reads this flag to
         # exclude anything any more. Kept and still set here anyway: it is

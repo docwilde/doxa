@@ -563,9 +563,11 @@ other.
 
 ### 9. Walk away, come back
 
-Closing the TUI (`ctrl+q`, or the palette's "Quit: detach") detaches every
+Closing the TUI (`ctrl+c`, or the palette's "Quit: detach") detaches every
 tab and leaves each daemon running — pressing it twice stops the sessions
-instead. `/detach` does the same for one tab. Running `doxa` again
+instead. `ctrl+q` and `/detach` are the single-tab doors: `ctrl+q` ends
+that tab's session for real, `/detach` (the same as `ctrl+w`) leaves it
+running. Running `doxa` again
 in the same repo restores the **whole tab set** you left — order, pinned
 names, which tab was active, and the conversation that was on each tab
 (`restore_tabs`, on by default) — reattaching every session still alive
@@ -603,7 +605,13 @@ tab — a process, not tokens: the CLI loads that conversation from its own
 store and nothing is sent until you type.
 
 A tab you closed with `ctrl+w` stays in the set — it only detached, the
-session is still running — but one you explicitly stopped does not. Split
+session is still running. **A tab you ended with `ctrl+q` stays too** —
+the session really is finalized, but the tab comes back exactly the way
+any other ended conversation does: resumed live per `resume_restored`, or
+read-only over its transcript. The one gesture that removes a session
+from the set for good is reaping it by name (`/sessions kill <prefix>` or
+`kill-detached`) — a tab merely closed, by any key, is never mistaken for
+a tab the user asked to forget. Split
 layouts are not restored, because DOXA does not have any; it is a tab
 strip. `doxa new` always starts exactly one fresh tab and never restores,
 `doxa attach <prefix>` stays the single-session path, and
@@ -612,10 +620,17 @@ strip. `doxa new` always starts exactly one fresh tab and never restores,
 The status bar's `⌁ session <id>` handle is the same idea without leaving
 the keyboard: clicking it opens a dropdown of every session in scope, live
 and detached (`⌁`) alike, the current one marked. Pick a detached one to
-attach to it — the same path `doxa attach` takes — or pick one already
-open in another tab to switch to that tab. Copying the handle to the
-clipboard, which used to be all a click did, is still there as the
+attach to it, in a **new tab** — the same path `doxa attach` takes, and
+the same one `/attach` (below) reaches from the prompt — or pick one
+already open in another tab to switch to that tab. Copying the handle to
+the clipboard, which used to be all a click did, is still there as the
 picker's own top row rather than dropped.
+
+`/attach [prefix]` is that same door from the keyboard, and the
+counterpart `/detach` never had: bare, it attaches the one detached
+session in scope outright, or opens the same picker when there are
+several; a prefix takes one directly, refusing an unknown or ambiguous
+one by naming what it found rather than guessing.
 
 `/sessions` lists every live session with its age and whether it is
 attached here or running detached, with a kill command for either.

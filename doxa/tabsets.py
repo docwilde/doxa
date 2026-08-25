@@ -62,7 +62,7 @@ reports all three counts, so a startup that quietly differs from what the
 user left is never silent about it.
 
 **Stopped vs. detached vs. killed** (v0.17's ``detached_on_purpose`` /
-stop-path distinction, carried into the record; revised v0.57.0): a
+stop-path distinction, carried into the record; revised v0.59.0): a
 session DETACHED (Ctrl+W, Ctrl+C once, "Quit: detach") keeps running and
 STAYS in the set, tab closed or not. A session STOPPED from inside this
 window (Ctrl+Q, the palette's "Quit: stop session", Ctrl+C twice) also

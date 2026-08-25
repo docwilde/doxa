@@ -607,7 +607,7 @@ async def test_sessions_picker_detached_row_calls_the_existing_attach_path(
 
 @pytest.mark.asyncio
 async def test_sessions_picker_detached_row_opens_a_new_tab(monkeypatch, tmp_path):
-    """v0.57.0: the real (un-stubbed) attach path, end to end. Through
+    """v0.59.0: the real (un-stubbed) attach path, end to end. Through
     v0.56.0 _cmd_attach switched the pane the picker was opened FROM in
     place, so the tab the user was looking at went blank rather than a
     new one appearing -- measured against a real SessionDaemon before

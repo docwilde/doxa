@@ -103,7 +103,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         # Set True at the top of stop(): this engine's daemon was told to
         # finalize for real, as opposed to detach()'s "handle cleared, but
         # nobody told the daemon to stop". Through v0.55.0 this also
-        # excluded the pane from the persisted tab set entirely -- v0.57.0
+        # excluded the pane from the persisted tab set entirely -- v0.59.0
         # dropped that (see DoxaApp._ended_this_run's docstring): a
         # finalized session is a resumable one now, so nothing branches on
         # this flag any more.

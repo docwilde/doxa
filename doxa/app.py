@@ -1022,7 +1022,7 @@ class DoxaApp(App):
         LIVE or _stopped alike, see below), _detached_this_run (sessions
         Ctrl+W'd out of the strip earlier this run, which keep running and
         therefore STAY in the set per item D #4) and _ended_this_run (the
-        v0.57.0 counterpart: sessions Ctrl+Q'd or palette-stopped out of
+        v0.59.0 counterpart: sessions Ctrl+Q'd or palette-stopped out of
         the strip, which do NOT keep running but stay in the set anyway --
         see that dict's own docstring for why). A mounted pane's own
         _stopped flag no longer excludes it here either, for the identical
@@ -1902,7 +1902,7 @@ class DoxaApp(App):
                 # mounted in the closing pane's own block list, which the
                 # user would never get a chance to see.
                 self.notify(note, severity="information", timeout=10)
-            # v0.57.0: this session STAYS in the persisted set even though
+            # v0.59.0: this session STAYS in the persisted set even though
             # its tab is about to leave the strip below -- Ctrl+Q finalizes
             # the SESSION, not the record of having had the tab. See
             # _ended_this_run's own docstring for why that is now the
@@ -2137,7 +2137,7 @@ class DoxaApp(App):
         NEW tab, through :meth:`_attach_in_new_tab` (the same door /resume
         already sends a still-running session through).
 
-        v0.57.0, reported and MEASURED, not assumed: through v0.56.0 this
+        v0.59.0, reported and MEASURED, not assumed: through v0.56.0 this
         switched the ACTIVE pane's engine in place instead (item 2's own
         original spec, two releases before /resume settled "a pane holds
         a live conversation; attaching is never a takeover"). Driven end
@@ -2181,7 +2181,7 @@ class DoxaApp(App):
         tab's session NOW; the tab closes with it. Stopping the only tab
         closes the app (the Phase 2 behavior, per-app == per-tab then).
 
-        The palette's own name for Ctrl+Q -- same disposition, same v0.57.0
+        The palette's own name for Ctrl+Q -- same disposition, same v0.59.0
         answer: stays in the persisted set (_record_after_close), because
         finalizing a session is no longer the same fact as losing its tab
         (see _ended_this_run's docstring)."""
@@ -2462,7 +2462,7 @@ class DoxaApp(App):
         # MOUNTED (detached or stop()-marked _stopped, neither removed:
         # the app quits right below), so _persist_tabset's own per-pane
         # scan picks all of them up without help from either side dict.
-        # v0.57.0: a stopped pane is no longer excluded there either -- see
+        # v0.59.0: a stopped pane is no longer excluded there either -- see
         # _ended_this_run's docstring -- so double-Ctrl+C (this method) now
         # leaves every tab resumable, the same as ending them one at a
         # time with Ctrl+Q does; there is no reason the all-at-once quit
