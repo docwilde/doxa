@@ -246,6 +246,28 @@ Three things the loader will need from it, and which the surface is shaped for:
   budget is a policy violation with no raise behind it, and it has to land in
   the same place
 
+*Shipped in v0.53.0*, and all three live in `doxa/errors.py` rather than in
+the loader that does not exist yet:
+
+| what a loader needs | what it calls |
+|---|---|
+| report a plugin crash as the *plugin's* | `app.report_exception(err, origin="plugin:jira", context="…")` |
+| report a broken promise with no raise | `app.report_failure(errors.policy_failure("plugin:jira", "text() took 900ms — the budget is 50ms"))` |
+| "is this plugin disabled for the run" | `app.failures.failed("plugin:jira")`, `app.failures.origins()` |
+
+`origin` is the whole of the attribution contract: pass it and the block
+header says `plugin:jira`; omit it and `errors.origin_of` reads the deepest
+non-infrastructure frame off the traceback, which already tells DOXA apart
+from `lore_core` and from a third-party package today. `Failure.kind` is
+`exception` or `policy` — the surface represents *a failure*, not *an
+exception*, precisely so the third state has somewhere to go.
+
+Deliberately NOT built: the loader, the allowlist, `Plugin`/`PLUGIN`, and
+any disabling. Nothing disables anything in v0.53.0 because there is nothing
+loadable to disable; `FailureLog` is the state that rule will be written
+against, and it is one attribute away from the settings modal that will read
+it. A speculative API would be worse than an honest one.
+
 ## Failure policy
 
 A plugin failure degrades **that plugin**, never the app:

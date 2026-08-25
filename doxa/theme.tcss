@@ -727,6 +727,55 @@ ShellBlock {
     margin-bottom: 1;
 }
 
+/* Something broke (v0.53.0, doxa/ui/transcript.py's ErrorBlock). Its own
+   kind, for the same reason ShellBlock above is one: a failure must never
+   read as the assistant's words or as doxa's ordinary chatter. So no `▎`
+   accent and no `▎ doxa` prefix, but a red left rule -- #D9534F, this
+   app's one "stop and look" color, already worn by the ctx chip at its
+   escalation step and by the needs-input popup, and by nothing that is
+   merely chrome.
+
+   height:auto is load-bearing and not decoration, on the v0.28.0 rule
+   this file has already paid for twice: a Collapsible whose height
+   resolves against its container draws its title row at ZERO rows,
+   passes every query_one() a suite can write, and ships invisible for a
+   release. A block nobody has looked at yet is exactly where that
+   happens, so tests/test_errors.py asserts this block's RENDERED height
+   and the height of the fold it opens. */
+ErrorBlock {
+    height: auto;
+    background: #201A19;
+    border-left: thick #D9534F;
+    padding: 0 2;
+    margin-bottom: 1;
+}
+
+/* The one line that is always read -- full-strength, unlike the muted
+   ramp SystemBlock and ToolCallsSection use. This is the opposite of
+   chrome. */
+ErrorBlock > CollapsibleTitle {
+    width: 1fr;
+    background: #201A19;
+    color: #D9534F;
+    text-style: none;
+    padding: 0 1;
+}
+
+/* The traceback, once someone asks for it. Auto height so the fold
+   actually GROWS when it opens: a fold that expands to nothing is the
+   same defect as a block that mounts at zero rows. */
+ErrorBlock > Contents {
+    height: auto;
+    background: #201A19;
+    padding: 1 0 0 1;
+}
+
+.error-detail {
+    height: auto;
+    background: #201A19;
+    color: #C9C0AE;
+}
+
 /* Peer messages: deliberately dimmer than a turn -- border one step DOWN
    the surface ramp (#2A251E, the chip surface, instead of #3A3429) and
    secondary text only. Another session talking must never read as this

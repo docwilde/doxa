@@ -238,6 +238,77 @@ class SystemBlock(Static):
             self._on_link()
 
 
+class ErrorBlock(Collapsible):
+    """Something broke, and here it is -- v0.53.0's whole point.
+
+    Four defects reached the user in one day and none of them arrived as a
+    legible error (see :mod:`doxa.errors` for the list). This is the block
+    they should have arrived as: ONE line saying what failed and who failed
+    it, and the whole scrubbed traceback behind a fold that starts
+    **collapsed**. A user must be able to see that something broke without
+    reading a wall of text, and reach the whole of it in one keystroke --
+    which is exactly the trade :class:`ToolCallsSection` and
+    :class:`ReasoningSection` already make, so this is their pattern rather
+    than a fourth idiom.
+
+    A KIND OF ITS OWN, on the same rule :class:`ShellBlock` established:
+    a failure must never be mistakable for the assistant's words or for
+    doxa's ordinary chatter. It carries neither the ``▎`` turn accent nor
+    the ``▎ doxa`` prefix, but a red left rule (theme.tcss ``ErrorBlock``)
+    -- the same ``#D9534F`` the context chip escalates to and the
+    needs-input popup wears, the app's one "stop and look" color, worn by
+    nothing that is merely chrome.
+
+    The header names the ORIGIN (:attr:`doxa.errors.Failure.origin`).
+    "TimeoutError … · textual_image" and "TimeoutError … · doxa" are
+    different bug reports, and a plugin's crash reading as a DOXA bug is
+    the specific outcome ``docs/plugin-api.md``'s failure policy exists to
+    prevent.
+
+    Repeats fold into ONE block. A widget that raises while painting
+    raises again on every paint; :meth:`bump` puts the tally in the header
+    instead of growing the transcript without bound (the caller,
+    ``DoxaApp.report_failure``, is what decides this is a repeat -- see
+    :attr:`doxa.errors.Failure.signature`).
+
+    Everything interpolated is escaped (:func:`_escape_markup`): a
+    traceback is a source listing, ``[`` in it is a list literal and not
+    Rich markup, and a block about a failure that fails to render would be
+    a joke at the user's expense. The text is ALREADY scrubbed -- see
+    :func:`doxa.errors.scrub`; this class re-scrubs nothing and must not
+    be handed anything raw."""
+
+    #: Fold header for a failure the app survived, and for one it did not.
+    #: A user has to be able to tell "this is broken" from "this is over"
+    #: at a glance, and both blocks are on screen at the same time when a
+    #: fatal failure follows a recoverable one.
+    MARK = "✗"
+    FATAL_MARK = "✗✗"
+
+    def __init__(self, failure: "Any") -> None:
+        self.failure = failure
+        self.repeats = 1
+        self.body = Static(
+            _escape_markup(failure.detail or "(no further detail)"),
+            classes="error-detail",
+        )
+        super().__init__(self.body, title=self._render_title(), collapsed=True)
+        self.add_class("error-block")
+
+    def _render_title(self) -> str:
+        mark = self.FATAL_MARK if self.failure.fatal else self.MARK
+        tally = f"  ·  ×{self.repeats}" if self.repeats > 1 else ""
+        return f"{mark} {_one_line(self.failure.headline(), 150)}{tally}"
+
+    def bump(self, repeats: int) -> None:
+        """The same failure again. A title rewrite only -- as cheap as
+        ToolCallsSection's own live "(N)" and, deliberately, no new widget
+        and no re-parse: the repeat case is the one that fires hundreds of
+        times, and it must cost a string."""
+        self.repeats = repeats
+        self.title = self._render_title()
+
+
 class ImageBlock(Vertical):
     """The `/img <path>` debug block: a caption line plus whatever
     doxa.images.widget_for yields for this terminal -- a real image widget

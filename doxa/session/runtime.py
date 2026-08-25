@@ -686,8 +686,34 @@ class PaneRuntimeMixin:
         if engine is not None and request_id:
             answerer = getattr(engine, "answer_needs_input", None)
             if answerer is not None:
-                with contextlib.suppress(Exception):
+                try:
                     await answerer(request_id, answer)
+                except Exception as exc:  # noqa: BLE001 -- reported, not swallowed
+                    # v0.53.0. This was `contextlib.suppress(Exception)`,
+                    # and it is one of the four defects that motivated the
+                    # error surface: "the needs-input dialog stopped
+                    # answering keys". The popup has ALREADY closed and
+                    # set_needs_input(False) has ALREADY run by the time
+                    # this line is reached, so a failed delivery left the
+                    # agent blocked forever on a question the user HAD
+                    # answered -- with no dialog, no message and no sign
+                    # anything had gone wrong. A wedged session that looks
+                    # exactly like an idle one.
+                    #
+                    # Now it is an error block plus a line saying what to
+                    # do about it, which is the difference between "DOXA is
+                    # broken" and "answer it again".
+                    reporter = getattr(self.app, "report_exception", None)
+                    if reporter is not None:
+                        reporter(
+                            exc,
+                            context="delivering your answer to the session",
+                        )
+                    await self._system(
+                        "your answer did not reach the session — it is still "
+                        "waiting. What failed is in the block above; answer "
+                        "again when it reappears, or /detach and reattach."
+                    )
 
     def _on_turn_done_status(self, duration_ms: "float | None") -> None:
         """Tab-status + desktop-notification side effects of ONE finished
