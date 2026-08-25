@@ -1,7 +1,7 @@
 """doxa.ui -- the widget layer, one module per surface.
 
 Every class here used to live in ``doxa/app.py``; none of them changed in
-the move. They are grouped by what a plugin would extend (docs/plugin-api.md
+the move. They are grouped by what a plugin would extend (docs/plans/plugin-api.md
 names four such surfaces) rather than by widget taxonomy:
 
 * :mod:`doxa.ui.labels` -- the pure formatters and the constants they read.

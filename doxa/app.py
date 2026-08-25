@@ -49,7 +49,7 @@ SessionPane's command, status-chip and engine-driven halves moved to
 re-exports every name this module exported before, unchanged, so no
 importer and no CSS selector had to move with them.
 
-The seams the split follows are the ones docs/plugin-api.md names: the
+The seams the split follows are the ones docs/plans/plugin-api.md names: the
 command table (:data:`doxa.session.commands.PANE_COMMANDS`), the status
 chips (:class:`doxa.session.chips.StatusChip`), the event dispatch map
 (:data:`doxa.session.runtime.EVENT_RENDERERS`) and the model provider
@@ -550,7 +550,7 @@ class DoxaApp(App):
         # v0.56.0's error surface. Three pieces of state, and each is one
         # of the three things the brief for this feature asked for:
         #
-        #   failures       -- the QUERYABLE record. docs/plugin-api.md's
+        #   failures       -- the QUERYABLE record. docs/plans/plugin-api.md's
         #                     failure policy is written in states ("this
         #                     plugin is disabled for the run"), and a
         #                     widget in a scrollback cannot answer a
@@ -2289,7 +2289,7 @@ class DoxaApp(App):
         its own. That is still not good enough to rely on: "the first
         prompt is focused because a widget we do not own happens to
         announce itself" is the same implicitness this release exists to
-        remove, and docs/split-panes.md needs the startup leaf to be a
+        remove, and docs/plans/split-panes.md needs the startup leaf to be a
         DECISION before a window can hold two panes at once. So startup
         says what it means, and the event becomes a no-op refocus.
 

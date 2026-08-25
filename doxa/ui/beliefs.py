@@ -25,7 +25,7 @@ loses your place.
 The surface divides its space with a FIXED split (a header block, then one
 scrolling body) and has no drag handle. Draggable dividers between the
 transcript, the prompt and the status bar are a general layout capability
-that belongs to the recursive split-panes work (docs/split-panes.md), and
+that belongs to the recursive split-panes work (docs/plans/split-panes.md), and
 bolting a one-off resizer into one browser is how a layout system ends up
 with two of them that behave differently.
 

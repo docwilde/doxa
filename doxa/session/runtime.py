@@ -5,7 +5,7 @@ connecting the engine, running a turn, rendering the events that come back,
 the peer pump that renders turns another attached client is driving, the
 subagent tracker, and the two ways a session ends.
 
-docs/plugin-api.md's third extension point is :data:`EVENT_RENDERERS`. The
+docs/plans/plugin-api.md's third extension point is :data:`EVENT_RENDERERS`. The
 ``if/elif`` chain over six event types that used to be
 :meth:`PaneRuntimeMixin._handle_event`'s whole body is now a dispatch map
 from event type to the method that renders it, one method per type. An
@@ -47,7 +47,7 @@ from ..ui.transcript import (
 
 
 # Event type -> the method on the pane that renders it. See the module
-# docstring: this is the dispatch map docs/plugin-api.md's transcript-block
+# docstring: this is the dispatch map docs/plans/plugin-api.md's transcript-block
 # extension point attaches to, and it is a module constant so a built-in
 # row cannot be swapped out per pane.
 EVENT_RENDERERS: "dict[str, str]" = {

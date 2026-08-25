@@ -19,7 +19,7 @@ Concretely, and each of these is asserted by ``tests/test_shell.py``:
 * ``!`` is **not** a row in :mod:`doxa.commands`. The slash registry is the
   one command surface that is dispatched by NAME from places other than a
   keystroke (``SessionPane.run_status_command`` runs a registry row on a
-  status-chip click; docs/plugin-api.md §1 proposes third-party rows), so
+  status-chip click; docs/plans/plugin-api.md §1 proposes third-party rows), so
   a ``/shell`` row would put the executor behind a dispatcher that takes a
   string. It has no such row, and therefore no palette entry, no
   autocomplete entry, and no reachable name.

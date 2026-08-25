@@ -99,7 +99,7 @@ class ModelProvider(Protocol):
     second provider (DeepSeek, Codex) is a new class satisfying this
     Protocol, never a branch inside the picker's own code.
 
-    ASSESSED against docs/plugin-api.md's fourth extension point (v0.34.0)
+    ASSESSED against docs/plans/plugin-api.md's fourth extension point (v0.34.0)
     and found to be the right shape for HALF of it. The catalog half is
     complete: the picker asks a provider what it can offer and never
     branches on who the provider is. The SESSION half is not here at all

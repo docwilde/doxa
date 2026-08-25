@@ -1063,7 +1063,7 @@ property, and this release fixes the property.
   test that says so.
 
 **Also a prerequisite for the plugin loader, which is why it is shaped the
-way it is.** `docs/plugin-api.md`'s failure policy promises three states —
+way it is.** `docs/plans/plugin-api.md`'s failure policy promises three states —
 not loaded, disabled for the run, over its `text()` time budget — and none
 of them had a mechanism. So a failure carries an **origin** (pass
 `origin="plugin:jira"` and the block says so; omit it and the deepest
@@ -1720,7 +1720,7 @@ full belief text on hover, per-row approve/reject buttons, and a surface
   prevent.
 - **No drag-resize.** *Judgment call, deliberately deferred.* Draggable
   dividers between the transcript, the prompt and the status bar are a
-  general layout capability, and `docs/split-panes.md` now owns them as a
+  general layout capability, and `docs/plans/split-panes.md` now owns them as a
   requirement rather than an open question — provoked by exactly this
   surface, and specified there instead of here. The browser is
   full-height, divides its own space with a fixed split, and ships no
@@ -1836,7 +1836,7 @@ predicts cannot disagree.
   than with a guessed one. A write path is the wrong place to guess.
 
 **Approve and reject, per row.** v0.31.0 shipped neither, because the write
-path into curated memory was under security review (`docs/plugin-api.md` §6,
+path into curated memory was under security review (`docs/plans/plugin-api.md` §6,
 LORE issue #43). LORE **0.36.0** concluded it: the write gate classifies
 every CLI write by caller, and the provenance ledger records who wrote each
 entry and whether it came through approval. That gate is CLI-layer only and
@@ -2367,7 +2367,7 @@ and this release removes both workarounds along with the causes.
   posts the message), so the prompt would in fact end up focused on its
   own. Startup focuses it explicitly anyway. "The first prompt is focused
   because a widget we do not own happens to announce itself" is the same
-  implicitness this release exists to remove, and `docs/split-panes.md`
+  implicitness this release exists to remove, and `docs/plans/split-panes.md`
   names an explicit startup leaf as a prerequisite: with two panes visible
   at once, an implicit mount-time focus is a race between siblings.
 - **Restore's tab choice is stated once.** `_activate_initial_tab` takes
@@ -2603,7 +2603,7 @@ it is safe for exactly one reason, which is written into
 - **It is not a slash command, and that is the security decision, not a
   style one.** The slash registry is the one command surface dispatched
   *by name* from somewhere other than a keystroke — a status-chip click
-  runs a registry row today, and docs/plugin-api.md §1 proposes
+  runs a registry row today, and docs/plans/plugin-api.md §1 proposes
   third-party rows tomorrow. A `/shell` row would put an arbitrary-command
   executor behind a dispatcher that takes a string. So: `!`-prefixed only,
   no `/shell`, no palette entry, no autocomplete entry, no name for
@@ -2817,7 +2817,7 @@ user-visible string. The proof is the suite it did not touch: **785 tests
 green, the same 785, unchanged** — no test was edited to accommodate the
 split, and the one place where that was a live risk is called out below.
 
-The shape is not arbitrary. `docs/plugin-api.md` was written *before* this
+The shape is not arbitrary. `docs/plans/plugin-api.md` was written *before* this
 split for exactly this reason: the four things that spec says a plugin
 would most obviously want to add were the four things `app.py` hardcoded,
 so each extension point is the seam the split follows. The file came apart
@@ -2918,7 +2918,7 @@ whatever boundary happened to be convenient this week.
   imports back onto `doxa.app` exist for the same class of reason and are
   each commented where they sit (`app_bindings` reading the live
   `DoxaApp.BINDINGS`, and two `isinstance(app, DoxaApp)` checks).
-- **Docs.** `docs/plugin-api.md`'s status line no longer says nothing is
+- **Docs.** `docs/plans/plugin-api.md`'s status line no longer says nothing is
   implemented — the four extension points now each name the structure that
   exists, and the "where it is hardcoded today" table gained a column
   saying where the seam is instead.
@@ -3253,7 +3253,7 @@ write path — see the scope note at the end.
 **Scope, stated rather than implied: this release is read-only.** There is
 no approve/reject button, no approve/reject RPC, and no plan for one here.
 The write path into curated memory and beliefs is under active security
-review (`docs/plugin-api.md` §6, LORE issue #43), and the approval gate
+review (`docs/plans/plugin-api.md` §6, LORE issue #43), and the approval gate
 must not gain a second door before that concludes. Listing and reading
 staged proposals touches none of it; approving them stays with LORE's own
 `/lore:approve` / `/lore:reject`. Two tests pin the boundary — one that

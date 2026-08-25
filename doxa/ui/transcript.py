@@ -10,7 +10,7 @@ transcript without an engine behind it.
 restored tab is not a lookalike of the session it restores, it is the
 session's own view rebuilt out of exactly these classes.
 
-docs/plugin-api.md's third extension point ("a transcript block") attaches
+docs/plans/plugin-api.md's third extension point ("a transcript block") attaches
 here -- see :meth:`doxa.session.runtime.PaneRuntimeMixin._handle_event`'s
 dispatch map for the side that chooses which block an event renders into.
 """
@@ -262,7 +262,7 @@ class ErrorBlock(Collapsible):
     The header names the ORIGIN (:attr:`doxa.errors.Failure.origin`).
     "TimeoutError … · textual_image" and "TimeoutError … · doxa" are
     different bug reports, and a plugin's crash reading as a DOXA bug is
-    the specific outcome ``docs/plugin-api.md``'s failure policy exists to
+    the specific outcome ``docs/plans/plugin-api.md``'s failure policy exists to
     prevent.
 
     Repeats fold into ONE block. A widget that raises while painting

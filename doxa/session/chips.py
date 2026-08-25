@@ -1,6 +1,6 @@
 """doxa.session.chips -- the status line, and every picker a chip opens.
 
-docs/plugin-api.md's second extension point, and the reason
+docs/plans/plugin-api.md's second extension point, and the reason
 ``_refresh_status`` had to come apart: it was 157 lines of literal chip
 construction, appending markup to one list and hint pairs to another and
 relying on the two staying in step by hand.
@@ -318,7 +318,7 @@ class PaneChipsMixin:
         shown empty. That is why this returns a list built by appends
         rather than a fixed-length one with holes in it.
 
-        docs/plugin-api.md's second extension point is this sequence. A
+        docs/plans/plugin-api.md's second extension point is this sequence. A
         contributed chip would be one more :class:`StatusChip` placed at
         its declared order; DOXA still owns the rendering, which is what
         makes the ordering guarantee enforceable. No such folding step

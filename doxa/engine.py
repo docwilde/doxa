@@ -1594,7 +1594,7 @@ class SessionEngine:
 
         v0.31.0 returned bare strings and shipped no approve/reject, both
         for the same reason: the write path into curated memory was under
-        security review (docs/plugin-api.md §6, LORE issue #43). That
+        security review (docs/plans/plugin-api.md §6, LORE issue #43). That
         review concluded in LORE 0.36.0, which shipped the write gate and
         the provenance ledger, so item V does two things v0.31.0 could
         not. It says what each proposal WOULD DO if approved -- a row that

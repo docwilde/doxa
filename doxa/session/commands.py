@@ -7,7 +7,7 @@ asserting ``pane._command_handlers().keys() == commands.interactive_names()``
 -- the registry describes, the pane executes, and neither may grow a
 command the other doesn't have.
 
-docs/plugin-api.md's first extension point attaches at :data:`PANE_COMMANDS`
+docs/plans/plugin-api.md's first extension point attaches at :data:`PANE_COMMANDS`
 below: the executor half is no longer a literal dict inside a method but an
 ordered tuple of :class:`CommandBinding` records that
 :meth:`PaneCommandsMixin._command_handlers` binds against a pane. A future

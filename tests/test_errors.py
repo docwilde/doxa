@@ -223,7 +223,7 @@ def test_an_explicit_origin_always_wins():
 
 
 def test_a_policy_violation_is_a_failure_with_no_exception_behind_it():
-    """docs/plugin-api.md's third failure state: a chip whose text()
+    """docs/plans/plugin-api.md's third failure state: a chip whose text()
     overruns its time budget did not raise, it broke a promise, and it is
     disabled just as loudly."""
     failure = errors.policy_failure(

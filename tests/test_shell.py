@@ -272,7 +272,7 @@ async def test_stdin_is_closed_so_an_interactive_command_cannot_hang(tmp_path):
 def test_shell_is_not_a_slash_command_so_no_dispatcher_can_name_it():
     """The slash registry is the one command surface dispatched BY NAME
     from somewhere other than a keystroke (a status-chip click runs a
-    registry row; docs/plugin-api.md §1 proposes third-party rows). A
+    registry row; docs/plans/plugin-api.md §1 proposes third-party rows). A
     `/shell` row would put an arbitrary-command executor behind a
     dispatcher that takes a string, so there is no such row -- and
     therefore no palette entry, no autocomplete entry and no name."""

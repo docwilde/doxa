@@ -9,7 +9,7 @@ timer -- see its docstring for the idle-CPU rule this app measures);
 What a chip SAYS is decided in :mod:`doxa.session.chips`, which builds an
 ordered sequence of :class:`~doxa.session.chips.StatusChip` records and
 hands their rendered markup to :meth:`StatusBar.update`. That sequence is
-docs/plugin-api.md's second extension point.
+docs/plans/plugin-api.md's second extension point.
 """
 
 from __future__ import annotations

@@ -17,7 +17,7 @@ Three things are deliberately separate here:
 **A failure is not an exception.** :class:`Failure` is the general record
 and an exception is only one way to build one (:func:`from_exception`).
 The other is :func:`policy_failure`, which exists because
-``docs/plugin-api.md`` already promises a third failure state that never
+``docs/plans/plugin-api.md`` already promises a third failure state that never
 raises at all -- a status chip whose ``text()`` blows its time budget is
 disabled "loudly", and a surface that can only represent exceptions has
 nowhere to put that. The naming will outlive this release, so it says
@@ -318,7 +318,7 @@ def policy_failure(
 ) -> Failure:
     """A failure with no exception behind it.
 
-    ``docs/plugin-api.md``'s third failure state: a chip whose ``text()``
+    ``docs/plans/plugin-api.md``'s third failure state: a chip whose ``text()``
     overran its time budget did not raise -- it broke a promise -- and it
     is disabled for the run just as loudly as one that crashed. Same
     record, same block, same log; only :attr:`Failure.kind` differs, so
@@ -336,7 +336,7 @@ class FailureLog:
     """Every failure this RUN has seen, by origin -- the queryable state
     behind the visible blocks.
 
-    ``docs/plugin-api.md``'s failure policy is written in terms of state,
+    ``docs/plans/plugin-api.md``'s failure policy is written in terms of state,
     not messages: a plugin that raises in a hook is "disabled for the
     run", and every such state is "visible in the settings modal". A
     widget in a scrollback cannot answer "is this plugin disabled"; this

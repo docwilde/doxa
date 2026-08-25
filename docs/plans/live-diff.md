@@ -15,7 +15,7 @@ you read a tool-call fold, or you open the repo elsewhere and diff by hand.
 ## Prerequisite: split panes
 
 This needs a vertical split, and DOXA has **tabs, not splits** —
-`docs/split-panes.md` specifies the layout tree and is unbuilt. So this feature
+`docs/plans/split-panes.md` specifies the layout tree and is unbuilt. So this feature
 is downstream of that one, and it is the first concrete consumer of it, which
 makes it useful as a design check: if the split spec cannot express
 *session left, diff right, both live*, the split spec is wrong.
@@ -37,7 +37,7 @@ second implementation when the split arrives.
 ## Where the diff comes from
 
 **Not a file watcher.** DOXA has a documented no-timer, no-per-frame rule, and
-`docs/code-graph.md` already refused a watcher for the same reason: a second
+`docs/plans/code-graph.md` already refused a watcher for the same reason: a second
 lifecycle to get wrong. There is a better signal already flowing.
 
 **The tool-result stream is the tick.** `tool_result` events for `Edit`,
