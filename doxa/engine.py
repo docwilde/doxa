@@ -801,6 +801,21 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _is_uuid(value: str) -> bool:
+    """Would the CLI accept this as its own ``--session-id``? The SDK says
+    only "Must be a valid UUID", so this asks ``uuid.UUID`` and nothing
+    else. Real sessions always pass (SessionEngine mints uuid4, and so
+    does spawn_daemon); the synthetic ids the test suite hands in ("s1",
+    "sess-a") do not, and a session that cannot pin its id simply does
+    not -- see _build_options, where a false answer here means one fewer
+    key rather than a refused connect."""
+    try:
+        uuid.UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return True
+
+
 def _as_tokens(value: Any) -> "int | None":
     """A token count out of an SDK reply field, or None. Item X: a
     non-numeric, negative or absent field is UNKNOWN -- coerced to 0 it
@@ -927,10 +942,19 @@ class SessionEngine:
         client_factory: Callable[[ClaudeAgentOptions], Any] = ClaudeSDKClient,
         allowed_tools: "set[str] | None" = None,
         daemon_socket: str | None = None,
+        resume: str | None = None,
     ) -> None:
         self.cwd = cwd
         self.model = model
         self.session_id = session_id or str(uuid.uuid4())
+        # v0.45.0 (session resume): the id of the conversation this engine
+        # CONTINUES rather than starts. Not a second id -- a resumed
+        # session keeps the id it is resuming (see _build_options), so
+        # self.session_id and self.resume are equal on every resume DOXA
+        # itself performs, and the field exists to say which of the two
+        # things a session is DOING with that id. None for a fresh
+        # session, which is every session DOXA started before v0.45.0.
+        self.resume = resume or None
         # Daemon marker for the shared registry entry (peers.PeerInfo.
         # daemon_socket): set when a doxa.daemon.SessionDaemon hosts this
         # engine, so `doxa attach` discovers the session through the SAME
@@ -1639,6 +1663,44 @@ class SessionEngine:
         reasoning = show_reasoning()
         return ClaudeAgentOptions(
             model=self.model,
+            # -- session identity, and the whole reason /resume works ----
+            #
+            # MEASURED (v0.45.0, real `claude` under cli_isolation.
+            # spawn_env): before this pair of keys, DOXA's session id and
+            # the CLI's were two DIFFERENT ID SPACES. DOXA minted a uuid4
+            # in __init__ and named its LORE transcript (and therefore
+            # every /search hit) after it; the CLI, given no session_id of
+            # its own, minted a SECOND uuid4, reported it in the init
+            # SystemMessage, and wrote ITS store under that. Probe:
+            # doxa sid 360a8897…, CLI sid f45bce98…; `resume=<CLI sid>`
+            # replayed the conversation, `resume=<doxa sid>` failed the
+            # turn with "No conversation found with session ID". A resume
+            # feature built on the id /search shows would have been
+            # broken for every session, in a way no test without a live
+            # CLI could catch.
+            #
+            # The fix is to stop having two spaces rather than to map
+            # between them: ClaudeAgentOptions.session_id asks the CLI to
+            # USE our id (measured: honored exactly, file written under
+            # it), so from v0.45.0 the id in the search list IS the id
+            # --resume takes. Only when it parses as a UUID -- the SDK
+            # requires that, and the test suite's short synthetic ids
+            # ("s1") must not become a connect-time error.
+            #
+            # Mutual exclusion is the SDK's, not ours: session_id "cannot
+            # be used with continue_conversation or resume unless
+            # fork_session is also set". A resume therefore sends resume
+            # ALONE, which is also what makes it a true continuation --
+            # measured: the resumed session comes back under the SAME id,
+            # so this engine's transcript file, its registry entry and
+            # its /search row all stay the one conversation they were,
+            # instead of forking into a second one the user never asked
+            # for.
+            **(
+                {"resume": self.resume} if self.resume
+                else {"session_id": self.session_id}
+                if _is_uuid(self.session_id) else {}
+            ),
             # Connect-time only -- see effort_level(). None leaves the CLI's
             # own default alone rather than asserting a level we made up.
             **({"effort": effort} if effort else {}),

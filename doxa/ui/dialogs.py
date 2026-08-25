@@ -902,6 +902,129 @@ class PermissionModeConfirm(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class ResumeConfirm(ModalScreen[bool]):
+    """Enter on a ``/search`` session header (v0.45.0): reopen this
+    conversation?
+
+    THE SHAPE is :class:`CompactConfirm`'s, above, and deliberately not a
+    fourth invention -- a focused ``ModalScreen``, a title row, a body, a
+    row of Statics that each name their own key, Esc cancels, Enter takes
+    the affirmative. It belongs to that family for the same reason
+    CompactConfirm belongs to CloseWithTurnRunning's: nothing is waiting
+    on the other end. A resume is a plain UI yes/no, not an engine request
+    the way NeedsInputPopup's prompt-driven answer is.
+
+    THE BODY STATES WHAT WILL HAPPEN and does not ask "are you sure?" --
+    the house rule, and here it has real work to do, because a resume is
+    several non-obvious things at once: it opens a NEW TAB (the current
+    pane's own session keeps running, untouched), the model comes back
+    with the conversation's history in context, and the prior turns are
+    re-rendered from the transcript on disk so the two agree about what
+    was said. Every one of those is a thing a user would otherwise have to
+    discover.
+
+    It also states what will NOT happen. ``reason`` carries
+    :func:`doxa.history.resume_state`'s explanation for a conversation
+    that cannot be resumed -- still running, cwd gone, or (the common one
+    for a while yet) started before DOXA and the CLI shared a session id.
+    Then this dialog has ONE door, it says why, and there is nothing to
+    confirm. Showing the refusal here rather than failing a turn later is
+    the entire point of checking before offering.
+
+    v0.28.0's defect is why ``#resume-confirm-buttons`` is ``height:
+    auto`` in theme.tcss and why this class ships with a test asserting
+    real rendered geometry: ``height: 1; padding-top: 1`` under Textual's
+    border-box model draws buttons at ZERO height -- present in the DOM,
+    passing every ``query_one``, drawn nowhere -- and that shipped for a
+    full release because the tests asserted the modal was pushed, never
+    that anything was visible."""
+
+    BINDINGS = [("escape", "pick_cancel", "Cancel")]
+
+    def __init__(
+        self,
+        title: str,
+        session_id: str,
+        *,
+        when: str = "",
+        cwd: str = "",
+        reason: str = "",
+    ) -> None:
+        super().__init__()
+        self._title = (title or "").strip() or session_id[:8] or "this session"
+        self._session_id = session_id
+        self._when = when
+        self._cwd = cwd
+        # Empty means resumable. Non-empty is the refusal, in the words
+        # doxa.history.resume_state already chose -- this dialog does not
+        # re-word somebody else's finding.
+        self.reason = reason
+
+    @property
+    def resumable(self) -> bool:
+        return not self.reason
+
+    def body_text(self) -> str:
+        """The body, built once here so the test that asserts it is on
+        screen and the compose that puts it there read the same string."""
+        where = f"\ncwd      {self._cwd}" if self._cwd else ""
+        when = f"  ·  last active {self._when}" if self._when else ""
+        head = f"session  {self._session_id}{where}{when}"
+        if not self.resumable:
+            return f"{head}\n\n{self.reason}"
+        return (
+            f"{head}\n\n"
+            "resuming opens this conversation in a NEW TAB. the model "
+            "comes back with its history in context, and the turns so far "
+            "are re-rendered from the transcript on disk so you can read "
+            "what it remembers. this tab's own session keeps running, "
+            "untouched."
+        )
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="resume-confirm"):
+            yield Static(
+                f"▎ resume “{self._title}”?" if self.resumable
+                else f"▎ cannot resume “{self._title}”",
+                id="resume-confirm-title",
+            )
+            yield Static(self.body_text(), id="resume-confirm-body")
+            with Horizontal(id="resume-confirm-buttons"):
+                if self.resumable:
+                    yield Static("[ resume · enter ]", id="resume-confirm-yes")
+                    yield Static("[ cancel · esc ]", id="resume-confirm-no")
+                else:
+                    yield Static("[ close · enter ]", id="resume-confirm-no")
+
+    def action_pick_cancel(self) -> None:
+        self.dismiss(False)
+
+    def on_key(self, event: events.Key) -> None:
+        # "return" rides alongside "enter" for terminals whose key name
+        # Textual has not normalized -- same pair CompactConfirm binds.
+        # On a REFUSAL every key that could mean yes means close instead:
+        # there is no affirmative to take, and a dialog whose only door is
+        # labelled "close" must not have a second, invisible one.
+        choice = {
+            "y": True, "r": True, "enter": True, "return": True,
+            "n": False, "c": False,
+        }.get(event.key)
+        if choice is None:
+            return
+        event.stop()
+        self.dismiss(choice and self.resumable)
+
+    @on(events.Click, "#resume-confirm-yes")
+    def _click_yes(self, event: events.Click) -> None:
+        event.stop()
+        self.dismiss(True)
+
+    @on(events.Click, "#resume-confirm-no")
+    def _click_no(self, event: events.Click) -> None:
+        event.stop()
+        self.dismiss(False)
+
+
 class AboutDialog(ModalScreen[None]):
     """``/about`` (item Z): what DOXA this is, and what a bug report needs.
 

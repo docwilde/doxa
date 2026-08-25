@@ -323,10 +323,17 @@ class SessionDaemon:
         engine_factory: Callable[[str, str, str], SessionEngine] | None = None,
         ring_capacity: int = RING_CAPACITY,
         base_branch: str | None = None,
+        resume: str | None = None,
     ) -> None:
         self.cwd = str(cwd or os.getcwd())
         self.model = model
         self.session_id = session_id or str(uuid.uuid4())
+        # v0.45.0 (/resume): this daemon CONTINUES an existing conversation
+        # rather than starting one. The id is not new -- see spawn_daemon,
+        # which passes the SAME string as both session_id and resume, so
+        # the transcript file, the registry entry and the /search row all
+        # stay the one session they already were.
+        self.resume = resume or None
         # Item S #1 (`doxa new --branch <name>`): the ref the session's OWN
         # worktree forks from, plumbed here from spawn_daemon's subprocess
         # arg. cli.py has already validated it exists before ever spawning
@@ -339,6 +346,7 @@ class SessionDaemon:
         self._engine_factory = engine_factory or (
             lambda cwd, sid, dsock: SessionEngine(
                 cwd=cwd, model=self.model, session_id=sid, daemon_socket=dsock,
+                resume=self.resume,
             )
         )
         self.engine: SessionEngine | None = None
@@ -369,7 +377,19 @@ class SessionDaemon:
         is built -- a no-op (returns None, leaves cwd alone) when the
         setting is off, ``cwd`` is not a git repo, or worktree creation
         fails for any reason: worktree-per-session is strictly additive,
-        never a reason a session fails to start."""
+        never a reason a session fails to start.
+
+        A RESUME never creates one (v0.45.0). ``--resume`` is resolved by
+        the CLI against ITS store, whose directories are keyed by the cwd
+        the session ran in; substituting a freshly-created worktree here
+        would hand the CLI a cwd the original conversation was never
+        recorded under, and turn a resume into "No conversation found with
+        session ID". The cwd a resume is launched with is the cwd LORE
+        recorded for that session -- which IS its worktree, when it had
+        one -- so the right move is to enter it as given, not to make a
+        second one beside it."""
+        if self.resume:
+            return
         path = worktrees_mod.create(
             self.cwd, self.session_id, base_branch=self.base_branch
         )
@@ -963,6 +983,7 @@ def spawn_daemon(
     linger_secs: float = DEFAULT_LINGER_SECS,
     wait_secs: float = 60.0,
     base_branch: str | None = None,
+    resume: str | None = None,
 ) -> "tuple[str, str]":
     """Spawn a detached daemon for ``cwd`` and wait for its registry entry.
 
@@ -972,6 +993,17 @@ def spawn_daemon(
     stderr go to a per-session log under the runtime dir (diagnostics only;
     the engine never prints transcript text).
 
+    ``resume`` (v0.45.0) means this daemon continues an EXISTING
+    conversation, and then the id is not minted at all: the resumed id IS
+    the session id. That equality is the feature, not a shortcut -- the
+    transcript file, the registry entry, the tab record and the /search
+    row are all keyed by session id, and minting a new one here would
+    fork one conversation into two everywhere except inside the model's
+    own context. Callers must check the session is not already RUNNING
+    before asking for this (doxa.app.resume_session does); two daemons
+    registered under one id is not a state this registry has an answer
+    for.
+
     ``base_branch`` (item S #1, ``doxa new --branch``) rides along as a
     subprocess arg -- the daemon is a separate process, so this is the
     only way anything reaches ``SessionDaemon.__init__``'s own
@@ -979,7 +1011,7 @@ def spawn_daemon(
     import subprocess
     import time as _time
 
-    session_id = str(uuid.uuid4())
+    session_id = resume or str(uuid.uuid4())
     reg = registry_dir()
     log_path = runtime_dir() / f"daemon-{session_id[:8]}.log"
     cmd = [
@@ -991,6 +1023,8 @@ def spawn_daemon(
         cmd += ["--model", model]
     if base_branch:
         cmd += ["--base-branch", base_branch]
+    if resume:
+        cmd += ["--resume", resume]
     with open(log_path, "ab") as log:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
@@ -1039,6 +1073,7 @@ async def _amain(args: argparse.Namespace) -> int:
         session_id=args.session_id,
         linger_secs=args.linger,
         base_branch=args.base_branch,
+        resume=args.resume,
     )
     install_signal_handlers(daemon)
     await daemon.serve()
@@ -1054,6 +1089,11 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument("--base-branch", default=None,
                         help="item S: fork the session worktree from this "
                              "ref instead of the launch cwd's checkout")
+    parser.add_argument("--resume", default=None,
+                        help="v0.45.0: continue the conversation with this "
+                             "session id instead of starting a new one "
+                             "(spawn_daemon passes the same value as "
+                             "--session-id -- a resume keeps its id)")
     args = parser.parse_args(argv)
     return asyncio.run(_amain(args))
 

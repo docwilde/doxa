@@ -55,6 +55,16 @@ chips (:class:`doxa.session.chips.StatusChip`), the event dispatch map
 (:data:`doxa.session.runtime.EVENT_RENDERERS`) and the model provider
 (:mod:`doxa.providers`). Those are structures, not a loader: this release
 gained no way to load third-party code, deliberately.
+
+v0.45.0 (session resume) added one more spawn seam beside the two the
+split already had: ``_resume_session_factory``, which builds a session
+that CONTINUES a recorded conversation rather than starting one -- see
+:meth:`DoxaApp.resume_session` for what it opens and for why a resume
+gets its own tab instead of taking over the one it was asked from. Same
+wrapping shape doxa.cli gives ``engine_factory`` and
+``new_session_factory_at``, and the confirm dialog it opens is re-exported
+through the facade below like every other name this module has ever
+exported.
 """
 
 from __future__ import annotations
@@ -155,6 +165,7 @@ from .ui.dialogs import (  # noqa: F401
     CompactConfirm,
     NeedsInputPopup,
     PermissionModeConfirm,
+    ResumeConfirm,
     SlashComplete,
     TabRename,
     TabRenameCancelled,
@@ -388,6 +399,7 @@ class DoxaApp(App):
         engine_factory: "Callable[[], Any] | None" = None,
         new_session_factory: "Callable[[], Any] | None" = None,
         new_session_factory_at: "Callable[[str], Any] | None" = None,
+        resume_session_factory: "Callable[[str, str], Any] | None" = None,
         restore_tabs: "list[RestoreTabSpec] | None" = None,
         restore_active_id: "str | None" = None,
         restore_report: "str | None" = None,
@@ -418,6 +430,26 @@ class DoxaApp(App):
         # "open in a new tab" for free rather than a silent dead end.
         self._new_session_factory_at = new_session_factory_at or (
             lambda path: SessionEngine(cwd=path, model=self.model)
+        )
+        # v0.45.0 (/resume): the third member of the same family -- spawn
+        # a session at an explicit path, except this one CONTINUES the
+        # conversation already recorded under ``session_id`` instead of
+        # starting a new one. Same wrapping shape doxa.cli gives the other
+        # two (spawn_daemon + EngineClient); the default is an in-process
+        # SessionEngine so `--in-process` mode and every existing
+        # DoxaApp(...) in the suite get /resume rather than a dead end.
+        #
+        # The id is passed TWICE and that is deliberate, not redundant: as
+        # session_id (this engine IS that session -- same transcript file,
+        # same registry entry, same /search row) and as resume (it is
+        # continuing it rather than starting it). See
+        # SessionEngine._build_options for the measured reason those are
+        # one id and not two.
+        self._resume_session_factory = resume_session_factory or (
+            lambda path, session_id: SessionEngine(
+                cwd=path, model=self.model,
+                session_id=session_id, resume=session_id,
+            )
         )
         # Item D: tabs doxa.cli already resolved to LIVE daemons (never a
         # raw saved record -- see doxa.tabsets.resolve), opened in compose()
@@ -607,6 +639,124 @@ class DoxaApp(App):
         tabbed.active = pane.id or tabbed.active
         self._focus_tab(pane)
         return None
+
+    async def resume_session(self, group: dict) -> "str | None":
+        """Reopen a past conversation (v0.45.0). Returns a note to show the
+        user, or None when there is nothing left to say.
+
+        NEW TAB, not this pane. A resumed conversation is a DIFFERENT
+        conversation from the one the active pane is holding -- its own
+        history, its own cost, its own transcript file -- and taking the
+        pane over would either end that session or orphan it, on a
+        keystroke whose stated subject was some other session entirely.
+        DOXA already has a verb for "replace what is in this tab"
+        (``/clear``, which says so and finalizes first) and a verb for "go
+        somewhere else" (the repo picker's open-in-a-new-tab, which this
+        mirrors down to the mount/activate/focus order). Resume is the
+        second kind. It is also the reversible kind: Ctrl+W closes the tab
+        and nothing was lost, whereas an in-pane takeover has no undo.
+
+        A RUNNING session is ATTACHED, never resumed. Resuming means
+        handing ``--resume <id>`` to a second CLI process while the first
+        is still alive on that conversation, which is two writers on one
+        transcript and two daemons under one registry id -- so this
+        detects it (the peer registry, the same reaped view ``doxa
+        attach`` reads) and does the thing the user actually wanted
+        instead: attaches to the live daemon, in a new tab, and says so.
+        Not a silent substitution and not a fork; a different, correct
+        act, named.
+
+        Every refusal comes back as a STRING the caller prints. Nothing
+        here raises, and nothing here half-creates a tab."""
+        session_id = str(group.get("session_id") or "")
+        cwd = str(group.get("cwd") or "")
+        title = str(group.get("title") or "").strip()
+        state, reason = await asyncio.to_thread(
+            history_mod.resume_state, session_id, cwd
+        )
+        if state == history_mod.RESUME_RUNNING:
+            return await self._attach_in_new_tab(session_id, title)
+        if state != history_mod.RESUME_OK:
+            return f"cannot resume {session_id[:8]} — {reason}"
+        # Already open in this window? Then the answer is the tab that has
+        # it, not a second one beside it -- and since it is open, it is
+        # also running, which the registry check above would normally have
+        # caught; this covers the in-process (no registry entry) case.
+        for pane in self.panes():
+            if pane._session_id == session_id:
+                self._focus_tab(pane)
+                self.query_one("#session-tabs", TabbedContent).active = (
+                    pane.id or ""
+                )
+                return f"{session_id[:8]} is already open in this window."
+        tabbed = self.query_one("#session-tabs", TabbedContent)
+        pane = self._make_pane_at(
+            cwd, lambda: self._resume_session_factory(cwd, session_id)
+        )
+        # Born labelled with the conversation's own title where it has
+        # one: a resumed tab whose label says "opus · doxa" like every
+        # other tab makes the user find it by elimination. The pane's
+        # auto_label takes over one boot later, exactly as for any tab.
+        if title:
+            pane.custom_name = title[:40]
+        # Read once by _boot, which reuses v0.32.0's transcript restore to
+        # draw the prior turns -- see SessionPane._restore_transcript.
+        pane._resume_from = session_id
+        await tabbed.add_pane(pane)
+        tabbed.active = pane.id or tabbed.active
+        self._focus_tab(pane)
+        return None
+
+    async def _attach_in_new_tab(
+        self, session_id: str, title: str
+    ) -> "str | None":
+        """A resume aimed at a session that is still RUNNING: attach to its
+        daemon instead, in a new tab.
+
+        A new tab rather than the palette's own in-pane attach
+        (``_cmd_attach``, which switches the ACTIVE pane's engine): the
+        user arrived here from a search result, not from "put something
+        else in this tab", and the promise the confirm dialog makes is a
+        new tab either way. Same non-destructive property -- whatever the
+        current pane holds is still there afterwards.
+
+        An in-process session with no daemon socket cannot be attached to
+        at all, and is refused in words rather than quietly resumed: a
+        second CLI on a live conversation is exactly what this branch
+        exists to avoid."""
+        from .client import EngineClient  # deferred: no daemon, no import
+
+        entry = next(
+            (e for e in peers_mod.read_registry() if e.session_id == session_id),
+            None,
+        )
+        socket_path = getattr(entry, "daemon_socket", "") if entry else ""
+        if not socket_path:
+            return (
+                f"{session_id[:8]} is still running, but not behind a daemon "
+                "this window can attach to (an in-process session). it is "
+                "not resumable while it runs — end it first, or use the "
+                "window that owns it."
+            )
+        tabbed = self.query_one("#session-tabs", TabbedContent)
+        pane = self._make_pane_at(
+            str(getattr(entry, "cwd", "") or self.cwd),
+            lambda: EngineClient(socket_path),
+        )
+        if title:
+            pane.custom_name = title[:40]
+        # An ATTACH, so the v0.32.0 restore path applies with its own
+        # precondition intact: the daemon has a ring it may replay, and
+        # the transcript is only drawn once it has agreed to skip it.
+        pane._restore_transcript_wanted = True
+        await tabbed.add_pane(pane)
+        tabbed.active = pane.id or tabbed.active
+        self._focus_tab(pane)
+        return (
+            f"{session_id[:8]} is still running — attached to it in a new "
+            "tab rather than resuming it. a live conversation has one "
+            "writer, and a second would fork it."
+        )
 
     @property
     def active_pane(self) -> SessionPane | None:
@@ -916,6 +1066,9 @@ class DoxaApp(App):
                             self._tab_title(spec.cwd or self.cwd),
                             pinned_name=spec.pinned_name,
                             id=_restore_pane_id(spec.session_id),
+                            # v0.45.0: read-only is now the FALLBACK, so
+                            # the tab says which of the reasons it was.
+                            resume_note=spec.resume_note,
                         )
                         continue
                     pane = SessionPane(
@@ -924,10 +1077,22 @@ class DoxaApp(App):
                     )
                     if spec.pinned_name:
                         pane._initial_pinned_name = spec.pinned_name
-                    # v0.32.0: this pane's scrollback comes from the
-                    # session's persisted transcript, not the daemon's
-                    # 512-frame ring (see SessionPane._restore_transcript).
-                    pane._restore_transcript_wanted = True
+                    if spec.resume:
+                        # v0.45.0: this tab's session had ENDED, and it is
+                        # coming back LIVE, continuing that conversation
+                        # (doxa.cli decided that; the engine_factory above
+                        # spawns with --resume). Its scrollback comes from
+                        # the same transcript file a reattach reads, minus
+                        # the backlog-skip precondition -- a freshly
+                        # spawned daemon has no ring to replay on top. See
+                        # SessionPane._restore_transcript.
+                        pane._resume_from = spec.session_id
+                    else:
+                        # v0.32.0: this pane's scrollback comes from the
+                        # session's persisted transcript, not the daemon's
+                        # 512-frame ring (see
+                        # SessionPane._restore_transcript).
+                        pane._restore_transcript_wanted = True
                     pane._restore_cwd = spec.cwd
                     if not report_placed:
                         pane._boot_report = self._restore_report

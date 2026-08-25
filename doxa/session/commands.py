@@ -101,11 +101,29 @@ PANE_COMMANDS: "tuple[CommandBinding, ...]" = (
     CommandBinding("/rename", "_cmd_rename"),
     CommandBinding("/search", "_cmd_search"),
     CommandBinding("/beliefs", "_cmd_beliefs"),
+    CommandBinding("/resume", "_cmd_resume"),
     CommandBinding("/pending", "_cmd_pending"),
     CommandBinding("/update", "_cmd_update"),
     CommandBinding("/help", "_cmd_help"),
     CommandBinding("/about", "_cmd_about"),
 )
+
+
+def _fmt_resume_row(hit: dict) -> str:
+    """One /resume picker row: title, age, message count. Ellipsized like
+    every other picker row, and the age comes from history.hit_age so the
+    command and the /search popup date a conversation identically."""
+    title = str(hit.get("title") or "").strip() or str(
+        hit.get("session_id") or "?"
+    )[:8]
+    age = history_mod.hit_age(hit)
+    count = hit.get("messages")
+    parts = [title[:44]]
+    if age:
+        parts.append(age)
+    if isinstance(count, int) and count:
+        parts.append(f"{count} msg")
+    return "  ·  ".join(parts)
 
 
 class PaneCommandsMixin:
@@ -124,6 +142,95 @@ class PaneCommandsMixin:
         would be folded into, and the closure assertion above stays exactly
         as true of a built dict as it was of a literal one."""
         return {entry.name: entry.bind(self) for entry in PANE_COMMANDS}
+
+    async def _cmd_resume(self, args: str) -> None:
+        """``/resume [session-id]`` -- reopen a past conversation.
+
+        The command form of the gesture Enter now makes on a ``/search``
+        session header, and the ONLY route to a resume for the one result
+        shape that has no header: a search matching a single session stays
+        flat by design ("no pointless fold", item I), so there is no
+        conversation row to press Enter on. That is why this is a command
+        and not only a key.
+
+        Bare, it offers the recent conversations in the SAME
+        :class:`ChipPicker` every other list in this app uses -- rows
+        carry title, age and message count, and DOXA's own recents query
+        (``history.recent_sessions``) supplies them, so this list and the
+        one an empty ``/search `` shows are the same list.
+
+        With an argument it takes a session id by PREFIX, the same
+        shorthand ``/sessions kill`` and ``doxa attach`` already accept:
+        the ids in this app are uuids, and nobody types one in full. An
+        ambiguous prefix is refused with the candidates rather than
+        resolved by picking the first -- resuming the wrong conversation
+        is not an error the user would notice quickly.
+
+        Every eligibility question (running? cwd still there? does the CLI
+        know this id?) belongs to :meth:`DoxaApp.resume_session`, which
+        the search gesture calls too. This method finds a session; it does
+        not decide anything about it."""
+        cwd = str(getattr(self.engine, "cwd", None) or self.cwd)
+        term = args.strip()
+        if term:
+            # A PREFIX QUERY, not a filter over the recents: the recents
+            # are capped and this-project-first, and an id typed by hand
+            # is usually an id from far enough back that it is not in
+            # them -- which would have answered "not indexed" about a row
+            # sitting in the table.
+            matches = await asyncio.to_thread(
+                history_mod.sessions_by_prefix, term
+            )
+            if not matches:
+                await self._system(
+                    f"resume: no indexed conversation whose id starts with "
+                    f"{term!r}. bare /resume lists the recent ones."
+                )
+                return
+            if len(matches) > 1:
+                listed = "\n".join(
+                    f"  {h['session_id']}  {h.get('title') or '(untitled)'}"
+                    for h in matches[:8]
+                )
+                await self._system(
+                    f"resume: {term!r} matches {len(matches)} conversations:"
+                    f"\n{listed}\ngive more of the id."
+                )
+                return
+            await self._resume_hit(matches[0])
+            return
+        rows = await asyncio.to_thread(history_mod.recent_sessions, cwd)
+        if not rows:
+            await self._system(
+                "resume: nothing indexed to resume yet — LORE indexes a "
+                "conversation when it ends."
+            )
+            return
+        by_id = {str(h.get("session_id") or ""): h for h in rows}
+        picker_rows = [
+            (sid, _fmt_resume_row(hit)) for sid, hit in by_id.items() if sid
+        ]
+        self._open_chip_picker(
+            picker_rows, None,
+            lambda rid: self.run_worker(
+                self._resume_hit(by_id[rid]), group="resume",
+            ),
+            title="resume",
+            note="opens the chosen conversation in a NEW tab; this one keeps running",
+        )
+
+    async def _resume_hit(self, hit: dict) -> None:
+        """One resolved conversation -> the app's one resume path. Both
+        surfaces (this command and the /search gesture) end here, so
+        neither can grow its own idea of what resuming means."""
+        from ..app import DoxaApp  # deferred: doxa.app imports this package
+
+        app = self.app
+        if not isinstance(app, DoxaApp):
+            return
+        note = await app.resume_session(hit)
+        if note:
+            await self._system(note)
 
     async def _cmd_pending(self, args: str) -> None:
         """``/pending`` -- see :meth:`open_pending_picker` for what it

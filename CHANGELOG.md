@@ -1013,6 +1013,168 @@ waiting to happen again.
   re-attaches itself to an unrelated belief in the next test — caught
   exactly that way.
 
+## 0.45.0 — 2026-08-25
+
+**Sessions can be resumed, and restored tabs resume themselves.**
+Reported twice, and the second report is the one that matters: *"Do we
+have a 'resume' command analog to Claude Code?"*, then — *"as long as a
+tab was open, when DOXA is started again, the tab should be resumed
+automatically, not via hotkey"*. Both had the same honest answer: no.
+`doxa attach` reattaches to a session that is still *running*; v0.32.0's
+`ArchivedSessionTab` shows an ended one *read-only*. Neither continues a
+finished conversation, and the SDK option that does
+(`ClaudeAgentOptions.resume`) was wired nowhere.
+
+**Restore now means restore.** A saved tab whose daemon no longer answers
+comes back as a **live session continuing its conversation** — no
+gesture, no key, nothing to discover. A daemon finalizing on its linger
+timer while the window is shut is the *ordinary* way a session ends, so
+the read-only dead end was the ordinary result of a restart: restore
+meant *display*. `doxa.cli.ended_tab_spec` asks
+`history.resume_state` about each such tab before deciding its kind, and
+read-only is now the **fallback**, carrying the reason it happened.
+Deliberate and asked-for: `enter` on a `/search` row and `/resume` remain,
+for conversations whose tab you closed months ago.
+
+**The crux was an id space, and it was measured, not assumed.** DOXA
+minted its own session uuid in `SessionEngine.__init__` and named its
+LORE transcript — and therefore every `/search` row, every tab record and
+every registry entry — after it. The spawned `claude` CLI, handed no id of
+its own, minted a **second** uuid and wrote its store under that. Probed
+live against a real CLI under `cli_isolation.spawn_env` before a line of
+this was written: DOXA sid `360a8897…`, CLI sid `f45bce98…` (reported in
+the init `SystemMessage`, which DOXA read for the model name and dropped
+on the floor); `resume=<CLI sid>` replayed the conversation, `resume=<DOXA
+sid>` failed the turn outright with `No conversation found with session
+ID`. **Every id this feature is reached by was an id `--resume` would have
+rejected.** A resume built on it would have been broken for every session
+ever recorded, in a way no test without a live CLI could catch.
+
+The fix is to stop having two spaces rather than to map between them:
+`_build_options` now sends `ClaudeAgentOptions.session_id` — measured,
+the CLI honours it exactly and writes its store under our uuid — so from
+this release the id in the search list **is** the id `--resume` takes.
+
+- **Enter on a `/search` conversation header changed meaning**, and this
+  is the note it deserves. It used to toggle that header's fold, on
+  reasoning the code stated outright: *"A header row is never itself an
+  excerpt, so this is the ONLY thing Enter can mean here."* True of the
+  meanings available then; not true once a header names something you can
+  reopen. Nothing was lost — `→` already expands a fold and `←` already
+  collapses it (item I bound both in v0.21.0), so the toggle keeps two
+  keys and `enter` now means what it means everywhere else in this app:
+  activate the highlighted row. **Enter on a snippet row is unchanged**
+  and pinned by its own test: it still copies the excerpt into the
+  prompt, which is what most `/search` traffic is. Clicking a row follows
+  the key, as it always has.
+- **Every revealed row carries when it happened.** Child rows spend the
+  six blank columns they already spent on indentation on that message's
+  own age instead, so an opened fold can be read in order and the excerpt
+  beside it loses **nothing** — a sixteen-column ISO date on every
+  snippet row would have been the regression the status bar's own history
+  warns about. Session headers carry **both** clocks: the absolute date
+  (orderable and citable by eye) and the age beside it (scannable), which
+  they can afford because a header has no excerpt competing for the row.
+  That is the whole judgment: the row with something to protect gets the
+  cheap answer, the row without gets both. The age is `_fmt_age`, still
+  the one age format in the app — v0.46.0's beliefs browser had already
+  given it the day tier this needed (session history hits the same wall
+  a four-month-old belief does: the hour tier alone renders last Tuesday
+  as `168h0m`), and its `days < 10` cut-off is what makes five columns a
+  real ceiling rather than a hope.
+- **A new tab, not this pane.** *Judgment call, argued:* a resumed
+  conversation is a different conversation from the one the active pane
+  holds — its own history, cost and transcript — and taking the pane over
+  would end or orphan that session on a keystroke whose stated subject
+  was some other session entirely. DOXA already has a verb for "replace
+  what is in this tab" (`/clear`, which says so and finalizes first) and
+  one for "go somewhere else" (the repo picker's open-in-a-new-tab, whose
+  mount/activate/focus order this mirrors). Resume is the second kind,
+  and it is the reversible kind: `ctrl+w` undoes it, an in-pane takeover
+  has no undo.
+- **A running session is attached, never forked.** Resuming means handing
+  `--resume` to a second CLI while the first is still alive on that
+  conversation: two writers on one transcript, two daemons under one
+  registry id. So the peer registry — the same reaped view `doxa attach`
+  and `/sessions` read — is consulted first, and a live session is
+  *attached* in a new tab with a message saying that is what happened. An
+  in-process session with no daemon socket has nothing to attach to and
+  is refused in words rather than quietly resumed.
+- **A resumed tab shows its prior conversation.** Reusing v0.32.0's own
+  machinery rather than a second copy: same `doxa.transcript` reader,
+  same `mount_transcript`, same render caps and the same on-screen
+  honesty when they bite. `_restore_transcript` gained one argument for
+  it — a reattach may only draw from disk once its daemon has agreed to
+  skip replaying its ring, and a resume has no such daemon, so the
+  precondition belongs to one caller and not to the method. A model
+  silently holding history the user cannot see is the wrong failure for a
+  tool whose premise is auditable memory.
+- **Three refusals, before anything is spawned.** `history.resume_state`
+  answers "may this be resumed, and if not, why" from local file and
+  registry reads only — no subprocess, nothing that can block a
+  keystroke. Still running; the cwd is gone; or the CLI has no history
+  under this id. That last one is **every conversation recorded before
+  this release**, whose `/search` row looks exactly like a resumable
+  one — so the dialog says so, naming the version and saying what still
+  works (readable, searchable), rather than letting the user discover it
+  one prompt into a conversation they believed they had reopened.
+- **`ResumeConfirm` is the fourth member of the existing modal family**
+  (`CloseWithTurnRunning`, `CompactConfirm`, `AboutDialog`): a focused
+  `ModalScreen`, a title row, a body, doors that each name their own key,
+  `esc` cancels. Its body **states what will happen** — new tab, history
+  reloaded, prior turns re-rendered, this tab untouched — rather than
+  asking "are you sure?"; on a refusal it has exactly **one** door,
+  because a confirm offering a "resume" button that cannot resume is
+  worse than no button. v0.28.0's defect is pre-empted rather than
+  rediscovered: `height: 1` + `padding-top: 1` under Textual's box model
+  draws buttons at *zero* height, present in the DOM and visible nowhere,
+  and that shipped for a full release because the tests asserted the
+  modal was pushed and never that anything was drawn. This one ships with
+  tests asserting rendered height, hit-testability and on-screen text.
+- **`/resume [session-id]`** joins the one registry every surface reads,
+  so `/help`, the palette and autocomplete get it for free. Bare it
+  offers the recent conversations in the shared `ChipPicker`; with an
+  argument it resolves an id by prefix, and an **ambiguous** prefix is
+  answered with the candidates rather than by taking the first — resuming
+  the wrong conversation is not a mistake anyone notices quickly. It is
+  also the only route to a resume for a single-session search result,
+  which by v0.21.0's "no pointless fold" rule stays flat and has no
+  header to press `enter` on. *Judgment call:* that rule was left
+  standing; overturning a deliberate decision from another release to
+  add an affordance a command already provides is not a trade this one
+  makes.
+- **Eager, not deferred, and the cost argument is the reason.** A resumed
+  tab costs one *process*, not tokens: the CLI reads that conversation out
+  of its own store at connect and DOXA sends nothing until you type. That
+  is the same per-tab cost restore **already** pays for every tab whose
+  daemon is alive — a spawn or an attach each — so deferring the spawn to
+  first activation would have bought a second, subtler tab lifecycle in
+  exchange for a cost the existing one already accepts. Anyone who would
+  rather not pay it has `resume_restored`.
+- **`resume_restored` is its own switch, not a clause of `restore_tabs`.**
+  It is the one part of restore that starts a *process*, and a machine
+  coming back to six restored tabs starts six of them. Off is v0.32.0
+  byte for byte — read-only over the transcript, marked — and
+  deliberately with **no** reason line: the setting doing what it says is
+  not a failure, and explaining it would be explaining the user's own
+  choice back to them.
+- **A resume that cannot happen degrades to today's tab, never to an
+  error or an empty pane** — plus a line naming which of the three
+  reasons it was. The big one, for a while, is the last: every
+  conversation DOXA recorded before this release has an id the CLI never
+  knew, so those tabs come back exactly as they do now and say so. Strictly
+  better than the current behaviour, never worse, which is the bar a
+  fallback has to clear.
+- **The restore report counts resumed tabs separately** from restored
+  ones. "Resumed" is a bigger claim than "restored" — those are live
+  sessions continuing conversations that had ended — and it must not hide
+  inside the other count.
+- **A resumed daemon never creates a worktree.** `--resume` is resolved
+  by the CLI against directories keyed by the cwd a session ran in;
+  substituting a freshly-created worktree would hand it a cwd the
+  conversation was never recorded under. A resume enters the cwd LORE
+  recorded — which *is* its worktree, when it had one.
+
 ## 0.44.0 — 2026-08-25
 
 - **The transcript spent four blank rows on every one-line answer.** Measured

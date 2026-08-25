@@ -151,7 +151,7 @@ terminal cannot physically send.
 
 ## What you get
 
-- **Sessions that outlive the window.** Each session is its own daemon process and the TUI is a thin client over a 0600 Unix socket, so closing the terminal detaches instead of killing; every event carries a monotonic `seq` into a bounded ring, and `doxa attach` replays from a cursor onto the live tail of that same stream. Each session also takes its own git worktree, so two sessions on one repo cannot stomp each other, and plain `doxa` brings back this repo's whole saved tab set — order, pinned names, active tab, and each tab's conversation read back from its on-disk transcript rather than from whatever still fit in the ring. No tmux is involved anywhere in that. A session whose daemon already exited comes back **read-only** over its transcript, marked `⏺`: DOXA reattaches to what is still running and reopens what is not, but it cannot restart a finished session's engine, and nothing it leaves behind is auto-merged — the closing message names the branch and the merge is yours.
+- **Sessions that outlive the window.** Each session is its own daemon process and the TUI is a thin client over a 0600 Unix socket, so closing the terminal detaches instead of killing; every event carries a monotonic `seq` into a bounded ring, and `doxa attach` replays from a cursor onto the live tail of that same stream. Each session also takes its own git worktree, so two sessions on one repo cannot stomp each other, and plain `doxa` brings back this repo's whole saved tab set — order, pinned names, active tab, and each tab's conversation read back from its on-disk transcript rather than from whatever still fit in the ring. No tmux is involved anywhere in that. **A tab whose session ended comes back continuing it** — restore now resumes, with no gesture and no key, because a daemon finalizing on its linger timer while the window is shut is the ordinary way a session ends, and the read-only transcript that used to be the answer was therefore the ordinary result of a restart. Read-only, marked `⏺`, is now the fallback, and it says which of three reasons it was. A finished conversation can also be **resumed** on demand — `enter` on its row in `/search`, or `/resume` — reopening in a new tab with the model's history reloaded and the prior turns re-rendered from that same transcript, so what the model remembers and what you can read are one thing. Resuming only works because DOXA and the `claude` CLI now share **one session id**: until v0.45.0 each minted its own, so the id every search row is keyed by was an id `--resume` would have rejected, and a conversation recorded before that release stays searchable and readable but says so rather than pretending. A session still *running* is attached, never forked — a live conversation has one writer. Nothing DOXA leaves behind is auto-merged: the closing message names the branch and the merge is yours.
 - **Reasoning and tool calls, on the record.** Replies stream as real markdown through Textual's append-only delta path, so a table fills row by row rather than appearing whole at the end. Above each reply, the model's summarized reasoning streams into a collapsed `✻ Reasoning (N chars)` fold, and the turn's tool calls compact behind one `Tool calls (N)` fold whose chips open to their exact arguments and exact result. Both folds are created lazily on first content, so a turn that used neither grows neither section, and formatting happens only for a chip somebody actually opened. A call against the memory store is an ordinary chip, so the mechanism that decides what the agent believes opens with the same two clicks as a `Grep`. What the fold shows is the model's **summarized** thinking, not its raw chain of thought — the API does not return that on any model at any setting, and turning the fold off stops DOXA asking to see the summary, not the thinking (or its billing).
 - **Pictures, or a straight answer about why not.** Images take a ladder — kitty graphics protocol → sixel → half-block cells → a plain text line — settled by one probe that runs before the TUI takes stdin. The opening block draws the DOXA mark itself, and which way round is deliberate: a **drawn** triangle with the wordmark and strapline beside it as plain text is the normal path, and the raster `logo.png` is the exception, spent only on `kgp`/`sixel` — the tiers carrying a real bitmap. Half-block is a 2×-vertical approximation, so a six-row logo there is twelve vertical samples for a 238-row image, and a downscale that *averages* is mush where a cell chosen by hand is as sharp as the font. `boot_banner` (`auto` · `blocks` · `image` · `off`) pins either form, and the raster keeps its declared six-row budget (`rows × cell aspect × content aspect ≈ 47 columns`) so it never outweighs the identity block beneath it. Neither form ever renders a useless `[image: doxa logo]` line. `/img` with no argument reports what this terminal actually answered and then draws the same asset **in each tier it answered for**. Nothing in that report is inferred: a rung the ladder short-circuited past is named as never asked and not drawn, a cell size textual-image defaulted to is labelled defaulted rather than reported as measured, and a settled `text` mode says whether the terminal declined or whether there was never an interactive terminal to ask. Pushing a kitty escape at a terminal without kitty support produces litter, not a picture.
 - **Subagents you can follow while they run.** A `Task`-spawned subagent appears as a `⧉ N agents` chip plus a second status row under the status bar, one clickable entry per subagent in flight; clicking one opens a **read-only transcript tab** that mirrors what its live `Task` chip has buffered and stays fed from there, leaving the original chip exactly where the trace tree put it. Once the call lands, the same activity is a foldable tree under the parent chip. A nested subagent gets its **own row**, not a recursive tree inside its parent's tab — a tab shows one subagent's narration and its direct subcalls, nothing deeper — and the tab is a view only: no engine behind it, no prompt to type into, `ctrl+w` just removes it.
@@ -176,8 +176,8 @@ silent no-op.
 The section above says what exists. This is one path through it, in roughly
 the order you meet each surface: start a session, watch a turn stream,
 open up what the agent did, answer something it asks, watch the window
-fill, detach, come back, and read what the deriver staged while you were
-gone.
+fill, detach, come back, pick an old conversation back up, and read what
+the deriver staged while you were gone.
 
 ### 1. Start it in a repo
 
@@ -554,16 +554,32 @@ The scrollback is read back from the session's own transcript on disk, so
 it is the whole conversation and not just whatever still fit in the
 daemon's replay buffer; a restore that had to leave earlier turns out says
 so where they would have been. A session that finalized in the meantime —
-its `--linger` expiring while the window was shut — comes back
-**read-only** over that same transcript, marked `⏺` and saying so in its
-first block. Restore never spawns a replacement for a session that is
-actually gone, and never lets a transcript pass for a live tab. Only a
-saved tab with no session *and* no transcript is skipped, and the report
-says which is which:
+its `--linger` expiring while the window was shut — is **resumed**: the
+tab comes back as a live session continuing that conversation, with the
+model's own history reloaded and the turns so far already on screen. That
+is the ordinary case, not the exception, which is exactly why it needs no
+gesture: a linger timer expiring behind a closed window is how sessions
+normally end.
+
+A conversation that *cannot* be continued comes back **read-only** over
+its transcript, marked `⏺` — v0.32.0's behaviour, now the fallback — and
+its first block says which of three reasons it was: the session is
+somehow still running, its directory is gone, or the `claude` CLI has no
+history under its id (true of every conversation DOXA recorded before
+v0.45.0, when the two kept separate session ids). Restore never spawns a
+*replacement* for a session that is gone, never lets a transcript pass
+for a live tab, and never resumes one that is still running — a live
+conversation has one writer. Only a saved tab with no session *and* no
+transcript is skipped, and the report says which is which:
 
 ```
-tab restore: restored 2 tabs, 1 read-only transcript (session ended), skipped 1 session no longer running.
+tab restore: restored 2 tabs, resumed 1 ended conversation, skipped 1 session no longer running.
 ```
+
+`resume_restored` (on by default) is the switch. Off is the old
+behaviour exactly. On, a restart starts one `claude` process per resumed
+tab — a process, not tokens: the CLI loads that conversation from its own
+store and nothing is sent until you type.
 
 A tab you closed with `ctrl+w` stays in the set — it only detached, the
 session is still running — but one you explicitly stopped does not. Split
@@ -599,18 +615,60 @@ lists recent sessions. Matched terms are FTS5's own `snippet()` output,
 highlighted rather than re-matched.
 
 A result set spanning more than one session groups into a tree —
-a collapsed session header (title, date, hit count) over its matching
+a collapsed session header (title, date, age, hit count) over its matching
 snippets; a single-session result set has nothing to fold against and
 stays flat. `↑`/`↓` move through visible rows, `→`/`←` open and close a
-fold, and `enter` toggles a header or, on a snippet, inserts its excerpt
+fold. Every row the fold reveals carries **its own age** in a fixed
+gutter — messages inside one conversation can be days apart, and a list of
+them with no times cannot be read in order.
+
+`enter` means *activate this row*. On a snippet that inserts its excerpt
 into the prompt: one citation line (which session, when) plus the text,
 collapsed to a `⧉ pasted …` placeholder past the same size threshold a
 clipboard paste uses, `ctrl+g` expandable, sent in full on submit either
-way.
+way. On a **conversation header** it offers to resume that conversation —
+see the next step. Folding did not lose a key: `→` and `←` already did it.
 
 <p align="center"><img src="assets/shots/search.gif" width="780" alt="Typing '/search deploy' opens the popup on one session, flat; completing the query brings up three sessions collapsed to headers; arrowing to the second and pressing right expands it to a highlighted snippet; enter inserts that excerpt above the prompt as a cited quotation"></p>
 
-### 11. Look at what the deriver staged
+### 11. Pick a conversation back up
+
+Most of the time you will not do anything at all. Close DOXA with three
+tabs open, come back tomorrow, and all three are there — including the
+ones whose sessions ended overnight, which come back as live sessions
+continuing their conversations rather than transcripts of them. The
+restore line says so (`resumed 2 ended conversations`), and a tab that
+could *not* be resumed comes back read-only exactly as before, with the
+reason in its first block. `resume_restored` turns the whole thing off if
+you would rather a restart not start a `claude` process per ended tab; it
+costs a process, not tokens, since nothing is sent until you type.
+
+For a conversation whose tab you closed months ago, there are two ways
+back. Press `enter` on a conversation row in `/search` and DOXA asks
+whether to resume it. The dialog states what will happen rather than asking whether
+you are sure: it opens in a **new tab**, the model comes back with that
+conversation's history in context, and the turns so far are re-rendered
+from the transcript on disk so you can read what it remembers instead of
+typing into a context you cannot see. The tab you were in keeps its own
+session, untouched — `ctrl+w` undoes the whole thing.
+
+`/resume` is the same act from the prompt or the palette. Bare, it lists
+the recent conversations to pick from; `/resume <id>` takes one by id
+prefix, and an ambiguous prefix is answered with the candidates rather
+than by guessing.
+
+Three things it refuses, in words, before spawning anything:
+
+- **Still running.** A live conversation has one writer. DOXA *attaches*
+  to its daemon in a new tab instead, and says that is what it did.
+- **The directory is gone.** There is nowhere to reopen it.
+- **Older than v0.45.0.** Until this release DOXA and the `claude` CLI
+  each minted their own session id, so a conversation from before it is
+  not one the CLI can continue. It stays readable and searchable; it is
+  not resumable, and the dialog says so rather than letting you find out
+  one prompt in.
+
+### 12. Look at what the deriver staged
 
 With `derive_secs` set, a background reviewer runs over the live
 transcript between turns and stages whatever it judges worth remembering —
@@ -695,7 +753,7 @@ degrades to **read-only**, renders no approve or reject control, and says
 which version it loaded and why — measured off the API it actually found,
 not inferred from a version string.
 
-### 12. Make it yours
+### 13. Make it yours
 
 `ctrl+,` opens the settings modal, grouped into category tabs (Session ·
 Memory · Appearance · Notifications · Paths · About). Every row shows its

@@ -259,6 +259,20 @@ REGISTRY: tuple[SlashCommand, ...] = (
         binding="ctrl+r",
     ),
     SlashCommand(
+        name="/resume",
+        group="Session",
+        # "in a new tab" is in the one-liner because it is the surprising
+        # half: resume does not take over the pane it was typed in, and a
+        # user who expects it to would otherwise find out by watching a
+        # tab they did not ask for appear.
+        summary="Reopen a past conversation in a new tab, its history and all",
+        usage="/resume [session-id]",
+        palette="Resume a conversation",
+        # NOT prefilled from the palette: bare /resume already offers the
+        # recent conversations to pick from, so prefilling would leave the
+        # user staring at a prompt asking for a uuid they do not have.
+    ),
+    SlashCommand(
         name="/compact",
         group="Maintenance",
         summary="Ask the CLI to compact the transcript (runs LORE's review first)",

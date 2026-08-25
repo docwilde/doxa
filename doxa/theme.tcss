@@ -304,6 +304,53 @@ PermissionModeConfirm {
     color: #F2E9DD;
 }
 
+/* /resume's confirm (v0.45.0): the fourth member of the same modal family
+   -- CloseWithTurnRunning, CompactConfirm, AboutDialog, this. Identical
+   wash, surface ramp, title treatment and button row, because a fifth
+   shape is how a TUI stops feeling like one program. Width 68, between
+   CompactConfirm's sentence (64) and AboutDialog's table (72): the body
+   carries a session uuid and an absolute cwd on their own lines, and a
+   path that wraps mid-path is a path nobody can read back. */
+ResumeConfirm {
+    align: center middle;
+    background: #171512 60%;
+}
+
+#resume-confirm {
+    width: 68;
+    height: auto;
+    background: #221F1A;
+    border: round #3A3429;
+    padding: 1 2;
+}
+
+#resume-confirm-title {
+    color: #D97757;
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+#resume-confirm-body {
+    color: #D8CDBB;
+}
+
+/* `height: auto`, for the fourth time and for the v0.28.0 reason spelled
+   out on #close-confirm-buttons above: border-box means `height: 1` plus
+   `padding-top: 1` leaves a 0-row content box and draws nothing at all --
+   buttons that pass every query_one and are visible nowhere. That shipped
+   for a whole release once. tests/test_resume.py asserts this row's
+   rendered height directly, and that its label text is on screen. */
+#resume-confirm-buttons {
+    height: auto;
+    padding-top: 1;
+}
+
+#resume-confirm-buttons > Static {
+    width: auto;
+    padding-right: 2;
+    color: #F2E9DD;
+}
+
 /* /about (item Z): the third member of the same modal family as
    CloseWithTurnRunning and CompactConfirm above -- identical wash, surface
    ramp, title treatment and button row. Wider (72) because its body is a

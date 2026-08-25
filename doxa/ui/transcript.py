@@ -59,13 +59,28 @@ class RestoreTabSpec:
     the whole of the reported defect. ``archived`` marks a tab whose
     session is GONE: there is nothing to attach to, ``engine_factory`` is
     never called, and DoxaApp builds an :class:`ArchivedSessionTab`
-    (read-only, transcript from disk) instead of a SessionPane."""
+    (read-only, transcript from disk) instead of a SessionPane.
+
+    ``resume`` (v0.45.0) is what makes "restore" mean restore. A tab whose
+    session ENDED used to have exactly one outcome -- ``archived``, a
+    read-only transcript and a dead end. Reported: *"as long as a tab was
+    open, when DOXA is started again, the tab should be resumed
+    automatically"*. So doxa.cli now asks
+    :func:`doxa.history.resume_state` about each such tab BEFORE deciding
+    its kind: resumable ones come back as real ``SessionPane``s whose
+    engine continues the conversation (``engine_factory`` spawns with
+    ``--resume``), and only the rest stay ``archived``. ``resume_note``
+    carries the reason when one does -- the read-only tab is now the
+    FALLBACK, and a fallback that cannot say why it happened is
+    indistinguishable from the feature not existing."""
 
     session_id: str
     engine_factory: "Callable[[], Any] | None" = None
     pinned_name: "str | None" = None
     cwd: "str | None" = None
     archived: bool = False
+    resume: bool = False
+    resume_note: str = ""
 
 
 def _restore_pane_id(session_id: str) -> str:
@@ -1041,7 +1056,16 @@ class ArchivedSessionTab(TabPane):
     The user can always tell which they got. The tab label carries a
     ``⏺`` archive mark, the first block says the session ended and where
     the text came from, and the palette/Ctrl+T remain the way to start a
-    real session in the same repo."""
+    real session in the same repo.
+
+    v0.45.0 demoted this from OUTCOME to FALLBACK. Restoring a tab now
+    tries to RESUME its conversation first (doxa.cli, over
+    :func:`doxa.history.resume_state`), and this class is what is left
+    when that is impossible -- the session is somehow still running, its
+    cwd is gone, the CLI has no history under its id, or the user turned
+    ``resume_restored`` off. It therefore states WHY (:attr:`resume_note`)
+    rather than only what: "read-only" with no reason reads as the feature
+    having silently not happened."""
 
     ARCHIVE_MARK = "⏺"
 
@@ -1053,9 +1077,14 @@ class ArchivedSessionTab(TabPane):
         *,
         pinned_name: "str | None" = None,
         id: str | None = None,
+        resume_note: str = "",
     ) -> None:
         self.session_id = session_id
         self.cwd = cwd
+        # v0.45.0: WHY this tab is read-only rather than resumed. Empty
+        # when auto-resume is switched off (then read-only is the setting
+        # doing what it says, not a failure worth explaining).
+        self.resume_note = resume_note
         self.custom_name = pinned_name
         self.base_label = pinned_name or label
         self.turns_restored = 0
@@ -1077,10 +1106,11 @@ class ArchivedSessionTab(TabPane):
         Not named ``_render``: that is ``textual.widget.Widget``'s own
         synchronous paint hook, and a coroutine in that slot is handed
         straight to the compositor as if it were a visual."""
+        why = f"\n\n{self.resume_note}" if self.resume_note else ""
         await self.scroll.mount(SystemBlock(
             f"⏺ this session has ended — transcript restored from disk, "
             f"read-only.\nsession  {self.session_id}\ncwd      {self.cwd}\n"
-            f"Ctrl+T starts a new session here."
+            f"Ctrl+T starts a new session here.{why}"
         ))
         try:
             snapshot = await asyncio.to_thread(

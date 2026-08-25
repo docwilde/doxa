@@ -153,6 +153,26 @@ class PaneRuntimeMixin:
             await block_list.mount(SystemBlock(self._boot_report))
             self._boot_report = None
         block_list.scroll_end(animate=False)
+        if self._resume_from:
+            # v0.45.0 (/resume): a resumed session must SHOW what it
+            # remembers. The model comes back holding the whole
+            # conversation (the CLI reloaded it from --resume), and
+            # drawing an empty pane over that would leave the user typing
+            # into a context they cannot see and have no way to audit --
+            # which for a tool whose premise is auditable memory is the
+            # wrong failure to ship. So it reuses v0.32.0's machinery
+            # outright: same transcript reader, same mount_transcript,
+            # same render caps, same on-screen honesty when they bite.
+            #
+            # The id it reads is THIS session's id, because a resume keeps
+            # its id rather than forking a new one (engine._build_options)
+            # -- the file being drawn is the file this session is about to
+            # go on appending to.
+            resume_id, self._resume_from = self._resume_from, None
+            with contextlib.suppress(Exception):
+                await self._restore_transcript(
+                    resume_id, git_cwd, require_backlog_skip=False,
+                )
         if self._restore_transcript_wanted:
             self._restore_transcript_wanted = False
             # Suppressed here as well as inside: _note_pane_booted below is
