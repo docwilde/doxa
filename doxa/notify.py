@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.notify -- desktop notifications: notify-send, focus-gated, per-trigger toggles.
 
 Same shape as LORE's own notifier (``lore_core.deriver.notify_icon``/

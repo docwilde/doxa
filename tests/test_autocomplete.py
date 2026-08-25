@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Slash autocomplete: the prompt's dropdown, driven by the ONE registry.
 
 Pilot tests only -- the point of this feature is keyboard behavior in a

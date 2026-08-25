@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.session.runtime -- boot, the turn loop, the event dispatch, stop.
 
 Everything a pane does that is driven by something other than a keystroke:

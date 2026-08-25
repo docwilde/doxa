@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.worktrees -- one git worktree per session, so two sessions on the
 same repo+branch never stomp each other's edits.
 

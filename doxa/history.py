@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.history -- full-text session search, as the ``/search`` popup.
 
 ONE search path, not two. The Phase 3 shape was a modal overlay on Ctrl+R;

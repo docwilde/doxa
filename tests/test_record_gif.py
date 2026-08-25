@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Registry integrity for scripts/record_gif.py -- no Pilot, no rendering,
 just the SCENES table itself: names are unique and non-empty, every scene
 declares more than one frame (a GIF that can only ever have one frame is a

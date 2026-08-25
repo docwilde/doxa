@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.ui.transcript -- the blocks one turn renders into.
 
 Extracted from ``doxa/app.py`` unchanged: the turn fold and its body, the

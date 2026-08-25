@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """The terminal's own window/taskbar title (v0.58.0).
 
 Two halves, and the second is the one worth having tests for: DOXA sets

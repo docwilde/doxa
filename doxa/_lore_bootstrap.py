@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Which ``lore_core`` this process gets, and where it came from.
 
 DOXA declares ``lore-core`` as a real dependency (see ``pyproject.toml``),

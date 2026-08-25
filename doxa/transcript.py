@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.transcript -- rebuild a session's CONVERSATION from the transcript
 DOXA already persists, so a restored tab comes back with what was on
 screen instead of an empty pane bound to a live session.

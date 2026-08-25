@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Status-chips (item Y and the branch/model click affordance): clicking
 the status bar was inert, despite looking like it should do something --
 the operator's own report. This file covers the v0.22.0 fix (the model

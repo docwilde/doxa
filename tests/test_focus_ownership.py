@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Focus ownership (v0.38.0): focus follows EXPLICIT user intent, and
 activation is no longer a side effect of a pane mounting.
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Lettered item V: the beliefs browser.
 
 Every test here asserts something a USER can see or a store can be checked

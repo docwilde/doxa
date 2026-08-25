@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.notify -- the gating matrix (master mode x per-trigger bool x
 focus), the notify-send call itself, and the LORE_NOTIFY inheritance
 bridge.

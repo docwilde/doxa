@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """/branch (item S #2/#3): the command surface itself -- dispatch,
 formatting, and the non-repo message. The real git mechanics
 (doxa.worktrees.branch_status/switch_base) are exercised with real

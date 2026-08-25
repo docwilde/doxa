@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.daemon -- the engine host process behind a Unix socket.
 
 The Phase 2 daemon split: the ``SessionEngine`` (and with it the PeerHost,

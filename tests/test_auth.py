@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """/login and /logout: the provider table, and the suspend-exec-resume path.
 
 DOXA never handles a credential -- it suspends the TUI and runs the

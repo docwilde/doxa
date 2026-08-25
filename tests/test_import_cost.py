@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Importing DOXA must not import the Claude Agent SDK.
 
 Measured on 2026-08-25, before this release: ``import doxa.app`` took

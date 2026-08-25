@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.session -- one session tab's behaviour, split by surface.
 
 :class:`~doxa.session.pane.SessionPane` is still one widget and still one

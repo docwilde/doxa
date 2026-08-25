@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Render the README's screenshot gallery -- no live SDK, no spend.
 
 Drives DoxaApp headlessly, one Textual pilot session per SCENE, each scene

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.commands -- the slash-command registry: ONE list, several surfaces.
 
 DOXA's slash commands are data here, exactly like ``doxa.operators``' tool

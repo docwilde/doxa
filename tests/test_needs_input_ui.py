@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Queue item 5's UI surface: the needs-input dialog (NeedsInputPopup),
 its key/click protocol, the tab blink it drives (set_needs_input, already
 tested mechanism-only in test_tab_status.py -- these tests are what

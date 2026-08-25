@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.keyboard -- which keyboard protocol this terminal actually grants,
 and which bound keys it therefore cannot deliver.
 

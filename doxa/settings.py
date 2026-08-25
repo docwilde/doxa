@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.settings -- the settings modal (Ctrl+, / ``/settings`` / palette).
 
 Three rules the panel exists to honor:

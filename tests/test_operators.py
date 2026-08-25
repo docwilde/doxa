@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Registry-discipline tests for doxa.operators: explicit closure, valid
 hand-written JSON Schemas, the three composing projection filters
 (allowed / include_write / configuredness), the read-only guarantee via a

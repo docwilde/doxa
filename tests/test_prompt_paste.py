@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Item N -- clipboard paste, the Pilot half.
 
 Pure collapse/normalize rules are pinned in tests/test_paste.py; this file

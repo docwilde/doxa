@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Item X (ctx absolute): the context chip could only ever say a
 PERCENTAGE, and 12% of a 200k window is not 12% of a 1M one -- DOXA drives
 several models, so the number the chip showed could not answer the only

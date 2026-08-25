@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.ui -- the widget layer, one module per surface.
 
 Every class here used to live in ``doxa/app.py``; none of them changed in

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """TUI peer-layer tests, headless via Textual's Pilot (same pattern as
 tests/test_app.py): the peers status chip, /peers and /msg command flows
 against a scripted FakeEngine, and one end-to-end test with a REAL

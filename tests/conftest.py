@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Test isolation: LORE_ROOT / LORE_PROJECTS_DIR must be pointed at a
 throwaway directory BEFORE lore_core (or anything that imports it, i.e.
 doxa.engine/doxa.app) is imported anywhere in this process -- config.py's

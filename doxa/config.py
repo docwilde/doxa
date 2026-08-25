@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.config -- the settings file, and the precedence rule around it.
 
 One rule, everywhere: **environment > config file > default.**

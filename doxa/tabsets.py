@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.tabsets -- item D: persist and restore a repo's tab set.
 
 **This item's original spec text did not survive to this session.** What

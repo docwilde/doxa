@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """v0.56.0: the opening block's `lore` line, widened.
 
 Reported: "the 'lore' line in the status/welcome box on startup should

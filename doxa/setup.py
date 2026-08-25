@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.setup -- ``/setup``: check state, fix findings ONE at a time.
 
 Modeled on ``/lore:setup``'s shape (check -> fix -> confirm, one finding at

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.palette -- DOXA's command palette (Ctrl+P): its provider, its
 entries, and the ordering all three command surfaces share.
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.launcher -- the XDG start-menu entry.
 
 Every test points XDG_DATA_HOME at tmp_path: the module resolves it at

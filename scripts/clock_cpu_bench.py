@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Measure the upper-right clock's real idle-CPU cost (item M).
 
 Three headless runs, each its own process (so a shared warm cache in one

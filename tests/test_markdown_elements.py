@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Markdown ELEMENT coverage for agent prose.
 
 `tests/test_restyle.py::test_markdown_streaming_survives_chunk_boundaries`

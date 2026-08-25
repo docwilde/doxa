@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/TUI-Textual-0b1120" alt="Textual TUI">
   <img src="https://img.shields.io/badge/subscription-no%20API%20key%20needed-2f9e44" alt="billed via Claude subscription">
   <img src="https://img.shields.io/badge/Linux%20%C2%B7%20macOS-terminal-555" alt="Linux and macOS terminals">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Noncommercial%201.0-8a8073" alt="license"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL%20v3-8a8073" alt="license"></a>
 </p>
 
 > [!WARNING]
@@ -1070,8 +1070,7 @@ third-party plugins today.
 
 ## License
 
-[DOXA Noncommercial License 1.0](LICENSE) (PolyForm-Noncommercial-derived)
-— free for personal use, research, education, and noncommercial
-organizations; commercial use requires a separate arrangement with the
-author. Same license family as [LORE](https://github.com/docwilde/LORE),
-whose `lore_core` DOXA embeds.
+[AGPL-3.0-only](LICENSE) for everyone, including over a network; a
+[commercial licence](LICENSE-COMMERCIAL.md) is available for uses AGPL's
+terms don't suit. The DOXA name and mark are reserved — see
+[TRADEMARK.md](TRADEMARK.md).

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Chrome: the closeable inspector, tab cycling, /help's hotkeys, no animation.
 
 The animation assertions are the load-bearing ones. DOXA already paid once

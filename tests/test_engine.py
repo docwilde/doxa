@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Engine event-stream unit tests: a fake claude_agent_sdk client, no
 subprocess, no network. Covers: typed events yielded in order, the LORE
 snapshot landing in system_prompt at start(), the secret-scrub choke point

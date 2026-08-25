@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Queue item 5 -- interactive permission (can_use_tool): engine-level unit
 tests, no subprocess, no network, no real SDK client (SessionEngine's
 _build_options() is exercised directly, and its can_use_tool callback is

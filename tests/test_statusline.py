@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """The status line: containment signal, real headroom, and chip ORDER.
 
 Three properties, each with a reason:

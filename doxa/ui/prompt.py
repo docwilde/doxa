@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.ui.prompt -- the prompt input and its key routing.
 
 Extracted from ``doxa/app.py`` unchanged. One widget, but its own module:

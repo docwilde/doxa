@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.session.pane -- SessionPane itself: state, layout, key routing.
 
 What is left of the class after :mod:`doxa.session.commands`,

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Containment tests for doxa.gate.ToolGate: total graceful degradation
 (execute never raises), the conservative two-strikes classifier + disable,
 allowed-set denial at both the hook and the executor, and the

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Session RESUME (v0.56.0): reopening a finished conversation.
 
 Two halves, and the second is the one with teeth.

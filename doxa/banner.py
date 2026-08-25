@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.banner -- the DOXA mark at the top of a session's opening block.
 
 **Read the ladder in this order, because v0.58.0 inverted it.** The DRAWN

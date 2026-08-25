@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.client -- the thin-client side of the daemon split.
 
 :class:`EngineClient` presents the SAME surface doxa.app consumes from

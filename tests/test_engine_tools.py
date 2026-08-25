@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Engine wiring for the native-tool registry + gate: the in-process SDK
 MCP server lands in ClaudeAgentOptions.mcp_servers, the PreToolUse hook
 routes every tool through the gate, and a two-strikes disable surfaces as a

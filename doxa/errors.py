@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.errors -- what a failure IS, before anything decides how to show it.
 
 Four defects reached the user on one day and not one of them arrived as a

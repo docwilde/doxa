@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """background (v0.29.0): the setting that stops DOXA painting its own
 base -- $doxa-base in theme.tcss, resolved by DoxaApp.get_theme_variable_
 defaults -- so an already-transparent terminal shows through.

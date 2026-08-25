@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """The Claude-Code-shaped commands: /model /effort /usage /clear /compact /help.
 
 Each of these was implemented only as far as the SDK actually supports it,

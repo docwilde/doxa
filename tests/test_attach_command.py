@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """``/attach`` (v0.60.0): the door back in that ``/detach`` never had a
 counterpart for.
 

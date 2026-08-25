@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Item K -- ``/context``: what is actually occupying the model's window.
 
 The feature's whole premise is that the ctx% chip is one opaque number and

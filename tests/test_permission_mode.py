@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Permission mode (v0.42.0): the status chip, the Shift+Tab cycle, /mode.
 
 The operator asked for "an indicator to switch from manual to auto mode …

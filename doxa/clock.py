@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.clock -- the upper-right clock: settings, formatting, boundary math.
 
 Pure functions only; the widget that owns the ONE timer lives in

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """v0.13.0 visual restyle: tool-call compaction (item b) and markdown
 rendering for the agent's streamed response (item c). Item (a) -- boxes to
 background tints -- is CSS-only and covered by eyeballing the regenerated

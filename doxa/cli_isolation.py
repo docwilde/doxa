@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.cli_isolation -- a CLI config directory DOXA owns, for the engine's
 spawned ``claude`` process ONLY.
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.window -- the title on the terminal's own window and taskbar entry.
 
 Distinct from :attr:`textual.app.App.title`, which is DOXA's business

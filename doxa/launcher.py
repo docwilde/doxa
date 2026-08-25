@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.launcher -- the start-menu entry, on distros that have one.
 
 `doxa launcher install` writes three files, all per-user, no root:

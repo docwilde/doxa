@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.peers -- same-user peer-session presence + explicit messaging.
 
 The user-level requirement this module carries: if multiple DOXA sessions

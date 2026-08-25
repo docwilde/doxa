@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.engine -- the session engine.
 
 Wraps ``claude_agent_sdk.ClaudeSDKClient`` and exposes one thing to the TUI:

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Act-time consult tests: the pre-turn belief note.
 
 One cheap FTS pass of the prompt over the belief store (no LLM call)

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.ui.beliefs -- lettered item V: the beliefs browser.
 
 WHAT THIS IS, AND WHAT IT IS NOT. v0.27.0 shipped a lightweight beliefs

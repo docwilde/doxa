@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.version -- ONE version, wherever DOXA is running from.
 
 ``pyproject.toml`` is the source of truth. Everything else derives:
@@ -214,11 +215,11 @@ def _dep_version(module_name: str, dist_name: str) -> "str | None":
 
 
 # The repository and licence a bug report needs to know it may quote code
-# at all. Public repo, and a NONCOMMERCIAL licence -- stating that on the
-# about screen is the same honesty the README's badge row already carries,
-# not a legal notice bolted on.
+# at all. Public repo, AGPL-3.0-only with a commercial option -- stating
+# that on the about screen is the same honesty the README's badge row
+# already carries, not a legal notice bolted on.
 REPO_URL = "https://github.com/docwilde/doxa"
-LICENCE = "DOXA Noncommercial License 1.0"
+LICENCE = "AGPL-3.0-only (commercial licence available)"
 
 
 def about_rows(

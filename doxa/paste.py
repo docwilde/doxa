@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.paste -- the clipboard/paste helpers shared by the prompt (item N)
 and, later, excerpt insertion into a running session (item J: pasting an
 excerpt or copying one out goes through the same collapse/format rules so
