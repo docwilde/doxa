@@ -153,18 +153,34 @@ def source_dirty() -> bool:
 
 
 def lore_core_version() -> "str | None":
-    """The LORE plugin's declared version, or None.
+    """The version of the ``lore_core`` this process LOADED, or None.
 
-    ``lore_core`` carries no ``__version__`` of its own (checked against
-    the installed package): it ships INSIDE the LORE Claude Code plugin,
-    whose ``.claude-plugin/plugin.json`` is the file that declares a
-    version, and that manifest sits beside the ``lore_core`` package
-    directory ``doxa._lore_bootstrap`` already resolves. So this reads the
-    manifest rather than inventing a version attribute in somebody else's
-    read-only repo. Any failure is None -- an /about row that cannot be
-    filled is omitted, never guessed."""
+    Two tiers, and both are load-bearing:
+
+    * ``lore_core.__version__`` (LORE 0.35.1 and later). It resolves the
+      same way this module does -- plugin manifest when the package sits
+      inside a plugin checkout, wheel metadata when it does not -- so it
+      is right for whichever carrier DOXA ended up with, including the
+      installed distribution that has no manifest to read at all.
+    * The plugin manifest at the bootstrap's own location. Every LORE
+      before 0.35.1 shipped only inside the plugin and carried no version
+      attribute; those installs are still out there, and for them
+      ``.claude-plugin/plugin.json`` beside the package is the only file
+      that declares a version.
+
+    Any failure is None -- an /about row that cannot be filled is omitted,
+    never guessed."""
     from . import _lore_bootstrap
 
+    _lore_bootstrap.ensure_importable()
+    try:
+        import lore_core
+
+        declared = getattr(lore_core, "__version__", None)
+        if declared:
+            return str(declared)
+    except Exception:  # noqa: BLE001 -- an unimportable lore_core is a row, not a crash
+        pass
     manifest = (
         _lore_bootstrap._lore_core_parent() / ".claude-plugin" / "plugin.json"
     )
@@ -264,11 +280,25 @@ def about_rows(
         import lore_core
 
         lore_root = str(lore_core.ROOT)
-    except Exception:  # noqa: BLE001 -- plugin absent: the row degrades
+    except Exception:  # noqa: BLE001 -- no lore_core at all: the row degrades
         lore_root = os.environ.get("LORE_ROOT", "").strip()
     lore_bits = [bit for bit in (lore_version, lore_root) if bit]
     if lore_bits:
         rows.append(("lore", "  ".join(lore_bits)))
+    # WHICH lore_core answered. Since v0.37.0 there are two places one can
+    # come from -- the declared ``lore-core`` dependency, and a LORE plugin
+    # checkout, which still wins when present (see
+    # ``doxa._lore_bootstrap``) -- so the version above is no longer
+    # enough to identify what is running. A user chasing a LORE-behaviour
+    # difference must not have to guess which copy DOXA loaded, and
+    # ``resolved_source`` measures it off ``lore_core.__file__`` rather
+    # than restating the precedence rule.
+    from . import _lore_bootstrap
+
+    source = _lore_bootstrap.resolved_source()
+    if source is not None:
+        kind, location = source
+        rows.append(("lore from", f"{kind}  {location}"))
     rows.append((
         "platform",
         f"{platform.system()} {platform.release()} ({platform.machine()})",

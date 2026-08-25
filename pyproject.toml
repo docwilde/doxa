@@ -1,6 +1,6 @@
 [project]
 name = "doxa"
-version = "0.36.0"
+version = "0.37.0"
 description = "A terminal for working with a Claude agent whose memory you can audit."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -8,6 +8,22 @@ dependencies = [
     "claude-agent-sdk>=0.2.144",
     "textual>=5,<6",
     "textual-image>=0.12.0",
+    # DOXA's memory model IS lore_core -- doxa.engine, doxa.peers,
+    # doxa.operators and doxa.transcript all import it, and until v0.37.0
+    # it was declared nowhere: a bare clone reached into a LORE Claude
+    # Code plugin checkout through a sys.path shim and, finding none,
+    # failed 41 of 52 test modules at collection.
+    #
+    # A git URL because neither project is on PyPI (the README's install
+    # section says the same of DOXA itself). Pinned to a COMMIT rather
+    # than a branch: a branch pin re-resolves to whatever LORE main is
+    # that day, which is how a dependency becomes a moving target.
+    #
+    # This is the commit that gave LORE its packaging metadata (0.35.1).
+    # It becomes `@v0.35.1` once that release is tagged -- a tag reads
+    # better, and until then there is no tag on a LORE that can be
+    # installed at all.
+    "lore-core @ git+https://github.com/docwilde/LORE@1b18ae1056711e1890ca59e68c03fea9e26e0655",
 ]
 
 [project.scripts]
@@ -27,6 +43,15 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# `lore-core @ git+https://...` is a PEP 508 direct reference, which
+# hatchling refuses by default -- the guard exists because PyPI rejects a
+# distribution carrying one, and it is worth being told rather than
+# finding out at upload. DOXA is not on PyPI and never will be (the
+# installer runs `uv tool install git+https://github.com/docwilde/doxa`),
+# so the guard is describing a rule that does not apply here.
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["doxa"]

@@ -108,9 +108,18 @@ def test_about_text_is_the_same_string_the_rows_describe():
         assert label in text and value in text
 
 
-def test_lore_version_comes_from_the_plugin_manifest_and_degrades(monkeypatch, tmp_path):
-    """lore_core carries no ``__version__``; the LORE plugin manifest beside
-    it does. A machine without the plugin gets None, never a guess."""
+def test_lore_version_degrades_to_nothing_rather_than_guessing(monkeypatch, tmp_path):
+    """A machine with no ``lore_core`` at all and no plugin manifest to
+    read gets None, and the row is left out -- never a plausible-looking
+    constant.
+
+    WHICH of the two carriers the version comes from (the package's own
+    ``__version__``, since LORE 0.35.1; the plugin manifest for anything
+    older) is tested in ``tests/test_lore_dependency.py``, next to the
+    ``lore from`` row that names the source."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "lore_core", None)
     monkeypatch.setenv("DOXA_LORE_CORE_PATH", str(tmp_path))
     assert version_mod.lore_core_version() is None
     manifest = tmp_path / ".claude-plugin" / "plugin.json"

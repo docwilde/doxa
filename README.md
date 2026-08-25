@@ -90,6 +90,24 @@ uv sync
 uv run doxa
 ```
 
+**Since v0.37.0 that is genuinely all of it.** DOXA's memory model is
+[LORE](https://github.com/docwilde/LORE)'s `lore_core`, and until v0.37.0
+that package was not declared anywhere — DOXA reached into a LORE Claude
+Code plugin checkout on the machine and hoped it was there. On a clone
+without the plugin, 41 of 52 test modules failed at import. `lore_core` is
+now an ordinary pinned dependency (`lore-core @ git+…LORE@<commit>`, a git
+URL because neither project is on PyPI), so `uv sync` installs it like
+anything else and nothing about the LORE plugin is a prerequisite for
+running DOXA.
+
+If you *do* have the LORE plugin installed, that checkout still wins over
+the pinned copy: DOXA and the plugin share one SQLite store, the plugin
+writes to it from a hook on every Claude Code session, and a terminal that
+silently stopped reflecting the memory system the rest of the machine runs
+would be a worse surprise than a version that is not the pinned one.
+`/about` names which copy loaded, so it never has to be guessed — see
+[How it works](#how-it-works).
+
 ## Quickstart
 
 ```sh
@@ -447,8 +465,9 @@ measurement of the session, so they cannot disagree with each other.
 **`/about`.** One screen with everything a bug report has to state: the
 DOXA version (with its sha, and a `+` when the checkout is dirty), whether
 an update is waiting, the Python, Textual and Claude Agent SDK versions,
-the LORE plugin version and store path, the platform, and the config file
-actually in force. `c` copies the whole thing, so it gets pasted rather
+the LORE version and store path, **which `lore_core` loaded** (the pinned
+dependency or a plugin checkout, with its directory), the platform, and
+the config file actually in force. `c` copies the whole thing, so it gets pasted rather
 than retyped. No row is a constant — each is read off the thing it names,
 and one that cannot be filled is left out rather than guessed.
 
@@ -648,11 +667,31 @@ the belief store, the derive/dream/dialectic split, calibration — is
 documented in the [LORE repository](https://github.com/docwilde/LORE),
 which DOXA embeds as `lore_core` rather than reimplementing.
 
-`lore_core` currently ships inside the LORE Claude Code plugin's
-marketplace checkout, not as an installable package, so DOXA locates it
-with a `sys.path` shim (`doxa/_lore_bootstrap.py`) documented there as
-temporary. Override the location with `DOXA_LORE_CORE_PATH` if your
-checkout isn't at the default `~/.claude/plugins/marketplaces/lore`.
+`lore_core` is a declared dependency — `lore-core @ git+…LORE@<commit>` in
+`pyproject.toml`, pinned to a commit rather than a branch — so a bare
+clone gets it from `uv sync` and needs nothing else. It is packaged out of
+the LORE repo, where the plugin manifest stays the one place the version
+is written.
+
+**Two copies can exist on one machine, and the plugin's wins.** A user
+with the LORE Claude Code plugin installed has a checkout that DOXA
+prepends to `sys.path` (`doxa/_lore_bootstrap.py`), ahead of the pinned
+one. That is deliberate: both read and write the same `~/.claude/lore`
+store, the plugin writes to it from a hook on every Claude Code session
+start, end and compaction, and pointing two different `lore_core` versions
+at one SQLite file is how a migration gets read by the version that did
+not perform it. It also means a checkout you are editing is the one DOXA
+sees, which is the behaviour that has been true since the shim was
+written.
+
+The price is that `pyproject.toml` no longer tells you what loaded, so
+DOXA says it: `/about` carries a **`lore from`** row naming the source
+(`plugin` or `package`) and its directory, measured off the imported
+module rather than restated from the rule. Two env vars steer it —
+`DOXA_LORE_CORE_PATH` points at a plugin checkout somewhere other than the
+default `~/.claude/plugins/marketplaces/lore`, and `DOXA_LORE_SOURCE=package`
+ignores any checkout and takes the pinned dependency, which is how you
+reproduce a bug against exactly what CI runs.
 
 ## Status
 

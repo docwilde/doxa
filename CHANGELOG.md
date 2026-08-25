@@ -4,6 +4,63 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.37.0 — 2026-08-25
+
+**A bare clone of this repo now works.** `uv sync && uv run pytest` on a
+machine that has never seen the LORE Claude Code plugin is the whole
+setup; it was not, and the failure mode was as bad as they get.
+
+- **`lore_core` is a declared dependency.** DOXA's memory model *is*
+  `lore_core` — `doxa.engine`, `doxa.peers`, `doxa.operators` and
+  `doxa.transcript` all import it — and it was declared nowhere.
+  `doxa/_lore_bootstrap.py` resolved it by reaching into a LORE plugin
+  checkout on the machine, so a clone without the plugin failed **41 of 52
+  test modules at collection**: not a red suite, a suite that never ran far
+  enough to say what was wrong. `pyproject.toml` now carries
+  `lore-core @ git+https://github.com/docwilde/LORE@<commit>` — a git URL
+  because neither project is on PyPI, pinned to a commit rather than a
+  branch, because a branch pin is a subscription rather than a dependency.
+  This required packaging LORE, which had no `pyproject.toml` of any kind;
+  that shipped as LORE 0.35.1, packaging only the importable `lore_core`
+  and leaving the plugin install path byte-identical.
+- **A LORE plugin checkout still wins over the pinned copy, on purpose.**
+  Both point at the same `~/.claude/lore` store and the same `state.db`,
+  and the plugin is the busier writer of the two — a hook fires on every
+  Claude Code session start, end and compaction. Letting the installed
+  wheel win would mean aiming two different `lore_core` versions at one
+  SQLite file and hoping the older one reads what the newer one migrated.
+  It also keeps the property the shim was written for: a user editing
+  their LORE checkout sees those edits in DOXA. Reproducibility loses that
+  argument and gets an escape hatch instead —
+  `DOXA_LORE_SOURCE=package` ignores any checkout and takes the pinned
+  dependency, which is how you reproduce a bug against exactly what CI
+  runs. `DOXA_LORE_CORE_PATH` still relocates the checkout.
+- **`/about` says which one it loaded.** New `lore from` row: `plugin` or
+  `package`, with the directory. Measured off `lore_core.__file__` after
+  the import rather than restated from the precedence rule, so a copy that
+  arrived some way the bootstrap did not arrange — `PYTHONPATH`, an
+  editable install — is reported as what it is. The `lore` version row now
+  reads `lore_core.__version__` (LORE 0.35.1 and later resolve their own
+  version correctly in either carrier) and falls back to the plugin
+  manifest for the older installs that carry no version attribute at all.
+- **CI stops pretending.** The workflow used to check out `docwilde/LORE`
+  alongside DOXA and point `DOXA_LORE_CORE_PATH` at it on every leg —
+  scaffolding that hid the missing dependency rather than testing
+  anything. The two Python legs now run the bare-clone case with no LORE
+  checkout at all, and a third leg checks LORE out deliberately to
+  exercise the *other* branch of the precedence, which is the
+  configuration most real machines are in (the `LORE_REF` hatch stays and
+  still tracks `main`, so a LORE change that breaks DOXA turns that leg
+  red before a user finds it). Every leg asserts which `lore_core` it
+  loaded before spending nine minutes on tests.
+- Tests: `tests/test_lore_dependency.py` (13) — the declaration itself and
+  that its pin is not a moving ref, the distribution being installed
+  independently of any plugin, both precedence branches and both env-var
+  hatches, a typo'd `DOXA_LORE_SOURCE` degrading to `auto` rather than to
+  "no memory system", the `lore from` row moving when the source moves,
+  and the version resolving for a 0.35.1-and-later package as well as for
+  a pre-0.35.1 plugin that has only a manifest.
+
 ## 0.36.0 — 2026-08-25
 
 Two things you can now do at the prompt: find out what is actually

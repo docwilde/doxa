@@ -18,20 +18,26 @@ permissions:
   contents: read
 
 env:
-  # doxa/_lore_bootstrap.py puts lore_core on sys.path from the LORE plugin
-  # checkout; DOXA_LORE_CORE_PATH overrides the default marketplace location.
-  # lore_core is NOT a pyproject dependency (it ships inside the LORE plugin
-  # and is not on PyPI), so without this checkout `import doxa.peers` -- and
-  # therefore 41 of the 52 test modules -- fails at collection.
+  # Which LORE the plugin-precedence leg checks out. lore_core is a real
+  # pyproject dependency since v0.37.0, pinned to a commit, so the OTHER
+  # legs need no LORE checkout at all -- they are the bare-clone case, which
+  # is the one that used to fail 41 of 52 test modules at collection.
   #
-  # Tracking LORE main mirrors what a real machine runs: the plugin
-  # marketplace tracks main, so DOXA imports whatever LORE main is today.
-  # The cost is that a LORE change can turn DOXA red. Pin this to a SHA if
-  # that trade stops being worth it -- it is a one-line change.
+  # This leg exists because a bare clone is not what most machines are: a
+  # user with the LORE Claude Code plugin installed gets the plugin's
+  # lore_core, which wins over the pinned one (doxa/_lore_bootstrap.py says
+  # why -- one shared SQLite store, and the plugin is its busier writer).
+  # The plugin marketplace tracks LORE main, so tracking main here is what
+  # those machines actually run, and a LORE change that breaks DOXA turns
+  # this leg red before a user finds it. Pin to a SHA if that trade stops
+  # being worth it -- still a one-line change.
   LORE_REF: main
 
 jobs:
   test:
+    # Named per leg, because two of the three now run the same Python and
+    # differ only in whether a LORE plugin is present.
+    name: py${{ matrix.python-version }}${{ matrix.lore-plugin && ' + LORE plugin' || '' }}
     runs-on: ubuntu-latest
     # The suite measured 8m34s locally; runners are slower, and some tests
     # spawn daemons over Unix sockets that could in principle hang. 25
@@ -39,24 +45,45 @@ jobs:
     # wedged daemon well short of burning a runner hour.
     timeout-minutes: 25
 
+    env:
+      # Set ONLY on the plugin leg. Empty everywhere else, which sends
+      # doxa/_lore_bootstrap to its default location -- a path that does not
+      # exist on a runner, so the pinned lore-core dependency is what loads.
+      # That is the bare-clone case, and it is asserted below rather than
+      # assumed.
+      DOXA_LORE_CORE_PATH: ${{ matrix.lore-plugin && format('{0}/.lore-plugin', github.workspace) || '' }}
+
     strategy:
-      # One leg's failure is worth seeing next to the other's result, and
+      # One leg's failure is worth seeing next to the others' results, and
       # each leg is ~9 minutes -- not worth re-running to learn the second answer.
       fail-fast: false
       matrix:
-        # Deliberately two legs, not five. pyproject declares
-        # requires-python = ">=3.11", so 3.11 is tested to keep that claim
-        # honest; .python-version pins 3.12, which is what contributors and
-        # releases actually run. 3.13/3.14 are claimed nowhere in the project
-        # metadata, and each extra leg costs another ~9 runner-minutes. Add
-        # legs when the project starts claiming those versions, not before.
+        # Deliberately three legs, not five, and not one per Python. The
+        # first two are the bare-clone case -- nothing but `uv sync`, which
+        # is the whole point of declaring lore-core: pyproject says
+        # requires-python = ">=3.11", so 3.11 keeps that claim honest, and
+        # .python-version pins 3.12, which is what contributors and releases
+        # actually run. 3.13/3.14 are claimed nowhere in the project metadata
+        # and each leg costs another ~9 runner-minutes.
         python-version: ["3.11", "3.12"]
+        lore-plugin: [false]
+        include:
+          # Third leg: a machine WITH the LORE plugin, i.e. the other branch
+          # of doxa/_lore_bootstrap's precedence and the configuration most
+          # real users are in. One Python is enough -- the axis under test
+          # here is which lore_core wins, not which interpreter runs it.
+          - python-version: "3.12"
+            lore-plugin: true
 
     steps:
       - name: Check out doxa
         uses: actions/checkout@v7
 
-      - name: Check out LORE (provides lore_core)
+      # Only for the plugin leg. Everywhere else lore_core arrives through
+      # the pinned dependency like any other package, and there is nothing
+      # to check out.
+      - name: Check out LORE (simulates an installed plugin)
+        if: matrix.lore-plugin
         uses: actions/checkout@v7
         with:
           repository: docwilde/LORE
@@ -78,9 +105,27 @@ jobs:
         # The dev group (pytest, pytest-asyncio) is included by default.
         run: uv sync --frozen --python ${{ matrix.python-version }}
 
+      # The claim this whole workflow now rests on, checked before nine
+      # minutes of tests: on a bare clone lore_core comes from the declared
+      # dependency, and on a machine with the plugin the plugin wins. A leg
+      # that silently loaded the wrong one would still be green and would
+      # be testing something other than what it says.
+      - name: Check which lore_core was loaded
+        run: |
+          uv run --no-sync python - <<'PY'
+          import os, sys
+          from doxa import _lore_bootstrap, version
+          print(version.about_text())
+          source = _lore_bootstrap.resolved_source()
+          if source is None:
+              sys.exit("::error::no lore_core could be imported at all")
+          kind, location = source
+          expected = "plugin" if os.environ.get("DOXA_LORE_CORE_PATH") else "package"
+          if kind != expected:
+              sys.exit(f"::error::expected lore_core from the {expected}, got {kind} at {location}")
+          PY
+
       - name: Run test suite
-        env:
-          DOXA_LORE_CORE_PATH: ${{ github.workspace }}/.lore-plugin
         # -rf prints a "FAILED <nodeid> - <reason>" line per failure, which
         # the summary step lifts verbatim; --tb=short keeps the log readable.
         # The flaky test below is deselected here and run on its own.
@@ -96,16 +141,14 @@ jobs:
       # focusing a widget inside a TabPane activates that pane, so a
       # newly-mounted pane can asynchronously steal active_pane from the tab
       # this test is asserting about. Measured 1 failure in 20 standalone runs
-      # (~5%) on a quiet machine; a CI runner is noisier, and across two matrix
-      # legs that is a ~10% spurious-red rate per push.
+      # (~5%) on a quiet machine; a CI runner is noisier, and across three
+      # matrix legs that is a ~14% spurious-red rate per push.
       #
       # Three attempts take the residual to ~0.01% while leaving the other 784
       # tests with zero retry budget, so a genuine regression anywhere else is
       # still a hard, first-attempt failure. The underlying focus fix is a
       # queued decision and is deliberately not made here.
       - name: Run known-flaky tab-status test (scoped retry)
-        env:
-          DOXA_LORE_CORE_PATH: ${{ github.workspace }}/.lore-plugin
         run: |
           test_id="tests/test_tab_status.py::test_done_unseen_marks_a_background_tab_and_clears_on_activation"
           for attempt in 1 2 3; do
@@ -125,7 +168,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "### Python ${{ matrix.python-version }}"
+            echo "### Python ${{ matrix.python-version }}${{ matrix.lore-plugin && ' + LORE plugin' || ' (bare clone)' }}"
             echo
             if [ -f pytest.log ]; then
               # pytest's own one-line tally, e.g. "784 passed in 513.85s".
@@ -153,6 +196,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: pytest-log-py${{ matrix.python-version }}
+          name: pytest-log-py${{ matrix.python-version }}${{ matrix.lore-plugin && '-lore-plugin' || '' }}
           path: pytest.log
           if-no-files-found: ignore
