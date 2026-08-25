@@ -352,13 +352,14 @@ class PaneChipsMixin:
         # lookup has to match what the widget actually paints.
         mode = str(getattr(engine, "permission_mode", None) or
                    engine_mod.DEFAULT_PERMISSION_MODE)
+        chip_armed = bool(getattr(engine, "bypass_armed", False))
         cramped = self._mode_chip_cramped()
         if mode != engine_mod.DEFAULT_PERMISSION_MODE or not cramped:
             mode_plain = mode_text(mode, short=cramped)
             chips.append(StatusChip.raw(
                 mode_plain,
                 f"[@click=open_mode_picker]{mode_chip(mode, short=cramped)}[/]",
-                ((mode_plain, mode_tooltip(mode)),),
+                ((mode_plain, mode_tooltip(mode, chip_armed)),),
             ))
         model = engine.model or "default"
         chips.append(StatusChip.clickable(
@@ -696,21 +697,30 @@ class PaneChipsMixin:
 
         if self.engine is None:
             return
+        # Per-SESSION since v0.56.0. A mode this session's CLI cannot be
+        # put into is not listed at all -- not listed-and-refused -- which
+        # is the user's own instruction ("if it wasnt started with that
+        # flag, the mode option should not even appear") and the rule
+        # engine.available_modes states: an option a user can see is an
+        # option that works.
+        armed = bool(getattr(self.engine, "bypass_armed", False))
+        offered = engine_mod.available_modes(armed)
         rows = [
             (name,
              ("⚠ " if name in engine_mod.UNASKED_MODES else "")
              + f"{name} — {MODE_EXPLAIN.get(name, '')}")
-            for name in engine_mod.PERMISSION_MODES
+            for name in offered
         ]
         # Grouped by the axis a user is actually choosing on: can I get
         # here with the key, or do I have to mean it? Since v0.50.0 that
         # is no longer the same as "is this one safe" -- the top group
-        # now contains two modes where nothing will ask -- so the row
-        # labels say what each group IS rather than implying safety.
+        # can contain modes where nothing will ask -- so the row labels
+        # say what each group IS rather than implying safety.
+        ring = engine_mod.cycle_modes(armed)
         groups = {
-            name: ("Shift+Tab reaches these" if name in engine_mod.CYCLE_MODES
+            name: ("Shift+Tab reaches these" if name in ring
                    else "/mode only — confirms first")
-            for name in engine_mod.PERMISSION_MODES
+            for name in offered
         }
         current = str(getattr(self.engine, "permission_mode", None) or "default")
         self._open_chip_picker(

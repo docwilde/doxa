@@ -272,9 +272,11 @@ class PaneCommandsMixin:
         engine = self.engine
         current = str(getattr(engine, "permission_mode", None) or
                       engine_mod.DEFAULT_PERMISSION_MODE)
+        armed = bool(getattr(engine, "bypass_armed", False))
+        offered = engine_mod.available_modes(armed)
         if not args:
             lines = [f"mode: {current}", ""]
-            for name in engine_mod.PERMISSION_MODES:
+            for name in offered:
                 mark = "▸" if name == current else " "
                 warn = "⚠ " if name in engine_mod.UNASKED_MODES else "  "
                 gate = "  (asks first)" if name in engine_mod.GATED_MODES else ""
@@ -284,10 +286,15 @@ class PaneCommandsMixin:
             lines += [
                 "",
                 "usage: /mode <name>   ·   Shift+Tab cycles "
-                + " → ".join(engine_mod.CYCLE_MODES) + " → (home)",
+                + " → ".join(engine_mod.cycle_modes(armed)) + " → (home)",
+                # Intersected with what this session actually offers --
+                # a global list here would leak the very mode the rest of
+                # this command is careful not to mention.
                 "⚠ marks a mode where DOXA will NOT ask you about a tool "
-                "call: " + ", ".join(engine_mod.UNASKED_MODES),
-                ", ".join(engine_mod.GATED_MODES)
+                "call: " + ", ".join(
+                    m for m in engine_mod.UNASKED_MODES if m in offered
+                ),
+                ", ".join(m for m in engine_mod.GATED_MODES if m in offered)
                 + " is not on the hotkey and confirms before it switches",
             ]
             # The settings row and the running session are different
@@ -310,8 +317,29 @@ class PaneCommandsMixin:
         wanted = args.split()[0]
         if wanted not in engine_mod.PERMISSION_MODES:
             await self._system(
-                f"mode: unknown mode {wanted!r} — "
-                + ", ".join(engine_mod.PERMISSION_MODES)
+                f"mode: unknown mode {wanted!r} — " + ", ".join(offered)
+            )
+            return
+        if wanted not in offered:
+            # The ONE place an unavailable mode may still be NAMED. It is
+            # absent from every list, every group and the cycle; but a user
+            # who types it deserves the reason rather than "unknown mode",
+            # which would be a second lie on top of the first. Reported as
+            # exactly this: "i get an error message that the session didnt
+            # start with a specific parameter" -- so say which parameter,
+            # and say how to get a session that has it.
+            await self._system(
+                f"mode: {wanted} is not available in this session.\n"
+                "  Its CLI was started without "
+                f"--{engine_mod.BYPASS_ARM_FLAG}, and that is decided at\n"
+                "  launch -- it cannot be turned on for a session already "
+                "running.\n"
+                "  To make it available to NEW sessions: /settings → "
+                "\"allow bypass\" (or DOXA_ALLOW_BYPASS=1),\n"
+                "  then /clear or ctrl+t for a fresh one. Off by default, "
+                "deliberately: it puts every\n"
+                "  session it applies to one keystroke from running tools "
+                "unapproved."
             )
             return
         setter = getattr(engine, "set_permission_mode", None)

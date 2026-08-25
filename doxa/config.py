@@ -89,6 +89,22 @@ SETTINGS: tuple[Setting, ...] = (
              "has no live setter, so a running session keeps its own.",
     ),
     Setting(
+        key="allow_bypass", env="DOXA_ALLOW_BYPASS",
+        label="allow bypass", category="Session",
+        kind="bool", default="",
+        help="Let NEW sessions reach bypassPermissions at all "
+             "(spawns their CLI with --allow-dangerously-skip-permissions)",
+        note="OFF by default, and the default is the point. The claude CLI "
+             "arms this capability at LAUNCH, not at runtime: a session "
+             "started without the flag cannot enter bypassPermissions, and "
+             "no setting can retrofit one that is already running. While "
+             "this is off, the mode is absent from the Shift+Tab cycle, the "
+             "chip's picker and /mode's list rather than being offered and "
+             "refused. Turning it on puts every session spawned afterwards "
+             "one keystroke away from running tools unapproved, in every "
+             "repository you open.",
+    ),
+    Setting(
         key="permission_mode", env="DOXA_PERMISSION_MODE",
         label="permission mode", category="Session",
         kind="choice", choices=("", "default", "acceptEdits", "plan"),

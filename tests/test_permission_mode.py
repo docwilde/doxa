@@ -104,66 +104,110 @@ def _hit(app, widget):
 # =======================================================================
 
 
-def test_the_cycle_reaches_exactly_the_named_set_and_nothing_else():
-    """The invariant that survived the user overruling the old one.
+def test_the_reachable_set_is_a_function_of_the_session():
+    """The invariant, now per-SESSION -- which is a sharper claim than the
+    global one it replaces.
 
-    Through v0.47.0 this test proved something stronger: that no key
-    sequence could reach a mode where nothing asks. The user has since put
-    `auto` and then `bypassPermissions` on the cycler in two explicit,
-    separate decisions, so that claim is false by design and asserting it
-    would be asserting a fiction.
+    Reported: "i cannot cycle past auto to 'bypass': i get an error
+    message that the session didnt start with a specific parameter". The
+    cycle offered a mode the CLI then refused. Measured against the real
+    CLI: on an unarmed session every mode EXCEPT bypassPermissions is
+    accepted; armed, all six are. So the ring is a property of how the
+    session was launched, and this test says exactly that:
 
-    What is still true and still worth guarding:
-
-    1. the set a keystroke can reach is EXACTLY ``CYCLE_MODES`` -- not a
-       subset, not a superset -- so a future edit cannot quietly add a
-       sixth mode to the hotkey without changing a named constant and
-       failing here;
-    2. ``dontAsk`` is not reachable by any number of presses from any
-       starting point; and
-    3. the step function is total over that set, so no input, state or
-       configuration produces anything outside it.
+      unarmed  -> exactly four, and bypassPermissions is not among them
+      armed    -> exactly five
+      both     -> dontAsk unreachable, step function total
 
     Closure is computed from every mode, plus None, plus strings no code
-    path should ever produce."""
+    path should produce."""
     seeds = list(engine_mod.PERMISSION_MODES) + [
         None, "", "garbage", "Default", "BYPASSPERMISSIONS", "plan ",
     ]
-    reachable: set[str] = set()
-    frontier = list(seeds)
-    while frontier:
-        nxt = engine_mod.next_cycle_mode(frontier.pop())
-        if nxt not in reachable:
-            reachable.add(nxt)
-            frontier.append(nxt)
 
-    # 1 -- exactly the named set, spelled out here as well as read from the
-    # constant, so that editing the constant alone cannot make this pass.
-    assert reachable == set(engine_mod.CYCLE_MODES)
-    assert reachable == {
+    def closure(armed):
+        seen, frontier = set(), list(seeds)
+        while frontier:
+            nxt = engine_mod.next_cycle_mode(frontier.pop(), armed)
+            if nxt not in seen:
+                seen.add(nxt)
+                frontier.append(nxt)
+        return seen
+
+    unarmed = closure(False)
+    assert unarmed == {"default", "acceptEdits", "plan", "auto"}
+    assert "bypassPermissions" not in unarmed
+    assert unarmed == set(engine_mod.cycle_modes(False))
+
+    armed = closure(True)
+    assert armed == {
         "default", "acceptEdits", "plan", "auto", "bypassPermissions",
     }
-    # 2 -- dontAsk is off the keyboard entirely.
-    assert "dontAsk" not in reachable
-    assert "dontAsk" not in engine_mod.CYCLE_MODES
+    assert armed == set(engine_mod.cycle_modes(True))
+
+    # dontAsk is off the keyboard whatever the session is.
+    for reachable in (unarmed, armed):
+        assert "dontAsk" not in reachable
     assert engine_mod.GATED_MODES == ("dontAsk",)
-    # 3 -- total over the set, as a property rather than as one computed
-    # answer.
-    for seed in seeds:
-        assert engine_mod.next_cycle_mode(seed) in engine_mod.CYCLE_MODES
+
+    # Total over the session's own ring, as a property.
+    for armed_flag in (False, True):
+        ring = engine_mod.cycle_modes(armed_flag)
+        for seed in seeds:
+            assert engine_mod.next_cycle_mode(seed, armed_flag) in ring
+
+    # The default argument takes the NARROWER ring: a caller that has not
+    # been taught about arming must not be handed the wider one.
+    assert engine_mod.next_cycle_mode("auto") == "default"
+    assert engine_mod.next_cycle_mode("auto", True) == "bypassPermissions"
+
+
+def test_every_surface_derives_from_one_function():
+    """"Do not compute it in three places." The cycle, the picker and
+    /mode's list must all be the same set, or one of them will go on
+    offering a mode that errors."""
+    for armed in (False, True):
+        offered = engine_mod.available_modes(armed)
+        # The ring is a sub-sequence of what is offered, never disjoint
+        # from it and never wider.
+        assert set(engine_mod.cycle_modes(armed)) <= set(offered)
+        # …and it preserves the declared cycle order.
+        assert list(engine_mod.cycle_modes(armed)) == [
+            m for m in engine_mod.CYCLE_MODES if m in offered
+        ]
+    assert set(engine_mod.available_modes(True)) - set(
+        engine_mod.available_modes(False)
+    ) == {"bypassPermissions"}
+
+
+def test_only_bypass_carries_a_launch_time_requirement():
+    """Measured against the real CLI rather than assumed: driving
+    set_permission_mode over an unarmed session accepts acceptEdits, plan,
+    auto, dontAsk and default, and refuses only bypassPermissions. A
+    second mode with a hidden prerequisite would have been the same defect
+    twice, so this pins the finding."""
+    unarmed = set(engine_mod.available_modes(False))
+    assert unarmed == set(engine_mod.PERMISSION_MODES) - {"bypassPermissions"}
+    assert "auto" in unarmed
+    assert "dontAsk" in unarmed
 
 
 def test_cycle_walks_every_mode_in_order_and_wraps_home():
     """Most oversight to least, then home -- so one more press is always
     the way OUT of the most permissive mode rather than a dead end."""
-    assert engine_mod.CYCLE_MODES == (
+    assert engine_mod.cycle_modes(True) == (
         "default", "acceptEdits", "plan", "auto", "bypassPermissions",
     )
-    assert engine_mod.next_cycle_mode("default") == "acceptEdits"
-    assert engine_mod.next_cycle_mode("acceptEdits") == "plan"
-    assert engine_mod.next_cycle_mode("plan") == "auto"
-    assert engine_mod.next_cycle_mode("auto") == "bypassPermissions"
-    assert engine_mod.next_cycle_mode("bypassPermissions") == "default"
+    for a, b in (("default", "acceptEdits"), ("acceptEdits", "plan"),
+                 ("plan", "auto"), ("auto", "bypassPermissions"),
+                 ("bypassPermissions", "default")):
+        assert engine_mod.next_cycle_mode(a, True) == b
+
+    # Unarmed, the ring simply closes one step earlier.
+    assert engine_mod.cycle_modes(False) == (
+        "default", "acceptEdits", "plan", "auto",
+    )
+    assert engine_mod.next_cycle_mode("auto", False) == "default"
 
 
 def test_a_mode_off_the_ring_cycles_home():
@@ -233,6 +277,7 @@ async def test_set_permission_mode_issues_the_sdk_control_request(monkeypatch):
     SEAM (the client's own call log), not at the engine attribute the
     engine sets on itself."""
     monkeypatch.delenv("DOXA_PERMISSION_MODE", raising=False)
+    monkeypatch.setenv("DOXA_ALLOW_BYPASS", "1")   # bypass is exercised below
     factory, created = factory_with_script([])
     engine = SessionEngine(cwd=".", client_factory=factory)
     await engine.start()
@@ -463,14 +508,14 @@ async def test_wide_terminal_shows_the_default_mode_too(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_clicking_the_chip_opens_a_picker_of_all_six_modes(
+async def test_clicking_the_chip_opens_a_picker_of_every_available_mode(
     monkeypatch, tmp_path,
 ):
     """The gated three are LISTED, not hidden: a capability the CLI has
     and DOXA refuses to mention is how a user ends up hand-editing config
     files to reach it. The confirmation, not the concealment, is what
     makes reaching one deliberate."""
-    fake = FakeEngine([])
+    fake = FakeEngine([], bypass_armed=True)
     app, _engines = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test(size=(140, 40)) as pilot:
         assert await _wait_status(pilot, app, "mode:default")
@@ -498,7 +543,7 @@ async def test_shift_tab_reaches_the_handler_with_the_prompt_focused(
     always), and asserts the SESSION moved -- not that an action method
     exists."""
     monkeypatch.delenv("DOXA_PERMISSION_MODE", raising=False)
-    fake = FakeEngine([])
+    fake = FakeEngine([], bypass_armed=True)   # the full five-mode ring
     app, _engines = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test(size=(140, 40)) as pilot:
         assert await _wait_status(pilot, app, "mode:default")
@@ -651,7 +696,9 @@ async def test_bare_mode_shows_the_current_mode_and_the_choices(
     monkeypatch, tmp_path,
 ):
     monkeypatch.delenv("DOXA_PERMISSION_MODE", raising=False)
-    fake = FakeEngine([], permission_mode="plan")
+    # Armed, because this asserts the FULL listing; the unarmed listing is
+    # test_an_unarmed_session_never_offers_bypass_anywhere's job.
+    fake = FakeEngine([], permission_mode="plan", bypass_armed=True)
     app, _engines = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test(size=(140, 40)) as pilot:
         assert await _wait_status(pilot, app, "mode:plan")
@@ -708,7 +755,7 @@ async def test_the_modes_on_the_hotkey_no_longer_confirm(monkeypatch, tmp_path):
     them directly. `dontAsk` is not on the cycler and still confirms."""
     monkeypatch.delenv("DOXA_PERMISSION_MODE", raising=False)
     for mode in ("auto", "bypassPermissions"):
-        fake = FakeEngine([])
+        fake = FakeEngine([], bypass_armed=True)
         app, _engines = await _app(monkeypatch, tmp_path, fake)
         async with app.run_test(size=(140, 40)) as pilot:
             assert await _wait_status(pilot, app, "mode:default")
@@ -731,7 +778,7 @@ async def test_entering_a_mode_that_stops_asking_says_so_in_the_transcript(
     somebody who got there by accident, so it names what STOPPED rather
     than only what changed."""
     monkeypatch.delenv("DOXA_PERMISSION_MODE", raising=False)
-    fake = FakeEngine([])
+    fake = FakeEngine([], bypass_armed=True)
     app, _engines = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test(size=(140, 40)) as pilot:
         assert await _wait_status(pilot, app, "mode:default")
@@ -756,6 +803,181 @@ async def test_entering_a_mode_that_stops_asking_says_so_in_the_transcript(
         assert await _wait_for(pilot, lambda: fake.permission_mode == "default")
         plain = [t for t in _system_texts(app) if t.startswith("mode: ")]
         assert plain and "⚠" not in plain[-1]
+
+
+@pytest.mark.asyncio
+async def test_an_unarmed_session_never_offers_bypass_anywhere(
+    monkeypatch, tmp_path,
+):
+    """The defect, as the user hit it, closed on every surface at once.
+
+    Reported: "i cannot cycle past auto to 'bypass': i get an error
+    message that the session didnt start with a specific parameter", then
+    "if it wasnt started with that flag, the mode option should not even
+    appear". So this asserts ABSENCE, not a nicer error: the cycle, the
+    picker and /mode's list must each stop at four."""
+    monkeypatch.delenv("DOXA_PERMISSION_MODE", raising=False)
+    monkeypatch.delenv("DOXA_ALLOW_BYPASS", raising=False)
+    fake = FakeEngine([])                     # unarmed, the shipped default
+    app, _engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(140, 40)) as pilot:
+        assert await _wait_status(pilot, app, "mode:default")
+
+        # 1. the cycle stops at auto and goes home
+        for expected in ("acceptEdits", "plan", "auto", "default"):
+            await pilot.press("shift+tab")
+            assert await _wait_for(
+                pilot, lambda e=expected: fake.permission_mode == e
+            ), expected
+        assert "bypassPermissions" not in fake.permission_mode_switches
+
+        # 2. the picker does not list it
+        picker = app.query_one("#chip-picker", ChipPicker)
+        await pilot.click("#status-bar", offset=_offset_of(app, "mode:default"))
+        assert await _wait_for(pilot, lambda: picker.is_open)
+        listed = "\n".join(label for _rid, label in picker._rows)
+        assert "bypassPermissions" not in listed
+        assert "auto" in listed and "dontAsk" in listed
+        picker.close()
+        app.query_one("#prompt-input").focus()
+        await pilot.pause()
+
+        # 3. /mode's own list does not either
+        await _run(pilot, app, "/mode")
+        # Match the LISTING, not the transcript lines the cycling above
+        # already wrote -- "usage:" only ever appears in the listing.
+        assert await _wait_for(
+            pilot, lambda: any("usage: /mode" in t for t in _system_texts(app))
+        )
+        listing = next(t for t in _system_texts(app) if "usage: /mode" in t)
+        assert "bypassPermissions" not in listing
+        assert "auto" in listing
+        assert "dontAsk" in listing
+
+
+@pytest.mark.asyncio
+async def test_naming_the_unavailable_mode_explains_rather_than_errors(
+    monkeypatch, tmp_path,
+):
+    """The one place it may still be NAMED. A user who types it deserves
+    the reason and the way out, not "unknown mode" -- which would be a
+    second lie on top of the first -- and not the raw CLI refusal, which
+    is what they reported."""
+    monkeypatch.delenv("DOXA_ALLOW_BYPASS", raising=False)
+    fake = FakeEngine([])
+    app, _engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(140, 40)) as pilot:
+        assert await _wait_status(pilot, app, "mode:default")
+        await _run(pilot, app, "/mode bypassPermissions")
+        assert await _wait_for(
+            pilot,
+            lambda: any("not available in this session" in t
+                        for t in _system_texts(app)),
+        )
+        note = next(t for t in _system_texts(app)
+                    if "not available in this session" in t)
+        assert "allow-dangerously-skip-permissions" in note   # which flag
+        assert "launch" in note                               # why not now
+        assert "DOXA_ALLOW_BYPASS" in note                    # how to fix
+        assert "unknown mode" not in note
+        # …and nothing was attempted against the engine.
+        assert fake.permission_mode_switches == []
+        assert fake.permission_mode == "default"
+
+
+@pytest.mark.asyncio
+async def test_an_armed_session_gets_the_mode_back(monkeypatch, tmp_path):
+    """The other half: with the setting on, the fifth mode is present on
+    every surface it was absent from."""
+    monkeypatch.setenv("DOXA_ALLOW_BYPASS", "1")
+    fake = FakeEngine([], bypass_armed=True)
+    app, _engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(140, 40)) as pilot:
+        assert await _wait_status(pilot, app, "mode:default")
+        for expected in ("acceptEdits", "plan", "auto", "bypassPermissions"):
+            await pilot.press("shift+tab")
+            assert await _wait_for(
+                pilot, lambda e=expected: fake.permission_mode == e
+            ), expected
+        assert await _wait_status(pilot, app, "mode:bypassPermissions")
+
+
+@pytest.mark.asyncio
+async def test_the_arming_flag_reaches_the_spawned_cli_only_when_asked(
+    monkeypatch,
+):
+    """The mechanism, at the seam: extra_args carries the flag with a None
+    value, which the SDK renders as a bare `--allow-dangerously-skip-
+    permissions`. An unarmed session's options must be byte-identical to
+    what they were before this release."""
+    monkeypatch.delenv("DOXA_ALLOW_BYPASS", raising=False)
+    factory, created = factory_with_script([])
+    await SessionEngine(cwd=".", client_factory=factory).start()
+    assert not (created[0].options.extra_args or {})
+
+    monkeypatch.setenv("DOXA_ALLOW_BYPASS", "1")
+    factory2, created2 = factory_with_script([])
+    engine = SessionEngine(cwd=".", client_factory=factory2)
+    assert engine.bypass_armed
+    await engine.start()
+    assert created2[0].options.extra_args == {
+        "allow-dangerously-skip-permissions": None
+    }
+
+
+def test_arming_is_off_by_default_and_is_a_real_setting():
+    """Default OFF is the substance of the fix, not a habit. Arming every
+    session would put every one of them a keystroke from no permission
+    checks, in every repo the user opens."""
+    monkeypatch_free = config_mod.raw("DOXA_ALLOW_BYPASS")
+    assert monkeypatch_free.strip() in ("", "0")
+    row = next(s for s in config_mod.SETTINGS if s.key == "allow_bypass")
+    assert row.env == "DOXA_ALLOW_BYPASS"
+    assert row.default == ""          # bool, off
+    assert "launch" in row.note.lower()
+
+
+@pytest.mark.asyncio
+async def test_a_running_session_is_not_armed_by_flipping_the_setting(
+    monkeypatch,
+):
+    """Arming is argv. Turning the setting on cannot retrofit a process
+    that is already running, and DOXA must not pretend it can -- that
+    would recreate the reported defect with an extra step."""
+    monkeypatch.delenv("DOXA_ALLOW_BYPASS", raising=False)
+    factory, _created = factory_with_script([])
+    engine = SessionEngine(cwd=".", client_factory=factory)
+    await engine.start()
+    assert not engine.bypass_armed
+
+    monkeypatch.setenv("DOXA_ALLOW_BYPASS", "1")
+    assert not engine.bypass_armed        # unchanged: it is this argv
+    with pytest.raises(RuntimeError) as excinfo:
+        await engine.set_permission_mode("bypassPermissions")
+    assert "allow-dangerously-skip-permissions" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_a_restored_unarmed_session_cannot_come_back_in_a_mode_it_cannot_hold(
+    monkeypatch,
+):
+    """Restore and auto-resume rebuild the engine, which re-reads BOTH the
+    persisted mode and the arming setting. The persisted set is already
+    narrower than the armed set, so a stored bypass is impossible -- and
+    the connect-time clamp is the belt to that braces, so a session can
+    never be spawned asking for a mode its own argv cannot support."""
+    monkeypatch.delenv("DOXA_ALLOW_BYPASS", raising=False)
+    monkeypatch.setenv("DOXA_PERMISSION_MODE", "bypassPermissions")
+    # The stored value is ignored outright: not persistable.
+    assert engine_mod.permission_mode_default() == "default"
+
+    factory, created = factory_with_script([])
+    engine = SessionEngine(cwd=".", client_factory=factory)
+    engine.permission_mode = "bypassPermissions"   # force the bad state
+    await engine.start()
+    # Clamped before it reached the CLI, so the tab lives.
+    assert engine.permission_mode == "default"
+    assert created[0].options.permission_mode == "default"
 
 
 @pytest.mark.asyncio
@@ -942,6 +1164,7 @@ async def test_a_new_session_starts_from_the_persisted_safe_default(monkeypatch)
     which re-reads the config -- so a gated mode cannot be carried into a
     session the user did not choose it for."""
     monkeypatch.setenv("DOXA_PERMISSION_MODE", "acceptEdits")
+    monkeypatch.setenv("DOXA_ALLOW_BYPASS", "1")
     factory, _created = factory_with_script([])
     first = SessionEngine(cwd=".", client_factory=factory)
     await first.start()
@@ -1006,9 +1229,11 @@ async def test_a_reattaching_client_sees_the_real_mode(tmp_path, monkeypatch):
     from doxa.client import EngineClient
 
     monkeypatch.delenv("DOXA_PERMISSION_MODE", raising=False)
+    monkeypatch.setenv("DOXA_ALLOW_BYPASS", "1")
     async with running_daemon(tmp_path, monkeypatch) as (daemon, _created, _):
         first = EngineClient(str(daemon.socket_path))
         await first.start()
+        assert first.bypass_armed          # the daemon told it so
         await first.set_permission_mode("bypassPermissions")
         await first.finalize()
 

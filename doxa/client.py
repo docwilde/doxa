@@ -96,6 +96,11 @@ class EngineClient:
         # yet", never "you were told there is none". The hello frame
         # corrects it immediately; see SessionDaemon._hello.
         self.permission_mode: str = "default"
+        # Engine parity (v0.56.0): whether the DAEMON's CLI was spawned
+        # able to reach bypassPermissions. False until the hello frame
+        # says otherwise, which is the safe direction to be wrong in for
+        # one frame -- the narrower cycle, never the wider one.
+        self.bypass_armed: bool = False
         self.cwd: str | None = None
         self.total_cost_usd = 0.0
         self.last_ctx_percentage: float | None = None
@@ -151,6 +156,7 @@ class EngineClient:
         self.model = hello.get("model")
         if hello.get("permission_mode"):
             self.permission_mode = str(hello["permission_mode"])
+        self.bypass_armed = bool(hello.get("bypass_armed"))
         self.cwd = hello.get("cwd")
         if self.skip_backlog:
             # The daemon has advertised its ring head since the protocol's
@@ -459,6 +465,8 @@ class EngineClient:
             self.model = status["model"]
         if status.get("permission_mode"):
             self.permission_mode = str(status["permission_mode"])
+        if "bypass_armed" in status:
+            self.bypass_armed = bool(status["bypass_armed"])
         if isinstance(status.get("account"), dict):
             self.account = status["account"]
         if status.get("lore_root"):
