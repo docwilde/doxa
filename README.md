@@ -131,56 +131,29 @@ starting with `!` runs as a shell command instead of a prompt, and `/help`
 lists every command and key binding — marking any binding your terminal
 cannot physically send.
 
-## Features
+## What you get
 
-**Sessions that outlive the window**
+- **Sessions that outlive the window.** Each session is its own daemon process and the TUI is a thin client over a 0600 Unix socket, so closing the terminal detaches instead of killing; every event carries a monotonic `seq` into a bounded ring, and `doxa attach` replays from a cursor onto the live tail of that same stream. Each session also takes its own git worktree, so two sessions on one repo cannot stomp each other, and plain `doxa` brings back this repo's whole saved tab set — order, pinned names, active tab, and each tab's conversation read back from its on-disk transcript rather than from whatever still fit in the ring. No tmux is involved anywhere in that. A session whose daemon already exited comes back **read-only** over its transcript, marked `⏺`: DOXA reattaches to what is still running and reopens what is not, but it cannot restart a finished session's engine, and nothing it leaves behind is auto-merged — the closing message names the branch and the merge is yours.
+- **Reasoning and tool calls, on the record.** Replies stream as real markdown through Textual's append-only delta path, so a table fills row by row rather than appearing whole at the end; images degrade down a ladder (kitty graphics protocol → sixel → half-block cells → a plain text line). Above each reply, the model's summarized reasoning streams into a collapsed `✻ Reasoning (N chars)` fold, and the turn's tool calls compact behind one `Tool calls (N)` fold whose chips open to their exact arguments and exact result. Both folds are created lazily on first content, so a turn that used neither grows neither section, and formatting happens only for a chip somebody actually opened. A call against the memory store is an ordinary chip, so the mechanism that decides what the agent believes opens with the same two clicks as a `Grep`. What the fold shows is the model's **summarized** thinking, not its raw chain of thought — the API does not return that on any model at any setting, and turning the fold off stops DOXA asking to see the summary, not the thinking (or its billing).
+- **Subagents you can follow while they run.** A `Task`-spawned subagent appears as a `⧉ N agents` chip plus a second status row under the status bar, one clickable entry per subagent in flight; clicking one opens a **read-only transcript tab** that mirrors what its live `Task` chip has buffered and stays fed from there, leaving the original chip exactly where the trace tree put it. Once the call lands, the same activity is a foldable tree under the parent chip. A nested subagent gets its **own row**, not a recursive tree inside its parent's tab — a tab shows one subagent's narration and its direct subcalls, nothing deeper — and the tab is a view only: no engine behind it, no prompt to type into, `ctrl+w` just removes it.
+- **Memory that is inert until it earns influence.** LORE's `lore_core` runs in-process — hard-capped curated memory (user + project), an uncapped belief store with an FTS index and evidence trails, one SQLite store shared with the LORE Claude Code plugin. The agent's whole tool surface is five operators: four read-only (`lore_belief_search`, `lore_belief_show`, `lore_memory_list`, `lore_session_search`) and one write, `lore_remember`, which only *stages* a proposal for the review gate. At act time a single FTS pass over the prompt may attach one belief note, labelled CITE-ONLY — no LLM call, no second injection path. Nothing writes into curated memory from DOXA: `/pending` here lists what a background reviewer staged and is **read-only**, because approving stays with LORE's own `/lore:approve`. No embeddings, no relevance model, no API call in any of it.
+- **A shell the model cannot reach.** A prompt line starting with `!` (`!git status`, `!pytest -q`) runs in this session's own worktree under a Textual worker, with stdin on `/dev/null`, output capped at 64 KB, and the whole process group killed at 120 seconds so a stray `!tail -f` cannot outlive the tab. It is not a slash command and not a tool, so nothing that dispatches by name and no model call can land there; exactly one module imports the executor and a test asserts that. It runs with your full privileges and **asks nothing first** — `!rm -rf ~` deletes your home directory. Neither the command nor its output enters the model's context, which also means it never reaches LORE and never survives a tab restore.
+- **Sessions that can be made to talk to each other.** Independently launched sessions on the same repo discover each other through a same-user runtime registry (0700, per-session presence file, heartbeat, dead pids reaped by any reader); `/peers` and `/sessions` list them, and `/msg <session> <text>` delivers one framed line-JSON message over the target's own 0600 socket. Every received field is scrubbed before display, and peer text reaches the model only behind an untrusted-peer preamble that names it as data, never instructions. **The model has no send tool** — its five operators are the LORE ones above — so every peer message crosses because a human typed `/msg`. Sessions can be *made* to talk; they do not talk on their own, and nothing here schedules them, routes work between them, or supervises them.
+- **Numbers that were measured, not estimated.** The status bar carries model · `⚑ needs input` · effort · `repo ⎇ branch @sha` · subscription headroom · context % · belief count · session handle · peers; every chip has a one-line tooltip, the inert ones included, and seven are clickable. `/context` breaks the window down by component in tokens using the `claude` CLI's own accounting of its own request — DOXA runs no tokenizer and estimates nothing, a context limit the CLI never reported reads `?` and stays `?`, and the one component that can only be counted in characters is reported in characters. `/about` is the screen a bug report is copied from, down to which `lore_core` loaded and which keyboard protocol your terminal actually granted — a binding it cannot physically transmit is marked `✗` in `/help` instead of silently doing nothing, and silence from the terminal reads as *not measured*, never as "legacy". There is **no animated chrome**: two timers exist in the whole app and a test asserts no third is ever armed.
 
-- Each session is its own **daemon process**; the TUI is a thin client over a Unix socket. Close it, `doxa attach` later, transcript intact. No tmux.
-- Plain `doxa` restores this repo's **whole saved tab set** — order, pinned names, which tab was active, and the conversation on each tab, read back from the session's own transcript on disk.
-- A session that finalized while the window was shut comes back **read-only** over that transcript, marked `⏺`, rather than being silently respawned.
-- Each session gets its **own git worktree** by default, so two sessions on one repo never stomp each other. `--branch` and `/branch` control what it forks from.
-- Sessions on the same repo find each other: `/peers`, `/sessions`, `/msg <session> <text>`. Peer text renders dimmed and reaches the model only behind an untrusted-peer preamble.
-
-**Memory you can audit**
-
-- LORE's `lore_core` runs **in-process**: hard-capped curated memory (user + project), an uncapped belief store with an FTS index and evidence trails, and one SQLite store shared with the LORE Claude Code plugin.
-- A belief is **inert** until a human approves it or its outcomes calibrate it. The live count is a status chip; clicking it opens a scope-grouped viewer.
-- A background reviewer stages proposals between turns. `/pending` lists them — **read-only**; approval stays with LORE's own `/lore:approve`.
-- `/search` (or `ctrl+r`) is full-text over **every** past session's index, not just this one, and inserts a cited excerpt into the prompt.
-
-**The transcript**
-
-- Replies stream as **real markdown** — tables, bold, fences — completing span by span rather than after the whole message.
-- The model's **summarized reasoning** streams into a collapsed per-turn fold that doesn't exist on a turn without any.
-- A turn's tool calls compact behind one **`Tool calls (N)`** fold; open a chip for its exact arguments and result.
-- Subagents get a live **`⧉ N agents`** row with a read-only transcript tab each, and a foldable **trace tree** under their `Task` chip once it lands.
-- Images degrade down a ladder: kitty graphics protocol → sixel → half-block cells → a plain text line.
-- **No animated chrome.** Two timers exist in the whole app, and a test asserts no third is ever armed.
-
-**At the prompt**
-
-- `!git status`, `!pytest -q` — a **shell command** in this session's own worktree, capped and killed on a timeout. Neither the command nor its output enters the model's context.
-- `ctrl+p` palette and `/` autocomplete read **one registry**, so a command cannot exist on one surface and not the other.
-- The prompt is a multi-line `TextArea`; bracketed paste is one edit however many lines land, and a large paste collapses to a `⧉ pasted …` placeholder that still sends in full.
-- `AskUserQuestion` and permission requests get a real **dialog**, a blinking tab, and a desktop notification — instead of the silent auto-deny a headless SDK run would otherwise give them.
-
-**Knowing what is going on**
-
-- Status bar: model · `⚑ needs input` · effort · `repo ⎇ branch @sha` · subscription headroom · context % · belief count · session handle · peers. Every chip has a one-line tooltip, inert ones included; seven are **clickable**, and the git chip's repo and branch halves do different things.
-- `/context` breaks the window down by component, in tokens, using the `claude` CLI's own accounting rather than a tokenizer of DOXA's own.
-- `/about` states everything a bug report needs, including **which `lore_core` loaded**; `/doctor` (and `doxa doctor`, no TUI) is pass/fail plus a fix command; `/setup` applies findings one confirmation at a time.
-- **Keyboard-protocol reporting**: a binding your terminal cannot physically transmit is marked `✗` in `/help`, rather than silently doing nothing.
-- Desktop notifications for turn-done, staged proposals, needs-input and an available update, each individually switchable and gated on window focus.
-
-**Install and configuration**
-
-- `curl | sh`, or `uv sync && uv run doxa` from a clone. `lore_core` is a pinned dependency; a LORE plugin checkout wins over it at runtime, and `/about` says which one loaded.
-- Precedence is **environment > `~/.doxa/config.toml` > default** everywhere, and the settings modal (`ctrl+,`) shows each row's effective value next to where it came from.
-- `doxa launcher install` writes the two XDG files every major desktop reads, so DOXA appears in the start menu.
+Three smaller invariants hold the rest together. The `ctrl+p` palette and `/`
+autocomplete read one registry, so a command cannot exist on one surface and
+not the other. `AskUserQuestion` and permission requests get a real dialog, a
+blinking tab and a desktop notification — a headless SDK run with no
+`can_use_tool` callback silently auto-denies both, and DOXA supplies one.
+Precedence is **environment > `~/.doxa/config.toml` > default** everywhere, so
+the settings modal (`ctrl+,`) shows each row's effective value next to where it
+came from and makes a row the environment is winning read-only rather than a
+silent no-op.
 
 ## A session, end to end
 
-The list above says what exists. This is one path through it, in roughly
+The section above says what exists. This is one path through it, in roughly
 the order you meet each surface: start a session, watch a turn stream,
 open up what the agent did, answer something it asks, watch the window
 fill, detach, come back, and read what the deriver staged while you were
@@ -770,23 +743,33 @@ reproduce a bug against exactly what CI runs.
 ## Status
 
 DOXA is a working daily driver for its author, not a finished product.
-Everything in [Features](#features) above has shipped and is described as
-it behaves today; [CHANGELOG.md](CHANGELOG.md) has the version-by-version
-history.
-
-Not yet built: session-history drill-in past `/search`'s result list, a
-beliefs browser with evidence trails and approve/reject flows (the belief
-chip today opens a light viewer), customizable keybindings, and a
-graphical context-window map. Interfaces — config keys, socket protocol,
+Everything in [What you get](#what-you-get) and in the walkthrough above has
+shipped and is described as it behaves today; [CHANGELOG.md](CHANGELOG.md) has
+the version-by-version history. Interfaces — config keys, socket protocol,
 command names — can still change between minor versions.
 
-Three documents under [`docs/`](docs/) are **specifications, not shipped
-features**, and are written that way on purpose — specifying a thing
-before building it is cheaper than discovering the design in the diff:
+The rest of this section is the other half: what has been designed and not
+built, and what gets asked about often enough to be worth answering plainly.
+Nothing below this line is available today, and none of it should be read as
+a feature.
 
-- [`docs/plugin-api.md`](docs/plugin-api.md) — the plugin extension points. v0.34.0's `app.py` split landed along these seams, so each point names a real structure; no loader exists and none is planned for this release.
-- [`docs/split-panes.md`](docs/split-panes.md) — split panes. DOXA is a tab strip today; nothing here is built.
-- [`docs/remote.md`](docs/remote.md) — remote control of a session. Nothing here is built.
+### Specified, but not built
+
+Three documents under [`docs/`](docs/) are **specifications, not shipped
+features**, and are written that way on purpose — specifying a thing before
+building it is cheaper than discovering the design in the diff. Each one is a
+design that has been thought through and not yet implemented:
+
+- [`docs/plugin-api.md`](docs/plugin-api.md) — **the plugin API.** There is no loader: no entry-point discovery, no `~/.doxa/plugins` scan, no allowlist, no `Plugin`/`PLUGIN` object, nothing in DOXA that loads third-party code at all. What v0.34.0 actually shipped is the *shape* — the `app.py` split landed along four seams (the command registry `PANE_COMMANDS`, the status-chip records `_status_chips()`, the event dispatch map `EVENT_RENDERERS`, and the `ModelProvider` protocol), so each extension point in the spec names a real structure a loader could bind to. That is the whole claim. The spec also settles two decisions ahead of time: a plugin is never loaded from the working repository, and no plugin-facing write into the belief store will exist.
+- [`docs/split-panes.md`](docs/split-panes.md) — **split panes.** DOXA is a tab strip today; nothing here is built, and a saved tab set restores no layout because there is none to save.
+- [`docs/remote.md`](docs/remote.md) — **remote control and a web client.** Nothing here is built. The daemon's sequenced event stream is what a second renderer would consume, which is why the spec exists, but there is no network transport, no authorization model and no client. Note that this document refers forward to a permission-mode feature that has also not landed on `main`.
+
+### Not built, and not specified either
+
+- **Orchestration.** There is none, in any form. Nothing in DOXA schedules sessions, assigns work between them, supervises a fleet, or decides that one session should start another. `/msg` is the entire inter-session mechanism and a human is always the one who sends it — see the peers bullet above for exactly how far that goes.
+- **Resuming a finished session.** Detaching and reattaching work; *resuming* does not. Once a daemon has finalized — `--linger` expired, or `doxa stop` — its engine is gone, and the session returns as a read-only archived tab over its transcript. Handing that transcript back to a fresh engine so the conversation continues is planned and unwritten; nothing on `main` implements it.
+- **A beliefs browser** with evidence trails and approve/reject flows. The belief chip opens a light scope-grouped viewer today, and approval stays with LORE's own commands.
+- Session-history drill-in past `/search`'s result list, customizable keybindings, and a graphical context-window map.
 
 Run the test suite with `uv run pytest`.
 
