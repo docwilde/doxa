@@ -111,6 +111,34 @@ The layout tree serialises into the existing `layout` node. Requirements:
   because focus was implicit. There must be a test with **three or more leaves**;
   the old two-tab test passed only because the saved tab happened to be last.
 
+## Draggable dividers — a requirement, not an option
+
+Requested directly (2026-08-25): "we should be able to drag the status line and
+resize the belief browser and input line". So dividers are draggable, and the
+scope is wider than splits between sessions — the **transcript / prompt / status
+bar** proportions inside a single pane are the case the user actually hit first,
+while reviewing 166 staged proposals in a surface that was too short for them.
+
+This lands here rather than in the feature that provoked it. Dividers,
+proportional weights and minimum sizes are one mechanism; implementing a
+one-off resizer inside the beliefs browser and a second one for splits is how a
+layout system rots. The beliefs browser therefore ships as a full-height
+surface with no drag handle of its own (v0.40.0), and inherits real dividers
+when this lands.
+
+Requirements:
+
+- A divider is draggable with the mouse **and** adjustable from the keyboard —
+  a mouse-only control is unreachable for a user driving DOXA by keyboard,
+  which is most users most of the time.
+- A drag changes weights, and weights persist — so a drag is a state change with
+  no keystroke behind it. It must survive restore like any other layout state,
+  and it must respect the minimum sizes below rather than dragging a pane into
+  an unusable sliver.
+- The prompt has a floor: a resize must never leave the input line too small to
+  type into, which is the one region whose collapse makes DOXA unusable rather
+  than merely awkward.
+
 ## Minimum sizes and degradation
 
 A pane has a floor below which it is not a pane. The status bar already carries
@@ -166,5 +194,4 @@ user sees.
    side by side is the obvious reading. A second *view* onto one session
    (transcript above, prompt below) is a different feature wearing the same
    gesture.
-3. **Mouse resize of the divider?** Textual can do it; it adds a drag surface
-   and a persistence question (weights change without a keystroke).
+3. *(settled — see "Draggable dividers" above.)*
