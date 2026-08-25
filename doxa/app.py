@@ -152,6 +152,7 @@ from .ui.dialogs import (  # noqa: F401
     CloseWithTurnRunning,
     CompactConfirm,
     NeedsInputPopup,
+    PermissionModeConfirm,
     SlashComplete,
     TabRename,
     TabRenameCancelled,
@@ -208,6 +209,15 @@ from .ui.labels import (  # noqa: F401
     fmt_tokens,
     git_branch_symbol,
     help_text,
+    MODE_ACTIVE,
+    MODE_CHIP_MIN_COLS,
+    MODE_DANGER,
+    MODE_EXPLAIN,
+    MODE_SHORT,
+    MODE_WARN_GLYPH,
+    mode_chip,
+    mode_text,
+    mode_tooltip,
     MODEL_ALIASES,
     provider_glyph,
     PROVIDER_GLYPH_COLOR,
@@ -326,6 +336,40 @@ class DoxaApp(App):
         ),
         Binding("ctrl+left", "prev_tab", "Previous tab", show=False, priority=True),
         Binding("ctrl+right", "next_tab", "Next tab", show=False, priority=True),
+        # Permission-mode cycle (v0.42.0). The operator asked for Ctrl+Tab.
+        # doxa.keyboard, this project's own measurement of what a terminal
+        # can physically send, answers `unreachable_under_legacy("ctrl+tab")
+        # -> True` and `("shift+tab") -> False` (back-tab, CSI Z, older than
+        # the problem that module is about) -- so Ctrl+Tab is deliverable
+        # only under the kitty protocol and Shift+Tab is deliverable
+        # everywhere. That is almost certainly why Claude Code, which this
+        # feature adopts, uses Shift+Tab too. Shift+Tab is therefore the
+        # PRIMARY binding; Ctrl+Tab rides beside it so the operator's own
+        # muscle memory works where the terminal supports it, and /help
+        # marks it unsendable where it does not (v0.39.0's whole point --
+        # the alternative is a documented key that silently does nothing).
+        #
+        # priority=True for the reason every global here needs it: the
+        # prompt is a focused TextArea and would otherwise eat the key.
+        #
+        # What this COSTS: Textual's Screen binds shift+tab to
+        # `app.focus_previous` (non-priority, `show=False`), so taking it
+        # here removes REVERSE focus traversal. Forward traversal is
+        # untouched and wraps, so every focusable widget stays reachable by
+        # Tab alone -- nobody is stranded, they just go the long way round.
+        # A three-widget pane makes that a cheap trade; it would not be on
+        # a form.
+        Binding(
+            "shift+tab", "cycle_permission_mode",
+            "Cycle permission mode (default → acceptEdits → plan)",
+            show=False, priority=True,
+        ),
+        Binding(
+            "ctrl+tab", "cycle_permission_mode",
+            "Cycle permission mode (same as Shift+Tab; needs a "
+            "kitty-protocol terminal)",
+            show=False, priority=True,
+        ),
         Binding(
             "ctrl+c", "ctrl_c_quit",
             "Quit: detach all tabs (twice = stop the sessions)",
@@ -1209,6 +1253,36 @@ class DoxaApp(App):
 
     def action_next_tab(self) -> None:
         self._cycle_tab(1)
+
+    def action_cycle_permission_mode(self) -> None:
+        """Shift+Tab (and Ctrl+Tab where the terminal can send it): step
+        the ACTIVE pane's session to the next permission mode.
+
+        The key can only ever reach :data:`doxa.engine.CYCLE_MODES` --
+        default → acceptEdits → plan → default. That is not a check
+        performed here; it is a property of
+        :func:`doxa.engine.next_cycle_mode`, which is total over that
+        tuple and cannot return anything outside it whatever this pane's
+        current mode happens to be. Putting the boundary in a pure
+        function rather than in this handler is what makes it testable as
+        a security assertion instead of as a UI behavior.
+
+        A session parked on a gated mode (reached through ``/mode`` and a
+        confirmation) is off the ring, so one press brings it home to
+        ``default`` -- which is also the one thing a user reaching for a
+        key to get out of bypass would want it to do.
+
+        Dispatch goes through ``_cmd_mode`` like every other door, so the
+        transcript records the switch in the same words a typed
+        ``/mode`` would, and there is exactly one place that talks to the
+        engine."""
+        from .engine import next_cycle_mode
+
+        pane = self.active_pane
+        if pane is None or pane.engine is None:
+            return
+        target = next_cycle_mode(getattr(pane.engine, "permission_mode", None))
+        pane.run_worker(pane._cmd_mode(target), group="command")
 
     def _switch_to_tab(self, pane_id: str) -> None:
         """Take me to that tab, by id -- the palette's open-tab entries

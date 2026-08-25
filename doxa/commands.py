@@ -157,6 +157,26 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette="Branch: switch",
     ),
     SlashCommand(
+        name="/mode",
+        group="Session",
+        # The keycap named here is Shift+Tab, not the Ctrl+Tab the request
+        # asked for: doxa.keyboard.unreachable_under_legacy("ctrl+tab") is
+        # True, so a legacy-encoding terminal cannot send it at all. BOTH
+        # are bound (see DoxaApp.BINDINGS) and /help marks whichever this
+        # terminal was measured unable to send; this row names the one that
+        # is deliverable everywhere.
+        binding="shift+tab",
+        summary="Permission mode: what still stops and asks you before a tool runs",
+        # `/mode [name]`, not the six spelled out. /help pads its whole
+        # command column to the widest call form, and enumerating them
+        # here made that column 63 characters -- every other row in the
+        # file indented past the point of being scannable to describe one
+        # command. Bare `/mode` lists all six with what each one does,
+        # which is the surface that has room for them.
+        usage="/mode [name]",
+        palette="Permission mode",
+    ),
+    SlashCommand(
         name="/effort",
         group="Session",
         summary="Effort level for NEW sessions (the SDK sets it at connect only)",
