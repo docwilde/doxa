@@ -499,13 +499,19 @@ class DoxaApp(App):
         SAME spawn primitive Ctrl+T (:meth:`action_new_tab`) uses, just
         parametrized by path instead of this app's own launch cwd. Returns
         an error string on a bad path (never raises, never half-creates a
-        tab); None on success."""
+        tab); None on success.
+
+        Activates AND focuses the new tab, in that order and both
+        explicitly -- picking a repo out of the picker is as much "take me
+        there" as Ctrl+T is, and since v0.38.0 neither activation nor
+        focus arrives on its own (see :meth:`_focus_tab`)."""
         if not os.path.isdir(path):
             return f"not a directory: {path}"
         tabbed = self.query_one("#session-tabs", TabbedContent)
         pane = self._make_pane_at(path, lambda: self._new_session_factory_at(path))
         await tabbed.add_pane(pane)
         tabbed.active = pane.id or tabbed.active
+        self._focus_tab(pane)
         return None
 
     @property
@@ -546,6 +552,68 @@ class DoxaApp(App):
             tab for tab in self.query(TabPane)
             if isinstance(tab, (SessionPane, ArchivedSessionTab))
         ]
+
+    def _activation_pending(self) -> bool:
+        """Has Textual decided WHICH tab is active yet?
+
+        ``TabbedContent.active`` is a reactive that starts as the empty
+        string and is only filled in when the inner ``Tabs`` widget's own
+        mount handler picks a tab and its watcher posts ``TabActivated``
+        -- several message-pump turns after the panes themselves exist and
+        can already be running. ``active_pane`` is None for that whole
+        window, which is a DIFFERENT statement from "a tab that is not a
+        session is active": one is "not yet", the other is an answer.
+        :meth:`_persist_tabset` is the caller that has to tell them
+        apart."""
+        try:
+            return not self.query_one("#session-tabs", TabbedContent).active
+        except Exception:
+            return True
+
+    # -- focus ownership (v0.38.0) ------------------------------------
+
+    def _focus_tab(self, tab: "Any") -> None:
+        """Put the keyboard into TAB. The ONE place that decides what
+        "focused" means for a tab, and the one place that does it.
+
+        Until v0.38.0 nothing called this because nothing had to: a
+        ``SessionPane`` focused its own prompt in ``on_mount``, and since
+        focusing a widget inside a ``TabPane`` also ACTIVATES that pane
+        (``TabbedContent._on_tab_pane_focused``), activation was a side
+        effect of mounting -- it landed whenever Textual got round to the
+        mount, which is a race against anything else deciding which tab is
+        active. Focus now follows EXPLICIT user intent instead, so every
+        site that moves the user to a tab on purpose calls this: Ctrl+T
+        (:meth:`action_new_tab`), Ctrl+←/→ (:meth:`_cycle_tab`), the
+        palette's tab entries and the peer chip's jump
+        (:meth:`_switch_to_tab`), the repo picker's new tab
+        (:meth:`open_tab_at`), and startup/restore
+        (:meth:`_activate_initial_tab`). :meth:`_on_tab_activated` calls
+        it too -- a MOUSE click on a tab produces no key event and has no
+        handler of its own to hang this on, so the event is the only hook
+        that path has.
+
+        Only a ``SessionPane`` has a prompt to focus. An
+        ``ArchivedSessionTab`` is read-only and was not focused by the old
+        mount-time path either (it is not a SessionPane, so it never had
+        one); a ``SubagentTranscriptTab`` focuses its own scroll container
+        at the point it is opened, which is that path's own explicit
+        intent (doxa.session.runtime.open_transcript_tab)."""
+        if isinstance(tab, SessionPane):
+            with contextlib.suppress(Exception):
+                tab.query_one("#prompt-input", PromptInput).focus()
+
+    def _focus_active_tab(self) -> None:
+        """:meth:`_focus_tab` for whichever tab is active RIGHT NOW --
+        for the callers that set ``TabbedContent.active`` by id and would
+        otherwise have to look the pane back up themselves. Safe to call
+        immediately after that assignment: ``active`` is a plain reactive,
+        so ``active_pane`` resolves synchronously once it is set (it is
+        only the INITIAL value that arrives late -- see
+        :meth:`_activation_pending`)."""
+        with contextlib.suppress(Exception):
+            tabbed = self.query_one("#session-tabs", TabbedContent)
+            self._focus_tab(tabbed.active_pane)
 
     # -- item D: persisted tab set ------------------------------------
 
@@ -630,6 +698,33 @@ class DoxaApp(App):
             tabs.append(tabsets_mod.TabRecord(sid, pane.custom_name, pane_cwd))
             if pane is active_tab:
                 active_id = sid
+        if (
+            active_id is None
+            and self._restore_active_id is not None
+            and self._restore_active_id in seen
+            and self._activation_pending()
+        ):
+            # The write-ordering race, fixed in v0.38.0. A restore's FIRST
+            # write is triggered by the last restored pane reporting its
+            # session id (_note_pane_booted), and a pane can boot before
+            # Textual has resolved which tab is active: TabbedContent.
+            # active is still the empty string it starts as, active_pane
+            # is therefore None, no tab matches `is active_tab`, and
+            # active_id would be saved as null. Nothing writes again until
+            # the tab set next changes, so that one racy write is what
+            # lands on disk -- the tabs restore complete and in order, on
+            # the WRONG tab, silently. Measured as 1 failure in 80 runs of
+            # tests/test_tabsets.py's restore test with four suites in
+            # parallel; the signature is a null active id, never a wrong
+            # one.
+            #
+            # In exactly that window the record we restored FROM is the
+            # answer, and it cannot be stale: no tab is active yet, so the
+            # user cannot have switched away from one. The
+            # _activation_pending() guard is what keeps this from firing
+            # later, when a None active_id is a real answer -- a subagent
+            # transcript tab is active, and no session tab is.
+            active_id = self._restore_active_id
         for record in self._detached_this_run.values():
             if record.session_id not in seen:
                 seen.add(record.session_id)
@@ -669,19 +764,14 @@ class DoxaApp(App):
                 # the first LIVE pane -- an archived tab already opens with
                 # a block of its own explaining what it is.
                 report_placed = False
-                # Exactly one restored pane may grab focus on mount, and
-                # it has to be the SAVED ACTIVE one: a mounting pane's
-                # prompt focus activates its tab, so every pane focusing
-                # left whichever mounted LAST active regardless of the
-                # record (v0.23.0 defect, measured with three tabs). With
-                # no saved active tab the first restored one wins, which
-                # is where Textual would have landed anyway.
-                focus_id = self._restore_active_id
-                if not focus_id:
-                    focus_id = next(
-                        (s.session_id for s in self._restore_tabs if not s.archived),
-                        None,
-                    )
+                # No pane arms a mount-time focus any more (v0.38.0): a
+                # restored pane mounts in the BACKGROUND, and which tab
+                # ends up active and focused is decided once, explicitly,
+                # in _activate_initial_tab. v0.23.0's "three restored tabs
+                # always land on the last one" defect was this same
+                # entanglement -- one pane was allowed to focus on mount so
+                # that exactly one activation-by-side-effect happened. The
+                # side effect is gone, so the workaround is too.
                 for spec in self._restore_tabs:
                     if spec.archived:
                         yield ArchivedSessionTab(
@@ -703,7 +793,6 @@ class DoxaApp(App):
                     # 512-frame ring (see SessionPane._restore_transcript).
                     pane._restore_transcript_wanted = True
                     pane._restore_cwd = spec.cwd
-                    pane._focus_on_mount = spec.session_id == focus_id
                     if not report_placed:
                         pane._boot_report = self._restore_report
                         report_placed = True
@@ -742,8 +831,14 @@ class DoxaApp(App):
             pane._set_tab_class("-done-unseen", False)
             pane.set_needs_input(False)
             pane.set_staged(False)
-            with contextlib.suppress(Exception):
-                pane.query_one("#prompt-input", PromptInput).focus()
+            # Focus here as well as at every keyboard site (v0.38.0), for
+            # the ONE path that has no keyboard site to hang it on: a
+            # MOUSE click on a tab header produces no key event and runs no
+            # action of ours -- Textual activates the tab and this is the
+            # only thing we hear about it. Every other caller of
+            # _focus_tab has already focused by the time this arrives, so
+            # this is a no-op refocus for them.
+            self._focus_tab(pane)
         elif isinstance(event.pane, SubagentTranscriptTab):
             # Same "you're looking at it now" clear, for a transcript tab
             # that finished (and picked up -done-unseen) while it sat in
@@ -871,11 +966,18 @@ class DoxaApp(App):
     async def action_new_tab(self) -> None:
         """Ctrl+T: a fresh session in the same repo scope (exactly
         new_session_factory -- a new daemon under the CLI, a new in-process
-        engine otherwise), attached in a new tab and focused."""
+        engine otherwise), attached in a new tab and focused.
+
+        All three steps are stated here, in order: mount, activate, focus.
+        Focus used to arrive on its own, from the pane's own mount, and
+        activation used to arrive as a side effect of THAT -- so the
+        keystroke's outcome was really a race with Textual's mount
+        scheduling (v0.38.0)."""
         tabbed = self.query_one("#session-tabs", TabbedContent)
         pane = self._make_pane(self._new_session_factory)
         await tabbed.add_pane(pane)
         tabbed.active = pane.id or tabbed.active
+        self._focus_tab(pane)
 
     async def action_close_tab(self) -> None:
         """Ctrl+W: close-DETACH the active tab -- its daemon keeps running,
@@ -1012,7 +1114,13 @@ class DoxaApp(App):
 
     def _cycle_tab(self, delta: int) -> None:
         """Ctrl+← / Ctrl+→ -- move to the neighbouring tab, wrapping. One
-        tab wraps to itself, which is the correct no-op."""
+        tab wraps to itself, which is the correct no-op.
+
+        Focuses the tab it lands on, right here (v0.38.0). That used to be
+        left to _on_tab_activated, one message-pump turn later -- and a
+        pane mounting in the meantime could focus itself and take the
+        activation back, which is exactly what made tests/test_tab_status.
+        py's done-unseen test flaky after a Ctrl+T/Ctrl+← pair."""
         panes = self.panes()
         if len(panes) < 2:
             return
@@ -1028,6 +1136,7 @@ class DoxaApp(App):
         # NOW -- one message-pump turn earlier than TabActivated arrives.
         # Held Ctrl+←/→ is the case this exists for.
         self._jump_tab_marker()
+        self._focus_active_tab()
 
     def action_prev_tab(self) -> None:
         self._cycle_tab(-1)
@@ -1036,9 +1145,14 @@ class DoxaApp(App):
         self._cycle_tab(1)
 
     def _switch_to_tab(self, pane_id: str) -> None:
+        """Take me to that tab, by id -- the palette's open-tab entries
+        and a peer chip's jump to a session already open here. Same three
+        beats as every other explicit switch: activate, move the marker,
+        focus (v0.38.0)."""
         with contextlib.suppress(Exception):
             self.query_one("#session-tabs", TabbedContent).active = pane_id
         self._jump_tab_marker()
+        self._focus_active_tab()
 
     # -- palette (Ctrl+P) --------------------------------------------
 
@@ -1270,22 +1384,60 @@ class DoxaApp(App):
 
         self.push_screen(SetupScreen(), callback=_done)
 
+    def _activate_initial_tab(self) -> None:
+        """Startup's own explicit tab choice: ACTIVATE the tab this launch
+        is about, and FOCUS it. Both halves, said once, here.
+
+        Activation of a RESTORED set was already explicit (item D: land on
+        the tab that was active when the set was saved, not whichever one
+        Textual defaults to). The other two cases were not. An ordinary
+        launch, and a restore with no saved active tab, got their active
+        tab as a side effect of the first pane focusing its own prompt on
+        mount -- and that focus is what v0.38.0 removed.
+
+        The risk that raised, tested rather than assumed: with no
+        mount-time focus, does the first pane still end up focused?
+        Measured -- Textual DOES post TabActivated for the initially
+        active tab (``Tabs._on_mount`` picks the first tab, its watcher
+        posts it), so _on_tab_activated would in fact focus the prompt on
+        its own. That is still not good enough to rely on: "the first
+        prompt is focused because a widget we do not own happens to
+        announce itself" is the same implicitness this release exists to
+        remove, and docs/split-panes.md needs the startup leaf to be a
+        DECISION before a window can hold two panes at once. So startup
+        says what it means, and the event becomes a no-op refocus.
+
+        Which tab: the saved active one if the record named one -- live
+        pane or archived tab alike, it is where the user was -- otherwise
+        the first SESSION pane in the strip. That second rule reproduces
+        what the old mount-time focus picked, including its one non-obvious
+        case: when every restored tab was archived, the tab that came up
+        active was the FRESH pane compose() adds beside them, not the first
+        archive, because the archives have no prompt to focus and the
+        fresh pane does."""
+        try:
+            tabbed = self.query_one("#session-tabs", TabbedContent)
+        except Exception:  # noqa: BLE001 -- no tab strip, nothing to choose
+            return
+        target: "Any" = None
+        if self._restore_active_id:
+            with contextlib.suppress(Exception):
+                target = tabbed.get_pane(_restore_pane_id(self._restore_active_id))
+        if target is None:
+            target = next(iter(self.panes()), None)
+        if target is None or not target.id:
+            return
+        with contextlib.suppress(Exception):
+            tabbed.active = target.id
+        self._focus_tab(target)
+
     async def on_mount(self) -> None:
         """Auto-run /setup exactly once: a genuine first launch on this
         machine (doxa.setup.needs_first_run), never again after. The
         marker is written the moment this fires -- declining or Esc-ing
         out of the wizard must not make it reappear at the next launch;
         /setup still runs on demand any time."""
-        if self._restore_active_id:
-            # Item D: land on the tab that was active when the set was
-            # saved, not just whichever one Textual defaults to (the
-            # first). Both panes already exist (compose() built every
-            # restored tab up front) -- only which one is ACTIVE moves
-            # here, never the tab-bar order itself.
-            with contextlib.suppress(Exception):
-                self.query_one("#session-tabs", TabbedContent).active = (
-                    _restore_pane_id(self._restore_active_id)
-                )
+        self._activate_initial_tab()
         from . import setup as setup_mod
 
         if setup_mod.needs_first_run():

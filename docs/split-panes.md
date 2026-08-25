@@ -62,9 +62,9 @@ earns one, a binding:
 
 This is the part most likely to go wrong, and there is already a scar.
 
-Focus and activation are currently **entangled**: `SessionPane.on_mount`
-focuses its prompt, and focusing a widget inside a `TabPane` activates that
-pane. The activation is a side effect of the focus, not the cause. That single
+Focus and activation *were* **entangled**: `SessionPane.on_mount` focused its
+prompt, and focusing a widget inside a `TabPane` activates that pane. The
+activation was a side effect of the focus, not the cause. That single
 mechanism produced the v0.32.0 restored-active-tab defect and the standing
 flake in `tests/test_tab_status.py`.
 
@@ -72,11 +72,14 @@ flake in `tests/test_tab_status.py`.
 "which pane is active" stops being derivable from "which tab is showing", and
 an implicit mount-time focus becomes an unpredictable race between siblings.
 
-The queued focus-ownership change — focus follows explicit user intent at each
-handler (Ctrl+T, directional movement, startup, restore), with
-`_on_tab_activated` retained only for mouse clicks, which have no key event —
-is therefore a **prerequisite**, not a parallel workstream. Split panes should
-not start until it lands.
+**That prerequisite landed in v0.38.0.** Focus follows explicit user intent at
+each handler — Ctrl+T, tab cycling, jump-by-id, `open_tab_at`, startup and
+restore — through the one `DoxaApp._focus_tab`; `_on_tab_activated` is
+retained only for mouse clicks, which have no key event; the mount-time focus
+is gone, and a pane mounted without setting `active` now stays in the
+background. `tests/test_focus_ownership.py` is the standing guard. Splits can
+start from here, and inherit the rule rather than the race: a new leaf mounts
+unfocused, and whatever creates it says where the keyboard goes.
 
 Consequences to settle when it does:
 

@@ -4,6 +4,140 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.38.0 — 2026-08-25
+
+**Two tab races, both fixed at the mechanism rather than the symptom.**
+Which tab is active, and which prompt has the keyboard, were decided by
+Textual's scheduling rather than by anything the user did; and a restore
+could silently forget which tab you were on. Neither was a new bug — both
+had a workaround shipped in front of them, one in the app and one in CI,
+and this release removes both workarounds along with the causes.
+
+### Focus and activation are no longer the same event
+
+- **The defect.** `SessionPane.on_mount` focused its own prompt, and
+  focusing a widget inside a `TabPane` **activates** that pane
+  (`TabbedContent._on_tab_pane_focused`). So activation was a *side
+  effect of mounting*, landing whenever Textual got round to the mount —
+  which is a race against every other decision about which tab is active.
+  It had already produced two visible failures. v0.23.0's restore opened
+  three saved tabs and always landed on the last one to mount regardless
+  of the record, because three panes each focusing on mount meant the
+  last focus won; v0.32.0 patched that narrowly, with a `_focus_on_mount`
+  flag that let exactly *one* restored pane focus itself so that exactly
+  one activation-by-side-effect happened. And
+  `tests/test_tab_status.py::test_done_unseen_marks_a_background_tab_and_clears_on_activation`
+  was flaky: after `ctrl+t` then `ctrl+left`, the second pane's mount-time
+  focus could steal `active_pane` back *after* the key press, so
+  `_on_turn_done_status` read `active=True` for the wrong pane and never
+  set `-done-unseen`. Measured on this machine at **7 failures in 40**
+  standalone runs (the earlier estimate was ~5%).
+- **The fix: focus follows explicit user intent, at each site.** The
+  mount-time focus is gone, and `DoxaApp._focus_tab` is now the single
+  place that puts the keyboard into a tab. Every path that moves the user
+  on purpose calls it and says so in its own body: `action_new_tab`
+  (Ctrl+T and the palette's *New tab*) mounts, activates, then focuses,
+  in that order; `_cycle_tab` (Ctrl+←/→) focuses the tab it lands on
+  rather than leaving it to an event a pump-turn later; `_switch_to_tab`
+  (the palette's open-tab entries, and a peer chip's jump to a session
+  already open in this window) does the same; `open_tab_at` (the repo
+  picker's *open in a new tab*) does the same; and startup/restore now
+  choose their tab in one explicit place, `_activate_initial_tab`.
+- **`_on_tab_activated` keeps focusing, for exactly one reason.** A
+  **mouse click on a tab header** produces no key event and runs no
+  action of ours — Textual activates the tab and that message is all we
+  hear. It is the one path with no explicit handler to hang focus on, so
+  the event stays its handler. For every other caller it is now a no-op
+  refocus of a prompt that is already focused.
+- **A pane that mounts in the background now stays there.** This is the
+  behaviour change that falls out of the above, and it is deliberate:
+  `add_pane` used to switch the user to the new tab as a side effect of
+  the pane focusing itself, so *any* code that added a pane also stole the
+  window whether it meant to or not. Nothing in the tree relied on that —
+  every mount site was audited and every one of them sets `active`
+  explicitly (Ctrl+T, `open_tab_at`, the subagent transcript tab, which
+  has focused its own scroll container on open since it shipped) or is
+  compose-time and now routed through `_activate_initial_tab` (the
+  ordinary launch's single pane; every restored `SessionPane` and
+  `ArchivedSessionTab`). The palette's *attach* and *new session* entries
+  mount nothing at all: they swap the engine inside the already-active
+  pane (`switch_engine`).
+- **Startup was tested, not assumed.** With the mount-time focus removed,
+  the first pane's focus depended on Textual posting `TabActivated` for
+  the *initially* active tab — which it need not, since nothing changed.
+  Measured: it does (`Tabs._on_mount` picks the first tab and its watcher
+  posts the message), so the prompt would in fact end up focused on its
+  own. Startup focuses it explicitly anyway. "The first prompt is focused
+  because a widget we do not own happens to announce itself" is the same
+  implicitness this release exists to remove, and `docs/split-panes.md`
+  names an explicit startup leaf as a prerequisite: with two panes visible
+  at once, an implicit mount-time focus is a race between siblings.
+- **Restore's tab choice is stated once.** `_activate_initial_tab` takes
+  the saved active tab when the record named one — live pane or archived
+  tab alike — and otherwise the first *session* pane in the strip. That
+  second rule reproduces what the old mount-time focus picked, including
+  its one non-obvious case: when every restored tab was an archive, the
+  window came up on the fresh pane `compose()` adds beside them rather
+  than on the first archive, because the archives have no prompt to focus.
+  `_focus_on_mount` is deleted.
+- **CI's retry scaffolding is deleted with the flake.** The workflow
+  deselected the done-unseen test from the suite and re-ran it alone with
+  three attempts. It is deterministic now — **40 of 40** standalone runs
+  after the fix, against 33 of 40 before — so it goes back in the suite
+  with the same zero retry budget as everything else. A retry left
+  wrapped around a fixed test only hides the next regression in it.
+
+### A restore no longer forgets which tab you were on
+
+- **The defect, and why it is a different bug.** `_note_pane_booted`
+  counts restored panes down and fires `_persist_tabset()` the instant the
+  last one reports its session id. `_persist_tabset` asks
+  `TabbedContent.active_pane` which tab is active — and that resolves
+  **asynchronously**: `active` is a reactive that starts as the empty
+  string and is only filled in when the inner `Tabs` widget's own mount
+  picks a tab. A pane that boots inside that window means no tab matches
+  `pane is active_tab`, so `active_session_id` is written as `null` — and
+  nothing writes again until the tab set next changes, so that one racy
+  write is what lands on disk. The tabs restore complete and correctly
+  ordered; only the memory of which one you were on is gone, silently, on
+  the *next* launch. Observed directly (`TabbedContent.active` read as
+  `''` at persist time) and measured as **1 failure in 80** runs of
+  `tests/test_tabsets.py::test_restore_tabs_open_in_saved_order_with_names_and_active_tab`
+  with four suites in parallel. Its signature is `assert None == 'sid-2'`
+  — a *null* id, never a wrong one, which is what distinguishes it from
+  the focus race above.
+- **The fix: `_persist_tabset` will not write an id it has not resolved.**
+  When the active tab comes back `None` *and* activation is still pending,
+  it falls back to the id the restore came from. In exactly that window
+  that id cannot be stale — no tab is active yet, so the user cannot have
+  switched away from one. The pending check is what keeps the fallback
+  from outliving its window: once activation has resolved, a `None` active
+  id is a real answer (a subagent transcript tab is active and no session
+  tab is) and is written as one.
+- **Fixing the focus race did not fix this one**, which was checked rather
+  than assumed: with the focus fix in and the fallback removed, the
+  deterministic case still fails, and the loaded 80-run still fails 1 in
+  80. Same family — asynchronous activation — but a different failure
+  mode, and write-ordering is not something focus ownership can reach.
+- Tests: `tests/test_focus_ownership.py` (13, new) — startup opens with a
+  focused prompt and types into it; Ctrl+T activates *and* focuses the new
+  prompt and typing lands only there; a pane mounted without setting
+  `active` stays in the background; a pane mounting *after* a Ctrl+←
+  cannot take the activation back (the done-unseen flake, made
+  deterministic); Ctrl+←/→ and a jump-by-id carry the focus with them;
+  `open_tab_at` lands the same way as Ctrl+T; a three-tab restore with the
+  saved active tab in the *middle* (the shape that exposed the v0.23.0
+  defect — two tabs hid it) activates and focuses that one; a restore with
+  no saved active tab lands on the first live pane even when the strip
+  starts with an archive; an all-archived restore lands on the fresh pane;
+  a restore whose saved tab is an archive comes up on the archive. Plus 2
+  in `tests/test_tabsets.py` — the active id survives a persist that beats
+  activation, and a later tab switch still wins over the restored id. Of
+  the 15, the 3 that encode the two races fail against pre-change code
+  (including the exact `assert None == 'sid-2'` signature); the other 12
+  assert outcomes the old mechanism also produced, and are here because
+  the mechanism producing them changed.
+
 ## 0.37.0 — 2026-08-25
 
 **A bare clone of this repo now works.** `uv sync && uv run pytest` on a

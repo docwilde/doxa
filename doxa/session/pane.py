@@ -117,18 +117,14 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         # reported cwd wins once it boots, this is the before-boot answer
         # (and the ONLY answer an archived tab ever has).
         self._restore_cwd: "str | None" = None
-        # Does this pane grab the keyboard when it mounts? Every ordinary
-        # tab does -- it is the only tab, or it is the one Ctrl+T just
-        # opened. A RESTORE is the exception, and getting this wrong is a
-        # defect that shipped in v0.23.0 and was measured here: focusing a
-        # prompt inside a TabPane ACTIVATES that pane, so three restored
-        # panes each focusing on mount left the LAST one active no matter
-        # what DoxaApp.on_mount had set from the saved record. (Two panes
-        # hid it -- the saved active tab in that test happened to be the
-        # last one, so the wrong mechanism produced the right answer.) So
-        # during a restore exactly one pane -- the saved active one --
-        # arms this, and _on_tab_activated does the focusing for the rest.
-        self._focus_on_mount = True
+        # NOTE (v0.38.0): a pane does NOT decide its own focus. It used to
+        # -- on_mount focused this pane's prompt, guarded by a
+        # _focus_on_mount flag -- and because focusing a widget inside a
+        # TabPane ACTIVATES that pane (TabbedContent._on_tab_pane_focused),
+        # that made ACTIVATION a side effect of mounting, arriving whenever
+        # Textual got round to it. Focus now belongs to DoxaApp, at each
+        # site that moves the user on purpose (DoxaApp._focus_tab and its
+        # callers). Nothing to store here any more.
         # Out-of-band turn rendering state (replayed history after reattach,
         # or a turn another attached client drives) -- see _peer_pump.
         self._oob_turn: TurnBlock | None = None
@@ -238,8 +234,6 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
             # header, and it only needs the DOM (already mounted here),
             # never the engine.
             self.set_custom_name(self._initial_pinned_name)
-        if self._focus_on_mount:
-            self.query_one("#prompt-input", PromptInput).focus()
         self.run_worker(self._boot(), exclusive=True, group="engine")
         self.run_worker(self._peer_pump(), exclusive=True, group="peers")
 

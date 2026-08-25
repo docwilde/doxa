@@ -1,0 +1,359 @@
+"""Focus ownership (v0.38.0): focus follows EXPLICIT user intent, and
+activation is no longer a side effect of a pane mounting.
+
+The defect these lock down: ``SessionPane.on_mount`` used to focus its own
+prompt, and focusing a widget inside a ``TabPane`` ACTIVATES that pane
+(``TabbedContent._on_tab_pane_focused``). So "which tab is active" was
+decided by Textual's mount scheduling rather than by the keystroke that
+opened the tab -- observable as the v0.23.0 restored-active-tab defect
+(three restored tabs always landed on the last one), and as a ~17%
+standalone flake in tests/test_tab_status.py's done-unseen test.
+
+Every assertion here is about the user-visible outcome -- which tab is
+active, and which widget has the keyboard -- never about the mechanism
+that produced it. Headless Pilot + FakeEngine, same pattern as
+tests/test_tabs.py.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from doxa import config as config_mod
+from doxa.app import ArchivedSessionTab, DoxaApp, RestoreTabSpec, SessionPane
+from doxa.ui.prompt import PromptInput
+from textual.widgets import TabbedContent
+from tests.fakes import FakeEngine
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(monkeypatch, tmp_path):
+    """Own DOXA_HOME + runtime dir: nothing here may read or write the
+    developer's real tabsets/registry state (same guard tests/
+    test_tabsets.py installs, and for the same reason -- the restore
+    cases below persist)."""
+    monkeypatch.setenv("DOXA_HOME", str(tmp_path / "doxa-home"))
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    config_mod.invalidate()
+    yield
+    config_mod.invalidate()
+
+
+def _tracked():
+    engines: list[FakeEngine] = []
+
+    def make() -> FakeEngine:
+        engines.append(FakeEngine([]))
+        return engines[-1]
+
+    return make, engines
+
+
+def _restore_factory(session_id: str):
+    def make() -> FakeEngine:
+        engine = FakeEngine([])
+        engine.session_id = session_id
+        return engine
+
+    return make
+
+
+def _app(tmp_path):
+    make, engines = _tracked()
+    return DoxaApp(
+        cwd=str(tmp_path), engine_factory=make, new_session_factory=make,
+    ), engines
+
+
+async def _wait(pilot, cond, tries=200):
+    for _ in range(tries):
+        if cond():
+            return True
+        await pilot.pause(0.02)
+    return cond()
+
+
+def _prompt_of(pane: SessionPane) -> PromptInput:
+    return pane.query_one("#prompt-input", PromptInput)
+
+
+def _tabbed(app: DoxaApp) -> TabbedContent:
+    return app.query_one("#session-tabs", TabbedContent)
+
+
+# -- startup ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_startup_opens_with_the_first_prompt_focused(tmp_path):
+    """The keyboard is IN the prompt when the window opens.
+
+    This used to be true only because the one pane focused itself on
+    mount. With that gone, startup says so on purpose
+    (DoxaApp._activate_initial_tab) -- and the measured reason it says so
+    rather than leaving it to Textual is in that method's docstring."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        pane = app.active_pane
+        assert pane is not None
+        assert app.focused is _prompt_of(pane)
+        assert _tabbed(app).active == pane.id
+
+
+@pytest.mark.asyncio
+async def test_startup_types_straight_into_the_prompt(tmp_path):
+    """The same thing said the way a user would notice it: the first
+    keystroke after launch is text in the prompt, not a lost key."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("h", "i")
+        assert _prompt_of(app.active_pane).text == "hi"
+
+
+# -- Ctrl+T -------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ctrl_t_activates_and_focuses_the_new_prompt(tmp_path):
+    app, _engines = _app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        first = app.active_pane
+
+        await pilot.press("ctrl+t")
+        assert await _wait(pilot, lambda: len(app.panes()) == 2)
+        second = app.panes()[1]
+
+        assert second is not first
+        assert app.active_pane is second
+        assert app.focused is _prompt_of(second)
+
+
+@pytest.mark.asyncio
+async def test_ctrl_t_then_typing_lands_in_the_new_tab_only(tmp_path):
+    app, _engines = _app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        first = app.active_pane
+
+        await pilot.press("ctrl+t")
+        assert await _wait(pilot, lambda: len(app.panes()) == 2)
+        await pilot.press("y", "o")
+
+        second = app.panes()[1]
+        assert _prompt_of(second).text == "yo"
+        assert _prompt_of(first).text == ""
+
+
+# -- a background mount stays in the background -------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_pane_mounted_without_activating_stays_in_the_background(
+    tmp_path,
+):
+    """Mounting a pane is not the same act as switching to it.
+
+    Before v0.38.0 it was: the new pane focused its own prompt on mount,
+    which activated its tab, so ANY code path that added a pane also
+    switched the user to it whether it said so or not. Adding a pane
+    without setting `active` now leaves the user exactly where they
+    were."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        first = app.active_pane
+
+        background = app._make_pane(app._new_session_factory)
+        await _tabbed(app).add_pane(background)
+        await pilot.pause()
+        await pilot.pause()
+
+        assert len(app.panes()) == 2
+        assert app.active_pane is first
+        assert app.focused is _prompt_of(first)
+
+
+@pytest.mark.asyncio
+async def test_a_background_mount_cannot_steal_the_tab_you_just_switched_to(
+    tmp_path,
+):
+    """The done-unseen flake, made deterministic.
+
+    Ctrl+T then Ctrl+← puts the user back on the first tab. A pane that
+    mounts AFTER that must not take the activation back -- which is
+    exactly what a mount-time focus did, arriving a message-pump turn or
+    two late and leaving _on_turn_done_status reading `active=True` for
+    the wrong pane."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        first = app.active_pane
+
+        await pilot.press("ctrl+t")
+        assert await _wait(pilot, lambda: len(app.panes()) == 2)
+        await pilot.press("ctrl+left")
+        await pilot.pause()
+        assert app.active_pane is first
+
+        late = app._make_pane(app._new_session_factory)
+        await _tabbed(app).add_pane(late)
+        for _ in range(5):
+            await pilot.pause()
+
+        assert app.active_pane is first
+        assert app.focused is _prompt_of(first)
+
+
+# -- cycling and jumping ------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cycling_tabs_takes_the_focus_with_it(tmp_path):
+    app, _engines = _app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        first = app.active_pane
+        await pilot.press("ctrl+t")
+        assert await _wait(pilot, lambda: len(app.panes()) == 2)
+        second = app.panes()[1]
+
+        await pilot.press("ctrl+left")
+        await pilot.pause()
+        assert app.active_pane is first
+        assert app.focused is _prompt_of(first)
+
+        await pilot.press("ctrl+right")
+        await pilot.pause()
+        assert app.active_pane is second
+        assert app.focused is _prompt_of(second)
+
+
+@pytest.mark.asyncio
+async def test_jumping_to_a_tab_by_id_focuses_it(tmp_path):
+    """_switch_to_tab -- the palette's open-tab entries and the peer
+    chip's "that session is already open here" jump."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        first = app.active_pane
+        await pilot.press("ctrl+t")
+        assert await _wait(pilot, lambda: len(app.panes()) == 2)
+
+        app._switch_to_tab(first.id or "")
+        await pilot.pause()
+        assert app.active_pane is first
+        assert app.focused is _prompt_of(first)
+
+
+@pytest.mark.asyncio
+async def test_open_tab_at_activates_and_focuses_the_new_tab(tmp_path):
+    """The repo picker's spawn (item 4) is as explicit an intent as
+    Ctrl+T and lands the same way."""
+    where = tmp_path / "elsewhere"
+    where.mkdir()
+    app, _engines = _app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        assert await app.open_tab_at(str(where)) is None
+        await pilot.pause()
+
+        opened = app.panes()[-1]
+        assert app.active_pane is opened
+        assert app.focused is _prompt_of(opened)
+
+
+# -- restore ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_three_tab_restore_activates_and_focuses_the_saved_tab(tmp_path):
+    """Three tabs, saved active in the MIDDLE -- the shape that exposed
+    the v0.23.0 defect (two tabs hid it, because the saved active tab
+    happened to be the one that mounted last)."""
+    where = tmp_path / "scratch"
+    where.mkdir()
+    specs = [
+        RestoreTabSpec(f"sid-{n}", _restore_factory(f"sid-{n}")) for n in (1, 2, 3)
+    ]
+    app = DoxaApp(cwd=str(where), restore_tabs=specs, restore_active_id="sid-2")
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: len(app.panes()) == 3)
+        await pilot.pause()
+        middle = app.panes()[1]
+        assert middle._session_id == "sid-2" or middle.id == "restore-sid-2"
+        assert app.active_pane is middle
+        assert app.focused is _prompt_of(middle)
+
+
+@pytest.mark.asyncio
+async def test_a_restore_with_no_saved_active_tab_lands_on_the_first_session(
+    tmp_path,
+):
+    """No saved active id, and the first tab in the strip is an ARCHIVE.
+    The user gets a prompt anyway -- the first LIVE pane -- which is what
+    the old mount-time focus picked, and is preserved deliberately."""
+    where = tmp_path / "scratch"
+    where.mkdir()
+    specs = [
+        RestoreTabSpec("sid-dead", None, cwd=str(where), archived=True),
+        RestoreTabSpec("sid-live", _restore_factory("sid-live")),
+    ]
+    app = DoxaApp(cwd=str(where), restore_tabs=specs)
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: len(app.panes()) == 1)
+        await pilot.pause()
+        live = app.panes()[0]
+        assert len(app.archived_tabs()) == 1
+        assert app.active_pane is live
+        assert app.focused is _prompt_of(live)
+
+
+@pytest.mark.asyncio
+async def test_an_all_archived_restore_lands_on_the_fresh_pane(tmp_path):
+    """Every restored tab is an archive, so compose() adds one fresh
+    session beside them -- and THAT is the tab the window opens on,
+    because it is the only one with a prompt."""
+    where = tmp_path / "scratch"
+    where.mkdir()
+    specs = [
+        RestoreTabSpec("sid-dead-1", None, cwd=str(where), archived=True),
+        RestoreTabSpec("sid-dead-2", None, cwd=str(where), archived=True),
+    ]
+    make, _engines = _tracked()
+    app = DoxaApp(
+        cwd=str(where), engine_factory=make, new_session_factory=make,
+        restore_tabs=specs,
+    )
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: len(app.panes()) == 1)
+        await pilot.pause()
+        fresh = app.panes()[0]
+        assert len(app.archived_tabs()) == 2
+        assert app.active_pane is fresh
+        assert app.focused is _prompt_of(fresh)
+
+
+@pytest.mark.asyncio
+async def test_a_restore_onto_an_archived_tab_still_activates_it(tmp_path):
+    """The saved active tab was a session that has since ended: the
+    window comes up on its read-only archive, not on the live pane beside
+    it. (Nothing to focus there -- an archive has no prompt -- which is
+    unchanged.)"""
+    where = tmp_path / "scratch"
+    where.mkdir()
+    specs = [
+        RestoreTabSpec("sid-live", _restore_factory("sid-live")),
+        RestoreTabSpec("sid-dead", None, cwd=str(where), archived=True),
+    ]
+    app = DoxaApp(
+        cwd=str(where), restore_tabs=specs, restore_active_id="sid-dead",
+    )
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: len(app.panes()) == 1)
+        await pilot.pause()
+        assert isinstance(_tabbed(app).active_pane, ArchivedSessionTab)
+        assert app.active_pane is None

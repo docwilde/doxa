@@ -128,40 +128,20 @@ jobs:
       - name: Run test suite
         # -rf prints a "FAILED <nodeid> - <reason>" line per failure, which
         # the summary step lifts verbatim; --tb=short keeps the log readable.
-        # The flaky test below is deselected here and run on its own.
+        #
+        # One suite, no deselect, no retry budget anywhere. Until v0.38.0
+        # tests/test_tab_status.py::test_done_unseen_marks_a_background_tab_
+        # and_clears_on_activation was deselected here and re-run on its own
+        # with three attempts, because SessionPane focused its prompt on mount
+        # and that focus ACTIVATED its tab, asynchronously, after the key press
+        # the test was asserting about (measured 7 failures in 40 standalone
+        # runs on this machine). Focus ownership moved to the app, the race is
+        # gone -- 40/40 standalone runs after the fix -- and the scaffolding
+        # went with it: a retry wrapped around a fixed test only hides the next
+        # regression in it.
         run: |
           set -o pipefail
-          uv run --no-sync python -m pytest -q -rf --tb=short \
-            --deselect "tests/test_tab_status.py::test_done_unseen_marks_a_background_tab_and_clears_on_activation" \
-            2>&1 | tee pytest.log
-
-      # Scoped retry -- ONLY this one test, never the suite.
-      #
-      # Diagnosed race: SessionPane focuses its prompt in on_mount, and
-      # focusing a widget inside a TabPane activates that pane, so a
-      # newly-mounted pane can asynchronously steal active_pane from the tab
-      # this test is asserting about. Measured 1 failure in 20 standalone runs
-      # (~5%) on a quiet machine; a CI runner is noisier, and across three
-      # matrix legs that is a ~14% spurious-red rate per push.
-      #
-      # Three attempts take the residual to ~0.01% while leaving the other 784
-      # tests with zero retry budget, so a genuine regression anywhere else is
-      # still a hard, first-attempt failure. The underlying focus fix is a
-      # queued decision and is deliberately not made here.
-      - name: Run known-flaky tab-status test (scoped retry)
-        run: |
-          test_id="tests/test_tab_status.py::test_done_unseen_marks_a_background_tab_and_clears_on_activation"
-          for attempt in 1 2 3; do
-            echo "::group::attempt $attempt"
-            if uv run --no-sync python -m pytest -q -rf --tb=short "$test_id"; then
-              echo "::endgroup::"
-              [ "$attempt" -gt 1 ] && echo "::warning::known-flaky test passed on attempt $attempt"
-              exit 0
-            fi
-            echo "::endgroup::"
-          done
-          echo "::error::known-flaky test failed 3/3 attempts -- this is no longer flake, investigate"
-          exit 1
+          uv run --no-sync python -m pytest -q -rf --tb=short 2>&1 | tee pytest.log
 
       - name: Summarize result
         # Runs even when the suite failed -- that is the case it exists for.

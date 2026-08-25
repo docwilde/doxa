@@ -23,6 +23,7 @@ from doxa import config as config_mod
 from doxa import peers as peers_mod
 from doxa import tabsets
 from doxa.app import DoxaApp, RestoreTabSpec, SystemBlock
+from textual.widgets import TabbedContent
 from tests.fakes import FakeEngine
 
 
@@ -404,6 +405,73 @@ async def test_restore_tabs_open_in_saved_order_with_names_and_active_tab(tmp_pa
     record = tabsets.load(str(where))
     assert [t.session_id for t in record.tabs] == ["sid-1", "sid-2"]
     assert record.active_session_id == "sid-2"
+
+
+@pytest.mark.asyncio
+async def test_the_active_tab_survives_a_persist_that_beats_activation(tmp_path):
+    """v0.38.0's write-ordering race, made deterministic.
+
+    A restore's FIRST save is triggered by the last restored pane
+    reporting its session id (_note_pane_booted), and Textual resolves
+    which tab is active ASYNCHRONOUSLY: ``TabbedContent.active`` is the
+    empty string it starts as until the inner ``Tabs`` widget's own mount
+    picks a tab. A pane that boots inside that window persisted with
+    ``active_session_id: null`` -- tabs complete, correctly ordered, and
+    the memory of which one you were on simply gone. Measured as 1 failure
+    in 80 runs of the test above with four suites in parallel; the
+    signature was always null, never a wrong id.
+
+    Reproduced here by putting the strip back into the unresolved state
+    (observed directly before the fix) and driving the SAME trigger."""
+    where = tmp_path / "scratch"
+    where.mkdir()
+    specs = [
+        RestoreTabSpec("sid-1", _fake_factory("sid-1")),
+        RestoreTabSpec("sid-2", _fake_factory("sid-2")),
+        RestoreTabSpec("sid-3", _fake_factory("sid-3")),
+    ]
+    app = DoxaApp(cwd=str(where), restore_tabs=specs, restore_active_id="sid-2")
+    async with app.run_test() as pilot:
+        assert await _wait(
+            pilot,
+            lambda: len(app.panes()) == 3 and all(p._session_id for p in app.panes()),
+        )
+        tabbed = app.query_one("#session-tabs", TabbedContent)
+        tabbed.active = ""
+        assert tabbed.active_pane is None  # exactly what a booting pane sees
+
+        app._restore_pending = 1
+        app._note_pane_booted(app.panes()[-1])
+
+        record = tabsets.load(str(where))
+        assert [t.session_id for t in record.tabs] == ["sid-1", "sid-2", "sid-3"]
+        assert record.active_session_id == "sid-2"
+
+
+@pytest.mark.asyncio
+async def test_a_later_tab_switch_still_wins_over_the_restored_active_id(tmp_path):
+    """The fallback above must not outlive the window it exists for: once
+    activation HAS resolved, the active tab is whatever the user is
+    actually on, restored id or not."""
+    where = tmp_path / "scratch"
+    where.mkdir()
+    specs = [
+        RestoreTabSpec("sid-1", _fake_factory("sid-1")),
+        RestoreTabSpec("sid-2", _fake_factory("sid-2")),
+    ]
+    app = DoxaApp(cwd=str(where), restore_tabs=specs, restore_active_id="sid-2")
+    async with app.run_test() as pilot:
+        assert await _wait(
+            pilot,
+            lambda: len(app.panes()) == 2 and all(p._session_id for p in app.panes()),
+        )
+        await pilot.press("ctrl+left")
+        await pilot.pause()
+        assert app.active_pane._session_id == "sid-1"
+
+        app._persist_tabset()
+        record = tabsets.load(str(where))
+        assert record.active_session_id == "sid-1"
 
 
 @pytest.mark.asyncio
