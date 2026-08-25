@@ -601,7 +601,7 @@ class ChipPicker(OptionList):
             for rid, label in candidates:
                 group = self._groups.get(rid, "") if self._groups else ""
                 if grouped and not group:
-                    # An UNGROUPED row (v0.52.0): rendered where the caller
+                    # An UNGROUPED row (v0.57.0): rendered where the caller
                     # put it, with no header above it and no fold around
                     # it. The pickers' "open the browser" rows are the
                     # case -- a door rather than data. Each had to be given

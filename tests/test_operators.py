@@ -29,7 +29,7 @@ def _no_staged_leak():
 
     conftest.py points LORE_ROOT at ONE throwaway directory for the whole
     session, and `lore_remember` below stages real proposals into it. That
-    was invisible until v0.52.0 gave staged proposals a status-bar chip:
+    was invisible until v0.57.0 gave staged proposals a status-bar chip:
     every leaked proposal then widened the status bar in every LATER test,
     pushing the last two clickable chips past the click offsets
     tests/test_status_chips.py computes -- two failures in a module that

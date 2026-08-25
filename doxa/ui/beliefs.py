@@ -727,7 +727,7 @@ class BeliefsBrowserTab(TabPane):
     def focus_section(self, target: str) -> None:
         """Land on the half the reader came for.
 
-        Both chips open this one tab, and before v0.52.0 both said they
+        Both chips open this one tab, and before v0.57.0 both said they
         were opening "the beliefs browser" -- so arriving from the
         PROPOSALS picker put you at the top of a tab named for beliefs,
         which is the misleading-door complaint in one sentence. The tab

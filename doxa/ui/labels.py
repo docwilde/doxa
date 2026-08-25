@@ -555,7 +555,7 @@ def _belief_scope_label(subject: str) -> str:
     return subject or "user"
 
 
-#: FLOOR for one chip-picker row, and since v0.52.0 only a floor.
+#: FLOOR for one chip-picker row, and since v0.57.0 only a floor.
 #:
 #: It WAS the row width from v0.27.0 to v0.48.0: 72 is what fits an
 #: 80-column terminal inside a bordered dropdown once the ` ▸ ` mark is
@@ -582,7 +582,7 @@ def _fmt_belief_row(belief: dict) -> str:
     """One beliefs-picker row: when it was created, what reality last said
     about it, then the claim.
 
-    Returned WHOLE (to :data:`PICKER_ROW_MAX`) since v0.52.0 and trimmed to
+    Returned WHOLE (to :data:`PICKER_ROW_MAX`) since v0.57.0 and trimmed to
     fit by the widget that paints it. That is not only about width: the
     filter scores this string, so a claim already cut to 72 characters here
     was a claim whose tail could not be searched for. The matcher now sees
@@ -737,7 +737,7 @@ def belief_created_text(
     this codebase avoids everywhere else. Fixed width beats one column.
 
     The column it costs is no longer taken from the claim either: since
-    v0.52.0 a picker row is trimmed by the WIDGET against its own measured
+    v0.57.0 a picker row is trimmed by the WIDGET against its own measured
     width rather than by this function against a constant.
 
     ``full=True`` spells the century out (``YYYY-MM-DD HH:MM``) for the

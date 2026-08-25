@@ -495,17 +495,17 @@ async def test_pending_is_a_real_doxa_command_and_lists_the_proposals(
 async def test_no_proposal_row_in_the_dropdown_acts_on_a_proposal(
     monkeypatch, tmp_path
 ):
-    """Scope boundary, restated for v0.52.0 rather than dropped.
+    """Scope boundary, restated for v0.57.0 rather than dropped.
 
     v0.31.0 pinned "DOXA does not write at all"; v0.40.0 "not from this
-    dropdown"; v0.52.0 gives proposals their own chip and puts approve and
+    dropdown"; v0.57.0 gives proposals their own chip and puts approve and
     reject behind their rows. The property underneath has never moved and
     is what this asserts directly: NO PROPOSAL ROW ACTS ON A PROPOSAL.
     Selecting one opens that proposal's own named verbs, because a
     dropdown row is one Enter from whatever the highlight is sitting on.
 
     The DOOR row does say "approve or reject" -- deliberately, and it is
-    the v0.52.0 fix: it names where it leads. It is excluded here because
+    the v0.57.0 fix: it names where it leads. It is excluded here because
     it is a destination, not a verb this list performs."""
     from doxa.session.chips import REVIEW_ALL_ROW
 

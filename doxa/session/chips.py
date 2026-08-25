@@ -82,7 +82,7 @@ from ..ui.statusline import StatusBar
 # these 166 proposals be applied" are not the same question and a dropdown
 # only answers the first.
 #
-# EACH DOOR NAMES ITS OWN DESTINATION (v0.52.0). Both open the same tab --
+# EACH DOOR NAMES ITS OWN DESTINATION (v0.57.0). Both open the same tab --
 # it holds this session's whole LORE state, and splitting it would
 # duplicate the surface rather than clarify it -- but they open it FOCUSED
 # on the half the reader came from, and they say which.
@@ -498,7 +498,7 @@ class PaneChipsMixin:
         )
         if mem is not None:
             chips.append(StatusChip.plain(*mem))
-        # Staged proposals (v0.52.0). Beside the belief count and the
+        # Staged proposals (v0.57.0). Beside the belief count and the
         # memory fill because it is the third answer to "what does LORE
         # hold for this session" -- and the only one WAITING on the user
         # rather than merely describing the store. Until this chip the
@@ -942,7 +942,7 @@ class PaneChipsMixin:
         rows: "list[tuple[str, str]]" = [BROWSE_ALL_ROW]
         # UNGROUPED, deliberately: ChipPicker renders a row with no group
         # where the caller put it, with no header and no fold. Until
-        # v0.52.0 this row was given a group of its own purely so the
+        # v0.57.0 this row was given a group of its own purely so the
         # header machinery would not paint a bare "▎", which then became a
         # fold around a single row once groups folded -- a fold whose only
         # effect was hiding the way out.

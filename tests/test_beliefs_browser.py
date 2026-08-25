@@ -1902,7 +1902,7 @@ def test_the_engine_has_no_bulk_belief_action_under_any_name():
         )[:2] == ["self", "belief_id"]
 
 
-# -- v0.52.0: the proposals chip, and four corrections to the pickers ----
+# -- v0.57.0: the proposals chip, and four corrections to the pickers ----
 
 
 def _proposals(n, kind="memory", scope="user", start=0, **kw):

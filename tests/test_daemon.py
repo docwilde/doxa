@@ -1002,7 +1002,7 @@ async def test_the_beliefs_picker_opens_complete_and_filterable_over_the_socket(
                 # Complete: every seeded belief is resident, not just the
                 # first frame's worth.
                 # Matched by row id AND by this fixture's own claim text:
-                # the id excludes the door row (which since v0.52.0 reads
+                # the id excludes the door row (which since v0.57.0 reads
                 # "open the belief browser" and a bare "belief " substring
                 # match counted as a 601st belief), and the claim text
                 # excludes any belief another test left in the shared
