@@ -4,7 +4,15 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
-## 0.42.0 — 2026-08-25
+## 0.47.0 — 2026-08-25
+
+Three workstreams that finished together and ship as one release: the
+permission-mode surface below, the needs-input/server-tool defect fix
+(originally numbered 0.43.0, section further down), and two status-line
+fixes found by using it — the project memory-fill that vanished on every
+worktree session, and a release codename rendering as a subscription plan.
+
+### Permission mode — 2026-08-25
 
 **The session now says whether it is still asking you.** Claude Code has
 an indicator for its permission mode and a key that cycles it; DOXA had
