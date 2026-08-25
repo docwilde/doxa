@@ -243,11 +243,24 @@ async def test_expanded_reasoning_stays_expanded_as_more_arrives(monkeypatch, tm
 
 
 @pytest.mark.asyncio
-async def test_reasoning_arrival_hides_the_thinking_marker(monkeypatch, tmp_path):
-    """v0.25.0 decision: ThinkingMarker is subsumed, not replaced -- the
-    first reasoning_delta hides it exactly like the first text_delta/
-    tool_call already does, because a live "Reasoning (N chars)" header IS
-    the "something is happening" signal at that point."""
+async def test_reasoning_arrival_moves_the_marker_into_the_reasoning_phase(
+    monkeypatch, tmp_path,
+):
+    """v0.25.0 had the first reasoning_delta HIDE the marker: it was
+    subsumed, on the grounds that a live "Reasoning (N chars)" header IS
+    the "something is happening" signal at that point.
+
+    v0.51.0 reverses that call, and the reversal is the feature rather
+    than a side effect of one. A header whose count has stopped moving
+    reads exactly like a finished one, and the phase AFTER reasoning -- a
+    streaming answer -- offers the reader no progress signal at all,
+    because the text is the thing they are trying to read. So the marker
+    lives for the whole turn now and names the phase it is in; see
+    ThinkingMarker's docstring for the full argument and
+    tests/test_transcript_density.py for the appearance assertions. What
+    v0.25.0 was really protecting is UNCHANGED: the marker still arms no
+    timer, and it is still ONE widget rather than a second thing saying
+    "working" beside the reasoning header."""
     monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([]))
     app = DoxaApp(cwd=str(tmp_path))
     async with app.run_test() as pilot:
@@ -256,6 +269,16 @@ async def test_reasoning_arrival_hides_the_thinking_marker(monkeypatch, tmp_path
         assert block.thinking.display is not False  # visible before anything arrives
 
         await block.append_reasoning("thinking...")
+        assert block.thinking.display is True
+        assert block.thinking.phase == "reasoning"
+        assert block.thinking.auto_refresh is None
+
+        # ...and it hands over cleanly when the answer itself starts.
+        await block.append_text("here goes")
+        assert block.thinking.phase == "generating"
+
+        # A finished turn still takes it away. That never moved.
+        await block.mark_done(0.001, 10, False)
         assert block.thinking.display is False
 
 

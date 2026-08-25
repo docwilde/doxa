@@ -12,18 +12,25 @@
    terminal's border-drawing glyphs render cleanly.
 
    v0.13.0 visual restyle: round borders remain on genuinely BOXED chrome
-   -- ToolChip (and its ToolCallsSection wrapper), modals, panels, the
-   prompt input -- but the transcript's own turns and system lines carry
-   their role as a background TINT instead of a border (see the TurnBlock/
-   SystemBlock rules below for the full rationale). No new colors were
-   added for this -- every tint used is already a stop on the ramp above.
+   -- modals, panels, the prompt input -- but the transcript's own turns
+   and system lines carry their role as a background TINT instead of a
+   border (see the TurnBlock/SystemBlock rules below for the full
+   rationale). No new colors were added for this -- every tint used is
+   already a stop on the ramp above. v0.51.0 removed the ONE transcript
+   exception that survived that restyle: ToolChip was boxed until then,
+   and is not any more -- the transcript is unboxed all the way down, see
+   the ToolChip rules for what replaced the border at zero rows' cost.
 
-   NOTHING ANIMATES. No transitions, no pulsing borders, no spinners: the
-   in-flight turn marker (`.thinking` below) is a static Static, having
-   replaced a LoadingIndicator whose 16 Hz auto-refresh was CPU spent on
-   reassurance. The only interval left anywhere is Textual's own 2 Hz
-   caret blink on the focused prompt input, which is load-bearing -- it is
-   how you find the caret -- and runs on exactly one widget.
+   NOTHING ANIMATES ON A CLOCK. No transitions, no pulsing borders, and
+   no timer-driven spinners: the in-flight turn marker (`.thinking`
+   below) replaced a LoadingIndicator whose 16 Hz auto-refresh was CPU
+   spent on reassurance. Since v0.51.0 that marker DOES spin -- but it is
+   ticked by the engine's own delta stream (a token arriving is a frame),
+   so it costs nothing when nothing is arriving and arms no timer at any
+   point; see ThinkingMarker's docstring. The only interval left anywhere
+   is Textual's own 2 Hz caret blink on the focused prompt input, which is
+   load-bearing -- it is how you find the caret -- and runs on exactly one
+   widget.
 
    $doxa-base (v0.29.0, the `background` setting): every selector below
    that used to hardcode the ramp's own #171512 now reads $doxa-base
@@ -464,13 +471,24 @@ ReasoningSection > Contents {
 /* Tool calls (N): doxa's own wrapper around a turn's top-level chips
    (see doxa/app.py's ToolCallsSection), never model content -- so it
    gets the SAME dimmer-step + muted-text treatment as SystemBlock below,
-   not a border. Created lazily, collapsed by default. Each chip inside
-   keeps ToolChip's own bordered chrome untouched. */
+   not a border. Created lazily, collapsed by default.
+
+   v0.51.0 measured this section the way v0.44.0 measured the turn body
+   before cutting it: an EXPANDED three-call section cost 15 rows, and 4
+   of them said anything -- the header and one title per chip. The other
+   11 were chrome: six chip border rows, three chip margins, the blank
+   Contents pad under the header, and the section's own trailing margin.
+   All eleven are gone. The trailing margin went first and for v0.44.0's
+   own reason: .turn-tools is the LAST thing in a turn, TurnBlock already
+   carries margin-bottom:1, so this margin was a second blank row at the
+   END rather than a separator BETWEEN anything. The Contents pad went
+   for the same reason -- a fold and its list are one unit, not two
+   paragraphs, and with one row per chip that pad read as a hole under
+   the header rather than as breathing room. */
 ToolCallsSection {
     background: #1D1B17;
     border: none;
     padding: 0 1;
-    margin-bottom: 1;
 }
 
 ToolCallsSection > CollapsibleTitle {
@@ -483,7 +501,7 @@ ToolCallsSection > CollapsibleTitle {
 
 ToolCallsSection > Contents {
     background: #1D1B17;
-    padding: 1 0 0 1;
+    padding: 0 0 0 1;
 }
 
 .tool-calls-list {
@@ -491,16 +509,30 @@ ToolCallsSection > Contents {
     height: auto;
 }
 
-/* ToolChip is the deliberate exception to the unboxed rule above: a tool
-   call reads as a nested artifact, not a transcript entry, and keeps its
-   bordered chrome at every fold level of a trace tree (unchanged by
-   v0.13.0 -- it lived inside .turn-tools before, it lives inside
-   ToolCallsSection now). */
+/* ToolChip WAS the deliberate exception to the unboxed rule above -- a
+   round border at every fold level of a trace tree. It is not any more
+   (v0.51.0, reported: "remove the boxes around and remove the empty line
+   in between"). A border costs two rows to draw a frame around one row
+   of text, which is a 3:1 chrome-to-content ratio on the commonest thing
+   a turn contains.
+
+   What separates one chip from the next now, with no row spent on it:
+   the fold arrow every CollapsibleTitle already draws (▶/▼ -- a leading
+   glyph doxa did not have to invent), one cell of indentation under the
+   section header, and the brightness step between the header's muted
+   #8A8073 and the chips' #D8CDBB. Indentation and a glyph were chosen
+   over a blank row deliberately: a separator that costs a row is paid
+   for once per chip, and a twelve-call turn pays it twelve times.
+
+   background is inherited rather than set: a chip renders inside the
+   section (#1D1B17), inside another chip's .chip-subcalls, and inside a
+   SubagentTranscriptTab's .transcript-chips on $doxa-base -- with no
+   border to delimit it, a chip painting its own tint would read as
+   exactly the box this change removed. */
 ToolChip {
-    background: #2A251E;
-    border: round #3A3429;
-    margin: 0 0 1 0;
-    padding: 0 1;
+    border: none;
+    margin: 0;
+    padding: 0 0 0 1;
 }
 
 ToolChip > CollapsibleTitle {
@@ -508,9 +540,22 @@ ToolChip > CollapsibleTitle {
     text-style: none;
 }
 
+/* Textual's own Collapsible.Contents pads a blank row above whatever it
+   holds and indents it three cells. Zeroed: the indent is .chip-body's
+   job below (two cells, so a nested trace level still steps in), and the
+   blank row is the one this release was asked to remove, on the surface
+   where the user meets it most. */
+ToolChip > Contents {
+    padding: 0;
+}
+
+/* The expanded chip's args/result dump. Indented under its own title
+   (the border used to do that job) and with no blank row above it: the
+   title says what ran, the body says with what, and they are one
+   thought. */
 .chip-body {
     color: #D8CDBB;
-    padding: 1 2;
+    padding: 0 0 0 2;
 }
 
 /* Trace tree: a subagent's own tool calls nest as further chips inside

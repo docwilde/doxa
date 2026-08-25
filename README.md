@@ -159,7 +159,7 @@ terminal cannot physically send.
 - **A shell the model cannot reach.** A prompt line starting with `!` (`!git status`, `!pytest -q`) runs in this session's own worktree under a Textual worker, with stdin on `/dev/null`, output capped at 64 KB, and the whole process group killed at 120 seconds so a stray `!tail -f` cannot outlive the tab. It is not a slash command and not a tool, so nothing that dispatches by name and no model call can land there; exactly one module imports the executor and a test asserts that. It runs with your full privileges and **asks nothing first** — `!rm -rf ~` deletes your home directory. Neither the command nor its output enters the model's context, which also means it never reaches LORE and never survives a tab restore.
 - **Sessions that can be made to talk to each other.** Independently launched sessions on the same repo discover each other through a same-user runtime registry (0700, per-session presence file, heartbeat, dead pids reaped by any reader); `/peers` and `/sessions` list them, and `/msg <session> <text>` delivers one framed line-JSON message over the target's own 0600 socket. Every received field is scrubbed before display, and peer text reaches the model only behind an untrusted-peer preamble that names it as data, never instructions. **The model has no send tool** — its five operators are the LORE ones above — so every peer message crosses because a human typed `/msg`. Sessions can be *made* to talk; they do not talk on their own, and nothing here schedules them, routes work between them, or supervises them.
 - **A permission mode you can see and change without leaving the keyboard.** `mode:` sits beside the model and says what still stops and asks you before a tool runs; **Shift+Tab** cycles it, `/mode` sets it by name, and clicking the chip opens the same picker every other selector chip uses. The hotkey walks exactly three modes — `default` → `acceptEdits` → `plan` — all of which keep DOXA's approval dialog reachable, and it **cannot** land on the three that remove it (`bypassPermissions` runs everything unapproved, `auto` puts a model classifier where you were, `dontAsk` denies silently instead of asking); those need `/mode <name>` and a confirmation that states what stops happening, and cannot be persisted in your settings at all, so no stored value can disarm the gate of a session you have not opened yet. The chip is amber once the session leaves its starting posture and red with a `⚠` once nothing is asking — and it is the one chip that keeps its place on a narrow row, shrinking to `⚠ mode:bypass` rather than falling off the end. The keycap is Shift+Tab and not the Ctrl+Tab you might expect because DOXA measured the difference: under the legacy key encoding there is no byte for Ctrl+Tab at all. Both are bound; `/help` marks the one your terminal cannot send.
-- **Numbers that were measured, not estimated.** The status bar carries model · `mode:<permission mode>` · `⚑ needs input` · effort · `repo ⎇ branch @sha` · subscription headroom · context % · belief count · curated-memory fill · session handle · peers; every chip has a one-line tooltip, the inert ones included, and eight are clickable. `/context` breaks the window down by component in tokens using the `claude` CLI's own accounting of its own request — DOXA runs no tokenizer and estimates nothing, a context limit the CLI never reported reads `?` and stays `?`, and the one component that can only be counted in characters is reported in characters. `/about` is the screen a bug report is copied from, down to which `lore_core` loaded and which keyboard protocol your terminal actually granted — a binding it cannot physically transmit is marked `✗` in `/help` instead of silently doing nothing, and silence from the terminal reads as *not measured*, never as "legacy". There is **no animated chrome**: two timers exist in the whole app and a test asserts no third is ever armed.
+- **Numbers that were measured, not estimated.** The status bar carries model · `mode:<permission mode>` · `⚑ needs input` · effort · `repo ⎇ branch @sha` · subscription headroom · context % · belief count · curated-memory fill · session handle · peers; every chip has a one-line tooltip, the inert ones included, and eight are clickable. `/context` breaks the window down by component in tokens using the `claude` CLI's own accounting of its own request — DOXA runs no tokenizer and estimates nothing, a context limit the CLI never reported reads `?` and stays `?`, and the one component that can only be counted in characters is reported in characters. `/about` is the screen a bug report is copied from, down to which `lore_core` loaded and which keyboard protocol your terminal actually granted — a binding it cannot physically transmit is marked `✗` in `/help` instead of silently doing nothing, and silence from the terminal reads as *not measured*, never as "legacy". There is **no clock-driven chrome**: two timers exist in the whole app, a test asserts no third is ever armed, and the one thing that does animate — the in-flight spinner — is ticked by the engine's delta stream rather than by an interval.
 
 Three smaller invariants hold the rest together. The `ctrl+p` palette and `/`
 autocomplete read one registry, so a command cannot exist on one surface and
@@ -184,9 +184,13 @@ gone.
 `doxa` inside a git repository spawns a daemon and attaches to it. The
 opening block states what you got: the DOXA version, the plan the `claude`
 CLI actually reports, the model, the working directory, the repo and
-branch, and how many beliefs LORE is holding for this project. That last
-number is the point of the whole program, so it is on screen before the
-first prompt rather than behind a command.
+branch, and what LORE is holding for this project — how many beliefs, how
+many proposals are staged waiting for you, and how many entries and how
+full each of user and project curated memory is. Those numbers are the
+point of the whole program, so they are on screen before the first prompt
+rather than behind a command. The percentages are the same measured
+character counts the status bar's memory chip quotes, off the same files,
+so the two cannot disagree.
 
 The session gets its own worktree (`git worktree add
 ~/.doxa/worktrees/<repo>-<id> -b doxa/<id>`) off the branch you were on.
@@ -254,10 +258,14 @@ it off is not turning thinking off — is spelled out under
 
 <p align="center"><img src="assets/shots/reasoning.gif" width="780" alt="A turn's collapsed 'Reasoning (N chars)' fold ticking up as the model thinks; opening it reveals the streamed summarized reasoning, then the response streams in below"></p>
 
-The in-flight marker is a static `⋯ thinking`, not a spinner. It covers
-the gap before anything at all has arrived and hides itself the moment
-something does — reasoning, the first word of the reply, or the first tool
-call.
+The in-flight marker trails a running turn and names the phase it is in —
+`⋯ thinking` before anything has arrived, then `reasoning`, `generating`
+or `working` — and it spins. It is **ticked by the engine's delta stream,
+not by a clock**: a token arriving is a frame, so a turn in flight
+animates while an idle DOXA repaints nothing and arms no timer. A rate
+floor stops a fast model buying itself a repaint per token — a measured
+700-delta answer advances the glyph four times. The marker goes on
+turn_done, on a failed turn, and on a restored transcript.
 
 ### 3. Inspect what it actually did
 
@@ -266,6 +274,11 @@ fold, collapsed by default and created lazily on the first call, so a turn
 with none grows no section. N updates live as calls land. Opening the
 fold, then a chip inside it, shows that chip's exact arguments and exact
 result — formatted only on that first look, never for chips nobody opened.
+The fold is **one row per call and nothing else**: an expanded three-call
+section used to cost 15 rows, 11 of them chip borders, chip margins and
+blank padding. It costs 4 now, and what separates one chip from the next
+is indentation and the fold arrow, because a separator that costs a row is
+paid once per call.
 
 <p align="center"><img src="assets/shots/tool-calls.gif" width="780" alt="A turn's 'Tool calls (N)' count ticking from 1 to 3 as chips land; opening the fold reveals three collapsed chips; opening the first shows its ARGS and RESULT"></p>
 

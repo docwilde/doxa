@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import json
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any, Callable  # noqa: F401 -- annotation-only, see below
 
 from textual.app import ComposeResult
@@ -129,6 +130,13 @@ async def mount_transcript(
     for index, turn in enumerate(snapshot.turns):
         block = TurnBlock(turn.prompt)
         await block_list.mount(block)
+        # Hidden BEFORE a word of the restored answer is written (v0.51.0):
+        # a restored turn finished long ago, and replaying its text through
+        # the same append_text a live turn uses would otherwise tick the
+        # spinner into "generating" on the way past. mark_done below hides
+        # it anyway -- doing it first is the difference between a marker
+        # that is torn down and one that was never shown.
+        block.hide_thinking()
         if not await _composed(block.body, block.tools):
             continue
         if turn.text:
@@ -421,6 +429,11 @@ class ToolChip(Collapsible):
         self._sub_text = ""  # subagent streamed text, rendered lazily
         self._body = Static("", id=f"chip-body-{call_id}", classes="chip-body")
         self._subout = Static("", id=f"chip-subout-{call_id}", classes="chip-subout")
+        # Hide-at-zero, the same convention ToolCallsSection/ReasoningSection
+        # and the status chips already follow: an EMPTY Static is still one
+        # row, and every expanded chip that never spawned a subagent (i.e.
+        # almost all of them) was spending it on nothing. v0.51.0.
+        self._subout.display = False
         self.subcalls = Vertical(
             id=f"chip-subcalls-{call_id}", classes="chip-subcalls"
         )
@@ -465,6 +478,7 @@ class ToolChip(Collapsible):
 
     def _render_subout(self) -> None:
         if self._sub_text:
+            self._subout.display = True
             self._subout.update("SUBAGENT:\n" + self._sub_text)
 
     def format_body(self) -> None:
@@ -598,31 +612,110 @@ class ReasoningSection(Collapsible):
             await self._stream.stop()
 
 
+SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+"""The spinner's glyph cycle. Braille dots (U+2801..U+28FF) rather than
+anything from doxa's own ▎/✻/⚒ vocabulary: those are all *marks* that name
+a kind of block, and reusing one as motion would make a running turn look
+like a section header. The braille cycle is the one spinner shape every
+terminal font in wide use carries a glyph for, and it occupies exactly one
+cell in all of them -- a two-cell frame would make the label jitter
+sideways on every tick, which is worse than no spinner."""
+
+SPINNER_MIN_INTERVAL = 0.1
+"""Seconds between two spinner repaints, at most ~10 Hz.
+
+Not a timer -- there is no clock here at all. This is a floor on how often
+an ARRIVING DELTA is allowed to cost a repaint. A long answer streams
+hundreds of deltas (see SessionPane's own note about a 700-delta answer),
+and repainting the marker for each of them would trade the old
+LoadingIndicator's fixed 16 Hz for something worse: a repaint rate set by
+the model's token rate. The floor caps the cost while a turn runs; when no
+turn is running no delta arrives, nothing calls advance(), and the cost is
+exactly zero."""
+
+
 class ThinkingMarker(Static):
-    """The in-flight marker on a running turn -- STATIC, deliberately.
+    """The in-flight marker on a running turn -- a spinner since v0.51.0,
+    and still TIMERLESS, which is the whole design.
 
-    This replaced a ``LoadingIndicator``, whose 16 Hz auto-refresh
-    animation was the same class of cost as the leaked-timer bug this app
-    already fixed once: every in-flight turn armed a repaint tick, and a
-    terminal that repaints sixteen times a second to say "working" is
-    spending the user's CPU on reassurance. The marker says the same thing
-    with zero timers. Nothing in DOXA's own chrome animates; the only
-    interval left in the app is Textual's caret blink on the focused
-    prompt, which is load-bearing (it is how you find the caret) and runs
-    at 2 Hz on exactly one widget.
+    This originally replaced a ``LoadingIndicator``, whose 16 Hz
+    auto-refresh animation was the same class of cost as the leaked-timer
+    bug this app already fixed once: every in-flight turn armed a repaint
+    tick, and a terminal that repaints sixteen times a second to say
+    "working" is spending the user's CPU on reassurance. The reported
+    request -- "a spinner while reasoning or generating the output" --
+    reads at first like an argument to put that back. It is not, because
+    the expensive part of the old indicator was never the animation, it
+    was the CLOCK behind it: a timer ticks whether or not anything is
+    happening, and DOXA's status line is built under an explicit
+    no-timer, no-per-frame rule (see :class:`doxa.ui.statusline.GitLine`).
 
-    v0.25.0 decision (reasoning stream): this marker is SUBSUMED, not
-    replaced -- it still owns the gap before ANYTHING has arrived (a turn
-    with show_reasoning off, or one the model answers without thinking
-    first, has no other sign of life until its first text/tool call), but
-    TurnBlock.hide_thinking() now also fires on the first reasoning_delta,
-    exactly like it already does on the first text_delta/tool_call: once a
-    ReasoningSection exists and is counting characters, that live header
-    IS the "something is happening" signal, and a static "⋯ thinking"
-    sitting above it would be a second, redundant one."""
+    So this spinner is driven by the DELTA STREAM instead. A token
+    arriving is a tick; :meth:`advance` moves the glyph on one frame and
+    names the phase it arrived from. When nothing is arriving nothing
+    ticks, which is precisely the behaviour wanted: an idle DOXA has no
+    turn in flight, no deltas, no repaints, and ``auto_refresh`` stays
+    ``None`` on every widget in the app. :data:`SPINNER_MIN_INTERVAL`
+    keeps the other end honest -- a fast model must not be able to buy
+    itself a 200 Hz repaint loop.
+
+    PHASES. The user named two, and both are real events on the wire:
+    ``reasoning`` (reasoning_delta) and ``generating`` (text_delta). A
+    third, ``working``, covers a tool call in flight -- between a
+    ``tool_call`` and its ``tool_result`` no delta arrives at all, so the
+    glyph legitimately stops moving, and it must not sit there claiming
+    to be generating text while a Bash command runs. The opening state is
+    the original static ``⋯ thinking``: before the first event there is
+    genuinely nothing to tick on, and inventing motion for it would be
+    the animation-for-its-own-sake this app keeps refusing.
+
+    v0.25.0's decision is REVERSED here, deliberately. That release had
+    the first reasoning_delta HIDE this marker, on the grounds that a live
+    "Reasoning (N chars)" header is itself the sign of life. It is -- but
+    only while reasoning is what is happening, and the reported gap is the
+    rest of the turn: a collapsed reasoning fold whose count stopped
+    moving looks identical to a finished one, and a streaming answer's own
+    text is the one thing a reader cannot use as a progress signal,
+    because they are trying to read it. One marker that lives for the
+    whole turn and says which phase it is in replaces three different
+    "is it still going?" tells with one. It is still not a THIRD widget
+    saying "working": ThinkingMarker is the widget that already said it,
+    given the whole turn instead of its first second.
+
+    Teardown is unchanged and total: :meth:`TurnBlock.hide_thinking` --
+    called from ``mark_done`` on turn_done, from ``mark_done`` on the
+    error path in ``_run_turn``, and from the restore path -- sets
+    ``display`` False and reasserts ``auto_refresh = None``."""
 
     def __init__(self) -> None:
+        self.frame = 0
+        self.phase = ""
+        self._last_tick = 0.0
         super().__init__("⋯ thinking", classes="thinking")
+
+    def advance(self, phase: str) -> None:
+        """One delta (or one tool call) arrived: move the glyph on, and
+        show ``phase``.
+
+        A phase CHANGE always repaints, even inside the interval floor:
+        the phase is information the user asked for, and swallowing the
+        switch from "reasoning" to "generating" to save a repaint would
+        hide the very transition the marker exists to show. Only the
+        glyph's own motion is rate-limited.
+
+        A HIDDEN marker stays hidden and stays at its opening phase. Gone
+        has to mean gone: the peer pump replays events, and a text_delta
+        arriving after this turn's turn_done must not be able to bring a
+        spinner back to life on a turn that already printed its cost."""
+        if not self.display:
+            return
+        now = monotonic()
+        if phase == self.phase and now - self._last_tick < SPINNER_MIN_INTERVAL:
+            return
+        self._last_tick = now
+        self.frame = (self.frame + 1) % len(SPINNER_FRAMES)
+        self.phase = phase
+        self.update(f"{SPINNER_FRAMES[self.frame]} {phase}")
 
 
 class TurnBlock(Collapsible):
@@ -654,7 +747,15 @@ class TurnBlock(Collapsible):
         self.tools = Vertical(classes="turn-tools")
         self.tool_section: ToolCallsSection | None = None
         super().__init__(
-            self.thinking, self.reasoning_holder, self.body, self.tools,
+            # The marker is LAST (v0.51.0; it used to lead). A spinner
+            # nobody can see is not a spinner: the block list scroll_end()s
+            # after every event, so the bottom of the running turn is what
+            # is on screen, and a marker pinned above a streaming answer
+            # scrolls out of view within a paragraph. Trailing the output
+            # also matches how it reads -- "here is what has arrived, and
+            # here is doxa still working" -- rather than announcing work
+            # above material that has already landed.
+            self.reasoning_holder, self.body, self.tools, self.thinking,
             title=self._render_title(), collapsed=False,
         )
 
@@ -674,7 +775,10 @@ class TurnBlock(Collapsible):
             self.thinking.auto_refresh = None
 
     async def append_text(self, chunk: str) -> None:
-        self.hide_thinking()
+        # v0.51.0: the marker advances instead of hiding. A delta arriving
+        # IS the spinner's tick (see ThinkingMarker) -- and the phase it
+        # names, "generating", is one of the two the request asked for.
+        self.thinking.advance("generating")
         self.assistant_text += chunk
         # Lazy, like everything else in this pane: the stream (and its one
         # background asyncio task -- an event-driven coroutine, NOT a
@@ -689,10 +793,13 @@ class TurnBlock(Collapsible):
         """Mount (on first use) and stream into this turn's ONE
         ``ReasoningSection`` -- same lazy-creation shape as
         ``add_tool_chip``, mirrored for reasoning instead of tool calls.
-        ``hide_thinking()`` here too: reasoning arriving is exactly as much
-        "something is happening" as a tool call or the first word of the
-        answer (see ThinkingMarker's v0.25.0 docstring note)."""
-        self.hide_thinking()
+
+        v0.51.0: this used to call ``hide_thinking()`` -- v0.25.0's
+        judgment that a live "Reasoning (N chars)" header made the marker
+        redundant. It now advances the marker into the ``reasoning``
+        phase instead; ThinkingMarker's docstring records why that call
+        was reopened."""
+        self.thinking.advance("reasoning")
         if self.reasoning_section is None:
             self.reasoning_section = ReasoningSection()
             await self.reasoning_holder.mount(self.reasoning_section)

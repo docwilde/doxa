@@ -132,6 +132,17 @@ class PaneRuntimeMixin:
         # DoxaApp.__init__ and this reads the cache (boot cost: zero).
         if banner_mod.enabled() and not block_list.children:
             await block_list.mount(BootBanner(self.app.size.width))
+        # Staged-proposal count for the `lore` line (v0.51.0). A socket
+        # round trip, and affordable exactly HERE and nowhere else: the
+        # opening block is drawn once, before the first prompt, on a pane
+        # that has just spent a connect and a git subprocess -- whereas
+        # _refresh_status runs on every peer event and every turn-done
+        # under the no-per-frame rule GitLine documents. Failure leaves
+        # _pending_count None and the line simply omits the fact.
+        with contextlib.suppress(Exception):
+            lister = getattr(self.engine, "list_pending", None)
+            if lister is not None:
+                self._pending_count = len(await lister())
         identity = SystemBlock(self._identity_text(git_cwd))
         identity.id = "identity-block"
         await block_list.mount(identity)
@@ -322,6 +333,11 @@ class PaneRuntimeMixin:
             # A subagent narrating: trace material, nested under its
             # Task chip -- never mixed into the turn's own prose.
             parent.append_subagent_text(ev.data["text"])
+            # The turn's spinner still has to move (v0.51.0): this delta
+            # never reaches block.append_text, so without the tick a turn
+            # spent entirely inside one Task call would freeze the marker
+            # on whatever frame its tool_call left it.
+            block.thinking.advance("working")
             # Live routing: an open transcript tab for THIS parent gets
             # the same narration, alongside (not instead of) the chip.
             self._route_transcript_text(parent_id, ev.data["text"])
@@ -340,6 +356,7 @@ class PaneRuntimeMixin:
             # trace buffer its spoken text already uses rather than
             # being dropped on the floor.
             parent.append_subagent_text(ev.data["text"])
+            block.thinking.advance("working")  # same reason as above
             self._route_transcript_text(parent_id, ev.data["text"])
         else:
             await block.append_reasoning(ev.data["text"])
@@ -347,7 +364,11 @@ class PaneRuntimeMixin:
     async def _render_tool_call(
         self, ev: EngineEvent, block: TurnBlock, chips: dict[str, ToolChip],
     ) -> None:
-        block.hide_thinking()
+        # "working", not "generating" (v0.51.0): between a tool_call and
+        # its tool_result no delta arrives, so the glyph genuinely stops
+        # moving -- and a frozen spinner labelled "generating" would be
+        # claiming text is streaming while a Bash command runs.
+        block.thinking.advance("working")
         chip = ToolChip(ev.data["id"], ev.data["name"], ev.data["input"])
         chips[ev.data["id"]] = chip
         parent_id = ev.data.get("parent_id") or ""

@@ -1430,6 +1430,36 @@ def memory_fill(scope: str, project: "str | None" = None) -> "tuple[int, int] | 
         return None
 
 
+def memory_entries(scope: str, project: "str | None" = None) -> "int | None":
+    """How many curated-memory ENTRIES a scope holds, or None if unknown.
+
+    The companion figure to :func:`memory_fill` above, and read from the
+    SAME file by lore_core's own ``read_entries`` -- so "9 entries, 39%
+    full" is two views of one file rather than two numbers that can
+    disagree. Counting `- ` lines here instead would be doxa reimplementing
+    lore_core's storage format, which is exactly how the two drift.
+
+    Deliberately UNCACHED, where memory_fill is cached on mtime. That
+    cache exists because ``_refresh_status`` runs several times a second
+    and must not add file reads; this function has one caller, the opening
+    identity block, drawn once per session boot (and again only after an
+    auth flow re-renders it). One read of an ≤8800-character file, once,
+    does not need a cache -- and a second cache keyed the same way is a
+    second thing to invalidate.
+
+    Same failure policy as memory_fill: absent means omitted, never
+    invented."""
+    try:
+        from lore_core import memory as lore_memory
+
+        path = lore_memory.memory_path(scope, project or "")
+        if not path.exists():
+            return None
+        return len(lore_memory.read_entries(path))
+    except Exception:
+        return None
+
+
 def memory_fill_chip(user: "tuple[int, int] | None",
                      project: "tuple[int, int] | None") -> "tuple[str, str] | None":
     """(chip text, hint) for the curated-memory fill, or None to omit.
