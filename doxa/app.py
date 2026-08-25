@@ -34,7 +34,9 @@ that streams past -- and compact further behind ONE per-turn "Tool calls
 
 Asyncio/Textual coexistence follows PHASE0_FINDINGS.md §4 exactly:
 ``run_worker`` schedules the SDK-driving coroutine on Textual's own running
-event loop (default ``thread=False``), same as ``spike/03_textual_marriage.py``
+event loop (default ``thread=False``) -- proven by the phase-0
+validation spike, whose result §4 records (the scripts themselves are gone;
+the finding is what mattered)
 proved out.
 
 v0.34.0 split this file. It was 6,415 lines, 36% of the package, and every
