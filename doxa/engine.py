@@ -99,6 +99,8 @@ from claude_agent_sdk import (
     PermissionResultAllow,
     PermissionResultDeny,
     ResultMessage,
+    ServerToolResultBlock,
+    ServerToolUseBlock,
     StreamEvent,
     SystemMessage,
     TextBlock,
@@ -471,6 +473,43 @@ def _tool_result_text(content: Any) -> str:
             c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"
         )
     return ""
+
+
+def _server_tool_result_text(content: Any) -> "tuple[str, bool]":
+    """``(readable text, is_error)`` for a ``ServerToolResultBlock``.
+
+    A client-side ``ToolResultBlock`` has a schema this app can rely on
+    (str, or a list of typed content parts). A server-side one does not:
+    the installed SDK types its ``content`` as a bare ``dict[str, Any]``
+    and says so in its own docstring -- "the raw dict from the API,
+    opaque to this layer" -- because every server tool (advisor,
+    web_search, web_fetch, the code-execution family) returns its own
+    shape, and the set of them grows without the SDK changing.
+
+    So this reads defensively rather than pretending to know the schema,
+    in the order that gets a human the most: an error code if the call
+    failed, the ordinary text parts if there are any, otherwise compact
+    JSON. The last tier is the point of the function -- a shape nobody
+    here has seen yet still renders as SOMETHING a reader can judge,
+    which is the whole difference between a tool that errors and a tool
+    whose result silently vanishes."""
+    if isinstance(content, dict):
+        code = content.get("error_code") or content.get("error")
+        if code and not content.get("content"):
+            return f"error: {code}", True
+        inner = content.get("content")
+        if inner is not None:
+            text, _ = _server_tool_result_text(inner)
+            return text, bool(code)
+    text = _tool_result_text(content)
+    if text:
+        return text, False
+    if content is None:
+        return "", False
+    try:
+        return json.dumps(content, ensure_ascii=False, default=str), False
+    except Exception:  # noqa: BLE001 -- unserializable payload, repr is still readable
+        return str(content), False
 
 
 _IMAGE_MEDIA_SUFFIX = {
@@ -1313,6 +1352,13 @@ class SessionEngine:
 
             elif isinstance(message, AssistantMessage):
                 parent = getattr(message, "parent_tool_use_id", None)
+                # Server-tool results ride the ASSISTANT message but are
+                # persisted through _persist_tool_results like every other
+                # tool result -- doxa.transcript reads results from the
+                # user-role record only, and a restore that dropped them
+                # would reintroduce the same vanished-result bug one launch
+                # later. One wire shape in, one reader out.
+                server_result_blocks: list[dict] = []
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         pending_assistant_blocks.append(
@@ -1332,9 +1378,67 @@ class SessionEngine:
                         if parent:  # a subagent's call: nests under the Task chip
                             event_data["parent_id"] = parent
                         yield EngineEvent("tool_call", event_data)
+                    elif isinstance(block, ServerToolUseBlock):
+                        # A tool the API ran on the model's behalf (advisor,
+                        # and whatever else joins ServerToolName later).
+                        # Same three beats as a client-side call above and
+                        # deliberately the SAME event type: it IS a tool
+                        # call, it wants the same chip, and giving it a
+                        # second event vocabulary would mean every consumer
+                        # -- the pane, the daemon frame replay, a plugin --
+                        # had to learn two spellings of one idea. The name
+                        # ("advisor", "web_search", ...) is the discriminator
+                        # for anyone who cares which side ran it.
+                        #
+                        # Client-side WebSearch/WebFetch are NOT this: the
+                        # CLI runs those itself and they arrive as ordinary
+                        # ToolUseBlocks. Measured against the installed SDK
+                        # and a real turn, not assumed.
+                        scrubbed_input = _scrub_json(block.input)
+                        pending_assistant_blocks.append({
+                            "type": "tool_use", "id": block.id,
+                            "name": block.name, "input": scrubbed_input,
+                        })
+                        self._tool_names[block.id] = block.name
+                        self._tool_started[block.id] = time.monotonic()
+                        event_data = {
+                            "id": block.id, "name": block.name, "input": scrubbed_input,
+                        }
+                        if parent:
+                            event_data["parent_id"] = parent
+                        yield EngineEvent("tool_call", event_data)
+                    elif isinstance(block, ServerToolResultBlock):
+                        # The other half, and the half that actually went
+                        # missing: a server tool's result arrives on the
+                        # ASSISTANT message (not on a following user message
+                        # the way a client-side tool_result does), so the
+                        # UserMessage branch below never saw it and nothing
+                        # else looked.
+                        started = self._tool_started.pop(block.tool_use_id, None)
+                        duration_ms = (
+                            int((time.monotonic() - started) * 1000) if started else None
+                        )
+                        raw_text, is_error = _server_tool_result_text(block.content)
+                        result_text = _scrub_text(raw_text)
+                        server_result_blocks.append({
+                            "type": "tool_result", "tool_use_id": block.tool_use_id,
+                            "content": result_text, "is_error": is_error,
+                        })
+                        event_data = {
+                            "id": block.tool_use_id,
+                            "name": self._tool_names.get(block.tool_use_id),
+                            "result_summary": result_text[:280],
+                            "is_error": is_error,
+                            "duration_ms": duration_ms,
+                        }
+                        if parent:
+                            event_data["parent_id"] = parent
+                        yield EngineEvent("tool_result", event_data)
                 if pending_assistant_blocks:
                     self._persist_assistant_blocks(pending_assistant_blocks)
                     pending_assistant_blocks = []
+                if server_result_blocks:
+                    self._persist_tool_results(server_result_blocks)
 
             elif isinstance(message, UserMessage):
                 parent = getattr(message, "parent_tool_use_id", None)

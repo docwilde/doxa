@@ -40,6 +40,115 @@ not written from memory.
   that it is what the session WOULD have cost on API pricing. `/usage` and the
   turn title keep the full wording — neither is width-constrained, and `/usage`
   is prose where spelling it out is the point.
+
+## 0.43.0 — 2026-08-25
+
+*Scoped and written as 0.43.0, landed after 0.44.0. `pyproject.toml` keeps
+the higher number — a declared version may not go backwards — and this
+entry sits where its own number belongs.*
+
+**A permission dialog that answered to no key at all, and the web search
+that looked broken because of it.** Reported as two defects: a web search
+whose invocation appeared and then nothing ever happened, and a permission
+dialog — blinking tab, multiple-choice menu, all of it on screen — that
+ignored `↑`/`↓`, ignored `1`/`2`/`3`, ignored Enter. They are ONE defect.
+The web search was not broken; it was *parked*, waiting on a permission
+request the user could not answer — and neither could anyone else: `Esc`,
+the documented way out, had gone deaf with every other key. A tab in that
+state has no way forward at all.
+
+**Reproduced before anything was changed**, in a driven app and against
+the real SDK, because the shape of the fix depended on which of the two
+stories was true:
+
+- A real turn through `SessionEngine` and the installed CLI: `WebSearch`
+  arrives as an ordinary `ToolUseBlock`/`ToolResultBlock` pair, DOXA
+  renders the call, `can_use_tool` fires with `display_name` set, and the
+  turn then blocks inside the SDK's permission round-trip until the
+  dialog is answered. That is the whole of "I see the tool invocation but
+  nothing happens afterwards" — the missing render was a missing
+  keystroke.
+- The dialog is `can_focus = False` by design and driven entirely through
+  `PromptInput`'s key protocol, so it answers a key only while the PROMPT
+  holds focus. Nothing guaranteed that. Three ordinary gestures broke it,
+  each measured in a headless pilot: **clicking the blinking tab when it
+  is already the active tab** (Textual focuses the tab strip and posts no
+  `TabActivated`, so `_on_tab_activated` — the only hook the mouse path
+  has — never runs); **clicking the transcript** to scroll back and read
+  before deciding (`#block-list` is a focusable `VerticalScroll`, and its
+  own up/down bindings then eat the arrows); and a stray **Tab** (the
+  prompt's `tab_behavior` is `"focus"`).
+
+- **A blocking request now claims the keyboard.** Opening the dialog
+  focuses that pane's prompt — but only when the pane is the tab the user
+  is actually looking at. Focusing a widget inside a `TabPane` activates
+  that pane, so doing it unconditionally would yank a background
+  request's tab out from under someone typing in another one; the blink
+  is that case's whole signal, and `_focus_tab` already focuses the
+  prompt when they come over to answer.
+- **And a net under it, at the app level.** While the active pane has a
+  dialog open, focus landing anywhere else on that screen returns to the
+  prompt. This is **not** a retreat from v0.38.0's focus ownership: focus
+  still moves only on explicit intent, and a request that has stopped the
+  session *is* intent — the rule names one more site rather than
+  reinstating the mount-time focus that release removed. Narrow on
+  purpose: only while a dialog is genuinely open, only for the active
+  pane, only on that pane's own screen (a pushed modal keeps its own
+  focus), and `ChipPicker` — the one widget here that deliberately takes
+  focus — is exempt. Mouse-wheel scrolling never needed focus and is
+  unaffected.
+- Seven tests assert the user-visible outcome rather than the mechanism:
+  the dialog answers to `↑`/`↓`, to a number key and to Enter after each
+  of the three gestures; `Esc` still declines; the request that arrives
+  while the pane is in the **background** — the reported path — answers
+  after the user comes over and reads the transcript first; and, as the
+  guard against over-fitting, with no dialog open the transcript still
+  takes focus when you click it and keeps it. All seven fail against
+  pre-fix code.
+
+**Separately: a server-side tool's result was silently dropped.** Not
+what the user hit — `WebSearch`/`WebFetch` are client-side tools the CLI
+runs itself, measured, not assumed — but a real hole one block type away
+from it. Tools the API runs on the model's behalf (`advisor`, and
+whatever else joins `claude_agent_sdk.ServerToolName`) arrive as
+`ServerToolUseBlock` and `ServerToolResultBlock`, and the engine handled
+neither: the call never drew a chip and the answer vanished with no
+error, which is worse than a tool that fails, because nothing on screen
+says whether it ran.
+
+- Both blocks now render, onto the **existing** `tool_call`/`tool_result`
+  events and the same chip. Deliberately not a new event vocabulary and
+  no new `EVENT_RENDERERS` row: it *is* a tool call, and a second
+  spelling of one idea would have to be learned by the pane, the daemon's
+  frame replay and every plugin. The tool name is the discriminator for
+  anyone who cares which side ran it.
+- The result rides the **assistant** message, not the user message a
+  client-side result comes back on — which is precisely why the
+  `UserMessage` branch never saw it. It is persisted through
+  `_persist_tool_results` all the same, because `doxa.transcript`'s
+  replay reads results from the user-role record only, and a restore that
+  dropped them would reintroduce the same vanished-result bug one launch
+  later.
+- The SDK types a server tool's result content as an opaque dict on
+  purpose (every server tool has its own schema, and the set grows
+  without the SDK changing), so `_server_tool_result_text` reads it
+  defensively: an error code if the call failed, ordinary text parts if
+  there are any, compact JSON otherwise. That last tier is the point — a
+  shape nobody has seen yet still renders as *something* a reader can
+  judge.
+
+**One latent suite flake, surfaced by adding to the suite.**
+`test_recent_sessions_are_the_empty_query_answer` seeded its two sessions
+with fixed 2026-08-2x timestamps, while every engine-driven test in the
+suite indexes a real session stamped at run time — always newer. Since
+`recent_sessions()` orders by `last_ts` and pages at `RESULT_LIMIT` (20),
+the test was really asserting "fewer than twenty other tests have run
+first", and four more engine tests were enough to make it answer no. The
+seed is now stamped ahead of any clock this suite can run under, so the
+test asks about the query rather than about its neighbours; the seeded
+`msg` rows keep their fixed dates, which the search, label and excerpt
+assertions quote literally.
+
 ## 0.41.0 — 2026-08-25
 
 **The logo is now the first thing a session shows, and `/img` will tell

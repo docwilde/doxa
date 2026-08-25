@@ -632,6 +632,48 @@ class DoxaApp(App):
             tabbed = self.query_one("#session-tabs", TabbedContent)
             self._focus_tab(tabbed.active_pane)
 
+    @on(events.DescendantFocus)
+    def _hold_focus_for_a_blocking_dialog(self, event: events.DescendantFocus) -> None:
+        """While the active pane has a needs-input dialog up, the keyboard
+        stays on that pane's prompt (v0.43.0).
+
+        This is the net under :meth:`_focus_tab`, and it exists because the
+        needs-input dialog is the one surface in this app where losing
+        focus is not a cosmetic annoyance but a WEDGED SESSION: the dialog
+        is ``can_focus = False`` and answered only through
+        ``PromptInput.on_key``, the agent is blocked until it is answered,
+        and Esc -- the documented way out -- is one of the keys that stops
+        working. Measured routes into that state, each of them one ordinary
+        gesture: clicking the transcript to scroll back and read before
+        deciding (``#block-list`` is a focusable ``VerticalScroll``, and
+        its own up/down bindings then eat the arrows), pressing Tab (the
+        prompt's ``tab_behavior`` is "focus"), and -- the reported one --
+        clicking the BLINKING TAB when it is already the active tab, which
+        focuses the tab strip and posts no ``TabActivated``, so
+        :meth:`_on_tab_activated`, the only hook the mouse path has, never
+        runs.
+
+        Not a retreat from v0.38.0: focus still moves only on explicit
+        intent, and a request that has stopped the session is intent. The
+        rule is narrow on purpose -- only while a dialog is actually open,
+        only for the ACTIVE pane, and only on that pane's own screen, so a
+        pushed modal keeps its own focus. :class:`ChipPicker` and
+        :class:`TabRename` are the two widgets on this screen that
+        deliberately take focus for themselves, so they are exempt rather
+        than fought with -- an editor whose caret got pulled out from
+        under it would be a new defect, not a fix. Mouse-wheel scrolling
+        never needed focus and is unaffected."""
+        pane = self.active_pane
+        if pane is None or isinstance(event.widget, (ChipPicker, TabRename)):
+            return
+        with contextlib.suppress(Exception):
+            if not pane.query_one("#needs-input-popup", NeedsInputPopup).is_open:
+                return
+            prompt = pane.query_one("#prompt-input", PromptInput)
+            if event.widget is prompt or event.widget.screen is not prompt.screen:
+                return
+            prompt.focus()
+
     # -- item D: persisted tab set ------------------------------------
 
     def _note_pane_booted(self, pane: "SessionPane") -> None:

@@ -32,6 +32,7 @@ from ..engine import EngineEvent
 from ..history import SessionSearch
 from ..ui.dialogs import NeedsInputPopup
 from ..ui.labels import _escape_markup, _needs_input_summary, _subagent_label
+from ..ui.prompt import PromptInput
 from ..ui.statusline import GitLine
 from ..ui.transcript import (
     BootBanner,
@@ -515,10 +516,29 @@ class PaneRuntimeMixin:
         gated exactly like notify_turn_done, by THIS pane's real
         app_has_focus (the detached-daemon case, no client at all
         attached, is handled separately, daemon-side -- see
-        doxa/daemon.py's _peer_pump)."""
+        doxa/daemon.py's _peer_pump).
+
+        Claims the keyboard, if this pane is the tab the user is actually
+        looking at (v0.43.0). The dialog is driven entirely through
+        ``PromptInput``'s key protocol -- it is ``can_focus = False`` by
+        design -- so a dialog opening while focus sits on the transcript
+        or the tab strip is a dialog no key can answer, and this one
+        BLOCKS the session until it is. That makes "something is waiting
+        on you" exactly the explicit intent v0.38.0 says a focus move
+        needs; it does not weaken that rule, it names one more site.
+
+        Only when this pane is ACTIVE. Focusing a widget inside a
+        ``TabPane`` also activates that pane, so doing it unconditionally
+        would yank a background request's tab out from under someone
+        typing in another one -- the blink is that case's whole signal,
+        and ``DoxaApp._focus_tab`` focuses the prompt when they come over
+        to answer."""
         popup = self.query_one("#needs-input-popup", NeedsInputPopup)
         popup.ask(data)
         self.set_needs_input(True)
+        if getattr(self.app, "active_pane", None) is self:
+            with contextlib.suppress(Exception):
+                self.query_one("#prompt-input", PromptInput).focus()
         notify_mod.notify_needs_input(
             getattr(self.app, "app_has_focus", True),
             self.display_name(),
