@@ -103,7 +103,7 @@ from .engine import (
 )
 from .peers import MAX_FRAME_BYTES, registry_dir, runtime_dir
 
-PROTOCOL_VERSION = 1
+from .events import PROTOCOL_VERSION  # noqa: F401 -- re-exported
 DEFAULT_LINGER_SECS = 120.0
 # A freshly spawned daemon that NO client has attached to yet gets this
 # claim window (>= spawn_daemon's own wait) before giving up, regardless of

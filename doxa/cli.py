@@ -49,7 +49,22 @@ from typing import Any, Callable  # noqa: F401 -- annotation-only
 from . import config, peers, tabsets
 from .app import DoxaApp, RestoreTabSpec
 from . import history as history_mod
-from .daemon import spawn_daemon
+# Imported lazily by _spawn_daemon below: doxa.daemon pulls doxa.engine and
+# therefore claude_agent_sdk (404 ms measured). `doxa doctor`, `doxa
+# launcher install`, `--help` and an attached TUI never spawn a daemon, and
+# until now every one of them paid that import before doing anything.
+
+
+def _spawn_daemon(*args: object, **kwargs: object) -> tuple:
+    """doxa.daemon.spawn_daemon, resolved at the moment of use.
+
+    Through this module's own attribute rather than by importing the name
+    directly: the suite substitutes a fake spawn with
+    ``monkeypatch.setattr(cli_mod, "spawn_daemon", ...)``, and a direct
+    import here would walk past the patch and really fork a daemon."""
+    import sys
+
+    return getattr(sys.modules[__name__], "spawn_daemon")(*args, **kwargs)
 
 
 def _resolve(entries: list[peers.PeerInfo], prefix: str | None) -> peers.PeerInfo:
@@ -84,7 +99,7 @@ def _run_attached(
     from .client import EngineClient
 
     def new_session_factory() -> EngineClient:
-        _sid, dsock = spawn_daemon(cwd, model=model, linger_secs=linger)
+        _sid, dsock = _spawn_daemon(cwd, model=model, linger_secs=linger)
         return EngineClient(dsock)
 
     def new_session_factory_at(path: str) -> EngineClient:
@@ -92,7 +107,7 @@ def _run_attached(
         # DoxaApp.open_tab_at): the SAME spawn_daemon call above, just
         # parametrized by an operator-chosen path instead of this
         # process's own launch cwd -- not a second daemon-spawning path.
-        _sid, dsock = spawn_daemon(path, model=model, linger_secs=linger)
+        _sid, dsock = _spawn_daemon(path, model=model, linger_secs=linger)
         return EngineClient(dsock)
 
     def resume_session_factory(path: str, session_id: str) -> EngineClient:
@@ -103,7 +118,7 @@ def _run_attached(
         # session id (a resume keeps its id; see that function's
         # docstring). Threaded into every DoxaApp construction in this
         # module so /resume is daemon-backed wherever the TUI is.
-        _sid, dsock = spawn_daemon(
+        _sid, dsock = _spawn_daemon(
             path, model=model, linger_secs=linger, resume=session_id,
         )
         return EngineClient(dsock)
@@ -251,7 +266,7 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
         # a tab opened from the picker during a RESTORED launch is a real
         # daemon-backed session like every other tab in the window, not a
         # silent fallback to an in-process one (DoxaApp's own default).
-        _sid, dsock = spawn_daemon(path, model=model, linger_secs=linger)
+        _sid, dsock = _spawn_daemon(path, model=model, linger_secs=linger)
         return EngineClient(dsock)
 
     def resume_session_factory(path: str, session_id: str) -> EngineClient:
@@ -262,13 +277,13 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
         # session id (a resume keeps its id; see that function's
         # docstring). Threaded into every DoxaApp construction in this
         # module so /resume is daemon-backed wherever the TUI is.
-        _sid, dsock = spawn_daemon(
+        _sid, dsock = _spawn_daemon(
             path, model=model, linger_secs=linger, resume=session_id,
         )
         return EngineClient(dsock)
 
     if not resolved.tabs and not resolved.archived:
-        _sid, dsock = spawn_daemon(launch_cwd, model=model, linger_secs=linger)
+        _sid, dsock = _spawn_daemon(launch_cwd, model=model, linger_secs=linger)
         app = DoxaApp(
             cwd=launch_cwd, model=model,
             engine_factory=lambda: EngineClient(dsock),
@@ -291,7 +306,7 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
     app_cwd = resolved.tabs[0][1].cwd if resolved.tabs else launch_cwd
 
     def new_session_factory() -> EngineClient:
-        _sid, dsock = spawn_daemon(app_cwd, model=model, linger_secs=linger)
+        _sid, dsock = _spawn_daemon(app_cwd, model=model, linger_secs=linger)
         return EngineClient(dsock)
 
     specs = []
@@ -559,3 +574,17 @@ def _resolve_branch_flag(cwd: str, args: argparse.Namespace):
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def __getattr__(name: str) -> object:
+    """``doxa.cli.spawn_daemon``, imported on first use (PEP 562).
+
+    doxa.daemon pulls doxa.engine and with it claude_agent_sdk -- 404 ms
+    before anything is on screen, for a command that may never spawn a
+    daemon. The name stays reachable so existing imports and every
+    ``monkeypatch.setattr(doxa.cli, "spawn_daemon", ...)`` keep working."""
+    if name == "spawn_daemon":
+        from .daemon import spawn_daemon
+
+        return spawn_daemon
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

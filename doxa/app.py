@@ -117,11 +117,17 @@ from . import tabsets as tabsets_mod
 from . import transcript as transcript_mod
 from . import version as version_mod
 from . import worktrees as worktrees_mod
-from .engine import (
+# The caps and the event record come from doxa.events; SessionEngine does
+# NOT come from anywhere at import time. Importing doxa.engine pulls
+# claude_agent_sdk (404 ms measured, 330 ms of it mcp.types building
+# pydantic models) -- 74% of what it used to cost to import this module,
+# paid before the first frame by every launch including `doxa doctor` and
+# `doxa launcher install`, neither of which ever starts an agent. The
+# three factories below import it when a session is actually built.
+from .events import (  # noqa: F401 -- re-exported: callers use app.EngineEvent
     BELIEF_LIST_LIMIT,
     PENDING_LIST_LIMIT,
     EngineEvent,
-    SessionEngine,
 )
 from . import history as history_mod
 from .history import SEARCH_PREFIX, SessionSearch
@@ -452,8 +458,23 @@ class DoxaApp(App):
         # a FRESH session -- the palette's "new session", and every Ctrl+T
         # tab -- distinct because an attach-flavored engine_factory must not
         # be re-invoked to mean "new".
+        # Imported HERE, not at module scope: this is the first place a
+        # SessionEngine can actually be built, and only when no factory was
+        # supplied (doxa.cli supplies one for every daemon-backed launch, so
+        # an attached TUI never reaches this import at all).
+        def _in_process(**kwargs: Any) -> Any:
+            # Resolved through THIS module's attribute, never imported
+            # directly: `monkeypatch.setattr(doxa.app, "SessionEngine", ...)`
+            # is how most of the suite substitutes a fake engine, and a
+            # direct `from .engine import SessionEngine` here would walk
+            # straight past the patch. Unpatched, the module __getattr__
+            # below does the real import, at this moment and not before.
+            import sys
+
+            return getattr(sys.modules[__name__], "SessionEngine")(**kwargs)
+
         self._engine_factory = engine_factory or (
-            lambda: SessionEngine(cwd=self.cwd, model=self.model)
+            lambda: _in_process(cwd=self.cwd, model=self.model)
         )
         self._new_session_factory = new_session_factory or self._engine_factory
         # v0.24.0's item 4 (repo picker): the SAME spawn primitive as
@@ -468,7 +489,7 @@ class DoxaApp(App):
         # DoxaApp(...) call, which passes neither) gets the repo picker's
         # "open in a new tab" for free rather than a silent dead end.
         self._new_session_factory_at = new_session_factory_at or (
-            lambda path: SessionEngine(cwd=path, model=self.model)
+            lambda path: _in_process(cwd=path, model=self.model)
         )
         # v0.56.0 (/resume): the third member of the same family -- spawn
         # a session at an explicit path, except this one CONTINUES the
@@ -485,7 +506,7 @@ class DoxaApp(App):
         # SessionEngine._build_options for the measured reason those are
         # one id and not two.
         self._resume_session_factory = resume_session_factory or (
-            lambda path, session_id: SessionEngine(
+            lambda path, session_id: _in_process(
                 cwd=path, model=self.model,
                 session_id=session_id, resume=session_id,
             )
@@ -2492,3 +2513,19 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def __getattr__(name: str) -> Any:
+    """``doxa.app.SessionEngine``, imported on first use (PEP 562).
+
+    The class is no longer imported at module scope -- doing so pulled
+    claude_agent_sdk, 404 ms, before the first frame of a TUI that may
+    never build an engine at all. It stays reachable under its old name so
+    that ``from doxa.app import SessionEngine`` and every
+    ``monkeypatch.setattr(doxa.app, "SessionEngine", ...)`` in the suite
+    keep working unchanged."""
+    if name == "SessionEngine":
+        from .engine import SessionEngine
+
+        return SessionEngine
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

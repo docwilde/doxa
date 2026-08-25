@@ -38,7 +38,7 @@ from textual.widgets import TabbedContent
 from .. import config as config_mod
 from .. import identity as identity_mod
 from .. import peers as peers_mod
-from ..engine import BELIEF_LIST_LIMIT, PENDING_LIST_LIMIT
+from ..events import BELIEF_LIST_LIMIT, PENDING_LIST_LIMIT
 from ..history import SessionSearch
 from ..ui.beliefs import BeliefsBrowserTab
 from ..ui.dialogs import ChipPicker, CompactConfirm, NeedsInputPopup, SlashComplete

@@ -28,7 +28,7 @@ from .. import banner as banner_mod
 from .. import identity as identity_mod
 from .. import naming as naming_mod
 from .. import notify as notify_mod
-from ..engine import EngineEvent
+from ..events import EngineEvent
 from ..history import SessionSearch
 from ..ui.dialogs import NeedsInputPopup
 from ..ui.labels import _escape_markup, _needs_input_summary, _subagent_label

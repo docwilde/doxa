@@ -413,33 +413,16 @@ def permission_mode_default() -> str:
     return value if value in PERSISTABLE_MODES else DEFAULT_PERMISSION_MODE
 
 
-# How many active beliefs the chip's picker will ever list in one open
-# (:meth:`SessionEngine.list_beliefs`, and EngineClient's paging loop over
-# the daemon's `beliefs` RPC, both default to this so the two paths agree
-# on where "the list" ends). v0.28.0 raised it from an implicit 500 after
-# an operator with ~517 active beliefs: at 500 the picker silently dropped
-# the tail, which is the one thing a belief list must not do. The cap has
-# to exist at all (this SELECTs every claim BODY), so the picker now SAYS
-# when it was reached -- see SessionPane.open_beliefs_picker's note row.
-BELIEF_LIST_LIMIT = 2000
-
-# How many staged proposals ``/pending`` will ever list in one open
-# (:meth:`SessionEngine.list_pending`, and EngineClient's paging loop over
-# the daemon's `pending` RPC, both default to this so the two paths agree
-# on where "the list" ends). Same shape and same honesty rule as
-# BELIEF_LIST_LIMIT above: the picker SAYS when the cap bit rather than
-# showing a short list as if it were the whole staging area. Lower than
-# the belief cap because a pending queue that ever gets near 500 is
-# already a signal to go review it, not to scroll further.
-PENDING_LIST_LIMIT = 500
-
-# How many evidence rows one belief's trail ever carries into the browser
-# (item V). Unlike the two caps above this one is per BELIEF, not per
-# store, and it is deliberately small: the trail is fetched lazily, one
-# belief at a time, precisely so a browser over 600 beliefs never has to
-# put 600 trails in a wire frame. A belief with more evidence than this
-# says so rather than showing a short trail as a complete one.
-BELIEF_EVIDENCE_LIMIT = 40
+# The list caps and EngineEvent moved to doxa.events (v0.61.0) and are
+# re-exported here: importing claude_agent_sdk costs 404 ms, and the
+# modules that wanted these four names -- doxa.client, doxa.session.runtime,
+# doxa.session.chips -- never run an agent. Callers keep their import.
+from .events import (  # noqa: F401
+    BELIEF_EVIDENCE_LIMIT,
+    BELIEF_LIST_LIMIT,
+    EngineEvent,
+    PENDING_LIST_LIMIT,
+)
 
 
 # -- item V: is this lore_core one DOXA may write through? ---------------
@@ -859,37 +842,6 @@ def derive_interval() -> float | None:
     return value if value > 0 else None
 
 
-@dataclass
-class EngineEvent:
-    """One typed event out of :meth:`SessionEngine.send` /
-    :meth:`SessionEngine.start` / :meth:`SessionEngine.finalize`.
-
-    ``type`` is one of: turn_started, text_delta, reasoning_delta, tool_call,
-    tool_result, turn_done, session_done -- the seven event kinds the TUI
-    (doxa/app.py) switches on to build/update blocks (reasoning_delta,
-    v0.25.0: the model's own summarized reasoning, routed like text_delta
-    -- see doxa.app.ReasoningSection and show_reasoning() above) -- plus
-    peer_joined, peer_left,
-    peer_message, tool_disabled, needs_input and needs_input_resolved,
-    which arrive out-of-band on the same EngineEvent type via
-    :meth:`SessionEngine.peer_events` (a turn generator can only yield
-    while a turn runs; peer activity doesn't wait for one, and a
-    two-strikes disable -- or a can_use_tool callback blocked on a
-    question -- fires from inside the SDK's own control-request dispatch,
-    outside our generator's yield points).
-
-    ``needs_input`` (data: ``id``, ``kind`` -- ``"ask_user"`` or
-    ``"permission"`` --, ``tool_name``, plus ``questions`` for ask_user or
-    ``input_summary``/``title``/``display_name``/``description`` for
-    permission) is queued by :meth:`_on_can_use_tool` and answered by
-    :meth:`answer_needs_input`; ``needs_input_resolved`` (data: ``id``)
-    follows once it is, so every attached client -- not just the one that
-    answered -- can drop its own copy of the dialog (same "everyone
-    learns" convention ``model_changed`` already follows for /model).
-    """
-
-    type: str
-    data: dict[str, Any] = field(default_factory=dict)
 
 
 def _scrub_text(text: Any) -> str:

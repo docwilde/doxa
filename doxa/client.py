@@ -41,8 +41,13 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from .daemon import PROTOCOL_VERSION
-from .engine import (
+# From doxa.events, not doxa.daemon: comparing one integer must not drag
+# in the module that runs an engine (and with it claude_agent_sdk).
+from .events import PROTOCOL_VERSION
+# doxa.events, not doxa.engine: this class talks to a daemon over a
+# socket and never constructs a SessionEngine, so it has no business
+# paying claude_agent_sdk's 404 ms import to learn four names.
+from .events import (
     BELIEF_EVIDENCE_LIMIT,
     BELIEF_LIST_LIMIT,
     PENDING_LIST_LIMIT,

@@ -4,6 +4,48 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.61.0 — 2026-08-25
+
+**Importing DOXA no longer imports the Claude Agent SDK.** `import
+doxa.app` cost 546 ms; it costs 168 ms. `doxa.client` cost 465 ms and
+costs 59 ms.
+
+Measured with `-X importtime`: `claude_agent_sdk` was 404 ms of the 546,
+and `mcp.types` alone was 330 ms of that, building pydantic models.
+DOXA's own modules were 7%. Bytecode caching never helped, because the
+cost is model construction at import, not parsing.
+
+Every launch paid it before the first frame — including `doxa doctor`,
+`doxa launcher install`, and a TUI attached to a daemon, none of which
+ever build a `SessionEngine`.
+
+- `doxa/events.py` holds `EngineEvent`, the three list caps and
+  `PROTOCOL_VERSION` — the vocabulary both sides of the socket share, with
+  no SDK behind it. `doxa.engine` and `doxa.daemon` re-export all of it, so
+  existing imports keep working.
+- `doxa.client`, `doxa.session.runtime` and `doxa.session.chips` read from
+  `doxa.events` now. None of them runs an agent; each paid 404 ms to learn
+  a dataclass and three integers.
+- `doxa.app` imports `SessionEngine` inside its three session factories,
+  and `doxa.cli` imports `spawn_daemon` at the point of use. A daemon-backed
+  launch supplies its own factory and never reaches either.
+- One MCP server per session costs **0.01 ms** to build (measured over 10
+  constructions), and `to_sdk_tools` costs 0.01 ms. Sessions were never the
+  expense; the one-time import was.
+
+Both deferred names stay reachable as module attributes through PEP 562
+`__getattr__`, and both factories resolve through the module rather than
+importing the class directly. That is not cosmetic: 262 tests substitute a
+fake engine or a fake spawn with `monkeypatch.setattr(doxa.app,
+"SessionEngine", ...)` / `(doxa.cli, "spawn_daemon", ...)`. A direct import
+inside the factory would have walked past every one of those patches and
+left the suite green while testing the real engine.
+
+`tests/test_import_cost.py` pins the invariant in a subprocess, since this
+suite's own `sys.modules` is already full. It asserts both directions: the
+three launch modules must not load the SDK, and `doxa.daemon` — the process
+that actually runs a session — must.
+
 ## 0.60.0 — 2026-08-25
 
 ### An ended session was erased from the tab set; `/attach` did not exist; the sessions-chip attach was already broken underneath
