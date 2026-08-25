@@ -23,6 +23,13 @@ dependencies = [
     # It becomes `@v0.35.1` once that release is tagged -- a tag reads
     # better, and until then there is no tag on a LORE that can be
     # installed at all.
+    #
+    # Nobody has to remember to make that edit:
+    # .github/workflows/lore-bump.yml checks weekly for a LORE tag ahead of
+    # this ref, and when one appears it rewrites the line below, re-locks,
+    # runs the suite and opens a PR. It only ever proposes -- this line is
+    # still only changed by a human merging one. Editing it by hand stays
+    # perfectly fine; the workflow reads whatever is here.
     "lore-core @ git+https://github.com/docwilde/LORE@1b18ae1056711e1890ca59e68c03fea9e26e0655",
 ]
 

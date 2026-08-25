@@ -1,0 +1,340 @@
+name: LORE bump
+
+# Proposes -- never applies -- an upgrade of the pinned `lore-core`
+# dependency, and does it as a pull request a human merges.
+#
+# Three different "in sync with LORE" exist in this project and only one of
+# them maintains itself:
+#
+#   1. A machine with the LORE Claude Code plugin installed runs the PLUGIN's
+#      lore_core, which wins over the pinned package on purpose (see
+#      doxa/_lore_bootstrap.py -- one shared ~/.claude/lore store, and the
+#      plugin is its busier writer). That copy self-syncs via the plugin
+#      marketplace and can drift in either direction from the pin.
+#   2. A bare install -- `uv tool install git+...doxa`, or CI -- is frozen at
+#      the pinned ref forever, until a human edits pyproject.toml and re-locks.
+#   3. ci.yml's third matrix leg checks LORE out at `main`. That leg is a
+#      CANARY: it reports that a LORE change BROKE DOXA. It cannot report
+#      that a LORE release exists and DOXA has not taken it.
+#
+# So nothing proposed the upgrade, and a LORE release could sit unadopted
+# indefinitely. This is the missing half: staleness, not breakage.
+#
+# What a run means:
+#   * green run, no PR -- no LORE release is newer than the pin. The normal
+#     weekly outcome, and a success.
+#   * green PR waiting  -- the upgrade locks and the full suite passes on it.
+#     Safe to merge whenever a human gets to it.
+#   * red PR waiting    -- LORE moved in a way DOXA cannot take yet. This is
+#     precisely what the canary leg cannot tell you, because the canary only
+#     goes red once main breaks, and a release you never adopted never does.
+
+on:
+  schedule:
+    # Mondays, 04:17 UTC. Weekly matches LORE's release pace -- daily would
+    # re-ask a question whose answer changes a few times a month. Monday so
+    # a proposal is already waiting at the start of the week rather than
+    # landing mid-Friday. 04:17 rather than 04:00 because GitHub's scheduled
+    # queue is heavily oversubscribed on the hour and on-the-hour crons are
+    # the ones that get delayed; 04:xx UTC is the middle of the night in the
+    # Americas and pre-dawn in Europe, so the ~12 runner-minutes an actual
+    # bump costs never compete with a human waiting on PR CI. Cron is UTC
+    # and does not observe DST, so this does not wander with the clocks.
+    - cron: "17 4 * * 1"
+  # The whole thing is runnable on demand, which is the difference between
+  # this workflow and ci.yml: it can be exercised for real, once, from the
+  # Actions tab the moment it lands on main, instead of waiting a week to
+  # find out whether it works.
+  workflow_dispatch:
+
+# Read-only by default. The one job that needs to write says so itself.
+permissions:
+  contents: read
+
+concurrency:
+  # Never cancel: two runs must not race to force-push the same proposal
+  # branch, and a run that is already nine minutes into the suite has more
+  # value than the one that would replace it.
+  group: lore-bump
+  cancel-in-progress: false
+
+env:
+  # One machine-owned branch, reused. See "Idempotency" on the push step.
+  BUMP_BRANCH: automation/lore-bump
+
+jobs:
+  propose:
+    name: Propose a LORE upgrade
+    runs-on: ubuntu-latest
+    # The no-upgrade path is a checkout and three API calls -- seconds. The
+    # upgrade path is a lock plus the full suite, measured at ~9 minutes
+    # locally and slower on a runner. 30 gives that ~2x headroom (ci.yml
+    # uses 25 for the suite alone) without letting a wedged run burn an hour.
+    timeout-minutes: 30
+
+    permissions:
+      # Push the proposal branch...
+      contents: write
+      # ...and open or update the PR that carries it. Nothing else, and
+      # nothing at all on any other job.
+      pull-requests: write
+
+    env:
+      # `gh` is preinstalled on the runner and reads this. Using it instead of
+      # a third-party create-pull-request action keeps the supply chain of a
+      # workflow that opens PRs against this repo down to two actions, both
+      # first-party-ish and both pinned to a tag that was verified to exist.
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Check out doxa
+        uses: actions/checkout@v7
+
+      # Runs on the runner's system python3 -- stdlib only, before uv exists,
+      # so the ordinary "nothing to do" answer costs no dependency sync.
+      # --write rewrites the pin in pyproject.toml only when the answer is
+      # `propose`; on `none` it changes nothing at all.
+      - name: Decide whether a newer LORE tag exists
+        id: decide
+        run: python3 scripts/lore_bump.py --write
+
+      - name: Nothing to propose
+        if: steps.decide.outputs.action != 'propose'
+        # Through env, not `${{ }}` inside the shell: every value this
+        # workflow interpolates ultimately derives from a tag name in another
+        # repository, and none of them should ever reach a shell as syntax.
+        env:
+          REASON: ${{ steps.decide.outputs.reason }}
+        run: echo "::notice::$REASON"
+
+      - name: Install uv
+        if: steps.decide.outputs.action == 'propose'
+        # Pinned to a real release tag. astral-sh/setup-uv publishes v10.0.1
+        # but no floating v10 -- `@v10` 404s at job setup, which is how this
+        # repo's first CI workflow died. Verified against the git refs API.
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Re-lock against the proposed LORE tag
+        if: steps.decide.outputs.action == 'propose'
+        env:
+          TAG: ${{ steps.decide.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # A lock failure here is not the signal this workflow is for. The
+          # tag was already confirmed to carry packaging metadata before we
+          # got as far as installing uv, so if uv still cannot resolve it,
+          # something is wrong with the release itself -- and there is no
+          # lockfile to propose. Fail the RUN (red, and it mails), rather
+          # than open a PR whose branch does not build.
+          if ! uv lock 2>&1 | tee uv-lock.log; then
+            echo "::error::uv could not lock lore-core at $TAG -- see log"
+            {
+              echo "### uv lock failed against \`$TAG\`"
+              echo
+              echo '```'
+              tail -n 40 uv-lock.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          git --no-pager diff --stat -- pyproject.toml uv.lock
+
+      # Idempotency, part one: has a human already said no to this exact
+      # proposal? A closed (not merged) PR with this tag's title is a
+      # decision, and re-opening it every Monday would be nagging.
+      - name: Look for an existing proposal
+        if: steps.decide.outputs.action == 'propose'
+        id: existing
+        env:
+          TITLE: "chore(deps): bump lore-core to ${{ steps.decide.outputs.tag }}"
+        run: |
+          set -euo pipefail
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+
+          declined=$(gh pr list --head "$BUMP_BRANCH" --state all --limit 30 \
+            --json number,title,state \
+            --jq '[.[] | select(.state == "CLOSED" and .title == env.TITLE)] | first | .number // empty')
+          if [ -n "$declined" ]; then
+            echo "::notice::PR #$declined already proposed this exact bump and was closed unmerged; not re-opening it."
+            echo "skip=declined" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          open_pr=$(gh pr list --head "$BUMP_BRANCH" --state open --limit 5 \
+            --json number --jq 'first | .number // empty')
+          echo "pr=$open_pr" >> "$GITHUB_OUTPUT"
+
+          # Idempotency, part two: is the branch already carrying exactly
+          # this pyproject.toml and uv.lock? Then the suite has already run
+          # against it and its verdict is already in the PR body. Re-running
+          # nine minutes of tests to reach the same answer is the cost this
+          # check exists to avoid -- and it is checked BEFORE the suite, not
+          # after.
+          # Explicit refspec: actions/checkout narrows `remote.origin.fetch`
+          # to the checked-out branch, so a bare `git fetch origin <branch>`
+          # would move FETCH_HEAD and leave no origin/<branch> to diff against.
+          # Braced deliberately: `$BUMP_BRANCH:refs/...` unbraced is a
+          # word-modifier to some shells, which silently rewrites the refspec
+          # into nonsense rather than failing loudly.
+          git fetch --no-tags origin \
+            "+refs/heads/${BUMP_BRANCH}:refs/remotes/origin/${BUMP_BRANCH}" || true
+          if git rev-parse --verify -q "origin/$BUMP_BRANCH" >/dev/null \
+             && git diff --quiet "origin/$BUMP_BRANCH" -- pyproject.toml uv.lock \
+             && [ -n "$open_pr" ]; then
+            echo "::notice::PR #$open_pr already proposes exactly this change; nothing to do."
+            echo "skip=unchanged" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Same deselect-and-retry shape as ci.yml, deliberately reusing that
+      # pattern rather than inventing a second one. The flaky test is
+      # tests/test_tab_status.py::test_done_unseen... -- a diagnosed
+      # mount-time focus race, ~5% standalone, and its fix is a separate
+      # queued decision.
+      #
+      # ONE leg, not ci.yml's three. The plugin leg would prove nothing here:
+      # when a LORE plugin checkout is present it WINS over the pinned
+      # package, so it does not exercise the pin this PR changes. 3.12 is
+      # .python-version and what releases run.
+      - name: Run the full suite against the proposed pin
+        if: steps.decide.outputs.action == 'propose' && steps.existing.outputs.skip == ''
+        id: suite
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          uv sync --frozen --python 3.12
+
+          # Prove the bump actually took: on a bare runner there is no plugin
+          # checkout, so lore_core must come from the pinned package. A leg
+          # that quietly tested the wrong copy would be green and meaningless.
+          uv run --no-sync python - <<'PY'
+          import sys
+          from doxa import _lore_bootstrap, version
+          print(version.about_text())
+          source = _lore_bootstrap.resolved_source()
+          if source is None:
+              sys.exit("::error::no lore_core could be imported at all")
+          kind, location = source
+          if kind != "package":
+              sys.exit(f"::error::expected the pinned package, got {kind} at {location}")
+          PY
+
+          set -o pipefail
+          uv run --no-sync python -m pytest -q -rf --tb=short \
+            --deselect "tests/test_tab_status.py::test_done_unseen_marks_a_background_tab_and_clears_on_activation" \
+            2>&1 | tee pytest.log
+
+          test_id="tests/test_tab_status.py::test_done_unseen_marks_a_background_tab_and_clears_on_activation"
+          for attempt in 1 2 3; do
+            if uv run --no-sync python -m pytest -q -rf --tb=short "$test_id"; then
+              exit 0
+            fi
+          done
+          echo "::error::known-flaky tab-status test failed 3/3 attempts"
+          exit 1
+
+      - name: Open or update the proposal
+        if: steps.decide.outputs.action == 'propose' && steps.existing.outputs.skip == ''
+        env:
+          TAG: ${{ steps.decide.outputs.tag }}
+          SLUG: ${{ steps.decide.outputs.slug }}
+          OLD_REF: ${{ steps.decide.outputs.pinned_ref }}
+          REASON: ${{ steps.decide.outputs.reason }}
+          TITLE: ${{ steps.existing.outputs.title }}
+          OPEN_PR: ${{ steps.existing.outputs.pr }}
+          SUITE: ${{ steps.suite.outcome }}
+        run: |
+          set -euo pipefail
+
+          if [ "$SUITE" = "success" ]; then
+            verdict="**The full suite passes on this pin.** Safe to merge."
+            tally="$(grep -E '(passed|failed|error)' pytest.log | tail -n 1 || echo 'see the run log')"
+          else
+            verdict="**The suite does NOT pass on this pin.** LORE moved in a way DOXA cannot take yet -- do not merge until that is understood."
+            tally="$(grep -E '(passed|failed|error)' pytest.log | tail -n 1 || echo 'the suite did not get far enough to report a tally')"
+          fi
+
+          {
+            echo "$REASON"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| was | \`$OLD_REF\` |"
+            echo "| now | \`$TAG\` |"
+            echo "| suite | $tally |"
+            echo
+            echo "$verdict"
+            if [ -f pytest.log ] && grep -q '^FAILED' pytest.log; then
+              echo
+              echo "#### Failed tests"
+              echo
+              grep '^FAILED' pytest.log | sed 's/^FAILED /- `/; s/ - /` - /'
+            fi
+            echo
+            echo "Diff in LORE: https://github.com/$SLUG/compare/$OLD_REF...$TAG"
+            echo
+            echo "---"
+            echo
+            echo "Two things worth knowing before merging:"
+            echo
+            echo "- **This does not change what a machine with the LORE Claude Code plugin runs.** That plugin checkout wins over the pinned package by design (\`doxa/_lore_bootstrap.py\`). This pin is what a bare install and CI get, which is exactly the population that has no other way to move."
+            echo "- **The suite result above was produced by the workflow that opened this PR, not by \`ci.yml\`.** Pull requests opened with \`GITHUB_TOKEN\` do not trigger further workflow runs, so this PR will show no CI checks of its own. Push any commit to the branch as yourself and \`ci.yml\` runs normally."
+            echo
+            echo "Opened by \`.github/workflows/lore-bump.yml\`. It never merges anything."
+          } > pr-body.md
+
+          # Force-push, and no rebase dance: this branch is machine-owned and
+          # its only content is the CURRENT proposal, rebuilt from the tip of
+          # main on every run. There is nothing human on it to lose.
+          #
+          # Idempotency, part three: one branch and therefore at most one open
+          # LORE-bump PR, ever. A newer tag SUPERSEDES the previous proposal
+          # in place rather than opening a second PR beside it -- nobody
+          # should have to work out which of three bump PRs is the one to
+          # take. The trade is that a PR under review can change tag beneath
+          # the reviewer; the title and the table above always name the tag
+          # currently proposed.
+          git checkout -b "$BUMP_BRANCH"
+          git add pyproject.toml uv.lock
+          # Identity passed per-command rather than written into the repo's
+          # git config -- nothing here should outlive the step.
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "$TITLE" -m "$REASON"
+          # --force, not --force-with-lease: the only writer that could lose
+          # the race is another run of this same workflow, and the
+          # `lore-bump` concurrency group already serializes those. A lease
+          # would additionally fail whenever the remote-tracking ref was not
+          # fetched -- e.g. the first run, when the branch does not exist.
+          git push --force origin "$BUMP_BRANCH"
+
+          if [ -n "$OPEN_PR" ]; then
+            gh pr edit "$OPEN_PR" --title "$TITLE" --body-file pr-body.md
+            echo "::notice::updated PR #$OPEN_PR to propose $TAG"
+          elif ! gh pr create --base main --head "$BUMP_BRANCH" \
+                 --title "$TITLE" --body-file pr-body.md; then
+            # One repo setting decides whether this line can ever work:
+            # Settings -> Actions -> General -> Workflow permissions ->
+            # "Allow GitHub Actions to create and approve pull requests".
+            # It is OFF by default (repos/<owner>/<repo>/actions/permissions/
+            # workflow reports it as can_approve_pull_request_reviews), and
+            # with it off GITHUB_TOKEN pushes branches fine and is refused at
+            # `pr create`. The branch above is already pushed and already
+            # tested, so say exactly that and where to click, rather than
+            # leaving a maintainer to read a 403 out of a log.
+            echo "::error::could not open the pull request. Enable Settings -> Actions -> General -> \"Allow GitHub Actions to create and approve pull requests\". The proposal branch is pushed and tested; open it by hand meanwhile: https://github.com/${GITHUB_REPOSITORY}/compare/main...${BUMP_BRANCH}?expand=1"
+            exit 1
+          fi
+
+          cat pr-body.md >> "$GITHUB_STEP_SUMMARY"
+
+      # The PR exists either way -- a red one is the point. But the scheduled
+      # run itself should also go red so it lands in the Actions mail rather
+      # than waiting to be noticed.
+      - name: Fail the run if the proposed pin does not pass
+        if: steps.decide.outputs.action == 'propose' && steps.existing.outputs.skip == '' && steps.suite.outcome != 'success'
+        run: |
+          echo "::error::the proposed LORE bump does not pass the suite; the PR is open and red on purpose"
+          exit 1

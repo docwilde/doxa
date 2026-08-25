@@ -4,3 +4,8 @@ __pycache__/
 # CI tees the suite here so the summary step can name the failures; the same
 # file appears when reproducing the workflow's command locally.
 pytest.log
+# The LORE bump workflow's own scratch: the uv resolve log it quotes when a
+# lock fails, and the PR body it composes before handing it to `gh`. Both sit
+# in the worktree it then commits from, so neither may be committable.
+uv-lock.log
+pr-body.md

@@ -673,6 +673,29 @@ clone gets it from `uv sync` and needs nothing else. It is packaged out of
 the LORE repo, where the plugin manifest stays the one place the version
 is written.
 
+**A pin is only as current as whatever moves it, so something does.**
+`.github/workflows/lore-bump.yml` runs weekly (Mondays, 04:17 UTC) and on
+demand: it reads the pinned ref, asks GitHub for LORE's newest `vX.Y.Z`
+tag, and if that tag is ahead of the pin it rewrites `pyproject.toml`,
+re-locks, runs the full suite against the result, and opens a pull
+request. It never merges and never pushes to `main` — a green PR means the
+upgrade is safe and waiting for a human, a red one means LORE moved in a
+way DOXA cannot take yet. There is at most one such PR at a time: the
+proposal lives on a single machine-owned branch (`automation/lore-bump`)
+that a newer tag supersedes in place, and a proposal a maintainer closes
+unmerged is not re-opened. When no LORE tag is newer than the pin the run
+is green and silent, which is its ordinary outcome — including today,
+because no LORE tag carries a `pyproject.toml` yet, and a ref without one
+cannot be installed as `lore-core` at all. `scripts/lore_bump.py` is that
+decision on its own and answers in about a second from a terminal.
+
+That is the *staleness* half. CI's third matrix leg, which checks LORE out
+at `main`, is the *breakage* half: it goes red when a LORE change breaks
+DOXA, and it can never tell you that a LORE release exists which DOXA has
+not adopted. Note also what a bump does **not** change, per the next
+paragraph — on a machine with the LORE plugin installed the plugin's copy
+wins regardless of the pin, so this matters for bare installs and for CI.
+
 **Two copies can exist on one machine, and the plugin's wins.** A user
 with the LORE Claude Code plugin installed has a checkout that DOXA
 prepends to `sys.path` (`doxa/_lore_bootstrap.py`), ahead of the pinned
