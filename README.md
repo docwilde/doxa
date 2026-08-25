@@ -212,10 +212,9 @@ uv run doxa
 that package was not declared anywhere — DOXA reached into a LORE Claude
 Code plugin checkout on the machine and hoped it was there. On a clone
 without the plugin, 41 of 52 test modules failed at import. `lore_core` is
-now an ordinary pinned dependency (`lore-core @ git+…LORE@v0.35.1`, a git
-URL because neither project is on PyPI), so `uv sync` installs it like
-anything else and nothing about the LORE plugin is a prerequisite for
-running DOXA.
+now an ordinary pinned dependency (a git URL in `pyproject.toml`, since
+neither project is on PyPI), so `uv sync` installs it like anything else
+and nothing about the LORE plugin is a prerequisite for running DOXA.
 
 If you *do* have the LORE plugin installed, that checkout still wins over
 the pinned copy: DOXA and the plugin share one SQLite store, the plugin

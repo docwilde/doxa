@@ -4,6 +4,21 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.63.0 — 2026-08-26
+
+Docs restructuring: nothing in `doxa/` changed.
+
+- CHANGELOG.md rewritten throughout to state what changed and why, dropping
+  narrative, dead ends and direct user quotes — 5139 to 947 lines.
+- Added `docs/manual.md`: the tab model and keys, permission modes,
+  worktrees and finalize, the daemon, status-bar chips, LORE integration
+  and the review gate, commands, and settings — written against current
+  source, not transcribed from release notes.
+- README's "What you get" section condensed to short bullets linking into
+  the manual; the session walkthrough, permission-mode table, configuration
+  table and reasoning section moved there too. "How it works" trimmed to
+  the shape of the system and moved up beside "What you get".
+
 ## 0.62.0 — 2026-08-25
 
 **lore-core moves from v0.36.0 to v0.38.0.** DOXA runs `lore_core`
