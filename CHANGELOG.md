@@ -4,6 +4,130 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.53.0 — 2026-08-25
+
+**DOXA fails invisibly or fatally, rarely legibly.** Four defects reached
+the user in one day and not one of them arrived as an error they could
+read. A `TimeoutError` out of `textual_image`, raised while Textual was
+*painting* a widget, killed the app to a bare terminal traceback. The
+needs-input dialog stopped answering keys and said nothing — the session
+simply wedged. Server-tool results vanished with no trace, so there was no
+way to tell whether a web search had happened at all. The memory chip drew
+half of itself and never mentioned the other half. Four bugs, one
+property, and this release fixes the property.
+
+- **An error block in the transcript.** Its own kind, on the rule
+  `ShellBlock` established: a failure must never be mistakable for the
+  assistant's words or for doxa's ordinary chatter, so it wears a red left
+  rule — `#D9534F`, this app's one "stop and look" colour — and neither
+  the `▎` turn accent nor the `▎ doxa` prefix. One line saying what broke
+  and *who* broke it; the whole scrubbed traceback behind a fold that
+  starts **collapsed**, the same `Collapsible` pattern `ToolCallsSection`
+  and `ReasoningSection` already use. Seeing that something broke must not
+  cost a wall of text, and reaching all of it must not cost more than a
+  keystroke.
+- **Caught at the boundary that actually fires — which turned out to be
+  one boundary.** Textual 5.3.0 funnels *everything* through
+  `App._handle_exception`: message handlers, `compose`/mount, idle
+  handlers, `call_later` callbacks, the compositor's paint loop, and a
+  failed worker (wrapped in `WorkerFailed`, because `run_worker`'s
+  `exit_on_error` defaults to True). Its own docstring says "Always
+  results in the app exiting". So there is exactly one method to override,
+  and it is overridden.
+- **Worker deaths were the loudest of the quiet failures.** DOXA starts a
+  worker for nearly everything — `_boot`, `_peer_pump`, every slash
+  command, the update check — and a worker that raised took the whole
+  window with it, indistinguishable from "DOXA crashed". Now it is one
+  block, and the session stays usable.
+- **Render-time containment, because Textual offers none.**
+  `textual/_compositor.py` contains no `except` at all: a widget that
+  raises while rendering does not fail alone, it takes the whole *frame*,
+  every frame, forever. Merely surviving the raise would leave an app
+  alive and unable to draw. So the culprit widget is read off the
+  traceback and **quarantined** — `display = False`, which ends the loop
+  at its source — and the block says which widget was hidden and why.
+  Half a widget silently missing is one of the four defects above; a whole
+  widget silently missing would be the same defect wearing a fix. Render
+  failures only: hiding an arbitrary widget because a keystroke handler
+  threw would be a second defect, not containment.
+- **Scrubbed before display, and scrubbed at the source.**
+  `lore_core.scrub.scrub_secrets` runs over every traceback at
+  construction rather than at each of the three doors out of the process,
+  so a fourth door added later does not start out leaking. Frame locals
+  are dropped entirely — Textual's own fatal path prints
+  `Traceback(show_locals=True)`, and the locals are where a credential
+  actually lives. A crash report that leaks a token is a worse defect than
+  the crash it describes.
+- **Fatal is still possible, and still seen.** A failure with no surface
+  to draw itself on, or one that repeats without end, exits — printing the
+  same information to the terminal on the way out. That report is
+  `/about`'s own block (`version.about_text`): version, sha, interpreter,
+  textual, agent SDK, which `lore_core` answered and from where, platform,
+  keyboard protocol, config path. A user who has to file a bug should not
+  have to reconstruct any of that from a Python traceback, and the crash
+  report is now byte-for-byte what the about dialog's copy door already
+  puts on the clipboard.
+- **A log to point at: `~/.doxa/errors.log`.** Bounded by size with one
+  previous generation (`errors.log.1`), 256 KiB each — so the whole
+  on-disk cost is half a megabyte and it needs no sweeper, no timer and no
+  setting. Written *after* the block is mounted, deliberately: a read-only
+  home directory may cost the persisted copy, never the visible one.
+- **One swallow removed, and it is defect two of the four.** Delivering
+  the user's answer to a blocking question was wrapped in
+  `contextlib.suppress(Exception)` — and by the time it ran the popup had
+  already closed and the needs-input flag had already cleared, so a failed
+  delivery left the agent blocked forever on a question the user *had*
+  answered. A wedged session that looked exactly like an idle one. It now
+  reports, and says what to do about it.
+- **Repeats collapse; they do not accumulate.** A widget raising on every
+  paint becomes one block with a `×N` tally — a title rewrite, as cheap as
+  `ToolCallsSection`'s own live count — and only the first is written to
+  the log. Past 25 the failure is by definition not recoverable, and the
+  app exits with a report rather than spinning.
+- **Nothing animates and nothing polls.** No timer is armed and no
+  per-frame cost is added: this surface does work only once something has
+  already gone wrong. The idle-CPU regression `GitLine` and
+  `_refresh_status` exist to warn about is not reopened, and there is a
+  test that says so.
+
+**Also a prerequisite for the plugin loader, which is why it is shaped the
+way it is.** `docs/plugin-api.md`'s failure policy promises three states —
+not loaded, disabled for the run, over its `text()` time budget — and none
+of them had a mechanism. So a failure carries an **origin** (pass
+`origin="plugin:jira"` and the block says so; omit it and the deepest
+non-infrastructure frame is read off the traceback, which already tells
+DOXA apart from `lore_core` apart from a third-party package — the
+reported render crash attributes to `textual_image`, which is a different
+user action from a DOXA bug). Failing is **state**
+(`app.failures.failed(origin)`), not a message that scrolls away. And the
+third state is not an exception at all, so the record is a `Failure` with
+a `kind`, and a chip overrunning its budget lands in the same block as a
+crash. The loader, the allowlist and any disabling are explicitly *not* in
+this release — there is nothing loadable to disable — and the doc now
+states exactly what a future loader calls.
+
+*Judgment call:* the surface is named for **failure** and not for
+exception, throughout. The naming outlives the release, a time-budget
+overrun is a broken promise rather than a raise, and a surface that could
+only hold exceptions would have sent that third state back to nowhere.
+
+*Layering, for the record:* the specific cause of the reported crash —
+textual-image probing stdin for the terminal's cell size during a paint at
+all — is fixed where it belongs, in `doxa.images`/`doxa.banner`. This
+release owns the general containment: whatever the cause, a render raise
+must not be fatal. The two do not overlap, and the crash is reproduced as
+a test here in the shape it arrived in.
+
+*Not swept in:* an audit of every `except Exception` and
+`contextlib.suppress` in `doxa/` found roughly a dozen more that hide real
+failures — a suppressed `finalize()` on stop and on detach, a suppressed
+`index_live` that reports "could not index" as "nothing to index", two
+`_on_can_use_tool` paths that *allow* a call when the permission prompt
+itself breaks, a shell reader whose lost output is presented as no output,
+and `list_beliefs` rendering a broken store as "you have no beliefs".
+They are reported rather than quietly rerouted into the new surface:
+routing them without saying which would be the same silence in a new coat.
+
 ## 0.50.0 — 2026-08-25
 
 **The permission-mode cycler now reaches `auto` and `bypassPermissions`,

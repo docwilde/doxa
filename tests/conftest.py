@@ -76,3 +76,51 @@ os.environ["XDG_CONFIG_HOME"] = str(_tmp / "xdg")
 # var doxa.setup.needs_first_run honors explicitly can. Tests that
 # exercise the auto-trigger itself clear this var first (test_setup.py).
 os.environ["DOXA_SKIP_FIRST_RUN"] = "1"
+
+
+# -- v0.53.0: the suite must not become a place errors hide -----------
+#
+# The error surface makes a caught exception SURVIVABLE, and a surface
+# that turns a crash into a quiet block is one keystroke away from being a
+# surface that turns a crash into a quietly passing test. Before v0.53.0
+# an unhandled exception failed the test that provoked it, because Textual
+# re-raises App._exception at run_test teardown; now a recoverable failure
+# deliberately does not set that, so nothing would notice.
+#
+# So every failure reported through DoxaApp.report_failure -- the single
+# door -- is collected per test, and a test that ends with unclaimed ones
+# FAILS. A test that means to provoke a failure opts in by setting
+# ``EXPECTS_FAILURES = True`` at module level and asserting on the block
+# itself, which is what tests/test_errors.py does. Opting in is per module
+# and by flag rather than by pytest marker so that no marker registration
+# (and therefore no pyproject change, and therefore no unregistered-marker
+# warning) rides along with it.
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _errors_must_be_claimed(request):
+    """Fail any test that quietly produced an error block."""
+    from doxa.app import DoxaApp
+
+    seen: list = []
+    original = DoxaApp.report_failure
+
+    def _record(self, failure):
+        seen.append(failure)
+        return original(self, failure)
+
+    DoxaApp.report_failure = _record  # type: ignore[method-assign]
+    try:
+        yield seen
+    finally:
+        DoxaApp.report_failure = original  # type: ignore[method-assign]
+    if seen and not getattr(request.module, "EXPECTS_FAILURES", False):
+        raise AssertionError(
+            "this test produced "
+            + ", ".join(sorted({f.headline() for f in seen}))
+            + " — a test that triggers an error block must assert it, not "
+            "tolerate it (set EXPECTS_FAILURES = True in the module and "
+            "assert on the block)"
+        )
