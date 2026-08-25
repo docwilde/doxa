@@ -60,7 +60,9 @@ cause real harm, so it is specified first.
 
 **What an exposed daemon actually grants.** DOXA's agent edits files and runs
 tools as the invoking user; v0.36.0 added `!`, which runs arbitrary shell
-commands; v0.42.0 adds permission modes including `bypassPermissions`. So a
+commands; and permission modes including `bypassPermissions` are specified for
+v0.42.0, unshipped at the time of writing but assumed here because a security
+boundary has to be designed against what is coming, not what has landed. So a
 reachable daemon socket is **remote code execution with the user's privileges**,
 and no amount of UI care compensates for getting this wrong.
 
