@@ -338,19 +338,30 @@ TurnBlock > CollapsibleTitle {
 
 TurnBlock > Contents {
     background: $doxa-base;
-    padding: 1 0 0 2;
+    padding: 0 0 0 2;
 }
 
 .turn-body {
     background: $doxa-base;
     color: #F2E9DD;
-    padding: 0 1 1 1;
+    padding: 0 1 0 1;
 }
 
 /* Reasoning (v0.25.0): same auto-height reasoning as .turn-tools below --
    zero rows with no ReasoningSection mounted, one row for a collapsed one.
    Sits ABOVE .turn-body in the widget tree (see TurnBlock.__init__), so
    reasoning always reads above the answer it led to. */
+/* Textual's markdown gives every block a bottom margin, which reads well
+   BETWEEN paragraphs and as dead space at the end of an answer -- where the
+   turn's own margin-bottom already separates it from what follows. Zeroing
+   only the last child keeps the rhythm inside a long answer and removes the
+   blank row a one-line answer used to end on. Measured: a one-line turn was
+   6 rows, 4 of them blank. */
+.turn-body > *:last-of-type,
+.reasoning-body > *:last-of-type {
+    margin-bottom: 0;
+}
+
 .turn-reasoning {
     height: auto;
     background: $doxa-base;

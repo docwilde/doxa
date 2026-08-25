@@ -719,3 +719,70 @@ def git_branch_symbol() -> str:
     the settings modal's stored value works exactly like the env var --
     env first, file second (doxa/config.py's one precedence rule)."""
     return "\ue0a0" if config_mod.raw("DOXA_NERD_FONT").strip() else "⎇"
+
+# -- curated-memory fill (v0.44.0) ------------------------------------------
+
+_MEM_FILL_CACHE: "dict[str, tuple[float, int]]" = {}
+
+
+def memory_fill(scope: str, project: "str | None" = None) -> "tuple[int, int] | None":
+    """(chars used, cap) for a curated-memory scope, or None if unknown.
+
+    Read from the file lore_core itself writes, so the number matches what
+    `lore status` and the injected snapshot report exactly -- an
+    approximation from st_size would drift on any multi-byte character,
+    and the whole point of the chip is that it agrees with the cap the
+    write path enforces.
+
+    Cached on mtime: `_refresh_status` already pays for a belief COUNT(*)
+    on every event-driven refresh (see PaneChipsMixin), and this must not
+    add two file reads on top of it. An unchanged file costs one stat.
+    """
+    try:
+        from lore_core import memory as lore_memory
+
+        # memory_path(scope, slug) -- slug is ignored for the user scope,
+        # required positionally regardless.
+        path = lore_memory.memory_path(scope, project or "")
+        cap = lore_memory.memory_cap(scope)
+        stamp = path.stat().st_mtime
+        key = str(path)
+        hit = _MEM_FILL_CACHE.get(key)
+        if hit is not None and hit[0] == stamp:
+            return hit[1], cap
+        used = len(path.read_text(encoding="utf-8"))
+        _MEM_FILL_CACHE[key] = (stamp, used)
+        return used, cap
+    except Exception:
+        # A missing store, an older lore_core, an unreadable file: the chip
+        # simply does not appear. Memory fill is a convenience, never a
+        # reason to degrade the status bar.
+        return None
+
+
+def memory_fill_chip(user: "tuple[int, int] | None",
+                     project: "tuple[int, int] | None") -> "tuple[str, str] | None":
+    """(chip text, hint) for the curated-memory fill, or None to omit.
+
+    Renders as `mem u63% p39%` -- two percentages, because the caps are
+    separate and fill at different rates: user memory holds facts that
+    never stop being true and creeps up forever, project memory rotates
+    with the repo. One merged number would hide the one that is about to
+    start refusing writes.
+    """
+    parts, hints = [], []
+    for tag, pair, name in (("u", user, "user"), ("p", project, "project")):
+        if pair is None:
+            continue
+        used, cap = pair
+        pct = round(100 * used / cap) if cap else 0
+        parts.append(f"{tag}{pct}%")
+        hints.append(f"{name} memory {used}/{cap} chars ({pct}%)")
+    if not parts:
+        return None
+    return (
+        "mem " + " ".join(parts),
+        " · ".join(hints) + " -- curated memory injected at session start; "
+        "a write past the cap fails and lists the entries so they get "
+        "consolidated rather than silently dropped",
+    )

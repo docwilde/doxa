@@ -236,7 +236,11 @@ async def test_subscription_auth_shows_tier_not_dollars(monkeypatch, tmp_path):
             await pilot.pause(0.02)
         status = str(app.query_one("#status-bar").renderable)
         assert "sub:max" in status
-        assert "(≈$0.0000 if API)" in status  # secondary what-if, not a bill
+        # The figure stays a secondary what-if, not a bill -- but the words
+        # "if API" were dropped from the CHIP for row width; `sub:` and `≈`
+        # carry that, and the tooltip spells it out.
+        assert "(≈$0.0000)" in status
+        assert "if API" not in status
 
         identity = app.query_one("#identity-block", SystemBlock)
         text = identity.text

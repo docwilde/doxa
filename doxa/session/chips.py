@@ -39,6 +39,8 @@ from ..engine import BELIEF_LIST_LIMIT, PENDING_LIST_LIMIT
 from ..history import SessionSearch
 from ..ui.dialogs import ChipPicker, CompactConfirm, NeedsInputPopup, SlashComplete
 from ..ui.labels import (
+    memory_fill,
+    memory_fill_chip,
     CLICKABLE_CHIP_ACCENT,
     CTX_ABSOLUTE_MIN_COLS,
     _belief_scope_label,
@@ -185,6 +187,17 @@ class PaneChipsMixin:
         width = getattr(width, "width", 0)
         return not width or width >= CTX_ABSOLUTE_MIN_COLS
 
+    def _lore_slug(self) -> str:
+        """This session's LORE project slug -- the same one lore_core uses
+        to pick MEMORY.md, derived from the pane's own cwd so a repo-less
+        session and a worktree agree with the snapshot the engine built."""
+        try:
+            from lore_core.config import project_slug
+
+            return project_slug(self.cwd)
+        except Exception:
+            return ""
+
     def _status_chips(self) -> "list[StatusChip]":
         """Every chip this pane's status line shows, in paint order.
 
@@ -251,10 +264,17 @@ class PaneChipsMixin:
         account = getattr(engine, "account", None) or {}
         tier = identity_mod.account_tier(account)
         if tier:
+            # The "if API" words were dropped from the CHIP (they cost row
+            # width, which is the scarcest thing in the status bar) but NOT
+            # the meaning: `sub:` already says this session bills no
+            # dollars, and `≈` marks the figure as an estimate. The full
+            # statement stays one hover away, where there is room for it --
+            # the same split /usage keeps, which spells it out in prose.
             chips.append(StatusChip.plain(
-                f"sub:{tier} (≈${engine.total_cost_usd:.4f} if API)",
+                f"sub:{tier} (≈${engine.total_cost_usd:.4f})",
                 f"subscription plan ({tier}) -- no API dollars are actually "
-                "spent; the ≈$ figure is the list-price what-if",
+                "spent; the ≈$ figure is the list-price what-if, i.e. what "
+                "this session WOULD have cost on API pricing",
             ))
         else:
             chips.append(StatusChip.plain(
@@ -313,6 +333,18 @@ class PaneChipsMixin:
             "active beliefs LORE holds for this session -- click to "
             "browse them, grouped by scope",
         ))
+        # Curated-memory fill, right after the belief count: both answer
+        # "what does LORE hold for this session", and the caps are the one
+        # LORE number that fails a WRITE when exceeded rather than
+        # degrading quietly -- a user at 88% wants to see it before the
+        # refusal, not after. Two percentages, not one: the caps are
+        # separate and fill at different rates.
+        mem = memory_fill_chip(
+            memory_fill("user"),
+            memory_fill("project", self._lore_slug()),
+        )
+        if mem is not None:
+            chips.append(StatusChip.plain(*mem))
         subagent_count = len(self._subagents)
         if subagent_count:  # hidden at 0 -- same convention as peers below
             noun = "agent" if subagent_count == 1 else "agents"

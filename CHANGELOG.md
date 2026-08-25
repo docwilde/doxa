@@ -4,6 +4,42 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.44.0 — 2026-08-25
+
+- **The transcript spent four blank rows on every one-line answer.** Measured
+  on a rendered turn: title 1, `TurnBlock > Contents` padding-top 1, the text
+  itself 1, Textual's own markdown block margin-bottom 1, `.turn-body`
+  padding-bottom 1, `TurnBlock` margin-bottom 1 — six rows to say one line, and
+  only the last of them separates one turn from the next. Dropped the Contents
+  padding and the body's trailing padding, and zeroed the markdown bottom
+  margin on the LAST block only (`.turn-body > *:last-of-type`). A one-line
+  turn is now 2 rows plus the one separator; a multi-paragraph answer keeps its
+  internal rhythm, verified as bottom margins `[1, 1, 0]` across three
+  paragraphs. Blank rows between paragraphs are readability; blank rows at the
+  end of a turn are waste stacked on the turn's own separator.
+- **The curated-memory caps had no indicator anywhere.** LORE injects user and
+  project memory into every session and enforces a hard cap on each: past it a
+  write is REFUSED and the entries are listed for consolidation, rather than
+  the store degrading quietly. That makes the fill the one LORE number worth
+  seeing before it bites, and it was visible only by running `lore status`. A
+  `mem u63% p39%` chip now sits next to the belief count, with the raw
+  `2824/4500 · 3471/8800` in its hint. Two percentages rather than one merged
+  figure: the caps are separate and fill at different rates -- user memory
+  holds facts that never stop being true and creeps up forever, project memory
+  rotates with the repo -- so merging them would hide whichever is about to
+  start refusing. Counted in CHARACTERS from the file lore_core itself writes,
+  not `st_size`, so the chip agrees with the cap the write path enforces (a
+  test pins this with deliberately multi-byte content); cached on mtime, since
+  `_refresh_status` already pays for a belief `COUNT(*)` per refresh and this
+  bar runs under a no-timer rule. An unreadable store, or an older lore_core,
+  omits the chip rather than degrading the bar.
+- **`if API` left the cost chip.** The status bar's scarcest resource is row
+  width, and the phrase cost eight characters of it on every session. The
+  meaning stays where it always was: `sub:` already says this session bills no
+  dollars and `≈` marks the figure an estimate, and the tooltip now spells out
+  that it is what the session WOULD have cost on API pricing. `/usage` and the
+  turn title keep the full wording — neither is width-constrained, and `/usage`
+  is prose where spelling it out is the point.
 ## 0.41.0 — 2026-08-25
 
 **The logo is now the first thing a session shows, and `/img` will tell
