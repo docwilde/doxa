@@ -408,8 +408,17 @@ def test_help_still_lists_the_binding_it_marks(monkeypatch):
 
 
 def test_unreachable_bindings_names_the_real_ones(monkeypatch):
+    # Ctrl+Tab joined this list in v0.42.0 and is SUPPOSED to be in it.
+    # The operator asked for Ctrl+Tab as the permission-mode cycle key;
+    # this module's own predicate says a legacy terminal cannot send it,
+    # so Shift+Tab (which it CAN send -- back-tab, CSI Z) is the primary
+    # binding and Ctrl+Tab rides beside it for terminals speaking the
+    # kitty protocol. Appearing here is the whole deal: a second, partly
+    # deliverable binding is only defensible because /help and /doctor say
+    # out loud where it does not work, instead of leaving it documented
+    # and silently dead -- which is the defect v0.39.0 exists to close.
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.LEGACY)
-    assert unreachable_bindings() == ["Ctrl+,"]
+    assert unreachable_bindings() == ["Ctrl+,", "Ctrl+Tab"]
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.KITTY)
     assert unreachable_bindings() == []
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.UNKNOWN)

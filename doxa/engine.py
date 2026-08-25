@@ -143,6 +143,132 @@ def consult_floor() -> float | None:
 
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
+
+# -- permission modes (v0.42.0) ---------------------------------------
+#
+# What the SDK offers, verbatim from ``claude_agent_sdk.types``::
+#
+#     PermissionMode = Literal["default", "acceptEdits", "plan",
+#                              "bypassPermissions", "dontAsk", "auto"]
+#
+# and, unlike effort, it has a LIVE setter --
+# ``ClaudeSDKClient.set_permission_mode`` issues a control request the way
+# ``set_model`` does, so a mode change is a switch and not a reconnect.
+# That is what makes a hotkey worth binding at all.
+#
+# The six do not divide into "safe" and "unsafe" along one axis, so DOXA
+# divides them along the axis that actually matters to a user pressing a
+# key: **does the approval gate still reach you?** DOXA's own
+# ``can_use_tool`` callback (see ``_on_can_use_tool``) is the thing that
+# turns a permission request into the needs-input dialog on the status
+# line; a mode that stops the CLI asking is a mode where that dialog
+# stops appearing.
+
+# The modes the cycle hotkey walks, IN CYCLE ORDER. Every one of them
+# leaves the approval gate intact:
+#
+#   default      the CLI asks about anything it considers dangerous, and
+#                DOXA renders the question.
+#   acceptEdits  file edits stop being asked about; everything else still
+#                is. Widened, but bounded -- and bounded by the one thing
+#                a user of a coding agent can already undo (git).
+#   plan         no tool executes at all. Strictly narrower than default.
+#
+# These are also exactly the three surfaces Claude Code's own Shift+Tab
+# walks, which is the shape the operator asked DOXA to adopt.
+CYCLE_MODES = ("default", "acceptEdits", "plan")
+
+# The other three, reachable ONLY through ``/mode <name>`` and only behind
+# an explicit confirmation (:class:`doxa.ui.dialogs.PermissionModeConfirm`).
+# None of them is merely "advanced"; each removes the human from a loop
+# they are in today:
+#
+#   bypassPermissions  every tool call runs, unapproved, at the user's
+#                      full privileges. Nothing asks. Nothing is checked.
+#   auto               a model classifier decides instead of the user.
+#                      The gate still exists; the person behind it does
+#                      not. That is the same removal with a nicer name.
+#   dontAsk            the inverse failure: anything not pre-approved is
+#                      DENIED rather than asked about, so turns start
+#                      failing with no dialog to explain why. Not a
+#                      hazard -- a silence -- but a user who landed here
+#                      by accident would have no way to know it.
+#
+# A hotkey that can arrive at any of these by mistake is exactly the
+# misclick asymmetry this codebase already refused for /compact (a lossy,
+# un-undoable action behind a single unconfirmed click, v0.28.0). The
+# keycap reaches the three above and nothing else, by construction rather
+# than by care: :func:`next_cycle_mode` cannot return a string that is not
+# in CYCLE_MODES.
+GATED_MODES = ("bypassPermissions", "auto", "dontAsk")
+
+PERMISSION_MODES = CYCLE_MODES + GATED_MODES
+
+# The mode a session runs in when nobody has said otherwise. Named rather
+# than spelled out at each site, because "default" is both the name of a
+# mode and the English word for this constant's role, and a bare literal
+# makes the two impossible to tell apart when reading a condition.
+DEFAULT_PERMISSION_MODE = "default"
+
+
+def cycle_index(mode: "str | None") -> int:
+    """Where `mode` sits in :data:`CYCLE_MODES`, or -1.
+
+    A session parked on a GATED mode is off the cycle entirely, and this
+    is where that fact is expressed -- see :func:`next_cycle_mode` for
+    what the hotkey then does."""
+    try:
+        return CYCLE_MODES.index(str(mode or DEFAULT_PERMISSION_MODE))
+    except ValueError:
+        return -1
+
+
+def next_cycle_mode(mode: "str | None") -> str:
+    """The mode one press of the cycle key moves to.
+
+    **This function is the security boundary for the hotkey**, and it is
+    written as a total function over :data:`CYCLE_MODES` for that reason:
+    its return value is an element of that tuple, always, for every
+    possible input -- including None, including garbage, including a gated
+    mode. There is no argument, no configuration and no state that makes
+    it return ``"bypassPermissions"``.
+
+    A session currently on a gated mode (reached deliberately, through
+    ``/mode`` and a confirmation) is not part of the ring, so the first
+    press LEAVES it, landing on ``CYCLE_MODES[0]`` -- the safe default.
+    Stepping "onward" from bypass into the ring at some arbitrary point
+    would do as much; going home is the one that is obvious to the person
+    who just pressed a key to get out of it."""
+    position = cycle_index(mode)
+    if position < 0:
+        return CYCLE_MODES[0]
+    return CYCLE_MODES[(position + 1) % len(CYCLE_MODES)]
+
+
+def permission_mode_default() -> str:
+    """``DOXA_PERMISSION_MODE`` / the config file's ``permission_mode``
+    row: which mode a NEW session connects in.
+
+    Validated against :data:`CYCLE_MODES`, **not** against the full six,
+    and that narrowing is the whole point of the function. A persisted
+    ``acceptEdits`` is a convenience -- it is what a user who works that
+    way every day would otherwise re-press on every tab. A persisted
+    ``bypassPermissions`` is a standing hazard: an unattended setting that
+    silently disarms the approval gate of every future session, including
+    sessions opened in repositories the user has not read, and including
+    sessions opened by someone who never set it. So a config file or an
+    environment variable can seed the three safe modes and cannot seed the
+    other three. An out-of-subset value here is IGNORED, the session
+    connects on the default, and ``/mode`` says so out loud rather than
+    letting the discrepancy sit silently (see ``_cmd_mode``).
+
+    The gated modes stay fully reachable -- ``/mode <name>``, one
+    confirmation, applied to the RUNNING session. What they cannot do is
+    outlive the session that chose them."""
+    value = config_mod.raw("DOXA_PERMISSION_MODE").strip()
+    return value if value in CYCLE_MODES else DEFAULT_PERMISSION_MODE
+
+
 # How many active beliefs the chip's picker will ever list in one open
 # (:meth:`SessionEngine.list_beliefs`, and EngineClient's paging loop over
 # the daemon's `beliefs` RPC, both default to this so the two paths agree
@@ -742,6 +868,16 @@ class SessionEngine:
         # chip) -- None until _build_options runs, same as every other
         # connect-time field here (server_info, account).
         self.effort: str | None = None
+        # Permission mode (v0.42.0). Unlike effort beside it, this is NOT
+        # connect-time-only: the SDK has a live setter, so this attribute
+        # is the running session's CURRENT mode and moves whenever
+        # set_permission_mode succeeds. Seeded here rather than in
+        # _build_options because the status chip must be able to paint the
+        # truth before the first connect completes, and because the seed
+        # is deliberately narrowed to the safe subset -- see
+        # permission_mode_default() for why a config file cannot arm a
+        # gated mode.
+        self.permission_mode: str = permission_mode_default()
         # Exact SIZE, in characters, of the LORE snapshot this session
         # appended to its system prompt at connect (_build_options). The
         # CLI's own context breakdown counts those tokens inside its
@@ -1405,6 +1541,16 @@ class SessionEngine:
             # Connect-time only -- see effort_level(). None leaves the CLI's
             # own default alone rather than asserting a level we made up.
             **({"effort": effort} if effort else {}),
+            # Permission mode, asserted UNCONDITIONALLY (no "omit the key
+            # when it is the default" branch, unlike effort above): this
+            # session already knows which mode it is in -- the status chip
+            # is painting it -- so leaving the CLI to pick would mean the
+            # chip and the CLI could disagree about the one thing the chip
+            # exists to report. This engine is one session: /clear and
+            # Ctrl+T build a NEW SessionEngine, which re-reads
+            # permission_mode_default() -- so a mode never outlives the
+            # session that chose it, and a gated one cannot be inherited.
+            permission_mode=self.permission_mode,
             **({"thinking": {"type": "adaptive", "display": "summarized"}}
                if reasoning else {}),
             cwd=self.cwd,
@@ -1805,6 +1951,47 @@ class SessionEngine:
         await setter(model)
         self.model = model
         return model or "default"
+
+    # -- live permission-mode switching (v0.42.0) ---------------------
+
+    async def set_permission_mode(self, mode: str) -> str:
+        """Switch this session's permission mode, IN PLACE.
+
+        The same shape as :meth:`set_model` directly above, and for the
+        same measured reason: ``ClaudeSDKClient.set_permission_mode`` is a
+        control request (``client.py:284`` -> ``Query.set_permission_mode``),
+        not a connect-time option, so the transcript, the daemon, the
+        replay ring, the peer presence and every hook survive the change
+        untouched. This is what separates ``/mode`` from ``/effort``, which
+        genuinely cannot do this and says so.
+
+        Validation happens HERE rather than only at the callers, because
+        this method is what the daemon RPC lands on too: an unknown mode
+        is refused rather than forwarded, since the CLI's own reaction to
+        an invalid mode is not something DOXA should be discovering
+        mid-session. **Refusing is not the security boundary** -- every
+        one of the six is accepted here, gated or not. The boundary is
+        that nothing reaches this method with a gated mode except a path
+        that has already shown the user a confirmation naming what stops
+        happening; see :func:`next_cycle_mode` for the hotkey's half of
+        that and ``_cmd_mode`` for the command's.
+
+        Returns the mode now in force. Raises RuntimeError when the
+        session cannot switch (not connected, or a client without the
+        method) -- the caller reports that rather than pretending."""
+        if mode not in PERMISSION_MODES:
+            raise RuntimeError(f"unknown permission mode {mode!r}")
+        if not self._connected or self._client is None:
+            raise RuntimeError("session is not connected")
+        setter = getattr(self._client, "set_permission_mode", None)
+        if setter is None:
+            raise RuntimeError(
+                "this session's client cannot switch permission modes "
+                "(no set_permission_mode)"
+            )
+        await setter(mode)
+        self.permission_mode = mode
+        return mode
 
     # -- branch switch (item S) ---------------------------------------
 

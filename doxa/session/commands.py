@@ -34,9 +34,10 @@ from .. import identity as identity_mod
 from .. import peers as peers_mod
 from .. import version as version_mod
 from ..peers import PeerSendError, age_secs
-from ..ui.dialogs import AboutDialog
+from ..ui.dialogs import AboutDialog, PermissionModeConfirm
 from ..ui.labels import (
     CONTEXT_UNAVAILABLE,
+    MODE_EXPLAIN,
     MODEL_ALIASES,
     _fmt_age,
     context_breakdown_text,
@@ -88,6 +89,7 @@ PANE_COMMANDS: "tuple[CommandBinding, ...]" = (
     CommandBinding("/doctor", "_cmd_doctor"),
     CommandBinding("/model", "_cmd_model"),
     CommandBinding("/branch", "_cmd_branch"),
+    CommandBinding("/mode", "_cmd_mode"),
     CommandBinding("/effort", "_cmd_effort"),
     CommandBinding("/usage", "_cmd_usage"),
     CommandBinding("/context", "_cmd_context"),
@@ -238,6 +240,103 @@ class PaneCommandsMixin:
             return
         self._refresh_status()
         await self._system(f"branch: {result.get('message') or 'switched'}")
+
+    async def _cmd_mode(self, args: str) -> None:
+        """``/mode`` (v0.42.0) -- which tool calls still stop and ask you.
+
+        The counterpart to ``/effort`` directly below, and deliberately
+        the opposite story, because the SDK is different in the two cases:
+        ``ClaudeAgentOptions.effort`` has no live setter and that command
+        says so; ``ClaudeSDKClient.set_permission_mode`` IS a control
+        request, so this one genuinely changes the running session, the
+        way ``/model`` does.
+
+        Bare ``/mode`` lists all six with what each one does and marks the
+        current one. ``/mode <name>`` switches. **The three gated modes go
+        through :class:`~doxa.ui.dialogs.PermissionModeConfirm` first**,
+        and this method is the single place that gate lives -- the chip's
+        picker and the Shift+Tab hotkey both land here rather than each
+        carrying their own copy of the rule (the hotkey cannot even reach
+        a gated mode; see ``engine.next_cycle_mode``).
+
+        Nothing here writes to the settings file, and that is the
+        persist-or-reset answer in one line: a mode is session state.
+        ``/model`` saves because a model is a preference; a permission
+        mode is a posture adopted for a piece of work, and a single
+        Shift+Tab tap silently rewriting the default for every future
+        session -- in repositories not yet cloned -- is not what that
+        keystroke means. The persistent default is its own settings row
+        (``permission_mode``), narrowed to the three cycle-safe modes."""
+        from .. import engine as engine_mod
+
+        engine = self.engine
+        current = str(getattr(engine, "permission_mode", None) or
+                      engine_mod.DEFAULT_PERMISSION_MODE)
+        if not args:
+            lines = [f"mode: {current}", ""]
+            for name in engine_mod.PERMISSION_MODES:
+                mark = "▸" if name == current else " "
+                gate = "  (asks first)" if name in engine_mod.GATED_MODES else ""
+                lines.append(
+                    f" {mark} {name:<18} {MODE_EXPLAIN.get(name, '')}{gate}"
+                )
+            lines += [
+                "",
+                "usage: /mode <name>   ·   Shift+Tab cycles "
+                + " → ".join(engine_mod.CYCLE_MODES),
+                "the other three stop DOXA asking you about a tool call, so "
+                "they are not on the hotkey and each confirms first",
+            ]
+            # The settings row and the running session are different
+            # things and can legitimately differ; say which is which rather
+            # than letting the user infer it from one number.
+            configured = config_mod.raw("DOXA_PERMISSION_MODE").strip()
+            if configured and configured not in engine_mod.CYCLE_MODES:
+                lines.append(
+                    f"note: permission_mode={configured!r} in your settings is "
+                    "IGNORED — only "
+                    + ", ".join(engine_mod.CYCLE_MODES)
+                    + " can be persisted, so no stored setting can disarm the "
+                    "approval gate of a session you have not opened yet"
+                )
+            elif configured:
+                lines.append(f"new sessions start in {configured}")
+            await self._system("\n".join(lines))
+            return
+        wanted = args.split()[0]
+        if wanted not in engine_mod.PERMISSION_MODES:
+            await self._system(
+                f"mode: unknown mode {wanted!r} — "
+                + ", ".join(engine_mod.PERMISSION_MODES)
+            )
+            return
+        setter = getattr(engine, "set_permission_mode", None)
+        if setter is None:
+            await self._system(
+                "mode: this session's handle cannot switch permission modes"
+            )
+            return
+        if wanted in engine_mod.GATED_MODES and wanted != current:
+            accepted = await self.app.push_screen_wait(
+                PermissionModeConfirm(wanted, current)
+            )
+            if not accepted:
+                # Declined: no control request is issued, the engine's own
+                # mode attribute is untouched and the status line does not
+                # move -- the same nothing-happened contract the compact
+                # confirm's decline path already keeps.
+                await self._system(f"mode: unchanged ({current})")
+                return
+        try:
+            resolved = await setter(wanted)
+        except Exception as exc:  # noqa: BLE001 -- a refusal is information
+            await self._system(f"mode: {type(exc).__name__}: {exc}")
+            return
+        self._refresh_status()
+        await self._system(
+            f"mode: {current} → {resolved}  ·  "
+            f"{MODE_EXPLAIN.get(resolved, '')} (this session only)"
+        )
 
     async def _cmd_effort(self, args: str) -> None:
         """/effort -- honest about a real SDK limit.

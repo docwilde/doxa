@@ -519,6 +519,9 @@ class StatusBar(Static):
     async def action_open_effort_picker(self) -> None:
         await self.pane.open_effort_picker()
 
+    async def action_open_mode_picker(self) -> None:
+        await self.pane.open_mode_picker()
+
     def action_open_repo_picker(self) -> None:
         self.pane.open_repo_picker()
 

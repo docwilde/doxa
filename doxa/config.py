@@ -89,6 +89,21 @@ SETTINGS: tuple[Setting, ...] = (
              "has no live setter, so a running session keeps its own.",
     ),
     Setting(
+        key="permission_mode", env="DOXA_PERMISSION_MODE",
+        label="permission mode", category="Session",
+        kind="choice", choices=("", "default", "acceptEdits", "plan"),
+        help="Permission mode NEW sessions connect in "
+             "(doxa.engine.permission_mode_default); Shift+Tab cycles the "
+             "running session, /mode sets it",
+        note="Only the three modes the hotkey cycles can be persisted here. "
+             "bypassPermissions, auto and dontAsk each stop DOXA asking you "
+             "about a tool call, so they are session-scoped: /mode <name> "
+             "sets one for the RUNNING session, behind a confirmation. A "
+             "standing setting that disarms the approval gate of every "
+             "future session -- in repositories you have not read yet -- "
+             "is not a knob this menu offers.",
+    ),
+    Setting(
         key="linger_secs", env="DOXA_LINGER_SECS", label="linger secs",
         category="Session", kind="number", default="120",
         help="Seconds a daemon outlives its last client before finalizing "

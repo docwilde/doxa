@@ -32,8 +32,9 @@ client -> server
                                                on the event stream tagged with
                                                the reply's "turn" id
   {"type": "call", "id": N, "method": "status"|"peers"|"msg"|"stop"|
-   "set_model"|"branch"|"answer_needs_input"|"beliefs"|"pending"|"context"|
-   "belief_evidence"|"lore_write"|"approve_pending"|"reject_pending",
+   "set_model"|"set_permission_mode"|"branch"|"answer_needs_input"|
+   "beliefs"|"pending"|"context"|"belief_evidence"|"lore_write"|
+   "approve_pending"|"reject_pending",
    "params": {...}}
 
 Interactive permission (queue item 5): a pending ``AskUserQuestion`` or
@@ -554,6 +555,13 @@ class SessionDaemon:
             "doxa": __version__,
             "session_id": self.session_id,
             "model": self.engine.model,
+            # Beside "model" for the same reason it is: both are answers
+            # the client needs before it paints, and EngineClient.attach
+            # runs its first status refresh under contextlib.suppress --
+            # so a refresh that fails would otherwise leave the mode chip
+            # showing this client's seeded guess rather than the daemon's
+            # fact. A safety indicator must not have a guess-shaped hole.
+            "permission_mode": getattr(self.engine, "permission_mode", None),
             "cwd": self.cwd,
             "next_seq": self.ring.next_seq,
         }))
@@ -673,6 +681,39 @@ class SessionDaemon:
             # that asked -- two tabs on one daemon must not disagree.
             self._publish(None, EngineEvent("model_changed", {"model": model}))
             await self._reply(writer, req_id, ok=True, model=model)
+        elif method == "set_permission_mode":
+            # /mode over the daemon split (v0.42.0): the SAME shape as
+            # set_model above, because it is the same kind of thing -- an
+            # SDK control request against the client the daemon owns, so
+            # no reconnect and nothing in the ring disturbed.
+            #
+            # The DAEMON owns the operation; the client sends a name.
+            # SessionEngine.set_permission_mode validates it here rather
+            # than trusting the caller, which matters more on this path
+            # than on the in-process one: a socket is reachable by
+            # something that is not this TUI. That validation is NOT the
+            # confirmation gate, though -- the confirmation is a UI act
+            # and lives with the UI (``_cmd_mode``). A daemon cannot show
+            # a dialog, and pretending otherwise by refusing gated modes
+            # here would only mean a detached session could never reach
+            # one at all.
+            try:
+                mode = await self.engine.set_permission_mode(
+                    str(params.get("mode") or "")
+                )
+            except Exception as exc:  # noqa: BLE001 -- the client shows it
+                await self._reply(writer, req_id, ok=False,
+                                  error=f"{type(exc).__name__}: {exc}")
+                return
+            # Every attached client learns it, not just the one that asked
+            # -- and this event matters more than model_changed does: a
+            # second tab on this daemon whose chip still says "default"
+            # while the session no longer asks about anything is a status
+            # line actively lying about a safety property.
+            self._publish(
+                None, EngineEvent("permission_mode_changed", {"mode": mode})
+            )
+            await self._reply(writer, req_id, ok=True, mode=mode)
         elif method == "branch":
             # /branch over the daemon split (item S #4): the SAME shape as
             # set_model above -- the daemon owns the git operation
@@ -848,6 +889,14 @@ class SessionDaemon:
         return {
             "session_id": self.session_id,
             "model": self.engine.model,
+            # v0.42.0: a REATTACHING client has to be told the truth about
+            # this one before it paints anything. Every other field here is
+            # a number that is merely stale until the next refresh; a mode
+            # chip defaulting to "default" on a session actually running
+            # unattended in bypassPermissions would be a status line
+            # misreporting a safety property to the person who just came
+            # back to check on it.
+            "permission_mode": getattr(self.engine, "permission_mode", None),
             "cwd": self.cwd,
             # Identity surface for the client's status cache: the account
             # block the CLI reported at connect (may be {}), and where the

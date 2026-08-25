@@ -46,12 +46,17 @@ from ..ui.labels import (
     memory_fill_chip,
     CLICKABLE_CHIP_ACCENT,
     CTX_ABSOLUTE_MIN_COLS,
+    MODE_CHIP_MIN_COLS,
+    MODE_EXPLAIN,
     _belief_scope_label,
     _chip_span,
     _fmt_belief_row,
     _fmt_pending_row,
     as_proposal,
     ctx_chip,
+    mode_chip,
+    mode_text,
+    mode_tooltip,
     proposal_tooltip,
 )
 from ..ui.labels import ctx_text as ctx_text_of
@@ -240,6 +245,38 @@ class PaneChipsMixin:
         except Exception:
             return ""
 
+    def _mode_chip_cramped(self) -> bool:
+        """Is the status row too narrow to spend full width on the mode?
+
+        The other half of the width discipline :meth:`_ctx_absolute_inline`
+        above starts, and it decides two things at once (see
+        :meth:`_status_chips`): below this threshold the chip prints its
+        SHORT form, and a chip that is merely reporting the safe default
+        stands down entirely.
+
+        The threshold is not a guess. An 80-column terminal was measured
+        already full: adding an unconditional chip pushed the session
+        handle off the right-hand end of the row, and the status bar has
+        no overflow behaviour -- a chip that does not fit is not truncated
+        or scrolled, it is simply gone. So an always-on mode chip does not
+        cost width in the abstract; it costs whichever chip is furthest
+        right, silently, on the terminal size most people actually use.
+
+        What does NOT stand down at any width is a mode that stopped
+        asking. That is the whole asymmetry: ``mode:default`` competing
+        with the reattach handle for the last eight columns should lose,
+        because it is telling the user what they already assume;
+        ``⚠ mode:bypass`` should win against anything on the row, because
+        it is the only place that fact appears.
+
+        Same no-resize-hook rule as its neighbour: re-evaluated on the
+        ordinary event-driven refreshes, so narrowing a window changes the
+        chip at the next repaint rather than mid-drag. An app that cannot
+        be measured yet (no screen, at construction) counts as wide."""
+        width = getattr(getattr(self, "app", None), "size", None)
+        width = getattr(width, "width", 0)
+        return bool(width) and width < MODE_CHIP_MIN_COLS
+
     def _status_chips(self) -> "list[StatusChip]":
         """Every chip this pane's status line shows, in paint order.
 
@@ -264,6 +301,8 @@ class PaneChipsMixin:
         its declared order; DOXA still owns the rendering, which is what
         makes the ordering guarantee enforceable. No such folding step
         exists yet -- this release ships the shape, not the loader."""
+        from .. import engine as engine_mod
+
         engine = self.engine
         chips: "list[StatusChip]" = []
         model = engine.model or "default"
@@ -273,6 +312,51 @@ class PaneChipsMixin:
             "model handling this session's turns -- click to switch "
             "(takes effect on the NEXT turn, transcript kept)",
         ))
+        # Permission mode (v0.42.0), second and beside the model on
+        # purpose: those two are what decide how this session BEHAVES, and
+        # everything after them reports what it has done.
+        #
+        # Hide-at-zero, but on a width condition rather than a value one,
+        # and the difference is the point. Every other chip here is absent
+        # when its number is zero or its state was never asserted; a
+        # permission mode is ALWAYS in force, and ``default`` is a mode
+        # with behavior rather than the absence of one -- so on a terminal
+        # with room, DOXA says which one, unconditionally. On a terminal
+        # WITHOUT room (measured: 80 columns is already full, and the row
+        # does not truncate, it drops whatever falls off the right) the
+        # chip yields -- but only when what it would have said is
+        # ``default``. A mode that has stopped asking is painted at every
+        # width, short-form if it must be, because it is the only place
+        # that fact appears at all. See :meth:`_mode_chip_cramped`.
+        #
+        # ``mode_chip`` colors it in three tiers -- uncolored at default,
+        # amber at acceptEdits/plan, red at the three that stop asking --
+        # and the click span is built HERE rather than through
+        # ``_chip_span``, the same exception the ctx chip below takes and
+        # for the same reason: that helper escapes its text, which would
+        # escape this chip's own already-trusted, code-generated coloring
+        # as if it were arbitrary bracket text. The accent shows through at
+        # the uncolored tier and yields to the escalation color once one
+        # applies -- the mode signal outranks the click affordance.
+        #
+        # The KEY below is the PLAIN text, never the colored markup:
+        # StatusBar._tooltip_for_x looks each chip up inside the bar's
+        # markup-STRIPPED string, so a key still carrying `[#D9534F]…[/]`
+        # matches nothing and the tooltip silently vanishes at exactly the
+        # tier that matters most. That is v0.35.0's ctx defect verbatim,
+        # and this chip is unusually well placed to repeat it, so the rule
+        # is written down here as well as there.
+        mode = str(getattr(engine, "permission_mode", None) or
+                   engine_mod.DEFAULT_PERMISSION_MODE)
+        cramped = self._mode_chip_cramped()
+        if mode != engine_mod.DEFAULT_PERMISSION_MODE or not cramped:
+            mode_plain = mode_text(mode, short=cramped)
+            chips.append(StatusChip.raw(
+                mode_plain,
+                f"[@click=open_mode_picker][{CLICKABLE_CHIP_ACCENT}]"
+                f"{mode_chip(mode, short=cramped)}[/][/]",
+                ((mode_plain, mode_tooltip(mode)),),
+            ))
         if self.needs_input:  # visible only while a question or permission
             # request is actually pending on THIS pane.
             chips.append(StatusChip.plain(
@@ -574,6 +658,44 @@ class PaneChipsMixin:
             rows, current,
             lambda chosen: self.run_worker(self._cmd_effort(chosen), group="command"),
             note=note, title="effort",
+        )
+
+    async def open_mode_picker(self) -> None:
+        """The permission-mode chip's click target (v0.42.0).
+
+        Lists ALL SIX modes, cycle-safe ones first, each row carrying the
+        one-sentence explanation the chip's tooltip and ``/mode``'s own
+        listing use (``labels.MODE_EXPLAIN`` -- one source, three
+        surfaces). The gated three are listed rather than hidden: a
+        capability the CLI has and DOXA refuses to mention is how a user
+        ends up editing config files to reach it, and the confirmation
+        (not the concealment) is what makes reaching it deliberate.
+
+        Selection calls the SAME ``_cmd_mode`` coroutine ``/mode <name>``
+        uses -- one switch path, three doors (keycap, chip, command), and
+        exactly one place where the confirmation for a gated mode lives.
+        Picking a gated row here therefore raises the confirm, and
+        declining it leaves the session where it was."""
+        from .. import engine as engine_mod
+
+        if self.engine is None:
+            return
+        rows = [
+            (name, f"{name} — {MODE_EXPLAIN.get(name, '')}")
+            for name in engine_mod.PERMISSION_MODES
+        ]
+        groups = {
+            name: ("cycled by Shift+Tab" if name in engine_mod.CYCLE_MODES
+                   else "asks first — stops DOXA asking you")
+            for name in engine_mod.PERMISSION_MODES
+        }
+        current = str(getattr(self.engine, "permission_mode", None) or "default")
+        self._open_chip_picker(
+            rows, current,
+            lambda chosen: self.run_worker(self._cmd_mode(chosen), group="command"),
+            note="Shift+Tab cycles the top group; the bottom group asks "
+                 "before it switches",
+            title="permission mode", groups=groups,
         )
 
     def run_status_command(self, name: str) -> None:

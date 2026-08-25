@@ -85,6 +85,17 @@ class EngineClient:
         self.backlog_skipped: "int | None" = None
         self.session_id: str | None = None
         self.model: str | None = None
+        # Permission mode (v0.42.0), engine parity: SessionEngine carries
+        # the same attribute name, so the status chip reads whichever
+        # object this pane has without knowing which side of the socket it
+        # is on. Seeded to the safe default rather than None because the
+        # chip can paint before the first reply lands -- and if this client
+        # is ever wrong for one frame, "default" is the answer that
+        # UNDERSTATES the session's freedom rather than overstating it, so
+        # the transient error is "you were not told about a gated mode
+        # yet", never "you were told there is none". The hello frame
+        # corrects it immediately; see SessionDaemon._hello.
+        self.permission_mode: str = "default"
         self.cwd: str | None = None
         self.total_cost_usd = 0.0
         self.last_ctx_percentage: float | None = None
@@ -138,6 +149,8 @@ class EngineClient:
             )
         self.session_id = hello.get("session_id")
         self.model = hello.get("model")
+        if hello.get("permission_mode"):
+            self.permission_mode = str(hello["permission_mode"])
         self.cwd = hello.get("cwd")
         if self.skip_backlog:
             # The daemon has advertised its ring head since the protocol's
@@ -293,6 +306,22 @@ class EngineClient:
             # the cached value follows immediately, not at the next status.
             if ev.data.get("model"):
                 self.model = str(ev.data["model"])
+        elif ev.type == "permission_mode_changed":
+            # v0.42.0, the same shape as model_changed directly above and
+            # for a sharper version of its reason: two tabs on one daemon
+            # must not disagree about the model, and MUST not disagree
+            # about whether this session still asks before it acts. The
+            # cached value follows the daemon's broadcast immediately
+            # rather than waiting for a status refresh.
+            # No status round-trip is issued here, deliberately: the event
+            # already CARRIES the new mode, and this frame goes on to the
+            # out-of-band queue whose pump repaints the status bar for
+            # every event it sees (see SessionPane._peer_pump's trailing
+            # _refresh_status). base_changed below does ask for one, but
+            # only because GitLine has to re-read a file this event does
+            # not contain.
+            if ev.data.get("mode"):
+                self.permission_mode = str(ev.data["mode"])
         elif ev.type == "base_changed":
             # Item S #4/#5: another client (or this one) switched the
             # session's base. Unlike model_changed, nothing needs caching
@@ -353,6 +382,27 @@ class EngineClient:
         self.model = reply.get("model") or model
         return str(self.model)
 
+    async def set_permission_mode(self, mode: str) -> str:
+        """``/mode`` over the socket (v0.42.0) -- engine parity with
+        :meth:`doxa.engine.SessionEngine.set_permission_mode`.
+
+        The SAME shape as :meth:`set_model` above: the daemon owns the
+        operation (it holds the SDK client), a refusal comes back as an
+        error the caller shows verbatim, and every attached client -- not
+        just this one -- learns the result through the daemon's
+        ``permission_mode_changed`` broadcast. The confirmation for a gated
+        mode is NOT on this path and must not be: it is a UI act, it
+        happens in ``_cmd_mode`` before this is ever called, and a socket
+        RPC that popped a dialog would be one that no headless caller
+        could satisfy."""
+        reply = await self._call("set_permission_mode", mode=mode)
+        if not reply.get("ok"):
+            raise EngineClientError(
+                reply.get("error") or "permission mode switch refused"
+            )
+        self.permission_mode = str(reply.get("mode") or mode)
+        return self.permission_mode
+
     async def switch_branch(self, target: "str | None") -> dict:
         """/branch over the socket (item S #4): the daemon does the git op
         either way (doxa.worktrees owns it), and on a successful SWITCH
@@ -407,6 +457,8 @@ class EngineClient:
         status = reply.get("status") or {}
         if status.get("model"):
             self.model = status["model"]
+        if status.get("permission_mode"):
+            self.permission_mode = str(status["permission_mode"])
         if isinstance(status.get("account"), dict):
             self.account = status["account"]
         if status.get("lore_root"):

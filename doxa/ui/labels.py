@@ -259,6 +259,152 @@ CTX_RED = "#D9534F"
 CTX_ABSOLUTE_MIN_COLS = 100
 
 
+# -- permission mode (v0.42.0) ----------------------------------------
+#
+# The chip the operator asked for: "in claude code you have an indicator
+# to switch from manual to auto mode, we should adopt that, add it to the
+# status line".
+
+# Full name -> what the chip prints when the terminal is narrow. The
+# status bar is the most contended row in the app, and a mode that has
+# stopped asking has to stay on it at EVERY width (see
+# MODE_CHIP_MIN_COLS below and PaneChipsMixin._mode_chip_cramped), so it
+# needs a small form rather than only a hide rule. Short enough to fit,
+# long enough to still read as the mode and not as a code the user has to
+# look up; the tooltip carries the exact SDK spelling in every tier,
+# because that is the string `/mode <name>` takes.
+#
+# ``default`` is deliberately absent: it is the one mode that never has to
+# fit, because a cramped row drops that chip entirely rather than shrinking
+# it (_mode_chip_cramped). Giving it an abbreviation here would ship a
+# label no user can ever see, which is the same "present, documented,
+# dead" failure the Ctrl+Tab measurement talked DOXA out of. The ``.get``
+# below falls back to the full name, so nothing breaks if that rule ever
+# changes -- it just prints `mode:default`.
+MODE_SHORT = {
+    "acceptEdits": "edits",
+    "plan": "plan",
+    "bypassPermissions": "bypass",
+    "dontAsk": "no-ask",
+    "auto": "auto",
+}
+
+# Prefixed to every mode that stops DOXA asking the user about a tool
+# call, in the FULL and the SHORT form alike -- the warning is the last
+# thing this chip gives up for width, ahead of the mode name itself.
+MODE_WARN_GLYPH = "⚠"
+
+# Non-default but gate-intact (acceptEdits, plan). The same amber the ctx
+# chip escalates to at 70%: "you have changed something here, and you may
+# have forgotten". Deliberately ONE color for both, even though plan is
+# strictly narrower than default and acceptEdits is wider -- what the
+# color says is not "this is risky", it is "this session is not in the
+# posture it started in", and both of those failures are real. A user
+# wondering why edits are landing unasked and a user wondering why nothing
+# executes at all are looking for the same chip.
+MODE_ACTIVE = CTX_AMBER
+
+# A mode where the approval gate no longer reaches the user. The SAME red
+# the ctx chip escalates to at 90%, deliberately: this app already has one
+# color that means "the thing you are about to lose is not recoverable",
+# and a second one would dilute it.
+MODE_DANGER = CTX_RED
+
+# Below this width the chip prints MODE_SHORT instead of the SDK's own
+# spelling -- `⚠ mode:bypassPermissions` costs 24 columns and
+# `⚠ mode:bypass` costs 13. Same reasoning and the same measured baseline
+# as CTX_ABSOLUTE_MIN_COLS above (the ordinary chip set already fills ~95
+# columns, and an 80-column bar was measured pushing the reattach handle
+# off the row once one more chip joined it), with one difference that
+# matters: a mode which has stopped asking SHRINKS here and never
+# disappears, because it is the only place that fact is shown. It is the
+# safe default that stands down instead -- see
+# PaneChipsMixin._mode_chip_cramped, which owns both halves of the rule.
+MODE_CHIP_MIN_COLS = 110
+
+# One sentence per mode, in the user's terms rather than the SDK's: the
+# question a person actually has in front of a status chip is "does
+# anything still ask me before it runs?". Shared by the chip's tooltip,
+# the picker's rows and ``/mode``'s own listing, so the three cannot say
+# different things about the same mode.
+MODE_EXPLAIN = {
+    "default": "the CLI asks you before anything it considers dangerous",
+    "acceptEdits": "file edits run unasked; everything else still asks",
+    "plan": "no tool runs at all — planning only",
+    "bypassPermissions": "EVERY tool call runs unapproved; nothing asks you",
+    "auto": "a model classifier approves or denies each call instead of you",
+    "dontAsk": "anything not pre-approved is DENIED, with no prompt shown",
+}
+
+
+def mode_text(mode: "str | None", *, short: bool = False) -> str:
+    """The permission-mode chip's PLAIN text.
+
+    Split from :func:`mode_chip` for the reason :func:`ctx_text` is split
+    from :func:`ctx_chip`, which is a defect this codebase has already
+    paid for once: ``StatusBar._tooltip_for_x`` resolves a chip's tooltip
+    by finding the chip's text inside the bar's markup-STRIPPED string, so
+    a key that still carries ``[#D9534F]…[/]`` matches nothing and the
+    tooltip silently vanishes at exactly the tier where it matters most
+    (v0.35.0, the ctx chip's amber and red tiers). One function builds the
+    words, the other colors them, and they cannot say different things.
+
+    An unrecognised mode is printed verbatim rather than mapped to
+    "default": if the CLI ever grows a seventh mode, a chip that lies
+    about which one is in force is worse than a chip that shows a name
+    DOXA does not know."""
+    from .. import engine as engine_mod
+
+    name = str(mode or engine_mod.DEFAULT_PERMISSION_MODE)
+    label = MODE_SHORT.get(name, name) if short else name
+    text = f"mode:{label}"
+    return f"{MODE_WARN_GLYPH} {text}" if name in engine_mod.GATED_MODES else text
+
+
+def mode_chip(mode: "str | None", *, short: bool = False) -> str:
+    """The permission-mode chip's MARKUP -- uncolored, amber, or red.
+
+    Three tiers, and the middle one is the point: the operator has to be
+    able to tell at a glance that this session is no longer in the mode it
+    started in, WITHOUT every non-default state screaming. ``plan`` is
+    narrower than default and ``acceptEdits`` is bounded by git; neither
+    earns the color ``bypassPermissions`` does.
+
+    The default tier returns the words with NO color at all, exactly as
+    :func:`ctx_chip` does below its amber threshold, and for the same
+    reason: the caller wraps this in the clickable accent, which shows
+    through at the uncolored tier and yields to the escalation color once
+    one applies. The pressure signal outranks the click affordance."""
+    from .. import engine as engine_mod
+
+    name = str(mode or engine_mod.DEFAULT_PERMISSION_MODE)
+    text = mode_text(name, short=short)
+    if name in engine_mod.GATED_MODES:
+        return f"[{MODE_DANGER}]{text}[/]"
+    if name == engine_mod.DEFAULT_PERMISSION_MODE:
+        return text
+    return f"[{MODE_ACTIVE}]{text}[/]"
+
+
+def mode_tooltip(mode: "str | None") -> str:
+    """The chip's hover row: what this mode DOES, in the terms the user
+    cares about (does anything still ask me?), plus the exact SDK spelling
+    so ``/mode <name>`` is copyable from the tooltip, plus the key.
+
+    Unconditional and full in every width tier -- the same discipline
+    ``_ctx_tooltip_absolute`` follows. What the chip gives up to fit is
+    never what the tooltip gives up."""
+    from .. import engine as engine_mod
+
+    name = str(mode or engine_mod.DEFAULT_PERMISSION_MODE)
+    what = MODE_EXPLAIN.get(name, "a permission mode DOXA does not know")
+    tail = (
+        "click to change, or /mode <name>; Shift+Tab cycles "
+        "default → acceptEdits → plan"
+    )
+    return f"permission mode {name} — {what} · {tail}"
+
+
 def fmt_tokens(count: "int | None") -> str:
     """A token count for a status chip: `812`, `24k`, `1.2M`, and `—` for
     a count nobody has reported. Rounded, because the chip answers "how

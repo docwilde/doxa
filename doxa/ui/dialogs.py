@@ -683,6 +683,90 @@ class CompactConfirm(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class PermissionModeConfirm(ModalScreen[bool]):
+    """``/mode bypassPermissions`` (and ``auto``, and ``dontAsk``): the one
+    door to a mode where DOXA stops asking you about a tool call.
+
+    The SHAPE is :class:`CompactConfirm`'s above, and the reasoning
+    transfers exactly. That dialog exists because compaction was lossy,
+    un-undoable and one unconfirmed click away; these three modes are the
+    same asymmetry moved from the transcript to the filesystem. The body
+    therefore states WHAT STOPS HAPPENING -- in the second person, naming
+    the approval gate the user actually experiences -- rather than asking
+    "are you sure?", a question nobody has ever answered with information.
+
+    The three modes are not interchangeable and the body does not pretend
+    they are: ``bypassPermissions`` runs everything unapproved, ``auto``
+    hands the decision to a model classifier, ``dontAsk`` fails the calls
+    instead of asking. One dialog, three bodies, because a generic "this
+    changes permissions" line would be equally useful for all three, which
+    is to say not at all.
+
+    Esc cancels. Unlike CompactConfirm, **Enter is NOT the accepting
+    door**: there, Enter completes an action the user's own click already
+    asked for; here, the dialog is the last thing between a keystroke and
+    an unattended agent. The accepting key is a letter the user has to
+    mean -- ``y`` -- and both doors name their own key, the house
+    convention since v0.28.0."""
+
+    BINDINGS = [("escape", "pick_cancel", "Cancel")]
+
+    def __init__(self, mode: str, current: str) -> None:
+        super().__init__()
+        self._mode = mode
+        self._current = current
+
+    def compose(self) -> ComposeResult:
+        from .labels import MODE_EXPLAIN
+
+        what = MODE_EXPLAIN.get(self._mode, "this mode changes who approves tool calls")
+        with Vertical(id="mode-confirm"):
+            yield Static(
+                f"▎ switch this session to {self._mode}?",
+                id="mode-confirm-title",
+            )
+            yield Static(
+                f"{what}.\n\n"
+                f"this session is on {self._current} now. after the switch, "
+                "DOXA's permission dialog stops appearing for the calls that "
+                "mode covers -- there is no prompt left to decline, because "
+                "nothing will ask.\n\n"
+                "it applies to THIS session only and is never written to "
+                "your settings.",
+                id="mode-confirm-body",
+            )
+            with Horizontal(id="mode-confirm-buttons"):
+                yield Static(f"[ switch to {self._mode} · y ]", id="mode-confirm-yes")
+                yield Static("[ cancel · esc ]", id="mode-confirm-no")
+
+    def action_pick_cancel(self) -> None:
+        self.dismiss(False)
+
+    def on_key(self, event: events.Key) -> None:
+        # Enter is DELIBERATELY absent from the accepting side (see the
+        # class docstring) and deliberately present on the cancelling one:
+        # the reflex key at a dialog must not be the one that disarms the
+        # approval gate, and a user who hits it and gets "nothing changed"
+        # has lost nothing at all.
+        choice = {
+            "y": True,
+            "n": False, "c": False, "enter": False, "return": False,
+        }.get(event.key)
+        if choice is not None:
+            event.stop()
+            self.dismiss(choice)
+
+    @on(events.Click, "#mode-confirm-yes")
+    def _click_yes(self, event: events.Click) -> None:
+        event.stop()
+        self.dismiss(True)
+
+    @on(events.Click, "#mode-confirm-no")
+    def _click_no(self, event: events.Click) -> None:
+        event.stop()
+        self.dismiss(False)
+
+
 class AboutDialog(ModalScreen[None]):
     """``/about`` (item Z): what DOXA this is, and what a bug report needs.
 

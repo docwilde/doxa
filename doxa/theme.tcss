@@ -253,6 +253,50 @@ CompactConfirm {
     color: #F2E9DD;
 }
 
+/* /mode <dangerous> (v0.42.0): the fourth member of the same modal family.
+   Identical wash, surface ramp and button-row treatment -- and `height:
+   auto` on the button row for the fourth time, for the v0.28.0 border-box
+   reason spelled out on #close-confirm-buttons above. Wider than the
+   compact confirm (68) because this body has to name three things (what
+   the mode does, what this session is on now, what stops appearing) and a
+   warning that wraps into a wall is a warning nobody finishes reading.
+   The title is RED rather than the family's #D97757, the one deviation:
+   this is the only dialog in the app whose accept button disarms a safety
+   gate, and it wears the same #D9534F the ctx chip escalates to. */
+PermissionModeConfirm {
+    align: center middle;
+    background: #171512 60%;
+}
+
+#mode-confirm {
+    width: 68;
+    height: auto;
+    background: #221F1A;
+    border: round #3A3429;
+    padding: 1 2;
+}
+
+#mode-confirm-title {
+    color: #D9534F;
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+#mode-confirm-body {
+    color: #D8CDBB;
+}
+
+#mode-confirm-buttons {
+    height: auto;
+    padding-top: 1;
+}
+
+#mode-confirm-buttons > Static {
+    width: auto;
+    padding-right: 2;
+    color: #F2E9DD;
+}
+
 /* /about (item Z): the third member of the same modal family as
    CloseWithTurnRunning and CompactConfirm above -- identical wash, surface
    ramp, title treatment and button row. Wider (72) because its body is a

@@ -4,6 +4,142 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.42.0 — 2026-08-25
+
+**The session now says whether it is still asking you.** Claude Code has
+an indicator for its permission mode and a key that cycles it; DOXA had
+neither, so "does this session stop before it edits my files?" was a
+question with no answer anywhere on screen. This adds the chip, the
+hotkey and `/mode` — and, because three of the six modes turn the
+approval gate off, a line down the middle of them.
+
+**On the keycap, because it is not the one that was asked for.** The
+request was `Ctrl+Tab`. `doxa/keyboard.py` — this project's own
+measurement of what a terminal can physically send, shipped in v0.39.0 —
+answers `unreachable_under_legacy('ctrl+tab') → True`: under the legacy
+key encoding, modified `Tab` carries no modifier information, so no byte
+exists for it and a binding on it never fires. `unreachable_under_legacy
+('shift+tab') → False` — back-tab (`CSI Z`) predates the whole problem
+and every terminal sends it. Shipping `Ctrl+Tab` alone would have
+produced the exact failure v0.39.0 exists to close: a documented key that
+does nothing, silently, for everyone outside a kitty-protocol terminal.
+That is also, almost certainly, why Claude Code uses Shift+Tab. So
+**Shift+Tab is the primary binding**, and **Ctrl+Tab is bound as well**
+rather than dropped — it costs one row, it works wherever the terminal
+supports it, and `/help` already marks it `✗` with a footnote where it
+does not. `tests/test_keyboard.py` now pins that mark as part of the
+deal: the second binding is only defensible because the app says out loud
+where it fails.
+
+- **The cycle covers three modes and cannot reach the other three.**
+  `default → acceptEdits → plan → default`, the same three surfaces
+  Claude Code's own Shift+Tab walks. What separates them from
+  `bypassPermissions`, `auto` and `dontAsk` is not how advanced they are,
+  it is whether the approval gate still reaches *you*: `acceptEdits`
+  widens only file edits (which git can undo), `plan` narrows, and both
+  still raise DOXA's permission dialog for everything else. The other
+  three each remove the human from a loop they are in today — one checks
+  nothing, one puts a model classifier where the person was, one denies
+  silently instead of asking. A key tapped to move between conveniences
+  must not be able to land on any of them, so `engine.next_cycle_mode` is
+  a **total function over the safe three**: no input, no configuration
+  and no state makes it return a gated mode. That is the misclick
+  asymmetry v0.28.0 refused for `/compact`, and it is asserted as a
+  security property — an exhaustive reachability closure from every mode,
+  plus `None`, plus strings no code path produces.
+- **A session parked on a gated mode cycles HOME, not onward.** One press
+  from `bypassPermissions` lands on `default`, with no confirmation in
+  the way: narrowing permissions never asks.
+- **`/mode <name>` is the only door to the other three, and it confirms
+  first.** `PermissionModeConfirm` follows `CompactConfirm`'s shape and
+  states what *stops happening* — "every tool call runs unapproved;
+  nothing asks you… there is no prompt left to decline, because nothing
+  will ask" — rather than asking "are you sure?". One dialog, three
+  bodies, because a generic permissions warning would be equally useless
+  for all three. **Enter does not accept it.** A deliberate break from
+  CompactConfirm, where Enter completes an action the user's own click
+  already requested; here the dialog is the last thing between a
+  keystroke and an unattended agent, so the accepting key is `y` and the
+  reflex key cancels. Declining issues no control request and moves
+  nothing.
+- **The chip, and what it costs.** `mode:<name>` sits beside the model —
+  those two decide how the session behaves; everything right of them
+  reports what it has done. Uncolored at `default`, **amber** at
+  `acceptEdits`/`plan` ("not the posture you started in"), **red with
+  `⚠`** at the three that stop asking. *Measured, and it changed the
+  design*: an unconditional chip pushed the reattach handle off an
+  80-column terminal, and the status row has no overflow behaviour — a
+  chip that does not fit is not truncated, it is gone. So below 110
+  columns the chip shrinks (`⚠ mode:bypass`), and a chip that would only
+  have said `default` stands down entirely. A mode that has stopped
+  asking is painted at **every** width, short-form if it must be,
+  because it is the only place that fact appears at all. The chip's key
+  carries the plain text and its markup carries the color, which is
+  v0.35.0's tooltip defect — a chip keyed by its own escape codes matched
+  nothing in the markup-stripped lookup and silently lost its hint at
+  exactly the tier that mattered — written down rather than repeated.
+- **Session-scoped, and the settings row is deliberately narrower than
+  the command.** `/mode` and the hotkey never write the settings file.
+  `/model` saves because a model is a preference; a permission mode is a
+  posture adopted for a piece of work, and one Shift+Tab tap silently
+  rewriting the default for every future session is not what that
+  keystroke means. The persistent default (`permission_mode` /
+  `DOXA_PERMISSION_MODE`) accepts **only the three cycle-safe modes**: a
+  stored `bypassPermissions` is a standing hazard, an unattended setting
+  that disarms the gate of sessions opened in repositories nobody has
+  read yet, possibly by somebody who never set it. An out-of-subset value
+  is ignored and bare `/mode` says so out loud, because a settings row
+  that cannot take effect must not sit there looking like it did.
+  `/clear` and `ctrl+t` build a fresh engine, so a gated mode cannot be
+  inherited by a session that did not choose it.
+- **Daemon parity, and one place it matters more than `set_model` does.**
+  `set_permission_mode` is a real RPC: the daemon owns the SDK control
+  request and broadcasts `permission_mode_changed` to every attached
+  client. Two tabs disagreeing about a model name is untidy; two tabs
+  disagreeing about whether the session still asks before it acts is a
+  status line misreporting a safety property. The mode rides the status
+  **and** the hello frame, so a client reattaching to a session someone
+  left running is told what it is actually doing before it paints
+  anything — `EngineClient.attach` runs its first status refresh under
+  `contextlib.suppress`, and a safety indicator must not have a
+  guess-shaped hole in it.
+- **What taking Shift+Tab costs, measured rather than assumed.** Textual's
+  `Screen` binds it to `app.focus_previous`; claiming it app-level with
+  `priority=True` (which the prompt, a focused `TextArea`, makes
+  necessary) removes reverse focus traversal. Forward `Tab` is untouched
+  and wraps, so no focusable widget becomes unreachable — there is a test
+  that presses the key and proves it. On a three-widget pane that is a
+  cheap trade; on a form it would not be.
+
+**The binding was verified in a real terminal, not only in a test.** A
+pilot keypress proves dispatch once Textual has already decided a key
+arrived; it says nothing about whether a terminal can produce that key,
+which is the entire Ctrl+Tab question. So the app was run under a pty with
+the actual back-tab bytes (`ESC [ Z`) written into it, and the rendered
+status line moved `mode:default → mode:acceptEdits → mode:plan`. A test
+pins the decoding half of that: `ESC [ Z` and `ESC [ 9;2u` both decode to
+`shift+tab`, while `ctrl+tab` exists only as `ESC [ 9;5u` — the kitty
+form, and no other — which is v0.39.0's predicate stated positively.
+
+37 new tests. The 35 behavioural ones were each verified failing against
+pre-change code, and against a *naive* implementation of the literal
+request (all six modes on the hotkey, no confirmation, an uncolored chip)
+which the security assertions reject. The other two are the parser
+measurement above and a completeness check on the chip's short labels;
+both pin facts rather than behaviour this change introduced. Suite:
+**1088 passed** on the tree this branch actually lands on (1051 without
+these 37). The total moves with every concurrent workstream that merges
+ahead of this one; the 37 is the part that belongs to this change.
+
+*On the number.* This workstream was assigned 0.42.0 and ran alongside
+0.41.0 and 0.44.0, both of which landed first — hence a section numbered
+below the two beneath it, the same ship-order-not-number ordering this
+file already uses for those two. `pyproject.toml` is deliberately left at
+`0.44.0`: the package version is what `/about`, `/update` and an install
+pin read, and moving it *backwards* to match this heading would make a
+released DOXA look older than the one it replaced. Tagging is the
+operator's call, not this branch's.
+
 ## 0.46.0 — 2026-08-25
 
 **The beliefs browser** — lettered item V. Every belief LORE holds and
@@ -255,6 +391,7 @@ waiting to happen again.
   straight back to the next insert and an orphaned outcome row silently
   re-attaches itself to an unrelated belief in the next test — caught
   exactly that way.
+
 ## 0.44.0 — 2026-08-25
 
 - **The transcript spent four blank rows on every one-line answer.** Measured
@@ -1125,7 +1262,6 @@ parity.
 `tests/test_tab_status.py::test_done_unseen_marks_a_background_tab_and_clears_on_activation`
 remains the known flake (mount-time prompt focus activates a tab
 asynchronously); focus ownership is a queued decision and was not touched.
-
 
 ## 0.34.0 — 2026-08-24
 

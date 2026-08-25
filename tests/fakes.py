@@ -46,6 +46,11 @@ class FakeClient:
         self.entered = False
         self.exited = False
         self.queried: list[tuple[str, str]] = []
+        # v0.42.0: every mode handed to set_permission_mode, in order.
+        # This is the SDK seam itself -- a test asserting "the mode
+        # actually reached the SDK" reads THIS list, not an engine
+        # attribute the engine set on itself.
+        self.permission_modes: list[str] = []
 
     async def __aenter__(self) -> "FakeClient":
         self.entered = True
@@ -61,6 +66,11 @@ class FakeClient:
     async def receive_response(self) -> AsyncIterator[Any]:
         for message in self.script:
             yield message
+
+    async def set_permission_mode(self, mode: str) -> None:
+        """The SDK control request DOXA's /mode drives
+        (``ClaudeSDKClient.set_permission_mode``)."""
+        self.permission_modes.append(mode)
 
     async def get_context_usage(self) -> dict:
         if self.ctx_usage is None:
@@ -106,6 +116,7 @@ class FakeEngine:
         peers: list[PeerInfo] | None = None,
         effort: "str | None" = None,
         cwd: str = "",
+        permission_mode: str = "default",
     ) -> None:
         self._script = script
         self.model = model
@@ -127,6 +138,17 @@ class FakeEngine:
         # never mutated for the life of a session -- same shape as the real
         # engine's self.effort.
         self.effort = effort
+        # Engine parity (v0.42.0): the session's CURRENT permission mode.
+        # Unlike effort directly above, this one MOVES -- the SDK has a
+        # live setter for it -- so the fake records every switch the way it
+        # already records model_switches, which is exactly what a test
+        # asserting "the mode actually reached the engine" reads.
+        self.permission_mode = permission_mode
+        self.permission_mode_switches: list[str] = []
+        # Set to an exception to make set_permission_mode refuse, the same
+        # way the real engine refuses an unknown mode or a disconnected
+        # client -- the pane has to SHOW that rather than swallow it.
+        self.permission_mode_error: "Exception | None" = None
         self.started = False
         self.finalized = False
         self._peers = peers or []
@@ -284,6 +306,16 @@ class FakeEngine:
         self.model = model
         self.model_switches.append(model)
         return model or "default"
+
+    async def set_permission_mode(self, mode: str) -> str:
+        """Engine parity for /mode (v0.42.0). The real engines issue an SDK
+        control request / a daemon RPC; the fake records the switch, which
+        is the whole surface the pane touches."""
+        if self.permission_mode_error is not None:
+            raise self.permission_mode_error
+        self.permission_mode = mode
+        self.permission_mode_switches.append(mode)
+        return mode
 
     async def switch_branch(self, target: "str | None") -> dict:
         """Engine parity for /branch (item S). Scriptable via
