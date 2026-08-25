@@ -37,18 +37,52 @@ def _banner(app):
 # -- geometry ----------------------------------------------------------
 
 
-def test_the_drawn_mark_is_authored_not_downscaled():
-    """Every cell of the mark is one of the half-block glyphs, chosen --
-    which is the whole difference from a resampled photograph, and the
-    whole of the complaint that produced this design."""
-    allowed = set(" ▀▄█◢◣")
+def test_the_drawn_mark_uses_full_blocks_and_nothing_else():
+    """The user's constraint, reached by looking at rendered candidates:
+    **"No, use the full block"**. One codepoint plus space.
+
+    Every glyph excluded here was excluded for a reason that survives the
+    font it was tested in, so this asserts the codepoints rather than the
+    appearance:
+
+    * ``▀``/``▄`` (U+2580/U+2584) -- *"do not use half-blocks / it leaves
+      gaps"*: drawn against the font's baseline and leading, so a column
+      of them seams instead of reading as one stroke.
+    * ``◢``/``◣`` (U+25E2/U+25E3) -- Geometric Shapes, not Block Elements.
+      A font can cover one and not the other, and the failure is tofu.
+    """
     assert banner.MARK_ROWS
+    used = set("".join(banner.MARK_ROWS))
+    assert used <= {"█", " "}, (
+        f"mark uses {sorted(f'U+{ord(c):04X}' for c in used)}; "
+        "only U+2588 FULL BLOCK and space are allowed"
+    )
+    assert "█" in used, "a mark of pure whitespace is not a mark"
     for row in banner.MARK_ROWS:
-        assert set(row) <= allowed, f"{row!r} uses a glyph outside the palette"
         assert len(row) == banner.MARK_COLUMNS, "the mark must be rectangular"
     # The wordmark is PLAIN TEXT, not glyph art -- the user's own call.
     assert banner.WORDMARK == "DOXA"
     assert set(banner.WORDMARK).isdisjoint("▀▄█▌▐")
+
+
+def test_the_mark_is_a_ring_around_a_triangle():
+    """Shape, not just palette. The ring must be closed and the triangle
+    must widen downward -- a regression that broke either would still pass
+    the codepoint test above."""
+    rows = banner.MARK_ROWS
+    assert len(rows) == 7, "seven rows: the approved geometry"
+    # Closed ring: every row has ink, and the outer edges bow in at the
+    # poles rather than running straight down a rectangle.
+    first_ink = [r.index("█") for r in rows]
+    assert all(r.strip() for r in rows), "a gap in the ring"
+    assert first_ink[0] > first_ink[3], "the top does not curve inward"
+    assert first_ink[-1] > first_ink[3], "the bottom does not curve inward"
+    # Triangle: apex a single cell, widening on each row below it.
+    middles = [r[banner.MARK_COLUMNS // 2 - 3 : banner.MARK_COLUMNS // 2 + 4] for r in rows[2:5]]
+    widths = [m.count("█") for m in middles]
+    assert widths == sorted(widths) and widths[0] < widths[-1], (
+        f"the inner triangle does not widen downward: {widths}"
+    )
 
 
 def test_drawn_lines_fit_the_width_they_are_given():
@@ -369,7 +403,7 @@ def test_img_is_registered_as_taking_an_optional_path():
     assert row.usage == "/img [path]"
 
 
-# -- v0.49.0: "the logo image is not rendering" ------------------------
+# -- v0.56.0: "the logo image is not rendering" ------------------------
 #
 # The report was one sentence and the banner had no way to answer it,
 # because every degrade path was correct AND silent -- which from the
@@ -387,7 +421,7 @@ def _unforced(monkeypatch, detected: str) -> None:
 
 
 def test_auto_draws_blocks_where_a_raster_would_only_be_a_downscale(monkeypatch):
-    """The v0.49.0 rule, from a user looking at a half-block render and
+    """The v0.56.0 rule, from a user looking at a half-block render and
     calling it "quite pixelated". Six rows of half-block is twelve
     vertical samples for a 238-row image; a drawn glyph wins there."""
     monkeypatch.delenv("DOXA_BOOT_BANNER", raising=False)
@@ -609,7 +643,7 @@ def test_the_banner_path_never_raises_without_an_asset(monkeypatch):
     banner._prepared.cache_clear()
 
 
-# -- v0.49.0: the crash report ------------------------------------------
+# -- v0.56.0: the crash report ------------------------------------------
 #
 # "doxa crashed while using it with: ... TimeoutError: Timeout waiting for
 # data", on Linux Mint's default terminal, in a session restoring a tab.
@@ -694,7 +728,7 @@ def test_the_cache_is_seeded_even_with_no_terminal(monkeypatch):
 
 
 def test_widget_for_never_raises_while_measuring_or_painting(monkeypatch):
-    """widget_for has always promised "never an exception". Until v0.49.0
+    """widget_for has always promised "never an exception". Until v0.56.0
     that covered construction only -- the easy half. These are the calls
     Textual makes later, from the compositor, with no caller left to catch
     anything."""

@@ -1,13 +1,14 @@
 """doxa.banner -- the DOXA mark at the top of a session's opening block.
 
-**Read the ladder in this order, because v0.49.0 inverted it.** The DRAWN
+**Read the ladder in this order, because v0.56.0 inverted it.** The DRAWN
 mark is the normal path. The raster ``logo.png`` is the exception, for the
 terminals that earn it.
 
-1. **Drawn** -- :data:`MARK_ROWS` (a triangle authored cell by cell out of
-   ``◢◣██``) with :data:`WORDMARK` and :data:`TAGLINE` beside it as plain
-   text, assembled by :func:`drawn_lines`. Four rows. This is what every
-   terminal without a real pixel protocol gets, which is most of them.
+1. **Drawn** -- :data:`MARK_ROWS` (a ring around a triangle, authored cell
+   by cell out of ``█`` and spaces and NOTHING ELSE) with :data:`WORDMARK`
+   and :data:`TAGLINE` beside it as plain text, assembled by
+   :func:`drawn_lines`. Seven rows. This is what every terminal without a
+   real pixel protocol gets, which is most of them.
 2. **Raster** -- ``assets/logo.png`` through :mod:`doxa.images`' existing
    ladder, but ONLY on ``kgp``/``sixel`` (:data:`PIXEL_TIERS`), the
    protocols that carry an actual bitmap. See :func:`use_image`.
@@ -91,38 +92,54 @@ MIN_COLUMNS = 64
 
 #: The DOXA mark -- ring and triangle -- DRAWN, not downscaled.
 #:
-#: Authored on a 9x8 subpixel grid and folded to half-block cells, so
-#: every cell was CHOSEN: ``█`` where both subpixels are ink, ``▀``/``▄``
-#: where one is, a space where neither. That is the whole difference from
-#: the raster path and the whole of the complaint that produced it -- a
-#: resampled photograph AVERAGES, and averaging at four rows is what the
-#: user was looking at when they wrote "quite pixelated". Nothing here is
-#: averaged, so nothing here is mushy: it is as sharp as the font.
-#: Two shapes were drawn, rendered in a real monospace font at true cell
-#: metrics, and LOOKED AT before this one was kept -- which is the only
-#: way any of this gets decided. A ring proved impossible at this size: a
-#: one-subpixel outline renders as horizontal bars, not as a circle. A
-#: triangle built from ``▀▄█`` alone renders as a stepped pyramid, because
-#: every row is a solid rectangle and the eye reads three stacked bars.
-#: The quadrant triangles ``◢``/``◣`` are what give the edge a real slope.
+#: **One codepoint and one space.** ``█`` (U+2588 FULL BLOCK) and ``" "``,
+#: nothing else. That constraint is the user's, arrived at by looking at
+#: rendered candidates rather than by argument, and each rejection closed
+#: off a whole family of solutions:
 #:
-#: The triangle is the logo's distinctive element and it survives the
-#: reduction intact. Four rows, two fewer than the raster it replaces.
+#: * Half blocks (``▀`` U+2580, ``▄`` U+2584) -- *"do not use half-blocks
+#:   / it leaves gaps"*. They are drawn against the font's own baseline
+#:   and leading, so a column of them seams horizontally instead of
+#:   reading as one stroke.
+#: * Quadrant triangles (``◢``/``◣`` U+25E2/U+25E3), which an earlier
+#:   revision used for a sloped edge -- they live in Geometric Shapes
+#:   rather than Block Elements, so a font covering one need not cover the
+#:   other, and the mark degrades to tofu rather than to something plainer.
+#: * Dropping the mark for a wordmark-only banner, which was offered when
+#:   even ``█`` was observed to render short, and was overruled: **"No,
+#:   use the full block"**.
 #:
-#: **Two limitations, both shown to the user and both accepted -- this
-#: shape is SETTLED, and is not to be iterated on again without them.**
-#: At four rows it reads as a stepped, stacked shape rather than as the
-#: smooth triangle-in-a-ring of the PNG: there are not enough rows for the
-#: ring and the tiers are visible. Dropping the mark for the wordmark
-#: alone was offered and declined. And ``◢``/``◣`` are U+25E2/U+25E3, in
-#: Geometric Shapes rather than the Block Elements the rest of this uses,
-#: so a font without that coverage shows tofu where ``▀▄█`` alone would
-#: not -- the real price of the sloped edge, paid knowingly.
+#: **The construction**, so this is tunable rather than magic. A circle of
+#: radius ``(rows - 1) / 2`` rasterised on a grid twice as wide as it is
+#: tall -- terminal cells run about 1:2, so widening the grid is what makes
+#: the ring round instead of an ellipse -- with a one-cell stroke, and a
+#: triangle whose apex sits at ``cy - R*0.55``, whose base sits at
+#: ``cy + R*0.62``, and whose half-width is ``t * R * 0.60``.
+#:
+#: **The rows below are hand-tightened at the poles and do not come out of
+#: that formula verbatim.** Re-rasterising gives seven cells on the top and
+#: bottom rows where these have five; at this size the pure result reads as
+#: a flattened cap rather than a curve. The formula is the intent, this is
+#: the artifact that was rendered and approved, and the difference is
+#: recorded here so nobody "corrects" the constant back to the generator's
+#: output. A 9x17 version reads well too, and is the thing to reach for if
+#: seven rows ever feels tight beside the text -- at the cost of three more
+#: rows of transcript per session.
+#:
+#: **The accepted caveat.** Some monospace fonts render Block Elements at
+#: reduced height, and some terminals add leading, so stacked full blocks
+#: can show faint horizontal banding. That is the terminal drawing the
+#: glyph, not DOXA drawing the mark, and there is no cell-level fix for it
+#: from this side. Shown to the user, accepted, and written down in the
+#: CHANGELOG so a reader who hits it does not think the mark is broken.
 MARK_ROWS: tuple[str, ...] = (
-    "   ◢◣   ",
-    "  ◢██◣  ",
-    " ◢████◣ ",
-    "◢██████◣",
+    "    █████    ",
+    " ███     ███ ",
+    "██    █    ██",
+    "██   ███   ██",
+    "██  █████  ██",
+    " ███     ███ ",
+    "    █████    ",
 )
 
 #: Width of :data:`MARK_ROWS`, and the blank gutter between mark and text.
@@ -145,10 +162,13 @@ TAGLINE = "doxa · belief earning knowledge"
 DRAWN_FULL_COLUMNS = MARK_COLUMNS + MARK_GAP + len(TAGLINE)
 DRAWN_MARK_COLUMNS = MARK_COLUMNS + MARK_GAP + len(WORDMARK)
 
-# Row indices the text sits on: the mark's two middle rows, which centres
-# it against the triangle instead of hanging it off the apex or the base.
-_WORDMARK_ROW = 1
-_TAGLINE_ROW = 2
+# Row indices the text sits on (0-based): rows 3 and 5 of the seven, with
+# a blank row between them. That straddles the ring's vertical centre --
+# row 4 -- so the two lines sit either side of the middle rather than
+# crowding the top, and the block of text has the same optical centre as
+# the mark it stands beside.
+_WORDMARK_ROW = 2
+_TAGLINE_ROW = 4
 
 MARK_COLOR = "#D97757"
 MUTED_COLOR = "#8A8073"
@@ -157,7 +177,7 @@ MUTED_COLOR = "#8A8073"
 def drawn_lines(content_columns: int) -> "list[str]":
     """The drawn banner as Textual markup rows, fitted to the width it has.
 
-    THIS IS THE NORMAL PATH, not a fallback. Since v0.49.0 the raster is
+    THIS IS THE NORMAL PATH, not a fallback. Since v0.56.0 the raster is
     the exception -- see :func:`use_image` -- and every terminal without a
     real pixel protocol gets these rows.
 
@@ -201,7 +221,7 @@ _LEGACY_ON = ("1", "true", "yes", "on")
 def form() -> str:
     """How the opening banner should be drawn: one of :data:`FORMS`.
 
-    ``auto`` (default) is the v0.49.0 rule -- drawn blocks where a raster
+    ``auto`` (default) is the v0.56.0 rule -- drawn blocks where a raster
     would only be a downscale, the raster where the terminal has real
     pixels. ``blocks`` and ``image`` pin it either way; ``off`` removes the
     banner. Legacy ``1``/``0`` read as ``auto``/``off``."""
@@ -270,7 +290,7 @@ def _prepared() -> Any:
     Cached: one decode and one composite per process, and the result is
     copied per caller so no widget can mutate another's image.
 
-    **Everything is inside the try, including the import** (v0.49.0).
+    **Everything is inside the try, including the import** (v0.56.0).
     ``doxa.images.widget_for`` is documented never to raise and always to
     return a mountable widget, but this function is DOXA's own code on the
     near side of that guarantee: it runs during ``BootBanner.compose``,
@@ -307,7 +327,7 @@ def image_source() -> Any:
 def use_image(mode: str, columns: int) -> bool:
     """Should the banner be the RASTER logo rather than the drawn mark?
 
-    **The v0.49.0 rule, and it came from a user looking at the thing.**
+    **The v0.56.0 rule, and it came from a user looking at the thing.**
     The report was "quite pixelated -- then i would prefer to just show it
     as unicode/ASCI blocks", against a half-block render on an ordinary
     Linux terminal. That is not a bug; it is arithmetic. Six rows of
