@@ -23,6 +23,32 @@ from doxa import operators as ops
 from doxa.gate import OperatorContext
 
 
+@pytest.fixture(autouse=True)
+def _no_staged_leak():
+    """Leave the shared pending spool as it was found.
+
+    conftest.py points LORE_ROOT at ONE throwaway directory for the whole
+    session, and `lore_remember` below stages real proposals into it. That
+    was invisible until v0.52.0 gave staged proposals a status-bar chip:
+    every leaked proposal then widened the status bar in every LATER test,
+    pushing the last two clickable chips past the click offsets
+    tests/test_status_chips.py computes -- two failures in a module that
+    passes cleanly on its own, three hundred tests away from the cause.
+
+    Same discipline `_seed_big_belief_store` and `lore_store_cleanup`
+    already follow: a test that really writes into the shared store puts it
+    back."""
+    pdir = lore_core.ROOT / "pending"
+    before = {p for p in pdir.glob("*.json")} if pdir.exists() else set()
+    try:
+        yield
+    finally:
+        if pdir.exists():
+            for path in pdir.glob("*.json"):
+                if path not in before:
+                    path.unlink(missing_ok=True)
+
+
 def _ctx(tmp_path, belief_store=None, session_id="sess-test") -> OperatorContext:
     return OperatorContext(
         session_id=session_id, cwd=str(tmp_path), repo_root=str(tmp_path),

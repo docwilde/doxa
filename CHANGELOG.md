@@ -4,6 +4,112 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.56.0 — 2026-08-25
+
+*(Numbered 0.56.0 rather than the 0.52.0 this work was assigned: 0.55.0
+released while it was in flight, and tags ascend in time.)*
+
+**Staged proposals get their own chip.** v0.48.0 settled that approve and
+reject belong to *proposals* rather than to beliefs. The consequence is
+this: proposals need their own way in. Until now the staged pile was
+reachable only by knowing `/pending` existed, which is how an operator ends
+up with **175 proposals they have not looked at all day**.
+
+- **A `175 proposals` chip beside the belief count and the memory fill.**
+  Those three are the same question — what does LORE hold for this session —
+  and this is the only one *waiting on the user* rather than describing the
+  store. **Hidden at zero**, the convention the subagent and peer chips
+  already follow.
+- **The count agrees with the list by construction.** Both walk
+  `lore_core.pending.load_pending` through one predicate,
+  `doxa.engine.pending_visible`. That is one function rather than two
+  because of a defect this release nearly shipped: the count was first
+  written on `lore_core.deriver.pending_texts`, which returns
+  `item["text"] or item["name"]` and silently drops anything carrying
+  neither — so every **filemap** proposal vanished from the count while
+  staying in the list, and a live spool of 59 rendered a chip reading
+  **5**. Caught by rendering both against the real store, not by a test;
+  the test pinning them equal over a mixed spool came after.
+- **Cached on the pending directory's mtime.** `_refresh_status` runs on
+  every event-driven refresh; scoping means opening every staged file. A
+  directory's mtime changes exactly when an entry is added or removed, so
+  an unchanged spool costs one `stat`. Measured on the live store:
+  **4.2 ms cold, 0.0062 ms warm — a ~670× saving.** Read locally, the way
+  `memory_fill` reads the file the daemon also writes.
+- **Grouped by KIND** — `memory/user`, `memory/project`, `filemap`,
+  `belief`, `skill` — because kind is what the **verdict acts on**. The
+  skill lane falls out for free, and that is the point: LORE's own
+  `/lore:pending` keeps skills out of memory clustering, because judging an
+  installable script with the same glance as a remembered sentence is how a
+  bad skill gets in.
+- **No row in the list acts on a proposal.** Selecting one opens *that
+  proposal's* named verbs. **Approve arms; reject is one act** — approving
+  writes into the model's context, rejecting archives a file that stays on
+  disk. These use the **wider** gate (`lore_write_state`, LORE 0.36.0): a
+  new entry with no `via` label is what that ledger exists to prevent. One
+  pid per call, no bulk form under any spelling.
+
+**Four corrections to the pickers, all reported after using v0.48.0.**
+
+- **`YY-MM-DD HH:MM`, always.** v0.48.0 dropped the year from a belief
+  derived in the current one to buy back a column. The user asked for it
+  back and wrote the format out — and the better reason is the second one:
+  a stamp that is 11 characters for some rows and 14 for others makes the
+  *claim column start in a different place down the list*. Fixed width
+  beats one saved column. The browser still spells the century out; both
+  forms are fixed-width, neither carries seconds.
+- **Rows use the terminal they have, and `PICKER_ROW_WIDTH` is now only a
+  floor.** It was a constant 72 — what fits an 80-column terminal — so a
+  claim on a 160-column terminal was cut at 72 anyway. Rows are trimmed by
+  the **widget**, against `scrollable_content_region` (which excludes the
+  scrollbar) falling back to `content_size` and only then to the constant.
+  *Not guessed:* v0.49.0's banner work already paid for guessing chrome,
+  and a scrollbar moves the budget by two. A resize re-renders. **And the
+  filter got better for free:** the matcher now scores the whole row rather
+  than a string the formatter had already cut, so a word past the visible
+  edge is findable again.
+- **The door has no fold around it.** It had been given a group of its own
+  purely so the header machinery would not paint a bare `▎`; once groups
+  folded that became a fold around a single row whose only effect was
+  hiding the way out. `ChipPicker` now renders an **ungrouped** row where
+  the caller put it, with no header and no fold.
+- **Each door names where it leads, and lands you there.** *This was the
+  real fix.* Both rows read "open the beliefs browser" — including the one
+  in the **proposals** picker, which sent a reader looking for
+  approve/reject to a door labelled beliefs. The door did not say where it
+  led because it led to two places at once. *Judgment call:* the tab keeps
+  **both halves** — they are one session's LORE state and splitting them
+  would duplicate the surface rather than clarify it — so instead the
+  beliefs door reads *evidence trails, outcomes, retract*, the proposals
+  door reads *approve or reject, one at a time*, the tab is renamed from
+  `beliefs` to `lore` (a tab titled for one of its two halves is the same
+  misleading label one level up), and each door opens it **focused on its
+  own half**.
+
+- **A leak this chip made visible, three hundred tests away from its
+  cause.** `tests/test_operators.py` stages real proposals through
+  `lore_remember` into the store `conftest.py` shares session-wide and
+  never removed them. Invisible until something counted staged proposals —
+  then every leaked proposal widened the status bar in every later test,
+  pushing the last two clickable chips past the click offsets
+  `tests/test_status_chips.py` computes. Two failures in a module that
+  passes cleanly alone.
+- Tests: 18 new in `tests/test_beliefs_browser.py`. Two older ones were
+  restated rather than dropped: the year-elision test (superseded by the
+  format the user asked for) and `/pending`'s scope boundary, whose real
+  property — **no row in the list acts on a proposal** — has never moved
+  through v0.31.0, v0.40.0 and now, and is asserted directly.
+- **One behaviour is verified by probe rather than pinned by a test.**
+  Re-entering an *already open* browser from a picker row and landing on
+  the other half is a three-way race between ChipPicker's focus hand-off to
+  the prompt, `TabbedContent.active` being a reactive, and its
+  `_on_tab_pane_focused` snap-back. It works — measured end to end with a
+  probe — but driving that sequence headlessly is not the same thing as a
+  user clicking, so the test asserts the recorded `focus_target` (which is
+  what the focus logic reads) rather than a focus outcome that was flaky to
+  reproduce. Said here rather than left as a green test that proves less
+  than it looks like it proves.
+
 ## 0.55.0 — 2026-08-25
 
 **A crash on Linux Mint's default terminal, and it was DOXA's own probe

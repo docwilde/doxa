@@ -45,6 +45,12 @@ from ..ui.dialogs import ChipPicker, CompactConfirm, NeedsInputPopup, SlashCompl
 from ..ui.labels import (
     memory_fill,
     memory_fill_chip,
+    proposal_group_label,
+    proposal_supersedes,
+    proposal_text,
+    proposal_verdict,
+    staged_chip,
+    staged_count,
     CLICKABLE_CHIP_ACCENT,
     CTX_ABSOLUTE_MIN_COLS,
     MODE_CHIP_MIN_COLS,
@@ -76,17 +82,27 @@ from ..ui.statusline import StatusBar
 # these 166 proposals be applied" are not the same question and a dropdown
 # only answers the first.
 #
-# The labels say what the browser HAS, never that it approves anything.
-# The picker itself has no write affordance and gains none by pointing at
-# one -- a row reading "approve" in a dropdown is the accidental-click
-# surface item V exists to avoid.
+# EACH DOOR NAMES ITS OWN DESTINATION (v0.52.0). Both open the same tab --
+# it holds this session's whole LORE state, and splitting it would
+# duplicate the surface rather than clarify it -- but they open it FOCUSED
+# on the half the reader came from, and they say which.
+#
+# Before this both rows read "open the beliefs browser", including the one
+# in the PROPOSALS picker, which sent a reader looking for approve/reject
+# to a door labelled beliefs. Reported as misleading, and it was: the door
+# did not say where it led, because it led to two places at once.
+#
+# Neither label names a verb the picker itself performs. The picker has no
+# write affordance and gains none by pointing at one -- a row reading
+# "approve" in a dropdown is the accidental-click surface item V exists to
+# avoid.
 BROWSE_ALL_ROW = (
     "browse:all",
-    "▸ open the beliefs browser — evidence trails, timestamps, provenance",
+    "▸ open the belief browser — evidence trails, outcomes, retract",
 )
 REVIEW_ALL_ROW = (
     "review:all",
-    "▸ open the beliefs browser — review these one at a time",
+    "▸ open the proposal review — approve or reject, one at a time",
 )
 
 
@@ -482,6 +498,22 @@ class PaneChipsMixin:
         )
         if mem is not None:
             chips.append(StatusChip.plain(*mem))
+        # Staged proposals (v0.52.0). Beside the belief count and the
+        # memory fill because it is the third answer to "what does LORE
+        # hold for this session" -- and the only one WAITING on the user
+        # rather than merely describing the store. Until this chip the
+        # staged pile was reachable only by knowing `/pending` existed,
+        # which is how an operator ends up with 175 proposals they have
+        # never looked at.
+        #
+        # HIDDEN AT ZERO, the convention the subagent and peer chips below
+        # already follow. Cost: one stat on an unchanged staging area, see
+        # doxa.ui.labels.staged_count.
+        staged = staged_chip(staged_count(self._lore_slug()))
+        if staged is not None:
+            chips.append(StatusChip.clickable(
+                staged[0], "open_pending_picker", staged[1],
+            ))
         subagent_count = len(self._subagents)
         if subagent_count:  # hidden at 0 -- same convention as peers below
             noun = "agent" if subagent_count == 1 else "agents"
@@ -908,9 +940,13 @@ class PaneChipsMixin:
                            belief_sort_key(b)),
         )
         rows: "list[tuple[str, str]]" = [BROWSE_ALL_ROW]
-        # Its own group header, because ChipPicker inserts one whenever the
-        # group changes and an EMPTY label would paint a bare "▎ " row.
-        groups: "dict[str, str]" = {BROWSE_ALL_ROW[0]: "browse"}
+        # UNGROUPED, deliberately: ChipPicker renders a row with no group
+        # where the caller put it, with no header and no fold. Until
+        # v0.52.0 this row was given a group of its own purely so the
+        # header machinery would not paint a bare "▎", which then became a
+        # fold around a single row once groups folded -- a fold whose only
+        # effect was hiding the way out.
+        groups: "dict[str, str]" = {}
         by_id: "dict[str, dict]" = {}
         tested: "dict[str, int]" = {}
         for belief in ordered:
@@ -959,7 +995,8 @@ class PaneChipsMixin:
         so nothing here acts on the belief you selected. It shows you what
         can be done to it, named for what it actually does."""
         if rid == BROWSE_ALL_ROW[0]:
-            self.run_worker(self.open_beliefs_browser(), group="command")
+            self.run_worker(self.open_beliefs_browser(focus="beliefs"),
+                            group="command")
             return
         belief = by_id.get(rid)
         if belief is not None:
@@ -1127,7 +1164,7 @@ class PaneChipsMixin:
             f"disk.\n\n{claim}"
         )
 
-    async def open_beliefs_browser(self) -> None:
+    async def open_beliefs_browser(self, focus: str = "beliefs") -> None:
         """Item V: open (or bring forward) this pane's beliefs browser.
 
         A TabPane in the shared ``#session-tabs`` strip, mounted the same
@@ -1149,12 +1186,17 @@ class PaneChipsMixin:
         existing = getattr(self, "_beliefs_tab", None)
         if existing is not None and existing.is_mounted:
             tabbed.active = existing.id or tabbed.active
-            if existing.rows:
-                existing.rows[0].focus()
-            else:
-                existing.scroll.focus()
+            # Activate, then take focus, synchronously -- the same two
+            # lines PaneRuntimeMixin.open_transcript uses for an already
+            # open subagent tab. It works here for the same reason it works
+            # there, PROVIDED the caller is not racing ChipPicker's own
+            # focus hand-off; the picker's row callbacks defer this whole
+            # call by a refresh for exactly that reason (see
+            # _pick_belief_row).
+            existing.focus_target = focus
+            existing._apply_focus(force=True)
             return
-        tab = BeliefsBrowserTab(self, id=f"beliefs-{self.id}")
+        tab = BeliefsBrowserTab(self, focus=focus, id=f"beliefs-{self.id}")
         self._beliefs_tab = tab
         await tabbed.add_pane(tab)
         tabbed.active = tab.id or tabbed.active
@@ -1248,10 +1290,24 @@ class PaneChipsMixin:
                 "proposed nothing awaiting your approval"
             )
             return
-        rows = [REVIEW_ALL_ROW]
-        rows += [(f"pending:{index}", _fmt_pending_row(item))
-                 for index, item in enumerate(proposals)]
-        by_id = {f"pending:{index}": item for index, item in enumerate(proposals)}
+        if self._pending_write_state() is None:
+            # Asked once, on a path already awaiting the store -- never on
+            # a status refresh, and never from inside the action menu where
+            # a socket round trip would stall a keystroke.
+            await self._prime_pending_write_state()
+        # Grouped by KIND, stable inside a group so the spool's own order
+        # (oldest first -- load_pending sorts filenames, which are
+        # timestamps) survives. The oldest proposal in a kind has waited
+        # longest, and that belongs at the top.
+        ordered = sorted(proposals, key=proposal_group_label)
+        rows = [REVIEW_ALL_ROW]      # ungrouped: a door, not data
+        groups: "dict[str, str]" = {}
+        by_id: "dict[str, Any]" = {}
+        for index, item in enumerate(ordered):
+            rid = f"pending:{index}"
+            rows.append((rid, _fmt_pending_row(item)))
+            groups[rid] = proposal_group_label(item)
+            by_id[rid] = item
         note = ""
         if len(proposals) >= PENDING_LIST_LIMIT:
             # Same honesty rule the beliefs picker's cap note follows: a
@@ -1264,16 +1320,160 @@ class PaneChipsMixin:
         self._open_chip_picker(
             rows, None,
             lambda rid: self._pick_pending_row(rid, by_id),
-            title="pending", note=note,
+            title="pending", note=note, groups=groups,
+            collapsible=True, counted_noun="proposal",
         )
 
     def _pick_pending_row(self, rid: str, by_id: "dict[str, Any]") -> None:
         """A pending row's destination: the browser, or one proposal
         inline. Same shape as :meth:`_pick_belief_row`."""
         if rid == REVIEW_ALL_ROW[0]:
-            self.run_worker(self.open_beliefs_browser(), group="command")
+            self.run_worker(self.open_beliefs_browser(focus="proposals"),
+                            group="command")
             return
-        self._show_pending_detail(by_id.get(rid))
+        item = by_id.get(rid)
+        if item is not None:
+            # Deferred a refresh cycle for the reason _select_repo_row
+            # documents: ChipPicker.select_row has already closed and is
+            # handing focus back, so a synchronous reopen races the queued
+            # Blur and gets closed right back.
+            self.app.call_after_refresh(
+                partial(self._open_pending_actions, rid, item, by_id)
+            )
+
+    def _open_pending_actions(
+        self, rid: str, item: "Any", by_id: "dict[str, Any]", *,
+        arm_approve: bool = False,
+    ) -> None:
+        """One staged proposal's actions, as a picker.
+
+        APPROVE ARMS, reject is one act -- v0.46.0's asymmetry, the same
+        way round here. Approving WRITES into curated memory or the belief
+        store, material injected into the model's context on every prompt;
+        rejecting archives a JSON file that stays on disk. Not equally
+        recoverable, so not equally easy -- and a dropdown is a MORE
+        accidental surface than a full-height tab, so if anything the
+        asymmetry matters more here.
+
+        The verdict leads the note, because what approving would change is
+        what this menu is deciding about."""
+        proposal = as_proposal(item)
+        pid = str(proposal.get("pid") or "")
+        rows: "list[tuple[str, str]]" = [("act:show", "▸ show the full proposal")]
+        writable = bool(pid) and (
+            self._pending_write_state() or {}).get("capable", False)
+        if writable:
+            rows.append(
+                ("act:approve!", "✓ CONFIRM APPROVE — select again to apply it")
+                if arm_approve else
+                ("act:approve", "✓ approve this proposal…")
+            )
+            rows.append(("act:reject", "✗ reject — archive it, writing nothing"))
+        rows.append(("act:back", "← back to the proposals list"))
+        note = proposal_verdict(proposal) or "verdict unavailable (no record)"
+        supersedes = proposal_supersedes(proposal)
+        if supersedes:
+            note += f" · supersedes: {ellipsize(supersedes, 40)}"
+        note += f"\n{ellipsize(_one_line(proposal_text(proposal), 200), 66)}"
+        if not writable:
+            reason = (self._pending_write_state() or {}).get("reason") or (
+                "this session cannot approve or reject" if pid else
+                "this proposal arrived without a record, so there is no id "
+                "to approve it by"
+            )
+            note += f"\nread-only — {reason}"
+        self._open_chip_picker(
+            rows, None,
+            lambda chosen: self._run_pending_action(chosen, rid, item, by_id),
+            title=f"proposal {pid or '?'}", note=note,
+        )
+
+    def _pending_write_state(self) -> "dict | None":
+        """Whether this session may approve -- ``lore_write_state``, cached
+        once per pane.
+
+        The WIDER of the two gates, deliberately, and not the one the
+        belief verbs use: approving a proposal writes a NEW ENTRY, and an
+        entry with no ``via`` label is exactly what LORE 0.36.0's
+        provenance ledger exists to prevent."""
+        return getattr(self, "_pending_writes_state", None)
+
+    async def _prime_pending_write_state(self) -> None:
+        engine = self.engine
+        asker = getattr(engine, "lore_write_state", None) if engine else None
+        if asker is None:
+            return
+        try:
+            result = asker()
+            if inspect.isawaitable(result):
+                result = await result
+            self._pending_writes_state = dict(result or {})
+        except Exception:  # noqa: BLE001 -- a caveat is never worth raising
+            self._pending_writes_state = None
+
+    def _run_pending_action(
+        self, chosen: str, rid: str, item: "Any", by_id: "dict[str, Any]",
+    ) -> None:
+        """Dispatch ONE action against ONE proposal. No id list anywhere on
+        this path, so there is nothing for an "approve all" to be built on
+        without adding it first."""
+        if chosen == "act:back":
+            self.app.call_after_refresh(
+                lambda: self.run_worker(self.open_pending_picker(),
+                                        group="command"))
+            return
+        if chosen == "act:show":
+            self._show_pending_detail(item)
+            return
+        if chosen == "act:approve":
+            # First selection ARMS. Reopening with a differently worded row
+            # is the confirmation: it is the only row that changed, and it
+            # is not where the highlight was.
+            self.app.call_after_refresh(
+                partial(self._open_pending_actions, rid, item, by_id,
+                        arm_approve=True))
+            return
+        if chosen == "act:approve!":
+            self.run_worker(self._resolve_pending(item, "approve"),
+                            group="command")
+            return
+        if chosen == "act:reject":
+            self.run_worker(self._resolve_pending(item, "reject"),
+                            group="command")
+
+    async def _resolve_pending(self, item: "Any", action: str) -> None:
+        """Run ONE approve or reject and say what happened.
+
+        Drives the engine methods v0.46.0 already built, which drive
+        ``lore_core.pending``'s own approve path -- so an entry approved
+        from this dropdown carries LORE's own ``via approved`` label,
+        exactly as one approved from the browser does. No second write
+        path."""
+        engine = self.engine
+        proposal = as_proposal(item)
+        pid = str(proposal.get("pid") or "")
+        method = "approve_pending" if action == "approve" else "reject_pending"
+        runner = getattr(engine, method, None) if engine else None
+        if runner is None:
+            await self._system(
+                f"pending: this session's handle cannot {action} proposals")
+            return
+        try:
+            error = await runner(pid)
+        except Exception as exc:  # noqa: BLE001 -- a refusal is information
+            error = f"{type(exc).__name__}: {exc}"
+        verdict = proposal_verdict(proposal) or pid
+        if error:
+            await self._system(f"proposal {pid} · NOT {action}d — {error}")
+            return
+        if action == "approve":
+            await self._system(
+                f"proposal {pid} approved — {verdict}. LORE recorded it as "
+                "an approved write (via approved).")
+        else:
+            await self._system(
+                f"proposal {pid} rejected — {verdict}. Nothing was written; "
+                "the proposal is archived.")
 
     def _show_pending_detail(self, item: "dict | str | None") -> None:
         """One staged proposal, in full, as a system block -- the same

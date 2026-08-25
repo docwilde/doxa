@@ -85,7 +85,7 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
-from textual.widgets import Static, TabPane
+from textual.widgets import Static, TabbedContent, TabPane
 
 from .labels import (
     CLICKABLE_CHIP_ACCENT,
@@ -550,8 +550,14 @@ class BeliefsBrowserTab(TabPane):
     One browser per pane; opening it again brings the existing one
     forward rather than stacking a second."""
 
-    def __init__(self, owner: Any, *, id: "str | None" = None) -> None:
+    def __init__(self, owner: Any, *, focus: str = "beliefs",
+                 id: "str | None" = None) -> None:
         self.owner = owner
+        #: Which half the reader came for -- "beliefs" or "proposals". The
+        #: tab holds both (they are one session's LORE state, and splitting
+        #: them would duplicate the surface), so the door that opened it
+        #: says which one to land on. See :meth:`focus_section`.
+        self.focus_target = focus
         self.rows: "list[BrowserRow]" = []
         self.write_state: dict = {}
         # v0.48.0: a SECOND, narrower capability than write_state -- see
@@ -561,7 +567,11 @@ class BeliefsBrowserTab(TabPane):
         self.belief_action_state: dict = {}
         self.belief_actions_enabled = False
         self.scroll = VerticalScroll(classes="beliefs-scroll")
-        super().__init__(f"{BROWSER_MARK} beliefs", id=id)
+        # Named for what it HOLDS, not for one of its two halves. It was
+        # "beliefs" while both doors claimed to open a beliefs browser;
+        # now that proposals have their own door, a tab title naming only
+        # one half is the same misleading label one level up.
+        super().__init__(f"{BROWSER_MARK} lore", id=id)
 
     def compose(self) -> ComposeResult:
         yield self.scroll
@@ -645,8 +655,7 @@ class BeliefsBrowserTab(TabPane):
 
         await self._mount_proposals(writable)
         await self._mount_beliefs()
-        if self.rows:
-            self.rows[0].focus()
+        self.focus_section(self.focus_target)
 
     async def _mount_proposals(self, writable: bool) -> None:
         try:
@@ -714,6 +723,61 @@ class BeliefsBrowserTab(TabPane):
             widgets.append(row)
             self.rows.append(row)
         await self.scroll.mount_all(widgets)  # one call -- see _mount_proposals
+
+    def focus_section(self, target: str) -> None:
+        """Land on the half the reader came for.
+
+        Both chips open this one tab, and before v0.52.0 both said they
+        were opening "the beliefs browser" -- so arriving from the
+        PROPOSALS picker put you at the top of a tab named for beliefs,
+        which is the misleading-door complaint in one sentence. The tab
+        still holds both halves; what changed is that the door names its
+        destination and this puts you there.
+
+        Falls back to the other half rather than to nothing: a reader who
+        came for proposals when none are staged wants the tab, not a blank
+        focus.
+
+        DEFERRED one refresh cycle, for the reason
+        ``PaneChipsMixin._select_repo_row`` documents at length: this is
+        reached from a ChipPicker row callback, and ``select_row`` has
+        already handed focus back to the prompt by the time it runs. A
+        synchronous ``row.focus()`` here is overtaken by that queued
+        hand-off and the reader lands on the prompt instead of the half
+        they asked for."""
+        self.focus_target = target
+        self._apply_focus()
+
+    def _apply_focus(self, force: bool = False) -> None:
+        """Put the focus on the target half.
+
+        ``force`` is the caller saying "I just activated this tab". It has
+        to be told rather than measured: ``TabbedContent.active`` is a
+        REACTIVE, so the assignment one line earlier has not landed yet and
+        reading it back here still returns the previous tab. Measured with
+        a probe -- the guard below declined every time, the reader stayed
+        on the prompt, and `active` showed the session tab throughout.
+
+        Without ``force`` the guard is what it says: a focus request from
+        an earlier open must not reach across and steal focus from whatever
+        the user is looking at now. Tried without it and it pulled focus
+        out of the next picker and blurred it shut."""
+        if not force:
+            with contextlib.suppress(Exception):
+                tabbed = self.app.query_one("#session-tabs", TabbedContent)
+                if tabbed.active != (self.id or ""):
+                    return
+        want = ProposalRow if self.focus_target == "proposals" else BeliefRow
+        row = next((r for r in self.rows if isinstance(r, want)), None)
+        if row is None:
+            row = self.rows[0] if self.rows else None
+        if row is None:
+            with contextlib.suppress(Exception):
+                self.scroll.focus()
+            return
+        with contextlib.suppress(Exception):
+            row.focus()
+            row.scroll_visible(top=True)
 
     # -- the write half ------------------------------------------------
 

@@ -199,6 +199,10 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         # opens (see PaneChipsMixin._prime_belief_action_state). None until
         # then, which renders as no caveat rather than a guessed one.
         self._belief_actions_state: "dict | None" = None
+        # v0.52.0: whether this session may APPROVE a staged proposal --
+        # lore_write_state, the wider gate (a new entry needs a `via`
+        # label). Fetched once when the proposals picker first opens.
+        self._pending_writes_state: "dict | None" = None
         # The second status row -- mounted the moment _subagents stops
         # being empty, unmounted the moment it is empty again (see
         # _sync_subagent_line); None at every other time, deliberately, so
