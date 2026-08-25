@@ -536,3 +536,8 @@ class StatusBar(Static):
 
     async def action_open_beliefs_picker(self) -> None:
         await self.pane.open_beliefs_picker()
+
+    async def action_open_pending_picker(self) -> None:
+        """The staged-proposals chip (v0.52.0). Same one-action-per-chip
+        shape every other clickable chip here follows."""
+        await self.pane.open_pending_picker()

@@ -1001,11 +1001,14 @@ async def test_the_beliefs_picker_opens_complete_and_filterable_over_the_socket(
 
                 # Complete: every seeded belief is resident, not just the
                 # first frame's worth.
-                labels = [label for _rid, label in picker._all_rows]
-                # "belief NNNN" is now preceded by item V's stamp segment
-                # (created date + idle age), so the claim is IN the row
-                # rather than at the head of it.
-                seeded = [l for l in labels if "belief " in l]
+                # Matched by row id AND by this fixture's own claim text:
+                # the id excludes the door row (which since v0.52.0 reads
+                # "open the belief browser" and a bare "belief " substring
+                # match counted as a 601st belief), and the claim text
+                # excludes any belief another test left in the shared
+                # store.
+                seeded = [label for rid, label in picker._all_rows
+                          if rid.startswith("belief:") and "belief 0" in label]
                 assert len(seeded) == 600
                 # ...and no caveat row, because nothing was actually capped.
                 assert picker._note == ""

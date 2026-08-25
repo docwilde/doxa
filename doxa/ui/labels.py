@@ -555,24 +555,38 @@ def _belief_scope_label(subject: str) -> str:
     return subject or "user"
 
 
-#: How wide one CHIP-PICKER row runs. Unchanged since v0.27.0, and the
-#: number is load-bearing rather than aesthetic: the picker is an
-#: OptionList with a border and a one-column margin, and the ` ▸ ` selection
-#: mark costs three more, so 72 is what fits an 80-column terminal without
-#: the row overflowing its own dropdown.
+#: FLOOR for one chip-picker row, and since v0.52.0 only a floor.
 #:
-#: Item V added a stamp segment in front of the claim and did NOT widen
-#: this to make room. The picker is the glance; the browser
-#: (doxa.ui.beliefs, CLAIM_WIDTH) is the full-width surface, and both of
-#: them are backstopped by a tooltip carrying the claim whole.
+#: It WAS the row width from v0.27.0 to v0.48.0: 72 is what fits an
+#: 80-column terminal inside a bordered dropdown once the ` ▸ ` mark is
+#: paid for. That cut a claim at 72 on a 160-column terminal too, which
+#: the user reported. The row is now trimmed by :class:`ChipPicker`
+#: against its OWN measured content width -- the widget is the only thing
+#: that knows how much room it has, and v0.49.0's banner work already paid
+#: for guessing chrome instead of measuring it (a scrollbar moves the
+#: budget by two).
+#:
+#: What survives here is the fallback for the unmeasurable case: a picker
+#: rendering before its first layout has no width to read, and 72 is the
+#: number that was safe for five releases.
 PICKER_ROW_WIDTH = 72
+
+#: How much of a claim or proposal ever reaches a picker row, before the
+#: widget trims it to fit. A bound, not a layout decision -- a row label is
+#: a string in a list, and one belief with a 40KB claim should not put 40KB
+#: through every render pass.
+PICKER_ROW_MAX = 400
 
 
 def _fmt_belief_row(belief: dict) -> str:
-    """One beliefs-picker row: when it was created, how long since anything
-    touched it, then the claim text, ellipsized -- filtering (ChipPicker's
-    type-to-filter) matches against exactly this string, so the claim has
-    to be IN it, not just referenced by an id.
+    """One beliefs-picker row: when it was created, what reality last said
+    about it, then the claim.
+
+    Returned WHOLE (to :data:`PICKER_ROW_MAX`) since v0.52.0 and trimmed to
+    fit by the widget that paints it. That is not only about width: the
+    filter scores this string, so a claim already cut to 72 characters here
+    was a claim whose tail could not be searched for. The matcher now sees
+    the whole row and the reader sees as much of it as the terminal holds.
 
     The stamp segment is emitted only when the belief actually CARRIES
     timestamps (item V added them to ``list_beliefs``' SELECT). A row that
@@ -580,8 +594,8 @@ def _fmt_belief_row(belief: dict) -> str:
     placeholder column that says nothing -- and that is also what keeps a
     belief arriving from an older daemon, over the wire, honest."""
     stamp = belief_stamp(belief)
-    claim = _one_line(str(belief.get("claim") or ""), 200)
-    return ellipsize(f"{stamp} · {claim}" if stamp else claim, PICKER_ROW_WIDTH)
+    claim = _one_line(str(belief.get("claim") or ""), PICKER_ROW_MAX)
+    return ellipsize(f"{stamp} · {claim}" if stamp else claim, PICKER_ROW_MAX)
 
 
 def _fmt_pending_row(item: "dict | str") -> str:
@@ -600,7 +614,7 @@ def _fmt_pending_row(item: "dict | str") -> str:
     age = proposal_age_text(proposal)
     text = _one_line(proposal_text(proposal), 200)
     lead = " · ".join(part for part in (verdict, age) if part)
-    return ellipsize(f"{lead} · {text}" if lead else text, PICKER_ROW_WIDTH)
+    return ellipsize(f"{lead} · {text}" if lead else text, PICKER_ROW_MAX)
 
 
 # -- item V: timestamps, age, provenance, and the proposed verdict --------
@@ -713,21 +727,24 @@ def belief_created_text(
     HH:MM, no seconds. Seconds on a claim derived by a background reviewer
     are a precision nobody acts on.
 
-    WHAT GAVE WAY FOR THE SIX COLUMNS. ``PICKER_ROW_WIDTH`` is 72 because
-    that is what fits an 80-column terminal inside a bordered dropdown, so
-    a wider stamp is columns taken from the claim -- and the claim is what
-    ChipPicker's type-to-filter matches against, so narrowing it narrows
-    what is findable. Rather than spend six, the picker drops the YEAR from
-    a belief derived in the current one: `08-25 14:23` costs ONE column
-    more than `2026-08-25` did, and a year the reader is standing in is the
-    least informative thing on the line. A belief from an earlier year
-    keeps its year and costs the full six, which is exactly the case where
-    the year is worth having. Same convention `ls -l` has used for decades.
+    THE YEAR IS ALWAYS THERE, in two digits. v0.48.0 dropped it from a
+    belief derived in the current year to buy back a column, on the
+    reasoning that a year the reader is standing in says little. The user
+    asked for it back and wrote the format out: ``YY-MM-DD``. The second
+    reason is better than the first was -- a stamp that is 11 characters
+    for some rows and 14 for others makes the CLAIM column start in a
+    different place down the list, which is exactly the shifting surface
+    this codebase avoids everywhere else. Fixed width beats one column.
 
-    ``full=True`` disables the elision -- the browser's own rows have the
-    width and are read as a record rather than as a glance, so they always
-    carry `YYYY-MM-DD HH:MM`. Both surfaces show HH:MM; only the picker
-    infers the year."""
+    The column it costs is no longer taken from the claim either: since
+    v0.52.0 a picker row is trimmed by the WIDGET against its own measured
+    width rather than by this function against a constant.
+
+    ``full=True`` spells the century out (``YYYY-MM-DD HH:MM``) for the
+    browser's own rows, which are read as a record rather than as a glance
+    and have the width for it. Both forms are fixed-width, both carry
+    HH:MM, and neither has ever carried seconds -- a precision nobody acts
+    on for a claim a background reviewer derived."""
     stamp = str(belief.get("created") or "").strip()
     when = _parse_lore_time(stamp)
     if when is None:
@@ -738,12 +755,7 @@ def belief_created_text(
     import time as _time
 
     parts = _time.gmtime(when)
-    if full:
-        return _time.strftime("%Y-%m-%d %H:%M", parts)
-    this_year = _time.gmtime(now if now is not None else _time.time()).tm_year
-    return _time.strftime(
-        "%m-%d %H:%M" if parts.tm_year == this_year else "%Y-%m-%d %H:%M", parts
-    )
+    return _time.strftime("%Y-%m-%d %H:%M" if full else "%y-%m-%d %H:%M", parts)
 
 
 def belief_age_text(belief: dict, now: "float | None" = None) -> str:
@@ -1518,6 +1530,112 @@ def memory_entries(scope: str, project: "str | None" = None) -> "int | None":
         return None
 
 
+#: Scoped staged-proposal counts, keyed by project slug and validated by
+#: the pending directory's own mtime. Same shape and same reason as
+#: :data:`_MEM_FILL_CACHE` above.
+_STAGED_CACHE: "dict[str, tuple[float, int]]" = {}
+
+
+def staged_count(slug: "str | None") -> "int | None":
+    """How many staged proposals this project's reviews can see, or None
+    when the staging area cannot be read at all.
+
+    SCOPED, and it agrees with the list clicking the chip opens BY
+    CONSTRUCTION: both walk ``lore_core.pending.load_pending`` through the
+    same predicate, :func:`doxa.engine.pending_visible`. A chip reading 175
+    over a picker showing 40 is worse than no chip, and the first version
+    of this function was exactly that bug -- it counted
+    ``lore_core.deriver.pending_texts``, which returns
+    ``item["text"] or item["name"]`` and silently drops anything carrying
+    neither, so a live spool of 59 (54 of them filemap proposals, which
+    carry a path and a purpose and neither of those fields) rendered a chip
+    reading 5.
+
+    CACHED ON THE DIRECTORY'S MTIME, and that is the whole cost argument.
+    ``_refresh_status`` runs on every event-driven refresh and already pays
+    a belief ``COUNT(*)``; scoping requires opening each staged file. A
+    directory's mtime changes when an entry is added or removed -- which is
+    exactly when this count can change -- so an unchanged staging area
+    costs ONE stat and a dict lookup. Editing a file in place bumps
+    neither the mtime nor the count.
+
+    Read locally rather than over the socket, the same way
+    :func:`memory_fill` reads the memory file the daemon also writes: the
+    LORE store is one directory shared by every process on the machine, and
+    putting this in the status payload would move the same opens into the
+    daemon rather than remove them."""
+    try:
+        import lore_core
+        from lore_core.pending import load_pending
+
+        from ..engine import pending_visible
+
+        pdir = lore_core.ROOT / "pending"
+        stamp = pdir.stat().st_mtime
+        key = str(slug or "")
+        hit = _STAGED_CACHE.get(key)
+        if hit is not None and hit[0] == stamp:
+            return hit[1]
+        count = sum(1 for _pid, item in load_pending()
+                    if isinstance(item, dict) and pending_visible(item, slug))
+        _STAGED_CACHE[key] = (stamp, count)
+        return count
+    except Exception:
+        # No store, no pending directory, an older lore_core: the chip does
+        # not appear. Same posture as memory_fill -- a convenience is never
+        # a reason to degrade the status bar.
+        return None
+
+
+def staged_chip(count: "int | None") -> "tuple[str, str] | None":
+    """(chip text, hint) for the staged-proposal count, or None to omit.
+
+    HIDDEN AT ZERO, the convention the subagent and peer chips already
+    follow: the status line is the most contended row in the UI and a chip
+    reading `0 proposals` is a permanent reminder of nothing. An empty
+    staging area is the ordinary state and needs no pixels."""
+    if not count:
+        return None
+    noun = "proposal" if count == 1 else "proposals"
+    return (
+        f"{count} {noun}",
+        f"{count} staged {noun} waiting for your approval -- click to "
+        "review them one at a time, with what each would do if approved",
+    )
+
+
+def proposal_group_label(item: "dict | str") -> str:
+    """Which fold a staged proposal falls under in the proposals picker.
+
+    BY KIND, not by project or by age, because kind is what the VERDICT
+    acts on: `memory/user` and `memory/project` write different files with
+    different caps, `filemap` writes a path map, `belief` writes a SQL row,
+    and a `skill` writes an executable ``SKILL.md`` into the agent's own
+    skill directory. A reviewer decides about one of those at a time.
+
+    The SKILL lane being its own group is the one non-obvious consequence
+    and it is deliberate: LORE's own `/lore:pending` keeps skills out of
+    memory clustering ("Skills are never clustered -- they stay their own
+    lane") precisely because judging an installable script with the same
+    glance as a remembered sentence is how a bad skill gets in. Grouping by
+    kind gives them that lane without a special case.
+
+    Derived from lore_core's own record fields rather than a hardcoded
+    list, so a kind LORE starts writing gets its own fold instead of being
+    filed silently under something else."""
+    proposal = as_proposal(item)
+    kind = str(proposal.get("kind") or "").strip().lower()
+    if kind == "memory":
+        scope = str(proposal.get("scope") or "").strip()
+        return f"memory/{scope}" if scope else "memory"
+    if kind:
+        return kind
+    # No kind: the deriver writes skill proposals with a `name` and no
+    # kind (see cmd_pending's own final else), and an older daemon can
+    # still send a bare string.
+    if proposal.get("name"):
+        return "skill"
+    return "unknown"
 def memory_fill_chip(user: "tuple[int, int] | None",
                      project: "tuple[int, int] | None") -> "tuple[str, str] | None":
     """(chip text, hint) for the curated-memory fill, or None to omit.

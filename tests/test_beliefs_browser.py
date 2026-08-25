@@ -38,7 +38,18 @@ from doxa.ui.labels import (
     proposal_verdict,
 )
 
+from textual.widgets import TabbedContent
+
 from fakes import FakeEngine
+
+
+def _status_plain(app) -> str:
+    """The status bar as a reader sees it -- markup resolved. Same helper
+    tests/test_status_chips.py uses: a chip asserted against raw markup is
+    a chip whose colour can hide it."""
+    from textual.content import Content
+
+    return Content.from_markup(str(app.query_one("#status-bar").renderable)).plain
 
 DAY = 86400.0
 
@@ -146,21 +157,26 @@ def test_the_picker_row_shows_hh_mm_not_just_the_day():
     assert "14:23:07" not in row, "seconds are a precision nobody acts on"
 
 
-def test_the_picker_elides_a_year_the_reader_is_standing_in():
-    """What gave way for the clock. PICKER_ROW_WIDTH is 72 because that is
-    what fits an 80-column terminal, and the claim is what type-to-filter
-    matches -- so a flat six more columns of stamp is six fewer columns of
-    findable claim. A belief from THIS year drops its year and costs one;
-    a belief from an earlier year keeps it and costs six, which is exactly
-    where the year is worth having."""
+def test_the_stamp_is_yy_mm_dd_hh_mm_and_never_changes_width():
+    """v0.48.0 dropped the year from a belief derived in the current one to
+    buy back a column. The user asked for it back and wrote the format out.
+    The better reason is the second one: a stamp that is 11 characters for
+    some rows and 14 for others makes the CLAIM column start in a different
+    place down the list -- the shifting surface this codebase avoids
+    everywhere else."""
     from doxa.ui.labels import belief_created_text
 
     now = time.mktime(time.strptime("2026-08-25", "%Y-%m-%d"))
     this_year = {"created": "2026-03-04T09:14:00Z"}
     older = {"created": "2025-11-03T09:14:00Z"}
-    assert belief_created_text(this_year, now=now) == "03-04 09:14"
-    assert belief_created_text(older, now=now) == "2025-11-03 09:14"
-    # The BROWSER has the width and is read as a record, so it never elides.
+    assert belief_created_text(this_year, now=now) == "26-03-04 09:14"
+    assert belief_created_text(older, now=now) == "25-11-03 09:14"
+    assert len(belief_created_text(this_year, now=now)) == len(
+        belief_created_text(older, now=now))
+    # Still no seconds -- a precision nobody acts on for a derived claim.
+    assert belief_created_text({"created": "2026-03-04T09:14:07Z"}).count(":") == 1
+    # The BROWSER spells the century out; it is read as a record and has
+    # the width. Fixed-width too.
     assert belief_created_text(this_year, full=True, now=now) == "2026-03-04 09:14"
 
 
@@ -1884,3 +1900,489 @@ def test_the_engine_has_no_bulk_belief_action_under_any_name():
         assert list(inspect.signature(
             getattr(cls, "retract_belief")).parameters
         )[:2] == ["self", "belief_id"]
+
+
+# -- v0.52.0: the proposals chip, and four corrections to the pickers ----
+
+
+def _proposals(n, kind="memory", scope="user", start=0, **kw):
+    out = []
+    for i in range(start, start + n):
+        item = {"pid": f"20260824-{i:03d}", "kind": kind, "action": "add",
+                "text": f"proposal number {i:03d}",
+                "created": _stamp(3 * DAY)}
+        if kind == "memory":
+            item["scope"] = scope
+            item["project"] = "doxa"
+        item.update(kw)
+        out.append(item)
+    return out
+
+
+async def _pending_picker(pilot, app):
+    from doxa.app import ChipPicker
+
+    pane = app.active_pane
+    await pane.open_pending_picker()
+    for _ in range(200):
+        picker = app.query_one("#chip-picker", ChipPicker)
+        if picker.is_open:
+            await pilot.pause()
+            return pane, picker
+        await pilot.pause(0.02)
+    raise AssertionError("the proposals picker never opened")
+
+
+def _pending_rows(picker):
+    return [(rid, label) for rid, label in picker._rows
+            if rid.startswith("pending:")]
+
+
+def _shown(picker):
+    return [str(picker.get_option_at_index(i).prompt)
+            for i in range(picker.option_count)]
+
+
+def test_the_staged_chip_is_hidden_at_zero_and_counts_at_one():
+    """The status line is the most contended row in the UI; a chip reading
+    `0 proposals` is a permanent reminder of nothing."""
+    from doxa.ui.labels import staged_chip
+
+    assert staged_chip(0) is None
+    assert staged_chip(None) is None
+    assert staged_chip(1)[0] == "1 proposal"
+    assert staged_chip(175)[0] == "175 proposals"
+
+
+def test_the_staged_count_is_cached_on_the_pending_directory(monkeypatch):
+    """COST DISCIPLINE. _refresh_status runs on every event-driven refresh
+    and already pays a belief COUNT(*); scoping the staged count means
+    opening every staged file. A directory's mtime changes exactly when an
+    entry is added or removed, so an unchanged spool costs one stat."""
+    import json
+
+    import lore_core
+    from lore_core import pending as pending_mod
+
+    from doxa.ui import labels as labels_mod
+
+    pdir = lore_core.ROOT / "pending"
+    pdir.mkdir(parents=True, exist_ok=True)
+    for stale in pdir.glob("*.json"):
+        stale.unlink()
+    for i in range(3):
+        (pdir / f"20260824-{i:02d}.json").write_text(json.dumps(
+            {"kind": "memory", "scope": "user", "text": f"p{i}"}))
+    labels_mod._STAGED_CACHE.clear()
+
+    reads = {"n": 0}
+    real = pending_mod.load_pending
+
+    def counting():
+        reads["n"] += 1
+        return real()
+
+    monkeypatch.setattr(pending_mod, "load_pending", counting)
+
+    assert labels_mod.staged_count(None) == 3
+    assert reads["n"] == 1
+    for _ in range(50):
+        assert labels_mod.staged_count(None) == 3
+    assert reads["n"] == 1, "an unchanged spool must not be re-read"
+
+    (pdir / "20260824-99.json").write_text(json.dumps(
+        {"kind": "memory", "scope": "user", "text": "new"}))
+    assert labels_mod.staged_count(None) == 4
+    assert reads["n"] == 2
+
+    for stale in pdir.glob("*.json"):
+        stale.unlink()
+    labels_mod._STAGED_CACHE.clear()
+
+
+@pytest.mark.asyncio
+async def test_the_chip_count_equals_the_list_it_opens(tmp_path,
+                                                       lore_store_cleanup):
+    """THE DEFECT THIS RELEASE NEARLY SHIPPED. A chip reading 5 over a
+    picker showing 59 is worse than no chip. The count was first written on
+    `lore_core.deriver.pending_texts`, which returns
+    `item["text"] or item["name"]` and drops anything carrying neither --
+    so every filemap proposal (a path and a purpose, and neither of those
+    fields) vanished from the count while staying in the list. Both now
+    walk load_pending through the SAME predicate."""
+    import json
+
+    import lore_core
+
+    from doxa.ui import labels as labels_mod
+
+    engine = _engine(tmp_path)
+    pdir = lore_core.ROOT / "pending"
+    pdir.mkdir(parents=True, exist_ok=True)
+    for stale in pdir.glob("*.json"):
+        stale.unlink()
+
+    mixed = [
+        {"kind": "memory", "scope": "user", "text": "a user memory"},
+        {"kind": "memory", "scope": "project", "project": engine.slug,
+         "text": "this project's memory"},
+        # No `text`, no `name` -- the shape that was being dropped.
+        {"kind": "filemap", "project": engine.slug,
+         "path": "doxa/app.py", "purpose": "the facade"},
+        {"kind": "belief", "subject": "user", "claim": "a staged belief"},
+        {"name": "a-learned-skill", "action": "add", "description": "a thing"},
+        {"kind": "memory", "scope": "project", "project": "some-other-repo",
+         "text": "not this project's"},
+    ]
+    for index, item in enumerate(mixed):
+        (pdir / f"20260824{index:04d}-00.json").write_text(
+            json.dumps({"created": "2026-08-24T12:00:00Z", **item}))
+    labels_mod._STAGED_CACHE.clear()
+
+    listed = await engine.list_pending(limit=500)
+    counted = labels_mod.staged_count(engine.slug)
+    assert counted == len(listed) == 5, (counted, len(listed))
+    assert any(p.get("kind") == "filemap" for p in listed)
+    assert all(p.get("project") != "some-other-repo" for p in listed)
+
+    for stale in pdir.glob("*.json"):
+        stale.unlink()
+    labels_mod._STAGED_CACHE.clear()
+
+
+@pytest.mark.asyncio
+async def test_the_chip_shows_the_count_and_opens_the_proposals_picker(
+    monkeypatch, tmp_path
+):
+    from doxa.session import chips as chips_mod
+
+    monkeypatch.setattr(chips_mod, "staged_count", lambda slug: 7)
+    fake = FakeEngine([])
+    fake.list_pending_result = _proposals(7)
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(200, 48)) as pilot:
+        await pilot.pause()
+        pane = app.active_pane
+        for _ in range(200):
+            if "7 proposals" in _status_plain(app):
+                break
+            await pilot.pause(0.02)
+        assert "7 proposals" in _status_plain(app)
+
+        await pane.query_one("#status-bar").action_open_pending_picker()
+        for _ in range(200):
+            picker = app.query_one("#chip-picker")
+            if picker.is_open:
+                break
+            await pilot.pause(0.02)
+        assert picker.border_title == "pending"
+
+
+@pytest.mark.asyncio
+async def test_the_chip_is_absent_when_nothing_is_staged(monkeypatch, tmp_path):
+    from doxa.session import chips as chips_mod
+
+    monkeypatch.setattr(chips_mod, "staged_count", lambda slug: 0)
+    fake = FakeEngine([])
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(200, 48)) as pilot:
+        await pilot.pause()
+        for _ in range(60):
+            await pilot.pause(0.02)
+        assert "proposal" not in _status_plain(app)
+
+
+@pytest.mark.asyncio
+async def test_proposals_fold_by_kind_with_their_counts(monkeypatch, tmp_path):
+    """BY KIND, because kind is what the verdict acts on -- and the SKILL
+    lane falls out of that for free, which is the point: LORE's own
+    /lore:pending keeps skills out of memory clustering."""
+    from doxa.app import ChipPicker
+
+    fake = FakeEngine([])
+    fake.list_pending_result = (
+        _proposals(6, scope="user")
+        + _proposals(4, scope="project", start=10)
+        + _proposals(2, kind="filemap", start=20)
+        + [{"pid": "s-1", "name": "a-learned-skill", "action": "add",
+            "description": "does a thing"}]
+    )
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(200, 48)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _pending_picker(pilot, app)
+        headers = [label for rid, label in picker._rows
+                   if rid.startswith(ChipPicker.GROUP_ROW_PREFIX)]
+        assert any("memory/user (6 proposals)" in h for h in headers), headers
+        assert any("memory/project (4 proposals)" in h for h in headers), headers
+        assert any("filemap (2 proposals)" in h for h in headers), headers
+        assert any("skill (1 proposal)" in h for h in headers), headers
+
+
+@pytest.mark.asyncio
+async def test_approve_arms_and_reject_is_one_act(monkeypatch, tmp_path):
+    """THE ASYMMETRY. Approving writes into curated memory or the belief
+    store -- material injected into the model's context on every prompt.
+    Rejecting archives a JSON file that stays on disk."""
+    fake = FakeEngine([])
+    fake.list_pending_result = _proposals(2)
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(200, 48)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _pending_picker(pilot, app)
+        rid = next(rid for rid, _l in _pending_rows(picker))
+        pid = fake.list_pending_result[0]["pid"]
+        picker.select_row(next(i for i, (r, _l) in enumerate(picker._rows)
+                               if r == rid))
+        for _ in range(150):
+            if any(r == "act:approve" for r, _l in picker._rows):
+                break
+            await pilot.pause(0.02)
+        assert fake.approved == [] and fake.rejected == []
+
+        picker.select_row(next(i for i, (r, _l) in enumerate(picker._rows)
+                               if r == "act:approve"))
+        for _ in range(150):
+            if any(r == "act:approve!" for r, _l in picker._rows):
+                break
+            await pilot.pause(0.02)
+        assert fake.approved == [], "the first approve selection must only arm"
+        armed = next(l for r, l in picker._rows if r == "act:approve!")
+        assert "CONFIRM APPROVE" in armed and "select again" in armed
+        assert "act:approve" not in [r for r, _l in picker._rows]
+
+        picker.select_row(next(i for i, (r, _l) in enumerate(picker._rows)
+                               if r == "act:approve!"))
+        for _ in range(150):
+            if fake.approved:
+                break
+            await pilot.pause(0.02)
+        assert fake.approved == [pid] and fake.rejected == []
+
+
+@pytest.mark.asyncio
+async def test_reject_takes_one_selection_and_writes_nothing(
+    monkeypatch, tmp_path
+):
+    fake = FakeEngine([])
+    fake.list_pending_result = _proposals(2)
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(200, 48)) as pilot:
+        await pilot.pause()
+        pane, picker = await _pending_picker(pilot, app)
+        rid = next(rid for rid, _l in _pending_rows(picker))
+        pid = fake.list_pending_result[0]["pid"]
+        picker.select_row(next(i for i, (r, _l) in enumerate(picker._rows)
+                               if r == rid))
+        for _ in range(150):
+            if any(r == "act:reject" for r, _l in picker._rows):
+                break
+            await pilot.pause(0.02)
+        picker.select_row(next(i for i, (r, _l) in enumerate(picker._rows)
+                               if r == "act:reject"))
+        for _ in range(150):
+            if fake.rejected:
+                break
+            await pilot.pause(0.02)
+        await pilot.pause()
+        assert fake.rejected == [pid] and fake.approved == []
+        texts = "\n".join(str(b.renderable) for b in pane.query("SystemBlock"))
+        assert "rejected" in texts and "Nothing was written" in texts
+
+
+@pytest.mark.asyncio
+async def test_a_session_that_cannot_record_provenance_offers_no_verbs(
+    monkeypatch, tmp_path
+):
+    """The WIDER gate: approving writes a NEW ENTRY, and an entry with no
+    `via` label is what LORE 0.36.0's ledger exists to prevent."""
+    fake = FakeEngine([])
+    fake.list_pending_result = _proposals(2)
+    fake.lore_write_state_result = {
+        "capable": False, "version": "0.34.0",
+        "reason": "lore_core 0.34.0 has no write gate or provenance ledger",
+    }
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(200, 48)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _pending_picker(pilot, app)
+        rid = next(rid for rid, _l in _pending_rows(picker))
+        picker.select_row(next(i for i, (r, _l) in enumerate(picker._rows)
+                               if r == rid))
+        for _ in range(150):
+            if any(r == "act:show" for r, _l in picker._rows):
+                break
+            await pilot.pause(0.02)
+        assert [r for r, _l in picker._rows
+                if r.startswith("act:")] == ["act:show", "act:back"]
+        assert "no write gate or provenance ledger" in picker._note
+        assert fake.approved == [] and fake.rejected == []
+
+
+def test_there_is_no_bulk_proposal_action_on_any_surface():
+    """SECURITY-SHAPED ASSERTION, on IDENTIFIERS rather than on prose --
+    the docstrings here talk about the "approve all" that deliberately does
+    not exist, and a substring search would match the argument against it.
+    One proposal per call, so there is nothing for a bulk action to be
+    built on without adding it first."""
+    import inspect
+
+    from doxa.session.chips import PaneChipsMixin
+
+    names = [n for n in dir(PaneChipsMixin)
+             if ("approve" in n or "reject" in n) and not n.startswith("__")]
+    assert names == [], names
+    assert list(inspect.signature(
+        PaneChipsMixin._resolve_pending).parameters) == ["self", "item", "action"]
+    assert list(inspect.signature(
+        PaneChipsMixin._run_pending_action).parameters) == [
+            "self", "chosen", "rid", "item", "by_id"]
+
+
+# -- the four picker corrections ----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_long_claim_uses_the_terminal_it_has(monkeypatch, tmp_path):
+    """PICKER_ROW_WIDTH was a constant 72 -- what fits an 80-column
+    terminal -- so a claim on a 160-column terminal was cut at 72 anyway.
+    The row is now trimmed by the WIDGET against its own measured content
+    width."""
+    claim = ("the operator prefers conventional commit subjects and asks for "
+             "the body to explain why rather than what, because the diff "
+             "already says what and a body repeating it is noise in a bisect")
+    fake = FakeEngine([])
+    fake.list_beliefs_result = [_belief(1, claim)]
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(160, 40)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _picker(pilot, app, beliefs=None)
+        assert picker._row_budget() > 72, picker._row_budget()
+        widest = max(len(line) for line in _shown(picker))
+        assert widest > 72, widest
+        assert widest <= 160
+
+    fake2 = FakeEngine([])
+    fake2.list_beliefs_result = [_belief(1, claim)]
+    monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: fake2)
+    narrow = DoxaApp(cwd=str(tmp_path))
+    async with narrow.run_test(size=(80, 40)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _picker(pilot, narrow, beliefs=None)
+        # ...and it degrades rather than overflowing its own dropdown.
+        assert all(len(line) <= 80 for line in _shown(picker))
+
+
+@pytest.mark.asyncio
+async def test_typing_finds_a_word_past_the_visible_cut(monkeypatch, tmp_path):
+    """The formatter used to ellipsize to 72 and the matcher scored THAT,
+    so the tail of a long claim could not be searched for."""
+    fake = FakeEngine([])
+    fake.list_beliefs_result = [
+        _belief(1, "x" * 200 + " quokka"),
+        _belief(2, "an unrelated claim"),
+    ]
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _picker(pilot, app, beliefs=None)
+        await pilot.press("q", "u", "o", "k", "k", "a")
+        await pilot.pause()
+        found = [rid for rid, _l in picker._rows if rid.startswith("belief:")]
+        assert found == ["belief:1"], found
+
+
+@pytest.mark.asyncio
+async def test_the_door_has_no_fold_around_it(monkeypatch, tmp_path):
+    """It was given a group of its own purely so the header machinery would
+    not paint a bare `▎` -- which became a fold around ONE row once groups
+    folded, a fold whose only effect was hiding the way out."""
+    from doxa.app import ChipPicker
+    from doxa.session.chips import BROWSE_ALL_ROW
+
+    fake = FakeEngine([])
+    fake.list_beliefs_result = _many(40)
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(160, 40)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _picker(pilot, app, beliefs=None)
+        rids = [rid for rid, _l in picker._rows]
+        assert rids[0] == BROWSE_ALL_ROW[0], "the door is present, and first"
+        headers = [label for rid, label in picker._rows
+                   if rid.startswith(ChipPicker.GROUP_ROW_PREFIX)]
+        assert not any("browse" in h.lower() for h in headers), headers
+        assert not any(h.strip() in ("▎", "") for h in headers), headers
+
+
+def test_each_door_names_the_half_it_opens():
+    """Reported as misleading, and it was: BOTH rows read "open the beliefs
+    browser", so a reader who clicked one in the PROPOSALS picker landed on
+    a tab named for beliefs. The door did not say where it led because it
+    led to two places at once."""
+    from doxa.session.chips import BROWSE_ALL_ROW, REVIEW_ALL_ROW
+
+    beliefs_door = BROWSE_ALL_ROW[1].lower()
+    proposals_door = REVIEW_ALL_ROW[1].lower()
+    assert "belief" in beliefs_door
+    assert "approve" not in beliefs_door and "reject" not in beliefs_door
+    assert "proposal" in proposals_door
+    assert "approve" in proposals_door and "reject" in proposals_door
+
+
+@pytest.mark.asyncio
+async def test_the_door_lands_on_the_half_you_came_from(monkeypatch, tmp_path):
+    """One tab, both halves -- splitting it would duplicate the surface --
+    so the door opens it focused where the reader was heading."""
+    from doxa.session.chips import BROWSE_ALL_ROW, REVIEW_ALL_ROW
+
+    fake = FakeEngine([])
+    fake.list_beliefs_result = [_belief(1, "a belief")]
+    fake.list_pending_result = _proposals(2)
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(160, 40)) as pilot:
+        await pilot.pause()
+        pane, picker = await _picker(pilot, app, beliefs=None)
+        picker.select_row(next(i for i, (r, _l) in enumerate(picker._rows)
+                               if r == BROWSE_ALL_ROW[0]))
+        for _ in range(200):
+            if pane._beliefs_tab is not None and pane._beliefs_tab.rows:
+                break
+            await pilot.pause(0.02)
+        browser = pane._beliefs_tab
+        for _ in range(200):
+            if isinstance(app.focused, BeliefRow):
+                break
+            await pilot.pause(0.02)
+        assert browser.focus_target == "beliefs"
+        assert isinstance(app.focused, BeliefRow), app.focused
+
+        # The OTHER door records the other half. Asserted on the recorded
+        # target rather than on app.focused: re-entering an already-open
+        # browser from a picker row is a three-way race between
+        # ChipPicker's focus hand-off to the prompt, TabbedContent's
+        # reactive `.active`, and its `_on_tab_pane_focused` snap-back, and
+        # driving that sequence headlessly is not the same thing as a user
+        # clicking. focus_target is what _apply_focus reads, so it is the
+        # product's own answer to "which half did the reader ask for".
+        pane.open_beliefs_browser  # (the door below routes through it)
+        browser.focus_target = "beliefs"
+        await pane.open_beliefs_browser(focus="proposals")
+        await pilot.pause()
+        assert browser.focus_target == "proposals"
+        assert pane._beliefs_tab is browser, "one tab, both halves"
+
+
+@pytest.mark.asyncio
+async def test_the_tab_is_named_for_what_it_holds(monkeypatch, tmp_path):
+    """A tab titled for one of its two halves is the same misleading label
+    one level up."""
+    fake = FakeEngine([])
+    fake.list_beliefs_result = [_belief(1, "a belief")]
+    fake.list_pending_result = _proposals(1)
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(160, 40)) as pilot:
+        await pilot.pause()
+        browser = await _browser(pilot, app, fake)
+        title = str(browser._title) if browser._title else ""
+        assert "belief" not in title.lower(), title
+        assert "lore" in title.lower(), title

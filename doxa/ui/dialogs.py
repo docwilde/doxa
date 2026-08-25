@@ -29,7 +29,7 @@ from textual.widgets.option_list import Option
 
 from .. import commands as commands_mod
 from .. import version as version_mod
-from .labels import _escape_markup
+from .labels import PICKER_ROW_WIDTH, _escape_markup, ellipsize
 
 
 class BeliefInspector(Vertical):
@@ -422,6 +422,13 @@ class ChipPicker(OptionList):
     #: must never reach `on_select` as if it were a candidate.
     GROUP_ROW_PREFIX = "\x00group:"
 
+    #: Columns this widget spends before a row's text starts: the leading
+    #: space, the `▸` current-marker and the space after it. Subtracted
+    #: from the MEASURED content width, never from a guess at the
+    #: terminal's -- v0.49.0's banner work already paid for guessing
+    #: chrome, and a scrollbar moves the budget by two.
+    ROW_CHROME_COLS = 3
+
     #: Below this many candidate rows every group opens and the fold is
     #: invisible. It is `#chip-picker`'s own `max-height` in theme.tcss: a
     #: list the widget can already show at once gains nothing from being
@@ -501,6 +508,38 @@ class ChipPicker(OptionList):
         self.display = True
         self.focus()
 
+    def _row_budget(self) -> int:
+        """How many columns a row's text may use, right now.
+
+        MEASURED, three tiers, widest correct answer first:
+
+        * ``scrollable_content_region`` -- inside the border, the padding
+          AND the scrollbar. The scrollbar is why this is not arithmetic on
+          the terminal width: it appears when the list is long, which is
+          exactly when rows are longest.
+        * ``content_size`` -- inside border and padding, before Textual
+          has decided about scrollbars.
+        * :data:`doxa.ui.labels.PICKER_ROW_WIDTH` -- for a widget with no
+          geometry at all, which is what ``open()`` renders against before
+          its first layout."""
+        for source in ("scrollable_content_region", "content_size"):
+            try:
+                width = int(getattr(getattr(self, source), "width", 0) or 0)
+            except Exception:  # noqa: BLE001 -- an unlaid-out widget is a tier
+                width = 0
+            if width > self.ROW_CHROME_COLS:
+                return max(20, width - self.ROW_CHROME_COLS)
+        return PICKER_ROW_WIDTH
+
+    def _on_resize(self, event: events.Resize) -> None:
+        """A row trimmed to yesterday's width lies about what it holds, so
+        a resize re-renders the open list -- keeping the highlight."""
+        if self.display:
+            highlighted = self.highlighted
+            self._render_rows()
+            if highlighted is not None and highlighted < len(self._rows):
+                self.highlighted = highlighted
+
     def _group_labels(self) -> "list[str]":
         """Every group label present in the current row set, in the order
         the caller's rows put them -- the same walk :meth:`_render_rows`
@@ -557,10 +596,25 @@ class ChipPicker(OptionList):
             self.add_option(Option("  (no match)", disabled=True))
         else:
             counts = self._group_counts() if self._collapsible else {}
+            budget = self._row_budget()
             current_group = None
             for rid, label in candidates:
+                group = self._groups.get(rid, "") if self._groups else ""
+                if grouped and not group:
+                    # An UNGROUPED row (v0.52.0): rendered where the caller
+                    # put it, with no header above it and no fold around
+                    # it. The pickers' "open the browser" rows are the
+                    # case -- a door rather than data. Each had to be given
+                    # a group of its own purely so the header machinery
+                    # would not paint a bare `▎`, which then became a fold
+                    # around a single row whose only effect was hiding the
+                    # way out.
+                    self.add_option(
+                        Option(f"   {_escape_markup(ellipsize(label, budget))}")
+                    )
+                    self._rows.append((rid, label))
+                    continue
                 if grouped:
-                    group = self._groups.get(rid, "")
                     if group != current_group:
                         current_group = group
                         if self._collapsible:
@@ -578,7 +632,12 @@ class ChipPicker(OptionList):
                     if group in self._collapsed:
                         continue
                 mark = "▸" if rid == self._current_id else " "
-                self.add_option(Option(f" {mark} {_escape_markup(label)}"))
+                # Trimmed HERE, against the measured width, rather than by
+                # the formatter against a constant -- which also means the
+                # matcher above scored the WHOLE row, so a word past the
+                # visible cut stays findable.
+                shown = ellipsize(label, budget)
+                self.add_option(Option(f" {mark} {_escape_markup(shown)}"))
                 self._rows.append((rid, label))
         first = next((i for i, (rid, _l) in enumerate(self._rows) if rid), None)
         self.highlighted = first

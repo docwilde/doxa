@@ -460,6 +460,25 @@ def lore_write_state() -> dict:
 BELIEF_OUTCOME_EVENTS: "tuple[str, ...]" = ("confirmed", "contradicted", "stale")
 
 
+def pending_visible(item: dict, slug: "str | None") -> bool:
+    """Whether one staged proposal belongs to ``slug``'s review.
+
+    lore_core's own scoping rule, in ONE place: a project-scoped proposal
+    staged for another project is destined for a different memory file and
+    says nothing about this one. Everything else -- user-scoped memory,
+    filemap, belief, skill -- is global and always counts.
+
+    A module function rather than a line inside
+    :meth:`SessionEngine._pending_records` because the status-bar COUNT has
+    to agree with the LIST clicking it opens, and the only way two callers
+    cannot drift is for there to be one predicate. Learned the hard way:
+    the count was first written on ``lore_core.deriver.pending_texts``,
+    which returns ``item["text"] or item["name"]`` and drops anything
+    carrying neither -- so every filemap proposal vanished from it and a
+    live spool of 59 rendered a chip reading 5."""
+    return not (item.get("scope") == "project" and item.get("project") != slug)
+
+
 def belief_action_state() -> dict:
     """Whether this ``lore_core`` lets a human record an outcome against a
     belief, or retract one -- measured off the API, never off a version.
@@ -1439,7 +1458,7 @@ class SessionEngine:
         for pid, item in items:
             if not isinstance(item, dict):
                 continue
-            if item.get("scope") == "project" and item.get("project") != self.slug:
+            if not pending_visible(item, self.slug):
                 continue
             record = {"pid": pid}
             for key in ("kind", "action", "scope", "project", "subject", "id",

@@ -492,19 +492,23 @@ async def test_pending_is_a_real_doxa_command_and_lists_the_proposals(
 
 
 @pytest.mark.asyncio
-async def test_the_pending_dropdown_itself_still_writes_nothing(
+async def test_no_proposal_row_in_the_dropdown_acts_on_a_proposal(
     monkeypatch, tmp_path
 ):
-    """Scope boundary, restated for v0.40.0 rather than dropped.
+    """Scope boundary, restated for v0.52.0 rather than dropped.
 
-    v0.31.0 pinned "DOXA does not write at all". Item V moves that line
-    rather than erasing it: approving is now possible, but only from a
-    per-row control in the full-height browser, never from this dropdown.
-    A one-cell-tall row in a list you opened for a glance is exactly the
-    accidental-click surface the review gate exists to prevent, so no row
-    HERE may offer an approve or a reject.
+    v0.31.0 pinned "DOXA does not write at all"; v0.40.0 "not from this
+    dropdown"; v0.52.0 gives proposals their own chip and puts approve and
+    reject behind their rows. The property underneath has never moved and
+    is what this asserts directly: NO PROPOSAL ROW ACTS ON A PROPOSAL.
+    Selecting one opens that proposal's own named verbs, because a
+    dropdown row is one Enter from whatever the highlight is sitting on.
 
-    The one row that leaves the picker names the browser, not the verb."""
+    The DOOR row does say "approve or reject" -- deliberately, and it is
+    the v0.52.0 fix: it names where it leads. It is excluded here because
+    it is a destination, not a verb this list performs."""
+    from doxa.session.chips import REVIEW_ALL_ROW
+
     fake = FakeEngine([])
     fake.list_pending_result = [
         {"pid": "20260824-00", "kind": "memory", "action": "add",
@@ -518,16 +522,28 @@ async def test_the_pending_dropdown_itself_still_writes_nothing(
         await pane.open_pending_picker()
         picker = pane.query_one("#chip-picker", ChipPicker)
         assert await _wait(pilot, lambda: picker.is_open)
-        labels = " ".join(label for _rid, label in picker._rows).lower()
-        assert "approve" not in labels and "reject" not in labels
-        # Selecting a proposal row only ever SHOWS the proposal.
-        proposal_row = next(
-            rid for rid, _l in picker._rows if rid.startswith("pending:")
-        )
-        picker._on_select(proposal_row)
+
+        proposal_labels = " ".join(
+            label for rid, label in picker._rows
+            if rid.startswith("pending:")).lower()
+        assert "approve" not in proposal_labels
+        assert "reject" not in proposal_labels
+        # ...and the door is present and does name its destination.
+        assert any(rid == REVIEW_ALL_ROW[0] for rid, _l in picker._rows)
+
+        row = next(rid for rid, _l in picker._rows if rid.startswith("pending:"))
+        index = next(i for i, (r, _l) in enumerate(picker._rows) if r == row)
+        picker.select_row(index)
+        assert await _wait(
+            pilot, lambda: any(r == "act:show" for r, _l in picker._rows))
+        assert fake.approved == [] and fake.rejected == []
+
+        show = next(i for i, (r, _l) in enumerate(picker._rows) if r == "act:show")
+        picker.select_row(show)
         assert await _wait(pilot, lambda: _system_blocks(app))
         await pilot.pause()
         assert "one proposal" in _plain(_system_blocks(app)[0])
+        assert fake.approved == [] and fake.rejected == []
 
 
 @pytest.mark.asyncio
