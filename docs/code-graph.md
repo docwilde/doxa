@@ -93,6 +93,48 @@ What the graph holds, per module:
 - **call edges** — caller → callee, same decidability rule
 
 
+## Scope: one graph per worktree
+
+**Decided (2026-08-25): per worktree, with a full rebuild triggered on commit.**
+
+Every session runs in its own worktree on `doxa/<session-id>` (v0.17.0+), and a
+session's questions are about the tree it is actually editing. A graph indexed
+per main repo would be authoritative about `main` and wrong about every
+uncommitted edit the agent just made — which is most of what a session touches.
+Per-worktree costs an index per session and answers the question that gets
+asked.
+
+**Commit is the rebuild trigger, not the freshness guarantee.** Those are
+different jobs and conflating them is how the index starts lying:
+
+- **On commit**: a full sweep, **run in the background** — a worker, off the UI
+  thread, exactly as `_derive_once` runs the streaming deriver today (one in
+  flight at a time, debounced, never blocking the turn path). A sweep of a
+  FINCH-sized tree must never be something a user waits through, and it must
+  never be a timer: the commit is the trigger, and between commits nothing
+  runs. Follow that path's discipline literally, including its rule that a
+  failure never takes the session down with it.
+- **On query**: the per-file mtime check below still applies, unconditionally.
+  An agent edits for twenty minutes before committing; during that window the
+  commit trigger has fired zero times, and a graph that only rebuilds on commit
+  would answer every question about the session's own work from a stale parse.
+
+So commit-triggered is the sweep and mtime-on-query is the contract. Neither
+alone is sufficient: the sweep alone is stale for the whole editing window, and
+mtime alone never notices a file that was *deleted* or a branch that moved
+under it.
+
+**Two consequences to design for:**
+
+- **A worktree is deleted when a session finalizes** (`worktrees.finalize`
+  removes it when clean and zero commits ahead). Its graph must go with it, or
+  the store accumulates an index per session forever. The sidecar that records
+  `base_ref` is the natural place to hang the graph's identity.
+- **Sessions in worktrees off one branch have separate graphs**, and that is
+  correct — they are separate trees with separate edits. It also means the
+  answer to "what imports this" is scoped to *this* session's view, which is
+  the honest scope and should be said in the answer rather than implied.
+
 ## The staleness contract — the hard part
 
 A code index that lags the tree gives confidently wrong answers, which is
@@ -231,12 +273,7 @@ the FTS5 session index. Not a second database.
 
 ## Open questions
 
-1. **Does it index the worktree or the main repo?** Every DOXA session runs in
-   a worktree (v0.17.0), and `_lore_slug` had to be fixed to resolve through
-   `peers.main_repo_root_of` for exactly this class of confusion. A graph
-   indexed per-worktree would be rebuilt per session; one indexed per main repo
-   would be wrong about a session's uncommitted edits. This needs deciding
-   before anything is built.
+1. *(settled — see "Scope: one graph per worktree" above.)*
 2. **How much of a repo is worth indexing?** `.venv`, `node_modules` and
    vendored trees are most of the AST and none of the value.
 3. **Does the agent get told the graph exists?** The retrieval ladder is
