@@ -296,6 +296,13 @@ def parse_rate_limit_tier(raw: "str | None") -> "str | None":
     return label or None
 
 
+# Words that make a subscriptionType read as a PLAN rather than a
+# codename. Substring, not equality: the field carries "max", "Claude
+# Max", "max_20x" and "pro" across versions, and a new suffix should not
+# silently become "subscription".
+_KNOWN_PLAN_WORDS = ("max", "pro", "team", "enterprise", "free")
+
+
 def tier_short(
     subscription_type: "str | None", rate_limit_tier: "str | None" = None
 ) -> "str | None":
@@ -313,8 +320,27 @@ def tier_short(
         return precise
     if not subscription_type or not str(subscription_type).strip():
         return None
-    tier = str(subscription_type).strip().lower()
-    return tier.removeprefix("claude").strip() or tier
+    tier = str(subscription_type).strip().lower().removeprefix("claude").strip()
+    if not tier:
+        return None
+    # Pass through only what reads as a PLAN. The rule here used to be
+    # "an unknown plan is reported, never renamed", which is right for a
+    # plan name nobody has taught this function yet -- and wrong for the
+    # release codenames the field actually carries: a user reported the
+    # status line reading `sub:raven`, which is not a plan they are on,
+    # it is a keyword. Rendering it as their subscription states
+    # something false with the same confidence as `sub:max 20x`.
+    #
+    # So an unrecognised value degrades to the thing we DO know -- that
+    # this session bills against a subscription rather than API credit,
+    # which is the distinction the chip exists to draw (see the cost
+    # chip's own comment: a bare $ figure on a subscription is
+    # misleading). The precise value is not lost: /about and the identity
+    # block still report it verbatim, where there is room to say
+    # "subscriptionType: raven" without it masquerading as a plan.
+    if any(word in tier for word in _KNOWN_PLAN_WORDS):
+        return tier
+    return "subscription"
 
 
 def account_tier(

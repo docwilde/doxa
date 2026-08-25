@@ -214,13 +214,29 @@ class PaneChipsMixin:
         return not width or width >= CTX_ABSOLUTE_MIN_COLS
 
     def _lore_slug(self) -> str:
-        """This session's LORE project slug -- the same one lore_core uses
-        to pick MEMORY.md, derived from the pane's own cwd so a repo-less
-        session and a worktree agree with the snapshot the engine built."""
+        """This session's LORE project slug -- the one lore_core uses to
+        pick MEMORY.md.
+
+        Resolved through the MAIN repo root, not the pane's raw cwd, and
+        that distinction is the whole point: since v0.17.0 every repo
+        session runs in a worktree, so `project_slug(cwd)` answers "which
+        DIRECTORY" when the question is "which PROJECT". A worktree at
+        /tmp/claude-1000/doxa-mode resolves to the slug
+        `-tmp-claude-1000-doxa-mode`, which owns no MEMORY.md -- so the
+        project half of the memory chip silently vanished for every
+        worktree session, i.e. the normal case (reported, v0.48.0).
+
+        `peers.main_repo_root_of` maps a worktree back to its main
+        checkout via `git rev-parse --git-common-dir`, and exists because
+        this exact scope-key fracture bit the peer registry first. Reusing
+        it keeps DOXA's answer to "which project am I in" in one place.
+        Falls back to the raw cwd when there is no repo at all, which is
+        what a repo-less session should get."""
         try:
             from lore_core.config import project_slug
 
-            return project_slug(self.cwd)
+            root = peers_mod.main_repo_root_of(self.cwd) or self.cwd
+            return project_slug(root)
         except Exception:
             return ""
 

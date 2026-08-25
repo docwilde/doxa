@@ -116,3 +116,46 @@ def test_repeat_reads_are_cached_until_the_file_changes(tmp_path, monkeypatch):
     os.utime(store, (stamp, stamp))
     assert memory_fill("user")[0] == len("- one\n- two\n")
     assert reads["n"] > first
+
+
+# -- the worktree case, which is the NORMAL case (v0.48.0) -----------------
+
+
+def test_a_worktree_resolves_to_its_main_repo_s_project_memory(tmp_path, monkeypatch):
+    """The defect this file shipped with, reported by the user: the chip
+    showed `mem u63%` and silently dropped the project half on every
+    worktree session.
+
+    Since v0.17.0 every repo session runs in a worktree, so resolving the
+    LORE slug from the pane's raw cwd answers "which DIRECTORY" when the
+    question is "which PROJECT" -- a worktree owns no MEMORY.md, the fill
+    came back None, and the chip rendered half of itself with no
+    indication anything was missing. The fix routes through
+    `peers.main_repo_root_of`, which already existed for exactly this
+    scope-key fracture.
+
+    Asserted against real git repos, not a stub: the mapping is git's own
+    (`rev-parse --git-common-dir`), and a test that mocks it would pass on
+    the broken code.
+    """
+    import pathlib
+    import subprocess
+
+    from doxa import peers as peers_mod
+
+    main = tmp_path / "repo"
+    main.mkdir()
+    run = lambda *a, **k: subprocess.run(*a, check=True, capture_output=True, **k)
+    run(["git", "init", "-q"], cwd=main)
+    run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+         "--allow-empty", "-m", "init"], cwd=main)
+    wt = tmp_path / "wt"
+    run(["git", "worktree", "add", "-q", "-b", "doxa/x", str(wt)], cwd=main)
+
+    # The premise: a worktree is its own toplevel, which is why the naive
+    # reading goes wrong. If this stops being true the test is moot.
+    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=wt,
+                         capture_output=True, text=True).stdout.strip()
+    assert pathlib.Path(top).resolve() == wt.resolve()
+
+    assert pathlib.Path(peers_mod.main_repo_root_of(str(wt))).resolve() == main.resolve()
