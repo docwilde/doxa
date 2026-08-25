@@ -311,47 +311,45 @@ class PaneChipsMixin:
 
         engine = self.engine
         chips: "list[StatusChip]" = []
-        model = engine.model or "default"
-        chips.append(StatusChip.clickable(
-            model,
-            "open_model_picker",
-            "model handling this session's turns -- click to switch "
-            "(takes effect on the NEXT turn, transcript kept)",
-        ))
-        # Permission mode (v0.42.0), second and beside the model on
-        # purpose: those two are what decide how this session BEHAVES, and
-        # everything after them reports what it has done.
+        # Permission mode. FIRST on the row since v0.50.0, ahead of even
+        # the model, and the reason is structural rather than editorial:
+        # the status bar has no overflow behaviour -- a chip that does not
+        # fit is not truncated or scrolled, it is simply gone -- so
+        # position IS the guarantee. Anything after the first chip can be
+        # pushed off by a long model id and a long branch name on a narrow
+        # terminal. This is the only chip on the row that reports whether
+        # the session will still stop and ask before it acts, and since
+        # v0.50.0 a single keystroke can turn that off, so it is the one
+        # chip that must never be the thing that falls off the end.
         #
-        # Hide-at-zero, but on a width condition rather than a value one,
-        # and the difference is the point. Every other chip here is absent
-        # when its number is zero or its state was never asserted; a
+        # It also no longer hides at ``default`` on a wide row: a
         # permission mode is ALWAYS in force, and ``default`` is a mode
-        # with behavior rather than the absence of one -- so on a terminal
-        # with room, DOXA says which one, unconditionally. On a terminal
-        # WITHOUT room (measured: 80 columns is already full, and the row
-        # does not truncate, it drops whatever falls off the right) the
-        # chip yields -- but only when what it would have said is
-        # ``default``. A mode that has stopped asking is painted at every
-        # width, short-form if it must be, because it is the only place
-        # that fact appears at all. See :meth:`_mode_chip_cramped`.
+        # with behavior rather than the absence of one. The single
+        # exception is a CRAMPED row showing ``default`` -- there the chip
+        # stands down, because at that width it would be spending columns
+        # to tell the user what they already assume. Anything else is
+        # painted at every width, short-form if it must be.
         #
-        # ``mode_chip`` colors it in three tiers -- uncolored at default,
-        # amber at acceptEdits/plan, red at the three that stop asking --
-        # and the click span is built HERE rather than through
-        # ``_chip_span``, the same exception the ctx chip below takes and
-        # for the same reason: that helper escapes its text, which would
-        # escape this chip's own already-trusted, code-generated coloring
-        # as if it were arbitrary bracket text. The accent shows through at
-        # the uncolored tier and yields to the escalation color once one
-        # applies -- the mode signal outranks the click affordance.
+        # ``mode_chip`` colors it with the values read out of the installed
+        # Claude Code CLI (doxa.ui.labels documents the extraction), and
+        # the click span is built HERE rather than through ``_chip_span``,
+        # the same exception the ctx chip below takes and for the same
+        # reason: that helper escapes its text, which would escape this
+        # chip's own already-trusted, code-generated coloring as if it were
+        # arbitrary bracket text. Unlike the ctx chip there is no accent
+        # wrapper -- every mode carries a color of its own now, so letting
+        # the clickable accent show through would mean painting a color
+        # this chip did not measure.
         #
         # The KEY below is the PLAIN text, never the colored markup:
         # StatusBar._tooltip_for_x looks each chip up inside the bar's
-        # markup-STRIPPED string, so a key still carrying `[#D9534F]…[/]`
+        # markup-STRIPPED string, so a key still carrying `[#FF6B80]…[/]`
         # matches nothing and the tooltip silently vanishes at exactly the
         # tier that matters most. That is v0.35.0's ctx defect verbatim,
         # and this chip is unusually well placed to repeat it, so the rule
-        # is written down here as well as there.
+        # is written down here as well as there. The GLYPH is part of the
+        # key, deliberately: it is text, it survives stripping, and the
+        # lookup has to match what the widget actually paints.
         mode = str(getattr(engine, "permission_mode", None) or
                    engine_mod.DEFAULT_PERMISSION_MODE)
         cramped = self._mode_chip_cramped()
@@ -359,10 +357,16 @@ class PaneChipsMixin:
             mode_plain = mode_text(mode, short=cramped)
             chips.append(StatusChip.raw(
                 mode_plain,
-                f"[@click=open_mode_picker][{CLICKABLE_CHIP_ACCENT}]"
-                f"{mode_chip(mode, short=cramped)}[/][/]",
+                f"[@click=open_mode_picker]{mode_chip(mode, short=cramped)}[/]",
                 ((mode_plain, mode_tooltip(mode)),),
             ))
+        model = engine.model or "default"
+        chips.append(StatusChip.clickable(
+            model,
+            "open_model_picker",
+            "model handling this session's turns -- click to switch "
+            "(takes effect on the NEXT turn, transcript kept)",
+        ))
         if self.needs_input:  # visible only while a question or permission
             # request is actually pending on THIS pane.
             chips.append(StatusChip.plain(
@@ -693,20 +697,26 @@ class PaneChipsMixin:
         if self.engine is None:
             return
         rows = [
-            (name, f"{name} — {MODE_EXPLAIN.get(name, '')}")
+            (name,
+             ("⚠ " if name in engine_mod.UNASKED_MODES else "")
+             + f"{name} — {MODE_EXPLAIN.get(name, '')}")
             for name in engine_mod.PERMISSION_MODES
         ]
+        # Grouped by the axis a user is actually choosing on: can I get
+        # here with the key, or do I have to mean it? Since v0.50.0 that
+        # is no longer the same as "is this one safe" -- the top group
+        # now contains two modes where nothing will ask -- so the row
+        # labels say what each group IS rather than implying safety.
         groups = {
-            name: ("cycled by Shift+Tab" if name in engine_mod.CYCLE_MODES
-                   else "asks first — stops DOXA asking you")
+            name: ("Shift+Tab reaches these" if name in engine_mod.CYCLE_MODES
+                   else "/mode only — confirms first")
             for name in engine_mod.PERMISSION_MODES
         }
         current = str(getattr(self.engine, "permission_mode", None) or "default")
         self._open_chip_picker(
             rows, current,
             lambda chosen: self.run_worker(self._cmd_mode(chosen), group="command"),
-            note="Shift+Tab cycles the top group; the bottom group asks "
-                 "before it switches",
+            note="⚠ = DOXA will not ask you about a tool call in that mode",
             title="permission mode", groups=groups,
         )
 

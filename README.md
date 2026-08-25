@@ -157,8 +157,8 @@ terminal cannot physically send.
 - **Memory that is inert until it earns influence.** LORE's `lore_core` runs in-process — hard-capped curated memory (user + project), an uncapped belief store with an FTS index and evidence trails, one SQLite store shared with the LORE Claude Code plugin. A `mem u63% p39%` chip next to the belief count says how full each cap is — **two percentages, not one merged figure**, because the caps fill at different rates and a single number would hide whichever one is about to start refusing writes. It counts characters read from the file `lore_core` itself writes, against that same module's own cap (4500 and 8800 by default), so the chip cannot disagree with the write path the way an `st_size` approximation would on any multi-byte character; an unreadable store or an older `lore_core` makes it absent rather than wrong. The agent's whole tool surface is five operators: four read-only (`lore_belief_search`, `lore_belief_show`, `lore_memory_list`, `lore_session_search`) and one write, `lore_remember`, which only *stages* a proposal for the review gate. At act time a single FTS pass over the prompt may attach one belief note, labelled CITE-ONLY — no LLM call, no second injection path. One write path into curated memory exists and it is a human clicking a control on one row: `/beliefs` opens a full-height browser where each staged proposal states what approving it would do and carries its own approve and reject, arming before it applies, one item at a time, with no bulk form anywhere in the UI or the API — and every approval goes through LORE's own approve path, so the entry is labelled `via approved` by LORE rather than by DOXA. On a `lore_core` too old to record that, the browser degrades to read-only and says so. No embeddings, no relevance model, no API call in any of it.
 - **A shell the model cannot reach.** A prompt line starting with `!` (`!git status`, `!pytest -q`) runs in this session's own worktree under a Textual worker, with stdin on `/dev/null`, output capped at 64 KB, and the whole process group killed at 120 seconds so a stray `!tail -f` cannot outlive the tab. It is not a slash command and not a tool, so nothing that dispatches by name and no model call can land there; exactly one module imports the executor and a test asserts that. It runs with your full privileges and **asks nothing first** — `!rm -rf ~` deletes your home directory. Neither the command nor its output enters the model's context, which also means it never reaches LORE and never survives a tab restore.
 - **Sessions that can be made to talk to each other.** Independently launched sessions on the same repo discover each other through a same-user runtime registry (0700, per-session presence file, heartbeat, dead pids reaped by any reader); `/peers` and `/sessions` list them, and `/msg <session> <text>` delivers one framed line-JSON message over the target's own 0600 socket. Every received field is scrubbed before display, and peer text reaches the model only behind an untrusted-peer preamble that names it as data, never instructions. **The model has no send tool** — its five operators are the LORE ones above — so every peer message crosses because a human typed `/msg`. Sessions can be *made* to talk; they do not talk on their own, and nothing here schedules them, routes work between them, or supervises them.
-- **A permission mode you can see and change without leaving the keyboard.** `mode:` sits beside the model and says what still stops and asks you before a tool runs; **Shift+Tab** cycles it, `/mode` sets it by name, and clicking the chip opens the same picker every other selector chip uses. The hotkey walks exactly three modes — `default` → `acceptEdits` → `plan` — all of which keep DOXA's approval dialog reachable, and it **cannot** land on the three that remove it (`bypassPermissions` runs everything unapproved, `auto` puts a model classifier where you were, `dontAsk` denies silently instead of asking); those need `/mode <name>` and a confirmation that states what stops happening, and cannot be persisted in your settings at all, so no stored value can disarm the gate of a session you have not opened yet. The chip is amber once the session leaves its starting posture and red with a `⚠` once nothing is asking — and it is the one chip that keeps its place on a narrow row, shrinking to `⚠ mode:bypass` rather than falling off the end. The keycap is Shift+Tab and not the Ctrl+Tab you might expect because DOXA measured the difference: under the legacy key encoding there is no byte for Ctrl+Tab at all. Both are bound; `/help` marks the one your terminal cannot send.
-- **Numbers that were measured, not estimated.** The status bar carries model · `mode:<permission mode>` · `⚑ needs input` · effort · `repo ⎇ branch @sha` · subscription headroom · context % · belief count · curated-memory fill · session handle · peers; every chip has a one-line tooltip, the inert ones included, and eight are clickable. `/context` breaks the window down by component in tokens using the `claude` CLI's own accounting of its own request — DOXA runs no tokenizer and estimates nothing, a context limit the CLI never reported reads `?` and stays `?`, and the one component that can only be counted in characters is reported in characters. `/about` is the screen a bug report is copied from, down to which `lore_core` loaded and which keyboard protocol your terminal actually granted — a binding it cannot physically transmit is marked `✗` in `/help` instead of silently doing nothing, and silence from the terminal reads as *not measured*, never as "legacy". There is **no animated chrome**: two timers exist in the whole app and a test asserts no third is ever armed.
+- **A permission mode you can see and change without leaving the keyboard.** `mode:` leads the status bar and says what still stops and asks you before a tool runs; **Shift+Tab** cycles it, `/mode` sets it by name, and clicking the chip opens the same picker every other selector chip uses. The hotkey walks five modes, most oversight to least, wrapping home — `default` → `acceptEdits` → `plan` → `auto` → `bypassPermissions` — so one more press is always the way *out* of the most permissive mode. Two of those (`auto`, where a model classifier decides instead of you, and `bypassPermissions`, where every call runs unapproved) mean DOXA stops asking you about tool calls, so entering one paints the chip red and writes a line in the transcript naming what stopped. `dontAsk` is deliberately not on the hotkey and still confirms first. **Nothing wider than `plan` can be persisted**: cycling is per-session and visible, but a stored bypass would silently disarm every future session in repos you have not read yet. The glyphs and colours are Claude Code's own, read out of the installed CLI rather than guessed, so a colour you have learned in one client means the same here. The keycap is Shift+Tab and not the Ctrl+Tab you might expect because DOXA measured the difference: under the legacy key encoding there is no byte for Ctrl+Tab at all. Both are bound; `/help` marks the one your terminal cannot send.
+- **Numbers that were measured, not estimated.** The status bar carries `mode:<permission mode>` (first, so it is never what falls off a narrow row) · model · `⚑ needs input` · effort · `repo ⎇ branch @sha` · subscription headroom · context % · belief count · curated-memory fill · session handle · peers; every chip has a one-line tooltip, the inert ones included, and eight are clickable. `/context` breaks the window down by component in tokens using the `claude` CLI's own accounting of its own request — DOXA runs no tokenizer and estimates nothing, a context limit the CLI never reported reads `?` and stays `?`, and the one component that can only be counted in characters is reported in characters. `/about` is the screen a bug report is copied from, down to which `lore_core` loaded and which keyboard protocol your terminal actually granted — a binding it cannot physically transmit is marked `✗` in `/help` instead of silently doing nothing, and silence from the terminal reads as *not measured*, never as "legacy". There is **no animated chrome**: two timers exist in the whole app and a test asserts no third is ever armed.
 
 Three smaller invariants hold the rest together. The `ctrl+p` palette and `/`
 autocomplete read one registry, so a command cannot exist on one surface and
@@ -329,37 +329,52 @@ the `mode:` chip beside the model is where it says so. **Shift+Tab**
 cycles it, `/mode` sets it by name, clicking the chip opens the same
 picker every other selector chip uses.
 
-The chip is uncolored at `default`, **amber** at `acceptEdits` and `plan`
-— "this session is not in the posture it started in" — and **red with a
-`⚠`** for the three modes that stop DOXA asking about a tool call at all.
-Below 110 columns it shrinks (`⚠ mode:bypass`); if all it would have said
-was `default` it stands down entirely, so the reattach handle and peers
-chip keep their columns. A mode that has stopped asking is painted at
-every width, because it is the only place that fact appears.
+The chip's glyphs and colours are **Claude Code's own**, read out of the
+installed CLI's permission-mode table rather than guessed — a safety
+indicator whose colour means one thing in one client and something else
+in another is worse than no convention at all:
 
-| mode | what it does | on the hotkey? |
-|---|---|---|
-| `default` | the CLI asks you before anything it considers dangerous | ✔ |
-| `acceptEdits` | file edits run unasked; everything else still asks | ✔ |
-| `plan` | no tool runs at all — planning only | ✔ |
-| `bypassPermissions` | **every** tool call runs unapproved; nothing asks | `/mode`, confirms first |
-| `auto` | a model classifier approves or denies each call instead of you | `/mode`, confirms first |
-| `dontAsk` | anything not pre-approved is **denied**, with no prompt shown | `/mode`, confirms first |
+| mode | chip | what it does | on the hotkey? |
+|---|---|---|---|
+| `default` | `⏸ mode:default` grey | the CLI asks you before anything it considers dangerous | ✔ |
+| `acceptEdits` | `⏵⏵ mode:acceptEdits` purple | file edits run unasked; everything else still asks | ✔ |
+| `plan` | `⏸ mode:plan` teal | no tool runs at all — planning only | ✔ |
+| `auto` | `⏵⏵ mode:auto` amber | a model classifier approves or denies each call **instead of you** | ✔ |
+| `bypassPermissions` | `⏵⏵ mode:bypassPermissions` **bold red** | **every** tool call runs unapproved; nothing asks | ✔ |
+| `dontAsk` | `⏵⏵ mode:dontAsk` **bold red** | anything not pre-approved is **denied**, with no prompt shown | `/mode`, confirms first |
 
-The split is not about which modes are advanced. It is about whether the
-approval gate still reaches *you*. The three on the hotkey all keep it:
-`acceptEdits` widens only file edits, which git can undo, and `plan`
-narrows. The three below it each remove the human from a loop they are in
-now — one checks nothing, one puts a model classifier where the person
-was, one fails calls silently instead of asking. A key you tap to move
-between conveniences must not be able to land on any of them, so it
-cannot: the cycle is a total function over the safe three, and a session
-already parked on a gated mode comes **home to `default` in one press**
-(narrowing never asks). `/mode <name>` is the only way in, and it opens a
-confirmation stating what *stops happening* rather than asking "are you
-sure?" — Esc cancels, Enter also cancels, and the accepting key is `y`,
-because the reflex key at a dialog should not be the one that disarms a
-gate.
+`⏸` marks the two modes that pause and ask; `⏵⏵` the four that run
+something without stopping. The one place DOXA deviates from what it
+measured is weight: Claude Code's own cycler cannot reach
+`bypassPermissions` at all, DOXA's can, and a colour calibrated for a
+mode you had to go out of your way to select is not calibrated for one a
+stray keystroke lands on — so the two modes where nothing is checked get
+the measured hue plus **bold**.
+
+The chip sits **first on the row**, ahead of the model. The status bar has
+no overflow behaviour — a chip that does not fit is simply gone — so
+position is the only real guarantee that the one chip reporting whether
+this session still asks is never the one that falls off the end. On a
+narrow terminal it shrinks (`⏵⏵ mode:bypass`) rather than vanishing;
+only a chip that would have said `default` stands down, and only when the
+row is cramped.
+
+Entering `auto` or `bypassPermissions` also writes a line in the
+transcript, not just a chip. The chip is persistent but peripheral, and
+someone who did not mean to press the key is by definition not looking at
+the corner of the screen; the transcript lands in the same column as the
+work, names what *stopped* ("there is nothing left to decline"), and says
+the mode was not saved.
+
+**Two of these were explicit user overrides.** v0.42.0 kept `auto` and
+`bypassPermissions` off the hotkey on the argument that a key you tap to
+move between conveniences should not reach a mode where nothing asks;
+the user read that and asked for both anyway, in two separate decisions.
+`dontAsk` was not asked for and is not on the cycler. What is still
+guaranteed is narrower and checkable: the set a keystroke can reach is
+**exactly** the five above, `dontAsk` is unreachable by any key sequence,
+and the step function is total over that set — so putting a sixth mode on
+the keyboard means editing a named constant and failing a test.
 
 **About the keycap.** The request was `Ctrl+Tab`. DOXA's own
 keyboard-protocol measurement answers
@@ -378,10 +393,13 @@ becomes unreachable.
 session and never write your settings: a permission mode is a posture
 adopted for a piece of work, and one Shift+Tab tap should not silently
 rewrite the default for every future session. The persistent default is
-its own settings row (`permission_mode`), and it takes **only the three
-cycle-safe modes** — a stored `bypassPermissions` would disarm the
-approval gate of sessions you have not opened yet, in repositories you
-have not read yet, so no config file or env var can arm one. `/mode` says
+its own settings row (`permission_mode`), and it takes **only `default`,
+`acceptEdits` and `plan`** — narrower than what the hotkey reaches, on
+purpose. Cycling into `bypassPermissions` is per-session, visible and
+announced, in a session you are looking at; a *stored* bypass is silent,
+unbounded in time, and applies to sessions opened in repositories you
+have not read yet. Those are different decisions, and no config file or
+env var can make the second one. `/mode` says
 so out loud if it finds a value it had to ignore. A detached session's
 mode lives with its daemon and rides the status and hello frames, so
 reattaching shows what the session is *actually* doing, and a switch made
@@ -763,7 +781,7 @@ survives being opened by an older one.
 |---|---|---|---|
 | `model` | `DOXA_MODEL` | CLI default | model for new turns (`/model` also switches live) |
 | `effort` | `DOXA_EFFORT` | CLI default | reasoning effort, new sessions only (connect-time SDK option) |
-| `permission_mode` | `DOXA_PERMISSION_MODE` | `default` | mode new sessions connect in. Accepts `default`/`acceptEdits`/`plan` only — the three modes that stop DOXA asking you are session-scoped (`/mode`, with a confirmation) and cannot be persisted here; an out-of-range value is ignored and `/mode` says so |
+| `permission_mode` | `DOXA_PERMISSION_MODE` | `default` | mode new sessions connect in. Accepts `default`/`acceptEdits`/`plan` only — **narrower than what Shift+Tab reaches**: cycling into `auto` or `bypassPermissions` is visible and lasts one session, a stored one would be silent and apply to every future session; an out-of-range value is ignored and `/mode` says so |
 | `derive_secs` | `DOXA_DERIVE_SECS` | off | streaming-deriver interval; unset runs review only at session end |
 | `linger_secs` | `DOXA_LINGER_SECS` | 120 | seconds a daemon outlives its last detached client |
 | `worktree_per_session` | `DOXA_WORKTREE` | **on** | give each session its own git worktree instead of sharing the launch directory |

@@ -164,43 +164,82 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 # line; a mode that stops the CLI asking is a mode where that dialog
 # stops appearing.
 
-# The modes the cycle hotkey walks, IN CYCLE ORDER. Every one of them
-# leaves the approval gate intact:
+# FOUR sets, and they no longer coincide. Through v0.47.0 there were two
+# ("cycles" and "gated") and they happened to partition the six the same
+# way every other question would have. Two explicit user decisions broke
+# that apart -- `auto` on the cycler, then `bypassPermissions` on it too --
+# so each question now gets its own named constant. Conflating any two of
+# them would be a bug, and naming them separately is what makes the
+# difference reviewable:
 #
-#   default      the CLI asks about anything it considers dangerous, and
-#                DOXA renders the question.
-#   acceptEdits  file edits stop being asked about; everything else still
-#                is. Widened, but bounded -- and bounded by the one thing
-#                a user of a coding agent can already undo (git).
-#   plan         no tool executes at all. Strictly narrower than default.
+#   CYCLE_MODES        what one Shift+Tab press can reach
+#   GATED_MODES        what needs /mode plus a confirmation dialog
+#   PERSISTABLE_MODES  what a settings file may seed a NEW session with
+#   UNASKED_MODES      what the chip must shout about, because the
+#                      approval gate no longer reaches the user
 #
-# These are also exactly the three surfaces Claude Code's own Shift+Tab
-# walks, which is the shape the operator asked DOXA to adopt.
-CYCLE_MODES = ("default", "acceptEdits", "plan")
+# The old single axis -- "does the approval gate still reach you?" -- is
+# still real and still worth painting, but it is no longer the same
+# question as "may a keystroke land here". It is UNASKED_MODES now, and
+# nothing else.
 
-# The other three, reachable ONLY through ``/mode <name>`` and only behind
-# an explicit confirmation (:class:`doxa.ui.dialogs.PermissionModeConfirm`).
-# None of them is merely "advanced"; each removes the human from a loop
-# they are in today:
+# The modes the cycle hotkey walks, IN CYCLE ORDER -- most oversight to
+# least, wrapping home:
 #
-#   bypassPermissions  every tool call runs, unapproved, at the user's
-#                      full privileges. Nothing asks. Nothing is checked.
-#   auto               a model classifier decides instead of the user.
-#                      The gate still exists; the person behind it does
-#                      not. That is the same removal with a nicer name.
-#   dontAsk            the inverse failure: anything not pre-approved is
-#                      DENIED rather than asked about, so turns start
-#                      failing with no dialog to explain why. Not a
-#                      hazard -- a silence -- but a user who landed here
-#                      by accident would have no way to know it.
+#   default            the CLI asks about anything it considers dangerous
+#   acceptEdits        file edits stop being asked about; the rest still is
+#   plan               no tool executes at all
+#   auto               a model classifier decides instead of the user
+#   bypassPermissions  every tool call runs, unapproved, at full privileges
 #
-# A hotkey that can arrive at any of these by mistake is exactly the
-# misclick asymmetry this codebase already refused for /compact (a lossy,
-# un-undoable action behind a single unconfirmed click, v0.28.0). The
-# keycap reaches the three above and nothing else, by construction rather
-# than by care: :func:`next_cycle_mode` cannot return a string that is not
-# in CYCLE_MODES.
-GATED_MODES = ("bypassPermissions", "auto", "dontAsk")
+# The first four are, in this order, exactly Claude Code's own Shift+Tab
+# cycler (`T1i` in its bundle: default, "accept edits on", "plan mode on",
+# "auto mode on"), which is the shape DOXA was asked to adopt.
+# `bypassPermissions` is appended rather than inserted because the same
+# bundle ranks permissiveness explicitly (`vNc`: plan 0, default 1,
+# dontAsk 1, acceptEdits 2, auto 3, bypassPermissions 4) and bypass is the
+# top of it -- so "one more press" always means "one step further out",
+# and the press after it comes all the way home.
+#
+# **The last two are here by explicit user decision, twice, against the
+# recommendation that was put to them in writing.** That is recorded in
+# the CHANGELOG rather than argued again here; what matters for the code
+# is that the set is DATA, in one place, and that :func:`next_cycle_mode`
+# is total over it.
+CYCLE_MODES = (
+    "default", "acceptEdits", "plan", "auto", "bypassPermissions",
+)
+
+# Reachable ONLY through ``/mode <name>``, behind an explicit confirmation
+# (:class:`doxa.ui.dialogs.PermissionModeConfirm`).
+#
+# `dontAsk` alone, and NOT because it is the most dangerous -- it is not;
+# it cannot widen anything, it DENIES whatever is not pre-approved. It is
+# here because it was not asked for. The user put `auto` and then
+# `bypassPermissions` on the cycler in two separate, deliberate messages,
+# and reading a third into that would be inventing consent rather than
+# following it. Its own failure mode is also the one least likely to be
+# understood from a status chip: turns simply start failing, with no
+# dialog to explain why.
+GATED_MODES = ("dontAsk",)
+
+# What a config file or ``DOXA_PERMISSION_MODE`` may seed a NEW session
+# with -- see :func:`permission_mode_default` for the argument. Narrower
+# than CYCLE_MODES on purpose, and that gap is the one deliberate
+# asymmetry left in this module: cycling into bypass is a visible act
+# inside one session, with a red chip and a transcript line naming it;
+# a STORED bypass is silent, applies to every future session, and reaches
+# repositories the user has not read yet. Those are different decisions
+# and only the first one was made.
+PERSISTABLE_MODES = ("default", "acceptEdits", "plan")
+
+# The display axis: modes where DOXA will not ask the user about a tool
+# call, whether because nothing checks (`bypassPermissions`), because a
+# model checks instead of the person (`auto`), or because the answer is a
+# silent denial (`dontAsk`). This is what the chip colours and what its
+# tooltip warns about -- see doxa.ui.labels, which takes the exact hues
+# from the installed Claude Code CLI.
+UNASKED_MODES = ("auto", "bypassPermissions", "dontAsk")
 
 PERMISSION_MODES = CYCLE_MODES + GATED_MODES
 
@@ -226,19 +265,17 @@ def cycle_index(mode: "str | None") -> int:
 def next_cycle_mode(mode: "str | None") -> str:
     """The mode one press of the cycle key moves to.
 
-    **This function is the security boundary for the hotkey**, and it is
-    written as a total function over :data:`CYCLE_MODES` for that reason:
-    its return value is an element of that tuple, always, for every
-    possible input -- including None, including garbage, including a gated
-    mode. There is no argument, no configuration and no state that makes
-    it return ``"bypassPermissions"``.
+    A total function over :data:`CYCLE_MODES`: the return value is an
+    element of that tuple for every possible input, including None and
+    including a mode outside the ring. The set a keystroke can reach is
+    therefore exactly one named constant, and changing it is a deliberate
+    edit to that constant. ``dontAsk`` is not in it.
 
-    A session currently on a gated mode (reached deliberately, through
-    ``/mode`` and a confirmation) is not part of the ring, so the first
-    press LEAVES it, landing on ``CYCLE_MODES[0]`` -- the safe default.
-    Stepping "onward" from bypass into the ring at some arbitrary point
-    would do as much; going home is the one that is obvious to the person
-    who just pressed a key to get out of it."""
+    A session on a mode outside the ring (``dontAsk``, reached through
+    ``/mode`` and its confirmation) has no "next", so the first press
+    LEAVES it and lands on ``CYCLE_MODES[0]``. Wrapping from the last
+    element does the same, which is what makes one further press the way
+    back to ``default`` rather than a dead end."""
     position = cycle_index(mode)
     if position < 0:
         return CYCLE_MODES[0]
@@ -249,24 +286,32 @@ def permission_mode_default() -> str:
     """``DOXA_PERMISSION_MODE`` / the config file's ``permission_mode``
     row: which mode a NEW session connects in.
 
-    Validated against :data:`CYCLE_MODES`, **not** against the full six,
-    and that narrowing is the whole point of the function. A persisted
-    ``acceptEdits`` is a convenience -- it is what a user who works that
-    way every day would otherwise re-press on every tab. A persisted
-    ``bypassPermissions`` is a standing hazard: an unattended setting that
-    silently disarms the approval gate of every future session, including
-    sessions opened in repositories the user has not read, and including
-    sessions opened by someone who never set it. So a config file or an
-    environment variable can seed the three safe modes and cannot seed the
-    other three. An out-of-subset value here is IGNORED, the session
-    connects on the default, and ``/mode`` says so out loud rather than
-    letting the discrepancy sit silently (see ``_cmd_mode``).
+    Validated against :data:`PERSISTABLE_MODES`, which is NARROWER than
+    :data:`CYCLE_MODES`, and that gap is deliberate rather than left over.
+    Since v0.50.0 a keystroke can put this session into
+    ``bypassPermissions``; that was asked for and it is built. It does not
+    follow that a FILE may put every future session there. The two differ
+    on the axis that matters:
 
-    The gated modes stay fully reachable -- ``/mode <name>``, one
-    confirmation, applied to the RUNNING session. What they cannot do is
-    outlive the session that chose them."""
+    * cycling is per-session, visible, and announced -- a red chip that
+      stays on the row and a transcript line naming what stopped
+      happening, in a session the user is looking at;
+    * a stored default is silent, unbounded in time, and applies to
+      sessions opened in repositories nobody has read yet, possibly by
+      somebody who never set it.
+
+    A persisted ``acceptEdits`` is a convenience worth having. A persisted
+    ``bypassPermissions`` is a standing hazard with no moment at which
+    anyone is told. So the file can seed the three modes where a human
+    still decides, and an out-of-subset value is IGNORED -- the session
+    connects on the default and ``/mode`` says so out loud rather than
+    letting the discrepancy sit (see ``_cmd_mode``).
+
+    The wider modes stay fully reachable: Shift+Tab for the four the user
+    put on the cycler, ``/mode <name>`` for ``dontAsk``. What none of them
+    can do is outlive the session that chose them."""
     value = config_mod.raw("DOXA_PERMISSION_MODE").strip()
-    return value if value in CYCLE_MODES else DEFAULT_PERMISSION_MODE
+    return value if value in PERSISTABLE_MODES else DEFAULT_PERMISSION_MODE
 
 
 # How many active beliefs the chip's picker will ever list in one open

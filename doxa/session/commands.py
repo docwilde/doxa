@@ -276,28 +276,32 @@ class PaneCommandsMixin:
             lines = [f"mode: {current}", ""]
             for name in engine_mod.PERMISSION_MODES:
                 mark = "▸" if name == current else " "
+                warn = "⚠ " if name in engine_mod.UNASKED_MODES else "  "
                 gate = "  (asks first)" if name in engine_mod.GATED_MODES else ""
                 lines.append(
-                    f" {mark} {name:<18} {MODE_EXPLAIN.get(name, '')}{gate}"
+                    f" {mark} {warn}{name:<18} {MODE_EXPLAIN.get(name, '')}{gate}"
                 )
             lines += [
                 "",
                 "usage: /mode <name>   ·   Shift+Tab cycles "
-                + " → ".join(engine_mod.CYCLE_MODES),
-                "the other three stop DOXA asking you about a tool call, so "
-                "they are not on the hotkey and each confirms first",
+                + " → ".join(engine_mod.CYCLE_MODES) + " → (home)",
+                "⚠ marks a mode where DOXA will NOT ask you about a tool "
+                "call: " + ", ".join(engine_mod.UNASKED_MODES),
+                ", ".join(engine_mod.GATED_MODES)
+                + " is not on the hotkey and confirms before it switches",
             ]
             # The settings row and the running session are different
             # things and can legitimately differ; say which is which rather
             # than letting the user infer it from one number.
             configured = config_mod.raw("DOXA_PERMISSION_MODE").strip()
-            if configured and configured not in engine_mod.CYCLE_MODES:
+            if configured and configured not in engine_mod.PERSISTABLE_MODES:
                 lines.append(
                     f"note: permission_mode={configured!r} in your settings is "
                     "IGNORED — only "
-                    + ", ".join(engine_mod.CYCLE_MODES)
-                    + " can be persisted, so no stored setting can disarm the "
-                    "approval gate of a session you have not opened yet"
+                    + ", ".join(engine_mod.PERSISTABLE_MODES)
+                    + " can be persisted. Shift+Tab can put THIS session in a "
+                    "wider mode; a stored one would apply to every future "
+                    "session, including in repos you have not read yet"
                 )
             elif configured:
                 lines.append(f"new sessions start in {configured}")
@@ -333,6 +337,26 @@ class PaneCommandsMixin:
             await self._system(f"mode: {type(exc).__name__}: {exc}")
             return
         self._refresh_status()
+        # A transcript line for EVERY switch, and a loud one for the modes
+        # where nothing will ask. The status chip is persistent but
+        # peripheral -- it sits in the corner and a user who did not mean
+        # to press the key is by definition not looking at it. A transcript
+        # block is transient but central: it lands where the user's eyes
+        # already are, in the same column as the work. Since v0.50.0 a
+        # single keystroke reaches bypassPermissions, so this is the one
+        # surface guaranteed to be in front of somebody who got there by
+        # accident, and it names what stopped rather than just what
+        # changed.
+        if resolved in engine_mod.UNASKED_MODES:
+            await self._system(
+                f"⚠ permission mode: {current} → {resolved}\n"
+                f"  {MODE_EXPLAIN.get(resolved, '')}.\n"
+                "  DOXA will not show you a permission dialog for those "
+                "calls — there is nothing left to decline.\n"
+                f"  Shift+Tab again to move on, or /mode default to stop "
+                "here. This session only; nothing was saved."
+            )
+            return
         await self._system(
             f"mode: {current} → {resolved}  ·  "
             f"{MODE_EXPLAIN.get(resolved, '')} (this session only)"

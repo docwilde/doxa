@@ -104,82 +104,106 @@ def _hit(app, widget):
 # =======================================================================
 
 
-def test_cycling_can_never_reach_a_dangerous_mode():
-    """The hotkey's reachable set is exactly CYCLE_MODES, from anywhere.
+def test_the_cycle_reaches_exactly_the_named_set_and_nothing_else():
+    """The invariant that survived the user overruling the old one.
 
-    Written as an exhaustive reachability proof rather than as a walk of
-    the intended path, because the question is not "does the happy path
-    work" but "is there ANY sequence of key presses that lands on
-    bypassPermissions". Closure is computed from every mode in the SDK's
-    vocabulary, plus None, plus strings no code path should ever produce
-    -- if a future edit adds a branch that steps "onward" from a gated
-    mode into the ring, this fails.
+    Through v0.47.0 this test proved something stronger: that no key
+    sequence could reach a mode where nothing asks. The user has since put
+    `auto` and then `bypassPermissions` on the cycler in two explicit,
+    separate decisions, so that claim is false by design and asserting it
+    would be asserting a fiction.
 
-    ``bypassPermissions`` disables the approval gate outright; ``auto``
-    replaces the human at it with a model classifier; ``dontAsk`` denies
-    silently instead of asking. A key that a user taps to move between
-    conveniences must not be able to arrive at any of them."""
+    What is still true and still worth guarding:
+
+    1. the set a keystroke can reach is EXACTLY ``CYCLE_MODES`` -- not a
+       subset, not a superset -- so a future edit cannot quietly add a
+       sixth mode to the hotkey without changing a named constant and
+       failing here;
+    2. ``dontAsk`` is not reachable by any number of presses from any
+       starting point; and
+    3. the step function is total over that set, so no input, state or
+       configuration produces anything outside it.
+
+    Closure is computed from every mode, plus None, plus strings no code
+    path should ever produce."""
     seeds = list(engine_mod.PERMISSION_MODES) + [
         None, "", "garbage", "Default", "BYPASSPERMISSIONS", "plan ",
     ]
     reachable: set[str] = set()
     frontier = list(seeds)
     while frontier:
-        current = frontier.pop()
-        nxt = engine_mod.next_cycle_mode(current)
+        nxt = engine_mod.next_cycle_mode(frontier.pop())
         if nxt not in reachable:
             reachable.add(nxt)
             frontier.append(nxt)
 
+    # 1 -- exactly the named set, spelled out here as well as read from the
+    # constant, so that editing the constant alone cannot make this pass.
     assert reachable == set(engine_mod.CYCLE_MODES)
-    assert not (reachable & set(engine_mod.GATED_MODES))
-    assert "bypassPermissions" not in reachable
-    # And the same claim stated as the property the function must hold,
-    # not as a fact about one computed set.
+    assert reachable == {
+        "default", "acceptEdits", "plan", "auto", "bypassPermissions",
+    }
+    # 2 -- dontAsk is off the keyboard entirely.
+    assert "dontAsk" not in reachable
+    assert "dontAsk" not in engine_mod.CYCLE_MODES
+    assert engine_mod.GATED_MODES == ("dontAsk",)
+    # 3 -- total over the set, as a property rather than as one computed
+    # answer.
     for seed in seeds:
         assert engine_mod.next_cycle_mode(seed) in engine_mod.CYCLE_MODES
 
 
-def test_cycle_walks_the_three_modes_in_order_and_wraps():
+def test_cycle_walks_every_mode_in_order_and_wraps_home():
+    """Most oversight to least, then home -- so one more press is always
+    the way OUT of the most permissive mode rather than a dead end."""
+    assert engine_mod.CYCLE_MODES == (
+        "default", "acceptEdits", "plan", "auto", "bypassPermissions",
+    )
     assert engine_mod.next_cycle_mode("default") == "acceptEdits"
     assert engine_mod.next_cycle_mode("acceptEdits") == "plan"
-    assert engine_mod.next_cycle_mode("plan") == "default"
-
-
-def test_a_session_parked_on_a_gated_mode_cycles_home_not_onward():
-    """One press from bypassPermissions goes to the SAFE default, not to
-    the "next" element of some larger ring. A user reaching for a key to
-    get out of a mode that asks nothing wants out, in one press."""
-    # Named literally rather than looped over GATED_MODES: a test whose
-    # body iterates a constant passes vacuously the moment that constant
-    # is empty, which is exactly the shape of an implementation that
-    # forgot to gate anything.
+    assert engine_mod.next_cycle_mode("plan") == "auto"
+    assert engine_mod.next_cycle_mode("auto") == "bypassPermissions"
     assert engine_mod.next_cycle_mode("bypassPermissions") == "default"
-    assert engine_mod.next_cycle_mode("auto") == "default"
+
+
+def test_a_mode_off_the_ring_cycles_home():
+    """dontAsk has no "next", so the first press leaves it for default."""
     assert engine_mod.next_cycle_mode("dontAsk") == "default"
-    assert set(engine_mod.GATED_MODES) == {"bypassPermissions", "auto", "dontAsk"}
 
 
-def test_no_configured_value_can_persist_a_gated_mode(monkeypatch):
-    """A settings file or an env var can seed the three cycle-safe modes
-    and cannot seed the other three. A standing bypassPermissions would
-    disarm the approval gate of every future session -- including ones
-    opened in repositories the user has not read, and ones opened by
-    somebody who never set it."""
-    for mode in engine_mod.CYCLE_MODES:
+def test_the_persisted_default_is_narrower_than_the_hotkey(monkeypatch):
+    """The one asymmetry left, and it is deliberate.
+
+    Since v0.50.0 a keystroke can put THIS session into `auto` or
+    `bypassPermissions`. A settings file still cannot seed either into
+    every FUTURE session. The difference is not how dangerous the mode is,
+    it is whether anybody is told: cycling is per-session, shows a red chip
+    and writes a transcript line in a session someone is looking at; a
+    stored default is silent, unbounded in time, and reaches repositories
+    nobody has read yet."""
+    for mode in engine_mod.PERSISTABLE_MODES:
         monkeypatch.setenv("DOXA_PERMISSION_MODE", mode)
         assert engine_mod.permission_mode_default() == mode
-    for mode in list(engine_mod.GATED_MODES) + ["nonsense", " "]:
+
+    not_persistable = set(engine_mod.PERMISSION_MODES) - set(
+        engine_mod.PERSISTABLE_MODES
+    )
+    assert not_persistable == {"auto", "bypassPermissions", "dontAsk"}
+    for mode in sorted(not_persistable) + ["nonsense", " "]:
         monkeypatch.setenv("DOXA_PERMISSION_MODE", mode)
-        assert engine_mod.permission_mode_default() == "default"
+        assert engine_mod.permission_mode_default() == "default", mode
+
+    # The gap between what a key reaches and what a file may store is the
+    # point of the two constants being separate.
+    assert set(engine_mod.PERSISTABLE_MODES) < set(engine_mod.CYCLE_MODES)
 
 
-def test_the_settings_row_offers_only_the_cycle_safe_modes():
-    """The modal is a surface too: it must not present a gated mode as a
-    persistable choice."""
+def test_the_settings_row_matches_the_persistable_set():
+    """The modal is a surface too: it must not offer a mode the loader
+    would then ignore, and it must not omit one the loader accepts."""
     row = next(s for s in config_mod.SETTINGS if s.key == "permission_mode")
-    assert set(row.choices) == {"", *engine_mod.CYCLE_MODES}
-    for mode in engine_mod.GATED_MODES:
+    assert set(row.choices) == {"", *engine_mod.PERSISTABLE_MODES}
+    for mode in ("auto", "bypassPermissions", "dontAsk"):
         assert mode not in row.choices
 
 
@@ -256,37 +280,83 @@ async def test_chip_renders_with_real_height_and_shows_the_mode(
 
 
 @pytest.mark.asyncio
-async def test_chip_is_visibly_distinct_once_the_session_stops_asking(
+async def test_chip_uses_claude_codes_measured_glyphs_and_colours(
     monkeypatch, tmp_path,
 ):
-    """Three tiers, and the point is that a glance is enough: default
-    carries no escalation color, acceptEdits/plan carry the amber that
-    means "not the posture you started in", and a mode that stops asking
-    carries the red the ctx chip uses for unrecoverable pressure AND a
-    warning glyph, so the signal survives a monochrome terminal too."""
-    from doxa.ui.labels import CTX_AMBER, CTX_RED, MODE_WARN_GLYPH
+    """The chip is Claude Code's, not DOXA's invention -- read out of the
+    installed CLI's own permission-mode table rather than eyeballed.
 
-    assert CTX_RED not in mode_chip("default")
-    assert CTX_AMBER not in mode_chip("default")
-    assert MODE_WARN_GLYPH not in mode_text("default")
+    Every value below is asserted literally as well as through the
+    constant, so editing the constant alone cannot make this pass. If a
+    future `claude` changes its palette these literals are what will
+    notice, which is the point: this is a safety indicator, and a user who
+    has learned what a colour means in one client must not have to
+    re-learn it here."""
+    from doxa.ui.labels import MODE_BOLD, MODE_COLOR, MODE_GLYPH
 
-    for mode in ("acceptEdits", "plan"):
-        assert CTX_AMBER in mode_chip(mode)
-        assert MODE_WARN_GLYPH not in mode_text(mode)
+    # ENc in the CLI bundle: `Pin` (U+23F8) for the two modes that stop
+    # and ask, `⏵⏵` (U+23F5 x2) for the four that run something.
+    assert MODE_GLYPH["default"] == "\u23f8"
+    assert MODE_GLYPH["plan"] == "\u23f8"
+    for mode in ("acceptEdits", "auto", "bypassPermissions", "dontAsk"):
+        assert MODE_GLYPH[mode] == "\u23f5\u23f5", mode
 
-    for mode in engine_mod.GATED_MODES:
-        assert CTX_RED in mode_chip(mode), mode
-        assert MODE_WARN_GLYPH in mode_text(mode), mode
-        # …and in the SHORT form too: width is the last thing a warning
-        # gives way to, never the first.
-        assert MODE_WARN_GLYPH in mode_text(mode, short=True), mode
+    # The dark theme's values for the colour name each mode maps to.
+    assert MODE_COLOR == {
+        "default": "#999999",            # inactive  rgb(153,153,153)
+        "plan": "#48968C",               # planMode  rgb(72,150,140)
+        "acceptEdits": "#AF87FF",        # autoAccept rgb(175,135,255)
+        "auto": "#FFC107",               # warning   rgb(255,193,7)
+        "bypassPermissions": "#FF6B80",  # error     rgb(255,107,128)
+        "dontAsk": "#FF6B80",            # error
+    }
 
+    # The glyph LEADS the label, which is what was asked for, and it is
+    # part of the plain text so the tooltip lookup still matches.
+    assert mode_text("default") == "\u23f8 mode:default"
+    assert mode_text("bypassPermissions") == "\u23f5\u23f5 mode:bypassPermissions"
+
+    # Every mode is coloured -- including default, which Claude Code paints
+    # `inactive` grey rather than leaving unstyled.
+    for mode in engine_mod.PERMISSION_MODES:
+        assert MODE_COLOR[mode] in mode_chip(mode), mode
+
+    # auto and bypassPermissions must not read as the same thing: same
+    # glyph (the table says so), different hue, and only the modes where
+    # NOTHING is checked carry the extra weight.
+    assert "#FFC107" in mode_chip("auto")
+    assert "#FF6B80" in mode_chip("bypassPermissions")
+    assert MODE_BOLD == ("bypassPermissions", "dontAsk")
+    assert "bold" in mode_chip("bypassPermissions")
+    assert "bold" not in mode_chip("auto")
+
+    # And it renders, on a real bar.
     fake = FakeEngine([], permission_mode="bypassPermissions")
     app, _engines = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test(size=(140, 40)) as pilot:
         assert await _wait_status(pilot, app, "mode:bypassPermissions")
-        assert MODE_WARN_GLYPH in _status_plain(app)
-        assert CTX_RED in _status_markup(app)
+        assert "\u23f5\u23f5" in _status_plain(app)
+        assert "#FF6B80" in _status_markup(app)
+
+
+def test_every_measured_colour_is_readable_on_the_status_bar():
+    """A hex lifted from another app still has to work here. The status
+    bar paints its own #221F1A in BOTH background modes (it does not read
+    $doxa-base -- see theme.tcss), so this is one check, not two."""
+    from doxa.ui.labels import MODE_COLOR
+
+    def _lum(h):
+        h = h.lstrip("#")
+        c = [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+        c = [x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4
+             for x in c]
+        return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+
+    bar = _lum("#221F1A")
+    for mode, colour in MODE_COLOR.items():
+        hi, lo = sorted((_lum(colour), bar), reverse=True)
+        ratio = (hi + 0.05) / (lo + 0.05)
+        assert ratio >= 4.5, f"{mode} {colour} contrast {ratio:.2f}"
 
 
 @pytest.mark.asyncio
@@ -309,14 +379,16 @@ async def test_chip_tooltip_survives_the_colored_tiers(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_narrow_terminal_keeps_the_warning_and_drops_only_the_default(
+async def test_a_mode_that_stopped_asking_survives_every_width(
     monkeypatch, tmp_path,
 ):
-    """Graceful degradation, in the direction that matters. The status row
-    does not truncate -- a chip that does not fit is simply gone -- so on a
-    narrow terminal the chip yields when it would only have said
-    "default", and shrinks rather than vanishing when it has something the
-    user cannot learn anywhere else."""
+    """Graceful degradation, in the direction that matters, and the
+    v0.50.0 constraint on top of it.
+
+    The status row does not truncate -- a chip that does not fit is simply
+    gone -- so on a narrow terminal the chip shrinks rather than
+    vanishing, and only a chip that would say "default" stands down.
+    Checked down to 40 columns, far below anything DOXA is used at."""
     monkeypatch.delenv("DOXA_PERMISSION_MODE", raising=False)
     fake = FakeEngine([])
     app, _engines = await _app(monkeypatch, tmp_path, fake)
@@ -324,14 +396,35 @@ async def test_narrow_terminal_keeps_the_warning_and_drops_only_the_default(
         assert await _wait_status(pilot, app, "beliefs")
         assert "mode:" not in _status_plain(app)
 
-    danger = FakeEngine([], permission_mode="bypassPermissions")
-    app2, _e2 = await _app(monkeypatch, tmp_path, danger)
-    async with app2.run_test(size=(80, 24)) as pilot:
-        assert await _wait_status(pilot, app2, "mode:bypass")
-        plain = _status_plain(app2)
-        assert "⚠" in plain
-        # SHORT form: the full SDK spelling would cost 22 columns here.
-        assert "mode:bypassPermissions" not in plain
+    for width in (100, 80, 60, 40):
+        danger = FakeEngine([], permission_mode="bypassPermissions")
+        app2, _e2 = await _app(monkeypatch, tmp_path, danger)
+        async with app2.run_test(size=(width, 24)) as pilot:
+            assert await _wait_status(pilot, app2, "mode:bypass"), width
+            plain = _status_plain(app2)
+            # The glyph survives the shrink; the long spelling does not
+            # have to.
+            assert "\u23f5\u23f5" in plain, width
+            if width < 110:
+                assert "mode:bypassPermissions" not in plain, width
+
+
+@pytest.mark.asyncio
+async def test_the_mode_chip_is_first_so_it_can_never_be_dropped(
+    monkeypatch, tmp_path,
+):
+    """Position IS the guarantee. The bar has no overflow behaviour, so a
+    chip that does not fit is gone -- and anything after the first chip can
+    be pushed off by a long model id plus a long branch name. Since a
+    single keystroke now reaches bypassPermissions, the chip reporting
+    that must be the one thing that cannot fall off the end."""
+    danger = FakeEngine([], model="claude-opus-4-5-20250929", permission_mode="bypassPermissions")
+    app, _engines = await _app(monkeypatch, tmp_path, danger)
+    async with app.run_test(size=(60, 24)) as pilot:
+        assert await _wait_status(pilot, app, "mode:bypass")
+        plain = _status_plain(app)
+        # First on the row, ahead of even the model.
+        assert plain.index("mode:bypass") < plain.index("claude-opus")
 
 
 def test_every_short_label_is_one_a_user_can_actually_reach():
@@ -350,9 +443,11 @@ def test_every_short_label_is_one_a_user_can_actually_reach():
     assert set(MODE_SHORT) == set(engine_mod.PERMISSION_MODES) - {"default"}
     for mode, short in MODE_SHORT.items():
         assert len(mode_text(mode, short=True)) <= len(mode_text(mode)), mode
-    # …and the one that actually has to fit does shrink, a lot.
-    assert len(mode_text("bypassPermissions", short=True)) == 13
-    assert len(mode_text("bypassPermissions")) == 24
+    # …and the one that actually has to fit does shrink, a lot. The glyph
+    # is counted here because it is painted: `⏵⏵ mode:bypassPermissions`
+    # against `⏵⏵ mode:bypass`.
+    assert len(mode_text("bypassPermissions", short=True)) == 14
+    assert len(mode_text("bypassPermissions")) == 25
 
 
 @pytest.mark.asyncio
@@ -409,18 +504,22 @@ async def test_shift_tab_reaches_the_handler_with_the_prompt_focused(
         assert await _wait_status(pilot, app, "mode:default")
         assert isinstance(app.focused, type(app.query_one("#prompt-input")))
 
-        await pilot.press("shift+tab")
-        assert await _wait_for(pilot, lambda: fake.permission_mode == "acceptEdits")
-        assert await _wait_status(pilot, app, "mode:acceptEdits")
+        for expected in ("acceptEdits", "plan", "auto", "bypassPermissions"):
+            await pilot.press("shift+tab")
+            assert await _wait_for(
+                pilot, lambda e=expected: fake.permission_mode == e
+            ), expected
+            assert await _wait_status(pilot, app, f"mode:{expected}")
 
-        await pilot.press("shift+tab")
-        assert await _wait_for(pilot, lambda: fake.permission_mode == "plan")
-        assert await _wait_status(pilot, app, "mode:plan")
-
+        # One more press comes all the way home rather than dead-ending on
+        # the most permissive mode.
         await pilot.press("shift+tab")
         assert await _wait_for(pilot, lambda: fake.permission_mode == "default")
-        # Exactly the ring, in order, and nothing else touched the engine.
-        assert fake.permission_mode_switches == ["acceptEdits", "plan", "default"]
+        assert fake.permission_mode_switches == [
+            "acceptEdits", "plan", "auto", "bypassPermissions", "default",
+        ]
+        # No confirmation stood in the way of any of them.
+        assert not isinstance(app.screen, PermissionModeConfirm)
 
 
 @pytest.mark.asyncio
@@ -563,9 +662,10 @@ async def test_bare_mode_shows_the_current_mode_and_the_choices(
         text = next(t for t in _system_texts(app) if t.startswith("mode: plan"))
         for mode in engine_mod.PERMISSION_MODES:
             assert mode in text, mode
-        assert "▸ plan" in text
+        assert "plan" in text
         assert "Shift+Tab" in text
-        assert "asks first" in text
+        assert "asks first" in text          # dontAsk still confirms
+        assert "bypassPermissions" in text
 
 
 @pytest.mark.asyncio
@@ -600,7 +700,66 @@ async def test_mode_switches_a_safe_mode_without_asking(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_mode_bypass_requires_confirmation(monkeypatch, tmp_path):
+async def test_the_modes_on_the_hotkey_no_longer_confirm(monkeypatch, tmp_path):
+    """A confirmation in front of a mode a keystroke already reaches is
+    theatre: it cannot prevent anything, and after the second or third
+    dismissal it trains the user to hit the accepting key without reading.
+    `auto` and `bypassPermissions` are on the cycler now, so `/mode` sets
+    them directly. `dontAsk` is not on the cycler and still confirms."""
+    monkeypatch.delenv("DOXA_PERMISSION_MODE", raising=False)
+    for mode in ("auto", "bypassPermissions"):
+        fake = FakeEngine([])
+        app, _engines = await _app(monkeypatch, tmp_path, fake)
+        async with app.run_test(size=(140, 40)) as pilot:
+            assert await _wait_status(pilot, app, "mode:default")
+            await _run(pilot, app, f"/mode {mode}")
+            assert await _wait_for(
+                pilot, lambda m=mode: fake.permission_mode == m
+            ), mode
+            assert not isinstance(app.screen, PermissionModeConfirm), mode
+
+
+@pytest.mark.asyncio
+async def test_entering_a_mode_that_stops_asking_says_so_in_the_transcript(
+    monkeypatch, tmp_path,
+):
+    """The status chip is persistent but peripheral; a user who did not
+    mean to press the key is by definition not looking at the corner of
+    the screen. The transcript line is transient but central -- it lands
+    in the same column as the work. Since a single keystroke now reaches
+    bypassPermissions, this is the surface guaranteed to be in front of
+    somebody who got there by accident, so it names what STOPPED rather
+    than only what changed."""
+    monkeypatch.delenv("DOXA_PERMISSION_MODE", raising=False)
+    fake = FakeEngine([])
+    app, _engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(140, 40)) as pilot:
+        assert await _wait_status(pilot, app, "mode:default")
+        for _ in range(4):  # default -> … -> bypassPermissions
+            await pilot.press("shift+tab")
+        assert await _wait_for(
+            pilot, lambda: fake.permission_mode == "bypassPermissions"
+        )
+        assert await _wait_for(
+            pilot,
+            lambda: any("bypassPermissions" in t and "⚠" in t
+                        for t in _system_texts(app)),
+        )
+        note = next(t for t in _system_texts(app)
+                    if "bypassPermissions" in t and "⚠" in t)
+        assert "unapproved" in note
+        assert "nothing left to decline" in note
+        assert "nothing was saved" in note
+
+        # …and a merely-narrowing switch does NOT shout.
+        await pilot.press("shift+tab")
+        assert await _wait_for(pilot, lambda: fake.permission_mode == "default")
+        plain = [t for t in _system_texts(app) if t.startswith("mode: ")]
+        assert plain and "⚠" not in plain[-1]
+
+
+@pytest.mark.asyncio
+async def test_dontask_requires_confirmation(monkeypatch, tmp_path):
     """The dialog appears, states what STOPS happening rather than asking
     "are you sure?", and nothing has reached the engine yet while it is
     up."""
@@ -608,14 +767,14 @@ async def test_mode_bypass_requires_confirmation(monkeypatch, tmp_path):
     app, _engines = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test(size=(140, 40)) as pilot:
         assert await _wait_status(pilot, app, "mode:default")
-        await _run(pilot, app, "/mode bypassPermissions")
+        await _run(pilot, app, "/mode dontAsk")
         assert await _wait_for(
             pilot, lambda: isinstance(app.screen, PermissionModeConfirm)
         )
         await pilot.pause()
 
         body = str(app.screen.query_one("#mode-confirm-body").renderable)
-        assert "unapproved" in body
+        assert "DENIED" in body or "denied" in body
         assert "nothing will ask" in body
         assert "this session only" in body.lower()
         # Nothing has been switched merely by asking.
@@ -632,7 +791,7 @@ async def test_declining_the_confirmation_changes_nothing(monkeypatch, tmp_path)
     app, _engines = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test(size=(140, 40)) as pilot:
         assert await _wait_status(pilot, app, "mode:default")
-        await _run(pilot, app, "/mode bypassPermissions")
+        await _run(pilot, app, "/mode dontAsk")
         assert await _wait_for(
             pilot, lambda: isinstance(app.screen, PermissionModeConfirm)
         )
@@ -658,7 +817,7 @@ async def test_enter_does_not_accept_the_permission_confirmation(
     app, _engines = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test(size=(140, 40)) as pilot:
         assert await _wait_status(pilot, app, "mode:default")
-        await _run(pilot, app, "/mode bypassPermissions")
+        await _run(pilot, app, "/mode dontAsk")
         assert await _wait_for(
             pilot, lambda: isinstance(app.screen, PermissionModeConfirm)
         )
@@ -677,16 +836,16 @@ async def test_accepting_the_confirmation_switches_the_session(
     app, _engines = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test(size=(140, 40)) as pilot:
         assert await _wait_status(pilot, app, "mode:default")
-        await _run(pilot, app, "/mode bypassPermissions")
+        await _run(pilot, app, "/mode dontAsk")
         assert await _wait_for(
             pilot, lambda: isinstance(app.screen, PermissionModeConfirm)
         )
         await pilot.press("y")
         assert await _wait_for(
-            pilot, lambda: fake.permission_mode == "bypassPermissions"
+            pilot, lambda: fake.permission_mode == "dontAsk"
         )
-        assert fake.permission_mode_switches == ["bypassPermissions"]
-        assert await _wait_status(pilot, app, "mode:bypassPermissions")
+        assert fake.permission_mode_switches == ["dontAsk"]
+        assert await _wait_status(pilot, app, "mode:dontAsk")
 
 
 @pytest.mark.asyncio
@@ -701,7 +860,7 @@ async def test_confirm_buttons_have_real_height_and_are_hittable(
     app, _engines = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test(size=(140, 40)) as pilot:
         assert await _wait_status(pilot, app, "mode:default")
-        await _run(pilot, app, "/mode auto")
+        await _run(pilot, app, "/mode dontAsk")
         assert await _wait_for(
             pilot, lambda: isinstance(app.screen, PermissionModeConfirm)
         )
@@ -859,8 +1018,10 @@ async def test_a_reattaching_client_sees_the_real_mode(tmp_path, monkeypatch):
         assert fresh.permission_mode == "bypassPermissions"
         status = await fresh.refresh_status()
         assert status["permission_mode"] == "bypassPermissions"
-        # And the chip it would paint says so, in red, with the glyph.
-        assert "⚠" in mode_text(fresh.permission_mode)
+        # And the chip it would paint says so, with Claude Code's own
+        # run-without-stopping glyph and the error hue.
+        assert "\u23f5\u23f5" in mode_text(fresh.permission_mode)
+        assert "#FF6B80" in mode_chip(fresh.permission_mode)
         await fresh.finalize()
 
 

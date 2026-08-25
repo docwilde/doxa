@@ -259,20 +259,90 @@ CTX_RED = "#D9534F"
 CTX_ABSOLUTE_MIN_COLS = 100
 
 
-# -- permission mode (v0.42.0) ----------------------------------------
+# -- permission mode (v0.42.0; Claude Code's own palette, v0.50.0) -----
 #
-# The chip the operator asked for: "in claude code you have an indicator
-# to switch from manual to auto mode, we should adopt that, add it to the
-# status line".
+# The chip the operator asked for -- "in claude code you have an indicator
+# to switch from manual to auto mode, we should adopt that" -- and then,
+# in v0.50.0, asked to look like the thing it adopts: "the mode chip
+# should have the same colors as it has in claude code and the same icon
+# leading the mode label".
+#
+# EVERY glyph and colour below was READ OUT OF THE INSTALLED CLI, not
+# guessed and not eyeballed from a screenshot. `claude` 2.1.228 is a
+# bun-compiled ELF; its canonical permission-mode table survives in the
+# bundle as a plain JS object literal keyed by the SAME mode names the SDK
+# uses, which is what makes this a lookup rather than an interpretation:
+#
+#   ENc = {
+#     default:           {title:"Manual",  symbol:Pin,      color:"inactive"},
+#     plan:              {title:"Plan",    symbol:Pin,      color:"planMode"},
+#     acceptEdits:       {title:"Accept edits",      symbol:"\u23F5\u23F5", color:"autoAccept"},
+#     bypassPermissions: {title:"Bypass Permissions",symbol:"\u23F5\u23F5", color:"error"},
+#     dontAsk:           {title:"Don't Ask",         symbol:"\u23F5\u23F5", color:"error"},
+#     auto:              {title:"Auto",             symbol:"\u23F5\u23F5", color:"warning"},
+#   }
+#
+# with `Pin = "\u23F8"` defined a few hundred bytes away. The colour NAMES
+# resolve through four theme tables in the same bundle -- light, light
+# colour-blind, dark, dark colour-blind. DOXA is a dark theme, so the dark
+# table is the one that applies; it is identifiable without guessing
+# because it is the one whose `text` is white and whose `claude` is
+# rgb(215,119,87), the Claude orange DOXA's own accent already tracks.
+#
+# Contrast was checked rather than assumed: against the status bar's own
+# #221F1A (which stays opaque in BOTH background modes -- the bar does not
+# read $doxa-base, see theme.tcss) every value below lands between 4.70
+# and 10.07 against WCAG AA's 4.5, all of them better than DOXA's own
+# CTX_RED at 4.14.
+
+# U+23F8 PAUSE / U+23F5 BLACK MEDIUM RIGHT-POINTING TRIANGLE, exactly as
+# the table above assigns them. The division is the real one: `⏸` for the
+# two modes that pause and ask, `⏵⏵` for the four that run something
+# without stopping.
+MODE_GLYPH = {
+    "default": "⏸",
+    "plan": "⏸",
+    "acceptEdits": "⏵⏵",
+    "auto": "⏵⏵",
+    "bypassPermissions": "⏵⏵",
+    "dontAsk": "⏵⏵",
+}
+
+# The dark table's values for the colour NAME each mode maps to, resolved
+# once here so the mapping mode -> colour is one hop rather than two:
+#   default -> inactive   rgb(153,153,153)
+#   plan    -> planMode   rgb(72,150,140)
+#   acceptEdits -> autoAccept rgb(175,135,255)
+#   auto    -> warning    rgb(255,193,7)
+#   bypassPermissions, dontAsk -> error rgb(255,107,128)
+MODE_COLOR = {
+    "default": "#999999",
+    "plan": "#48968C",
+    "acceptEdits": "#AF87FF",
+    "auto": "#FFC107",
+    "bypassPermissions": "#FF6B80",
+    "dontAsk": "#FF6B80",
+}
+
+# The one place DOXA deliberately diverges from what it measured, and the
+# reason is a difference in the PRODUCT, not in taste: Claude Code's own
+# Shift+Tab cycler has four entries (default, acceptEdits, plan, auto --
+# `T1i` in the same bundle) and cannot reach bypassPermissions at all. In
+# DOXA, since v0.50.0, it can: the user asked for it explicitly. A colour
+# that is merely "error red" is calibrated for a mode you had to go out of
+# your way to select; it is not calibrated for one a mistyped keystroke
+# lands on. So the two modes where nothing is checked at all get the same
+# hue and one extra step of weight, which costs no columns and survives
+# every width. Everything else -- hue, glyph, ordering -- is the measured
+# value untouched.
+MODE_BOLD = ("bypassPermissions", "dontAsk")
 
 # Full name -> what the chip prints when the terminal is narrow. The
 # status bar is the most contended row in the app, and a mode that has
-# stopped asking has to stay on it at EVERY width (see
-# MODE_CHIP_MIN_COLS below and PaneChipsMixin._mode_chip_cramped), so it
-# needs a small form rather than only a hide rule. Short enough to fit,
-# long enough to still read as the mode and not as a code the user has to
-# look up; the tooltip carries the exact SDK spelling in every tier,
-# because that is the string `/mode <name>` takes.
+# stopped asking has to stay on it at EVERY width, so it needs a small
+# form rather than only a hide rule. Short enough to fit, long enough to
+# still read as the mode; the tooltip carries the exact SDK spelling in
+# every tier, because that is the string `/mode <name>` takes.
 #
 # ``default`` is deliberately absent: it is the one mode that never has to
 # fit, because a cramped row drops that chip entirely rather than shrinking
@@ -289,30 +359,9 @@ MODE_SHORT = {
     "auto": "auto",
 }
 
-# Prefixed to every mode that stops DOXA asking the user about a tool
-# call, in the FULL and the SHORT form alike -- the warning is the last
-# thing this chip gives up for width, ahead of the mode name itself.
-MODE_WARN_GLYPH = "⚠"
-
-# Non-default but gate-intact (acceptEdits, plan). The same amber the ctx
-# chip escalates to at 70%: "you have changed something here, and you may
-# have forgotten". Deliberately ONE color for both, even though plan is
-# strictly narrower than default and acceptEdits is wider -- what the
-# color says is not "this is risky", it is "this session is not in the
-# posture it started in", and both of those failures are real. A user
-# wondering why edits are landing unasked and a user wondering why nothing
-# executes at all are looking for the same chip.
-MODE_ACTIVE = CTX_AMBER
-
-# A mode where the approval gate no longer reaches the user. The SAME red
-# the ctx chip escalates to at 90%, deliberately: this app already has one
-# color that means "the thing you are about to lose is not recoverable",
-# and a second one would dilute it.
-MODE_DANGER = CTX_RED
-
 # Below this width the chip prints MODE_SHORT instead of the SDK's own
-# spelling -- `⚠ mode:bypassPermissions` costs 24 columns and
-# `⚠ mode:bypass` costs 13. Same reasoning and the same measured baseline
+# spelling -- `⏵⏵ mode:bypassPermissions` costs 25 columns and
+# `⏵⏵ mode:bypass` costs 14. Same reasoning and the same measured baseline
 # as CTX_ABSOLUTE_MIN_COLS above (the ordinary chip set already fills ~95
 # columns, and an 80-column bar was measured pushing the reattach handle
 # off the row once one more chip joined it), with one difference that
@@ -327,6 +376,9 @@ MODE_CHIP_MIN_COLS = 110
 # anything still ask me before it runs?". Shared by the chip's tooltip,
 # the picker's rows and ``/mode``'s own listing, so the three cannot say
 # different things about the same mode.
+#
+# Corroborated against the same bundle: its `Kmr()` maps auto -> "classify",
+# bypassPermissions -> "allow", dontAsk -> "deny", everything else -> "ask".
 MODE_EXPLAIN = {
     "default": "the CLI asks you before anything it considers dangerous",
     "acceptEdits": "file edits run unasked; everything else still asks",
@@ -338,52 +390,51 @@ MODE_EXPLAIN = {
 
 
 def mode_text(mode: "str | None", *, short: bool = False) -> str:
-    """The permission-mode chip's PLAIN text.
+    """The permission-mode chip's PLAIN text, glyph included.
 
     Split from :func:`mode_chip` for the reason :func:`ctx_text` is split
     from :func:`ctx_chip`, which is a defect this codebase has already
     paid for once: ``StatusBar._tooltip_for_x`` resolves a chip's tooltip
     by finding the chip's text inside the bar's markup-STRIPPED string, so
-    a key that still carries ``[#D9534F]…[/]`` matches nothing and the
+    a key that still carries ``[#FF6B80]…[/]`` matches nothing and the
     tooltip silently vanishes at exactly the tier where it matters most
-    (v0.35.0, the ctx chip's amber and red tiers). One function builds the
-    words, the other colors them, and they cannot say different things.
+    (v0.35.0, the ctx chip's amber and red tiers). The GLYPH belongs on
+    this side of that split, not the colour side: it is text, it survives
+    markup stripping, and the tooltip has to key on the same string the
+    widget paints.
 
-    An unrecognised mode is printed verbatim rather than mapped to
-    "default": if the CLI ever grows a seventh mode, a chip that lies
-    about which one is in force is worse than a chip that shows a name
-    DOXA does not know."""
+    An unrecognised mode is printed verbatim and glyphless rather than
+    mapped to "default": if the CLI grows a seventh mode, a chip that lies
+    about which one is in force is worse than one showing a name DOXA does
+    not know."""
     from .. import engine as engine_mod
 
     name = str(mode or engine_mod.DEFAULT_PERMISSION_MODE)
     label = MODE_SHORT.get(name, name) if short else name
-    text = f"mode:{label}"
-    return f"{MODE_WARN_GLYPH} {text}" if name in engine_mod.GATED_MODES else text
+    glyph = MODE_GLYPH.get(name, "")
+    return f"{glyph} mode:{label}" if glyph else f"mode:{label}"
 
 
 def mode_chip(mode: "str | None", *, short: bool = False) -> str:
-    """The permission-mode chip's MARKUP -- uncolored, amber, or red.
+    """The permission-mode chip's MARKUP -- Claude Code's colour for this
+    mode, bold for the two where nothing is checked at all.
 
-    Three tiers, and the middle one is the point: the operator has to be
-    able to tell at a glance that this session is no longer in the mode it
-    started in, WITHOUT every non-default state screaming. ``plan`` is
-    narrower than default and ``acceptEdits`` is bounded by git; neither
-    earns the color ``bypassPermissions`` does.
-
-    The default tier returns the words with NO color at all, exactly as
-    :func:`ctx_chip` does below its amber threshold, and for the same
-    reason: the caller wraps this in the clickable accent, which shows
-    through at the uncolored tier and yields to the escalation color once
-    one applies. The pressure signal outranks the click affordance."""
+    Every mode is coloured, including ``default``: that is what the
+    measured table does (``inactive``, a grey), and it is also what makes
+    the chip readable as one object rather than as a word that sometimes
+    lights up. Unlike :func:`ctx_chip`, this returns no uncoloured tier at
+    all, so the caller's clickable accent never shows through -- the mode
+    signal owns this chip's colour outright, which is the point of
+    matching another client's palette in the first place."""
     from .. import engine as engine_mod
 
     name = str(mode or engine_mod.DEFAULT_PERMISSION_MODE)
     text = mode_text(name, short=short)
-    if name in engine_mod.GATED_MODES:
-        return f"[{MODE_DANGER}]{text}[/]"
-    if name == engine_mod.DEFAULT_PERMISSION_MODE:
+    colour = MODE_COLOR.get(name)
+    if colour is None:
         return text
-    return f"[{MODE_ACTIVE}]{text}[/]"
+    weight = "bold " if name in MODE_BOLD else ""
+    return f"[{weight}{colour}]{text}[/]"
 
 
 def mode_tooltip(mode: "str | None") -> str:
@@ -393,15 +444,15 @@ def mode_tooltip(mode: "str | None") -> str:
 
     Unconditional and full in every width tier -- the same discipline
     ``_ctx_tooltip_absolute`` follows. What the chip gives up to fit is
-    never what the tooltip gives up."""
+    never what the tooltip gives up. The cycle is spelled out from the
+    constant rather than written into this string, so a mode joining or
+    leaving the hotkey cannot leave a stale list here."""
     from .. import engine as engine_mod
 
     name = str(mode or engine_mod.DEFAULT_PERMISSION_MODE)
     what = MODE_EXPLAIN.get(name, "a permission mode DOXA does not know")
-    tail = (
-        "click to change, or /mode <name>; Shift+Tab cycles "
-        "default → acceptEdits → plan"
-    )
+    cycle = " → ".join(engine_mod.CYCLE_MODES)
+    tail = f"click to change, or /mode <name>; Shift+Tab cycles {cycle}"
     return f"permission mode {name} — {what} · {tail}"
 
 
