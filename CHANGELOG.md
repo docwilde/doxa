@@ -4,6 +4,54 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.60.0 — 2026-08-25
+
+**The mark is a ring around a triangle, drawn in `█` and spaces and
+nothing else.** Seven rows by thirteen columns. This **supersedes the mark
+described under 0.55.0** — that entry stays as the historical record, but
+the quadrant-triangle shape it describes is no longer what ships.
+
+Every candidate was rendered and looked at rather than argued about, and
+each rejection closed off a family of solutions rather than one drawing:
+
+- **Half blocks are out** — *"do not use half-blocks / it leaves gaps"*.
+  `▀`/`▄` are positioned against the font's own baseline and leading, so a
+  column of them seams horizontally instead of reading as one stroke.
+- **Quadrant triangles are out.** 0.55.0 used `◢`/`◣` (U+25E2/U+25E3) for
+  a sloped edge. They live in Unicode's Geometric Shapes, not Block
+  Elements — a font can cover one and not the other, and that failure mode
+  is **tofu**, not something plainer.
+- **Wordmark-only was offered and overruled.** When even `█` was observed
+  rendering short, dropping the mark entirely was put forward. The answer
+  was **"No, use the full block"**.
+- **The construction is written down, so the shape is tunable and not a
+  magic constant.** A circle of radius `(rows-1)/2` rasterised on a grid
+  twice as wide as it is tall — terminal cells run about 1:2, so widening
+  the grid is what makes the ring round rather than an ellipse — a
+  one-cell stroke, and a triangle with apex at `cy - R*0.55`, base at
+  `cy + R*0.62`, half-width `t * R * 0.60`. The shipped rows are
+  **hand-tightened at the poles** and deliberately differ from that
+  formula: re-rasterising gives seven cells top and bottom where these
+  have five, which at this size reads as a flattened cap rather than a
+  curve. That difference is recorded beside the constant so nobody
+  "corrects" it back to the generator's output. A 9×17 version reads well
+  too, if seven rows ever feels tight beside the text.
+- **The font caveat, accepted knowingly.** Some monospace fonts render
+  Block Elements at reduced height and some terminals add leading, so
+  stacked full blocks can show faint **horizontal banding**. That is the
+  terminal drawing the glyph, not DOXA drawing the mark, and there is no
+  cell-level fix available from this side. It is written down here so a
+  reader who hits it knows the mark is not broken; `boot_banner=image` (on
+  a pixel tier) or `off` are the ways out.
+- **The `banner-blocks` screenshot scene grew from 21 rows to 25.** The
+  mark went from four rows to seven, and at 21 the transcript overflowed,
+  scrolled to its tail, and cut the top of the ring off in the shot. A
+  scene has to be tall enough to hold the thing it is a picture of.
+
+Everything else from 0.55.0 stands unchanged: the drawn form as the normal
+path, the raster reserved for `kgp`/`sixel`, the `boot_banner` setting, the
+fit against the widget's own `content_size`, and the crash containment.
+
 ## 0.59.0 — 2026-08-25
 
 **v0.50.0 shipped a cycle that offered a mode the CLI then refused.**
