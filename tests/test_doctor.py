@@ -322,10 +322,17 @@ def test_image_protocol_check_reports_the_detected_mode(monkeypatch):
     assert "halfblock" in check.detail
 
 
-def test_keyboard_enhancement_check_is_honestly_unknown():
+def test_keyboard_enhancement_check_is_honestly_unknown(monkeypatch):
+    """Item O measured the grant, and this check stayed honest about the
+    case a measurement cannot cover: a run with no interactive terminal to
+    ask -- the suite's own condition, and CI's. The measured branches live
+    in tests/test_keyboard.py, beside the probe that produces them."""
+    from doxa import keyboard as keyboard_mod
+
+    monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.UNKNOWN)
     check = doctor_mod._keyboard_enhancement_check()
     assert check.status == doctor_mod.STATUS_UNKNOWN
-    assert "isn't measured yet" in check.detail
+    assert "not measured" in check.detail
 
 
 def test_mcp_check_reports_nothing_configured():

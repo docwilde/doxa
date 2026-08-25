@@ -303,6 +303,17 @@ def about_rows(
         "platform",
         f"{platform.system()} {platform.release()} ({platform.machine()})",
     ))
+    # Keyboard protocol (item O). This row is ALWAYS present, including
+    # when the answer is "not measured" -- the one deliberate exception to
+    # the omit-what-you-cannot-answer rule above, and it earns the
+    # exception. The row exists to settle "is this key dead because of
+    # DOXA or because of my terminal", and an ABSENT row cannot be told
+    # apart from a DOXA old enough never to have looked; "not measured" is
+    # an observation about this run, not the plausible-looking constant
+    # that rule forbids.
+    from . import keyboard as keyboard_mod
+
+    rows.append(("keyboard", keyboard_mod.describe()))
     config_file = config_mod.config_path()
     rows.append((
         "config",

@@ -94,6 +94,7 @@ from . import commands as commands_mod
 from . import config as config_mod
 from . import identity as identity_mod
 from . import images as images_mod
+from . import keyboard as keyboard_mod
 from . import naming as naming_mod
 from . import notify as notify_mod
 from . import paste as paste_mod
@@ -425,6 +426,14 @@ class DoxaApp(App):
         # stdin, which Textual's own reader thread will grab the moment
         # App.run() starts (doxa/images.py's detection discipline note).
         images_mod.detect_mode()
+        # Same window, same reason (item O): doxa.keyboard asks the terminal
+        # whether it grants the kitty keyboard protocol and reads the reply
+        # off stdin. Textual requests the protocol but never reports whether
+        # it was granted (doxa/keyboard.py's docstring, with the file:line
+        # evidence), so this query is the only measurement there is -- and
+        # once App.run() has started, the reader thread would eat its answer
+        # and the probe would honestly report "unknown" forever.
+        keyboard_mod.detect_protocol()
         # background (v0.29.0): $doxa-base (theme.tcss) needs ansi_color
         # True to actually reach the terminal as ESC[49m instead of being
         # rewritten into an approximated opaque RGB by Textual's own

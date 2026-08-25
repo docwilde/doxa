@@ -4,6 +4,109 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.39.0 — 2026-08-25
+
+**A key that does nothing now says why.** DOXA binds `Ctrl+,` to
+`/settings`. On a terminal speaking the legacy key encoding there is no
+byte for `Ctrl+,` — the combination is not merely unbound, it is
+*unsendable* — so the documented key did nothing, forever, silently, with
+no way for the user to tell whether DOXA or the terminal was at fault.
+Same for `Shift+Enter` at the prompt, which is why `Alt+Enter` has always
+been bound beside it.
+
+**Provenance, stated up front.** The lettered spec for item O was lost
+before this work started; what shipped is re-derived from the item's name
+(*keyboard-protocol detection*) plus the codebase, which had already
+written down what it was waiting for: `doxa/doctor.py` carried a
+placeholder check deferring the measurement to "item O", and both
+`doxa/ui/prompt.py` and the README said item O "will one day tell you"
+which newline key your terminal grants. Every judgment call is marked
+below.
+
+- **Textual reports nothing, so DOXA asks the terminal.** Textual 5.3.0's
+  Linux driver *requests* the kitty keyboard protocol unconditionally —
+  `linux_driver.py:276` writes `\x1b[>1u`, `:373` disables it again — and
+  never asks whether the request was granted. There is no `App`
+  attribute, no `Driver` property and no message carrying it. The
+  contrast sits two lines away: in-band window resize IS queried
+  (`_query_in_band_window_resize`, `:149`), answered through
+  `messages.InBandWindowResize`, and remembered on both the driver
+  (`_in_band_window_resize`, `:64`) and the app
+  (`App.supports_smooth_scrolling`, `app.py:822`). The parser will decode
+  a `CSI u` key if one arrives (`_xterm_parser.py:326`), but that is a
+  parse, not a report — it can only tell you anything *after* the user
+  pressed a key you might not be able to receive. So new
+  `doxa/keyboard.py` sends the protocol's own support query, `\x1b[?u`,
+  followed by Primary Device Attributes, and classifies the reply.
+- **Silence is never read as "legacy".** The DA sentinel is the whole
+  honesty argument: a terminal that answers DA and *not* the `u` query is
+  measurably legacy; one that answers nothing at all was not listening to
+  us — headless, a pipe, or a Textual reader thread that already owns
+  stdin — and that says nothing about the keyboard, so DOXA says nothing
+  about it. Third state, `unknown`, surfaced as such everywhere. The
+  probe follows `doxa/images.py`'s discipline for the same reason and
+  with the same failure mode: it runs at most once, cached, settled by
+  `DoxaApp.__init__` while this process still owns the terminal, and
+  short-circuits without writing a byte when stdin and stdout are not
+  both a tty. No new dependency — `termios`/`tty`/`select` and nothing
+  else.
+- **`/about` gains a `keyboard` row** — the bug-report screen, where
+  someone chasing a dead key looks first, and it copies out with the rest
+  under `c`. *Judgment call:* the row is present even when the answer is
+  "not measured", the one deliberate exception to that screen's
+  omit-what-you-cannot-answer rule. An absent row cannot be told apart
+  from a DOXA old enough never to have looked, and "not measured" is an
+  observation about this run rather than the plausible-looking constant
+  that rule forbids.
+- **`/doctor` stops being a placeholder.** The keyboard-enhancement check
+  now measures, and names the bindings actually lost. *Judgment call:* a
+  legacy terminal is a **pass**, not a fail — nothing is wrong with the
+  terminal or the install, and `doxa doctor` exits non-zero on failures
+  (`scripts/install.sh` runs it). `unknown` remains for the case a
+  measurement cannot cover. *Judgment call:* `/doctor` is an
+  **additional** home, not the better one. It is where you go when you
+  suspect something is broken, and a dead key does not feel broken, it
+  feels like a misremembered shortcut. `/about` is where a bug report
+  starts, so it carries the row; `/doctor` carries the detail, including
+  the list of lost bindings.
+- **`/help` marks a binding this terminal cannot send.** A `✗` after the
+  key, and a footnote — appearing only when something was marked — that
+  says what happened, points at the slash command reaching the same
+  place, and names terminals that would deliver it. On a real machine
+  today that is exactly one binding, `Ctrl+,`. *Judgment call:* the
+  annotation ships, but only off a positive measurement.
+  `keyboard.is_unreachable` is False whenever the protocol is `unknown`,
+  so on any terminal DOXA could not ask, `/help` is byte-identical to
+  what it always was. A false "this key is dead" sends a user into their
+  terminal settings after a bug that is ours, which is worse than the
+  silence it replaced. The reachability predicate is under-claimed by
+  construction for the same reason: True only for combinations whose
+  legacy encoding is *known* (Ctrl+punctuation with no C0 code,
+  Ctrl+I/M/H/[ which arrive as Tab/Enter/Backspace/Escape, modified
+  Enter/Tab/Escape/Backspace/Space, Ctrl+Shift+letter, and
+  Super/Hyper/Meta), and False — assume it works — for everything else,
+  including every modified cursor and function key, Alt+anything, and
+  Shift+Tab.
+- **No binding changed, and none had to.** This item reports what a
+  terminal can do; it does not re-map keys around it. `Alt+Enter` was
+  already bound beside `Shift+Enter`, and `/settings` was already the
+  slash form of `Ctrl+,` — the annotation points at doors that were
+  always there.
+- *Judgment call:* `DOXA_KEYBOARD_PROTOCOL` (`kitty`/`legacy`/`unknown`)
+  overrides detection, but is an environment variable only — no
+  `config.toml` setting and no settings-modal row. A saved protocol is a
+  claim about a terminal the user may not be sitting at any more, and
+  persisting a wrong claim is the exact failure this item exists to
+  prevent.
+- Tests: `tests/test_keyboard.py` (68). The predicate as a truth table in
+  both directions, including every case it must *not* claim; the probe
+  driven through a real pty with a thread playing the terminal, covering
+  kitty, legacy, total silence, a truncated reply, and that raw mode is
+  restored afterwards; the cache running at most once; headless
+  degradation writing no byte and raising nothing; the `/about` row
+  rendered on the real modal at non-zero geometry with its own text;
+  `/help` marking, not marking on kitty, and not marking on unmeasured;
+  and all three `/doctor` branches.
 ## 0.38.0 — 2026-08-25
 
 **Two tab races, both fixed at the mechanism rather than the symptom.**

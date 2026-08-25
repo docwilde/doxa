@@ -31,6 +31,17 @@ os.environ["DOXA_RUNTIME_DIR"] = str(_tmp / "runtime")
 # DOXA_IMAGE_MODE themselves via monkeypatch.
 os.environ["DOXA_IMAGE_MODE"] = "text"
 
+# Keyboard-protocol kill switch, and the same reasoning one line up:
+# doxa.keyboard asks the terminal whether it grants the kitty keyboard
+# protocol by writing escape queries and reading the reply off stdin in raw
+# mode. Headless that short-circuits before writing a byte, but a suite run
+# with capture off (`pytest -s`) from a real terminal would put every worker
+# into raw mode for a third of a second. "unknown" is the honest headless
+# answer anyway; tests that exercise the kitty/legacy tiers set
+# DOXA_KEYBOARD_PROTOCOL themselves via monkeypatch, and the ones that
+# exercise the PROBE drive its seams directly.
+os.environ["DOXA_KEYBOARD_PROTOCOL"] = "unknown"
+
 # Identity isolation: doxa.identity reads the Claude Code CLI's own global
 # config for the PRECISE plan tier (organizationRateLimitTier), resolving
 # its path the way the CLI does -- CLAUDE_CONFIG_DIR first, home directory

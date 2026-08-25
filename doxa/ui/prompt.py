@@ -66,11 +66,14 @@ class PromptInput(TextArea):
     While a popup is open, up/down/tab/enter/escape belong to IT. With
     all three popups closed, bare Enter submits (see :class:`Submitted`)
     and Shift+Enter/Alt+Enter insert a literal newline -- whichever a
-    given terminal actually distinguishes from bare Enter; item O's
-    keyboard-protocol detection is what will one day tell the operator
-    which of the two their terminal grants, but both are bound here
-    regardless so neither terminal family is left without a
-    deliberate-newline key.
+    given terminal actually distinguishes from bare Enter. Both are bound
+    here regardless, so neither terminal family is left without a
+    deliberate-newline key; item O's keyboard-protocol detection
+    (:mod:`doxa.keyboard`) is what now TELLS the operator which of the two
+    they have, on ``/about`` and in ``/doctor``. It does not change this
+    pair, and deliberately: reporting what a terminal can do is a
+    different job from re-mapping keys around it, and Alt+Enter working
+    everywhere is why there was never anything here to re-map.
 
     The needs-input dialog (queue item 5) is checked FIRST, ahead of
     search and the slash dropdown: a pending AskUserQuestion/permission

@@ -442,10 +442,9 @@ exact fix command for anything failing: python and DOXA versions, the
 active belief count, whether `config.toml` parses, live daemon count and
 stale presence files (report only — `/doctor` never deletes what it
 counts; a normal launch's sweep does that), the detected terminal image
-protocol, and MCP reachability (nothing configured yet, so nothing to
-check). Keyboard-enhancement grant is reported `?` rather than guessed —
-Textual requests it at session start but doesn't yet expose whether the
-terminal actually honored it. `doxa doctor` runs the same checks with no
+protocol, the keyboard protocol in force (see below), and MCP
+reachability (nothing configured yet, so nothing to
+check). `doxa doctor` runs the same checks with no
 TUI at all (what `scripts/install.sh` runs at the end of a fresh install)
 and exits 1 if anything failed; `/setup` runs it too, as its last step.
 
@@ -466,10 +465,29 @@ measurement of the session, so they cannot disagree with each other.
 DOXA version (with its sha, and a `+` when the checkout is dirty), whether
 an update is waiting, the Python, Textual and Claude Agent SDK versions,
 the LORE version and store path, **which `lore_core` loaded** (the pinned
-dependency or a plugin checkout, with its directory), the platform, and
+dependency or a plugin checkout, with its directory), the platform, **the
+keyboard protocol your terminal grants**, and
 the config file actually in force. `c` copies the whole thing, so it gets pasted rather
 than retyped. No row is a constant — each is read off the thing it names,
 and one that cannot be filled is left out rather than guessed.
+
+**Keyboard protocol.** Terminals differ in which key combinations they can
+physically transmit. Under the legacy encoding there is no byte for
+`Ctrl+,` and no way to tell `Shift+Enter` from plain Enter; the
+[kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/)
+fixes that, and Textual asks for it at startup — but never reports whether
+the terminal agreed, so a documented key could simply do nothing with no
+way to tell whether DOXA or the terminal was at fault. DOXA now asks the
+terminal itself, once, before the TUI takes over the keyboard, and reports
+the answer on `/about` and in `/doctor`. A binding this terminal cannot
+send is marked `✗` in `/help`, next to the slash command that reaches the
+same place — on a real machine that is `Ctrl+,` for `/settings`, and
+nothing else. Silence from the terminal reads as **not measured**, never as
+"legacy": nothing is marked unless the protocol was actually observed,
+because a wrong "this key is dead" is worse than no annotation. Nothing is
+re-mapped — this reports what your terminal can do, it does not move keys
+around it. `DOXA_KEYBOARD_PROTOCOL=kitty|legacy|unknown` overrides the
+detection for a terminal that lies (or to see the other rendering).
 
 **Identity and auth.** The session-start block and status line report the
 plan you actually have — DOXA prefers the precise tier the `claude` CLI
@@ -491,8 +509,8 @@ timer is ever armed, with every overlay open.
 single-line `Input` — it grows with the conversation, up to 10 rows, then
 scrolls internally rather than displacing the block list above it. Enter
 submits; Shift+Enter and Alt+Enter both insert a literal newline (whichever
-your terminal actually distinguishes from bare Enter — item O's keyboard-
-protocol detection will one day tell you which). Bracketed paste is one
+your terminal actually distinguishes from bare Enter — `/about` now says
+which, see Keyboard protocol below). Bracketed paste is one
 edit no matter how many lines land — never one submit per embedded
 newline — and CRLF/CR both normalize to LF. A paste past 4 lines or 4 KB
 collapses to `⧉ pasted N lines (X KB)`; Ctrl+G expands it back in place to
@@ -604,6 +622,7 @@ survives being opened by an older one.
 | `nerd_font` | `DOXA_NERD_FONT` | off | use a Nerd Font glyph for the branch chip |
 | `ctx_absolute` | `DOXA_CTX_ABSOLUTE` | off | print `24k/200k` beside the `ctx%` chip; dropped again below 100 columns, and the numbers are in the chip's tooltip either way |
 | `image_mode` | `DOXA_IMAGE_MODE` | probe | force a rung of the image ladder (`kgp`/`sixel`/`halfblock`/`text`) |
+| *keyboard override* | `DOXA_KEYBOARD_PROTOCOL` | probe | `kitty`/`legacy`/`unknown`, for a terminal that lies about it. Env-only on purpose: a saved answer is a claim about a terminal you may not be sitting at any more |
 | `show_reasoning` | `DOXA_SHOW_REASONING` | **on** | stream the model's summarized reasoning into a collapsed per-turn fold; `0` stops DOXA asking to see it |
 | `clock_show` | `DOXA_CLOCK_SHOW` | **on** | show the upper-right clock (the one bool here that defaults on — `0` turns it off) |
 | `clock_date` | `DOXA_CLOCK_DATE` | off | prefix the clock with `%Y-%m-%d` |

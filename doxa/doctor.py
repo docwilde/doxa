@@ -14,13 +14,14 @@ is the one entry point both surfaces call:
   off the event loop (``doxa.app``'s handler) because the claude-CLI auth
   probe shells out.
 
-Keyboard enhancement is reported :data:`STATUS_UNKNOWN`, not pass/fail:
-Textual's Linux driver requests the Kitty/CSI-u protocol unconditionally
-at startup (``\\x1b[>1u``, see ``textual/drivers/linux_driver.py``) but
-does not itself expose whether the terminal actually granted it -- DETECTING
-the grant is item O's job (customizable keybindings), not this one's, and a
-doctor check that guesses pass/fail for something it cannot actually
-measure is worse than one that says so.
+Keyboard enhancement WAS reported :data:`STATUS_UNKNOWN` unconditionally,
+because Textual's Linux driver requests the Kitty/CSI-u protocol at startup
+(``\\x1b[>1u``, ``textual/drivers/linux_driver.py:276``) and never exposes
+whether the terminal granted it. Item O measured it -- by asking the
+terminal directly, since Textual still reports nothing (see
+:mod:`doxa.keyboard`) -- so the check now answers pass for a measured
+terminal of either kind and keeps :data:`STATUS_UNKNOWN` for the case that
+has not gone away: a run with no interactive terminal to ask.
 """
 
 from __future__ import annotations
@@ -282,12 +283,53 @@ def _image_protocol_check() -> Check:
 
 
 def _keyboard_enhancement_check() -> Check:
+    """Item O turned this from a placeholder into a measurement.
+
+    Three outcomes, and the middle one is why this is still not a
+    pass/fail check:
+
+    * **kitty granted** -- pass, every bound key can be delivered.
+    * **legacy encoding** -- also PASS, deliberately. The terminal is
+      doing nothing wrong and neither is the install; a smaller keyboard
+      is not a broken machine, and failing here would exit ``doxa
+      doctor`` non-zero (``scripts/install.sh`` runs it) on a correct
+      setup. The detail names the bindings actually lost, read off the
+      live binding list rather than from a hardcoded example, so it is
+      empty of content precisely when nothing is lost.
+    * **not measured** -- unknown, the same honest answer this check gave
+      when nothing measured at all: no terminal to ask (headless, a
+      pipe), or a reply read by something else.
+    """
+    from . import keyboard as keyboard_mod
+
+    protocol = keyboard_mod.detect_protocol()
+    if protocol == keyboard_mod.UNKNOWN:
+        return Check(
+            id="keyboard-enhancement", title="keyboard enhancement",
+            status=STATUS_UNKNOWN,
+            detail=(
+                "not measured -- no interactive terminal to ask (headless, "
+                "or the reply was read by something else)"
+            ),
+        )
+    if protocol == keyboard_mod.KITTY:
+        return Check(
+            id="keyboard-enhancement", title="keyboard enhancement",
+            status=STATUS_PASS,
+            detail="kitty keyboard protocol granted -- every bound key reaches DOXA",
+        )
+    from .ui.labels import unreachable_bindings
+
+    lost = unreachable_bindings()
+    detail = "legacy key encoding (no kitty/CSI-u)"
+    detail += (
+        f" -- these bindings cannot be sent: {', '.join(lost)}"
+        if lost
+        else " -- no bound key needs it"
+    )
     return Check(
-        id="keyboard-enhancement", title="keyboard enhancement", status=STATUS_UNKNOWN,
-        detail=(
-            "requested (kitty/CSI-u) at session start; whether THIS terminal "
-            "granted it isn't measured yet"
-        ),
+        id="keyboard-enhancement", title="keyboard enhancement",
+        status=STATUS_PASS, detail=detail,
     )
 
 

@@ -6,12 +6,16 @@ context chip's escalation, the belief/pending row text, ``/help``. The rest
 of :mod:`doxa.ui` depends on this module; this module depends on no other
 part of it, which is what keeps the import graph a tree.
 
-The two exceptions each carry their reason in their own docstring:
+The exceptions each carry their reason in their own docstring:
 :func:`_write_tab_label` / :func:`_write_tab_class` take an app and write
 onto a Tab header (they are shared by two widgets that are not each
-other's parent), and :func:`app_bindings` reads ``DoxaApp.BINDINGS``
+other's parent), :func:`app_bindings` reads ``DoxaApp.BINDINGS``
 through a deferred import, because /help documents the bindings Textual
-actually dispatches and there is no second place to read them from.
+actually dispatches and there is no second place to read them from, and
+(item O) :func:`_binding_mark` reads :mod:`doxa.keyboard`'s settled probe
+result, because a binding /help advertises that this terminal cannot
+physically send has to be marked where it is advertised, and the only
+place that knows is the module that asked the terminal.
 """
 
 from __future__ import annotations
@@ -404,6 +408,49 @@ def _pretty_key(key: str) -> str:
                     for p in parts)
 
 
+UNREACHABLE_MARK = "✗"
+"""Appended to a key in /help when THIS terminal cannot send it (item O).
+
+A glyph rather than prose because it has to fit inside a padded key
+column, and this one rather than a warning triangle because the claim is
+"the key does not arrive", not "careful"."""
+
+
+def _binding_mark(key: str) -> str:
+    """:data:`UNREACHABLE_MARK` when `key` is unreachable in the terminal
+    we are measurably in, empty otherwise.
+
+    Empty covers BOTH "the terminal can send it" and "we could not
+    measure the terminal", and those two collapsing into the same output
+    is the design, not a gap in it: :func:`doxa.keyboard.is_unreachable`
+    only ever answers True off a real measurement, because a /help that
+    wrongly labels a working key as dead sends the user to their terminal
+    settings for a bug that is ours."""
+    from .. import keyboard as keyboard_mod
+
+    return UNREACHABLE_MARK if keyboard_mod.is_unreachable(key) else ""
+
+
+def unreachable_bindings() -> "list[str]":
+    """Every advertised binding this terminal cannot deliver, in pretty
+    form (``["Ctrl+,"]``) -- the command bindings and the bare hotkeys
+    both, read off the same two sources /help renders. Empty on a terminal
+    that grants the kitty protocol AND on one we never got to measure.
+
+    ``/doctor`` names these; /help marks them in place."""
+    keys = [cmd.binding for cmd in commands_mod.REGISTRY if cmd.binding]
+    keys += [key for key, _description in app_bindings()]
+    seen: set[str] = set()
+    out: list[str] = []
+    for key in keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        if _binding_mark(key):
+            out.append(_pretty_key(key))
+    return out
+
+
 def help_text() -> str:
     """``/help``, generated from the command registry AND the live binding
     list -- never a hand-maintained list, because a hand-maintained list is
@@ -419,10 +466,18 @@ def help_text() -> str:
     is a dispatch surface, and the shell executor must not be reachable
     from one. A user still has to be able to find out the feature exists,
     so /help says so in prose rather than the registry saying it in
-    data."""
+    data.
+
+    Item O adds one thing to the rendering: a binding THIS terminal cannot
+    physically send is marked (:data:`UNREACHABLE_MARK`) and explained in
+    a footnote that only appears when something was marked. A documented
+    key that does nothing is the failure this fixes -- and on a terminal
+    whose protocol we could not measure, nothing is marked and /help is
+    byte-identical to what it always was."""
     lines = ["commands", ""]
     width = max(len(cmd.call_form()) for cmd in commands_mod.REGISTRY)
     bound: set[str] = set()
+    marked = False
     # Same grouping and the same order the dropdown and the palette use --
     # commands.grouped() is the single sequence (see doxa/commands.py).
     for group, group_commands in commands_mod.grouped():
@@ -431,7 +486,9 @@ def help_text() -> str:
             note = ""
             if command.binding:
                 bound.add(command.binding)
-                note = f"   [{_pretty_key(command.binding)}]"
+                mark = _binding_mark(command.binding)
+                marked = marked or bool(mark)
+                note = f"   [{_pretty_key(command.binding)}]{mark}"
             if command.passthrough:
                 note += "  (sent to the CLI, not intercepted)"
             lines.append(
@@ -444,9 +501,27 @@ def help_text() -> str:
     hotkeys = [(k, d) for k, d in app_bindings() if k not in bound]
     if hotkeys:
         lines += ["", "hotkeys (no slash form)", ""]
-        key_width = max(len(_pretty_key(k)) for k, _d in hotkeys)
-        for key, description in hotkeys:
-            lines.append(f"  {_pretty_key(key):<{key_width}}  {description}")
+        # The mark is part of the key column, not something trailing the
+        # description: it belongs to the key it disqualifies, and padding
+        # the column to the marked width keeps the descriptions aligned.
+        rendered = [(_pretty_key(k) + _binding_mark(k), d) for k, d in hotkeys]
+        marked = marked or any(k.endswith(UNREACHABLE_MARK) for k, _d in rendered)
+        key_width = max(len(k) for k, _d in rendered)
+        for key, description in rendered:
+            lines.append(f"  {key:<{key_width}}  {description}")
+    if marked:
+        lines += [
+            "",
+            f"  {UNREACHABLE_MARK} This terminal cannot send that combination: it "
+            "speaks the legacy key",
+            "    encoding, which has no way to express it. Where the same place "
+            "has a slash",
+            "    command, that command is the way in. A terminal that supports "
+            "the",
+            "    kitty keyboard protocol (kitty, Ghostty, WezTerm, foot, recent",
+            "    Alacritty/iTerm2) would send it; /about reports what was "
+            "measured here.",
+        ]
     lines += [
         "",
         "shell (no slash form, deliberately)",
