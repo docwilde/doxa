@@ -594,6 +594,44 @@ async def test_closing_an_archived_tab_takes_it_out_of_the_record(tmp_path):
     assert record is None or "sid-gone" not in {t.session_id for t in record.tabs}
 
 
+@pytest.mark.asyncio
+async def test_ctrl_q_closes_an_archived_tab_and_leaves_the_live_one_alone(tmp_path):
+    """v0.58.0. An archived tab's session ended before this window opened,
+    so Ctrl+Q -- "end this session (finalize now) and close its tab" -- has
+    nothing to finalize. Through v0.56.0 it therefore did nothing, and a
+    read-only transcript was a tab the close key would not close.
+
+    It now closes, taking the archive out of the persisted set exactly as
+    Ctrl+W does -- and the LIVE session in the neighbouring tab keeps
+    running, which is what says the key stayed scoped to the visible
+    tab."""
+    _write_transcript("sid-gone", str(tmp_path), [{"prompt": "p", "text": "a"}])
+    factory = _restore_engine("sid-live")
+    app = DoxaApp(
+        cwd=str(tmp_path),
+        engine_factory=factory,
+        new_session_factory=factory,
+        restore_tabs=[RestoreTabSpec(
+            "sid-gone", cwd=str(tmp_path), archived=True)],
+    )
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: app.archived_tabs())
+        assert await _wait(pilot, lambda: app.panes() and app.panes()[0]._session_id)
+        tabbed = app.query_one("#session-tabs")
+        archived_id = app.archived_tabs()[0].id
+        tabbed.active = archived_id
+        assert await _wait(pilot, lambda: tabbed.active == archived_id)
+
+        await pilot.press("ctrl+q")
+        assert await _wait(pilot, lambda: not app.archived_tabs())
+        live = app.panes()
+        assert len(live) == 1 and live[0].is_mounted
+        assert live[0].engine is not None  # not detached, not finalized
+        await pilot.pause()
+    record = tabsets.load(str(tmp_path))
+    assert record is None or "sid-gone" not in {t.session_id for t in record.tabs}
+
+
 def test_the_report_names_read_only_tabs_separately():
     """"restored" and "read-only" must never read as the same thing: one
     is a session you can type into, the other is a transcript. The user

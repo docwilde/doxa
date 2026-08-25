@@ -384,7 +384,8 @@ class DoxaApp(App):
         # IXON/IXOFF, i.e. `stty -ixon`, so Ctrl+Q reaches the app.)
         Binding(
             "ctrl+q", "end_session",
-            "End this session (finalize now) and close its tab",
+            "End this session (finalize now) and close its tab — on a "
+            "read-only tab, just closes it",
             show=False, priority=True,
         ),
         Binding("ctrl+left", "prev_tab", "Previous tab", show=False, priority=True),
@@ -1665,15 +1666,8 @@ class DoxaApp(App):
         attach`). The cheapest outcome to recover from is what a close key
         does; ENDING a session is Ctrl+Q, which says so.
 
-        The three non-session tabs -- a subagent transcript
-        (SubagentTranscriptTab), a restored archive (ArchivedSessionTab)
-        and item V's beliefs browser (BeliefsBrowserTab) -- take the SAME
-        key to a much simpler path: none is a session (self.active_pane
-        -- SessionPane-only -- comes back None for all three), so there is
-        no daemon to detach and no turn-in-flight question to ask; they
-        just close. There is always at least one SessionPane, so none of
-        them is ever "the last tab" and none reaches the close-the-app
-        branch _close_pane below falls back to.
+        The three non-session tabs take the SAME key to a much simpler
+        path -- :meth:`_close_read_only_tab`, which Ctrl+Q now shares.
 
         Closing the last SESSION tab closes the app, on the same detach
         semantics."""
@@ -1681,14 +1675,49 @@ class DoxaApp(App):
         if pane is not None:
             await self._close_pane(pane, terminate=False)
             return
+        await self._close_read_only_tab()
+
+    async def _close_read_only_tab(self) -> bool:
+        """Close the active tab when it is one of the three READ-ONLY
+        kinds, and say whether it closed one.
+
+        The three -- a subagent transcript (SubagentTranscriptTab), a
+        restored archive (ArchivedSessionTab) and item V's beliefs browser
+        (BeliefsBrowserTab) -- share the property that makes this one
+        method: none of them is a session. ``self.active_pane`` is
+        SessionPane-only and comes back None for all three, so there is no
+        daemon to detach, no engine to stop and no turn-in-flight question
+        to ask. Each still needs ITS own teardown (a transcript and a
+        browser drop the owning pane's reference so reopening builds a
+        fresh one; an archive re-persists the tab set so closing it is
+        what takes it out) -- hence the dispatch rather than one
+        remove_pane call.
+
+        There is always at least one SessionPane beside them, so none is
+        ever "the last tab" and none reaches the close-the-app branch
+        :meth:`_close_pane` falls back to.
+
+        Extracted in v0.58.0 so BOTH close keys reach it. Ctrl+W has
+        called this path since these tabs existed; Ctrl+Q did not, and
+        stopped dead on them (see :meth:`_end_session`). The boolean is
+        the load-bearing part of the signature: it lets a caller tell
+        "closed a read-only tab" from "there was nothing here I know how
+        to close", which is what a NEW tab kind will hit -- v0.46.0 shipped
+        the beliefs browser unclosable for exactly one release by not
+        having a shared answer here."""
+        active: "Any" = None
         with contextlib.suppress(Exception):
             active = self.query_one("#session-tabs", TabbedContent).active_pane
-            if isinstance(active, SubagentTranscriptTab):
-                await self._close_transcript_tab(active)
-            elif isinstance(active, ArchivedSessionTab):
-                await self._close_archived_tab(active)
-            elif isinstance(active, BeliefsBrowserTab):
-                await self._close_beliefs_tab(active)
+        if isinstance(active, SubagentTranscriptTab):
+            await self._close_transcript_tab(active)
+            return True
+        if isinstance(active, ArchivedSessionTab):
+            await self._close_archived_tab(active)
+            return True
+        if isinstance(active, BeliefsBrowserTab):
+            await self._close_beliefs_tab(active)
+            return True
+        return False
 
     async def _close_beliefs_tab(self, tab: "BeliefsBrowserTab") -> None:
         """Ctrl+W on the beliefs browser (item V): nothing to detach and
@@ -1732,6 +1761,25 @@ class DoxaApp(App):
         itself -- killing work silently is not a thing a keystroke should
         do -- so it asks; an idle session ends without a prompt.
 
+        On a tab with NO session to end -- a subagent transcript, a
+        restored archive, the beliefs browser -- it closes the tab, and
+        that is the whole of what it does. Through v0.56.0 it did
+        NOTHING there: ``_end_session`` looked for a SessionPane, found
+        None and returned, so the user sat on a read-only tab pressing the
+        key they had been taught closes tabs. Same defect class as the
+        beliefs browser and Ctrl+W in v0.46.0, and it now takes the same
+        shared answer, :meth:`_close_read_only_tab`.
+
+        That does NOT make the two keys the same key. The distinction is
+        about the SESSION -- Ctrl+W leaves it running, Ctrl+Q finalizes it
+        -- and on a tab with no session there is no distinction left to
+        draw: the archive's session ended before the window opened, the
+        subagent's transcript is a copy, the browser holds no engine.
+        Two keys agreeing where the difference is meaningless is not
+        ambiguity, it is the absence of a trap. What would be wrong is
+        Ctrl+Q ending the tab's OWNING session -- a key aimed at the
+        visible tab must never reach past it -- and it does not.
+
         Dispatched into a worker because awaiting a modal's answer
         (push_screen_wait) is only legal from one."""
         self.run_worker(self._end_session(), group="close")
@@ -1739,6 +1787,7 @@ class DoxaApp(App):
     async def _end_session(self) -> None:
         pane = self.active_pane
         if pane is None:
+            await self._close_read_only_tab()
             return
         if pane.turn_in_flight:
             choice = await self.push_screen_wait(CloseWithTurnRunning())
@@ -2160,6 +2209,34 @@ class DoxaApp(App):
         with contextlib.suppress(Exception):
             tabbed.active = target.id
         self._focus_tab(target)
+
+    def run(self, *args: "Any", **kwargs: "Any") -> "Any":
+        """``App.run``, wrapped in ownership of the TERMINAL's title.
+
+        The window/taskbar title is not :attr:`App.title` -- that one is
+        the Header widget's caption and never leaves the process. This is
+        the OSC sequence the emulator reads, which Textual 5.3.0 offers no
+        API for at all; :mod:`doxa.window` writes it, and this is the seam.
+
+        Wrapped HERE, around ``run()``, rather than in ``on_mount`` /
+        ``on_unmount`` or at each of :mod:`doxa.cli`'s four call sites:
+
+        * ``on_unmount`` does not fire on every way out of a TUI, and when
+          it does it fires while Textual still owns the screen -- the
+          restore has to be the LAST thing written, after the driver has
+          handed the terminal back.
+        * ``run()`` is the one door. ``doxa new``, ``doxa attach``, a
+          restore-from-tabset launch and ``--in-process`` all come through
+          it, and so will any entry point added later -- which is what
+          stops the next one shipping without the restore.
+
+        ``run_test()`` does NOT come through here, deliberately: the suite
+        has no terminal to title, and a test that emitted escapes into the
+        captured output would be measuring its own harness."""
+        from . import window as window_mod
+
+        with window_mod.terminal_title(window_mod.title_for(self.cwd)):
+            return super().run(*args, **kwargs)
 
     async def on_mount(self) -> None:
         """Auto-run /setup exactly once: a genuine first launch on this

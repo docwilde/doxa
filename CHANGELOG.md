@@ -4,6 +4,215 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.58.0 — 2026-08-25
+
+**Three reports about DOXA's own identity: which DOXA the start-menu
+shortcut actually launches, what the terminal window is called, and a tab
+you could not close.**
+
+### The shortcut launched a different DOXA
+
+*"the shortcut uv run launcher install creates is serving a stale version
+(0.8.0) … not the one in /repos/doxa."*
+
+**The defect was never a version string.** Nothing in `doxa/launcher.py`
+carried one — the entry it wrote recorded no version at all. `Exec=doxa`
+was a *bare name*, and a `.desktop` `Exec` is resolved against the PATH of
+the **desktop session** at click time: the one the display manager
+exported at login, which has no venv on it, frequently no `~/.local/bin`
+either, and no relationship whatsoever to the shell that typed the install
+command. So `launcher install`, run from a current checkout, wrote a
+shortcut that started whatever old `uv tool install`ed copy was still
+lying around. Both are called `doxa`. They are different programs. The
+0.8.0 the user read was a correct rendering of the wrong install.
+
+- **`Exec` is now an absolute path to the DOXA that wrote the entry.**
+  `launcher.exec_target()` — the console script in this environment
+  (`<venv>/bin/doxa`), or that environment's own interpreter run as
+  `-m doxa.cli` when there is no script.
+- ***Judgment call, stated rather than defaulted into: the shortcut
+  pins.*** The alternatives were "whatever `doxa` is on PATH" (what it
+  did) and "the install this command was run from" (this). PATH
+  resolution has a real advantage — it follows a later `uv tool install`
+  upgrade for free — and one disqualifying property: it is unobservable,
+  which is the entire defect. `doxa launcher install` is not a request
+  for a shortcut to *some* DOXA; the user runs it from a specific tree,
+  having just built or updated that tree, and means *this one*. An entry
+  that pins is at least a wrong answer you can read.
+- **The cost of pinning is paid loudly, not hidden.** A shortcut to a
+  checkout dies when the checkout moves. Three things make that legible:
+  `install` prints the path and the version it reports, the entry records
+  both, and `doxa doctor`'s new `launcher` check **fails** with
+  `doxa launcher install` as the fix when the recorded path has stopped
+  existing.
+- **A second bug, found by running the command rather than reasoning
+  about it.** The first fix anchored on `sys.executable`. Under
+  `uv run doxa launcher install` that is the *base* interpreter uv
+  resolved the environment from
+  (`~/.local/share/uv/python/cpython-3.12…/bin/python3.12`), while
+  `sys.prefix` is the project venv. An `Exec` built from the former names
+  a python that cannot import `doxa` **at all** — a shortcut that fails
+  with `ModuleNotFoundError`, which is strictly worse than one that
+  starts the wrong version. `exec_target()` anchors on `sys.prefix`, the
+  environment this code was imported from by definition. Nothing is
+  `resolve()`d either: `<venv>/bin/python` is a symlink to the base
+  interpreter and following it is the same crash by another road.
+- **The install report is part of the fix.** It names the absolute `Exec`
+  path, the version that path reports, and both icon paths. The defect
+  was invisible for exactly as long as it was because the command said
+  "installed", the entry looked fine, and the disagreement surfaced weeks
+  later as a wrong-looking banner.
+- **The other DOXA is reported, never touched.** When a *different* `doxa`
+  is on PATH, `install` names it and its version and says the shortcut
+  does not use it. Its version is **read, not run**:
+  `launcher.version_at()` follows the console script's shebang to its
+  interpreter and reads the `.dist-info` directory name out of that
+  environment's site-packages. A launcher command must not spawn an
+  unknown binary to write a text file, and a stale install is precisely
+  the copy most likely to be broken in a way that hangs. Unmeasurable
+  reads as "an unknown version" — a launcher that *guessed* one would be
+  repeating the original defect in a new place. Rewriting somebody's
+  `uv tool install` is not a side effect a shortcut command gets to have,
+  and a stable tool install beside a dev checkout is how most people work.
+- **Secondary, and still true: every version anywhere comes from
+  `doxa/version.py`.** The entry records `X-DOXA-Version` and shows the
+  version in the `Comment` the desktop puts on hover. `X-` prefixed
+  because the freedesktop spec's own `Version` key means the version of
+  the *spec* the entry conforms to; writing `0.57.0` there would be a lie
+  in a standardised field. `DESKTOP_ENTRY` was a module-level constant
+  and is now `desktop_entry()`, a function — both interesting fields are
+  measurements of the running process, and a constant evaluated at import
+  time is exactly the shape of thing that goes stale.
+- **An already-installed stale entry is overwritten.** `install()` already
+  promised idempotence, DOXA wrote every byte of the file, and refusing
+  would leave the user holding the broken entry that made them run the
+  command. An entry with no version key at all — every entry written
+  before this release — reads as `unversioned` and is stale by
+  construction: it also carries the `Exec=doxa` that made the version
+  wrong.
+
+### The terminal window and the taskbar entry
+
+*"can we change the terminal title to 'DOXA' and add the app icon to the
+planck icon and taskbar window title?"*
+
+**What Textual actually offers: nothing.** Measured against the installed
+5.3.0 rather than assumed — the only OSC the library writes is `OSC 52`
+for the clipboard (`textual/app.py`, `_set_clipboard`). There is no
+`set_terminal_title`, no driver hook, and `App.TITLE` / `App.title` are a
+plain reactive consumed by the `Header` widget, which never leaves the
+process. DOXA already set `TITLE = "DOXA"` and it had never reached a
+window manager. So `doxa/window.py` writes the sequence itself.
+
+- **Setting it is the easy half; giving it back is the point.** A
+  terminal title is process-global state with no owner and **no query** —
+  OSC 21 is disabled by default in every terminal that ever shipped it,
+  because a program that can read the title can read what the previous
+  program left there. There is nothing to save and restore by hand, and an
+  app that merely sets a title leaves the user's window called "DOXA"
+  until they notice, which they then cannot undo because they do not know
+  the escape either.
+- **So: the title stack.** `CSI 22;0t` asks the *terminal* — the one
+  process that does know — to push the current window and icon titles;
+  `CSI 23;0t` pops them back. `window.terminal_title()` is a context
+  manager around that pair with the pop in a `finally`.
+- **Restore-on-exit, and exactly which exits it covers.** Normal quit:
+  `App.run()` returns. **Ctrl+C**: two cases, both held — DOXA binds
+  `ctrl+c` itself (`action_ctrl_c_quit`, `priority=True`) so the ordinary
+  press is a quit action that returns normally, and a press arriving
+  before the app is live raises `KeyboardInterrupt` straight out of
+  `run()` and through the `finally` (it inherits from `BaseException`, so
+  a bare `except Exception` would have missed it). **A crash**: any
+  exception unwinds through the `finally` before the traceback prints.
+  All three are separate tests. What it does **not** survive is `SIGKILL`
+  and a hard `SIGTERM`, and this deliberately does not chase them:
+  Textual installs its own signal handlers, a second one racing them is
+  how a shutdown path acquires a Heisenbug, and a terminal that lost its
+  title to `kill -9` gets it back from the next shell prompt anyway. A
+  terminal without the stack ignores both sequences and recovers the same
+  way — the floor `vim`, `htop` and `tmux` all accept, for the same
+  reason.
+- **Wrapped around `DoxaApp.run()`, one seam.** Not `on_unmount` (it does
+  not fire on every way out of a TUI, and when it does it fires while
+  Textual still owns the screen — the restore must be the *last* thing
+  written) and not at each of `doxa.cli`'s four call sites. `doxa new`,
+  `doxa attach`, a tabset restore and `--in-process` all come through
+  `run()`, and so will the next entry point, which is what stops that one
+  shipping without the restore. `run_test()` does not come through it, so
+  the suite emits no escapes into its own captured output.
+- ***Judgment call: the title is `DOXA — <project>`, not bare `DOXA`.***
+  "DOXA" is the floor the user asked for and is what a run outside any
+  project gets. The project is added because of *where the string lands*:
+  a taskbar button and a terminal tab exist to tell two windows apart, and
+  what distinguishes two DOXA windows is never the application — it is
+  always the repository. Three buttons all reading "DOXA" is a taskbar
+  that has stopped working as a taskbar. It deliberately does **not**
+  carry the active session: the title would then change on every tab
+  switch, and a taskbar label that moves under the pointer is worse than a
+  stale one. The session is already named on the tab strip, inside the
+  window, where the user is looking at it. The window title answers
+  "which window", once.
+- **Three refusals.** Not a terminal (an escape into a pipe is corruption
+  of somebody's data), `TERM` unset or `dumb`, or `DOXA_NO_TERMINAL_TITLE`
+  set — an env var rather than a config setting because "my multiplexer
+  owns the title" is a property of the environment, not of the DOXA.
+  Directory names are scrubbed of control characters and bounded: a `BEL`
+  inside the payload would terminate the OSC early and spray the rest
+  across the screen, and a directory name is attacker-influenced input on
+  a machine that clones repositories.
+- **The icon was already in the wheel; verified, not assumed.**
+  `pyproject.toml`'s `force-include` has mapped `assets/icon.png` to
+  `doxa/assets/icon.png` since v0.41.0, and the entry has always said
+  `Icon=doxa` against a 512×512 PNG in `hicolor`. What was missing is the
+  **scalable** icon: a panel asking for 22px off a 512px PNG downsamples,
+  and hicolor's lookup prefers an exact raster size and falls back to
+  scalable. `install` now also writes
+  `icons/hicolor/scalable/apps/doxa.svg` from `assets/icon.svg`, so the
+  launcher grid gets the PNG and a small panel slot gets a rendering
+  instead of a smudge. `uninstall` removes it too.
+
+### Ctrl+Q did nothing on a read-only tab
+
+*"CTRL+Q doesnt work with read-only session tabs…"*
+
+`action_end_session` is "end this session (finalize now) and close its
+tab". `_end_session` asked for `self.active_pane`, which is `SessionPane`
+-only, got `None` on every read-only tab, and **returned** — so the user
+sat on a tab they could not close with the key they had been taught closes
+tabs. Same defect class as the beliefs browser and Ctrl+W in v0.46.0,
+which "had no branch and would have been unclosable"; it now takes the
+same shared answer.
+
+- **`DoxaApp._close_read_only_tab()`** is that answer, extracted from
+  `action_close_tab` so **both** keys reach it. It returns a `bool`, and
+  that is the load-bearing part of the signature: it lets a caller tell
+  "closed a read-only tab" from "there was nothing here I know how to
+  close", which is what the *next* tab kind will hit.
+- **Ctrl+W and Ctrl+Q still read correctly.** The distinction between them
+  is about the SESSION — Ctrl+W leaves it running, Ctrl+Q finalizes it —
+  and on a tab with no session there is no distinction left to draw: the
+  archive's session ended before the window opened, the subagent's
+  transcript is a copy, the browser holds no engine. Two keys agreeing
+  where the difference is meaningless is not ambiguity, it is the absence
+  of a trap. What *would* be wrong is Ctrl+Q reaching past the visible tab
+  to end its owning session — each of the three new tests asserts that it
+  does not (the owning pane stays mounted, its engine unfinalized, its
+  turn still in flight).
+
+**Every tab kind, every close key.** This table is the artifact that stops
+the next tab kind shipping unclosable:
+
+| tab kind | Ctrl+W — *close-detach* | Ctrl+Q — *end the session* |
+|---|---|---|
+| `SessionPane` (live) | Tab closes. The daemon **keeps running**; reattach via the palette or `doxa attach`. Asks first if a turn is in flight. | Session **finalized now** (LORE review + index run daemon-side), socket closed, presence file removed, daemon reaped; tab closes. Asks first if a turn is in flight. |
+| `SessionPane` (the last one) | Same, and the window closes on detach semantics. | Same, and the window closes on stop semantics. |
+| `SubagentTranscriptTab` | Tab closes; the owning pane drops its reference. No engine, no daemon, no dialog. | **Identical** — there is no session here to end. The owning session is untouched. |
+| `ArchivedSessionTab` | Tab closes, and that is the one way to take it out of the persisted tab set. | **Identical** — the session ended before this window opened. |
+| beliefs browser (`BeliefsBrowserTab`) | Tab closes; the owning pane drops its reference, so reopening builds a fresh one. Never persisted. | **Identical** — it holds no engine. |
+
+App-level quitting is unchanged and is still Ctrl+C: one press detaches
+every tab, a second within two seconds stops every session.
+
 ## 0.57.0 — 2026-08-25
 
 *(Numbered 0.57.0 rather than the 0.52.0 this work was assigned: 0.55.0

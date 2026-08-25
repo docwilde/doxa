@@ -1118,6 +1118,38 @@ async def test_ctrl_w_closes_the_browser_and_reopening_builds_a_fresh_one(
         assert second.is_mounted
 
 
+@pytest.mark.asyncio
+async def test_ctrl_q_closes_the_browser_and_leaves_the_session_running(
+    monkeypatch, tmp_path
+):
+    """v0.58.0. The browser holds no engine, so Ctrl+Q -- "end this
+    session (finalize now) and close its tab" -- has no session to end.
+    Through v0.56.0 that made it a no-op and the browser was closable by
+    exactly one of the two close keys.
+
+    It now closes, and the session that OPENED it is left running: Ctrl+Q
+    on a tab with no session must not fall through to the pane
+    underneath."""
+    fake = FakeEngine([])
+    fake.list_beliefs_result = [_belief(1, "prefers terse commits")]
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(160, 48)) as pilot:
+        await pilot.pause()
+        pane = app.active_pane
+        await _browser(pilot, app, fake)
+        await pilot.press("ctrl+q")
+        for _ in range(100):
+            if pane._beliefs_tab is None:
+                break
+            await pilot.pause(0.02)
+        assert pane._beliefs_tab is None
+        assert not list(app.query(BeliefsBrowserTab))
+        # The session tab is still there, still holding its engine.
+        assert pane in app.panes()
+        assert pane.engine is fake
+        assert fake.finalized is False
+
+
 # -- the outcome ledger, against the real lore_core ----------------------
 
 
@@ -1902,7 +1934,7 @@ def test_the_engine_has_no_bulk_belief_action_under_any_name():
         )[:2] == ["self", "belief_id"]
 
 
-# -- v0.57.0: the proposals chip, and four corrections to the pickers ----
+# -- v0.58.0: the proposals chip, and four corrections to the pickers ----
 
 
 def _proposals(n, kind="memory", scope="user", start=0, **kw):
