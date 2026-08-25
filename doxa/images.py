@@ -31,6 +31,19 @@ no argument renders. It measures nothing new: the ladder probe is spent
 before ``App.run()`` and cannot honestly be repeated, so every row is
 either a settled value or an explicit "not measured", and the tiers /img
 DRAWS are only the ones this terminal answered for.
+
+v0.49.0 added the containment half, from a crash report, and it is three
+separate defences against the same fact -- **this library runs code inside
+DOXA's render loop and on DOXA's terminal, and DOXA does not get to review
+what it does there**:
+
+* :func:`_mute_library_logging` -- it may not WRITE on the screen. Its
+  warnings go to stderr, and stderr is the screen.
+* :func:`_seed_library_cache` -- it may not ASK the terminal anything
+  after ``App.run()``, because Textual owns stdin by then and the answer
+  can never arrive.
+* :func:`_guarded` -- it may not RAISE while measuring or painting, where
+  there is no caller of ours left to catch it.
 """
 
 from __future__ import annotations
@@ -44,6 +57,46 @@ ENV_VAR = "DOXA_IMAGE_MODE"
 
 # Ladder result, settled at most once per process (see module docstring).
 _detected: str | None = None
+
+
+def _mute_library_logging() -> None:
+    """Stop textual-image writing on DOXA's screen (v0.49.0, from a crash
+    report). Run at import, once, before anything can log.
+
+    **The reported failure, exactly.** ``get_cell_size`` probes with
+    ``ESC[16t``, and a terminal that does not implement that window-op --
+    VTE, which is GNOME Terminal and so Linux Mint's default -- never
+    answers. Upstream CATCHES its own timeout, which is correct, and then
+    reports it with ``logger.warning(..., exc_info=e)``. With no logging
+    configured, Python's last-resort handler writes WARNING and above to
+    **stderr**, so the message and a full traceback land on the terminal
+    at the exact moment the TUI is taking it over. The user reported that
+    as a crash, and from where they were sitting it is indistinguishable
+    from one:
+
+        doxa: restoring 1 tab(s) in /home/fabian/repos/doxa…
+        Failed to get cell size via escape sequence, assuming VT340 sizes
+        Traceback (most recent call last): ...
+        TimeoutError: Timeout waiting for data
+
+    Nothing there is an error -- it is a library narrating a handled
+    fallback. But in a full-screen app **stderr is the screen**, so a
+    library's idea of a warning is DOXA's idea of corrupted output.
+
+    A ``NullHandler`` plus ``propagate=False`` is the documented way to
+    say "this library's records are not mine to print". It is deliberately
+    the whole logger and not one message: any record from this package
+    would land in the same place with the same result. What the user
+    actually needs from that probe is a *reported* value, and ``/img``
+    already prints it -- labelled as defaulted when it was defaulted."""
+    import logging
+
+    logger = logging.getLogger("textual_image")
+    logger.addHandler(logging.NullHandler())
+    logger.propagate = False
+
+
+_mute_library_logging()
 
 
 def _is_tty() -> bool:
@@ -140,15 +193,47 @@ def cell_size() -> "tuple[int, int] | None":
         return _cell_size
     _cell_size_settled = True
     try:
-        if not _is_tty():
-            return None
         from textual_image._terminal import get_cell_size
-
-        measured = get_cell_size()
-        _cell_size = (int(measured.width), int(measured.height))
-    except Exception:  # noqa: BLE001 -- an unmeasurable terminal is not an error
-        _cell_size = None
+    except Exception:  # noqa: BLE001 -- no library, nothing to settle
+        return None
+    if _is_tty():
+        try:
+            measured = get_cell_size()
+            _cell_size = (int(measured.width), int(measured.height))
+        except Exception:  # noqa: BLE001 -- an unmeasurable terminal is not
+            # an error. Measured, on a pty reporting zero columns:
+            # get_cell_size divides by that zero and raises
+            # ZeroDivisionError straight out of its own except clause.
+            _cell_size = None
+    _seed_library_cache(get_cell_size)
     return _cell_size
+
+
+def _seed_library_cache(get_cell_size) -> None:
+    """Make sure textual-image never asks the terminal again (v0.49.0).
+
+    ``get_cell_size`` memoises onto its own ``_result`` attribute, but only
+    on the path that RETURNS -- if it raised, or if we never called it,
+    the attribute is absent and the next caller re-probes. Every other
+    caller is a widget measuring or painting itself, which happens after
+    ``App.run()``, where Textual's reader thread owns stdin and the
+    terminal's reply to ``ESC[16t`` can never arrive. That probe is
+    therefore guaranteed to burn its timeout and guaranteed to fail, and
+    it does so from inside a render, where a raise is not a degraded
+    picture but a dead app.
+
+    So whatever happened above, the cache is left populated: with what we
+    measured, or with the same VT340 constant upstream would have fallen
+    back to anyway. Nothing is claimed by this that
+    :func:`diagnostics` does not already label as defaulted."""
+    try:
+        if hasattr(get_cell_size, "_result"):
+            return
+        from textual_image._terminal import CellSize
+
+        setattr(get_cell_size, "_result", CellSize(*(_cell_size or VT340_DEFAULT_CELL)))
+    except Exception:  # noqa: BLE001 -- an upstream rename must not be fatal
+        pass
 
 
 def probe_answered() -> bool:
@@ -262,11 +347,109 @@ def fallback_line(desc: str) -> str:
     return f"[image: {desc}]"
 
 
+from functools import lru_cache
+
+
+class _GuardedRenderable:
+    """The last few inches of the paint path.
+
+    ``Widget.render`` only BUILDS a Rich renderable; the library's actual
+    drawing -- and its ``get_cell_size`` call -- happens later, when Rich
+    asks that object to produce segments. That is past the widget method,
+    inside the compositor, with nothing of DOXA's on the stack. So the
+    renderable is wrapped too, and a raise becomes the text fallback
+    rather than a dead session. Segments already yielded before a failure
+    are kept: a half-drawn image plus one honest line beats losing the
+    frame."""
+
+    def __init__(self, inner: Any, fallback: str) -> None:
+        self._inner = inner
+        self._fallback = fallback
+
+    def __rich_console__(self, console, options):
+        from rich.text import Text
+
+        try:
+            yield from console.render(self._inner, options)
+        except Exception:  # noqa: BLE001 -- see the class docstring
+            yield Text(self._fallback)
+
+    def __rich_measure__(self, console, options):
+        from rich.measure import Measurement
+
+        try:
+            return Measurement.get(console, options, self._inner)
+        except Exception:  # noqa: BLE001
+            width = len(self._fallback)
+            return Measurement(width, width)
+
+
+@lru_cache(maxsize=None)
+def _guarded(cls):
+    """`cls` with its measure and paint methods wrapped so a raise degrades
+    the picture instead of the session (v0.49.0).
+
+    :func:`widget_for` has always promised "never an exception", and until
+    now that promise covered CONSTRUCTION only -- which is the easy half.
+    A Textual widget is also asked for its width, its height and its
+    content long after it was built, from inside the compositor, where
+    there is no caller left to catch anything: an exception there takes
+    the app down. That is not hypothetical for this library. Its
+    ``get_cell_size`` divides by a terminal-reported column count and
+    raises ``ZeroDivisionError`` when that count is zero, and every one of
+    the three methods below calls it.
+
+    The seeded cache in :func:`_seed_library_cache` closes that particular
+    door before it can open. This closes the doorway. Both, because the
+    library gets to decide what it does inside a render and DOXA does not.
+
+    The height fallback is deliberately 1 and not 0: a widget measuring to
+    zero rows is present in the DOM, invisible on screen, and passes every
+    structural assertion -- the v0.28.0 defect, and the one failure mode
+    images make cheap to reproduce."""
+    def _desc(self) -> str:
+        return fallback_line(getattr(self, "_doxa_desc", "image"))
+
+    def render(self):
+        try:
+            return _GuardedRenderable(cls.render(self), _desc(self))
+        except Exception:  # noqa: BLE001 -- see this function's docstring
+            return _desc(self)
+
+    def get_content_width(self, container, viewport) -> int:
+        try:
+            return cls.get_content_width(self, container, viewport)
+        except Exception:  # noqa: BLE001
+            return len(_desc(self))
+
+    def get_content_height(self, container, viewport, width) -> int:
+        try:
+            return cls.get_content_height(self, container, viewport, width)
+        except Exception:  # noqa: BLE001
+            return 1
+
+    return type(
+        cls.__name__,
+        (cls,),
+        {
+            "render": render,
+            "get_content_width": get_content_width,
+            "get_content_height": get_content_height,
+        },
+        # textual_image.widget.Image.__init_subclass__ REQUIRES this
+        # keyword; passing the parent's own renderable keeps the subclass
+        # painting exactly what the parent would have painted.
+        Renderable=cls._Renderable,
+    )
+
+
 def widget_for(source: Any, desc: str, mode: str | None = None):
     """An image widget for `source` (path / bytes-stream / PIL image), or a
     ``Static`` with the text fallback -- ALWAYS a mountable widget, never
-    None, never an exception. `desc` is the human line used by the fallback
-    (typically the path or the tool name that produced the image)."""
+    None, never an exception, and since v0.49.0 never an exception while
+    PAINTING either (see :func:`_guarded`). `desc` is the human line used
+    by the fallback (typically the path or the tool name that produced the
+    image)."""
     from textual.widgets import Static
 
     mode = mode if mode in MODES else detect_mode()
@@ -276,7 +459,9 @@ def widget_for(source: Any, desc: str, mode: str | None = None):
         from textual_image.widget import HalfcellImage, SixelImage, TGPImage
 
         cls = {"kgp": TGPImage, "sixel": SixelImage, "halfblock": HalfcellImage}[mode]
-        return cls(source, classes="image-widget")
+        widget = _guarded(cls)(source, classes="image-widget")
+        widget._doxa_desc = desc
+        return widget
     except Exception:
         return Static(fallback_line(desc), classes="image-fallback")
 

@@ -586,8 +586,20 @@ ToolChip > CollapsibleTitle {
     max-width: 100%;
 }
 
+/* height AUTO, not a fixed 3. Three rows silently CLIPPED the tagline on
+   any terminal narrow enough to wrap it -- measured at 20 columns, where
+   the wrapped line needed four rows and was given three. The wordmark now
+   drops its tagline before it can wrap (banner.fits_tagline); auto is the
+   belt to that pair of braces. */
 .banner-wordmark {
-    height: 3;
+    height: auto;
+}
+
+/* The one line saying why the logo did not draw. Muted rather than
+   alarming: on most terminals that reach it, nothing is broken. */
+.banner-reason {
+    color: #8A8073;
+    height: auto;
 }
 
 .thinking {

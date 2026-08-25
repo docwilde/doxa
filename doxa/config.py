@@ -188,16 +188,23 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     Setting(
         key="boot_banner", env="DOXA_BOOT_BANNER", label="boot banner",
-        category="Appearance", kind="bool_on", default="1",
-        help="Draw the DOXA logo above the session's opening identity "
-             "block (doxa.banner.enabled)",
-        note="Six rows at 41 columns on a terminal that can draw pixels; a "
-             "three-row half-block wordmark on the text tier or below 56 "
-             "columns, because `[image: doxa logo]` as the first line of "
-             "every session is honest and unusable. Off removes it "
-             "entirely -- the identity block is then the first thing on "
-             "screen, exactly as before v0.41.0. /img reports what your "
-             "terminal actually granted.",
+        category="Appearance", kind="choice",
+        choices=("", "auto", "blocks", "image", "off"), default="auto",
+        help="How to draw the DOXA mark above the session's opening "
+             "identity block (doxa.banner.form)",
+        note="auto (default) draws the WORDMARK in unicode blocks on the "
+             "half-block and text tiers, and the raster logo only where "
+             "the terminal carries real pixels (kitty graphics, sixel). "
+             "That split is v0.49.0's, from a user looking at a half-block "
+             "render and calling it 'quite pixelated -- then i would "
+             "prefer to just show it as unicode/ASCI blocks': six rows of "
+             "half-block is twelve vertical samples for a 238-row image, "
+             "and a drawn glyph beats a resampled photograph at that size. "
+             "blocks pins the wordmark everywhere; image pins the raster "
+             "wherever any pixel tier exists, which is v0.41.0's "
+             "behaviour; off removes the banner. 1 and 0 still read as "
+             "auto and off. /img reports which tier your terminal "
+             "actually granted.",
     ),
     Setting(
         key="show_reasoning", env="DOXA_SHOW_REASONING", label="show reasoning",

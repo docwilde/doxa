@@ -400,6 +400,10 @@ async def _drive_banner(app: DoxaApp, pilot) -> None:
     await _settle(pilot)
 
 
+async def _drive_banner_degraded(app: DoxaApp, pilot) -> None:
+    await _settle(pilot)
+
+
 async def _drive_image_support(app: DoxaApp, pilot) -> None:
     await _settle(pilot)
     await app.active_pane._cmd_img("")
@@ -458,9 +462,23 @@ SCENES: list[Scene] = [
           new_session_factory=lambda: FakeEngine([], model="claude-sonnet-4-5")),
     Scene("sessions", _drive_sessions, size=(172, 47),
           engine_factory=_hero_engine),
+    # The `image` FORM of the banner. Pinned, because since v0.49.0 `auto`
+    # draws the wordmark on half-block -- and half-block is the only tier
+    # an SVG export can capture at all, so this shot stands in for what a
+    # kitty-graphics or sixel terminal draws from the same asset at its
+    # own far higher resolution.
     Scene("banner", _drive_banner, size=(120, 32),
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
-          env=_HALFBLOCK),
+          env={**_HALFBLOCK, "DOXA_BOOT_BANNER": "image"}),
+    # v0.49.0: what a terminal that cannot draw the logo sees. The whole
+    # of the defect report it came from was "the logo image is not
+    # rendering"; this is the screen that now answers that in place.
+    # v0.49.0: the wordmark at 80 columns, which is where the user who
+    # filed "quite pixelated" is. This is now the COMMON banner -- a
+    # half-block terminal gets drawn glyphs, not a downscaled photograph.
+    Scene("banner-blocks", _drive_banner_degraded, size=(80, 21),
+          engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
+          env={"DOXA_IMAGE_MODE": "halfblock"}),
     Scene("image-support", _drive_image_support, size=(172, 47),
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
           env=_HALFBLOCK),

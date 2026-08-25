@@ -4,6 +4,151 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.49.0 — 2026-08-25
+
+**A crash on Linux Mint's default terminal, and it was DOXA's own probe
+that caused it.** Reported as *"doxa crashed while using it"*, with a
+`TimeoutError: Timeout waiting for data` traceback, in a session restoring
+a tab. Reproduced in a pty configured the way VTE reports itself, and the
+mechanism is not what the traceback makes it look like.
+
+- **Nothing was raising.** `textual-image` probes the terminal's cell size
+  with `ESC[16t`. VTE — GNOME Terminal, and so Mint's default — does not
+  implement that window-op and never answers, so the read times out.
+  Upstream *catches* its own timeout, which is correct, and then reports
+  it with `logger.warning(..., exc_info=e)`. With no logging configured,
+  Python's last-resort handler writes WARNING and above to **stderr**. In
+  a full-screen app stderr *is* the screen, so a handled fallback printed
+  a message and a full traceback over the TUI exactly as it was taking the
+  terminal over. Indistinguishable from a crash from where the user sat.
+- **The caller was `DoxaApp.__init__`** — DOXA's own pre-`App.run()` cell
+  probe, added in v0.41.0. The ordering in the report proves it: the
+  `doxa: restoring 1 tab(s)…` line is printed by the CLI before the app
+  starts, and the warning follows it immediately. *The late-widget theory
+  was wrong and the measurement says so*: instrumented in a pty, the
+  library's cache is populated before `App.run()` and `/img` afterwards
+  never re-probes.
+- **Fixed three ways, because one of them is only the symptom.** The
+  `textual_image` logger gets a `NullHandler` and `propagate = False` — a
+  library's idea of a warning is a TUI's idea of corrupted output, and
+  what the user actually needs from that probe is a *reported* value,
+  which `/img` already prints and already labels as defaulted. The
+  library's cell-size cache is now **always** seeded, even when our probe
+  raised or never ran, so no later caller can re-probe: every later caller
+  is a widget painting itself, after `App.run()`, where Textual owns stdin
+  and the reply can never arrive — a probe guaranteed to burn its timeout
+  and fail, from inside a render.
+- **And `widget_for`'s promise now covers painting.** It has always said
+  "never an exception"; that covered *construction* only, which is the
+  easy half. Textual asks a widget for its width, its height and its
+  content long afterwards, from the compositor, with no caller left to
+  catch anything — and this library's `get_cell_size` divides by a
+  terminal-reported column count and raises `ZeroDivisionError` when that
+  count is zero, which is measurable in a pty. Those three methods are now
+  wrapped, and so is the Rich renderable `render()` returns, since that is
+  where the drawing actually happens. A failure degrades to the
+  `[image: …]` line. The height fallback is 1 and never 0: a widget
+  measuring to zero rows is in the DOM, invisible on screen, and passes
+  every structural assertion — the v0.28.0 defect, which images make cheap
+  to reproduce.
+
+**"quite pixelated — then i would prefer to just show it as unicode/ASCI
+blocks", "and the real logo png just in terminals that support it."** The
+opening banner's ladder is inverted. A drawn mark and plain text are now
+the normal path; `logo.png` is the exception, for terminals with a real
+pixel protocol.
+
+The report arrived first as "the logo image is not rendering", which cost
+this release a detour. A screenshot settled it: the logo *was* rendering —
+mark, wordmark, colour, correctly placed — on a stock Linux terminal at
+the half-block tier. The complaint was quality, and it was correct.
+
+- **The arithmetic behind it.** Half-block is not a pixel protocol with
+  fewer pixels; it is a 2×-vertical approximation made of `▀`. Six rows of
+  it is twelve vertical samples for a 238-row image. A downscale
+  *averages*, and averaging at that ratio is mush — the asset's own
+  strapline came out as a grey smear. v0.41.0 said as much in its own
+  changelog and shipped it anyway, on the theory that the mark carried the
+  banner. In front of the person who sees it every launch, it did not.
+- **The drawn form, which is now the common one.** A triangle authored
+  cell by cell — every cell *chosen*, none averaged, so it is exactly as
+  sharp as the font — with the wordmark and strapline beside it as
+  **plain text**. Four rows, two fewer than the raster it replaces.
+  *Judgment call:* the wordmark is no longer glyph art either. v0.41.0
+  drew "DOXA" in blocks; four ordinary capitals are simply legible where
+  stylised ones are something to squint at, and the font already knows how
+  to draw an A.
+- **The mark was chosen by drawing candidates and looking at them**, in a
+  real monospace font at true cell metrics, then again through the actual
+  renderer. Two were rejected on sight. A **ring** is impossible at this
+  size — a one-subpixel outline renders as horizontal bars, not a circle.
+  A triangle built from `▀▄█` alone renders as a **stepped pyramid**,
+  because every row is a solid rectangle and the eye reads three stacked
+  bars. The quadrant triangles `◢`/`◣` are what give the edge a real
+  slope. Smaller and sharp beat bigger and mushy, which is the same rule
+  the rest of the module follows.
+- **Two known limitations, both shown to the user and both accepted.**
+  First: at four rows the mark reads as a **stepped, stacked shape**
+  rather than as the smooth triangle-in-a-ring of the PNG — there are not
+  enough rows for the ring, and the tiers are visible. The alternative
+  offered was dropping the mark and keeping the wordmark alone; the glyph
+  was chosen. Second: `◢`/`◣` are U+25E2/U+25E3, in Unicode's Geometric
+  Shapes rather than the Block Elements the rest of the drawing uses, so a
+  font without Geometric Shapes coverage shows **tofu** where the plain
+  `▀▄█` set would not. That is a real cost of the sloped edge and is
+  written down here rather than discovered later; `boot_banner=image` (on
+  a pixel tier) or `off` are the ways out.
+- **The raster is kept where it is genuinely good.** `kgp` and `sixel`
+  carry an actual bitmap, and there `logo.png` looks like the brand asset
+  it is. Nothing about that path changed.
+- **`boot_banner` becomes a choice: `auto` · `blocks` · `image` · `off`.**
+  `auto` is the rule above; `blocks` pins the drawn form everywhere;
+  `image` pins the raster wherever any pixel tier exists at all, which is
+  v0.41.0's behaviour kept reachable; `off` removes the banner. The knob
+  shipped as a bool, so `1` and `0` still read as `auto` and `off` — a
+  `config.toml` written by the old settings modal keeps meaning what it
+  meant, and a test pins that.
+- **No new dependency, no figlet.** The mark is a tuple of four strings.
+
+Three genuine defects surfaced while chasing the wrong diagnosis, and are
+fixed here rather than left for the next report:
+
+- **The drawn banner could be silently clipped, and no height assertion
+  could ever have caught it.** Its CSS pinned it to three rows, so content
+  too wide for the column was *clipped to exactly the height a passing
+  test expected*. The fit was also computed from the terminal width minus
+  a guessed chrome constant, and the real chrome is not constant — the
+  transcript's scrollbar moves it by two. It is now fitted to the widget's
+  own `content_size`, dropping the strapline, then the mark, as the column
+  narrows. The test asserts that no rendered row is wider than the column
+  it goes into; asserting height is what let this through.
+- **The banner path could raise, and would have taken the pane boot with
+  it.** `doxa.images.widget_for` is documented never to raise, but the
+  crop-and-flatten step added in v0.41.0 is DOXA's own code on the near
+  side of that guarantee and runs inside `BootBanner.compose`. Both
+  `from PIL import Image` and the asset lookup sat *outside* the `try`.
+  Pillow is a declared dependency, so the import "cannot" fail — precisely
+  the class of assumption that produces a bug report, and it cost one
+  indent to stop making it.
+- **When the raster is *asked for* and cannot be drawn, the banner says
+  so** in one muted line naming the cause and pointing at `/img`. Only
+  under `image`, never under `auto`: announcing "logo not drawn" over a
+  banner drawing exactly as designed would be noise on most sessions.
+
+Ruled out by measurement, recorded so the next report starts further
+along: **not** an app-size race — under a real Textual driver in a pty the
+banner is constructed with the true terminal width. **Not** packaging —
+built as a wheel, installed into a clean virtualenv and run from a
+directory with no checkout on `sys.path`, the asset resolves and prepares
+to 928×238. **Not** a mount failure — the banner mounts with non-zero
+height on every tier and width tested, 20 columns upward. Worth knowing
+for remote sessions: `textual-image` queries for kitty and sixel support
+with a **0.1 s** timeout where DOXA's own keyboard probe deliberately uses
+0.3 s, documented as "long enough for a round trip through tmux and an ssh
+hop" — so a remote terminal is likely to have its graphics query time out
+and be recorded as half-block, which as of this release is a tier that
+draws the mark and looks right.
+
 ## 0.48.0 — 2026-08-25
 
 **The beliefs chip becomes a surface you can work in.** Five things the

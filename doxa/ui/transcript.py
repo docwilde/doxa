@@ -232,21 +232,44 @@ class ImageBlock(Vertical):
 
 
 class BootBanner(Vertical):
-    """The DOXA mark above a session's opening identity block (v0.41.0).
+    """The DOXA mark above a session's opening identity block.
 
-    Two shapes, chosen by :func:`doxa.banner.use_image` off the render mode
-    and the terminal's width -- the asset at :data:`doxa.banner.COLUMNS`
-    cells wide, or the half-block wordmark. Never the ``[image: ...]``
-    line: this widget is decoration, and a fallback line announcing a
-    decoration that failed is worse than the decoration's absence.
+    **The DRAWN mark is the normal path; the raster is the exception.**
+    That reads backwards from v0.41.0 and is the point of v0.49.0. A
+    terminal without a real pixel protocol gets
+    :func:`doxa.banner.drawn_lines` -- a ring-and-triangle authored cell
+    by cell in half-blocks, with the wordmark and strapline as plain text
+    beside it. Only ``kgp``/``sixel``, which carry an actual bitmap, get
+    ``logo.png``. :func:`doxa.banner.use_image` owns that decision and the
+    ``boot_banner`` setting can pin it either way.
 
-    WIDTH is set here and height is not, deliberately: the image widget
-    derives its rows from the terminal's own cell aspect (see
-    :mod:`doxa.banner`), so a terminal whose cells are not 2:1 gets the
-    right number of rows rather than a letterboxed six."""
+    Never the ``[image: ...]`` line: this widget is decoration, and a
+    fallback line announcing a decoration that failed is worse than the
+    decoration's absence.
+
+    On the raster path WIDTH is set here and height is not, deliberately:
+    the image widget derives its rows from the terminal's own cell aspect
+    (see :mod:`doxa.banner`), so a terminal whose cells are not 2:1 gets
+    the right number of rows rather than a letterboxed six.
+
+    **The drawn form fills itself in on resize, not at compose time**, and
+    that is not fussiness. The chrome between the terminal's width and this
+    widget's content width is not a constant: the block list contributes
+    padding and a vertical scrollbar comes and goes with the transcript,
+    moving it by two. Laying the art out against a GUESSED chrome wrapped
+    it into mush -- measured, at 40 and 20 columns. Art must not wrap, so
+    it is fitted to :attr:`content_size`, which is the real number and is
+    only knowable once Textual has done the layout."""
+
+    #: Below this the explanation line is prose in a column too narrow to
+    #: be prose, so it is dropped rather than wrapped into a paragraph.
+    REASON_COLUMNS = 30
 
     def __init__(self, columns: int) -> None:
         self.columns = columns
+        self._drawn: "Static | None" = None
+        self._reason_widget: "Static | None" = None
+        self._reason = ""
         super().__init__(classes="boot-banner")
 
     def compose(self) -> ComposeResult:
@@ -260,11 +283,34 @@ class BootBanner(Vertical):
             widget.add_class("banner-image")
             yield widget
             return
-        rows = "\n".join(banner_mod.WORDMARK_ROWS)
-        yield Static(
-            f"[#D97757]{rows}[/]\n[#8A8073]{banner_mod.TAGLINE}[/]",
-            classes="banner-wordmark",
-        )
+        # The drawn mark, plus -- only when the raster was ASKED for and
+        # could not be given -- one line saying why (banner.fallback_reason
+        # on why that is rare). Content is filled in by _lay_out, once a
+        # real width exists.
+        self._reason = banner_mod.fallback_reason(mode, self.columns)
+        self._drawn = Static("", classes="banner-wordmark")
+        yield self._drawn
+        if self._reason:
+            self._reason_widget = Static("", classes="banner-reason")
+            yield self._reason_widget
+
+    def on_mount(self) -> None:
+        self._lay_out()
+
+    def on_resize(self) -> None:
+        self._lay_out()
+
+    def _lay_out(self) -> None:
+        """Fit the drawn banner to the width it actually has."""
+        from .. import banner as banner_mod
+
+        if self._drawn is None:
+            return
+        width = self.content_size.width or self.columns
+        self._drawn.update("\n".join(banner_mod.drawn_lines(width)))
+        if self._reason_widget is not None:
+            self._reason_widget.display = width >= self.REASON_COLUMNS
+            self._reason_widget.update(self._reason)
 
 
 class ImageShowcaseBlock(Vertical):
