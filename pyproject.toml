@@ -1,6 +1,6 @@
 [project]
 name = "doxa"
-version = "0.39.0"
+version = "0.41.0"
 description = "A terminal for working with a Claude agent whose memory you can audit."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -8,6 +8,19 @@ dependencies = [
     "claude-agent-sdk>=0.2.144",
     "textual>=5,<6",
     "textual-image>=0.12.0",
+    # NOT a new dependency: textual-image has always required Pillow and it
+    # has always been on disk. What changed in v0.41.0 is who imports it.
+    # doxa.banner opens assets/logo.png itself -- it has to, because
+    # textual-image normalizes with PIL's convert("RGB"), which discards
+    # alpha instead of compositing it, and the logo's transparent
+    # background would render as a white slab on a dark theme. So the
+    # banner crops and flattens the image before handing it over, and this
+    # line moves up out of the dev group on the rule that group's own
+    # comment already stated: code that imports `PIL.Image` directly earns
+    # its own declaration rather than riding another package's coattails.
+    # scripts/record_gif.py, the previous holder of that comment, is
+    # covered by this line too.
+    "pillow>=11",
     # DOXA's memory model IS lore_core -- doxa.engine, doxa.peers,
     # doxa.operators and doxa.transcript all import it, and until v0.37.0
     # it was declared nowhere: a bare clone reached into a LORE Claude
@@ -40,11 +53,6 @@ doxa = "doxa.cli:main"
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
-    # scripts/record_gif.py's own frame-assembly step (rasterized SVG ->
-    # palette-quantized GIF) -- already on disk transitively via
-    # textual-image, but a script that imports `PIL.Image` directly earns
-    # its own line here rather than riding an app dependency's coattails.
-    "pillow>=11",
 ]
 
 [build-system]
@@ -65,9 +73,14 @@ packages = ["doxa"]
 
 # The launcher icon is the repo's own assets/icon.png, mapped into the
 # package at build time (doxa.launcher reads it via importlib.resources)
-# -- one file in git, no duplicate under doxa/.
+# -- one file in git, no duplicate under doxa/. The banner logo joins it
+# on exactly those terms: doxa.banner draws assets/logo.png at the top of
+# every session's opening block, so an INSTALLED doxa has to carry it.
+# Without this line the banner would be a source-checkout-only feature and
+# silently nothing for everyone who installed the documented way.
 [tool.hatch.build.targets.wheel.force-include]
 "assets/icon.png" = "doxa/assets/icon.png"
+"assets/logo.png" = "doxa/assets/logo.png"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

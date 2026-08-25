@@ -4,6 +4,126 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.41.0 — 2026-08-25
+
+**The logo is now the first thing a session shows, and `/img` will tell
+you why it looks the way it does.** DOXA has had a terminal-image ladder
+since v0.13.0 — kitty graphics, sixel, half-block cells, then the
+`[image: …]` line — and almost nothing on the default path ever exercised
+it. The opening block now draws the README's own banner through that same
+ladder, so the renderer is under test on every launch on every terminal,
+and `/img` with no argument reports what this terminal actually granted
+and then demonstrates it.
+
+- **The banner is `assets/logo.png`, whole, at 41 columns.** *Judgment
+  call:* the wide logo rather than the square `icon.png`, because a banner
+  is a wide thing and the square mark drops the wordmark that makes it
+  read as DOXA rather than as a triangle. *Judgment call:* the width is
+  derived, not chosen — `columns = rows × cell_aspect × logo_aspect =
+  6 × 2 × 3.4375 ≈ 41` — because a 1100-pixel image means nothing to an
+  80-column terminal and the only unit that does is cells. 41 is half of
+  an 80-column terminal and a third of a 120, which reads as deliberate at
+  every common width instead of as an image that happened to fit.
+- **Six rows is the budget, and it is the number the module defends.** The
+  opening block is the first thing you see and the transcript scrolls past
+  it; a banner costing fifteen rows is a nuisance by the third session of
+  the day. Six is a quarter of a classic 24-row terminal and about the
+  height of the identity block's own field list directly beneath it, so
+  the banner never outweighs what it introduces. Only WIDTH is pinned —
+  height comes from the image widget, which derives it from *this*
+  terminal's cell aspect, so a terminal whose cells are not 2∶1 gets the
+  right number of rows rather than a letterboxed six.
+- **The text tier gets a wordmark, not `[image: doxa logo]`.** *Judgment
+  call, and the one this feature would have been worst without.* The
+  fallback line exists to say that an image you asked for could not be
+  drawn; it is not fit to be the permanent first line of every session. So
+  the `text` tier — and any terminal under 56 columns, where 41 cells is
+  most of the line and the identity block starts wrapping — gets three
+  rows of half-block glyphs spelling DOXA over the logo's own tagline.
+  Hand-rolled, fifteen columns wide, in one place, no new dependency, and
+  drawn from the same glyph vocabulary the half-block tier uses, so the
+  small sibling looks related to the big one.
+- **On by default, `boot_banner` / `DOXA_BOOT_BANNER=0` to turn it off.**
+  *Judgment call:* default-on rests on the degrade path rather than on the
+  picture — there is no terminal and no width at which this costs more
+  than three rows of something legible — and a default-off banner would
+  also mean the image renderer ships untested on every machine that never
+  finds the switch. Off is genuinely off: no widget, and the rows come
+  back, which a test asserts by measuring where the identity block lands
+  with the banner on versus off.
+- **Half-block was checked by looking at it, not by assuming.** The logo
+  was down-sampled to the exact cell grid at five candidate sizes and
+  eyeballed. The ΔΟΞΑ wordmark holds up; the tagline set into the asset
+  becomes a soft grey rule at any size a terminal can afford. That is the
+  asset's own design rather than damage introduced here, and it is why the
+  wordmark fallback repeats the tagline as real text.
+- **The first screenshot found two defects a green suite had not.** Both
+  are the reason "render it and look at it" is part of shipping an image
+  feature. First: `logo.png` is RGBA with a fully transparent background,
+  and textual-image normalizes with PIL's `convert("RGB")`, which
+  *discards* alpha rather than compositing it — so every transparent pixel
+  came out as the white hiding underneath, and the banner was a glaring
+  white slab on a dark theme. `doxa.banner` now flattens onto the theme's
+  own `#171512` before the widget sees the image. Second: 15% of the
+  asset's width and 26% of its height is transparent margin — page layout
+  for a README, and pure waste inside a six-row budget — so the image is
+  cropped to its alpha bounding box first. That is a third more resolution
+  for the wordmark at no cost in rows, and it is why the banner is 47
+  columns rather than 41: the geometry follows the *inked* aspect,
+  928 ∶ 238, which a test re-measures off the real file so the constant
+  cannot drift away from the asset it describes.
+- **Pillow is now a declared runtime dependency, and is still not a new
+  one.** textual-image has always required it and it has always been on
+  disk; what changed is that DOXA imports it directly, for the compositing
+  above. The line moves up out of the dev group on the rule that group's
+  own comment already stated — code importing `PIL.Image` earns its own
+  declaration instead of riding another package's coattails.
+- **A cell size textual-image *defaulted* is never reported as one it
+  measured.** When neither `ioctl` nor the escape query answers, upstream
+  returns a VT340 constant indistinguishable from a real reading, so the
+  showcase labels that value instead of reprinting it. Under-claiming by
+  one line of text is the side of the trade `doxa/keyboard.py` already
+  argued for. The same guard catches a real upstream crash: on a pty that
+  reports zero columns, `get_cell_size` divides by that zero and raises
+  `ZeroDivisionError` out of its own except clause, which lands here as
+  "not measured" rather than as a broken session.
+- **`/img` with no argument is now the showcase.** *Judgment call on where
+  it lives.* Not `/doctor`: that is a text report with an exit code —
+  `scripts/install.sh` runs `doxa doctor` headless and reads pass/fail out
+  of it — and a check that must mount image widgets to mean anything
+  cannot live there. Not a new `/image` either: `/img` already exists, its
+  registry summary already called it a "terminal image-support probe", and
+  a second command one letter away from it is a coin flip at the
+  autocomplete. `/img <path>` is untouched.
+- **The showcase separates measured, inferred and never-asked, and never
+  collapses the third into the first two.** It reports the detected mode
+  and whether it was probed or forced, whether a terminal actually
+  *answered* (a settled "text" is silence, not a terminal that said no),
+  `textual-image`'s version, and the effective cell size. Then it renders
+  the same asset in every tier it may honestly draw: the detected one plus
+  half-block and text, which need nothing from the terminal. A tier the
+  ladder short-circuited past — sixel, on a terminal that answered for
+  kitty — is named as never asked and is **not drawn**. Pushing a graphics
+  escape at a terminal that has none does not produce a picture, it
+  produces litter in the transcript, and a showcase implying kitty support
+  where there is none is worse than no showcase. A mutation run proves the
+  rule earns its place: relax it and the suite captures raw `_Gi=…`
+  payload in its own stdout.
+- **No new probe, and no new cost at boot.** The banner reads the ladder
+  result `DoxaApp.__init__` already settled. The one addition to that
+  startup window is the terminal's cell size, which `textual-image`
+  resolves with an `ESC[16t` query whenever `ioctl` cannot answer — the
+  same read-stdin hazard `doxa/images.py` and `doxa/keyboard.py` are both
+  built around, so it is settled in the same place, for the same reason,
+  behind the same tty short-circuit. Headless it returns `None` without
+  writing a byte, and it is asked at most once.
+- **An installed DOXA carries the logo.** `pyproject.toml` maps
+  `assets/logo.png` into the wheel at `doxa/assets/logo.png`, on exactly
+  the terms `assets/icon.png` has been mapped since the launcher shipped:
+  one file in git, no duplicate under `doxa/`. Without that line the
+  banner would be a source-checkout-only feature and silently nothing for
+  everyone who installed the documented way.
+
 ## 0.39.0 — 2026-08-25
 
 **A key that does nothing now says why.** DOXA binds `Ctrl+,` to

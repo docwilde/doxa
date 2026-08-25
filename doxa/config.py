@@ -172,6 +172,19 @@ SETTINGS: tuple[Setting, ...] = (
              "(doxa.images.detect_mode)",
     ),
     Setting(
+        key="boot_banner", env="DOXA_BOOT_BANNER", label="boot banner",
+        category="Appearance", kind="bool_on", default="1",
+        help="Draw the DOXA logo above the session's opening identity "
+             "block (doxa.banner.enabled)",
+        note="Six rows at 41 columns on a terminal that can draw pixels; a "
+             "three-row half-block wordmark on the text tier or below 56 "
+             "columns, because `[image: doxa logo]` as the first line of "
+             "every session is honest and unusable. Off removes it "
+             "entirely -- the identity block is then the first thing on "
+             "screen, exactly as before v0.41.0. /img reports what your "
+             "terminal actually granted.",
+    ),
+    Setting(
         key="show_reasoning", env="DOXA_SHOW_REASONING", label="show reasoning",
         category="Appearance", kind="bool_on", default="1",
         help="Stream the model's summarized reasoning into a collapsed "

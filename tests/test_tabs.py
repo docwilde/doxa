@@ -276,20 +276,24 @@ async def test_palette_stop_session_is_tab_scoped(tmp_path):
 
 @pytest.mark.asyncio
 async def test_slash_commands_stay_pane_scoped(tmp_path):
-    """A /img usage error in tab two lands in tab two's block list, not in
-    tab one's -- the input handler lives on the pane."""
+    """A /img error in tab two lands in tab two's block list, not in tab
+    one's -- the input handler lives on the pane."""
     app, engines = _app(tmp_path)
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.press("ctrl+t")
         assert await _wait(pilot, lambda: len(engines) == 2 and engines[1].started)
         second = app.panes()[1]
-        second.query_one("#prompt-input").value = "/img"
+        # A path that cannot exist. The claim under test is WHICH pane the
+        # block lands in, so any command yielding one per-pane system block
+        # serves; bare `/img` was that command until v0.41.0 gave it the
+        # image showcase instead of a usage error.
+        second.query_one("#prompt-input").value = "/img /nonexistent/pic.png"
         await pilot.press("enter")
 
         def _sys_blocks(pane):
             return [b for b in pane.query(SystemBlock) if b.id != "identity-block"]
 
         assert await _wait(pilot, lambda: _sys_blocks(second))
-        assert "usage: /img" in _sys_blocks(second)[0].text
+        assert "no such file" in _sys_blocks(second)[0].text
         assert not _sys_blocks(app.panes()[0])

@@ -500,6 +500,41 @@ ToolChip > CollapsibleTitle {
     color: #D8CDBB;
 }
 
+/* /img's report table and the per-tier labels above each rendered
+   sample -- chrome around the pictures, so the muted system ramp. */
+.image-diagnostics {
+    color: #8A8073;
+    padding: 1 0 0 0;
+}
+
+.image-mode-label {
+    color: #D97757;
+    padding: 1 0 0 0;
+}
+
+/* The opening banner (doxa/banner.py). Width is set on the widget in
+   CELLS -- see BootBanner -- and height is deliberately auto so the image
+   derives its rows from THIS terminal's real cell aspect rather than from
+   an assumed 2:1. max-height is the row budget's backstop: a terminal
+   reporting a wildly non-square cell may not spend half the budget again.
+   No border, no background: the banner introduces the identity block
+   below it and must not read as a block of its own. */
+.boot-banner {
+    height: auto;
+    padding: 0 2;
+    margin-bottom: 1;
+}
+
+.banner-image {
+    height: auto;
+    max-height: 9;
+    max-width: 100%;
+}
+
+.banner-wordmark {
+    height: 3;
+}
+
 .thinking {
     color: #D97757;
     height: 1;

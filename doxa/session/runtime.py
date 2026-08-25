@@ -24,6 +24,7 @@ import contextlib
 from textual.containers import VerticalScroll
 from textual.widgets import Static, TabbedContent
 
+from .. import banner as banner_mod
 from .. import identity as identity_mod
 from .. import naming as naming_mod
 from .. import notify as notify_mod
@@ -33,6 +34,7 @@ from ..ui.dialogs import NeedsInputPopup
 from ..ui.labels import _escape_markup, _needs_input_summary, _subagent_label
 from ..ui.statusline import GitLine
 from ..ui.transcript import (
+    BootBanner,
     PeerMessageBlock,
     SubagentLine,
     SubagentTranscriptTab,
@@ -121,6 +123,14 @@ class PaneRuntimeMixin:
         # Initial identity block: who/where this session actually is --
         # only fields the CLI/config really reported, never guesses.
         block_list = self.query_one("#block-list", VerticalScroll)
+        # The banner introduces the identity block, so it mounts first and
+        # only where there was nothing before it -- switch_engine re-runs
+        # _boot into a pane that already has a transcript, and a logo
+        # appearing halfway down one is not an opening block, it is litter.
+        # No probe of its own: doxa.images.detect_mode() was settled in
+        # DoxaApp.__init__ and this reads the cache (boot cost: zero).
+        if banner_mod.enabled() and not block_list.children:
+            await block_list.mount(BootBanner(self.app.size.width))
         identity = SystemBlock(self._identity_text(git_cwd))
         identity.id = "identity-block"
         await block_list.mount(identity)

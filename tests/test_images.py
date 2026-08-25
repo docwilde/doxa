@@ -304,7 +304,7 @@ async def test_img_command_mounts_block_with_fallback(monkeypatch, tmp_path, png
 
 
 @pytest.mark.asyncio
-async def test_img_command_missing_file_and_usage(monkeypatch, tmp_path):
+async def test_img_command_missing_file_and_bare_showcase(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([])
     )
@@ -323,11 +323,16 @@ async def test_img_command_missing_file_and_usage(monkeypatch, tmp_path):
             await pilot.pause(0.02)
         assert "no such file" in _blocks()[0].text
 
+        # Bare /img is the showcase since v0.41.0, not a usage error -- but
+        # it must still never mount an ImageBlock, which is the /img <path>
+        # widget and belongs to a path the user did not give.
+        from doxa.app import ImageShowcaseBlock
+
         app.query_one("#prompt-input").value = "/img"
         await pilot.press("enter")
         for _ in range(100):
-            if len(_blocks()) >= 2:
+            if app.query(ImageShowcaseBlock):
                 break
             await pilot.pause(0.02)
-        assert "usage: /img" in _blocks()[1].text
+        assert app.query(ImageShowcaseBlock)
         assert not app.query(ImageBlock)

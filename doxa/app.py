@@ -196,7 +196,9 @@ from .ui.transcript import (  # noqa: F401
     _composed,
     _restore_pane_id,
     ArchivedSessionTab,
+    BootBanner,
     ImageBlock,
+    ImageShowcaseBlock,
     mount_transcript,
     PeerMessageBlock,
     ReasoningSection,
@@ -426,6 +428,12 @@ class DoxaApp(App):
         # stdin, which Textual's own reader thread will grab the moment
         # App.run() starts (doxa/images.py's detection discipline note).
         images_mod.detect_mode()
+        # Same window, same reason (v0.41.0): textual-image resolves the
+        # terminal's CELL SIZE with an ESC[16t query whenever ioctl cannot
+        # answer, and reads that reply off stdin as well. Settling it here
+        # keeps the query out of the opening banner's first render AND
+        # gives /img a measured cell size to report rather than a guess.
+        images_mod.cell_size()
         # Same window, same reason (item O): doxa.keyboard asks the terminal
         # whether it grants the kitty keyboard protocol and reads the reply
         # off stdin. Textual requests the protocol but never reports whether

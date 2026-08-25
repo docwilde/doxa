@@ -104,8 +104,10 @@ REGISTRY: tuple[SlashCommand, ...] = (
     SlashCommand(
         name="/img",
         group="Tools & config",
-        summary="Render an image file here (terminal image-support probe)",
-        usage="/img <path>",
+        summary="What this terminal can draw, measured and shown in every "
+                "tier; with a path, render that file",
+        usage="/img [path]",
+        palette="Image support",
     ),
     SlashCommand(
         name="/login",

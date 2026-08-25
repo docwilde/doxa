@@ -379,6 +379,34 @@ async def _drive_sessions(app: DoxaApp, pilot) -> None:
 
 
 # --------------------------------------------------------------------- #
+# Scenes: banner -- the opening block with the DOXA logo above the
+# identity fields; image-support -- /img's measurement plus a render in
+# every tier this terminal may honestly draw.
+#
+# Both force the HALF-BLOCK tier, and that is a constraint of the medium
+# rather than a preference. Textual's SVG export writes CELLS: half-block
+# glyphs survive it as real colored rectangles, while kitty-graphics and
+# sixel are escape sequences a terminal interprets and an SVG has no
+# representation for at all. So half-block is the only tier a still can
+# capture -- which makes these shots a floor, not a ceiling. On a terminal
+# that answers the graphics query the same banner is drawn at full pixel
+# resolution, and `/img` in that terminal is where you see the difference.
+# --------------------------------------------------------------------- #
+
+_HALFBLOCK = {"DOXA_IMAGE_MODE": "halfblock"}
+
+
+async def _drive_banner(app: DoxaApp, pilot) -> None:
+    await _settle(pilot)
+
+
+async def _drive_image_support(app: DoxaApp, pilot) -> None:
+    await _settle(pilot)
+    await app.active_pane._cmd_img("")
+    await _settle(pilot)
+
+
+# --------------------------------------------------------------------- #
 
 @dataclass
 class Scene:
@@ -387,6 +415,11 @@ class Scene:
     size: tuple[int, int] = (104, 32)
     engine_factory: "Callable[[], FakeEngine] | None" = None
     new_session_factory: "Callable[[], FakeEngine] | None" = None
+    env: "dict[str, str] | None" = None
+    """Environment for the whole scene, set BEFORE the app is constructed
+    and removed after. The image scenes need it: the banner is mounted
+    during pane boot, which is over before `drive` gets its first pause,
+    so forcing the tier from inside a driver would be too late."""
 
 
 # `size` is a (cols, rows) TERMINAL geometry, not a pixel one -- Textual's
@@ -425,15 +458,29 @@ SCENES: list[Scene] = [
           new_session_factory=lambda: FakeEngine([], model="claude-sonnet-4-5")),
     Scene("sessions", _drive_sessions, size=(172, 47),
           engine_factory=_hero_engine),
+    Scene("banner", _drive_banner, size=(120, 32),
+          engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
+          env=_HALFBLOCK),
+    Scene("image-support", _drive_image_support, size=(172, 47),
+          engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
+          env=_HALFBLOCK),
 ]
 
 
 async def _run_scene(scene: Scene) -> None:
-    app = DoxaApp(
-        cwd=str(ROOT),
-        engine_factory=scene.engine_factory,
-        new_session_factory=scene.new_session_factory,
-    )
+    # Scene env is applied around app CONSTRUCTION, not just the drive:
+    # DoxaApp.__init__ settles the image probe and the pane mounts its
+    # banner during boot, both before a driver's first pause.
+    with mock.patch.dict(os.environ, scene.env or {}):
+        app = DoxaApp(
+            cwd=str(ROOT),
+            engine_factory=scene.engine_factory,
+            new_session_factory=scene.new_session_factory,
+        )
+        await _export(app, scene)
+
+
+async def _export(app: DoxaApp, scene: Scene) -> None:
     with _fake_identity():
         async with app.run_test(size=scene.size) as pilot:
             await scene.drive(app, pilot)

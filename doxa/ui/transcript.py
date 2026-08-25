@@ -231,6 +231,93 @@ class ImageBlock(Vertical):
         yield images_mod.widget_for(self.path, self.path)
 
 
+class BootBanner(Vertical):
+    """The DOXA mark above a session's opening identity block (v0.41.0).
+
+    Two shapes, chosen by :func:`doxa.banner.use_image` off the render mode
+    and the terminal's width -- the asset at :data:`doxa.banner.COLUMNS`
+    cells wide, or the half-block wordmark. Never the ``[image: ...]``
+    line: this widget is decoration, and a fallback line announcing a
+    decoration that failed is worse than the decoration's absence.
+
+    WIDTH is set here and height is not, deliberately: the image widget
+    derives its rows from the terminal's own cell aspect (see
+    :mod:`doxa.banner`), so a terminal whose cells are not 2:1 gets the
+    right number of rows rather than a letterboxed six."""
+
+    def __init__(self, columns: int) -> None:
+        self.columns = columns
+        super().__init__(classes="boot-banner")
+
+    def compose(self) -> ComposeResult:
+        from .. import banner as banner_mod
+
+        mode = images_mod.detect_mode()
+        if banner_mod.use_image(mode, self.columns):
+            source = banner_mod.image_source()
+            widget = images_mod.widget_for(source, "doxa logo", mode=mode)
+            widget.styles.width = banner_mod.COLUMNS
+            widget.add_class("banner-image")
+            yield widget
+            return
+        rows = "\n".join(banner_mod.WORDMARK_ROWS)
+        yield Static(
+            f"[#D97757]{rows}[/]\n[#8A8073]{banner_mod.TAGLINE}[/]",
+            classes="banner-wordmark",
+        )
+
+
+class ImageShowcaseBlock(Vertical):
+    """``/img`` with no argument: what this terminal can ACTUALLY do with
+    images, measured, and then demonstrated in every tier it may honestly
+    draw (v0.41.0).
+
+    It is one block rather than a `/doctor` section on purpose. `/doctor`
+    is a text report with an exit code -- ``scripts/install.sh`` runs
+    ``doxa doctor`` headless and reads pass/fail out of it, and a check
+    that has to mount image widgets to mean anything cannot live there.
+    It is `/img` rather than a new `/image` for the opposite reason: `/img`
+    already exists, its registry summary already calls it "terminal
+    image-support probe", and a second command one letter away from it is a
+    coin flip at the autocomplete. ``/img <path>`` is untouched.
+
+    Every rendered tier is one this terminal answered for
+    (:func:`doxa.images.renderable_modes`). A tier that was never asked
+    about is named in the report as never asked, and NOT drawn -- pushing a
+    TGP escape at a terminal that has no TGP does not produce a picture, it
+    produces litter, and a showcase implying kitty support where there is
+    none is worse than no showcase."""
+
+    def compose(self) -> ComposeResult:
+        from .. import banner as banner_mod
+
+        yield Static("▎ img · terminal image support", classes="image-caption")
+        rows = images_mod.diagnostics()
+        pad = max(len(label) for label, _ in rows)
+        yield Static(
+            "\n".join(f"{label.ljust(pad)}  {value}" for label, value in rows),
+            classes="image-diagnostics",
+        )
+        if banner_mod.image_source() is None:
+            yield Static(
+                "assets/logo.png is not on disk — nothing to render with",
+                classes="image-fallback",
+            )
+            return
+        for mode in images_mod.renderable_modes():
+            yield Static(f"── {mode} ──", classes="image-mode-label")
+            widget = images_mod.widget_for(
+                banner_mod.image_source(), "doxa logo", mode=mode
+            )
+            if mode != "text":
+                # The text tier's demonstration IS the one-line fallback;
+                # giving it the image geometry would be dressing it up as
+                # something it is not.
+                widget.styles.width = banner_mod.COLUMNS
+                widget.add_class("banner-image")
+            yield widget
+
+
 class ShellBlock(Static):
     """One ``!`` command and what it printed -- item Q's transcript block.
 

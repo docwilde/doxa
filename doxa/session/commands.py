@@ -42,7 +42,7 @@ from ..ui.labels import (
     context_breakdown_text,
     help_text,
 )
-from ..ui.transcript import ImageBlock
+from ..ui.transcript import ImageBlock, ImageShowcaseBlock
 
 
 @dataclass(frozen=True)
@@ -585,10 +585,18 @@ class PaneCommandsMixin:
         )
 
     async def _cmd_img(self, args: str) -> None:
-        # Debug render site for image support -- see ImageBlock.
+        # Debug render site for image support -- see ImageBlock. With NO
+        # argument it is the showcase rather than a usage error: this
+        # command's whole reason to exist is "can this terminal draw
+        # pictures", and it now answers that with the measurement plus a
+        # render in every tier it may honestly draw. ImageShowcaseBlock's
+        # docstring carries the argument for putting it here instead of in
+        # /doctor or in a second, near-homonym /image.
         path = os.path.expanduser(args) if args else ""
         if not path:
-            await self._system("usage: /img <path>")
+            block_list = self.query_one("#block-list", VerticalScroll)
+            await block_list.mount(ImageShowcaseBlock())
+            block_list.scroll_end(animate=False)
             return
         if not os.path.isfile(path):
             await self._system(f"img: no such file: {path}")
