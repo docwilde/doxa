@@ -949,7 +949,7 @@ class SessionDaemon:
             # back to check on it.
             "permission_mode": getattr(self.engine, "permission_mode", None),
             # Whether THIS daemon's CLI was spawned with the arming flag
-            # (v0.59.0). A client cannot work this out for itself -- it did
+            # (v0.58.0). A client cannot work this out for itself -- it did
             # not build the argv -- and every surface it paints derives
             # from it, so it rides the status reply like the mode does.
             "bypass_armed": bool(getattr(self.engine, "bypass_armed", False)),

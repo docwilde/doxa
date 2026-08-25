@@ -1920,7 +1920,7 @@ class DoxaApp(App):
         pane = self.active_pane
         if pane is None or pane.engine is None:
             return
-        # The ring is per-session since v0.59.0: a session not spawned
+        # The ring is per-session since v0.58.0: a session not spawned
         # with the arming flag has no bypassPermissions in it, so the key
         # steps straight from auto back to default rather than offering a
         # mode the CLI would refuse.

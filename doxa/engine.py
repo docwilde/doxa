@@ -250,7 +250,7 @@ PERMISSION_MODES = CYCLE_MODES + GATED_MODES
 DEFAULT_PERMISSION_MODE = "default"
 
 
-# -- launch-time arming (v0.59.0) --------------------------------------
+# -- launch-time arming (v0.58.0) --------------------------------------
 #
 # Reported: "i cannot cycle past auto to 'bypass': i get an error message
 # that the session didnt start with a specific parameter". Measured, by
@@ -360,7 +360,7 @@ def next_cycle_mode(mode: "str | None", armed: bool = False) -> str:
     keystroke can reach is therefore exactly one derived sequence, and
     changing it means changing :func:`available_modes`.
 
-    Since v0.59.0 that set is per-SESSION rather than global, which is a
+    Since v0.58.0 that set is per-SESSION rather than global, which is a
     better invariant than the constant it replaced: an unarmed session
     reaches four modes, an armed one reaches five, and ``dontAsk`` is
     unreachable in both. `armed` defaults to False so that any caller
@@ -1123,7 +1123,7 @@ class SessionEngine:
         self.permission_mode: str = permission_mode_default()
         # Whether THIS session's CLI was spawned with the arming flag, and
         # therefore whether bypassPermissions is reachable in it at all
-        # (v0.59.0). Read once, here, at construction -- not per call --
+        # (v0.58.0). Read once, here, at construction -- not per call --
         # because it describes how the subprocess was launched. Flipping
         # the setting later cannot retrofit a running session's argv, and
         # this attribute is what stops DOXA pretending otherwise.
@@ -1850,7 +1850,7 @@ class SessionEngine:
             # The arming flag, and ONLY when this session is armed. None
             # renders as a bare `--allow-dangerously-skip-permissions`
             # (SDK subprocess_cli.py). An unarmed session's argv is
-            # byte-identical to what it was before v0.59.0 -- adding a
+            # byte-identical to what it was before v0.58.0 -- adding a
             # capability to every session by default is exactly what this
             # change refused to do.
             **({"extra_args": {BYPASS_ARM_FLAG: None}}

@@ -1,6 +1,6 @@
 """doxa.banner -- the DOXA mark at the top of a session's opening block.
 
-**Read the ladder in this order, because v0.60.0 inverted it.** The DRAWN
+**Read the ladder in this order, because v0.58.0 inverted it.** The DRAWN
 mark is the normal path. The raster ``logo.png`` is the exception, for the
 terminals that earn it.
 
@@ -177,7 +177,7 @@ MUTED_COLOR = "#8A8073"
 def drawn_lines(content_columns: int) -> "list[str]":
     """The drawn banner as Textual markup rows, fitted to the width it has.
 
-    THIS IS THE NORMAL PATH, not a fallback. Since v0.60.0 the raster is
+    THIS IS THE NORMAL PATH, not a fallback. Since v0.58.0 the raster is
     the exception -- see :func:`use_image` -- and every terminal without a
     real pixel protocol gets these rows.
 
@@ -221,7 +221,7 @@ _LEGACY_ON = ("1", "true", "yes", "on")
 def form() -> str:
     """How the opening banner should be drawn: one of :data:`FORMS`.
 
-    ``auto`` (default) is the v0.60.0 rule -- drawn blocks where a raster
+    ``auto`` (default) is the v0.58.0 rule -- drawn blocks where a raster
     would only be a downscale, the raster where the terminal has real
     pixels. ``blocks`` and ``image`` pin it either way; ``off`` removes the
     banner. Legacy ``1``/``0`` read as ``auto``/``off``."""
@@ -290,7 +290,7 @@ def _prepared() -> Any:
     Cached: one decode and one composite per process, and the result is
     copied per caller so no widget can mutate another's image.
 
-    **Everything is inside the try, including the import** (v0.60.0).
+    **Everything is inside the try, including the import** (v0.58.0).
     ``doxa.images.widget_for`` is documented never to raise and always to
     return a mountable widget, but this function is DOXA's own code on the
     near side of that guarantee: it runs during ``BootBanner.compose``,
@@ -327,7 +327,7 @@ def image_source() -> Any:
 def use_image(mode: str, columns: int) -> bool:
     """Should the banner be the RASTER logo rather than the drawn mark?
 
-    **The v0.60.0 rule, and it came from a user looking at the thing.**
+    **The v0.58.0 rule, and it came from a user looking at the thing.**
     The report was "quite pixelated -- then i would prefer to just show it
     as unicode/ASCI blocks", against a half-block render on an ordinary
     Linux terminal. That is not a bug; it is arithmetic. Six rows of

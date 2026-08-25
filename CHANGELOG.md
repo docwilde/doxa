@@ -4,138 +4,14 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
-## 0.60.0 — 2026-08-25
-
-**The mark is a ring around a triangle, drawn in `█` and spaces and
-nothing else.** Seven rows by thirteen columns. This **supersedes the mark
-described under 0.55.0** — that entry stays as the historical record, but
-the quadrant-triangle shape it describes is no longer what ships.
-
-Every candidate was rendered and looked at rather than argued about, and
-each rejection closed off a family of solutions rather than one drawing:
-
-- **Half blocks are out** — *"do not use half-blocks / it leaves gaps"*.
-  `▀`/`▄` are positioned against the font's own baseline and leading, so a
-  column of them seams horizontally instead of reading as one stroke.
-- **Quadrant triangles are out.** 0.55.0 used `◢`/`◣` (U+25E2/U+25E3) for
-  a sloped edge. They live in Unicode's Geometric Shapes, not Block
-  Elements — a font can cover one and not the other, and that failure mode
-  is **tofu**, not something plainer.
-- **Wordmark-only was offered and overruled.** When even `█` was observed
-  rendering short, dropping the mark entirely was put forward. The answer
-  was **"No, use the full block"**.
-- **The construction is written down, so the shape is tunable and not a
-  magic constant.** A circle of radius `(rows-1)/2` rasterised on a grid
-  twice as wide as it is tall — terminal cells run about 1:2, so widening
-  the grid is what makes the ring round rather than an ellipse — a
-  one-cell stroke, and a triangle with apex at `cy - R*0.55`, base at
-  `cy + R*0.62`, half-width `t * R * 0.60`. The shipped rows are
-  **hand-tightened at the poles** and deliberately differ from that
-  formula: re-rasterising gives seven cells top and bottom where these
-  have five, which at this size reads as a flattened cap rather than a
-  curve. That difference is recorded beside the constant so nobody
-  "corrects" it back to the generator's output. A 9×17 version reads well
-  too, if seven rows ever feels tight beside the text.
-- **The font caveat, accepted knowingly.** Some monospace fonts render
-  Block Elements at reduced height and some terminals add leading, so
-  stacked full blocks can show faint **horizontal banding**. That is the
-  terminal drawing the glyph, not DOXA drawing the mark, and there is no
-  cell-level fix available from this side. It is written down here so a
-  reader who hits it knows the mark is not broken; `boot_banner=image` (on
-  a pixel tier) or `off` are the ways out.
-- **The `banner-blocks` screenshot scene grew from 21 rows to 25.** The
-  mark went from four rows to seven, and at 21 the transcript overflowed,
-  scrolled to its tail, and cut the top of the ring off in the shot. A
-  scene has to be tall enough to hold the thing it is a picture of.
-
-Everything else from 0.55.0 stands unchanged: the drawn form as the normal
-path, the raster reserved for `kgp`/`sixel`, the `boot_banner` setting, the
-fit against the widget's own `content_size`, and the crash containment.
-
-## 0.59.0 — 2026-08-25
-
-**v0.50.0 shipped a cycle that offered a mode the CLI then refused.**
-Reported: *"i cannot cycle past auto to 'bypass': i get an error message
-that the session didnt start with a specific parameter"*. Four of five
-modes cycled; the fifth errored after the keystroke. That is the worst
-shape a defect can take — the user learns the feature is broken rather
-than that their session is not armed.
-
-**Measured, by driving the real CLI through the SDK** — `set_permission_mode`
-called for every mode on an unarmed session, then again on an armed one:
-
-| | unarmed | armed |
-|---|---|---|
-| `acceptEdits` `plan` `auto` `dontAsk` `default` | OK | OK |
-| `bypassPermissions` | **refused** | OK |
-
-> Cannot set permission mode to bypassPermissions because the session was
-> not launched with `--dangerously-skip-permissions`
-
-So **exactly one mode carries a launch-time prerequisite**. `auto` does
-not — worth confirming rather than assuming, since a second mode with a
-hidden requirement would have been the same defect twice. The CLI splits
-the capability across two flags deliberately:
-`--allow-dangerously-skip-permissions` **arms** it at launch,
-`--dangerously-skip-permissions` **uses** it.
-
-**The fix is not "add the flag".** Arming every session would make the
-shipped cycle work as advertised and was rejected: it would put every
-DOXA session one keystroke from no permission checks at all, forever,
-including sessions opened in repositories the user has never read. The
-CLI models this as a launch-time decision, and that is a considered
-design worth inheriting rather than routing around.
-
-- **New setting `allow_bypass` / `DOXA_ALLOW_BYPASS`, default OFF.** On,
-  sessions spawned afterwards get `--allow-dangerously-skip-permissions`
-  through `ClaudeAgentOptions.extra_args` (whose `None` value the SDK
-  renders as a bare flag — verified in `subprocess_cli.py`, not assumed).
-  Off, a session's argv is byte-identical to what it was before this
-  release.
-- **An unarmed session does not show the mode at all.** Per the user:
-  *"if it wasnt started with that flag, the mode option should not even
-  appear."* It is absent from the Shift+Tab cycle (`default → acceptEdits
-  → plan → auto → default`), absent from the chip's picker, and absent
-  from `/mode`'s list. The principle is written into the code so it
-  survives: **an option a user can see is an option that works.** Same
-  rule the beliefs browser follows when the store is too old for a write
-  path — the control is gone and a line says why, rather than a button
-  that fails.
-- **One place still names it: `/mode bypassPermissions`.** A user who
-  types it by name gets the reason, not "unknown mode" — which flag is
-  missing, that arming is decided at launch and cannot be applied to a
-  running session, and how to get a session that has it.
-- **The reachable set is now a function of the session, not a constant**,
-  and that is a better invariant than the one it replaces. The test says:
-  an unarmed session reaches exactly four modes, an armed one exactly
-  five, `dontAsk` is unreachable in both, and the step function is total
-  over whichever ring applies. `next_cycle_mode`'s `armed` argument
-  defaults to `False`, so a caller that has not been taught about arming
-  gets the narrower ring — the safe direction for a default to fail in.
-- **Every surface derives from one function** (`engine.available_modes`),
-  with the cycle derived from it by intersection. Three copies of the rule
-  would be three chances for one of them to keep offering the broken mode
-  — and the test that pins this caught exactly that during development:
-  `/mode`'s "⚠ marks…" footer was still listing `UNASKED_MODES` globally
-  and leaked `bypassPermissions` into an unarmed listing.
-- **Arming cannot be retrofitted.** It is argv. Turning the setting on
-  does not arm sessions already running, and DOXA says so rather than
-  pretending; a running session's `bypass_armed` is read once, at
-  construction.
-- **A restored session cannot come back in a mode it cannot hold.**
-  Restore and auto-resume rebuild the engine, which re-reads both the
-  persisted mode and the arming setting; the persistable set is already
-  narrower than the armed set, so a stored `bypassPermissions` is
-  impossible. A connect-time clamp is the belt to that braces — a session
-  is never spawned asking for a mode its own argv cannot support, because
-  a connect the CLI rejects outright is a dead tab.
-- **Daemon parity:** `bypass_armed` rides the status and hello frames, so
-  a reattaching client never paints a cycle its daemon would refuse.
-
-50 tests in `tests/test_permission_mode.py`, **19 verified failing**
-against v0.50.0. Suite: **1162 passed** on the tree this lands on.
-
 ## 0.58.0 — 2026-08-25
+
+Three branches that were in flight together and land together, so they
+share one version rather than three tags on one tree -- the same call
+0.56.0 made, and for the same reason: a tag is a tree state, and these
+three have only one between them.
+
+### The shortcut launches THIS doxa, the window is called DOXA, and a read-only tab closes
 
 **Three reports about DOXA's own identity: which DOXA the start-menu
 shortcut actually launches, what the terminal window is called, and a tab
@@ -343,6 +219,137 @@ the next tab kind shipping unclosable:
 
 App-level quitting is unchanged and is still Ctrl+C: one press detaches
 every tab, a second within two seconds stops every session.
+
+### `bypassPermissions` needs a launch flag, so unarmed sessions no longer offer it
+
+**v0.50.0 shipped a cycle that offered a mode the CLI then refused.**
+Reported: *"i cannot cycle past auto to 'bypass': i get an error message
+that the session didnt start with a specific parameter"*. Four of five
+modes cycled; the fifth errored after the keystroke. That is the worst
+shape a defect can take — the user learns the feature is broken rather
+than that their session is not armed.
+
+**Measured, by driving the real CLI through the SDK** — `set_permission_mode`
+called for every mode on an unarmed session, then again on an armed one:
+
+| | unarmed | armed |
+|---|---|---|
+| `acceptEdits` `plan` `auto` `dontAsk` `default` | OK | OK |
+| `bypassPermissions` | **refused** | OK |
+
+> Cannot set permission mode to bypassPermissions because the session was
+> not launched with `--dangerously-skip-permissions`
+
+So **exactly one mode carries a launch-time prerequisite**. `auto` does
+not — worth confirming rather than assuming, since a second mode with a
+hidden requirement would have been the same defect twice. The CLI splits
+the capability across two flags deliberately:
+`--allow-dangerously-skip-permissions` **arms** it at launch,
+`--dangerously-skip-permissions` **uses** it.
+
+**The fix is not "add the flag".** Arming every session would make the
+shipped cycle work as advertised and was rejected: it would put every
+DOXA session one keystroke from no permission checks at all, forever,
+including sessions opened in repositories the user has never read. The
+CLI models this as a launch-time decision, and that is a considered
+design worth inheriting rather than routing around.
+
+- **New setting `allow_bypass` / `DOXA_ALLOW_BYPASS`, default OFF.** On,
+  sessions spawned afterwards get `--allow-dangerously-skip-permissions`
+  through `ClaudeAgentOptions.extra_args` (whose `None` value the SDK
+  renders as a bare flag — verified in `subprocess_cli.py`, not assumed).
+  Off, a session's argv is byte-identical to what it was before this
+  release.
+- **An unarmed session does not show the mode at all.** Per the user:
+  *"if it wasnt started with that flag, the mode option should not even
+  appear."* It is absent from the Shift+Tab cycle (`default → acceptEdits
+  → plan → auto → default`), absent from the chip's picker, and absent
+  from `/mode`'s list. The principle is written into the code so it
+  survives: **an option a user can see is an option that works.** Same
+  rule the beliefs browser follows when the store is too old for a write
+  path — the control is gone and a line says why, rather than a button
+  that fails.
+- **One place still names it: `/mode bypassPermissions`.** A user who
+  types it by name gets the reason, not "unknown mode" — which flag is
+  missing, that arming is decided at launch and cannot be applied to a
+  running session, and how to get a session that has it.
+- **The reachable set is now a function of the session, not a constant**,
+  and that is a better invariant than the one it replaces. The test says:
+  an unarmed session reaches exactly four modes, an armed one exactly
+  five, `dontAsk` is unreachable in both, and the step function is total
+  over whichever ring applies. `next_cycle_mode`'s `armed` argument
+  defaults to `False`, so a caller that has not been taught about arming
+  gets the narrower ring — the safe direction for a default to fail in.
+- **Every surface derives from one function** (`engine.available_modes`),
+  with the cycle derived from it by intersection. Three copies of the rule
+  would be three chances for one of them to keep offering the broken mode
+  — and the test that pins this caught exactly that during development:
+  `/mode`'s "⚠ marks…" footer was still listing `UNASKED_MODES` globally
+  and leaked `bypassPermissions` into an unarmed listing.
+- **Arming cannot be retrofitted.** It is argv. Turning the setting on
+  does not arm sessions already running, and DOXA says so rather than
+  pretending; a running session's `bypass_armed` is read once, at
+  construction.
+- **A restored session cannot come back in a mode it cannot hold.**
+  Restore and auto-resume rebuild the engine, which re-reads both the
+  persisted mode and the arming setting; the persistable set is already
+  narrower than the armed set, so a stored `bypassPermissions` is
+  impossible. A connect-time clamp is the belt to that braces — a session
+  is never spawned asking for a mode its own argv cannot support, because
+  a connect the CLI rejects outright is a dead tab.
+- **Daemon parity:** `bypass_armed` rides the status and hello frames, so
+  a reattaching client never paints a cycle its daemon would refuse.
+
+50 tests in `tests/test_permission_mode.py`, **19 verified failing**
+against v0.50.0. Suite: **1162 passed** on the tree this lands on.
+
+### A ring around a triangle, in full blocks only
+
+**The mark is a ring around a triangle, drawn in `█` and spaces and
+nothing else.** Seven rows by thirteen columns. This **supersedes the mark
+described under 0.55.0** — that entry stays as the historical record, but
+the quadrant-triangle shape it describes is no longer what ships.
+
+Every candidate was rendered and looked at rather than argued about, and
+each rejection closed off a family of solutions rather than one drawing:
+
+- **Half blocks are out** — *"do not use half-blocks / it leaves gaps"*.
+  `▀`/`▄` are positioned against the font's own baseline and leading, so a
+  column of them seams horizontally instead of reading as one stroke.
+- **Quadrant triangles are out.** 0.55.0 used `◢`/`◣` (U+25E2/U+25E3) for
+  a sloped edge. They live in Unicode's Geometric Shapes, not Block
+  Elements — a font can cover one and not the other, and that failure mode
+  is **tofu**, not something plainer.
+- **Wordmark-only was offered and overruled.** When even `█` was observed
+  rendering short, dropping the mark entirely was put forward. The answer
+  was **"No, use the full block"**.
+- **The construction is written down, so the shape is tunable and not a
+  magic constant.** A circle of radius `(rows-1)/2` rasterised on a grid
+  twice as wide as it is tall — terminal cells run about 1:2, so widening
+  the grid is what makes the ring round rather than an ellipse — a
+  one-cell stroke, and a triangle with apex at `cy - R*0.55`, base at
+  `cy + R*0.62`, half-width `t * R * 0.60`. The shipped rows are
+  **hand-tightened at the poles** and deliberately differ from that
+  formula: re-rasterising gives seven cells top and bottom where these
+  have five, which at this size reads as a flattened cap rather than a
+  curve. That difference is recorded beside the constant so nobody
+  "corrects" it back to the generator's output. A 9×17 version reads well
+  too, if seven rows ever feels tight beside the text.
+- **The font caveat, accepted knowingly.** Some monospace fonts render
+  Block Elements at reduced height and some terminals add leading, so
+  stacked full blocks can show faint **horizontal banding**. That is the
+  terminal drawing the glyph, not DOXA drawing the mark, and there is no
+  cell-level fix available from this side. It is written down here so a
+  reader who hits it knows the mark is not broken; `boot_banner=image` (on
+  a pixel tier) or `off` are the ways out.
+- **The `banner-blocks` screenshot scene grew from 21 rows to 25.** The
+  mark went from four rows to seven, and at 21 the transcript overflowed,
+  scrolled to its tail, and cut the top of the ring off in the shot. A
+  scene has to be tall enough to hold the thing it is a picture of.
+
+Everything else from 0.55.0 stands unchanged: the drawn form as the normal
+path, the raster reserved for `kgp`/`sixel`, the `boot_banner` setting, the
+fit against the widget's own `content_size`, and the crash containment.
 
 ## 0.57.0 — 2026-08-25
 

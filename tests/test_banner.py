@@ -403,7 +403,7 @@ def test_img_is_registered_as_taking_an_optional_path():
     assert row.usage == "/img [path]"
 
 
-# -- v0.60.0: "the logo image is not rendering" ------------------------
+# -- v0.58.0: "the logo image is not rendering" ------------------------
 #
 # The report was one sentence and the banner had no way to answer it,
 # because every degrade path was correct AND silent -- which from the
@@ -421,7 +421,7 @@ def _unforced(monkeypatch, detected: str) -> None:
 
 
 def test_auto_draws_blocks_where_a_raster_would_only_be_a_downscale(monkeypatch):
-    """The v0.60.0 rule, from a user looking at a half-block render and
+    """The v0.58.0 rule, from a user looking at a half-block render and
     calling it "quite pixelated". Six rows of half-block is twelve
     vertical samples for a 238-row image; a drawn glyph wins there."""
     monkeypatch.delenv("DOXA_BOOT_BANNER", raising=False)
@@ -643,7 +643,7 @@ def test_the_banner_path_never_raises_without_an_asset(monkeypatch):
     banner._prepared.cache_clear()
 
 
-# -- v0.60.0: the crash report ------------------------------------------
+# -- v0.58.0: the crash report ------------------------------------------
 #
 # "doxa crashed while using it with: ... TimeoutError: Timeout waiting for
 # data", on Linux Mint's default terminal, in a session restoring a tab.
@@ -728,7 +728,7 @@ def test_the_cache_is_seeded_even_with_no_terminal(monkeypatch):
 
 
 def test_widget_for_never_raises_while_measuring_or_painting(monkeypatch):
-    """widget_for has always promised "never an exception". Until v0.60.0
+    """widget_for has always promised "never an exception". Until v0.58.0
     that covered construction only -- the easy half. These are the calls
     Textual makes later, from the compositor, with no caller left to catch
     anything."""

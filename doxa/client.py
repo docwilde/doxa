@@ -96,7 +96,7 @@ class EngineClient:
         # yet", never "you were told there is none". The hello frame
         # corrects it immediately; see SessionDaemon._hello.
         self.permission_mode: str = "default"
-        # Engine parity (v0.59.0): whether the DAEMON's CLI was spawned
+        # Engine parity (v0.58.0): whether the DAEMON's CLI was spawned
         # able to reach bypassPermissions. False until the hello frame
         # says otherwise, which is the safe direction to be wrong in for
         # one frame -- the narrower cycle, never the wider one.

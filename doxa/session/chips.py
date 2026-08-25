@@ -729,7 +729,7 @@ class PaneChipsMixin:
 
         if self.engine is None:
             return
-        # Per-SESSION since v0.59.0. A mode this session's CLI cannot be
+        # Per-SESSION since v0.58.0. A mode this session's CLI cannot be
         # put into is not listed at all -- not listed-and-refused -- which
         # is the user's own instruction ("if it wasnt started with that
         # flag, the mode option should not even appear") and the rule

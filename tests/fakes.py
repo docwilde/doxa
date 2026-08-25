@@ -145,7 +145,7 @@ class FakeEngine:
         # already records model_switches, which is exactly what a test
         # asserting "the mode actually reached the engine" reads.
         self.permission_mode = permission_mode
-        # Engine parity (v0.59.0): whether this session's CLI was spawned
+        # Engine parity (v0.58.0): whether this session's CLI was spawned
         # able to reach bypassPermissions at all. Default False, matching
         # the shipped default, so every pre-existing test exercises the
         # UNARMED session -- which is the one a user actually gets.
@@ -345,7 +345,7 @@ class FakeEngine:
         control request / a daemon RPC; the fake records the switch, which
         is the whole surface the pane touches.
 
-        v0.59.0: refuses a mode this session is not armed for, exactly as
+        v0.58.0: refuses a mode this session is not armed for, exactly as
         SessionEngine does, so a test cannot accidentally prove a UI path
         works against a fake more permissive than the real thing."""
         if self.permission_mode_error is not None:
