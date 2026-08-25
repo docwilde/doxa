@@ -130,7 +130,21 @@ Requirements:
 
 - A divider is draggable with the mouse **and** adjustable from the keyboard —
   a mouse-only control is unreachable for a user driving DOXA by keyboard,
-  which is most users most of the time.
+  which is most users most of the time. The keys are **Ctrl+Up / Ctrl+Down**
+  (chosen 2026-08-25; verified free — the existing set is ctrl+p, ctrl+r,
+  ctrl+comma, ctrl+t, ctrl+w, ctrl+q, ctrl+c and ctrl+left/right for tab
+  cycling, so a vertical pair reads as size against a horizontal pair that
+  already means "move between tabs").
+- **Ctrl+Up/Down resizes the FOCUSED region against its neighbour** — grow takes
+  space from the region below, shrink gives it back. This is what makes the
+  hotkey well-defined: a stacked pane has more than one horizontal boundary
+  (transcript/prompt, prompt/status) and a split tree has many, so a key with no
+  target either picks arbitrarily or does nothing. Keying it to focus needs no
+  "select a divider" mode and composes when splits land, because the focused
+  leaf always has an edge. Note keyboard resize is therefore only reachable for
+  a region that CAN hold focus; a boundary between two unfocusable regions is
+  mouse-only, and if that case exists it should be called out rather than left
+  silently unreachable.
 - A drag changes weights, and weights persist — so a drag is a state change with
   no keystroke behind it. It must survive restore like any other layout state,
   and it must respect the minimum sizes below rather than dragging a pane into
