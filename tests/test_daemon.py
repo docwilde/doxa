@@ -1226,3 +1226,45 @@ async def test_one_approve_crosses_with_exactly_one_id(tmp_path, monkeypatch):
         assert await client.reject_pending("20260824-01") is None
         assert seen == ["20260824-00", ("reject", "20260824-01")]
         await client.finalize()
+
+
+@pytest.mark.asyncio
+async def test_belief_actions_cross_the_socket_one_belief_at_a_time(
+    tmp_path, monkeypatch,
+):
+    """v0.48.0: recording an outcome and retracting over the daemon split.
+    One belief_id per call, no list parameter, and no bulk spelling of
+    either -- the same protocol-level property approve/reject carry."""
+    seen: list = []
+
+    async def fake_outcome(belief_id, event, note=None):
+        seen.append(("outcome", belief_id, event))
+        return None
+
+    async def fake_retract(belief_id, reason="x"):
+        seen.append(("retract", belief_id))
+        return None
+
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+        monkeypatch.setattr(daemon.engine, "record_belief_outcome", fake_outcome)
+        monkeypatch.setattr(daemon.engine, "retract_belief", fake_retract)
+        monkeypatch.setattr(daemon.engine, "belief_action_state", lambda: {
+            "capable": False, "version": "0.30.0",
+            "reason": "no outcome ledger over here",
+        })
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+
+        state = await client.belief_action_state()
+        assert state["capable"] is False
+        assert "no outcome ledger over here" in state["reason"]
+
+        assert await client.record_belief_outcome(7, "confirmed") is None
+        assert await client.retract_belief(9) is None
+        assert seen == [("outcome", 7, "confirmed"), ("retract", 9)]
+
+        for method in ("retract_all", "belief_outcome_all", "retract_beliefs"):
+            reply = await client._call(method)
+            assert reply.get("ok") is False
+            assert "unknown method" in str(reply.get("error")), method
+        await client.finalize()

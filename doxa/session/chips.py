@@ -26,6 +26,7 @@ order; that folding step is deliberately NOT built here.
 
 from __future__ import annotations
 
+import inspect
 import os
 from dataclasses import dataclass, field
 from functools import partial
@@ -52,12 +53,17 @@ from ..ui.labels import (
     _chip_span,
     _fmt_belief_row,
     _fmt_pending_row,
+    _one_line,
     as_proposal,
+    belief_outcome_kind,
+    belief_sort_key,
     ctx_chip,
+    ellipsize,
     mode_chip,
     mode_text,
     mode_tooltip,
     proposal_tooltip,
+    OUTCOME_EVENTS,
 )
 from ..ui.labels import ctx_text as ctx_text_of
 from ..ui.statusline import StatusBar
@@ -550,6 +556,10 @@ class PaneChipsMixin:
         note: str = "",
         title: str = "",
         groups: "dict[str, str] | None" = None,
+        collapsible: bool = False,
+        group_notes: "dict[str, str] | None" = None,
+        counted_noun: str = "",
+        open_groups: "set[str] | None" = None,
     ) -> None:
         """Shared entry point for every chip that opens :class:`ChipPicker`
         -- guards against opening UNDER a pending needs-input request (same
@@ -562,6 +572,8 @@ class PaneChipsMixin:
         self.query_one("#session-search", SessionSearch).close()
         self.query_one("#chip-picker", ChipPicker).open(
             rows, current_id, on_select, note=note, title=title, groups=groups,
+            collapsible=collapsible, group_notes=group_notes,
+            counted_noun=counted_noun, open_groups=open_groups,
         )
 
     @staticmethod
@@ -865,42 +877,245 @@ class PaneChipsMixin:
         if not beliefs:
             await self._system("beliefs: none active")
             return
-        # Sorted by GROUP first (stable -- ties keep list_beliefs' own
-        # updated-DESC order) so ChipPicker's group-header insertion (which
-        # walks rows in the order given, per its own docstring) produces
+        # Asked once, here, on a path that is already awaiting the store --
+        # never on a status refresh, and never from inside the action menu
+        # where a socket round trip would stall a keystroke.
+        if self._belief_action_state_cached() is None:
+            await self._prime_belief_action_state()
+        # Sorted by GROUP first (stable -- so ChipPicker's group-header
+        # insertion, which walks rows in the order given, still produces
         # clean contiguous blocks rather than a header reappearing every
-        # time two subjects happen to interleave.
+        # time two subjects interleave) and then, INSIDE each group, by
+        # what reality has said (v0.48.0). belief_sort_key already existed
+        # for the browser and the picker simply never used it: tested
+        # beliefs to the top of their group, most recently tested first,
+        # never-tested following as a stable bucket. With ~2% of a real
+        # store carrying any verdict at all, a picker that buried those is
+        # a picker that hid the only evidence it holds.
         ordered = sorted(
             beliefs,
-            key=lambda b: _belief_scope_label(str(b.get("subject") or "")),
+            key=lambda b: (_belief_scope_label(str(b.get("subject") or "")),
+                           belief_sort_key(b)),
         )
         rows: "list[tuple[str, str]]" = [BROWSE_ALL_ROW]
         # Its own group header, because ChipPicker inserts one whenever the
         # group changes and an EMPTY label would paint a bare "▎ " row.
         groups: "dict[str, str]" = {BROWSE_ALL_ROW[0]: "browse"}
         by_id: "dict[str, dict]" = {}
+        tested: "dict[str, int]" = {}
         for belief in ordered:
             rid = f"belief:{belief.get('id')}"
             rows.append((rid, _fmt_belief_row(belief)))
-            groups[rid] = _belief_scope_label(str(belief.get("subject") or ""))
+            group = _belief_scope_label(str(belief.get("subject") or ""))
+            groups[rid] = group
             by_id[rid] = belief
+            if belief_outcome_kind(belief) in OUTCOME_EVENTS:
+                tested[group] = tested.get(group, 0) + 1
+        # The header annotation ChipPicker cannot compute for itself: how
+        # many of a group's beliefs reality has ever tested. It is the
+        # number this store makes interesting -- 15 of 635 on the reporting
+        # operator's -- and a folded group that says "412 beliefs, 3
+        # tested" has answered a question the expanded list would have
+        # taken six hundred rows to answer.
+        group_notes = {group: f"{n} tested" for group, n in tested.items()}
         self._open_chip_picker(
             rows, None,
             lambda rid: self._pick_belief_row(rid, by_id),
             title="beliefs", groups=groups,
             note=self._belief_cap_note(engine, len(rows) - 1),
+            collapsible=True, group_notes=group_notes, counted_noun="belief",
+            # The browse row is a DOOR, not data: folding it would hide the
+            # way into the browser behind exactly the fold a 635-belief
+            # store makes necessary.
+            open_groups={"browse"},
         )
 
     def _pick_belief_row(self, rid: str, by_id: "dict[str, dict]") -> None:
-        """A picker row's destination: the browser, or one claim inline.
+        """A picker row's destination: the browser, or THIS belief's own
+        actions.
 
-        The picker keeps its own selection behaviour unchanged (v0.27.0:
-        "the least-surprising small thing a claim-summary row can do") and
-        gains ONE row that leaves it -- see :data:`BROWSE_ALL_ROW`."""
+        v0.27.0 spilled the claim inline and stopped there; v0.48.0 makes
+        that the first row of a per-belief menu instead, because the user
+        asked for a button on every row and an ``OptionList`` cannot give
+        one -- an ``Option`` has no widgets, no tooltip and exactly one
+        click target. What it CAN do is reopen itself against a new row set,
+        which is the pattern the repo picker has used since v0.22.0 to
+        descend a directory. So the row's own actions become the row set.
+
+        That shape is also the right one for safety rather than a
+        consolation for the wrong one. A dropdown row is one Enter away
+        from whatever the highlight is sitting on, which makes it a MORE
+        accidental surface than the browser's full-height rows, not less --
+        so nothing here acts on the belief you selected. It shows you what
+        can be done to it, named for what it actually does."""
         if rid == BROWSE_ALL_ROW[0]:
             self.run_worker(self.open_beliefs_browser(), group="command")
             return
-        self._show_belief_detail(by_id.get(rid))
+        belief = by_id.get(rid)
+        if belief is not None:
+            # Deferred one refresh cycle, for the reason
+            # :meth:`_select_repo_row` already documents at length:
+            # ChipPicker.select_row has ALREADY called close() and is about
+            # to hand focus back to the prompt, so reopening the same
+            # instance synchronously races Textual's queued Blur delivery
+            # and gets closed right back. Same fix, same call.
+            self.app.call_after_refresh(
+                partial(self._open_belief_actions, belief, by_id)
+            )
+
+    def _open_belief_actions(
+        self, belief: dict, by_id: "dict[str, dict]", *, arm_retract: bool = False,
+    ) -> None:
+        """One belief's actions, as a picker.
+
+        WHY THESE VERBS AND NOT "APPROVE"/"REJECT". The user asked for
+        approve/reject on every belief row, and those two are not
+        operations on a belief. Approving applies a STAGED PROPOSAL -- an
+        entry that does not exist yet -- and every proposal already carries
+        approve and reject in the browser. A belief is a claim that is
+        already in the store and already steering the model; the things
+        LORE can actually do to one are record what reality did to it
+        (``belief_outcomes``: confirmed / contradicted / stale) and end it
+        (retract). So those are the verbs, spelled LORE's way.
+
+        Recording an outcome is the high-value one and the reason this menu
+        is worth the keystroke: 97.6% of a live store has never been tested
+        by anything, and every ``calibrated_confidence`` in the product is
+        reading a curve built on that nothing.
+
+        RETRACT ARMS. It is the destructive verb -- the belief leaves the
+        working set and the model's context -- and this is a dropdown, so
+        it takes a second, separately-worded selection on the same menu.
+        Same misclick asymmetry the browser's approve control carries, in
+        the idiom this widget has."""
+        bid = belief.get("id")
+        claim = ellipsize(_one_line(str(belief.get("claim") or ""), 200), 46)
+        rows: "list[tuple[str, str]]" = [
+            ("act:show", "▸ show the full claim"),
+            ("act:confirmed", "✓ confirmed — reality agreed with this"),
+            ("act:contradicted", "✗ contradicted — reality disagreed with this"),
+            ("act:stale", "⌛ stale — no longer applies"),
+        ]
+        if arm_retract:
+            rows.append(
+                ("act:retract!", "⌫ RETRACT — select again to end this belief")
+            )
+        else:
+            rows.append(("act:retract", "⌫ retract this belief…"))
+        rows.append(("act:back", "← back to the belief list"))
+        state = self._belief_action_state_cached()
+        note = f"belief {bid} · {claim}"
+        if state is not None and not state.get("capable"):
+            note = f"{note}\nread-only — {state.get('reason') or 'actions unavailable'}"
+            rows = [r for r in rows if r[0] in ("act:show", "act:back")]
+        self._open_chip_picker(
+            rows, None,
+            lambda rid: self._run_belief_action(rid, belief, by_id),
+            title=f"belief {bid}", note=note,
+        )
+
+    def _belief_action_state_cached(self) -> "dict | None":
+        """The engine's belief-action capability, fetched once per pane.
+
+        Cached because this menu opens on a keystroke and the daemon path
+        is a socket round trip -- and because the answer cannot change
+        without the process that holds lore_core restarting. None means
+        "not asked yet", which renders as no caveat rather than as a
+        guessed one; the write itself is gated engine-side regardless, so
+        an unfetched cache can never turn into an ungated action."""
+        return getattr(self, "_belief_actions_state", None)
+
+    async def _prime_belief_action_state(self) -> None:
+        engine = self.engine
+        asker = getattr(engine, "belief_action_state", None) if engine else None
+        if asker is None:
+            return
+        try:
+            result = asker()
+            if inspect.isawaitable(result):
+                result = await result
+            self._belief_actions_state = dict(result or {})
+        except Exception:  # noqa: BLE001 -- a caveat is never worth raising
+            self._belief_actions_state = None
+
+    def _run_belief_action(
+        self, rid: str, belief: dict, by_id: "dict[str, dict]",
+    ) -> None:
+        """Dispatch one selected action. Never acts on more than the belief
+        whose menu this is -- there is no id list anywhere on this path."""
+        if rid == "act:back":
+            self.app.call_after_refresh(
+                lambda: self.run_worker(self.open_beliefs_picker(),
+                                        group="command")
+            )
+            return
+        if rid == "act:show":
+            self._show_belief_detail(belief)
+            return
+        if rid == "act:retract":
+            # First selection ARMS. Reopening the same menu with the armed
+            # row is the whole confirmation: it is worded differently, it
+            # is the only row that changed, and it is not where the
+            # highlight was. Deferred for the close/blur/focus reason
+            # _select_repo_row documents.
+            self.app.call_after_refresh(
+                partial(self._open_belief_actions, belief, by_id,
+                        arm_retract=True)
+            )
+            return
+        if rid == "act:retract!":
+            self.run_worker(self._retract_belief(belief), group="command")
+            return
+        if rid.startswith("act:"):
+            self.run_worker(
+                self._record_belief_outcome(belief, rid.split(":", 1)[1]),
+                group="command",
+            )
+
+    async def _record_belief_outcome(self, belief: dict, event: str) -> None:
+        engine = self.engine
+        recorder = getattr(engine, "record_belief_outcome", None) if engine else None
+        bid = belief.get("id")
+        if recorder is None:
+            await self._system(
+                "beliefs: this session's handle cannot record an outcome"
+            )
+            return
+        try:
+            error = await recorder(bid, event)
+        except Exception as exc:  # noqa: BLE001 -- a refusal is information
+            error = f"{type(exc).__name__}: {exc}"
+        claim = _one_line(str(belief.get("claim") or ""), 160)
+        if error:
+            # Not silently a failure and not silently a success: LORE's own
+            # dormancy note comes back through this same channel, so a
+            # contradiction that just retired a belief says so here.
+            await self._system(f"belief {bid} · {event} · {error}\n\n{claim}")
+            return
+        await self._system(
+            f"belief {bid} recorded as {event} (source: user)\n\n{claim}"
+        )
+
+    async def _retract_belief(self, belief: dict) -> None:
+        engine = self.engine
+        retractor = getattr(engine, "retract_belief", None) if engine else None
+        bid = belief.get("id")
+        if retractor is None:
+            await self._system("beliefs: this session's handle cannot retract")
+            return
+        try:
+            error = await retractor(bid)
+        except Exception as exc:  # noqa: BLE001
+            error = f"{type(exc).__name__}: {exc}"
+        claim = _one_line(str(belief.get("claim") or ""), 160)
+        if error:
+            await self._system(f"belief {bid} · NOT retracted — {error}\n\n{claim}")
+            return
+        await self._system(
+            f"belief {bid} retracted — it leaves the working set and the "
+            f"model's context. Its evidence and outcome ledger stay on "
+            f"disk.\n\n{claim}"
+        )
 
     async def open_beliefs_browser(self) -> None:
         """Item V: open (or bring forward) this pane's beliefs browser.

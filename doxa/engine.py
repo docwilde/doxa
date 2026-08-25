@@ -407,6 +407,62 @@ def lore_write_state() -> dict:
     return state
 
 
+#: The three verdicts a human can record against a belief from DOXA, and
+#: the one that ends it. Read off ``lore_core``: the first three are the
+#: CHECK constraint on ``belief_outcomes.event``, ``retract`` is the
+#: transition ``lore_core.pending.apply_item`` performs for an approved
+#: retract proposal. Nothing here is a DOXA spelling of a LORE concept.
+BELIEF_OUTCOME_EVENTS: "tuple[str, ...]" = ("confirmed", "contradicted", "stale")
+
+
+def belief_action_state() -> dict:
+    """Whether this ``lore_core`` lets a human record an outcome against a
+    belief, or retract one -- measured off the API, never off a version.
+
+    A NARROWER check than :func:`lore_write_state`, deliberately, and the
+    two are not interchangeable. That one gates approving a staged
+    PROPOSAL and requires LORE 0.36.0, because approving writes a new
+    entry and an entry with no ``via`` label is the thing it exists to
+    prevent. These actions write somewhere else:
+
+    * an outcome is a row in ``belief_outcomes``, which already carries
+      its own provenance in the ``source`` and ``agent`` columns and has
+      done since the ledger landed -- well before 0.36.0.
+    * a retract is a status transition on a row that already exists. It
+      creates nothing, so there is nothing for a provenance column to
+      label.
+
+    Gating these on 0.36.0 would refuse a perfectly recordable outcome on
+    a store that can record it, which is a different dishonesty from the
+    one that gate prevents. So this asks the only question that matters:
+    are ``record_outcome`` and ``belief_supersede`` here to be called."""
+    from . import _lore_bootstrap
+    from . import version as version_mod
+
+    version = version_mod.lore_core_version()
+    source = _lore_bootstrap.resolved_source()
+    where = f"{source[0]} at {source[1]}" if source else "unknown source"
+    state = {"capable": False, "version": version,
+             "source": source[0] if source else None, "reason": ""}
+    try:
+        from lore_core.beliefs import belief_supersede, record_outcome
+    except Exception:  # noqa: BLE001 -- an absent API is a reason, not a crash
+        belief_supersede = record_outcome = None  # type: ignore[assignment]
+    missing = [name for name, func in (("record_outcome", record_outcome),
+                                       ("belief_supersede", belief_supersede))
+               if not callable(func)]
+    if missing:
+        state["reason"] = (
+            f"lore_core {version or 'of unknown version'} ({where}) is missing "
+            f"{', '.join(missing)} — DOXA drives LORE's own outcome ledger "
+            "rather than reimplementing it, so there is nothing here to drive. "
+            "Recording an outcome and retracting are disabled."
+        )
+        return state
+    state["capable"] = True
+    return state
+
+
 # -- /context (item K): the breakdown, normalized ----------------------
 #
 # ``ClaudeSDKClient.get_context_usage`` returns the CLI's OWN accounting of
@@ -2313,6 +2369,120 @@ class SessionEngine:
             if source:
                 record["outcome_source"] = source
         return index
+
+    def belief_action_state(self) -> dict:
+        """Whether this engine can record outcomes and retract -- see the
+        module function :func:`belief_action_state`. A method as well, for
+        the same reason :meth:`lore_write_state` is one: the surfaces reach
+        their engine through ``getattr`` and a detached session has to be
+        able to answer for the DAEMON's lore_core, not the client's."""
+        return belief_action_state()
+
+    async def record_belief_outcome(
+        self, belief_id: int, event: str, note: "str | None" = None,
+    ) -> "str | None":
+        """What reality actually did to one belief. None on success, or the
+        sentence to show the user.
+
+        The single highest-value action in this product, on the numbers:
+        97.6% of the live working set has never been tested by anything, so
+        the calibration curve every ``calibrated_confidence`` reads is
+        running on almost no evidence. This is the one-keystroke way to
+        give it some.
+
+        ``source="user"`` is not a label DOXA chose. It is exactly what
+        ``lore_core.beliefs.cmd_outcome`` -- LORE's own "manual/pushback
+        path: the user (or the agent relaying the user's correction)
+        records what actually happened to a cited belief" -- passes, and a
+        human selecting a verdict in a DOXA row IS that path. The write
+        itself is ``record_outcome``, so the dormancy trigger it carries
+        (``CONTRADICTIONS_TO_DORMANT`` contradictions retire a claim from
+        the working set) fires here exactly as it does from the CLI. That
+        is why this returns the resulting counts to the caller: a
+        contradiction that just retired a belief must say so.
+
+        ONE belief and ONE event per call, no list form -- the same rule
+        :meth:`approve_pending` follows and for the same reason."""
+        state = belief_action_state()
+        if not state.get("capable"):
+            return state.get("reason") or "recording an outcome is not available here"
+        if event not in BELIEF_OUTCOME_EVENTS:
+            return f"{event!r} is not one of {', '.join(BELIEF_OUTCOME_EVENTS)}"
+
+        def _record() -> "str | None":
+            from lore_core.beliefs import outcome_counts, record_outcome
+
+            conn = lore_store.db_connect()
+            row = conn.execute(
+                "SELECT status FROM beliefs WHERE id = ?", (int(belief_id),)
+            ).fetchone()
+            if row is None:
+                return f"no belief {belief_id} — nothing to record against"
+            record_outcome(conn, int(belief_id), event, "user",
+                           session_id=self.session_id,
+                           note=_scrub_text(note) if note else None)
+            conn.commit()
+            after = conn.execute(
+                "SELECT status FROM beliefs WHERE id = ?", (int(belief_id),)
+            ).fetchone()
+            if row[0] == "active" and after and after[0] != "active":
+                confirms, contradicts, _stales = outcome_counts(conn, int(belief_id))
+                return (
+                    f"recorded — and belief {belief_id} is now {after[0]}: "
+                    f"{contradicts} contradictions retire a claim from the "
+                    f"working set (confirms {confirms})"
+                )
+            return None
+
+        try:
+            return await asyncio.to_thread(_record)
+        except Exception as exc:  # noqa: BLE001 -- a refusal is information
+            return f"{belief_id}: {type(exc).__name__}: {exc}"
+
+    async def retract_belief(
+        self, belief_id: int, reason: str = "retracted from the DOXA beliefs browser",
+    ) -> "str | None":
+        """End one belief. None on success, or the sentence to show.
+
+        The transition is LORE's, copied from the branch
+        ``lore_core.pending.apply_item`` runs for an approved ``retract``
+        proposal -- ``belief_supersede(conn, bid, None, reason)`` then
+        ``status = 'retracted'`` -- so a retraction from DOXA and a
+        retraction from ``lore approve`` leave the store in the same shape,
+        resolution text and all. DOXA invents no second way to end a
+        belief.
+
+        This is the destructive one, and the surfaces treat it that way:
+        the browser row arms it, and the picker's action menu makes it a
+        second, separately-named selection. Not irreversible in the sense
+        of lost data -- the row survives with `status='retracted'` and its
+        evidence and outcome ledger intact -- but it is out of the working
+        set and out of the model's context, which is the whole point."""
+        state = belief_action_state()
+        if not state.get("capable"):
+            return state.get("reason") or "retracting is not available here"
+
+        def _retract() -> "str | None":
+            from lore_core.beliefs import belief_supersede
+
+            conn = lore_store.db_connect()
+            row = conn.execute(
+                "SELECT status FROM beliefs WHERE id = ?", (int(belief_id),)
+            ).fetchone()
+            if row is None:
+                return f"no belief {belief_id} — nothing to retract"
+            if row[0] == "retracted":
+                return f"belief {belief_id} was already retracted"
+            belief_supersede(conn, int(belief_id), None, _scrub_text(reason))
+            conn.execute("UPDATE beliefs SET status = 'retracted' WHERE id = ?",
+                         (int(belief_id),))
+            conn.commit()
+            return None
+
+        try:
+            return await asyncio.to_thread(_retract)
+        except Exception as exc:  # noqa: BLE001
+            return f"{belief_id}: {type(exc).__name__}: {exc}"
 
     async def belief_evidence(
         self, belief_id: int, limit: int = BELIEF_EVIDENCE_LIMIT

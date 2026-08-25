@@ -386,10 +386,48 @@ class ChipPicker(OptionList):
     headers. A typed filter COLLAPSES the groups, same as the palette's
     own filtered search drops its section headers: once a fuzzy match is
     doing the ranking, a header contributes nothing a hit doesn't already
-    say better."""
+    say better.
+
+    ``collapsible`` (v0.48.0) turns those headers into the only thing a
+    large list shows until you ask for more: each becomes a SELECTABLE row
+    carrying a fold marker and its own count -- `▸ project (412 beliefs)` --
+    and selecting it folds that group open or shut in place. Requested
+    against a store with 635 active beliefs, where a picker that opens
+    fully expanded is a wall rather than a glance.
+
+    Two properties of that are worth stating because they are load-bearing
+    rather than incidental:
+
+    * **Filtering is untouched by collapse, by construction.** The fold is
+      applied ONLY inside the `grouped` branch below, and `grouped` is
+      already false whenever a filter is typed -- the matcher has always
+      scored `self._all_rows`, the complete set, not what is on screen. So
+      a user typing a word still finds a belief inside a folded group, and
+      it needs no auto-expand rule, no re-fold bookkeeping and no special
+      case: the filtered view simply never had groups to fold. Clearing
+      the filter returns to exactly the fold state that was there before.
+    * **A small list does not fold at all.** Folding three rows behind
+      three headers is strictly worse than showing them, so when the whole
+      list already fits the widget (see :data:`AUTOEXPAND_ROWS`, which is
+      `#chip-picker`'s own `max-height` in theme.tcss) every group opens
+      and the feature is invisible."""
 
     can_focus = True
     BINDINGS = [Binding("escape", "close_picker", "Close", show=False)]
+
+    #: Row-id prefix a FOLD HEADER carries. Namespaced so it cannot collide
+    #: with a caller's own ids (`belief:7`, `pending:3`, a branch name), and
+    #: checked by :meth:`select_row` before anything is handed to the
+    #: caller's callback -- a header is this widget's own affordance and
+    #: must never reach `on_select` as if it were a candidate.
+    GROUP_ROW_PREFIX = "\x00group:"
+
+    #: Below this many candidate rows every group opens and the fold is
+    #: invisible. It is `#chip-picker`'s own `max-height` in theme.tcss: a
+    #: list the widget can already show at once gains nothing from being
+    #: folded, and folding it would cost a selection to see what was
+    #: previously just there.
+    AUTOEXPAND_ROWS = 10
 
     def __init__(self, pane: "SessionPane") -> None:
         super().__init__(id="chip-picker")
@@ -403,6 +441,10 @@ class ChipPicker(OptionList):
         self._rows: list[tuple[str, str]] = []
         self._note = ""
         self._groups: "dict[str, str] | None" = None
+        self._collapsible = False
+        self._collapsed: "set[str]" = set()
+        self._group_notes: "dict[str, str]" = {}
+        self._counted_noun = ""
         self._filter_text = ""
         self._current_id: "str | None" = None
         self._on_select: "Callable[[str], Any] | None" = None
@@ -420,6 +462,10 @@ class ChipPicker(OptionList):
         note: str = "",
         title: str = "",
         groups: "dict[str, str] | None" = None,
+        collapsible: bool = False,
+        group_notes: "dict[str, str] | None" = None,
+        counted_noun: str = "",
+        open_groups: "set[str] | None" = None,
     ) -> None:
         """Configure and show. Reopening (a click on a DIFFERENT chip
         while this one is already up -- or the SAME chip re-rendering
@@ -432,11 +478,63 @@ class ChipPicker(OptionList):
         self._on_select = on_select
         self._note = note
         self._groups = groups
+        self._collapsible = bool(collapsible and groups)
+        self._group_notes = dict(group_notes or {})
+        self._counted_noun = counted_noun
+        # Every group folded shut on open -- except when the whole list
+        # already fits, see AUTOEXPAND_ROWS. The counts in the headers are
+        # what makes a fully folded list informative rather than empty:
+        # "project (412 beliefs) · user (83 beliefs)" IS the rough answer
+        # to what the store holds, and one selection opens the part you
+        # came for.
+        #
+        # ``open_groups`` is the exception that has to exist: a group whose
+        # rows are DOORS rather than data (the beliefs picker's "open the
+        # browser" row lives in one) must never start folded, or a large
+        # store hides the way out of itself behind a fold.
+        self._collapsed = set()
+        if self._collapsible and len(self._all_rows) > self.AUTOEXPAND_ROWS:
+            self._collapsed = set(self._group_labels()) - set(open_groups or ())
         self._filter_text = ""
         self.border_title = title
         self._render_rows()
         self.display = True
         self.focus()
+
+    def _group_labels(self) -> "list[str]":
+        """Every group label present in the current row set, in the order
+        the caller's rows put them -- the same walk :meth:`_render_rows`
+        does, so the two can never disagree about what a group is."""
+        seen: "list[str]" = []
+        for rid, _label in self._all_rows:
+            group = (self._groups or {}).get(rid, "")
+            if group and group not in seen:
+                seen.append(group)
+        return seen
+
+    def _group_counts(self) -> "dict[str, int]":
+        counts: "dict[str, int]" = {}
+        for rid, _label in self._all_rows:
+            group = (self._groups or {}).get(rid, "")
+            if group:
+                counts[group] = counts.get(group, 0) + 1
+        return counts
+
+    def _header_text(self, group: str, count: int) -> str:
+        """One fold header: marker, group, count, and whatever the caller
+        wanted said about it.
+
+        The COUNT is this widget's own (it has the rows), the NOTE is the
+        caller's -- "9 tested" is a fact about beliefs and a generic
+        dropdown has no business knowing it, while "how many rows are in
+        this group" is a fact about rows and the caller should not have to
+        recount them."""
+        marker = "▸" if group in self._collapsed else "▾"
+        noun = self._counted_noun
+        plural = f" {noun}{'' if count == 1 else 's'}" if noun else ""
+        note = self._group_notes.get(group, "")
+        inside = f"{count}{plural}" + (f", {note}" if note else "")
+        return f"{marker} {group} ({inside})"
 
     def _render_rows(self) -> None:
         self.clear_options()
@@ -458,14 +556,27 @@ class ChipPicker(OptionList):
         if not candidates:
             self.add_option(Option("  (no match)", disabled=True))
         else:
+            counts = self._group_counts() if self._collapsible else {}
             current_group = None
             for rid, label in candidates:
                 if grouped:
                     group = self._groups.get(rid, "")
                     if group != current_group:
                         current_group = group
-                        self.add_option(Option(f"▎ {group}", disabled=True))
-                        self._rows.append(("", f"▎ {group}"))
+                        if self._collapsible:
+                            # A SELECTABLE header: folding is the affordance
+                            # and a disabled row cannot be selected, so this
+                            # one is enabled and select_row intercepts it.
+                            head = self._header_text(group, counts.get(group, 0))
+                            self.add_option(Option(f" {_escape_markup(head)}"))
+                            self._rows.append(
+                                (f"{self.GROUP_ROW_PREFIX}{group}", head)
+                            )
+                        else:
+                            self.add_option(Option(f"▎ {group}", disabled=True))
+                            self._rows.append(("", f"▎ {group}"))
+                    if group in self._collapsed:
+                        continue
                 mark = "▸" if rid == self._current_id else " "
                 self.add_option(Option(f" {mark} {_escape_markup(label)}"))
                 self._rows.append((rid, label))
@@ -503,6 +614,21 @@ class ChipPicker(OptionList):
         self.close()
         self.pane.query_one("#prompt-input").focus()
 
+    def toggle_group(self, group: str) -> None:
+        """Fold one group open or shut, keeping the highlight on its own
+        header so a second Enter folds it back -- a fold you have to hunt
+        for the header again to undo is a fold nobody uses twice."""
+        if group in self._collapsed:
+            self._collapsed.discard(group)
+        else:
+            self._collapsed.add(group)
+        self._render_rows()
+        target = f"{self.GROUP_ROW_PREFIX}{group}"
+        for index, (rid, _label) in enumerate(self._rows):
+            if rid == target:
+                self.highlighted = index
+                break
+
     def select_row(self, index: int) -> None:
         """OptionSelected's `option_index` -- fired by Enter (OptionList's
         own `action_select`) or a mouse click on a row (OptionList's own
@@ -512,6 +638,11 @@ class ChipPicker(OptionList):
             return
         rid, _label = self._rows[index]
         if not rid:
+            return
+        if rid.startswith(self.GROUP_ROW_PREFIX):
+            # This widget's own affordance: fold, stay open, and never let
+            # a header reach the caller's callback as if it were a row.
+            self.toggle_group(rid[len(self.GROUP_ROW_PREFIX):])
             return
         callback = self._on_select
         self.close()
@@ -525,6 +656,10 @@ class ChipPicker(OptionList):
         self._on_select = None
         self._all_rows = []
         self._rows = []
+        self._collapsed = set()
+        self._group_notes = {}
+        self._collapsible = False
+        self._counted_noun = ""
         self._filter_text = ""
         self.border_title = ""
         self.border_subtitle = ""

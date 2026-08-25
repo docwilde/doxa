@@ -34,7 +34,8 @@ client -> server
   {"type": "call", "id": N, "method": "status"|"peers"|"msg"|"stop"|
    "set_model"|"set_permission_mode"|"branch"|"answer_needs_input"|
    "beliefs"|"pending"|"context"|"belief_evidence"|"lore_write"|
-   "approve_pending"|"reject_pending",
+   "approve_pending"|"reject_pending"|"belief_action_state"|
+   "belief_outcome"|"retract_belief",
    "params": {...}}
 
 Interactive permission (queue item 5): a pending ``AskUserQuestion`` or
@@ -796,6 +797,32 @@ class SessionDaemon:
                 writer, req_id, ok=True, evidence=page,
                 evidence_truncated=next_offset is not None,
             )
+        elif method == "belief_action_state":
+            # v0.48.0: a NARROWER capability than `lore_write`, asked of
+            # the side that holds the store for the same reason -- an
+            # outcome row and a status transition need only that lore_core
+            # still has record_outcome/belief_supersede, not the 0.36.0
+            # provenance ledger an approved WRITE needs.
+            await self._reply(
+                writer, req_id, ok=True, state=self.engine.belief_action_state(),
+            )
+        elif method == "belief_outcome":
+            # ONE verdict against ONE belief, recorded as source="user" --
+            # the same path lore_core.beliefs.cmd_outcome takes, because a
+            # human selecting a verdict in a DOXA row IS that path. No list
+            # parameter, same rule approve_pending follows.
+            error = await self.engine.record_belief_outcome(
+                int(params.get("belief_id") or 0),
+                str(params.get("event") or ""),
+                params.get("note"),
+            )
+            await self._reply(writer, req_id, ok=not error, error=error)
+        elif method == "retract_belief":
+            error = await self.engine.retract_belief(
+                int(params.get("belief_id") or 0),
+                str(params.get("reason") or "retracted from DOXA"),
+            )
+            await self._reply(writer, req_id, ok=not error, error=error)
         elif method == "lore_write":
             # Item V's read-only degradation, asked of the side that holds
             # the store. A detached session's lore_core is the DAEMON's,

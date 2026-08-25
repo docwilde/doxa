@@ -630,6 +630,35 @@ class EngineClient:
             )
         return dict(reply.get("state") or {})
 
+    async def belief_action_state(self) -> dict:
+        """Engine parity for :meth:`SessionEngine.belief_action_state` --
+        asked of the DAEMON, which is the process holding lore_core and
+        the store. Same reasoning as :meth:`lore_write_state`, and a
+        separate call because it is a separate (narrower) capability."""
+        reply = await self._call("belief_action_state")
+        if not reply.get("ok"):
+            raise EngineClientError(
+                reply.get("error") or "belief_action_state call failed"
+            )
+        return dict(reply.get("state") or {})
+
+    async def record_belief_outcome(
+        self, belief_id: int, event: str, note: "str | None" = None,
+    ) -> "str | None":
+        """Engine parity for :meth:`SessionEngine.record_belief_outcome` --
+        one belief, one verdict, and the outcome sentence back."""
+        reply = await self._call("belief_outcome", belief_id=int(belief_id),
+                                 event=str(event), note=note)
+        return reply.get("error") or (None if reply.get("ok") else "outcome failed")
+
+    async def retract_belief(
+        self, belief_id: int, reason: str = "retracted from DOXA",
+    ) -> "str | None":
+        """Engine parity for :meth:`SessionEngine.retract_belief`."""
+        reply = await self._call("retract_belief", belief_id=int(belief_id),
+                                 reason=str(reason))
+        return reply.get("error") or (None if reply.get("ok") else "retract failed")
+
     async def approve_pending(self, pid: str) -> "str | None":
         """Engine parity for :meth:`SessionEngine.approve_pending` -- ONE
         staged proposal, by id. The write happens in the daemon, through

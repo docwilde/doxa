@@ -605,6 +605,32 @@ async def test_sessions_picker_detached_row_calls_the_existing_attach_path(
             sock.close()
 
 
+async def _show_belief(pilot, app, picker, rid):
+    """Drive the picker to one belief's full claim.
+
+    v0.48.0 moved that off the belief row itself: selecting a belief opens
+    THAT belief's actions (record an outcome, retract, show the claim,
+    open the browser), because an OptionList row cannot carry a button and
+    the actions ARE the row set. "Show the full claim" is the first of
+    them, so the old one-selection behaviour is still one selection away
+    -- this helper is what that costs a test."""
+    index = next(i for i, (r, _l) in enumerate(picker._rows) if r == rid)
+    picker.select_row(index)
+    # The action menu reopens the picker one refresh cycle later (see
+    # PaneChipsMixin._pick_belief_row on why it cannot be synchronous).
+    for _ in range(100):
+        if any(r == "act:show" for r, _l in picker._rows):
+            break
+        await pilot.pause(0.02)
+    show = next(i for i, (r, _l) in enumerate(picker._rows) if r == "act:show")
+    picker.select_row(show)
+    for _ in range(100):
+        if _system_texts(app):
+            break
+        await pilot.pause(0.02)
+    return bool(_system_texts(app))
+
+
 # -- beliefs chip: grouped, filterable, lazy -- item 3 --------------------
 
 
@@ -627,10 +653,16 @@ async def test_beliefs_chip_click_opens_grouped_picker(monkeypatch, tmp_path):
         picker = app.query_one("#chip-picker", ChipPicker)
         assert picker.is_open
         assert picker.border_title == "beliefs"
-        headers = [label for rid, label in picker._rows if not rid]
-        assert any("project" in h for h in headers)
-        assert any("user" in h for h in headers)
-        assert any("user model" in h for h in headers)
+        # v0.48.0: group headers are SELECTABLE (folding is their
+        # affordance), so they carry a namespaced rid rather than the
+        # empty one a disabled separator used to have. The grouping this
+        # test exists for is unchanged -- and each header now says how
+        # many beliefs it stands for.
+        headers = [label for rid, label in picker._rows
+                   if rid.startswith(ChipPicker.GROUP_ROW_PREFIX)]
+        assert any("project (1 belief)" in h for h in headers), headers
+        assert any("user (1 belief)" in h for h in headers), headers
+        assert any("user model (1 belief)" in h for h in headers), headers
         # Cost discipline: list_beliefs() is a CLICK-only call.
         assert fake.list_beliefs_calls == 1
 
@@ -685,12 +717,7 @@ async def test_beliefs_picker_selection_shows_detail_inline(monkeypatch, tmp_pat
         await pane.open_beliefs_picker()
         await pilot.pause()
         picker = app.query_one("#chip-picker", ChipPicker)
-        index = next(i for i, (rid, _l) in enumerate(picker._rows) if rid == "belief:7")
-        picker.select_row(index)
-        for _ in range(100):
-            if _system_texts(app):
-                break
-            await pilot.pause(0.02)
+        assert await _show_belief(pilot, app, picker, "belief:7")
         assert "loves caveman commits" in _system_texts(app)[-1]
         assert "0.42" in _system_texts(app)[-1]
 
@@ -1318,11 +1345,6 @@ async def test_a_truncated_claim_says_so_in_the_detail_view(monkeypatch, tmp_pat
         await pane.open_beliefs_picker()
         await pilot.pause()
         picker = app.query_one("#chip-picker", ChipPicker)
-        index = next(i for i, (rid, _l) in enumerate(picker._rows) if rid == "belief:9")
-        picker.select_row(index)
-        for _ in range(100):
-            if _system_texts(app):
-                break
-            await pilot.pause(0.02)
+        assert await _show_belief(pilot, app, picker, "belief:9")
         assert "the beginning of a huge claim" in _system_texts(app)[-1]
         assert "truncated" in _system_texts(app)[-1]

@@ -212,6 +212,18 @@ class FakeEngine:
         self.rejected: list[str] = []
         self.approve_error: "str | None" = None
         self.reject_error: "str | None" = None
+        # v0.48.0 (belief actions): the ledger for outcomes and retracts,
+        # same discipline as approved/rejected above -- a test asserting
+        # that nothing fires without an explicit per-belief action asserts
+        # against these lists, not against the UI.
+        self.outcomes_recorded: list = []
+        self.retracted: list = []
+        self.outcome_error: "str | None" = None
+        self.retract_error: "str | None" = None
+        self.belief_action_state_result: dict = {
+            "capable": True, "version": "0.36.0", "source": "package",
+            "reason": "",
+        }
         # Item K (/context): what context_usage() hands back, plus a call
         # counter. None is the REAL absence case (a session whose handle
         # cannot report a breakdown), which is exactly what the "nothing is
@@ -240,6 +252,21 @@ class FakeEngine:
         """Engine parity for item V's lazy evidence fetch."""
         self.belief_evidence_calls.append(belief_id)
         return list(self.belief_evidence_result.get(belief_id, []))
+
+    def belief_action_state(self) -> dict:
+        """Engine parity for v0.48.0's narrower capability check -- what
+        gates recording an outcome and retracting, which need only the
+        outcome ledger rather than 0.36.0's provenance columns."""
+        return dict(self.belief_action_state_result)
+
+    async def record_belief_outcome(self, belief_id, event, note=None) -> "str | None":
+        """ONE belief, ONE verdict -- no list form on either real engine."""
+        self.outcomes_recorded.append((belief_id, event))
+        return self.outcome_error
+
+    async def retract_belief(self, belief_id, reason="retracted") -> "str | None":
+        self.retracted.append(belief_id)
+        return self.retract_error
 
     def lore_write_state(self) -> dict:
         """Engine parity for item V's read-only degradation check.

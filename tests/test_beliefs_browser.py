@@ -126,12 +126,50 @@ def test_fmt_age_gained_a_day_tier_and_kept_every_old_one():
     assert _fmt_age(DAY * 120) == "120d"
 
 
-def test_a_belief_row_carries_its_creation_date_and_its_last_verdict():
+def test_a_belief_row_carries_its_creation_time_and_its_last_verdict():
     row = _fmt_belief_row(_belief(1, "prefers terse commits", created_days=120,
                                   outcome="confirmed", outcome_days=3))
     assert "prefers terse commits" in row
     assert "confirmed 3d" in row
-    assert time.strftime("%Y-%m-%d", time.gmtime(time.time() - 120 * DAY)) in row
+    assert time.strftime("%m-%d %H:%M",
+                         time.gmtime(time.time() - 120 * DAY)) in row
+
+
+def test_the_picker_row_shows_hh_mm_not_just_the_day():
+    """Asked for directly. A belief store IS browsed by day, which was the
+    old argument for dropping the clock -- but two beliefs derived in the
+    same session land on the same date, and the date alone cannot order
+    them for a reader."""
+    row = _fmt_belief_row({"id": 1, "claim": "x",
+                           "created": "2026-08-25T14:23:07Z", "outcomes": 0})
+    assert "14:23" in row
+    assert "14:23:07" not in row, "seconds are a precision nobody acts on"
+
+
+def test_the_picker_elides_a_year_the_reader_is_standing_in():
+    """What gave way for the clock. PICKER_ROW_WIDTH is 72 because that is
+    what fits an 80-column terminal, and the claim is what type-to-filter
+    matches -- so a flat six more columns of stamp is six fewer columns of
+    findable claim. A belief from THIS year drops its year and costs one;
+    a belief from an earlier year keeps it and costs six, which is exactly
+    where the year is worth having."""
+    from doxa.ui.labels import belief_created_text
+
+    now = time.mktime(time.strptime("2026-08-25", "%Y-%m-%d"))
+    this_year = {"created": "2026-03-04T09:14:00Z"}
+    older = {"created": "2025-11-03T09:14:00Z"}
+    assert belief_created_text(this_year, now=now) == "03-04 09:14"
+    assert belief_created_text(older, now=now) == "2025-11-03 09:14"
+    # The BROWSER has the width and is read as a record, so it never elides.
+    assert belief_created_text(this_year, full=True, now=now) == "2026-03-04 09:14"
+
+
+def test_an_unreadable_created_stamp_never_grows_an_invented_clock():
+    from doxa.ui.labels import belief_created_text
+
+    unreadable = belief_created_text({"created": "sometime last week"})
+    assert ":" not in unreadable, "no clock invented for a string it cannot parse"
+    assert belief_created_text({}) == ""
 
 
 def test_being_cited_is_not_being_confirmed():
@@ -1197,3 +1235,652 @@ async def test_belief_rows_paint_never_tested_where_the_idle_age_used_to_be(
             assert row.size.height > 0
         # Tested first, inside the one scope group they share.
         assert rows[0].belief["id"] == 1
+
+
+# -- v0.48.0: the chip picker as a navigable surface ---------------------
+
+
+async def _picker(pilot, app, *, beliefs):
+    from doxa.app import ChipPicker
+
+    pane = app.active_pane
+    await pane.open_beliefs_picker()
+    for _ in range(200):
+        picker = app.query_one("#chip-picker", ChipPicker)
+        if picker.is_open:
+            await pilot.pause()
+            return pane, picker
+        await pilot.pause(0.02)
+    raise AssertionError("the beliefs picker never opened")
+
+
+def _headers(picker):
+    from doxa.app import ChipPicker
+
+    return [label for rid, label in picker._rows
+            if rid.startswith(ChipPicker.GROUP_ROW_PREFIX)]
+
+
+def _belief_rows(picker):
+    return [(rid, label) for rid, label in picker._rows
+            if rid.startswith("belief:")]
+
+
+_NEXT_ID = [1000]
+
+
+def _many(n, group="project:doxa", **kw):
+    """n beliefs in one scope, with ids that are unique ACROSS calls --
+    the picker keys its group map by row id, so two batches sharing ids
+    would silently merge into one group and count wrong."""
+    start = _NEXT_ID[0]
+    _NEXT_ID[0] += n
+    return [_belief(i, f"claim number {i:03d}", subject=group, **kw)
+            for i in range(start, start + n)]
+
+
+@pytest.mark.asyncio
+async def test_scope_groups_are_headers_carrying_their_own_count(
+    monkeypatch, tmp_path
+):
+    """Asked for directly: `project (N beliefs)`. The counts follow the
+    labels _belief_scope_label actually emits -- which keeps `user-model`
+    its own group rather than folding it into plain `user`, so a store
+    with both shows three headers and not two."""
+    fake = FakeEngine([])
+    fake.list_beliefs_result = (
+        _many(8) + _many(3, group="user") + _many(2, group="user-model")
+    )
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(160, 48)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _picker(pilot, app, beliefs=None)
+        headers = _headers(picker)
+        assert any("project (8 beliefs)" in h for h in headers), headers
+        assert any("user (3 beliefs)" in h for h in headers), headers
+        assert any("user model (2 beliefs)" in h for h in headers), headers
+
+
+@pytest.mark.asyncio
+async def test_a_group_of_one_is_not_pluralised(monkeypatch, tmp_path):
+    fake = FakeEngine([])
+    fake.list_beliefs_result = _many(11) + _many(1, group="user")
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(160, 48)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _picker(pilot, app, beliefs=None)
+        assert any("user (1 belief)" in h for h in _headers(picker))
+
+
+@pytest.mark.asyncio
+async def test_the_header_says_how_many_of_a_group_reality_has_tested(
+    monkeypatch, tmp_path
+):
+    """The number this store makes interesting: 15 of 635 on the reporting
+    operator's. A folded group that says "412 beliefs, 3 tested" answered
+    a question the expanded list would have taken six hundred rows to."""
+    fake = FakeEngine([])
+    fake.list_beliefs_result = (
+        _many(9)
+        + [_belief(90, "tested one", subject="project:doxa", outcome="confirmed")]
+        + _many(3, group="user")
+    )
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(160, 48)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _picker(pilot, app, beliefs=None)
+        headers = _headers(picker)
+        assert any("project (10 beliefs, 1 tested)" in h for h in headers), headers
+        # A group with none says nothing rather than "0 tested".
+        assert any(h.strip().startswith("▸ user (3 beliefs)")
+                   or h.strip().startswith("▾ user (3 beliefs)")
+                   for h in headers), headers
+
+
+@pytest.mark.asyncio
+async def test_a_large_list_opens_folded_and_a_header_unfolds_it(
+    monkeypatch, tmp_path
+):
+    """635 active beliefs is the reported store. A picker that opens fully
+    expanded is a wall, not a glance -- so every group opens folded, and
+    the counts in the headers are what make the folded view an answer
+    rather than an empty box."""
+    fake = FakeEngine([])
+    fake.list_beliefs_result = _many(40) + _many(6, group="user")
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(160, 48)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _picker(pilot, app, beliefs=None)
+        assert _headers(picker), "groups must still have headers"
+        assert _belief_rows(picker) == [], "a folded group shows no belief rows"
+
+        index = next(i for i, (_rid, label) in enumerate(picker._rows)
+                     if "project (40 beliefs" in label)
+        picker.select_row(index)
+        await pilot.pause()
+        assert picker.is_open, "folding must not close the picker"
+        opened = _belief_rows(picker)
+        assert len(opened) == 40
+        assert all("claim number" in label for _rid, label in opened)
+        # ...and the user group beside it stays folded.
+        assert any("▸ user (6 beliefs)" in h for h in _headers(picker))
+
+        # A second selection folds it back, and the highlight is still on
+        # the header so it can be toggled again without hunting for it.
+        index = next(i for i, (_rid, label) in enumerate(picker._rows)
+                     if "project (40 beliefs" in label)
+        assert picker.highlighted == index
+        picker.select_row(index)
+        await pilot.pause()
+        assert _belief_rows(picker) == []
+
+
+@pytest.mark.asyncio
+async def test_a_small_list_does_not_fold_at_all(monkeypatch, tmp_path):
+    """Folding three rows behind three headers is strictly worse than
+    showing them. Below the widget's own max-height every group opens."""
+    fake = FakeEngine([])
+    fake.list_beliefs_result = _many(2) + _many(2, group="user")
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(160, 48)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _picker(pilot, app, beliefs=None)
+        assert len(_belief_rows(picker)) == 4
+        assert not picker._collapsed
+
+
+@pytest.mark.asyncio
+async def test_typing_still_finds_a_belief_inside_a_folded_group(
+    monkeypatch, tmp_path
+):
+    """THE constraint. Folding must not make a belief unfindable, and this
+    needs no auto-expand rule: the matcher has always scored the complete
+    row set rather than what is on screen, and a typed filter drops the
+    group headers entirely, so the folded view simply is not the view
+    being filtered."""
+    fake = FakeEngine([])
+    fake.list_beliefs_result = (
+        _many(40)
+        + [_belief(999, "the operator keeps doxa in a worktree",
+                   subject="project:doxa")]
+    )
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(160, 48)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _picker(pilot, app, beliefs=None)
+        assert _belief_rows(picker) == [], "starts folded"
+
+        await pilot.press("w", "o", "r", "k", "t", "r", "e", "e")
+        await pilot.pause()
+        found = _belief_rows(picker)
+        assert any("worktree" in label for _rid, label in found), found
+        assert _headers(picker) == [], "a filtered view has no group headers"
+
+        # Clearing the filter returns to exactly the fold state from before.
+        for _ in range(8):
+            await pilot.press("backspace")
+        await pilot.pause()
+        assert _belief_rows(picker) == []
+        assert _headers(picker)
+
+
+@pytest.mark.asyncio
+async def test_the_picker_sorts_tested_beliefs_to_the_top_of_their_group(
+    monkeypatch, tmp_path
+):
+    """belief_sort_key existed for the browser since v0.46.0 and the picker
+    never used it -- chips.py sorted by scope label alone. This is that
+    defect, fixed, without disturbing the contiguous grouping the header
+    insertion depends on."""
+    fake = FakeEngine([])
+    fake.list_beliefs_result = [
+        _belief(1, "untested alpha", subject="project:doxa"),
+        _belief(2, "tested beta", subject="project:doxa", outcome="confirmed",
+                outcome_days=9),
+        _belief(3, "untested gamma", subject="project:doxa"),
+        _belief(4, "tested delta", subject="project:doxa",
+                outcome="contradicted", outcome_days=1),
+        _belief(5, "a user one", subject="user"),
+    ]
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(160, 48)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _picker(pilot, app, beliefs=None)
+        rows = _belief_rows(picker)          # small list: nothing folded
+        project = [rid for rid, _l in rows if rid in
+                   ("belief:1", "belief:2", "belief:3", "belief:4")]
+        assert project[:2] == ["belief:4", "belief:2"], project
+        assert set(project[2:]) == {"belief:1", "belief:3"}
+        # Grouping survives: the project ids are contiguous, so the header
+        # insertion still produces one block per scope.
+        ids = [rid for rid, _l in rows]
+        assert ids.index("belief:5") == len(ids) - 1
+
+
+@pytest.mark.asyncio
+async def test_selecting_the_browse_row_opens_the_browser_in_a_tab(
+    monkeypatch, tmp_path
+):
+    """Item 3, verified rather than assumed: BROWSE_ALL_ROW already opened
+    the browser tab in v0.46.0 and still does. The user was confirming the
+    expectation, not reporting a defect -- this is the proof."""
+    from doxa.session.chips import BROWSE_ALL_ROW
+
+    fake = FakeEngine([])
+    fake.list_beliefs_result = _many(3)
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(160, 48)) as pilot:
+        await pilot.pause()
+        pane, picker = await _picker(pilot, app, beliefs=None)
+        index = next(i for i, (rid, _l) in enumerate(picker._rows)
+                     if rid == BROWSE_ALL_ROW[0])
+        picker.select_row(index)
+        for _ in range(200):
+            if pane._beliefs_tab is not None and pane._beliefs_tab.rows:
+                break
+            await pilot.pause(0.02)
+        assert isinstance(pane._beliefs_tab, BeliefsBrowserTab)
+        assert pane._beliefs_tab.is_mounted
+
+
+# -- v0.48.0: what a belief row can actually DO --------------------------
+#
+# The user asked for "Approve or Reject" on every belief row. Those two
+# are not operations on a belief: approving applies a staged PROPOSAL, an
+# entry that does not exist yet, and every proposal already carries them
+# in the browser. A belief is a claim already in the store and already
+# steering the model. What LORE can do to one is record what reality did
+# (belief_outcomes: confirmed / contradicted / stale) and end it (retract).
+# These assert that vocabulary, and that the destructive half is harder to
+# reach than the reversible half.
+
+
+def _actions(picker):
+    return [rid for rid, _l in picker._rows if rid.startswith("act:")]
+
+
+@pytest.mark.asyncio
+async def test_a_belief_row_offers_lores_verbs_not_approve_and_reject(
+    monkeypatch, tmp_path
+):
+    fake = FakeEngine([])
+    fake.list_beliefs_result = _many(3)
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(160, 48)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _picker(pilot, app, beliefs=None)
+        row = next(i for i, (rid, _l) in enumerate(picker._rows)
+                   if rid.startswith("belief:"))
+        picker.select_row(row)
+        await pilot.pause()
+        assert picker.is_open, "selecting a belief opens its actions"
+        assert _actions(picker) == [
+            "act:show", "act:confirmed", "act:contradicted", "act:stale",
+            "act:retract", "act:back",
+        ]
+        painted = " ".join(label for _rid, label in picker._rows).lower()
+        assert "approve" not in painted
+        assert "reject" not in painted
+        # Nothing has happened to the belief just by looking at its menu.
+        assert fake.outcomes_recorded == [] and fake.retracted == []
+
+
+@pytest.mark.asyncio
+async def test_recording_an_outcome_takes_two_explicit_selections(
+    monkeypatch, tmp_path
+):
+    """A dropdown row is one Enter from whatever the highlight sits on,
+    which makes it a MORE accidental surface than the browser's rows. So
+    selecting a belief never acts on it -- it opens the named verbs."""
+    fake = FakeEngine([])
+    fake.list_beliefs_result = _many(3)
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(160, 48)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _picker(pilot, app, beliefs=None)
+        rid = next(rid for rid, _l in picker._rows if rid.startswith("belief:"))
+        bid = int(rid.split(":", 1)[1])
+        picker.select_row(next(i for i, (r, _l) in enumerate(picker._rows)
+                               if r == rid))
+        await pilot.pause()
+        assert fake.outcomes_recorded == []
+
+        picker.select_row(next(i for i, (r, _l) in enumerate(picker._rows)
+                               if r == "act:confirmed"))
+        for _ in range(150):
+            if fake.outcomes_recorded:
+                break
+            await pilot.pause(0.02)
+        assert fake.outcomes_recorded == [(bid, "confirmed")]
+        assert fake.retracted == []
+
+
+@pytest.mark.asyncio
+async def test_retract_from_the_dropdown_arms_before_it_ends_a_belief(
+    monkeypatch, tmp_path
+):
+    """SECURITY-SHAPED ASSERTION. Retract is the destructive verb: the
+    belief leaves the working set and the model's context. One selection
+    re-words the row; only a second, differently-worded selection acts."""
+    fake = FakeEngine([])
+    fake.list_beliefs_result = _many(3)
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(160, 48)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _picker(pilot, app, beliefs=None)
+        rid = next(rid for rid, _l in picker._rows if rid.startswith("belief:"))
+        bid = int(rid.split(":", 1)[1])
+        picker.select_row(next(i for i, (r, _l) in enumerate(picker._rows)
+                               if r == rid))
+        await pilot.pause()
+
+        picker.select_row(next(i for i, (r, _l) in enumerate(picker._rows)
+                               if r == "act:retract"))
+        await pilot.pause()
+        assert fake.retracted == [], "the first selection only arms"
+        armed = next(label for r, label in picker._rows if r == "act:retract!")
+        assert "RETRACT" in armed and "select again" in armed
+        assert "act:retract" not in _actions(picker), "the unarmed row is gone"
+
+        picker.select_row(next(i for i, (r, _l) in enumerate(picker._rows)
+                               if r == "act:retract!"))
+        for _ in range(150):
+            if fake.retracted:
+                break
+            await pilot.pause(0.02)
+        assert fake.retracted == [bid]
+        assert fake.outcomes_recorded == []
+
+
+@pytest.mark.asyncio
+async def test_the_dropdown_hides_the_verbs_when_lore_cannot_record_them(
+    monkeypatch, tmp_path
+):
+    fake = FakeEngine([])
+    fake.list_beliefs_result = _many(3)
+    fake.belief_action_state_result = {
+        "capable": False, "version": "0.30.0", "source": "plugin",
+        "reason": "lore_core 0.30.0 (plugin at /x) is missing record_outcome",
+    }
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(160, 48)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _picker(pilot, app, beliefs=None)
+        rid = next(rid for rid, _l in picker._rows if rid.startswith("belief:"))
+        picker.select_row(next(i for i, (r, _l) in enumerate(picker._rows)
+                               if r == rid))
+        await pilot.pause()
+        assert _actions(picker) == ["act:show", "act:back"]
+        assert "missing record_outcome" in picker._note
+        assert fake.outcomes_recorded == [] and fake.retracted == []
+
+
+@pytest.mark.asyncio
+async def test_the_browser_row_carries_the_same_verbs_as_real_controls(
+    monkeypatch, tmp_path
+):
+    """The browser CAN have a button per row -- one widget per row is why
+    it exists -- so it has one, and the keyboard reaches the same place."""
+    fake = FakeEngine([])
+    fake.list_beliefs_result = [_belief(7, "a claim under test")]
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(180, 48)) as pilot:
+        await pilot.pause()
+        browser = await _browser(pilot, app, fake)
+        row = next(iter(browser.query(BeliefRow)))
+        painted = _plain(row)
+        assert "✓ confirmed" in painted and "✗ contradicted" in painted
+        assert "⌫ retract" in painted
+        assert "approve" not in painted.lower()
+        assert row.size.height > 0
+
+        row.focus()
+        await pilot.press("c")
+        for _ in range(150):
+            if fake.outcomes_recorded:
+                break
+            await pilot.pause(0.02)
+        assert fake.outcomes_recorded == [(7, "confirmed")]
+
+
+@pytest.mark.asyncio
+async def test_the_browser_retract_arms_and_enter_never_reaches_it(
+    monkeypatch, tmp_path
+):
+    fake = FakeEngine([])
+    fake.list_beliefs_result = [_belief(7, "a claim under test")]
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(180, 48)) as pilot:
+        await pilot.pause()
+        browser = await _browser(pilot, app, fake)
+        row = next(iter(browser.query(BeliefRow)))
+        row.focus()
+
+        # Enter is the key a hand rests on: it expands evidence, nothing else.
+        for _ in range(4):
+            await pilot.press("enter")
+            await pilot.pause()
+        assert fake.retracted == [] and fake.outcomes_recorded == []
+
+        await pilot.press("d")
+        await pilot.pause()
+        assert row.armed and fake.retracted == []
+        assert "CONFIRM RETRACT" in _plain(row)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not row.armed and fake.retracted == []
+
+        await pilot.press("d")
+        await pilot.press("d")
+        for _ in range(150):
+            if fake.retracted:
+                break
+            await pilot.pause(0.02)
+        assert fake.retracted == [7]
+        assert "retracted" in _plain(row)
+
+
+@pytest.mark.asyncio
+async def test_the_browser_hides_belief_verbs_on_a_lore_core_without_them(
+    monkeypatch, tmp_path
+):
+    fake = FakeEngine([])
+    fake.list_beliefs_result = [_belief(7, "a claim under test")]
+    fake.belief_action_state_result = {
+        "capable": False, "reason": "lore_core 0.30.0 is missing record_outcome",
+    }
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(180, 48)) as pilot:
+        await pilot.pause()
+        browser = await _browser(pilot, app, fake)
+        painted = "\n".join(str(w.renderable) for w in browser.query("Static"))
+        assert "missing record_outcome" in painted
+        row = next(iter(browser.query(BeliefRow)))
+        assert "confirmed" not in _plain(row).lower().split("·")[-1]
+        assert "⌫ retract" not in _plain(row)
+        row.focus()
+        await pilot.press("c", "x", "d", "d")
+        await pilot.pause()
+        assert fake.outcomes_recorded == [] and fake.retracted == []
+
+
+@pytest.mark.asyncio
+async def test_recording_an_outcome_repaints_the_staleness_column(
+    monkeypatch, tmp_path
+):
+    """The point of recording an outcome is that the column changes. A row
+    that still said "never tested" after you confirmed it would be the
+    browser lying about the one thing it exists to show."""
+    fake = FakeEngine([])
+    fake.list_beliefs_result = [_belief(7, "a claim under test")]
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(180, 48)) as pilot:
+        await pilot.pause()
+        browser = await _browser(pilot, app, fake)
+        row = next(iter(browser.query(BeliefRow)))
+        assert "never tested" in _plain(row)
+        # The store now answers with a confirmed belief.
+        fake.list_beliefs_result = [
+            _belief(7, "a claim under test", outcome="confirmed", outcome_days=0)
+        ]
+        row.focus()
+        await pilot.press("c")
+        for _ in range(200):
+            if "confirmed" in _plain(row) and "never tested" not in _plain(row):
+                break
+            await pilot.pause(0.02)
+        assert "never tested" not in _plain(row)
+        assert "confirmed" in _plain(row)
+
+
+# -- belief actions against the real lore_core ---------------------------
+
+
+@pytest.mark.asyncio
+async def test_recording_an_outcome_lands_in_lores_own_ledger(
+    tmp_path, lore_store_cleanup
+):
+    """The provenance condition for this verb. DOXA does not invent a
+    label: it calls record_outcome with source="user", which is exactly
+    what lore_core.beliefs.cmd_outcome -- LORE's own "manual/pushback
+    path" -- passes. Read back out of the store, not trusted."""
+    from lore_core import store as lore_store
+    from lore_core.beliefs import belief_insert, belief_subject, outcome_counts
+
+    from doxa.engine import belief_action_state
+
+    if not belief_action_state()["capable"]:
+        pytest.skip("this lore_core has no outcome ledger")
+
+    engine = _engine(tmp_path)
+    conn = lore_store.db_connect()
+    bid, _ = belief_insert(conn, belief_subject("user", engine.slug),
+                           "the operator confirms beliefs from doxa",
+                           0.8, None, None, None)
+    conn.commit()
+
+    assert await engine.record_belief_outcome(bid, "confirmed") is None
+
+    row = conn.execute(
+        "SELECT event, source, session_id FROM belief_outcomes"
+        " WHERE belief_id = ?", (bid,)).fetchone()
+    assert row is not None, "the outcome never reached the ledger"
+    assert row[0] == "confirmed"
+    assert row[1] == "user", "LORE's own label for the manual path"
+    assert row[2] == engine.session_id
+    assert outcome_counts(conn, bid) == (1, 0, 0)
+
+    # ...and the belief now carries its verdict into the browser's column.
+    listed = next(b for b in await engine.list_beliefs() if b["id"] == bid)
+    assert belief_outcome_kind(listed) == "confirmed"
+    assert belief_outcome_text(listed).startswith("confirmed")
+
+
+@pytest.mark.asyncio
+async def test_contradictions_retire_a_belief_and_the_reply_says_so(
+    tmp_path, lore_store_cleanup
+):
+    """record_outcome carries LORE's dormancy trigger, and DOXA drives it
+    rather than routing around it -- so the second contradiction retires
+    the claim exactly as `lore outcome` would, and the user is TOLD."""
+    from lore_core import store as lore_store
+    from lore_core.beliefs import (
+        CONTRADICTIONS_TO_DORMANT,
+        belief_insert,
+        belief_subject,
+    )
+
+    from doxa.engine import belief_action_state
+
+    if not belief_action_state()["capable"]:
+        pytest.skip("this lore_core has no outcome ledger")
+
+    engine = _engine(tmp_path)
+    conn = lore_store.db_connect()
+    bid, _ = belief_insert(conn, belief_subject("user", engine.slug),
+                           "a claim reality keeps disagreeing with",
+                           0.8, None, None, None)
+    conn.commit()
+
+    said = [await engine.record_belief_outcome(bid, "contradicted")
+            for _ in range(CONTRADICTIONS_TO_DORMANT)]
+    status = conn.execute("SELECT status FROM beliefs WHERE id = ?",
+                          (bid,)).fetchone()[0]
+    assert status == "dormant"
+    assert said[-1] and "dormant" in said[-1], said
+    assert "retire a claim from the working set" in said[-1]
+    # A dormant belief is out of the working set, so out of the browser.
+    assert all(b["id"] != bid for b in await engine.list_beliefs())
+
+
+@pytest.mark.asyncio
+async def test_retracting_uses_lores_own_transition(tmp_path, lore_store_cleanup):
+    """Copied from the branch lore_core.pending.apply_item runs for an
+    approved retract proposal, so a retraction from DOXA and one from
+    `lore approve` leave the store in the same shape -- status, resolution
+    text and all. And the evidence survives: retracting is not deleting."""
+    from lore_core import store as lore_store
+    from lore_core.beliefs import belief_insert, belief_subject
+
+    from doxa.engine import belief_action_state
+
+    if not belief_action_state()["capable"]:
+        pytest.skip("this lore_core has no belief_supersede")
+
+    engine = _engine(tmp_path)
+    conn = lore_store.db_connect()
+    bid, _ = belief_insert(conn, belief_subject("user", engine.slug),
+                           "a claim the operator kills on sight",
+                           0.8, None, None, "seen in a session")
+    conn.commit()
+
+    assert await engine.retract_belief(bid) is None
+
+    row = conn.execute(
+        "SELECT status, resolution FROM beliefs WHERE id = ?", (bid,)).fetchone()
+    assert row[0] == "retracted"
+    assert row[1], "belief_supersede's own resolution text is recorded"
+    assert conn.execute(
+        "SELECT count(*) FROM belief_evidence WHERE belief_id = ?", (bid,)
+    ).fetchone()[0] == 1, "retracting is not deleting"
+    assert all(b["id"] != bid for b in await engine.list_beliefs())
+
+    again = await engine.retract_belief(bid)
+    assert again and "already retracted" in again
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_verdict_is_refused_rather_than_written(
+    tmp_path, lore_store_cleanup
+):
+    """The vocabulary is LORE's CHECK constraint, not free text. A verdict
+    this store cannot hold is refused here rather than raised out of
+    sqlite three frames down."""
+    from doxa.engine import BELIEF_OUTCOME_EVENTS
+
+    engine = _engine(tmp_path)
+    said = await engine.record_belief_outcome(1, "approved")
+    assert said and "approved" in said
+    assert all(event in said for event in BELIEF_OUTCOME_EVENTS)
+
+
+def test_the_engine_has_no_bulk_belief_action_under_any_name():
+    """SECURITY-SHAPED ASSERTION at the API, matching the one approve and
+    reject already carry: one belief per call, so there is nothing for a
+    "retract all" to be built on without adding it first."""
+    import inspect
+
+    from doxa.client import EngineClient
+    from doxa.engine import SessionEngine
+
+    for cls in (SessionEngine, EngineClient):
+        names = sorted(n for n in dir(cls)
+                       if ("retract" in n or "outcome" in n)
+                       and not n.startswith("_"))
+        assert names == ["record_belief_outcome", "retract_belief"], (cls, names)
+        assert list(inspect.signature(
+            getattr(cls, "record_belief_outcome")).parameters
+        )[:3] == ["self", "belief_id", "event"]
+        assert list(inspect.signature(
+            getattr(cls, "retract_belief")).parameters
+        )[:2] == ["self", "belief_id"]

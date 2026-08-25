@@ -194,6 +194,11 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         # is_mounted re-check in open_beliefs_browser is what notices a
         # tab the user closed behind DOXA's back.
         self._beliefs_tab: "Any | None" = None
+        # v0.48.0: whether this session's lore_core can record a belief
+        # outcome or retract, fetched once when the beliefs picker first
+        # opens (see PaneChipsMixin._prime_belief_action_state). None until
+        # then, which renders as no caveat rather than a guessed one.
+        self._belief_actions_state: "dict | None" = None
         # The second status row -- mounted the moment _subagents stops
         # being empty, unmounted the moment it is empty again (see
         # _sync_subagent_line); None at every other time, deliberately, so

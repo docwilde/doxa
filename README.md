@@ -587,9 +587,25 @@ approving it changes is not reviewable. The dropdown itself writes
 nothing; its first row opens the browser.
 
 The status bar's belief count is the standing version of the same
-question. Clicking it opens a filterable list grouped by scope (`user`,
-`project`, `user model`), and picking one shows its full claim and
-confidence inline. That is the **glance**.
+question. Clicking it opens a list grouped by scope (`user`, `project`,
+`user model`), each group **folded behind a header carrying its own
+count** — `project (412 beliefs, 3 tested)` — because 635 active beliefs
+expanded at once is a wall rather than a glance. The counts are the answer
+for most visits; one selection opens the group you came for. A small
+enough store skips the folding entirely. Typing filters across **every**
+belief whether its group is folded or not, because the matcher has always
+scored the whole set rather than what is on screen. Rows carry the minute a
+belief was derived, not just the day, and tested beliefs sort to the top of
+their group. That is the **glance**.
+
+Selecting a belief opens **that belief's own verbs**: record what reality
+did to it — `confirmed`, `contradicted`, `stale`, straight into LORE's
+outcome ledger as `source: user`, the same path `lore outcome` takes — or
+retract it. Not "approve": a belief is a claim already in the store and
+already steering the model, and approving is what happens to a *staged
+proposal*, which is a different thing with its own controls below. Retract
+takes a second, differently-worded selection, because it takes the belief
+out of the working set and the model's context.
 
 `/beliefs` is the session. A full-height tab holding every active belief
 and every staged proposal at once. A belief row carries its scope, its
@@ -599,7 +615,10 @@ anything predating LORE's ledger — never back-filled with a guess), and how
 many pieces of evidence it rests on. Hovering any row shows its **full**
 claim text; `Enter` expands the evidence trail underneath it, fetched for
 that belief alone so a store of several hundred never has to cross the wire
-with several hundred trails.
+with several hundred trails. Each row carries the same verbs as real
+controls — `✓ confirmed`, `✗ contradicted`, `⌛ stale`, `⌫ retract…`, or
+`c` / `x` / `d` on the focused row — because one widget per row is exactly
+what a dropdown cannot give you and what this surface exists to.
 
 That middle column is LORE's own outcome ledger, not an idle timer. Being
 *cited* is not being *confirmed* — a belief the agent read back to itself

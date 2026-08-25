@@ -91,12 +91,15 @@ from .labels import (
     CLICKABLE_CHIP_ACCENT,
     CTX_AMBER,
     CTX_RED,
+    OUTCOME_COLORS,
+    OUTCOME_EVENTS,
     _belief_scope_label,
     _escape_markup,
     _one_line,
     as_proposal,
     belief_created_text,
     belief_outcome_color,
+    belief_outcome_kind,
     belief_outcome_text,
     belief_provenance,
     belief_sort_key,
@@ -237,20 +240,40 @@ class BeliefRow(BrowserRow):
     opposite facts, or the plain word ``never tested`` in the muted body
     colour, which is what ~95% of a real store says.
 
-    Read-only, always. Item V's write half is the staged-proposal queue --
-    a belief already IN the store is not something this browser edits, and
-    a retraction is itself a proposal (``lore belief retract`` stages one,
-    and it shows up below as ``retract → belief #N``).
+    NOT read-only since v0.48.0, and the verbs are LORE's rather than the
+    proposal queue's. A belief is a claim already in the store and already
+    steering the model; "approve" is not an operation on one. What is:
+    recording what reality did to it (``confirmed`` / ``contradicted`` /
+    ``stale``, into ``belief_outcomes``) and ending it (``retract``). The
+    first is the highest-value action in the product on the numbers --
+    97.6% of a live store has never been tested by anything, and every
+    calibrated confidence is reading a curve built on that nothing.
+
+    Retract ARMS on the first press and applies on the second, on this same
+    row, repainted in a different colour with different words -- the same
+    misclick asymmetry the proposal rows' approve control carries, for the
+    same reason: an outcome appends to a ledger and can be answered by the
+    opposite verdict tomorrow, a retraction takes the belief out of the
+    working set today.
 
     Enter expands the evidence trail. It is the only thing Enter does
     anywhere in this browser."""
 
-    BINDINGS = [Binding("enter", "toggle_evidence", "Evidence", show=False)]
+    BINDINGS = [
+        Binding("enter", "toggle_evidence", "Evidence", show=False),
+        Binding("c", "confirm", "Confirmed", show=False),
+        Binding("x", "contradict", "Contradicted", show=False),
+        Binding("d", "retract", "Retract (twice)", show=False),
+        Binding("escape", "disarm", "Disarm", show=False),
+    ]
 
     def __init__(self, browser: "BeliefsBrowserTab", belief: dict) -> None:
         self.belief = dict(belief)
         self.belief_id = belief.get("id")
         self._trail: "EvidenceTrail | None" = None
+        self.armed = False
+        self.resolved = ""
+        self._busy = False
         super().__init__(browser, classes="belief-row")
         self.update(self._line())
         # The tooltip is set from the SAME record, in the SAME constructor
@@ -271,7 +294,7 @@ class BeliefRow(BrowserRow):
         lead = [
             _belief_scope_label(subject),
             f"conf {conf}",
-            belief_created_text(b) or "created ?",
+            belief_created_text(b, full=True) or "created ?",
         ]
         tail = [
             belief_provenance(b),
@@ -286,11 +309,85 @@ class BeliefRow(BrowserRow):
         segments.append(_escape_markup(" · ".join(p for p in tail if p)))
         claim = ellipsize(_one_line(str(b.get("claim") or ""), 400), CLAIM_WIDTH)
         mark = "▾ hide evidence" if self._trail is not None else "▸ evidence"
-        return (
+        head = (
             _span(mark, "click_toggle", CLICKABLE_CHIP_ACCENT) + "  "
             + " · ".join(seg for seg in segments if seg)
-            + "\n    " + _escape_markup(claim)
         )
+        if self.resolved:
+            head = f"{self.resolved} · {head}"
+        return head + self._controls() + "\n    " + _escape_markup(claim)
+
+    def _controls(self) -> str:
+        """This belief's own verbs. Absent entirely when the loaded
+        lore_core cannot record them, rather than present and inert."""
+        if self.resolved or not self.browser.belief_actions_enabled:
+            return ""
+        if self.armed:
+            return (
+                "        "
+                + _span("⌫ CONFIRM RETRACT", "retract", ARMED_COLOR)
+                + "        (Esc, or any other row, disarms)"
+            )
+        return (
+            "        " + _span("✓ confirmed", "confirm", OUTCOME_COLORS["confirmed"])
+            + "   " + _span("✗ contradicted", "contradict",
+                            OUTCOME_COLORS["contradicted"])
+            + "   " + _span("⌛ stale", "mark_stale", OUTCOME_COLORS["stale"])
+            + "     " + _span("⌫ retract…", "retract", REJECT_COLOR)
+        )
+
+    def disarm(self) -> None:
+        if self.armed:
+            self.armed = False
+            self._repaint()
+
+    def action_disarm(self) -> None:
+        self.disarm()
+
+    def _outcome(self, event: str) -> None:
+        if self.resolved or self._busy or not self.browser.belief_actions_enabled:
+            return
+        self.armed = False
+        self._busy = True
+        self._repaint()
+        self.run_worker(self.browser.record_outcome(self, event),
+                        group="beliefs-write")
+
+    def action_confirm(self) -> None:
+        self._outcome("confirmed")
+
+    def action_contradict(self) -> None:
+        self._outcome("contradicted")
+
+    def action_mark_stale(self) -> None:
+        self._outcome("stale")
+
+    def action_retract(self) -> None:
+        """First press ARMS this row; the second, on the same row, ends the
+        belief. Arming disarms every other row, so there is never a second
+        armed control for a stray click to land on."""
+        if self.resolved or self._busy or not self.browser.belief_actions_enabled:
+            return
+        if not self.armed:
+            self.browser.disarm_all(except_row=self)
+            self.armed = True
+            self._repaint()
+            return
+        self.armed = False
+        self._busy = True
+        self._repaint()
+        self.run_worker(self.browser.retract(self), group="beliefs-write")
+
+    def settle(self, outcome: str, belief: "dict | None" = None) -> None:
+        """Record what happened, in the row itself. The row STAYS -- same
+        rule ProposalRow.settle follows, and for the same reason."""
+        self._busy = False
+        self.armed = False
+        self.resolved = outcome
+        if belief is not None:
+            self.belief = dict(belief)
+            self.tooltip = belief_tooltip(self.belief)
+        self._repaint()
 
     def _repaint(self) -> None:
         self.update(self._line())
@@ -457,6 +554,12 @@ class BeliefsBrowserTab(TabPane):
         self.owner = owner
         self.rows: "list[BrowserRow]" = []
         self.write_state: dict = {}
+        # v0.48.0: a SECOND, narrower capability than write_state -- see
+        # doxa.engine.belief_action_state for why recording an outcome and
+        # retracting do not need the 0.36.0 provenance ledger that
+        # approving a staged proposal does.
+        self.belief_action_state: dict = {}
+        self.belief_actions_enabled = False
         self.scroll = VerticalScroll(classes="beliefs-scroll")
         super().__init__(f"{BROWSER_MARK} beliefs", id=id)
 
@@ -505,6 +608,12 @@ class BeliefsBrowserTab(TabPane):
             state = {"capable": False, "reason": f"{type(exc).__name__}: {exc}"}
         self.write_state = dict(state)
         writable = bool(state.get("capable"))
+        try:
+            actions = await self._ask("belief_action_state") or {}
+        except Exception as exc:  # noqa: BLE001
+            actions = {"capable": False, "reason": f"{type(exc).__name__}: {exc}"}
+        self.belief_action_state = dict(actions)
+        self.belief_actions_enabled = bool(actions.get("capable"))
 
         version = state.get("version") or "unknown version"
         source = state.get("source") or "unknown source"
@@ -521,6 +630,16 @@ class BeliefsBrowserTab(TabPane):
             await self.scroll.mount(BrowserNote(
                 "read-only — " + _escape_markup(str(state.get("reason") or
                                   "this session cannot approve or reject")),
+                classes="beliefs-readonly",
+            ))
+        if not self.belief_actions_enabled:
+            # A SEPARATE banner, because it is a separate capability and
+            # collapsing the two would tell a user on a 0.35 lore_core that
+            # outcomes are unavailable when they are.
+            await self.scroll.mount(BrowserNote(
+                "beliefs are read-only — " + _escape_markup(str(
+                    actions.get("reason")
+                    or "this session cannot record outcomes or retract")),
                 classes="beliefs-readonly",
             ))
 
@@ -578,9 +697,13 @@ class BeliefsBrowserTab(TabPane):
             key=lambda b: (_belief_scope_label(str(b.get("subject") or "")),
                            belief_sort_key(b)),
         )
-        widgets: "list[Any]" = [BrowserNote(
-            f"▎ active beliefs ({len(ordered)})", classes="beliefs-section",
-        )]
+        tested = sum(1 for b in ordered
+                     if belief_outcome_kind(b) in OUTCOME_EVENTS)
+        head = f"▎ active beliefs ({len(ordered)}, {tested} tested)"
+        if self.belief_actions_enabled:
+            head += ("\n   c confirmed · x contradicted · d arms retract, "
+                     "d again ends it · Esc disarms")
+        widgets: "list[Any]" = [BrowserNote(head, classes="beliefs-section")]
         current = None
         for belief in ordered:
             group = _belief_scope_label(str(belief.get("subject") or ""))
@@ -594,10 +717,72 @@ class BeliefsBrowserTab(TabPane):
 
     # -- the write half ------------------------------------------------
 
-    def disarm_all(self, except_row: "ProposalRow | None" = None) -> None:
+    def disarm_all(self, except_row: "BrowserRow | None" = None) -> None:
+        """Exactly one armed control on screen, ever -- across BOTH row
+        kinds, because a proposal's armed approve and a belief's armed
+        retract are equally one Enter from happening."""
         for row in self.rows:
-            if isinstance(row, ProposalRow) and row is not except_row:
+            if row is not except_row and isinstance(row, (ProposalRow, BeliefRow)):
                 row.disarm()
+
+    async def record_outcome(self, row: "BeliefRow", event: str) -> None:
+        """One verdict against one belief, and say what happened.
+
+        Re-reads the belief afterwards so the row repaints with its NEW
+        staleness column -- the point of recording an outcome is that the
+        column changes, and a row that still said "never tested" after you
+        confirmed it would be the browser lying about the thing it exists
+        to show."""
+        try:
+            error = await self._ask("record_belief_outcome", row.belief_id, event)
+        except Exception as exc:  # noqa: BLE001
+            error = f"{type(exc).__name__}: {exc}"
+        if error:
+            # LORE's dormancy note arrives here too: a contradiction that
+            # just retired a belief is not a failure and is not silent.
+            row.settle(f"· {event}")
+            await self._say(
+                f"beliefs browser · belief {row.belief_id} · {event} · "
+                f"{_escape_markup(str(error))}"
+            )
+            return
+        row.settle("", await self._refetch(row.belief_id) or row.belief)
+        await self._say(
+            f"beliefs browser · belief {row.belief_id} recorded as {event} "
+            "(source: user) — LORE's own outcome ledger, the one "
+            "calibrated confidence reads."
+        )
+
+    async def retract(self, row: "BeliefRow") -> None:
+        try:
+            error = await self._ask("retract_belief", row.belief_id)
+        except Exception as exc:  # noqa: BLE001
+            error = f"{type(exc).__name__}: {exc}"
+        if error:
+            row.settle("✗ NOT retracted")
+            await self._say(
+                f"beliefs browser · belief {row.belief_id} — "
+                f"{_escape_markup(str(error))}"
+            )
+            return
+        row.settle("⌫ retracted")
+        await self._say(
+            f"beliefs browser · belief {row.belief_id} retracted — it leaves "
+            "the working set and the model's context. Its evidence and "
+            "outcome ledger stay on disk."
+        )
+
+    async def _refetch(self, belief_id: Any) -> "dict | None":
+        """This belief as the store now holds it. Never raises: a row that
+        cannot be re-read keeps the record it already had rather than
+        blanking a line the user is looking at."""
+        try:
+            for belief in await self._ask("list_beliefs") or []:
+                if belief.get("id") == belief_id:
+                    return belief
+        except Exception:  # noqa: BLE001
+            pass
+        return None
 
     async def apply(self, row: "ProposalRow", action: str) -> None:
         """Run ONE approve or reject, for ONE row, and say what happened.

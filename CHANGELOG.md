@@ -4,6 +4,173 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.48.0 — 2026-08-25
+
+**The beliefs chip becomes a surface you can work in.** Five things the
+user asked for after living with v0.46.0: the minute a belief was derived,
+tested beliefs at the top, the browser one selection away, something to
+*do* on a belief row, and scope groups that fold with their counts in the
+header.
+
+- **`HH:MM`, and what gave way for it.** v0.46.0 showed the date alone and
+  argued the clock was noise "in a column that has to fit beside a claim".
+  The user overruled the first half; the second half is why the fix is not
+  simply six wider columns. `PICKER_ROW_WIDTH` is 72 because that is what
+  fits an 80-column terminal inside a bordered dropdown, and the row string
+  is *exactly* what ChipPicker's type-to-filter matches — so columns taken
+  for a stamp are columns of claim that stop being findable. *Judgment
+  call:* the picker drops the **year** from a belief derived in the current
+  one. `08-25 14:23` costs one column more than `2026-08-25` did; a belief
+  from an earlier year keeps its year and costs the full six, which is
+  exactly where the year is worth having. The same convention `ls -l` has
+  used for decades. Seconds are still noise and are still absent. The
+  browser's own rows have the width and always render
+  `YYYY-MM-DD HH:MM` — both surfaces show the clock, only the picker infers
+  the year.
+- **Tested-first in the picker — a real defect, not a new feature.**
+  `belief_sort_key` was written for the browser in v0.46.0 and the picker
+  never called it: `chips.py` sorted by scope label *alone*. Tested beliefs
+  now rise to the top of their group there too, most recently tested first,
+  never-tested following as a stable bucket — without disturbing the
+  contiguous grouping the header insertion depends on.
+- **Selecting the browse row already opened the browser in a tab, and
+  still does.** Verified rather than assumed: that behaviour shipped in
+  v0.46.0 and has a test pinning it. The user was confirming an
+  expectation, not reporting a bug. Nothing changed, and the test is now
+  named for the expectation so it stays confirmed.
+
+**Scope groups fold, and say how much they are hiding.** `project (412
+beliefs, 3 tested)` — count from the widget, which has the rows; the
+"tested" note from the caller, because how many beliefs reality has tested
+is a fact about beliefs and a generic dropdown has no business knowing it.
+The labels are whatever `_belief_scope_label` emits, so `user model` stays
+its own group rather than being folded into plain `user`.
+
+- **Folded by default on a large list, expanded on a small one.**
+  *Judgment call.* 635 active beliefs is the reported store; a picker that
+  opens fully expanded is a wall, not a glance, and that is the thing the
+  fold exists to fix. But folding three rows behind three headers is
+  strictly worse than showing them, so below `#chip-picker`'s own
+  `max-height` every group opens and the feature is invisible. The
+  threshold is the widget's real number, not a taste.
+- **The counts are what make a folded list an answer.** `project (412
+  beliefs) · user (83 beliefs) · user model (12 beliefs)` *is* the rough
+  shape of the store — which is what the chip is for — and one selection
+  opens the part you came for.
+- **Group ORDER stays alphabetical and does not react to test counts.**
+  *Judgment call, and a deliberate refusal.* A group that outranked another
+  because it happened to gain an outcome would move between openings, and
+  this house's own rule is that a status surface whose contents shift is
+  worse than one that omits something. Scope is a taxonomy, not a ranking.
+  The tested count goes in the header instead, where it informs without
+  making the layout jump; tested-first stays a *within*-group ordering,
+  which is where it was asked for.
+- **Filtering is untouched by the fold, by construction.** The matcher has
+  always scored the complete row set rather than what is on screen, and a
+  typed filter already dropped group headers entirely — so a folded view is
+  simply not the view being filtered. A user typing a word finds a belief
+  inside a folded group with no auto-expand rule, no re-fold bookkeeping
+  and no special case, and clearing the filter returns to exactly the fold
+  state that was there before. Asserted.
+- **The door never folds.** The "open the beliefs browser" row lives in its
+  own group, and a group of doors rather than data starts open — caught by
+  building it: on a 635-belief store the first version hid the way out of
+  the picker behind the very fold that made the picker usable.
+
+**And the browse row is *more* necessary now, not less.** A navigable
+picker settles what each surface is for: the picker answers *what is in
+here and roughly how much*, and the browser owns the things a dropdown
+still cannot render — evidence trails, tooltips carrying the whole claim,
+and two independent controls on one row.
+
+**What a belief row can actually DO — and why it is not "approve".** The
+user asked for an Approve/Reject button on every belief row. Those two are
+not operations on a belief, and shipping them under those names would have
+taught the wrong model of the system:
+
+- **Approving applies a staged PROPOSAL** — an entry that does not exist in
+  the store yet. Every proposal already carries approve and reject, per
+  row, in the browser (v0.46.0).
+- **A belief is a claim already in the store and already steering the
+  model.** What LORE can do to one is record what reality did to it
+  (`belief_outcomes`: `confirmed` / `contradicted` / `stale`) and end it
+  (`retract`). So those are the verbs, spelled LORE's way — read off the
+  `CHECK` constraint and off the transition `pending.apply_item` performs
+  for an approved retract, not invented here.
+
+Recording an outcome is the high-value one and the reason the affordance is
+worth the keystroke: **97.6% of a live store has never been tested by
+anything**, and every `calibrated_confidence` in the product reads a curve
+built on that nothing. `source="user"` is not a label DOXA chose — it is
+what `lore_core.beliefs.cmd_outcome`, LORE's own *"manual/pushback path"*,
+passes, and a human selecting a verdict in a DOXA row **is** that path. A
+test reads it back out of the store.
+
+- **In the browser: real controls, one per row.** `✓ confirmed`,
+  `✗ contradicted`, `⌛ stale`, `⌫ retract…`, each in the colour its
+  verdict already wears, plus `c` / `x` / `d` / `Esc` on the focused row.
+  This is the surface that *can* have a button per row — one widget per row
+  is why it exists.
+- **In the dropdown: the row's actions become the row set.** *Judgment
+  call.* `ChipPicker` is an `OptionList`, and an `Option` has no widgets, no
+  tooltip and exactly one click target — a button per row is not something
+  it can be made to do without rebuilding the widget five other pickers
+  share. What it *can* do is reopen itself against a new row set, which is
+  the pattern the repo picker has used to descend a directory since
+  v0.22.0. So selecting a belief opens **that belief's** named verbs. That
+  shape is the safer one anyway rather than a consolation for the wrong
+  one: a dropdown row is one Enter from whatever the highlight is sitting
+  on, which makes it a *more* accidental surface than a full-height tab,
+  not less — so nothing here acts on the belief you selected; it shows you
+  what can be done to it.
+- **Retract arms, on both surfaces.** It is the destructive verb: the
+  belief leaves the working set and the model's context. The browser row
+  arms and repaints; the dropdown re-words the row and requires a second,
+  differently-worded selection. An outcome appends to a ledger and can be
+  answered by the opposite verdict tomorrow; a retraction takes the belief
+  out today. Retracting is **not** deleting — the row survives with
+  `status='retracted'` and its evidence and outcome ledger intact, asserted.
+- **LORE's dormancy trigger fires and the user is told.** `record_outcome`
+  retires a claim after `CONTRADICTIONS_TO_DORMANT` contradictions. DOXA
+  drives that function rather than routing around it, so the second
+  contradiction retires the belief exactly as `lore outcome` would — and
+  the reply says so instead of a row quietly vanishing.
+- **One belief per call, no bulk form.** No list parameter on either
+  engine, no bulk RPC, no multi-select, under any spelling — asserted at the
+  API and at the protocol, the same way approve and reject already are.
+- **A narrower capability gate than approving, deliberately.** *Judgment
+  call.* `lore_write_state` requires LORE 0.36.0 because approving a
+  proposal WRITES an entry and an entry with no `via` label is what that
+  gate exists to prevent. These write somewhere else: an outcome is a row
+  in `belief_outcomes`, which has carried its own provenance in `source`
+  and `agent` since the ledger landed — well before 0.36.0 — and a retract
+  is a status transition on a row that already exists, creating nothing for
+  a provenance column to label. Gating them on 0.36.0 would refuse a
+  perfectly recordable outcome on a store that can record it, which is a
+  different dishonesty from the one that gate prevents. New
+  `belief_action_state` asks the only question that matters, measured off
+  the API: are `record_outcome` and `belief_supersede` here to be called.
+  Both surfaces degrade to read-only with their own banner and their own
+  reason when they are not.
+
+- Tests: 25 new — 24 in `tests/test_beliefs_browser.py` (76 there in
+  total) and one in `tests/test_daemon.py` — each verified failing against
+  `origin/main`.
+  Folding, counts, the tested-first order, filtering reaching a folded
+  belief, the door never folding, both arming paths, and the outcome and
+  retract round trips read back out of the real store.
+- Three tests in `tests/test_status_chips.py` needed updating rather than
+  fixing, and both changes are the point of the release: a group header now
+  carries a row id because folding is its affordance (it was a disabled
+  separator with an empty one), and selecting a belief opens that belief's
+  actions rather than spilling its claim — "show the full claim" is the
+  first of them, so the old behaviour is one selection away and the tests
+  now walk that path.
+- **A race caught by building it.** Reopening `ChipPicker` from inside a
+  row callback races Textual's queued `Blur` delivery and closes the picker
+  right back. `_select_repo_row` documented this in v0.22.0 and fixes it
+  with `call_after_refresh`; the belief action menu needed the same fix and
+  now carries the same note pointing at it.
 ## 0.47.0 — 2026-08-25
 
 Three workstreams that finished together and ship as one release: the

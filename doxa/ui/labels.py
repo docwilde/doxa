@@ -651,11 +651,48 @@ def belief_touched(belief: dict) -> "str | None":
     )
 
 
-def belief_created_text(belief: dict) -> str:
-    """The creation DATE, no clock time: a belief store is browsed by day,
-    and the seconds are noise in a column that has to fit beside a claim.
-    Empty when the row carries no ``created``."""
-    return str(belief.get("created") or "").strip()[:10]
+def belief_created_text(
+    belief: dict, *, full: bool = False, now: "float | None" = None,
+) -> str:
+    """When the belief entered the store, to the MINUTE.
+
+    v0.46.0 showed the date alone and argued that "a belief store is
+    browsed by day, and the seconds are noise in a column that has to fit
+    beside a claim". The user overruled the first half and kept the second:
+    HH:MM, no seconds. Seconds on a claim derived by a background reviewer
+    are a precision nobody acts on.
+
+    WHAT GAVE WAY FOR THE SIX COLUMNS. ``PICKER_ROW_WIDTH`` is 72 because
+    that is what fits an 80-column terminal inside a bordered dropdown, so
+    a wider stamp is columns taken from the claim -- and the claim is what
+    ChipPicker's type-to-filter matches against, so narrowing it narrows
+    what is findable. Rather than spend six, the picker drops the YEAR from
+    a belief derived in the current one: `08-25 14:23` costs ONE column
+    more than `2026-08-25` did, and a year the reader is standing in is the
+    least informative thing on the line. A belief from an earlier year
+    keeps its year and costs the full six, which is exactly the case where
+    the year is worth having. Same convention `ls -l` has used for decades.
+
+    ``full=True`` disables the elision -- the browser's own rows have the
+    width and are read as a record rather than as a glance, so they always
+    carry `YYYY-MM-DD HH:MM`. Both surfaces show HH:MM; only the picker
+    infers the year."""
+    stamp = str(belief.get("created") or "").strip()
+    when = _parse_lore_time(stamp)
+    if when is None:
+        # Unparseable but present: show whatever date-shaped prefix it has
+        # rather than dropping the column, and never invent a clock time
+        # for a string this function could not read.
+        return stamp[:10]
+    import time as _time
+
+    parts = _time.gmtime(when)
+    if full:
+        return _time.strftime("%Y-%m-%d %H:%M", parts)
+    this_year = _time.gmtime(now if now is not None else _time.time()).tm_year
+    return _time.strftime(
+        "%m-%d %H:%M" if parts.tm_year == this_year else "%Y-%m-%d %H:%M", parts
+    )
 
 
 def belief_age_text(belief: dict, now: "float | None" = None) -> str:
@@ -760,11 +797,13 @@ def belief_sort_key(belief: dict) -> "tuple[int, float]":
     return (1, 0.0)
 
 
-def belief_stamp(belief: dict, now: "float | None" = None) -> str:
+def belief_stamp(
+    belief: dict, now: "float | None" = None, *, full: bool = False,
+) -> str:
     """The row's two facts as one segment: when the belief was created, and
     what reality last said about it."""
     return " · ".join(
-        part for part in (belief_created_text(belief),
+        part for part in (belief_created_text(belief, full=full, now=now),
                           belief_outcome_text(belief, now))
         if part
     )
