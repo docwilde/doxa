@@ -959,7 +959,7 @@ class PaneCommandsMixin:
 
     def _lore_memory_bits(self) -> "list[str]":
         """The rest of what LORE holds for this session, for the opening
-        block's `lore` line (v0.51.0, reported): how many proposals are
+        block's `lore` line (v0.56.0, reported): how many proposals are
         staged, how many entries each curated-memory scope holds, and how
         full each scope is.
 

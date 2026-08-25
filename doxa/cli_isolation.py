@@ -330,7 +330,7 @@ def cli_session_file(session_id: str) -> "Path | None":
     The one question ``/resume`` has to answer before it offers anything:
     ``--resume`` reads the CLI's session store, which is a DIFFERENT store
     from the LORE transcript DOXA writes and ``/search`` indexes. Measured
-    (v0.45.0, against a real ``claude`` under this module's own
+    (v0.56.0, against a real ``claude`` under this module's own
     ``spawn_env``): resuming an id the store does not hold fails the turn
     outright with ``No conversation found with session ID: <id>``, and
     that is not an error worth discovering one prompt into a conversation

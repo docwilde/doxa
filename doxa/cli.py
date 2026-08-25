@@ -96,7 +96,7 @@ def _run_attached(
         return EngineClient(dsock)
 
     def resume_session_factory(path: str, session_id: str) -> EngineClient:
-        # /resume (v0.45.0): the same spawn primitive again, except the
+        # /resume (v0.56.0): the same spawn primitive again, except the
         # daemon CONTINUES the conversation already recorded under
         # session_id instead of minting a new one -- spawn_daemon's own
         # `resume` argument, which also makes the resumed id the daemon's
@@ -134,7 +134,7 @@ def _restore_report_text(
     transcript" is said out loud at the moment the window opens, not left
     to be discovered.
 
-    v0.45.0 adds the ``resumed`` clause and it carries the same duty in
+    v0.56.0 adds the ``resumed`` clause and it carries the same duty in
     the other direction: those tabs are LIVE sessions continuing a
     conversation that had ended, which is a strictly bigger claim than
     "restored" and must not hide inside it. Its counterpart is that the
@@ -181,7 +181,7 @@ def ended_tab_spec(
     (:func:`doxa.history.resume_state`): no subprocess, nothing that can
     slow a launch measurably, and nothing that can fail a launch. It is
     also what keeps this honest -- the CLI holds no history under any
-    session id DOXA minted before v0.45.0, when its ids and the CLI's were
+    session id DOXA minted before v0.56.0, when its ids and the CLI's were
     two different id spaces (see ``SessionEngine._build_options``), so
     those tabs come back exactly as they do today AND SAY WHY.
 
@@ -255,7 +255,7 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
         return EngineClient(dsock)
 
     def resume_session_factory(path: str, session_id: str) -> EngineClient:
-        # /resume (v0.45.0): the same spawn primitive again, except the
+        # /resume (v0.56.0): the same spawn primitive again, except the
         # daemon CONTINUES the conversation already recorded under
         # session_id instead of minting a new one -- spawn_daemon's own
         # `resume` argument, which also makes the resumed id the daemon's

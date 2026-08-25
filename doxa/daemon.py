@@ -328,7 +328,7 @@ class SessionDaemon:
         self.cwd = str(cwd or os.getcwd())
         self.model = model
         self.session_id = session_id or str(uuid.uuid4())
-        # v0.45.0 (/resume): this daemon CONTINUES an existing conversation
+        # v0.56.0 (/resume): this daemon CONTINUES an existing conversation
         # rather than starting one. The id is not new -- see spawn_daemon,
         # which passes the SAME string as both session_id and resume, so
         # the transcript file, the registry entry and the /search row all
@@ -379,7 +379,7 @@ class SessionDaemon:
         fails for any reason: worktree-per-session is strictly additive,
         never a reason a session fails to start.
 
-        A RESUME never creates one (v0.45.0). ``--resume`` is resolved by
+        A RESUME never creates one (v0.56.0). ``--resume`` is resolved by
         the CLI against ITS store, whose directories are keyed by the cwd
         the session ran in; substituting a freshly-created worktree here
         would hand the CLI a cwd the original conversation was never
@@ -993,7 +993,7 @@ def spawn_daemon(
     stderr go to a per-session log under the runtime dir (diagnostics only;
     the engine never prints transcript text).
 
-    ``resume`` (v0.45.0) means this daemon continues an EXISTING
+    ``resume`` (v0.56.0) means this daemon continues an EXISTING
     conversation, and then the id is not minted at all: the resumed id IS
     the session id. That equality is the feature, not a shortcut -- the
     transcript file, the registry entry, the tab record and the /search
@@ -1090,7 +1090,7 @@ def main(argv: "list[str] | None" = None) -> int:
                         help="item S: fork the session worktree from this "
                              "ref instead of the launch cwd's checkout")
     parser.add_argument("--resume", default=None,
-                        help="v0.45.0: continue the conversation with this "
+                        help="v0.56.0: continue the conversation with this "
                              "session id instead of starting a new one "
                              "(spawn_daemon passes the same value as "
                              "--session-id -- a resume keeps its id)")

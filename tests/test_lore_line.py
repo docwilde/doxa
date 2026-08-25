@@ -1,4 +1,4 @@
-"""v0.51.0: the opening block's `lore` line, widened.
+"""v0.56.0: the opening block's `lore` line, widened.
 
 Reported: "the 'lore' line in the status/welcome box on startup should
 also show how many pending, how many in user/project context and how full

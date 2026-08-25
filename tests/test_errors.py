@@ -1,4 +1,4 @@
-"""The error surface (v0.53.0) -- doxa/errors.py, ErrorBlock, and the
+"""The error surface (v0.56.0) -- doxa/errors.py, ErrorBlock, and the
 app-level boundary that catches what Textual would otherwise exit on.
 
 Every assertion about the block is a USER-VISIBLE one, on the v0.28.0 rule

@@ -78,11 +78,11 @@ os.environ["XDG_CONFIG_HOME"] = str(_tmp / "xdg")
 os.environ["DOXA_SKIP_FIRST_RUN"] = "1"
 
 
-# -- v0.53.0: the suite must not become a place errors hide -----------
+# -- v0.56.0: the suite must not become a place errors hide -----------
 #
 # The error surface makes a caught exception SURVIVABLE, and a surface
 # that turns a crash into a quiet block is one keystroke away from being a
-# surface that turns a crash into a quietly passing test. Before v0.53.0
+# surface that turns a crash into a quietly passing test. Before v0.56.0
 # an unhandled exception failed the test that provoked it, because Textual
 # re-raises App._exception at run_test teardown; now a recoverable failure
 # deliberately does not set that, so nothing would notice.

@@ -123,7 +123,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         # reported cwd wins once it boots, this is the before-boot answer
         # (and the ONLY answer an archived tab ever has).
         self._restore_cwd: "str | None" = None
-        # v0.45.0 (/resume): this pane's engine CONTINUES an existing
+        # v0.56.0 (/resume): this pane's engine CONTINUES an existing
         # conversation. Set at construction by DoxaApp.resume_session, read
         # once by _boot, which then reuses v0.32.0's own
         # _restore_transcript to put the prior turns back on screen -- see
@@ -188,7 +188,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         # set_staged for why it is a steady tint and never a blink.
         self.staged_pending = False
         # How many proposals LORE has staged, counted ONCE at boot for the
-        # opening block's `lore` line (v0.51.0 -- see _lore_memory_bits).
+        # opening block's `lore` line (v0.56.0 -- see _lore_memory_bits).
         # None means "not asked yet, or the engine could not answer", which
         # that line renders as omission rather than as a zero nobody
         # measured. Never refreshed on a status tick: the count costs a
@@ -311,7 +311,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         at all -- v0.31.0's replay-only behavior, unchanged, rather than a
         doubled transcript.
 
-        ``require_backlog_skip=False`` is the RESUME caller (v0.45.0), and
+        ``require_backlog_skip=False`` is the RESUME caller (v0.56.0), and
         it is the only difference between the two. A reattach shares a
         daemon that has been running all along, so drawing from disk is
         only safe once that daemon has agreed not to replay its ring on
@@ -618,7 +618,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
     @on(OptionList.OptionSelected, "#session-search")
     def _on_search_selected(self, event: OptionList.OptionSelected) -> None:
         """Clicking a row does what Enter would: offer to RESUME a session
-        header (v0.45.0 -- it used to toggle that header's fold), or take a
+        header (v0.56.0 -- it used to toggle that header's fold), or take a
         snippet's excerpt.
 
         The two must not drift. Enter's meaning on a header changed in

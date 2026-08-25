@@ -56,7 +56,7 @@ chips (:class:`doxa.session.chips.StatusChip`), the event dispatch map
 (:mod:`doxa.providers`). Those are structures, not a loader: this release
 gained no way to load third-party code, deliberately.
 
-v0.45.0 (session resume) added one more spawn seam beside the two the
+v0.56.0 (session resume) added one more spawn seam beside the two the
 split already had: ``_resume_session_factory``, which builds a session
 that CONTINUES a recorded conversation rather than starting one -- see
 :meth:`DoxaApp.resume_session` for what it opens and for why a resume
@@ -274,7 +274,7 @@ from .ui.transcript import (  # noqa: F401
 # a second press inside it upgrades to quit-stop (finalize NOW).
 CTRL_C_DOUBLE_SECS = 2.0
 
-# -- v0.53.0: the error surface's app-level half -----------------------
+# -- v0.56.0: the error surface's app-level half -----------------------
 #
 # Textual 5.3.0 funnels EVERYTHING through ``App._handle_exception``:
 # message-handler raises, compose/mount raises, idle handlers, next-
@@ -469,7 +469,7 @@ class DoxaApp(App):
         self._new_session_factory_at = new_session_factory_at or (
             lambda path: SessionEngine(cwd=path, model=self.model)
         )
-        # v0.45.0 (/resume): the third member of the same family -- spawn
+        # v0.56.0 (/resume): the third member of the same family -- spawn
         # a session at an explicit path, except this one CONTINUES the
         # conversation already recorded under ``session_id`` instead of
         # starting a new one. Same wrapping shape doxa.cli gives the other
@@ -519,7 +519,7 @@ class DoxaApp(App):
         # gets detached twice (should never happen) doesn't duplicate.
         self._detached_this_run: "dict[str, tabsets_mod.TabRecord]" = {}
         self._tab_serial = 0
-        # v0.53.0's error surface. Three pieces of state, and each is one
+        # v0.56.0's error surface. Three pieces of state, and each is one
         # of the three things the brief for this feature asked for:
         #
         #   failures       -- the QUERYABLE record. docs/plugin-api.md's
@@ -703,7 +703,7 @@ class DoxaApp(App):
         return None
 
     async def resume_session(self, group: dict) -> "str | None":
-        """Reopen a past conversation (v0.45.0). Returns a note to show the
+        """Reopen a past conversation (v0.56.0). Returns a note to show the
         user, or None when there is nothing left to say.
 
         NEW TAB, not this pane. A resumed conversation is a DIFFERENT
@@ -1098,7 +1098,7 @@ class DoxaApp(App):
         if pane is not None:
             pane._refresh_status()
 
-    # -- the error surface (v0.53.0) ---------------------------------
+    # -- the error surface (v0.56.0) ---------------------------------
 
     def _failure_surface(self) -> "VerticalScroll | None":
         """WHERE a failure gets drawn: the active session's transcript,
@@ -1445,7 +1445,7 @@ class DoxaApp(App):
                             self._tab_title(spec.cwd or self.cwd),
                             pinned_name=spec.pinned_name,
                             id=_restore_pane_id(spec.session_id),
-                            # v0.45.0: read-only is now the FALLBACK, so
+                            # v0.56.0: read-only is now the FALLBACK, so
                             # the tab says which of the reasons it was.
                             resume_note=spec.resume_note,
                         )
@@ -1457,7 +1457,7 @@ class DoxaApp(App):
                     if spec.pinned_name:
                         pane._initial_pinned_name = spec.pinned_name
                     if spec.resume:
-                        # v0.45.0: this tab's session had ENDED, and it is
+                        # v0.56.0: this tab's session had ENDED, and it is
                         # coming back LIVE, continuing that conversation
                         # (doxa.cli decided that; the engine_factory above
                         # spawns with --resume). Its scrollback comes from

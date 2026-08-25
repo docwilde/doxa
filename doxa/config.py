@@ -146,7 +146,7 @@ SETTINGS: tuple[Setting, ...] = (
         kind="bool_on", default="1",
         help="A restored tab whose session ENDED comes back as a LIVE "
              "session continuing that conversation, instead of a "
-             "read-only transcript (v0.45.0)",
+             "read-only transcript (v0.56.0)",
         note="Its own switch rather than a clause of `restore_tabs`, "
              "because it is the one part of restore that starts a "
              "PROCESS: one `claude` per resumed tab, spawned with "
@@ -157,7 +157,7 @@ SETTINGS: tuple[Setting, ...] = (
              "choice worth being able to decline. Off is exactly "
              "v0.32.0's behaviour: read-only over the transcript, "
              "marked. A conversation the CLI has no history for (every "
-             "session DOXA recorded before v0.45.0, when its id and the "
+             "session DOXA recorded before v0.56.0, when its id and the "
              "CLI's were still two different id spaces) falls back to "
              "read-only either way, and the tab says so.",
     ),

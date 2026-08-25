@@ -85,7 +85,7 @@ class PromptInput(TextArea):
     popups are mutually exclusive in practice, and this settles the order
     anyway.
 
-    v0.45.0 changed exactly one meaning in that protocol: Enter on a
+    v0.56.0 changed exactly one meaning in that protocol: Enter on a
     ``/search`` SESSION HEADER posts :class:`ResumeRequested` instead of
     toggling the header's fold. The old comment on that branch reasoned
     that toggling was "the ONLY thing Enter can mean here", which held
@@ -133,7 +133,7 @@ class PromptInput(TextArea):
 
     class ResumeRequested(Message):
         """Enter (or a click) on a ``/search`` SESSION HEADER row: the
-        user wants that conversation back (v0.45.0).
+        user wants that conversation back (v0.56.0).
 
         Carries the header's whole group dict -- session id, title, cwd,
         timestamp -- because everything downstream needs all four: the
@@ -377,7 +377,7 @@ class PromptInput(TextArea):
             elif event.key == "enter":
                 group = self.search.chosen_session()
                 if group is not None:
-                    # v0.45.0 -- Enter on a session header REPURPOSED.
+                    # v0.56.0 -- Enter on a session header REPURPOSED.
                     #
                     # It used to toggle the fold, on the reasoning that "a
                     # header row is never itself an excerpt, so this is

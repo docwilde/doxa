@@ -449,7 +449,7 @@ async def test_right_expands_left_collapses_a_header(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_enter_on_a_header_no_longer_toggles_the_fold(monkeypatch, tmp_path):
-    """v0.45.0 REPURPOSED this key, and this test is the old one rewritten
+    """v0.56.0 REPURPOSED this key, and this test is the old one rewritten
     rather than deleted, so the change is legible where it happened.
 
     Through v0.44.0 Enter on a session header toggled its fold, reasoning

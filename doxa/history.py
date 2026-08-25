@@ -41,7 +41,7 @@ spec text did not survive to this session; both features here are
 RE-DERIVED from the surviving fragments plus this codebase -- see
 CHANGELOG.md's 0.21.0 entry for what had to be judgment-called.
 
-v0.45.0 -- a result row is not only a citation any more. A session header
+v0.56.0 -- a result row is not only a citation any more. A session header
 names a CONVERSATION, and a conversation can be reopened: Enter on one now
 offers to RESUME it (the fold kept Right and Left, which is what freed the
 key; Enter on a snippet still inserts its excerpt, unchanged). Two things
@@ -83,7 +83,7 @@ RESULT_LIMIT = 20
 MATCH_STYLE = "#D97757"
 DIM_STYLE = "#8A8073"
 
-# Width of the age gutter every row carries (v0.45.0): five columns for
+# Width of the age gutter every row carries (v0.56.0): five columns for
 # doxa.ui.labels._fmt_age's answer plus one separator.
 #
 # Exactly, to the column, the blank indent child_row_label ALREADY spent
@@ -247,7 +247,7 @@ def with_titles(hits: list[dict]) -> list[dict]:
     "which conversation was this?" is the first thing a reader of a result
     list asks.
 
-    ``cwd`` joined in the same pass (v0.45.0) because ``/resume`` needs the
+    ``cwd`` joined in the same pass (v0.56.0) because ``/resume`` needs the
     DIRECTORY a session ran in and cannot get it from anywhere else. The
     hit's ``project`` is a SLUG -- ``project_slug`` is
     ``re.sub(r"[^A-Za-z0-9]", "-", ...)``, which maps ``/`` and ``.`` and
@@ -284,7 +284,7 @@ def with_titles(hits: list[dict]) -> list[dict]:
     return hits
 
 
-# -- resume eligibility (v0.45.0) -------------------------------------
+# -- resume eligibility (v0.56.0) -------------------------------------
 #
 # What ``/resume`` and the search popup's confirm modal both ask before
 # offering anything, so neither has to re-derive it and the two can never
@@ -304,7 +304,7 @@ there is nowhere to reopen it."""
 
 RESUME_NO_HISTORY = "no_history"
 """The isolated CLI has no transcript under this id -- in practice a
-session DOXA started before v0.45.0, when its id and the CLI's were two
+session DOXA started before v0.56.0, when its id and the CLI's were two
 different id spaces."""
 
 
@@ -329,11 +329,11 @@ def resume_state(session_id: str, cwd: str) -> "tuple[str, str]":
 
     THE MEASURED PROBLEM this exists to catch. ``--resume`` is resolved by
     the CLI against ITS session store, which is a different store from the
-    LORE transcript ``/search`` indexes. Before v0.45.0 DOXA minted its own
+    LORE transcript ``/search`` indexes. Before v0.56.0 DOXA minted its own
     uuid and let the CLI mint a second one, so no id in this popup was an
     id ``--resume`` would accept -- measured live: resuming a DOXA session
     id failed the turn with ``No conversation found with session ID``.
-    v0.45.0 pins the two together (``ClaudeAgentOptions.session_id`` in
+    v0.56.0 pins the two together (``ClaudeAgentOptions.session_id`` in
     ``doxa.engine._build_options``), but only for sessions started SINCE.
     Every older conversation in the index is un-resumable in a way nothing
     about its row reveals, and finding that out one prompt into a
@@ -376,7 +376,7 @@ def resume_state(session_id: str, cwd: str) -> "tuple[str, str]":
         return RESUME_NO_HISTORY, (
             "the claude CLI has no history under this session id, so it "
             "cannot be continued. DOXA and the CLI only started sharing "
-            "one session id in v0.45.0 — conversations from before that "
+            "one session id in v0.56.0 — conversations from before that "
             "stay readable and searchable, but not resumable."
         )
     return RESUME_OK, ""
@@ -443,7 +443,7 @@ def child_row_label(hit: dict) -> Text:
     header above already said which session and when, and repeating a full
     date on every child would have been noise under its own fold. But
     "when" on the header is when the CONVERSATION was, and the user's ask
-    (v0.45.0) is per-ROW -- opening a fold reveals messages that may be
+    (v0.56.0) is per-ROW -- opening a fold reveals messages that may be
     days apart, and a list of them with no times cannot be read in order.
 
     So the six columns that were blank now hold that row's own age
@@ -472,7 +472,7 @@ def group_by_session(hits: list[dict]) -> list[dict]:
             by_id[sid] = {
                 "session_id": sid,
                 "title": hit.get("title", ""),
-                # Carried from the first hit of the session (v0.45.0): the
+                # Carried from the first hit of the session (v0.56.0): the
                 # header row is what Enter resumes, and a resume needs the
                 # directory the conversation ran in. Every hit of one
                 # session carries the same value -- with_titles joins it
@@ -492,7 +492,7 @@ def group_label(group: dict) -> Text:
     glyphs -- Textual's ``Collapsible`` default ▶/▼, reused rather than
     invented), title, date, age, hit count.
 
-    BOTH clocks, deliberately (v0.45.0). The absolute date is what makes a
+    BOTH clocks, deliberately (v0.56.0). The absolute date is what makes a
     list of conversations orderable and citable by eye -- "the one from
     the 19th" is a thing people say. The age beside it is what makes it
     scannable: nobody subtracts dates to find out whether a conversation
@@ -745,7 +745,7 @@ class SessionSearch(OptionList):
         """The highlighted HEADER row's group dict -- session id, title,
         cwd, timestamp -- or ``None`` on a hit row or nothing selectable.
 
-        :meth:`chosen`'s mirror image, added in v0.45.0 when Enter on a
+        :meth:`chosen`'s mirror image, added in v0.56.0 when Enter on a
         header stopped meaning only "toggle": the prompt now has to hand
         the whole conversation somewhere, not just its fold state, and it
         must not reach into ``_rows`` to do it. Same non-mutating contract

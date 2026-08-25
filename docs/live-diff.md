@@ -43,7 +43,7 @@ lifecycle to get wrong. There is a better signal already flowing.
 **The tool-result stream is the tick.** `tool_result` events for `Edit`,
 `Write`, `NotebookEdit` and a `Bash` call that touched the tree already arrive
 in `doxa/session/runtime.py`'s dispatch (`EVENT_RENDERERS`). An edit landing IS
-the event; recompute then and only then. The same reasoning that gave v0.51.0's
+the event; recompute then and only then. The same reasoning that gave v0.56.0's
 spinner zero idle cost — *a token arriving is a tick, and it costs nothing when
 nothing is arriving*.
 

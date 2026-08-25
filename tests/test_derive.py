@@ -470,7 +470,7 @@ async def test_pending_is_a_real_doxa_command_and_lists_the_proposals(
     async with app.run_test() as pilot:
         await pilot.pause()
         pane = app.active_pane
-        # Exactly ONE call, and it is _boot's: v0.51.0 puts the staged
+        # Exactly ONE call, and it is _boot's: v0.56.0 puts the staged
         # count on the opening block's `lore` line, which is drawn once
         # per session boot. The discipline this line has always pinned is
         # unchanged, and re-asserted right below it -- an ordinary STATUS

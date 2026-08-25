@@ -4,6 +4,472 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.56.0 — 2026-08-25
+
+Three features built in parallel on separate branches and landed together, so they share one version rather than three tags on one tree. The numbers 0.45.0, 0.51.0 and 0.53.0 were reserved for them while they were in flight and were never cut; their work is below, unchanged.
+
+### Restored tabs continue their conversation; `/search` and `/resume` reopen any other
+
+**Sessions can be resumed, and restored tabs resume themselves.**
+Reported twice, and the second report is the one that matters: *"Do we
+have a 'resume' command analog to Claude Code?"*, then — *"as long as a
+tab was open, when DOXA is started again, the tab should be resumed
+automatically, not via hotkey"*. Both had the same honest answer: no.
+`doxa attach` reattaches to a session that is still *running*; v0.32.0's
+`ArchivedSessionTab` shows an ended one *read-only*. Neither continues a
+finished conversation, and the SDK option that does
+(`ClaudeAgentOptions.resume`) was wired nowhere.
+
+**Restore now means restore.** A saved tab whose daemon no longer answers
+comes back as a **live session continuing its conversation** — no
+gesture, no key, nothing to discover. A daemon finalizing on its linger
+timer while the window is shut is the *ordinary* way a session ends, so
+the read-only dead end was the ordinary result of a restart: restore
+meant *display*. `doxa.cli.ended_tab_spec` asks
+`history.resume_state` about each such tab before deciding its kind, and
+read-only is now the **fallback**, carrying the reason it happened.
+Deliberate and asked-for: `enter` on a `/search` row and `/resume` remain,
+for conversations whose tab you closed months ago.
+
+**The crux was an id space, and it was measured, not assumed.** DOXA
+minted its own session uuid in `SessionEngine.__init__` and named its
+LORE transcript — and therefore every `/search` row, every tab record and
+every registry entry — after it. The spawned `claude` CLI, handed no id of
+its own, minted a **second** uuid and wrote its store under that. Probed
+live against a real CLI under `cli_isolation.spawn_env` before a line of
+this was written: DOXA sid `360a8897…`, CLI sid `f45bce98…` (reported in
+the init `SystemMessage`, which DOXA read for the model name and dropped
+on the floor); `resume=<CLI sid>` replayed the conversation, `resume=<DOXA
+sid>` failed the turn outright with `No conversation found with session
+ID`. **Every id this feature is reached by was an id `--resume` would have
+rejected.** A resume built on it would have been broken for every session
+ever recorded, in a way no test without a live CLI could catch.
+
+The fix is to stop having two spaces rather than to map between them:
+`_build_options` now sends `ClaudeAgentOptions.session_id` — measured,
+the CLI honours it exactly and writes its store under our uuid — so from
+this release the id in the search list **is** the id `--resume` takes.
+
+- **Enter on a `/search` conversation header changed meaning**, and this
+  is the note it deserves. It used to toggle that header's fold, on
+  reasoning the code stated outright: *"A header row is never itself an
+  excerpt, so this is the ONLY thing Enter can mean here."* True of the
+  meanings available then; not true once a header names something you can
+  reopen. Nothing was lost — `→` already expands a fold and `←` already
+  collapses it (item I bound both in v0.21.0), so the toggle keeps two
+  keys and `enter` now means what it means everywhere else in this app:
+  activate the highlighted row. **Enter on a snippet row is unchanged**
+  and pinned by its own test: it still copies the excerpt into the
+  prompt, which is what most `/search` traffic is. Clicking a row follows
+  the key, as it always has.
+- **Every revealed row carries when it happened.** Child rows spend the
+  six blank columns they already spent on indentation on that message's
+  own age instead, so an opened fold can be read in order and the excerpt
+  beside it loses **nothing** — a sixteen-column ISO date on every
+  snippet row would have been the regression the status bar's own history
+  warns about. Session headers carry **both** clocks: the absolute date
+  (orderable and citable by eye) and the age beside it (scannable), which
+  they can afford because a header has no excerpt competing for the row.
+  That is the whole judgment: the row with something to protect gets the
+  cheap answer, the row without gets both. The age is `_fmt_age`, still
+  the one age format in the app — v0.46.0's beliefs browser had already
+  given it the day tier this needed (session history hits the same wall
+  a four-month-old belief does: the hour tier alone renders last Tuesday
+  as `168h0m`), and its `days < 10` cut-off is what makes five columns a
+  real ceiling rather than a hope.
+- **A new tab, not this pane.** *Judgment call, argued:* a resumed
+  conversation is a different conversation from the one the active pane
+  holds — its own history, cost and transcript — and taking the pane over
+  would end or orphan that session on a keystroke whose stated subject
+  was some other session entirely. DOXA already has a verb for "replace
+  what is in this tab" (`/clear`, which says so and finalizes first) and
+  one for "go somewhere else" (the repo picker's open-in-a-new-tab, whose
+  mount/activate/focus order this mirrors). Resume is the second kind,
+  and it is the reversible kind: `ctrl+w` undoes it, an in-pane takeover
+  has no undo.
+- **A running session is attached, never forked.** Resuming means handing
+  `--resume` to a second CLI while the first is still alive on that
+  conversation: two writers on one transcript, two daemons under one
+  registry id. So the peer registry — the same reaped view `doxa attach`
+  and `/sessions` read — is consulted first, and a live session is
+  *attached* in a new tab with a message saying that is what happened. An
+  in-process session with no daemon socket has nothing to attach to and
+  is refused in words rather than quietly resumed.
+- **A resumed tab shows its prior conversation.** Reusing v0.32.0's own
+  machinery rather than a second copy: same `doxa.transcript` reader,
+  same `mount_transcript`, same render caps and the same on-screen
+  honesty when they bite. `_restore_transcript` gained one argument for
+  it — a reattach may only draw from disk once its daemon has agreed to
+  skip replaying its ring, and a resume has no such daemon, so the
+  precondition belongs to one caller and not to the method. A model
+  silently holding history the user cannot see is the wrong failure for a
+  tool whose premise is auditable memory.
+- **Three refusals, before anything is spawned.** `history.resume_state`
+  answers "may this be resumed, and if not, why" from local file and
+  registry reads only — no subprocess, nothing that can block a
+  keystroke. Still running; the cwd is gone; or the CLI has no history
+  under this id. That last one is **every conversation recorded before
+  this release**, whose `/search` row looks exactly like a resumable
+  one — so the dialog says so, naming the version and saying what still
+  works (readable, searchable), rather than letting the user discover it
+  one prompt into a conversation they believed they had reopened.
+- **`ResumeConfirm` is the fourth member of the existing modal family**
+  (`CloseWithTurnRunning`, `CompactConfirm`, `AboutDialog`): a focused
+  `ModalScreen`, a title row, a body, doors that each name their own key,
+  `esc` cancels. Its body **states what will happen** — new tab, history
+  reloaded, prior turns re-rendered, this tab untouched — rather than
+  asking "are you sure?"; on a refusal it has exactly **one** door,
+  because a confirm offering a "resume" button that cannot resume is
+  worse than no button. v0.28.0's defect is pre-empted rather than
+  rediscovered: `height: 1` + `padding-top: 1` under Textual's box model
+  draws buttons at *zero* height, present in the DOM and visible nowhere,
+  and that shipped for a full release because the tests asserted the
+  modal was pushed and never that anything was drawn. This one ships with
+  tests asserting rendered height, hit-testability and on-screen text.
+- **`/resume [session-id]`** joins the one registry every surface reads,
+  so `/help`, the palette and autocomplete get it for free. Bare it
+  offers the recent conversations in the shared `ChipPicker`; with an
+  argument it resolves an id by prefix, and an **ambiguous** prefix is
+  answered with the candidates rather than by taking the first — resuming
+  the wrong conversation is not a mistake anyone notices quickly. It is
+  also the only route to a resume for a single-session search result,
+  which by v0.21.0's "no pointless fold" rule stays flat and has no
+  header to press `enter` on. *Judgment call:* that rule was left
+  standing; overturning a deliberate decision from another release to
+  add an affordance a command already provides is not a trade this one
+  makes.
+- **Eager, not deferred, and the cost argument is the reason.** A resumed
+  tab costs one *process*, not tokens: the CLI reads that conversation out
+  of its own store at connect and DOXA sends nothing until you type. That
+  is the same per-tab cost restore **already** pays for every tab whose
+  daemon is alive — a spawn or an attach each — so deferring the spawn to
+  first activation would have bought a second, subtler tab lifecycle in
+  exchange for a cost the existing one already accepts. Anyone who would
+  rather not pay it has `resume_restored`.
+- **`resume_restored` is its own switch, not a clause of `restore_tabs`.**
+  It is the one part of restore that starts a *process*, and a machine
+  coming back to six restored tabs starts six of them. Off is v0.32.0
+  byte for byte — read-only over the transcript, marked — and
+  deliberately with **no** reason line: the setting doing what it says is
+  not a failure, and explaining it would be explaining the user's own
+  choice back to them.
+- **A resume that cannot happen degrades to today's tab, never to an
+  error or an empty pane** — plus a line naming which of the three
+  reasons it was. The big one, for a while, is the last: every
+  conversation DOXA recorded before this release has an id the CLI never
+  knew, so those tabs come back exactly as they do now and say so. Strictly
+  better than the current behaviour, never worse, which is the bar a
+  fallback has to clear.
+- **The restore report counts resumed tabs separately** from restored
+  ones. "Resumed" is a bigger claim than "restored" — those are live
+  sessions continuing conversations that had ended — and it must not hide
+  inside the other count.
+- **A resumed daemon never creates a worktree.** `--resume` is resolved
+  by the CLI against directories keyed by the cwd a session ran in;
+  substituting a freshly-created worktree would hand it a cwd the
+  conversation was never recorded under. A resume enters the cwd LORE
+  recorded — which *is* its worktree, when it had one.
+
+### A condensed tool-calls fold, a timerless spinner, and a `lore` line that says what LORE holds
+
+Three refinements to what a session shows you, all reported from using
+it: the tool-calls fold was mostly chrome, a running turn had no sign of
+life once its first word arrived, and the opening block's `lore` line
+named a store without saying what was in it.
+
+#### The tool-calls section, condensed
+
+Reported verbatim: *"condense the Tool calls collapsible section: remove
+the boxes around and remove the empty line in between."*
+
+**Measured before cutting, the way v0.44.0 measured the turn body.** An
+expanded three-call section cost **15 rows**, and four of them said
+anything:
+
+| rows | what they were |
+|---|---|
+| 1 | the `⚒ Tool calls (3)` header |
+| 1 | blank — `ToolCallsSection > Contents`' top padding |
+| 12 | three chips × (border top, title, border bottom, margin blank) |
+| 1 | blank — the section's own trailing `margin-bottom` |
+
+**It now costs 4**, one header and one line per call, and every one of
+the four carries text. `tests/test_transcript_density.py` pins the number
+by measuring `outer_size.height` and by reading the composited screen rows
+back as strings — not by checking that a CSS rule exists. Eleven rows of
+chrome removed from the commonest thing a turn contains; a twelve-call
+turn was spending 48 rows to show twelve lines.
+
+- **The border went because of its ratio, not its looks.** Two rows to
+  draw a frame around one row of text is 3:1 chrome-to-content. `ToolChip`
+  had been the deliberate exception to this transcript's unboxed rule
+  since v0.13.0 ("a tool call reads as a nested artifact"); the exception
+  is withdrawn, and the transcript is now unboxed all the way down.
+- **What separates one chip from the next, at zero rows:** the fold arrow
+  Textual already draws on every `CollapsibleTitle` (a leading glyph DOXA
+  did not have to invent), one cell of indentation under the header, and
+  the brightness step from the header's muted `#8A8073` to the chips'
+  `#D8CDBB`. **Indentation and a glyph were chosen over a blank row
+  deliberately**: a separator costing a row is paid once per chip, so a
+  twelve-call turn pays it twelve times, where indentation is free at any
+  count.
+- **The two blank rows are two different judgment calls, and both follow
+  v0.44.0's rule** — blank rows BETWEEN paragraphs are readability, blank
+  rows at the END are waste. The section's trailing `margin-bottom` is
+  waste: `.turn-tools` is the last thing in a turn and `TurnBlock`
+  already carries `margin-bottom: 1`, so it was a second blank row at the
+  end rather than a separator between anything. The `Contents` top
+  padding is the closer call, and it went too: **a fold and its list are
+  one unit, not two paragraphs**, and with one row per chip that pad read
+  as a hole under the header rather than as breathing room.
+- **One blank row inside an expanded chip is kept, and a different one is
+  removed.** The blank between `ARGS:` and `RESULT:` stays — that is
+  between paragraphs, and it is the whole reason the dump is legible. The
+  one that went was invisible in origin: `ToolChip`'s subagent-output
+  `Static` is empty on every chip that never spawned a subagent, and an
+  empty `Static` is still one row. It is now hidden at zero and mounts
+  itself back the moment there is narration to show, which is the same
+  hide-at-zero convention `ToolCallsSection`, `ReasoningSection` and the
+  status chips already follow.
+- **`ReasoningSection` was left alone.** It has the same `Contents` pad,
+  and cutting it would have been consistent — but reasoning is prose,
+  where a leading blank reads as a paragraph break rather than a hole,
+  and the report named one section. Consistency is not by itself a reason
+  to restyle a surface nobody complained about.
+
+#### A spinner while reasoning or generating
+
+Reported: *"i would like to have a spinner while reasoning or generating
+the output."*
+
+**The naive version of this is a regression this app already paid to
+shed**, and saying so is the design. `ThinkingMarker` exists because it
+replaced a `LoadingIndicator` whose 16 Hz auto-refresh armed a repaint
+tick on every in-flight turn; `doxa/ui/statusline.py`'s `GitLine`
+documents a no-timer, no-per-frame rule; `tests/test_chrome.py` asserts
+that **zero** timers are armed while a turn is in flight. A `set_interval`
+spinner fails that test on the way in.
+
+**So the spinner is driven by the delta stream instead.** A token
+arriving *is* a tick: `text_delta` advances it into the `generating`
+phase, `reasoning_delta` into `reasoning`, a `tool_call` into `working`.
+When nothing is arriving nothing ticks — which is exactly the wanted
+behaviour, because an idle DOXA has no turn, no deltas and no repaints.
+There is no clock anywhere in it.
+
+- **Measured, both ends.** Idle, with 20 completed turns of scrollback
+  and a 20-second sampling window: **0.14–0.17 s CPU after** against
+  **0.18–0.22 s before** — the same range, noise-dominated, no measurable
+  idle cost, and `ClockChip` remains the only armed timer in the app on
+  both sides. In flight, a 700-delta answer: **0.39–0.41 s CPU after**
+  against **0.37–0.69 s before**, also within noise.
+- **The other failure mode was a repaint rate set by the model.** Ticking
+  on every delta would have traded a fixed 16 Hz for something worse — a
+  700-delta answer buying 700 repaints. `SPINNER_MIN_INTERVAL` floors it
+  at 0.1 s, and that same 700-delta answer measurably advances the glyph
+  **4 times**. A phase CHANGE always gets through the floor: the switch
+  from reasoning to generating is the information, not the motion.
+- **No third widget saying "working".** `ThinkingMarker` already said it;
+  it has been given the whole turn instead of its first second. **This
+  reverses a v0.25.0 decision**, deliberately: that release had the first
+  `reasoning_delta` hide the marker, on the grounds that a live
+  "Reasoning (N chars)" header is itself the sign of life. It is — but
+  only while reasoning is what is happening, and a header whose count has
+  stopped moving reads exactly like a finished one. The phase after it, a
+  streaming answer, offers no progress signal at all, because the text is
+  what the reader is trying to read.
+  `test_reasoning_arrival_hides_the_thinking_marker` was rewritten rather
+  than deleted, and carries the argument.
+- **The marker moved to the bottom of the turn.** A spinner nobody can
+  see is not a spinner: the block list scrolls to the end after every
+  event, so a marker pinned above a streaming answer leaves the viewport
+  inside a paragraph. It now trails the output — "here is what arrived,
+  and here is DOXA still working".
+- **Braille glyphs (`⠋⠙⠹…`), not one of DOXA's own marks.** `▎ ✻ ⚒ ⧉` all
+  *name a kind of block*; reusing one as motion would make a running turn
+  look like a section header. The braille cycle is also one cell wide in
+  every font in wide use, so the label does not jitter sideways on each
+  tick.
+- **It disappears on every exit.** turn_done, the error path in
+  `_run_turn` (a refused turn, a dropped daemon connection) and restore
+  all route through the same `mark_done` → `hide_thinking`, which also
+  reasserts `auto_refresh = None`. Each is asserted as a pair — that the
+  marker *ran*, and then went — because "gone" on its own also passes on
+  a marker that never showed.
+- **Gone means gone, and on a restore it means never-shown.** `advance()`
+  is a no-op on a hidden marker: the peer pump replays engine events, so a
+  delta can be routed at a turn *after* its turn_done, and that must not
+  raise a spinner on a turn which has already printed its cost. And
+  `mount_transcript` hides the marker *before* writing the first restored
+  word rather than only afterwards — restore replays a finished answer
+  through the same `append_text` a live turn uses, so without that the
+  scrollback would tick every restored turn into "generating" on the way
+  past.
+
+#### The `lore` line says what LORE holds
+
+Reported: *"the 'lore' line in the status/welcome box on startup should
+also show how many pending, how many in user/project context and how full
+each one is."* It read `lore  /home/…/.claude/lore · 518 beliefs`; it now
+also carries `· 3 pending · user 14 entries 63% · project 9 entries 39%`.
+
+**Nothing here is newly derived.** The percentages are v0.44.0's
+`labels.memory_fill` — the exact character count read from the file
+`lore_core` itself writes, cached on mtime — so this line and the status
+bar's `mem u63% p39%` chip cannot quote different numbers at each other.
+The entry counts go through `lore_core`'s own `read_entries` over that
+same file, because counting `- ` lines in DOXA would be reimplementing
+LORE's storage format, which is how two readers of one file drift apart.
+The staged count is v0.31.0's paged `list_pending`.
+
+- **The project slug resolves through `peers.main_repo_root_of`**, not
+  the raw cwd. That is the v0.47.0 fix, and reproducing its bug in a new
+  place was the live risk here: every session runs in a worktree, a
+  worktree's own slug owns no `MEMORY.md`, and the project half would
+  have silently vanished for the normal case exactly as it did in the
+  memory chip. The guard is a real git repo with a real worktree, not a
+  stubbed mapping — a mocked one passes on the broken code.
+- **One socket round trip, at boot, and nowhere else.** The opening block
+  is drawn once, before the first prompt, on a pane that has just spent a
+  connect and a git subprocess; `_refresh_status` runs on every peer event
+  and every turn-done under the rule `GitLine` documents. So `_boot`
+  counts the staged proposals once into `_pending_count`, and the line
+  reads that. `test_derive.py`'s cost assertion was tightened rather than
+  relaxed: it now pins the count at exactly one after boot **and** that
+  five status refreshes do not add a sixth.
+- **`0 pending` is stated, not hidden.** Hide-at-zero is the status bar's
+  convention, where a chip competes for width. This is a boot report, and
+  a reader who cannot tell a clear queue from a failed lookup has been
+  told less than nothing. A scope with no file on disk is still omitted —
+  `project 0 entries 0%` would be a measurement nobody took, and this
+  block's own rule is that absent fields are omitted, never invented.
+- **A daemon that cannot answer costs the fact, never the boot.** The
+  count falls out of the line and everything else stays.
+
+### What broke, shown inside DOXA, highlighted — and never fatally by default
+
+**DOXA fails invisibly or fatally, rarely legibly.** Four defects reached
+the user in one day and not one of them arrived as an error they could
+read. A `TimeoutError` out of `textual_image`, raised while Textual was
+*painting* a widget, killed the app to a bare terminal traceback. The
+needs-input dialog stopped answering keys and said nothing — the session
+simply wedged. Server-tool results vanished with no trace, so there was no
+way to tell whether a web search had happened at all. The memory chip drew
+half of itself and never mentioned the other half. Four bugs, one
+property, and this release fixes the property.
+
+- **An error block in the transcript.** Its own kind, on the rule
+  `ShellBlock` established: a failure must never be mistakable for the
+  assistant's words or for doxa's ordinary chatter, so it wears a red left
+  rule — `#D9534F`, this app's one "stop and look" colour — and neither
+  the `▎` turn accent nor the `▎ doxa` prefix. One line saying what broke
+  and *who* broke it; the whole scrubbed traceback behind a fold that
+  starts **collapsed**, the same `Collapsible` pattern `ToolCallsSection`
+  and `ReasoningSection` already use. Seeing that something broke must not
+  cost a wall of text, and reaching all of it must not cost more than a
+  keystroke.
+- **Caught at the boundary that actually fires — which turned out to be
+  one boundary.** Textual 5.3.0 funnels *everything* through
+  `App._handle_exception`: message handlers, `compose`/mount, idle
+  handlers, `call_later` callbacks, the compositor's paint loop, and a
+  failed worker (wrapped in `WorkerFailed`, because `run_worker`'s
+  `exit_on_error` defaults to True). Its own docstring says "Always
+  results in the app exiting". So there is exactly one method to override,
+  and it is overridden.
+- **Worker deaths were the loudest of the quiet failures.** DOXA starts a
+  worker for nearly everything — `_boot`, `_peer_pump`, every slash
+  command, the update check — and a worker that raised took the whole
+  window with it, indistinguishable from "DOXA crashed". Now it is one
+  block, and the session stays usable.
+- **Render-time containment, because Textual offers none.**
+  `textual/_compositor.py` contains no `except` at all: a widget that
+  raises while rendering does not fail alone, it takes the whole *frame*,
+  every frame, forever. Merely surviving the raise would leave an app
+  alive and unable to draw. So the culprit widget is read off the
+  traceback and **quarantined** — `display = False`, which ends the loop
+  at its source — and the block says which widget was hidden and why.
+  Half a widget silently missing is one of the four defects above; a whole
+  widget silently missing would be the same defect wearing a fix. Render
+  failures only: hiding an arbitrary widget because a keystroke handler
+  threw would be a second defect, not containment.
+- **Scrubbed before display, and scrubbed at the source.**
+  `lore_core.scrub.scrub_secrets` runs over every traceback at
+  construction rather than at each of the three doors out of the process,
+  so a fourth door added later does not start out leaking. Frame locals
+  are dropped entirely — Textual's own fatal path prints
+  `Traceback(show_locals=True)`, and the locals are where a credential
+  actually lives. A crash report that leaks a token is a worse defect than
+  the crash it describes.
+- **Fatal is still possible, and still seen.** A failure with no surface
+  to draw itself on, or one that repeats without end, exits — printing the
+  same information to the terminal on the way out. That report is
+  `/about`'s own block (`version.about_text`): version, sha, interpreter,
+  textual, agent SDK, which `lore_core` answered and from where, platform,
+  keyboard protocol, config path. A user who has to file a bug should not
+  have to reconstruct any of that from a Python traceback, and the crash
+  report is now byte-for-byte what the about dialog's copy door already
+  puts on the clipboard.
+- **A log to point at: `~/.doxa/errors.log`.** Bounded by size with one
+  previous generation (`errors.log.1`), 256 KiB each — so the whole
+  on-disk cost is half a megabyte and it needs no sweeper, no timer and no
+  setting. Written *after* the block is mounted, deliberately: a read-only
+  home directory may cost the persisted copy, never the visible one.
+- **One swallow removed, and it is defect two of the four.** Delivering
+  the user's answer to a blocking question was wrapped in
+  `contextlib.suppress(Exception)` — and by the time it ran the popup had
+  already closed and the needs-input flag had already cleared, so a failed
+  delivery left the agent blocked forever on a question the user *had*
+  answered. A wedged session that looked exactly like an idle one. It now
+  reports, and says what to do about it.
+- **Repeats collapse; they do not accumulate.** A widget raising on every
+  paint becomes one block with a `×N` tally — a title rewrite, as cheap as
+  `ToolCallsSection`'s own live count — and only the first is written to
+  the log. Past 25 the failure is by definition not recoverable, and the
+  app exits with a report rather than spinning.
+- **Nothing animates and nothing polls.** No timer is armed and no
+  per-frame cost is added: this surface does work only once something has
+  already gone wrong. The idle-CPU regression `GitLine` and
+  `_refresh_status` exist to warn about is not reopened, and there is a
+  test that says so.
+
+**Also a prerequisite for the plugin loader, which is why it is shaped the
+way it is.** `docs/plugin-api.md`'s failure policy promises three states —
+not loaded, disabled for the run, over its `text()` time budget — and none
+of them had a mechanism. So a failure carries an **origin** (pass
+`origin="plugin:jira"` and the block says so; omit it and the deepest
+non-infrastructure frame is read off the traceback, which already tells
+DOXA apart from `lore_core` apart from a third-party package — the
+reported render crash attributes to `textual_image`, which is a different
+user action from a DOXA bug). Failing is **state**
+(`app.failures.failed(origin)`), not a message that scrolls away. And the
+third state is not an exception at all, so the record is a `Failure` with
+a `kind`, and a chip overrunning its budget lands in the same block as a
+crash. The loader, the allowlist and any disabling are explicitly *not* in
+this release — there is nothing loadable to disable — and the doc now
+states exactly what a future loader calls.
+
+*Judgment call:* the surface is named for **failure** and not for
+exception, throughout. The naming outlives the release, a time-budget
+overrun is a broken promise rather than a raise, and a surface that could
+only hold exceptions would have sent that third state back to nowhere.
+
+*Layering, for the record:* the specific cause of the reported crash —
+textual-image probing stdin for the terminal's cell size during a paint at
+all — is fixed where it belongs, in `doxa.images`/`doxa.banner`. This
+release owns the general containment: whatever the cause, a render raise
+must not be fatal. The two do not overlap, and the crash is reproduced as
+a test here in the shape it arrived in.
+
+*Not swept in:* an audit of every `except Exception` and
+`contextlib.suppress` in `doxa/` found roughly a dozen more that hide real
+failures — a suppressed `finalize()` on stop and on detach, a suppressed
+`index_live` that reports "could not index" as "nothing to index", two
+`_on_can_use_tool` paths that *allow* a call when the permission prompt
+itself breaks, a shell reader whose lost output is presented as no output,
+and `list_beliefs` rendering a broken store as "you have no beliefs".
+They are reported rather than quietly rerouted into the new surface:
+routing them without saying which would be the same silence in a new coat.
+
 ## 0.55.0 — 2026-08-25
 
 **A crash on Linux Mint's default terminal, and it was DOXA's own probe
@@ -149,130 +615,6 @@ hop" — so a remote terminal is likely to have its graphics query time out
 and be recorded as half-block, which as of this release is a tier that
 draws the mark and looks right.
 
-## 0.53.0 — 2026-08-25
-
-**DOXA fails invisibly or fatally, rarely legibly.** Four defects reached
-the user in one day and not one of them arrived as an error they could
-read. A `TimeoutError` out of `textual_image`, raised while Textual was
-*painting* a widget, killed the app to a bare terminal traceback. The
-needs-input dialog stopped answering keys and said nothing — the session
-simply wedged. Server-tool results vanished with no trace, so there was no
-way to tell whether a web search had happened at all. The memory chip drew
-half of itself and never mentioned the other half. Four bugs, one
-property, and this release fixes the property.
-
-- **An error block in the transcript.** Its own kind, on the rule
-  `ShellBlock` established: a failure must never be mistakable for the
-  assistant's words or for doxa's ordinary chatter, so it wears a red left
-  rule — `#D9534F`, this app's one "stop and look" colour — and neither
-  the `▎` turn accent nor the `▎ doxa` prefix. One line saying what broke
-  and *who* broke it; the whole scrubbed traceback behind a fold that
-  starts **collapsed**, the same `Collapsible` pattern `ToolCallsSection`
-  and `ReasoningSection` already use. Seeing that something broke must not
-  cost a wall of text, and reaching all of it must not cost more than a
-  keystroke.
-- **Caught at the boundary that actually fires — which turned out to be
-  one boundary.** Textual 5.3.0 funnels *everything* through
-  `App._handle_exception`: message handlers, `compose`/mount, idle
-  handlers, `call_later` callbacks, the compositor's paint loop, and a
-  failed worker (wrapped in `WorkerFailed`, because `run_worker`'s
-  `exit_on_error` defaults to True). Its own docstring says "Always
-  results in the app exiting". So there is exactly one method to override,
-  and it is overridden.
-- **Worker deaths were the loudest of the quiet failures.** DOXA starts a
-  worker for nearly everything — `_boot`, `_peer_pump`, every slash
-  command, the update check — and a worker that raised took the whole
-  window with it, indistinguishable from "DOXA crashed". Now it is one
-  block, and the session stays usable.
-- **Render-time containment, because Textual offers none.**
-  `textual/_compositor.py` contains no `except` at all: a widget that
-  raises while rendering does not fail alone, it takes the whole *frame*,
-  every frame, forever. Merely surviving the raise would leave an app
-  alive and unable to draw. So the culprit widget is read off the
-  traceback and **quarantined** — `display = False`, which ends the loop
-  at its source — and the block says which widget was hidden and why.
-  Half a widget silently missing is one of the four defects above; a whole
-  widget silently missing would be the same defect wearing a fix. Render
-  failures only: hiding an arbitrary widget because a keystroke handler
-  threw would be a second defect, not containment.
-- **Scrubbed before display, and scrubbed at the source.**
-  `lore_core.scrub.scrub_secrets` runs over every traceback at
-  construction rather than at each of the three doors out of the process,
-  so a fourth door added later does not start out leaking. Frame locals
-  are dropped entirely — Textual's own fatal path prints
-  `Traceback(show_locals=True)`, and the locals are where a credential
-  actually lives. A crash report that leaks a token is a worse defect than
-  the crash it describes.
-- **Fatal is still possible, and still seen.** A failure with no surface
-  to draw itself on, or one that repeats without end, exits — printing the
-  same information to the terminal on the way out. That report is
-  `/about`'s own block (`version.about_text`): version, sha, interpreter,
-  textual, agent SDK, which `lore_core` answered and from where, platform,
-  keyboard protocol, config path. A user who has to file a bug should not
-  have to reconstruct any of that from a Python traceback, and the crash
-  report is now byte-for-byte what the about dialog's copy door already
-  puts on the clipboard.
-- **A log to point at: `~/.doxa/errors.log`.** Bounded by size with one
-  previous generation (`errors.log.1`), 256 KiB each — so the whole
-  on-disk cost is half a megabyte and it needs no sweeper, no timer and no
-  setting. Written *after* the block is mounted, deliberately: a read-only
-  home directory may cost the persisted copy, never the visible one.
-- **One swallow removed, and it is defect two of the four.** Delivering
-  the user's answer to a blocking question was wrapped in
-  `contextlib.suppress(Exception)` — and by the time it ran the popup had
-  already closed and the needs-input flag had already cleared, so a failed
-  delivery left the agent blocked forever on a question the user *had*
-  answered. A wedged session that looked exactly like an idle one. It now
-  reports, and says what to do about it.
-- **Repeats collapse; they do not accumulate.** A widget raising on every
-  paint becomes one block with a `×N` tally — a title rewrite, as cheap as
-  `ToolCallsSection`'s own live count — and only the first is written to
-  the log. Past 25 the failure is by definition not recoverable, and the
-  app exits with a report rather than spinning.
-- **Nothing animates and nothing polls.** No timer is armed and no
-  per-frame cost is added: this surface does work only once something has
-  already gone wrong. The idle-CPU regression `GitLine` and
-  `_refresh_status` exist to warn about is not reopened, and there is a
-  test that says so.
-
-**Also a prerequisite for the plugin loader, which is why it is shaped the
-way it is.** `docs/plugin-api.md`'s failure policy promises three states —
-not loaded, disabled for the run, over its `text()` time budget — and none
-of them had a mechanism. So a failure carries an **origin** (pass
-`origin="plugin:jira"` and the block says so; omit it and the deepest
-non-infrastructure frame is read off the traceback, which already tells
-DOXA apart from `lore_core` apart from a third-party package — the
-reported render crash attributes to `textual_image`, which is a different
-user action from a DOXA bug). Failing is **state**
-(`app.failures.failed(origin)`), not a message that scrolls away. And the
-third state is not an exception at all, so the record is a `Failure` with
-a `kind`, and a chip overrunning its budget lands in the same block as a
-crash. The loader, the allowlist and any disabling are explicitly *not* in
-this release — there is nothing loadable to disable — and the doc now
-states exactly what a future loader calls.
-
-*Judgment call:* the surface is named for **failure** and not for
-exception, throughout. The naming outlives the release, a time-budget
-overrun is a broken promise rather than a raise, and a surface that could
-only hold exceptions would have sent that third state back to nowhere.
-
-*Layering, for the record:* the specific cause of the reported crash —
-textual-image probing stdin for the terminal's cell size during a paint at
-all — is fixed where it belongs, in `doxa.images`/`doxa.banner`. This
-release owns the general containment: whatever the cause, a render raise
-must not be fatal. The two do not overlap, and the crash is reproduced as
-a test here in the shape it arrived in.
-
-*Not swept in:* an audit of every `except Exception` and
-`contextlib.suppress` in `doxa/` found roughly a dozen more that hide real
-failures — a suppressed `finalize()` on stop and on detach, a suppressed
-`index_live` that reports "could not index" as "nothing to index", two
-`_on_can_use_tool` paths that *allow* a call when the permission prompt
-itself breaks, a shell reader whose lost output is presented as no output,
-and `list_beliefs` rendering a broken store as "you have no beliefs".
-They are reported rather than quietly rerouted into the new surface:
-routing them without saying which would be the same silence in a new coat.
-
 ## 0.50.0 — 2026-08-25
 
 **The permission-mode cycler now reaches `auto` and `bypassPermissions`,
@@ -398,181 +740,6 @@ failing** against v0.47.0 — every new or changed assertion. The rest are
 unchanged behaviour this release did not touch. Suite: **1132 passed** on the
 tree this lands on.
 
-## 0.51.0 — 2026-08-25
-
-Three refinements to what a session shows you, all reported from using
-it: the tool-calls fold was mostly chrome, a running turn had no sign of
-life once its first word arrived, and the opening block's `lore` line
-named a store without saying what was in it.
-
-### The tool-calls section, condensed — 2026-08-25
-
-Reported verbatim: *"condense the Tool calls collapsible section: remove
-the boxes around and remove the empty line in between."*
-
-**Measured before cutting, the way v0.44.0 measured the turn body.** An
-expanded three-call section cost **15 rows**, and four of them said
-anything:
-
-| rows | what they were |
-|---|---|
-| 1 | the `⚒ Tool calls (3)` header |
-| 1 | blank — `ToolCallsSection > Contents`' top padding |
-| 12 | three chips × (border top, title, border bottom, margin blank) |
-| 1 | blank — the section's own trailing `margin-bottom` |
-
-**It now costs 4**, one header and one line per call, and every one of
-the four carries text. `tests/test_transcript_density.py` pins the number
-by measuring `outer_size.height` and by reading the composited screen rows
-back as strings — not by checking that a CSS rule exists. Eleven rows of
-chrome removed from the commonest thing a turn contains; a twelve-call
-turn was spending 48 rows to show twelve lines.
-
-- **The border went because of its ratio, not its looks.** Two rows to
-  draw a frame around one row of text is 3:1 chrome-to-content. `ToolChip`
-  had been the deliberate exception to this transcript's unboxed rule
-  since v0.13.0 ("a tool call reads as a nested artifact"); the exception
-  is withdrawn, and the transcript is now unboxed all the way down.
-- **What separates one chip from the next, at zero rows:** the fold arrow
-  Textual already draws on every `CollapsibleTitle` (a leading glyph DOXA
-  did not have to invent), one cell of indentation under the header, and
-  the brightness step from the header's muted `#8A8073` to the chips'
-  `#D8CDBB`. **Indentation and a glyph were chosen over a blank row
-  deliberately**: a separator costing a row is paid once per chip, so a
-  twelve-call turn pays it twelve times, where indentation is free at any
-  count.
-- **The two blank rows are two different judgment calls, and both follow
-  v0.44.0's rule** — blank rows BETWEEN paragraphs are readability, blank
-  rows at the END are waste. The section's trailing `margin-bottom` is
-  waste: `.turn-tools` is the last thing in a turn and `TurnBlock`
-  already carries `margin-bottom: 1`, so it was a second blank row at the
-  end rather than a separator between anything. The `Contents` top
-  padding is the closer call, and it went too: **a fold and its list are
-  one unit, not two paragraphs**, and with one row per chip that pad read
-  as a hole under the header rather than as breathing room.
-- **One blank row inside an expanded chip is kept, and a different one is
-  removed.** The blank between `ARGS:` and `RESULT:` stays — that is
-  between paragraphs, and it is the whole reason the dump is legible. The
-  one that went was invisible in origin: `ToolChip`'s subagent-output
-  `Static` is empty on every chip that never spawned a subagent, and an
-  empty `Static` is still one row. It is now hidden at zero and mounts
-  itself back the moment there is narration to show, which is the same
-  hide-at-zero convention `ToolCallsSection`, `ReasoningSection` and the
-  status chips already follow.
-- **`ReasoningSection` was left alone.** It has the same `Contents` pad,
-  and cutting it would have been consistent — but reasoning is prose,
-  where a leading blank reads as a paragraph break rather than a hole,
-  and the report named one section. Consistency is not by itself a reason
-  to restyle a surface nobody complained about.
-
-### A spinner while reasoning or generating — 2026-08-25
-
-Reported: *"i would like to have a spinner while reasoning or generating
-the output."*
-
-**The naive version of this is a regression this app already paid to
-shed**, and saying so is the design. `ThinkingMarker` exists because it
-replaced a `LoadingIndicator` whose 16 Hz auto-refresh armed a repaint
-tick on every in-flight turn; `doxa/ui/statusline.py`'s `GitLine`
-documents a no-timer, no-per-frame rule; `tests/test_chrome.py` asserts
-that **zero** timers are armed while a turn is in flight. A `set_interval`
-spinner fails that test on the way in.
-
-**So the spinner is driven by the delta stream instead.** A token
-arriving *is* a tick: `text_delta` advances it into the `generating`
-phase, `reasoning_delta` into `reasoning`, a `tool_call` into `working`.
-When nothing is arriving nothing ticks — which is exactly the wanted
-behaviour, because an idle DOXA has no turn, no deltas and no repaints.
-There is no clock anywhere in it.
-
-- **Measured, both ends.** Idle, with 20 completed turns of scrollback
-  and a 20-second sampling window: **0.14–0.17 s CPU after** against
-  **0.18–0.22 s before** — the same range, noise-dominated, no measurable
-  idle cost, and `ClockChip` remains the only armed timer in the app on
-  both sides. In flight, a 700-delta answer: **0.39–0.41 s CPU after**
-  against **0.37–0.69 s before**, also within noise.
-- **The other failure mode was a repaint rate set by the model.** Ticking
-  on every delta would have traded a fixed 16 Hz for something worse — a
-  700-delta answer buying 700 repaints. `SPINNER_MIN_INTERVAL` floors it
-  at 0.1 s, and that same 700-delta answer measurably advances the glyph
-  **4 times**. A phase CHANGE always gets through the floor: the switch
-  from reasoning to generating is the information, not the motion.
-- **No third widget saying "working".** `ThinkingMarker` already said it;
-  it has been given the whole turn instead of its first second. **This
-  reverses a v0.25.0 decision**, deliberately: that release had the first
-  `reasoning_delta` hide the marker, on the grounds that a live
-  "Reasoning (N chars)" header is itself the sign of life. It is — but
-  only while reasoning is what is happening, and a header whose count has
-  stopped moving reads exactly like a finished one. The phase after it, a
-  streaming answer, offers no progress signal at all, because the text is
-  what the reader is trying to read.
-  `test_reasoning_arrival_hides_the_thinking_marker` was rewritten rather
-  than deleted, and carries the argument.
-- **The marker moved to the bottom of the turn.** A spinner nobody can
-  see is not a spinner: the block list scrolls to the end after every
-  event, so a marker pinned above a streaming answer leaves the viewport
-  inside a paragraph. It now trails the output — "here is what arrived,
-  and here is DOXA still working".
-- **Braille glyphs (`⠋⠙⠹…`), not one of DOXA's own marks.** `▎ ✻ ⚒ ⧉` all
-  *name a kind of block*; reusing one as motion would make a running turn
-  look like a section header. The braille cycle is also one cell wide in
-  every font in wide use, so the label does not jitter sideways on each
-  tick.
-- **It disappears on every exit.** turn_done, the error path in
-  `_run_turn` (a refused turn, a dropped daemon connection) and restore
-  all route through the same `mark_done` → `hide_thinking`, which also
-  reasserts `auto_refresh = None`. Each is asserted as a pair — that the
-  marker *ran*, and then went — because "gone" on its own also passes on
-  a marker that never showed.
-- **Gone means gone, and on a restore it means never-shown.** `advance()`
-  is a no-op on a hidden marker: the peer pump replays engine events, so a
-  delta can be routed at a turn *after* its turn_done, and that must not
-  raise a spinner on a turn which has already printed its cost. And
-  `mount_transcript` hides the marker *before* writing the first restored
-  word rather than only afterwards — restore replays a finished answer
-  through the same `append_text` a live turn uses, so without that the
-  scrollback would tick every restored turn into "generating" on the way
-  past.
-
-### The `lore` line says what LORE holds — 2026-08-25
-
-Reported: *"the 'lore' line in the status/welcome box on startup should
-also show how many pending, how many in user/project context and how full
-each one is."* It read `lore  /home/…/.claude/lore · 518 beliefs`; it now
-also carries `· 3 pending · user 14 entries 63% · project 9 entries 39%`.
-
-**Nothing here is newly derived.** The percentages are v0.44.0's
-`labels.memory_fill` — the exact character count read from the file
-`lore_core` itself writes, cached on mtime — so this line and the status
-bar's `mem u63% p39%` chip cannot quote different numbers at each other.
-The entry counts go through `lore_core`'s own `read_entries` over that
-same file, because counting `- ` lines in DOXA would be reimplementing
-LORE's storage format, which is how two readers of one file drift apart.
-The staged count is v0.31.0's paged `list_pending`.
-
-- **The project slug resolves through `peers.main_repo_root_of`**, not
-  the raw cwd. That is the v0.47.0 fix, and reproducing its bug in a new
-  place was the live risk here: every session runs in a worktree, a
-  worktree's own slug owns no `MEMORY.md`, and the project half would
-  have silently vanished for the normal case exactly as it did in the
-  memory chip. The guard is a real git repo with a real worktree, not a
-  stubbed mapping — a mocked one passes on the broken code.
-- **One socket round trip, at boot, and nowhere else.** The opening block
-  is drawn once, before the first prompt, on a pane that has just spent a
-  connect and a git subprocess; `_refresh_status` runs on every peer event
-  and every turn-done under the rule `GitLine` documents. So `_boot`
-  counts the staged proposals once into `_pending_count`, and the line
-  reads that. `test_derive.py`'s cost assertion was tightened rather than
-  relaxed: it now pins the count at exactly one after boot **and** that
-  five status refreshes do not add a sixth.
-- **`0 pending` is stated, not hidden.** Hide-at-zero is the status bar's
-  convention, where a chip competes for width. This is a boot report, and
-  a reader who cannot tell a clear queue from a failed lookup has been
-  told less than nothing. A scope with no file on disk is still omitted —
-  `project 0 entries 0%` would be a measurement nobody took, and this
-  block's own rule is that absent fields are omitted, never invented.
-- **A daemon that cannot answer costs the fact, never the boot.** The
-  count falls out of the line and everything else stays.
 ## 0.48.0 — 2026-08-25
 
 **The beliefs chip becomes a surface you can work in.** Five things the
@@ -1136,168 +1303,6 @@ waiting to happen again.
   straight back to the next insert and an orphaned outcome row silently
   re-attaches itself to an unrelated belief in the next test — caught
   exactly that way.
-
-## 0.45.0 — 2026-08-25
-
-**Sessions can be resumed, and restored tabs resume themselves.**
-Reported twice, and the second report is the one that matters: *"Do we
-have a 'resume' command analog to Claude Code?"*, then — *"as long as a
-tab was open, when DOXA is started again, the tab should be resumed
-automatically, not via hotkey"*. Both had the same honest answer: no.
-`doxa attach` reattaches to a session that is still *running*; v0.32.0's
-`ArchivedSessionTab` shows an ended one *read-only*. Neither continues a
-finished conversation, and the SDK option that does
-(`ClaudeAgentOptions.resume`) was wired nowhere.
-
-**Restore now means restore.** A saved tab whose daemon no longer answers
-comes back as a **live session continuing its conversation** — no
-gesture, no key, nothing to discover. A daemon finalizing on its linger
-timer while the window is shut is the *ordinary* way a session ends, so
-the read-only dead end was the ordinary result of a restart: restore
-meant *display*. `doxa.cli.ended_tab_spec` asks
-`history.resume_state` about each such tab before deciding its kind, and
-read-only is now the **fallback**, carrying the reason it happened.
-Deliberate and asked-for: `enter` on a `/search` row and `/resume` remain,
-for conversations whose tab you closed months ago.
-
-**The crux was an id space, and it was measured, not assumed.** DOXA
-minted its own session uuid in `SessionEngine.__init__` and named its
-LORE transcript — and therefore every `/search` row, every tab record and
-every registry entry — after it. The spawned `claude` CLI, handed no id of
-its own, minted a **second** uuid and wrote its store under that. Probed
-live against a real CLI under `cli_isolation.spawn_env` before a line of
-this was written: DOXA sid `360a8897…`, CLI sid `f45bce98…` (reported in
-the init `SystemMessage`, which DOXA read for the model name and dropped
-on the floor); `resume=<CLI sid>` replayed the conversation, `resume=<DOXA
-sid>` failed the turn outright with `No conversation found with session
-ID`. **Every id this feature is reached by was an id `--resume` would have
-rejected.** A resume built on it would have been broken for every session
-ever recorded, in a way no test without a live CLI could catch.
-
-The fix is to stop having two spaces rather than to map between them:
-`_build_options` now sends `ClaudeAgentOptions.session_id` — measured,
-the CLI honours it exactly and writes its store under our uuid — so from
-this release the id in the search list **is** the id `--resume` takes.
-
-- **Enter on a `/search` conversation header changed meaning**, and this
-  is the note it deserves. It used to toggle that header's fold, on
-  reasoning the code stated outright: *"A header row is never itself an
-  excerpt, so this is the ONLY thing Enter can mean here."* True of the
-  meanings available then; not true once a header names something you can
-  reopen. Nothing was lost — `→` already expands a fold and `←` already
-  collapses it (item I bound both in v0.21.0), so the toggle keeps two
-  keys and `enter` now means what it means everywhere else in this app:
-  activate the highlighted row. **Enter on a snippet row is unchanged**
-  and pinned by its own test: it still copies the excerpt into the
-  prompt, which is what most `/search` traffic is. Clicking a row follows
-  the key, as it always has.
-- **Every revealed row carries when it happened.** Child rows spend the
-  six blank columns they already spent on indentation on that message's
-  own age instead, so an opened fold can be read in order and the excerpt
-  beside it loses **nothing** — a sixteen-column ISO date on every
-  snippet row would have been the regression the status bar's own history
-  warns about. Session headers carry **both** clocks: the absolute date
-  (orderable and citable by eye) and the age beside it (scannable), which
-  they can afford because a header has no excerpt competing for the row.
-  That is the whole judgment: the row with something to protect gets the
-  cheap answer, the row without gets both. The age is `_fmt_age`, still
-  the one age format in the app — v0.46.0's beliefs browser had already
-  given it the day tier this needed (session history hits the same wall
-  a four-month-old belief does: the hour tier alone renders last Tuesday
-  as `168h0m`), and its `days < 10` cut-off is what makes five columns a
-  real ceiling rather than a hope.
-- **A new tab, not this pane.** *Judgment call, argued:* a resumed
-  conversation is a different conversation from the one the active pane
-  holds — its own history, cost and transcript — and taking the pane over
-  would end or orphan that session on a keystroke whose stated subject
-  was some other session entirely. DOXA already has a verb for "replace
-  what is in this tab" (`/clear`, which says so and finalizes first) and
-  one for "go somewhere else" (the repo picker's open-in-a-new-tab, whose
-  mount/activate/focus order this mirrors). Resume is the second kind,
-  and it is the reversible kind: `ctrl+w` undoes it, an in-pane takeover
-  has no undo.
-- **A running session is attached, never forked.** Resuming means handing
-  `--resume` to a second CLI while the first is still alive on that
-  conversation: two writers on one transcript, two daemons under one
-  registry id. So the peer registry — the same reaped view `doxa attach`
-  and `/sessions` read — is consulted first, and a live session is
-  *attached* in a new tab with a message saying that is what happened. An
-  in-process session with no daemon socket has nothing to attach to and
-  is refused in words rather than quietly resumed.
-- **A resumed tab shows its prior conversation.** Reusing v0.32.0's own
-  machinery rather than a second copy: same `doxa.transcript` reader,
-  same `mount_transcript`, same render caps and the same on-screen
-  honesty when they bite. `_restore_transcript` gained one argument for
-  it — a reattach may only draw from disk once its daemon has agreed to
-  skip replaying its ring, and a resume has no such daemon, so the
-  precondition belongs to one caller and not to the method. A model
-  silently holding history the user cannot see is the wrong failure for a
-  tool whose premise is auditable memory.
-- **Three refusals, before anything is spawned.** `history.resume_state`
-  answers "may this be resumed, and if not, why" from local file and
-  registry reads only — no subprocess, nothing that can block a
-  keystroke. Still running; the cwd is gone; or the CLI has no history
-  under this id. That last one is **every conversation recorded before
-  this release**, whose `/search` row looks exactly like a resumable
-  one — so the dialog says so, naming the version and saying what still
-  works (readable, searchable), rather than letting the user discover it
-  one prompt into a conversation they believed they had reopened.
-- **`ResumeConfirm` is the fourth member of the existing modal family**
-  (`CloseWithTurnRunning`, `CompactConfirm`, `AboutDialog`): a focused
-  `ModalScreen`, a title row, a body, doors that each name their own key,
-  `esc` cancels. Its body **states what will happen** — new tab, history
-  reloaded, prior turns re-rendered, this tab untouched — rather than
-  asking "are you sure?"; on a refusal it has exactly **one** door,
-  because a confirm offering a "resume" button that cannot resume is
-  worse than no button. v0.28.0's defect is pre-empted rather than
-  rediscovered: `height: 1` + `padding-top: 1` under Textual's box model
-  draws buttons at *zero* height, present in the DOM and visible nowhere,
-  and that shipped for a full release because the tests asserted the
-  modal was pushed and never that anything was drawn. This one ships with
-  tests asserting rendered height, hit-testability and on-screen text.
-- **`/resume [session-id]`** joins the one registry every surface reads,
-  so `/help`, the palette and autocomplete get it for free. Bare it
-  offers the recent conversations in the shared `ChipPicker`; with an
-  argument it resolves an id by prefix, and an **ambiguous** prefix is
-  answered with the candidates rather than by taking the first — resuming
-  the wrong conversation is not a mistake anyone notices quickly. It is
-  also the only route to a resume for a single-session search result,
-  which by v0.21.0's "no pointless fold" rule stays flat and has no
-  header to press `enter` on. *Judgment call:* that rule was left
-  standing; overturning a deliberate decision from another release to
-  add an affordance a command already provides is not a trade this one
-  makes.
-- **Eager, not deferred, and the cost argument is the reason.** A resumed
-  tab costs one *process*, not tokens: the CLI reads that conversation out
-  of its own store at connect and DOXA sends nothing until you type. That
-  is the same per-tab cost restore **already** pays for every tab whose
-  daemon is alive — a spawn or an attach each — so deferring the spawn to
-  first activation would have bought a second, subtler tab lifecycle in
-  exchange for a cost the existing one already accepts. Anyone who would
-  rather not pay it has `resume_restored`.
-- **`resume_restored` is its own switch, not a clause of `restore_tabs`.**
-  It is the one part of restore that starts a *process*, and a machine
-  coming back to six restored tabs starts six of them. Off is v0.32.0
-  byte for byte — read-only over the transcript, marked — and
-  deliberately with **no** reason line: the setting doing what it says is
-  not a failure, and explaining it would be explaining the user's own
-  choice back to them.
-- **A resume that cannot happen degrades to today's tab, never to an
-  error or an empty pane** — plus a line naming which of the three
-  reasons it was. The big one, for a while, is the last: every
-  conversation DOXA recorded before this release has an id the CLI never
-  knew, so those tabs come back exactly as they do now and say so. Strictly
-  better than the current behaviour, never worse, which is the bar a
-  fallback has to clear.
-- **The restore report counts resumed tabs separately** from restored
-  ones. "Resumed" is a bigger claim than "restored" — those are live
-  sessions continuing conversations that had ended — and it must not hide
-  inside the other count.
-- **A resumed daemon never creates a worktree.** `--resume` is resolved
-  by the CLI against directories keyed by the cwd a session ran in;
-  substituting a freshly-created worktree would hand it a cwd the
-  conversation was never recorded under. A resume enters the cwd LORE
-  recorded — which *is* its worktree, when it had one.
 
 ## 0.44.0 — 2026-08-25
 

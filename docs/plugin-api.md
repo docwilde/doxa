@@ -224,7 +224,7 @@ format, no second config file.
 ## Prerequisite: the error surface
 
 The failure policy below promises that a plugin failure is *visible* — not
-loaded, disabled for the run, over its time budget — and until v0.53.0 DOXA
+loaded, disabled for the run, over its time budget — and until v0.56.0 DOXA
 had nowhere legible to put any of that. An unhandled exception killed the app
 to a terminal traceback; a failed worker died quietly; a widget that raised
 while painting took the pane with it. All three were observed in one day of
@@ -246,7 +246,7 @@ Three things the loader will need from it, and which the surface is shaped for:
   budget is a policy violation with no raise behind it, and it has to land in
   the same place
 
-*Shipped in v0.53.0*, and all three live in `doxa/errors.py` rather than in
+*Shipped in v0.56.0*, and all three live in `doxa/errors.py` rather than in
 the loader that does not exist yet:
 
 | what a loader needs | what it calls |
@@ -263,7 +263,7 @@ from `lore_core` and from a third-party package today. `Failure.kind` is
 exception*, precisely so the third state has somewhere to go.
 
 Deliberately NOT built: the loader, the allowlist, `Plugin`/`PLUGIN`, and
-any disabling. Nothing disables anything in v0.53.0 because there is nothing
+any disabling. Nothing disables anything in v0.56.0 because there is nothing
 loadable to disable; `FailureLog` is the state that rule will be written
 against, and it is one attribute away from the settings modal that will read
 it. A speculative API would be worse than an honest one.

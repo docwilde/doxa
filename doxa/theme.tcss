@@ -16,7 +16,7 @@
    and system lines carry their role as a background TINT instead of a
    border (see the TurnBlock/SystemBlock rules below for the full
    rationale). No new colors were added for this -- every tint used is
-   already a stop on the ramp above. v0.51.0 removed the ONE transcript
+   already a stop on the ramp above. v0.56.0 removed the ONE transcript
    exception that survived that restyle: ToolChip was boxed until then,
    and is not any more -- the transcript is unboxed all the way down, see
    the ToolChip rules for what replaced the border at zero rows' cost.
@@ -24,7 +24,7 @@
    NOTHING ANIMATES ON A CLOCK. No transitions, no pulsing borders, and
    no timer-driven spinners: the in-flight turn marker (`.thinking`
    below) replaced a LoadingIndicator whose 16 Hz auto-refresh was CPU
-   spent on reassurance. Since v0.51.0 that marker DOES spin -- but it is
+   spent on reassurance. Since v0.56.0 that marker DOES spin -- but it is
    ticked by the engine's own delta stream (a token arriving is a frame),
    so it costs nothing when nothing is arriving and arms no timer at any
    point; see ThinkingMarker's docstring. The only interval left anywhere
@@ -304,7 +304,7 @@ PermissionModeConfirm {
     color: #F2E9DD;
 }
 
-/* /resume's confirm (v0.45.0): the fourth member of the same modal family
+/* /resume's confirm (v0.56.0): the fourth member of the same modal family
    -- CloseWithTurnRunning, CompactConfirm, AboutDialog, this. Identical
    wash, surface ramp, title treatment and button row, because a fifth
    shape is how a TUI stops feeling like one program. Width 68, between
@@ -520,7 +520,7 @@ ReasoningSection > Contents {
    gets the SAME dimmer-step + muted-text treatment as SystemBlock below,
    not a border. Created lazily, collapsed by default.
 
-   v0.51.0 measured this section the way v0.44.0 measured the turn body
+   v0.56.0 measured this section the way v0.44.0 measured the turn body
    before cutting it: an EXPANDED three-call section cost 15 rows, and 4
    of them said anything -- the header and one title per chip. The other
    11 were chrome: six chip border rows, three chip margins, the blank
@@ -558,7 +558,7 @@ ToolCallsSection > Contents {
 
 /* ToolChip WAS the deliberate exception to the unboxed rule above -- a
    round border at every fold level of a trace tree. It is not any more
-   (v0.51.0, reported: "remove the boxes around and remove the empty line
+   (v0.56.0, reported: "remove the boxes around and remove the empty line
    in between"). A border costs two rows to draw a frame around one row
    of text, which is a 3:1 chrome-to-content ratio on the commonest thing
    a turn contains.
@@ -727,7 +727,7 @@ ShellBlock {
     margin-bottom: 1;
 }
 
-/* Something broke (v0.53.0, doxa/ui/transcript.py's ErrorBlock). Its own
+/* Something broke (v0.56.0, doxa/ui/transcript.py's ErrorBlock). Its own
    kind, for the same reason ShellBlock above is one: a failure must never
    read as the assistant's words or as doxa's ordinary chatter. So no `▎`
    accent and no `▎ doxa` prefix, but a red left rule -- #D9534F, this

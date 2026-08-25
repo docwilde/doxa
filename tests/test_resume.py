@@ -1,4 +1,4 @@
-"""Session RESUME (v0.45.0): reopening a finished conversation.
+"""Session RESUME (v0.56.0): reopening a finished conversation.
 
 Two halves, and the second is the one with teeth.
 
@@ -20,7 +20,7 @@ sid>`` replayed the conversation, ``resume=<doxa sid>`` failed with ``No
 conversation found with session ID``. A resume keyed on the id the search
 list shows would have been broken for every session ever recorded.
 
-v0.45.0 closes that by asking the CLI to USE DOXA's id
+v0.56.0 closes that by asking the CLI to USE DOXA's id
 (``ClaudeAgentOptions.session_id``, measured: honored exactly), so the two
 spaces become one. The tests below pin the options-building that does it,
 and pin the honest refusal for every conversation recorded BEFORE it --
@@ -121,12 +121,12 @@ def _cli_history(session_id: str) -> Path:
 
 
 def test_a_conversation_the_cli_never_knew_is_refused_in_words(tmp_path):
-    """Every session recorded before v0.45.0 is in this state, and its
+    """Every session recorded before v0.56.0 is in this state, and its
     /search row looks exactly like a resumable one. Saying so at the
     dialog is the entire reason this check exists."""
     state, reason = history_mod.resume_state(OTHER_ID, str(tmp_path))
     assert state == history_mod.RESUME_NO_HISTORY
-    assert "v0.45.0" in reason
+    assert "v0.56.0" in reason
     assert "searchable" in reason  # says what still WORKS, not just what doesn't
 
 
@@ -353,7 +353,7 @@ async def test_enter_on_a_conversation_row_opens_a_visible_confirm(
 async def test_an_unresumable_conversation_gets_one_door_and_a_reason(
     monkeypatch, tmp_path
 ):
-    """The pre-v0.45.0 case, which for a while is most of the index. The
+    """The pre-v0.56.0 case, which for a while is most of the index. The
     dialog opens on the same key, says WHY in the body, and offers exactly
     one door -- a confirm with a "resume" button that cannot resume is
     worse than no button at all."""
@@ -375,7 +375,7 @@ async def test_an_unresumable_conversation_gets_one_door_and_a_reason(
         close = dialog.query_one("#resume-confirm-no")
         assert close.size.height > 0 and _hit(app, close) is close
         body = str(dialog.query_one("#resume-confirm-body").renderable)
-        assert "v0.45.0" in body and "searchable" in body
+        assert "v0.56.0" in body and "searchable" in body
 
 
 @pytest.mark.asyncio
@@ -599,7 +599,7 @@ async def test_a_running_in_process_session_is_refused_in_words(
 async def test_resuming_an_unresumable_session_spawns_nothing(
     monkeypatch, tmp_path
 ):
-    """A pre-v0.45.0 conversation reached through /resume by id, rather
+    """A pre-v0.56.0 conversation reached through /resume by id, rather
     than through the dialog: same refusal, same words, no half-created
     tab."""
     work = tmp_path / "work"
@@ -722,14 +722,14 @@ def test_an_unresumable_ended_tab_falls_back_to_read_only_and_says_why(tmp_path)
     from doxa.cli import ended_tab_spec
 
     work = tmp_path / "work"; work.mkdir()
-    spec = ended_tab_spec(  # no CLI history: a pre-v0.45.0 conversation
+    spec = ended_tab_spec(  # no CLI history: a pre-v0.56.0 conversation
         _tab(OTHER_ID, str(work)), str(tmp_path), lambda cwd, sid: None,
     )
     assert spec.archived is True
     assert spec.resume is False
     assert spec.engine_factory is None       # nothing spawns
     assert "not resumed" in spec.resume_note
-    assert "v0.45.0" in spec.resume_note     # names the reason, not just the state
+    assert "v0.56.0" in spec.resume_note     # names the reason, not just the state
 
 
 def test_resume_restored_off_is_exactly_the_old_behaviour(tmp_path, monkeypatch):

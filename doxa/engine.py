@@ -947,13 +947,13 @@ class SessionEngine:
         self.cwd = cwd
         self.model = model
         self.session_id = session_id or str(uuid.uuid4())
-        # v0.45.0 (session resume): the id of the conversation this engine
+        # v0.56.0 (session resume): the id of the conversation this engine
         # CONTINUES rather than starts. Not a second id -- a resumed
         # session keeps the id it is resuming (see _build_options), so
         # self.session_id and self.resume are equal on every resume DOXA
         # itself performs, and the field exists to say which of the two
         # things a session is DOING with that id. None for a fresh
-        # session, which is every session DOXA started before v0.45.0.
+        # session, which is every session DOXA started before v0.56.0.
         self.resume = resume or None
         # Daemon marker for the shared registry entry (peers.PeerInfo.
         # daemon_socket): set when a doxa.daemon.SessionDaemon hosts this
@@ -1665,7 +1665,7 @@ class SessionEngine:
             model=self.model,
             # -- session identity, and the whole reason /resume works ----
             #
-            # MEASURED (v0.45.0, real `claude` under cli_isolation.
+            # MEASURED (v0.56.0, real `claude` under cli_isolation.
             # spawn_env): before this pair of keys, DOXA's session id and
             # the CLI's were two DIFFERENT ID SPACES. DOXA minted a uuid4
             # in __init__ and named its LORE transcript (and therefore
@@ -1682,7 +1682,7 @@ class SessionEngine:
             # The fix is to stop having two spaces rather than to map
             # between them: ClaudeAgentOptions.session_id asks the CLI to
             # USE our id (measured: honored exactly, file written under
-            # it), so from v0.45.0 the id in the search list IS the id
+            # it), so from v0.56.0 the id in the search list IS the id
             # --resume takes. Only when it parses as a UUID -- the SDK
             # requires that, and the test suite's short synthetic ids
             # ("s1") must not become a connect-time error.

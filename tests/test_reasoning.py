@@ -250,7 +250,7 @@ async def test_reasoning_arrival_moves_the_marker_into_the_reasoning_phase(
     subsumed, on the grounds that a live "Reasoning (N chars)" header IS
     the "something is happening" signal at that point.
 
-    v0.51.0 reverses that call, and the reversal is the feature rather
+    v0.56.0 reverses that call, and the reversal is the feature rather
     than a side effect of one. A header whose count has stopped moving
     reads exactly like a finished one, and the phase AFTER reasoning -- a
     streaming answer -- offers the reader no progress signal at all,

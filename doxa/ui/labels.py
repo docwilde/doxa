@@ -1302,7 +1302,7 @@ def _chip_span(text: str, action: str) -> str:
 def _fmt_age(secs: float) -> str:
     """One age, one format, everywhere -- session uptime, cache staleness,
     (item V) how long a belief has sat untouched or a proposal unreviewed,
-    and (v0.45.0) every row of the ``/search`` popup.
+    and (v0.56.0) every row of the ``/search`` popup.
 
     The DAY tier is item V's addition and the reason there is still only
     one of these functions. Beliefs and staged proposals are months old,

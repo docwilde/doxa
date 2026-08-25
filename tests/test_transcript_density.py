@@ -1,4 +1,4 @@
-"""v0.51.0: the tool-calls section condensed, and the in-flight marker
+"""v0.56.0: the tool-calls section condensed, and the in-flight marker
 turned into a spinner that costs no timer.
 
 Every assertion here is about what a user SEES -- a measured row count, a
@@ -254,7 +254,7 @@ async def test_the_marker_spins_and_says_generating_while_text_arrives(
 @pytest.mark.asyncio
 async def test_the_marker_says_reasoning_while_the_model_thinks(monkeypatch, tmp_path):
     """The other half. v0.25.0 HID the marker here, on the grounds that a
-    live "Reasoning (N chars)" header is itself a sign of life; v0.51.0
+    live "Reasoning (N chars)" header is itself a sign of life; v0.56.0
     reverses that, because one marker that survives the whole turn is what
     the request asked for and a collapsed fold whose count stopped moving
     reads exactly like a finished one."""

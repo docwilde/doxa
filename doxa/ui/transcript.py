@@ -61,7 +61,7 @@ class RestoreTabSpec:
     never called, and DoxaApp builds an :class:`ArchivedSessionTab`
     (read-only, transcript from disk) instead of a SessionPane.
 
-    ``resume`` (v0.45.0) is what makes "restore" mean restore. A tab whose
+    ``resume`` (v0.56.0) is what makes "restore" mean restore. A tab whose
     session ENDED used to have exactly one outcome -- ``archived``, a
     read-only transcript and a dead end. Reported: *"as long as a tab was
     open, when DOXA is started again, the tab should be resumed
@@ -145,7 +145,7 @@ async def mount_transcript(
     for index, turn in enumerate(snapshot.turns):
         block = TurnBlock(turn.prompt)
         await block_list.mount(block)
-        # Hidden BEFORE a word of the restored answer is written (v0.51.0):
+        # Hidden BEFORE a word of the restored answer is written (v0.56.0):
         # a restored turn finished long ago, and replaying its text through
         # the same append_text a live turn uses would otherwise tick the
         # spinner into "generating" on the way past. mark_done below hides
@@ -239,7 +239,7 @@ class SystemBlock(Static):
 
 
 class ErrorBlock(Collapsible):
-    """Something broke, and here it is -- v0.53.0's whole point.
+    """Something broke, and here it is -- v0.56.0's whole point.
 
     Four defects reached the user in one day and none of them arrived as a
     legible error (see :mod:`doxa.errors` for the list). This is the block
@@ -564,7 +564,7 @@ class ToolChip(Collapsible):
         # Hide-at-zero, the same convention ToolCallsSection/ReasoningSection
         # and the status chips already follow: an EMPTY Static is still one
         # row, and every expanded chip that never spawned a subagent (i.e.
-        # almost all of them) was spending it on nothing. v0.51.0.
+        # almost all of them) was spending it on nothing. v0.56.0.
         self._subout.display = False
         self.subcalls = Vertical(
             id=f"chip-subcalls-{call_id}", classes="chip-subcalls"
@@ -767,7 +767,7 @@ exactly zero."""
 
 
 class ThinkingMarker(Static):
-    """The in-flight marker on a running turn -- a spinner since v0.51.0,
+    """The in-flight marker on a running turn -- a spinner since v0.56.0,
     and still TIMERLESS, which is the whole design.
 
     This originally replaced a ``LoadingIndicator``, whose 16 Hz
@@ -879,7 +879,7 @@ class TurnBlock(Collapsible):
         self.tools = Vertical(classes="turn-tools")
         self.tool_section: ToolCallsSection | None = None
         super().__init__(
-            # The marker is LAST (v0.51.0; it used to lead). A spinner
+            # The marker is LAST (v0.56.0; it used to lead). A spinner
             # nobody can see is not a spinner: the block list scroll_end()s
             # after every event, so the bottom of the running turn is what
             # is on screen, and a marker pinned above a streaming answer
@@ -907,7 +907,7 @@ class TurnBlock(Collapsible):
             self.thinking.auto_refresh = None
 
     async def append_text(self, chunk: str) -> None:
-        # v0.51.0: the marker advances instead of hiding. A delta arriving
+        # v0.56.0: the marker advances instead of hiding. A delta arriving
         # IS the spinner's tick (see ThinkingMarker) -- and the phase it
         # names, "generating", is one of the two the request asked for.
         self.thinking.advance("generating")
@@ -926,7 +926,7 @@ class TurnBlock(Collapsible):
         ``ReasoningSection`` -- same lazy-creation shape as
         ``add_tool_chip``, mirrored for reasoning instead of tool calls.
 
-        v0.51.0: this used to call ``hide_thinking()`` -- v0.25.0's
+        v0.56.0: this used to call ``hide_thinking()`` -- v0.25.0's
         judgment that a live "Reasoning (N chars)" header made the marker
         redundant. It now advances the marker into the ``reasoning``
         phase instead; ThinkingMarker's docstring records why that call
@@ -1129,7 +1129,7 @@ class ArchivedSessionTab(TabPane):
     the text came from, and the palette/Ctrl+T remain the way to start a
     real session in the same repo.
 
-    v0.45.0 demoted this from OUTCOME to FALLBACK. Restoring a tab now
+    v0.56.0 demoted this from OUTCOME to FALLBACK. Restoring a tab now
     tries to RESUME its conversation first (doxa.cli, over
     :func:`doxa.history.resume_state`), and this class is what is left
     when that is impossible -- the session is somehow still running, its
@@ -1152,7 +1152,7 @@ class ArchivedSessionTab(TabPane):
     ) -> None:
         self.session_id = session_id
         self.cwd = cwd
-        # v0.45.0: WHY this tab is read-only rather than resumed. Empty
+        # v0.56.0: WHY this tab is read-only rather than resumed. Empty
         # when auto-resume is switched off (then read-only is the setting
         # doing what it says, not a failure worth explaining).
         self.resume_note = resume_note

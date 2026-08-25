@@ -132,7 +132,7 @@ class PaneRuntimeMixin:
         # DoxaApp.__init__ and this reads the cache (boot cost: zero).
         if banner_mod.enabled() and not block_list.children:
             await block_list.mount(BootBanner(self.app.size.width))
-        # Staged-proposal count for the `lore` line (v0.51.0). A socket
+        # Staged-proposal count for the `lore` line (v0.56.0). A socket
         # round trip, and affordable exactly HERE and nowhere else: the
         # opening block is drawn once, before the first prompt, on a pane
         # that has just spent a connect and a git subprocess -- whereas
@@ -154,7 +154,7 @@ class PaneRuntimeMixin:
             self._boot_report = None
         block_list.scroll_end(animate=False)
         if self._resume_from:
-            # v0.45.0 (/resume): a resumed session must SHOW what it
+            # v0.56.0 (/resume): a resumed session must SHOW what it
             # remembers. The model comes back holding the whole
             # conversation (the CLI reloaded it from --resume), and
             # drawing an empty pane over that would leave the user typing
@@ -353,7 +353,7 @@ class PaneRuntimeMixin:
             # A subagent narrating: trace material, nested under its
             # Task chip -- never mixed into the turn's own prose.
             parent.append_subagent_text(ev.data["text"])
-            # The turn's spinner still has to move (v0.51.0): this delta
+            # The turn's spinner still has to move (v0.56.0): this delta
             # never reaches block.append_text, so without the tick a turn
             # spent entirely inside one Task call would freeze the marker
             # on whatever frame its tool_call left it.
@@ -384,7 +384,7 @@ class PaneRuntimeMixin:
     async def _render_tool_call(
         self, ev: EngineEvent, block: TurnBlock, chips: dict[str, ToolChip],
     ) -> None:
-        # "working", not "generating" (v0.51.0): between a tool_call and
+        # "working", not "generating" (v0.56.0): between a tool_call and
         # its tool_result no delta arrives, so the glyph genuinely stops
         # moving -- and a frozen spinner labelled "generating" would be
         # claiming text is streaming while a Bash command runs.
@@ -689,7 +689,7 @@ class PaneRuntimeMixin:
                 try:
                     await answerer(request_id, answer)
                 except Exception as exc:  # noqa: BLE001 -- reported, not swallowed
-                    # v0.53.0. This was `contextlib.suppress(Exception)`,
+                    # v0.56.0. This was `contextlib.suppress(Exception)`,
                     # and it is one of the four defects that motivated the
                     # error surface: "the needs-input dialog stopped
                     # answering keys". The popup has ALREADY closed and

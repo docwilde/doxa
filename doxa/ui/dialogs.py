@@ -903,7 +903,7 @@ class PermissionModeConfirm(ModalScreen[bool]):
 
 
 class ResumeConfirm(ModalScreen[bool]):
-    """Enter on a ``/search`` session header (v0.45.0): reopen this
+    """Enter on a ``/search`` session header (v0.56.0): reopen this
     conversation?
 
     THE SHAPE is :class:`CompactConfirm`'s, above, and deliberately not a
