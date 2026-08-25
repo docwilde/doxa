@@ -4,6 +4,26 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.62.0 — 2026-08-25
+
+**lore-core moves from v0.36.0 to v0.38.0.** DOXA runs `lore_core`
+in-process, so a LORE release changes what this terminal does, not just
+what it depends on. Two releases land at once:
+
+- **0.37.0 cuts the deriver's proposal ceiling from 5 to 3** and tells it
+  the number is a ceiling rather than a quota. LORE measured 79% of runs
+  emitting exactly 5, and those runs were approved at 0.83% against 2.47%
+  for runs emitting 4 or fewer. It also adds the act-not-know test and
+  suppresses a proposal an existing entry already covers.
+- **0.38.0 separates the two user channels by a stated rule.** The user
+  said it → `user`, and a later session may act on it. You concluded it →
+  `user-model`, and it authorizes nothing. The check is asymmetric on
+  purpose: an inference already carried by a stated fact gets dropped, the
+  reverse gets kept and reported.
+
+Expect fewer proposals on the `proposals` chip, and expect them to be
+better. Nothing in DOXA changed.
+
 ## 0.61.0 — 2026-08-25
 
 **Importing DOXA no longer imports the Claude Agent SDK.** `import
