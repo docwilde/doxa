@@ -768,3 +768,62 @@ def test_the_guarded_widget_is_still_the_real_widget(monkeypatch):
     assert type(widget).__name__ == "HalfcellImage"
     # One subclass per tier, not one per call.
     assert images._guarded(HalfcellImage) is images._guarded(HalfcellImage)
+
+
+def test_no_real_width_draws_the_name_and_never_the_terminal_width():
+    """The CI-only defect of v0.58.0, made deterministic.
+
+    ``_lay_out`` used ``self.content_size.width or self.columns``. The
+    fallback is the TERMINAL's width; this widget's content box is
+    narrower by chrome whose size is not a constant (v0.55.0 measured the
+    scrollbar alone moving it by two). At 30 columns the guess built a
+    20-cell row into an 18-cell box -- and nothing corrected it, because
+    no resize follows a widget whose own size never changed.
+
+    A local run passed and three CI jobs did not, which is the signature
+    of a fallback that happens to be right on one machine.
+    """
+    block = BootBanner(columns=30)
+    block._drawn = _Recorder()
+    block._lay_out()
+    drawn = block._drawn.text
+    assert drawn == banner.WORDMARK, (
+        "with no measured width the banner must draw the name, which fits "
+        f"any column -- got {drawn!r}"
+    )
+    for line in drawn.splitlines():
+        assert len(line) <= len(banner.WORDMARK)
+
+
+def test_a_measured_width_is_used_verbatim():
+    """The other half: once a real content width exists it is the number
+    fitted against, not the terminal's."""
+    from textual.geometry import Size
+
+    class _Sized(BootBanner):
+        @property
+        def content_size(self) -> Size:  # type: ignore[override]
+            return Size(20, 7)
+
+    block = _Sized(columns=120)
+    block._drawn = _Recorder()
+    block._lay_out()
+    rows = block._drawn.text.splitlines()
+    assert len(rows) > 1, "20 columns is wide enough for the mark"
+    for line in rows:
+        assert len(line) <= 20
+
+
+class _Recorder:
+    """A stand-in for the Static the banner writes into, so the fit can be
+    read without mounting an app -- the mounted path is covered by
+    test_narrow_terminal_never_overflows_the_glyph_art above, and this one
+    is about the branch that runs BEFORE a layout exists."""
+
+    def __init__(self) -> None:
+        self.text = ""
+
+    def update(self, text: str) -> None:
+        import re
+
+        self.text = re.sub(r"\[[^]]*\]", "", text)

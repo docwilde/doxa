@@ -4,6 +4,37 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.59.0 — 2026-08-25
+
+**CI was red on two shipped tags and a local suite was green on both, which
+is the whole finding.** 1307 passed here; three CI jobs failed. Neither
+defect is flaky — both are cases where the machine running the test decided
+the answer.
+
+- **The banner could draw wider than the column it goes into, and no
+  resize would ever correct it.** `_lay_out` fitted to
+  `self.content_size.width or self.columns`. That fallback is the
+  *terminal's* width; the widget's content box is narrower by chrome whose
+  size is not a constant — v0.55.0 measured the scrollbar alone moving it
+  by two. At 30 columns the guess built a 20-cell row into an 18-cell box,
+  and nothing followed to fix it, because a widget whose own size never
+  changed gets no resize event. It now draws the **name** when it has no
+  measured width — four cells, narrower than any column DOXA runs in — and
+  asks again once Textual has laid it out, bounded at three retries so a
+  widget that never gets a width settles rather than spins. Two new tests
+  drive the no-width branch directly; the mounted case was already pinned
+  and is what CI failed on.
+- **`doxa launcher install` could crash on a machine without
+  `desktop-file-utils`.** The cache refresh is guarded by
+  `shutil.which`, which is the right guard and not a sufficient one: a
+  `which` that answers and an exec that succeeds are two claims, and the
+  test defeated the first by patching `which` to answer for *every* name —
+  so the refresh really ran `update-desktop-database`, present on a
+  developer's desktop and absent on a CI runner. The test now answers for
+  `doxa` only, and the product suppresses `OSError` around the exec as
+  well as a non-zero exit: a cache the desktop rebuilds on its own
+  schedule must never be the thing that fails an install.
+
 ## 0.58.0 — 2026-08-25
 
 Three branches that were in flight together and land together, so they

@@ -439,7 +439,13 @@ def install() -> str:
         ("gtk-update-icon-cache", "-q", str(data_home() / "icons" / "hicolor")),
     ):
         if shutil.which(cmd[0]):
-            subprocess.run(cmd, check=False, capture_output=True)
+            # OSError as well as a non-zero exit: `which` answering and the
+            # exec succeeding are two claims, and a PATH entry can go away
+            # between them. Best-effort means best-effort -- a cache the
+            # desktop rebuilds on its own schedule anyway must never be the
+            # thing that fails an install.
+            with contextlib.suppress(OSError):
+                subprocess.run(cmd, check=False, capture_output=True)
 
     lines = [
         f"launcher: installed {dp}",

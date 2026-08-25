@@ -359,11 +359,17 @@ class BootBanner(Vertical):
     #: be prose, so it is dropped rather than wrapped into a paragraph.
     REASON_COLUMNS = 30
 
+    #: How many refreshes _lay_out will wait for a real content width before
+    #: it stops asking. Bounded because the retry re-enters _lay_out: a
+    #: widget that never gets a width must settle on the name, not spin.
+    FIT_RETRIES = 3
+
     def __init__(self, columns: int) -> None:
         self.columns = columns
         self._drawn: "Static | None" = None
         self._reason_widget: "Static | None" = None
         self._reason = ""
+        self._fit_retries = 0
         super().__init__(classes="boot-banner")
 
     def compose(self) -> ComposeResult:
@@ -400,7 +406,26 @@ class BootBanner(Vertical):
 
         if self._drawn is None:
             return
-        width = self.content_size.width or self.columns
+        width = self.content_size.width
+        if not width:
+            # No real width yet. Falling back to ``self.columns`` here was a
+            # defect, and CI caught it where a local run did not: that is
+            # the TERMINAL's width, and this widget's content box is
+            # narrower by chrome -- a border, a padding, a scrollbar that
+            # appears once the transcript is long enough. The difference is
+            # not a constant (v0.55.0 measured the scrollbar alone moving
+            # it by two), so a guess from ``columns`` can build rows wider
+            # than the column they go into -- and NO resize follows to
+            # correct it, because the widget's own size never changed.
+            #
+            # So: draw the name, which fits any column, and ask again once
+            # Textual has laid us out.
+            self._drawn.update("\n".join(banner_mod.drawn_lines(0)))
+            if self._fit_retries < self.FIT_RETRIES:
+                self._fit_retries += 1
+                self.call_after_refresh(self._lay_out)
+            return
+        self._fit_retries = 0
         self._drawn.update("\n".join(banner_mod.drawn_lines(width)))
         if self._reason_widget is not None:
             self._reason_widget.display = width >= self.REASON_COLUMNS

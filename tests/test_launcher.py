@@ -252,7 +252,14 @@ def test_install_reports_the_other_doxa_and_changes_nothing_about_it(
     monkeypatch.setattr(sys, "platform", "linux")
     old = _fake_install(tmp_path / "old", "0.8.0")
     before = old.read_bytes()
-    monkeypatch.setattr(launcher.shutil, "which", lambda name: str(old))
+    # Answer for `doxa` ONLY. A blanket `which` also answered for
+    # update-desktop-database and gtk-update-icon-cache, so install()'s
+    # best-effort cache refresh really executed them -- present on a
+    # developer's desktop, absent on a CI runner, which is where this
+    # failed with FileNotFoundError while passing locally.
+    monkeypatch.setattr(
+        launcher.shutil, "which", lambda name: str(old) if name == "doxa" else None
+    )
 
     msg = launcher.install()
     assert str(old) in msg
