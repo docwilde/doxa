@@ -168,9 +168,28 @@ class FakeEngine:
         # shape and the same call counter as the beliefs pair above. The
         # picker is click-only, so the counter is what proves an ordinary
         # status refresh never reaches for staged-proposal text.
-        self.list_pending_result: list[str] = []
+        self.list_pending_result: list = []
         self.list_pending_calls = 0
         self.list_pending_error: "Exception | None" = None
+        # Item V (the beliefs browser): the evidence trail a belief row
+        # expands to, keyed by belief id, plus the lore_core write-state
+        # the browser asks for before it renders any approve/reject
+        # control at all -- scripting it False is how the read-only
+        # degradation gets exercised without an old lore_core on disk.
+        self.belief_evidence_result: "dict[Any, list[dict]]" = {}
+        self.belief_evidence_calls: list = []
+        self.lore_write_state_result: dict = {
+            "capable": True, "version": "0.36.0", "source": "package",
+            "location": "/fake", "reason": "",
+        }
+        # THE SECURITY LEDGER. Every approve/reject that reached the engine,
+        # in order, one entry per call. A test asserting that nothing is
+        # approved without an explicit per-item action asserts against this
+        # list, not against the UI -- the UI is what is on trial.
+        self.approved: list[str] = []
+        self.rejected: list[str] = []
+        self.approve_error: "str | None" = None
+        self.reject_error: "str | None" = None
         # Item K (/context): what context_usage() hands back, plus a call
         # counter. None is the REAL absence case (a session whose handle
         # cannot report a breakdown), which is exactly what the "nothing is
@@ -194,6 +213,28 @@ class FakeEngine:
         if self.list_pending_error is not None:
             raise self.list_pending_error
         return list(self.list_pending_result)[offset : offset + limit]
+
+    async def belief_evidence(self, belief_id, limit: int = 40) -> list[dict]:
+        """Engine parity for item V's lazy evidence fetch."""
+        self.belief_evidence_calls.append(belief_id)
+        return list(self.belief_evidence_result.get(belief_id, []))
+
+    def lore_write_state(self) -> dict:
+        """Engine parity for item V's read-only degradation check.
+        Sync here, like SessionEngine's; EngineClient's is async and the
+        browser awaits whichever it got."""
+        return dict(self.lore_write_state_result)
+
+    async def approve_pending(self, pid: str) -> "str | None":
+        """Engine parity for item V's write half. ONE id -- there is no
+        list form on either real engine and there is none here either, so
+        a test cannot accidentally prove a bulk path works."""
+        self.approved.append(str(pid))
+        return self.approve_error
+
+    async def reject_pending(self, pid: str) -> "str | None":
+        self.rejected.append(str(pid))
+        return self.reject_error
 
     async def answer_needs_input(self, req_id: str, answer: dict) -> bool:
         self.needs_input_answers.append((req_id, dict(answer or {})))

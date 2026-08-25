@@ -42,7 +42,12 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from .daemon import PROTOCOL_VERSION
-from .engine import BELIEF_LIST_LIMIT, PENDING_LIST_LIMIT, EngineEvent
+from .engine import (
+    BELIEF_EVIDENCE_LIMIT,
+    BELIEF_LIST_LIMIT,
+    PENDING_LIST_LIMIT,
+    EngineEvent,
+)
 from .peers import MAX_FRAME_BYTES, PeerInfo, PeerSendError
 
 CALL_TIMEOUT_SECS = 15.0
@@ -487,9 +492,35 @@ class EngineClient:
             cursor = nxt
         return out[:limit]
 
+    async def belief_evidence(
+        self, belief_id: int, limit: int = BELIEF_EVIDENCE_LIMIT
+    ) -> list[dict]:
+        """Engine parity for :meth:`SessionEngine.belief_evidence` (item V)
+        -- one belief's evidence trail over the daemon split.
+
+        Unpaged, unlike the two list calls around it, and that is the
+        design rather than an omission: the trail is fetched for ONE
+        belief that a reader expanded and the engine caps it at
+        :data:`BELIEF_EVIDENCE_LIMIT` rows, so there is no unbounded list
+        here for a pager to protect. The daemon still runs the page
+        through the shared byte budget and reports ``evidence_truncated``
+        when it bit; that flag rides back onto the last row so the surface
+        says the trail was cut instead of showing a short one as whole."""
+        reply = await self._call(
+            "belief_evidence", belief_id=int(belief_id), limit=int(limit),
+        )
+        if not reply.get("ok"):
+            raise EngineClientError(
+                reply.get("error") or "belief_evidence call failed"
+            )
+        rows = [dict(row) for row in (reply.get("evidence") or [])]
+        if reply.get("evidence_truncated") and rows:
+            rows[-1]["trail_truncated"] = True
+        return rows
+
     async def list_pending(
         self, limit: int = PENDING_LIST_LIMIT, offset: int = 0
-    ) -> list[str]:
+    ) -> list[dict]:
         """Engine parity for :meth:`SessionEngine.list_pending` -- the
         `/pending` list over the daemon split.
 
@@ -500,8 +531,16 @@ class EngineClient:
         what ``SessionEngine.list_pending`` returns for the same arguments
         -- one complete list, no cursor to manage -- because ``doxa.app``
         reaches both engines through the same ``getattr(engine,
-        "list_pending")`` and must not be able to tell them apart."""
-        out: list[str] = []
+        "list_pending")`` and must not be able to tell them apart.
+
+        RECORDS since item V, where they were bare strings: a proposal has
+        to carry its pending id (there is nothing to approve without one)
+        and the fields the proposed verdict is computed from. A row that
+        arrives as a string anyway -- an already-running daemon on the
+        older build, which installing a new DOXA does not restart -- is
+        passed through as it came and renders without a verdict rather
+        than with a guessed one (``doxa.ui.labels.as_proposal``)."""
+        out: list[dict] = []
         cursor = max(0, offset)
         while len(out) < limit:
             reply = await self._call(
@@ -511,7 +550,7 @@ class EngineClient:
                 raise EngineClientError(
                     reply.get("error") or "pending call failed"
                 )
-            out.extend(str(text) for text in (reply.get("pending") or []))
+            out.extend(reply.get("pending") or [])
             nxt = reply.get("next_offset")
             if not isinstance(nxt, int) or nxt <= cursor:
                 # Exhausted, or a daemon that failed to advance -- the same
@@ -520,6 +559,38 @@ class EngineClient:
                 break
             cursor = nxt
         return out[:limit]
+
+    async def lore_write_state(self) -> dict:
+        """Engine parity for :meth:`SessionEngine.lore_write_state` --
+        asked of the DAEMON, because the daemon is the process holding
+        lore_core and the store. A terminal with a current wheel installed
+        can be driving a daemon that loaded a stale plugin checkout (the
+        plugin checkout wins -- see doxa._lore_bootstrap), so answering
+        this locally would report the wrong process's capability.
+
+        async where ``SessionEngine``'s is sync: a socket round trip
+        cannot be made synchronous, and the one caller awaits whichever it
+        got."""
+        reply = await self._call("lore_write")
+        if not reply.get("ok"):
+            raise EngineClientError(
+                reply.get("error") or "lore_write call failed"
+            )
+        return dict(reply.get("state") or {})
+
+    async def approve_pending(self, pid: str) -> "str | None":
+        """Engine parity for :meth:`SessionEngine.approve_pending` -- ONE
+        staged proposal, by id. The write happens in the daemon, through
+        lore_core's own approve path; this carries the id there and the
+        outcome back, and takes no list for the same reason that method
+        does not."""
+        reply = await self._call("approve_pending", pid=str(pid))
+        return reply.get("error") or (None if reply.get("ok") else "approve failed")
+
+    async def reject_pending(self, pid: str) -> "str | None":
+        """Engine parity for :meth:`SessionEngine.reject_pending`."""
+        reply = await self._call("reject_pending", pid=str(pid))
+        return reply.get("error") or (None if reply.get("ok") else "reject failed")
 
     def disabled_tools(self) -> list[str]:
         return list(self._disabled)

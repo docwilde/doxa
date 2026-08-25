@@ -32,11 +32,14 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable  # noqa: F401 -- annotation-only
 
+from textual.widgets import TabbedContent
+
 from .. import config as config_mod
 from .. import identity as identity_mod
 from .. import peers as peers_mod
 from ..engine import BELIEF_LIST_LIMIT, PENDING_LIST_LIMIT
 from ..history import SessionSearch
+from ..ui.beliefs import BeliefsBrowserTab
 from ..ui.dialogs import ChipPicker, CompactConfirm, NeedsInputPopup, SlashComplete
 from ..ui.labels import (
     memory_fill,
@@ -47,10 +50,33 @@ from ..ui.labels import (
     _chip_span,
     _fmt_belief_row,
     _fmt_pending_row,
+    as_proposal,
     ctx_chip,
+    proposal_tooltip,
 )
 from ..ui.labels import ctx_text as ctx_text_of
 from ..ui.statusline import StatusBar
+
+
+# Item V: the one row in each of the two LORE pickers that LEAVES the
+# picker. The chip stays a glance and the browser is the session -- both,
+# rather than one replacing the other, because "roughly what does LORE
+# believe about me" and "which of these 619 beliefs is stale and should
+# these 166 proposals be applied" are not the same question and a dropdown
+# only answers the first.
+#
+# The labels say what the browser HAS, never that it approves anything.
+# The picker itself has no write affordance and gains none by pointing at
+# one -- a row reading "approve" in a dropdown is the accidental-click
+# surface item V exists to avoid.
+BROWSE_ALL_ROW = (
+    "browse:all",
+    "▸ open the beliefs browser — evidence trails, timestamps, provenance",
+)
+REVIEW_ALL_ROW = (
+    "review:all",
+    "▸ open the beliefs browser — review these one at a time",
+)
 
 
 def _ctx_tooltip_absolute(used: "int | None", limit: "int | None") -> str:
@@ -330,8 +356,9 @@ class PaneChipsMixin:
         chips.append(StatusChip.clickable(
             f"{engine.belief_count()} beliefs",
             "open_beliefs_picker",
-            "active beliefs LORE holds for this session -- click to "
-            "browse them, grouped by scope",
+            "active beliefs LORE holds for this session -- click for the "
+            "grouped list, or /beliefs for the full browser (evidence, "
+            "age, provenance, staged proposals)",
         ))
         # Curated-memory fill, right after the belief count: both answer
         # "what does LORE hold for this session", and the caps are the one
@@ -709,8 +736,10 @@ class PaneChipsMixin:
             beliefs,
             key=lambda b: _belief_scope_label(str(b.get("subject") or "")),
         )
-        rows: "list[tuple[str, str]]" = []
-        groups: "dict[str, str]" = {}
+        rows: "list[tuple[str, str]]" = [BROWSE_ALL_ROW]
+        # Its own group header, because ChipPicker inserts one whenever the
+        # group changes and an EMPTY label would paint a bare "▎ " row.
+        groups: "dict[str, str]" = {BROWSE_ALL_ROW[0]: "browse"}
         by_id: "dict[str, dict]" = {}
         for belief in ordered:
             rid = f"belief:{belief.get('id')}"
@@ -719,10 +748,54 @@ class PaneChipsMixin:
             by_id[rid] = belief
         self._open_chip_picker(
             rows, None,
-            lambda rid: self._show_belief_detail(by_id.get(rid)),
+            lambda rid: self._pick_belief_row(rid, by_id),
             title="beliefs", groups=groups,
-            note=self._belief_cap_note(engine, len(rows)),
+            note=self._belief_cap_note(engine, len(rows) - 1),
         )
+
+    def _pick_belief_row(self, rid: str, by_id: "dict[str, dict]") -> None:
+        """A picker row's destination: the browser, or one claim inline.
+
+        The picker keeps its own selection behaviour unchanged (v0.27.0:
+        "the least-surprising small thing a claim-summary row can do") and
+        gains ONE row that leaves it -- see :data:`BROWSE_ALL_ROW`."""
+        if rid == BROWSE_ALL_ROW[0]:
+            self.run_worker(self.open_beliefs_browser(), group="command")
+            return
+        self._show_belief_detail(by_id.get(rid))
+
+    async def open_beliefs_browser(self) -> None:
+        """Item V: open (or bring forward) this pane's beliefs browser.
+
+        A TabPane in the shared ``#session-tabs`` strip, mounted the same
+        way :meth:`PaneRuntimeMixin.open_transcript` mounts a subagent's
+        transcript tab -- one browser per pane, reopening activates the
+        existing one rather than stacking a second, and focus moves into
+        the new tab so the keyboard route to a row's own approve/reject
+        works the moment it opens.
+
+        The pane keeps its own reference (``_beliefs_tab``) rather than
+        searching the strip by id: a tab the user closed must not be
+        resurrected by a stale query, and a dropped reference is how this
+        pane learns that happened (see the guard below, which re-checks
+        the tab is still mounted before activating it)."""
+        try:
+            tabbed = self.app.query_one("#session-tabs", TabbedContent)
+        except Exception:  # noqa: BLE001 -- app mid-teardown; nothing to open
+            return
+        existing = getattr(self, "_beliefs_tab", None)
+        if existing is not None and existing.is_mounted:
+            tabbed.active = existing.id or tabbed.active
+            if existing.rows:
+                existing.rows[0].focus()
+            else:
+                existing.scroll.focus()
+            return
+        tab = BeliefsBrowserTab(self, id=f"beliefs-{self.id}")
+        self._beliefs_tab = tab
+        await tabbed.add_pane(tab)
+        tabbed.active = tab.id or tabbed.active
+        tab.scroll.focus()
 
     @staticmethod
     def _belief_cap_note(engine: "Any", shown: int) -> str:
@@ -783,13 +856,13 @@ class PaneChipsMixin:
         a dead end, and the fix is a native surface, not a better
         sentence.
 
-        READ-ONLY, and that is a scope decision rather than an oversight:
-        there is no approve/reject affordance here and none is planned for
-        this release. The write path into curated memory and beliefs is
-        under security review (docs/plugin-api.md §6, LORE issue #43), and
-        the approval gate must not gain a second door while that review is
-        open. Viewing touches none of it. Approving stays with LORE's own
-        ``/lore:approve``."""
+        STILL READ-ONLY, and since item V that is a division of labour
+        rather than a scope boundary. Every row now says WHAT APPROVING IT
+        WOULD DO (:func:`doxa.ui.labels._fmt_pending_row`), because a row
+        that does not is not reviewable -- but a dropdown is a glance, and
+        approving is not something to do at a glance. The approve and
+        reject controls live on the rows of the beliefs browser, one per
+        proposal, and this picker's first row is the door to it."""
         engine = self.engine
         if engine is None:
             return
@@ -800,49 +873,63 @@ class PaneChipsMixin:
             )
             return
         try:
-            texts = await lister()
+            proposals = await lister()
         except Exception as exc:  # noqa: BLE001 -- a refusal is information
             await self._system(f"pending: {type(exc).__name__}: {exc}")
             return
         # Looking at the list is the strongest possible "I have seen it".
         self.set_staged(False)
-        if not texts:
+        if not proposals:
             await self._system(
                 "pending: nothing staged — the background reviewer has "
                 "proposed nothing awaiting your approval"
             )
             return
-        rows = [(f"pending:{index}", _fmt_pending_row(text))
-                for index, text in enumerate(texts)]
-        by_id = {rid: text for (rid, _label), text in zip(rows, texts)}
+        rows = [REVIEW_ALL_ROW]
+        rows += [(f"pending:{index}", _fmt_pending_row(item))
+                 for index, item in enumerate(proposals)]
+        by_id = {f"pending:{index}": item for index, item in enumerate(proposals)}
         note = ""
-        if len(texts) >= PENDING_LIST_LIMIT:
+        if len(proposals) >= PENDING_LIST_LIMIT:
             # Same honesty rule the beliefs picker's cap note follows: a
             # list that ended because it hit the cap must never be shown
             # as if the staging area had run out.
             note = (
-                f"showing the first {len(texts)} staged proposals -- this "
+                f"showing the first {len(proposals)} staged proposals -- this "
                 f"list is capped at {PENDING_LIST_LIMIT}"
             )
         self._open_chip_picker(
             rows, None,
-            lambda rid: self._show_pending_detail(by_id.get(rid)),
+            lambda rid: self._pick_pending_row(rid, by_id),
             title="pending", note=note,
         )
 
-    def _show_pending_detail(self, text: "str | None") -> None:
+    def _pick_pending_row(self, rid: str, by_id: "dict[str, Any]") -> None:
+        """A pending row's destination: the browser, or one proposal
+        inline. Same shape as :meth:`_pick_belief_row`."""
+        if rid == REVIEW_ALL_ROW[0]:
+            self.run_worker(self.open_beliefs_browser(), group="command")
+            return
+        self._show_pending_detail(by_id.get(rid))
+
+    def _show_pending_detail(self, item: "dict | str | None") -> None:
         """One staged proposal, in full, as a system block -- the same
         "a row's selection surfaces its whole body inline" shape
         :meth:`_show_belief_detail` uses, and for the same reason: the
         picker row is ellipsized, and the least surprising thing a
-        truncated row can do is show you the rest. Read-only, like
-        everything else on this path."""
-        if not text:
+        truncated row can do is show you the rest.
+
+        Since item V it leads with the proposed VERDICT, because what
+        approving would change is the thing a reader of this block is
+        deciding about. Still read-only: the block names the browser as
+        where the decision is made rather than making it here."""
+        if not item:
             return
+        proposal = as_proposal(item)
         self.run_worker(
             self._system(
-                "staged proposal · awaiting approval in LORE "
-                f"(/lore:approve)\n\n{text}"
+                "staged proposal · awaiting your approval\n"
+                f"{proposal_tooltip(proposal)}"
             ),
             group="command",
         )

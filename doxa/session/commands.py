@@ -96,6 +96,7 @@ PANE_COMMANDS: "tuple[CommandBinding, ...]" = (
     CommandBinding("/sessions", "_cmd_sessions"),
     CommandBinding("/rename", "_cmd_rename"),
     CommandBinding("/search", "_cmd_search"),
+    CommandBinding("/beliefs", "_cmd_beliefs"),
     CommandBinding("/pending", "_cmd_pending"),
     CommandBinding("/update", "_cmd_update"),
     CommandBinding("/help", "_cmd_help"),
@@ -122,8 +123,17 @@ class PaneCommandsMixin:
 
     async def _cmd_pending(self, args: str) -> None:
         """``/pending`` -- see :meth:`open_pending_picker` for what it
-        opens and for why it is read-only."""
+        opens and for why the dropdown itself stays read-only."""
         await self.open_pending_picker()
+
+    async def _cmd_beliefs(self, args: str) -> None:
+        """``/beliefs`` (item V) -- open the full-height beliefs browser.
+
+        A command as well as two picker rows and a chip, because it is a
+        destination: reachable from the prompt, the Ctrl+P palette and
+        autocomplete, exactly like every other row in the registry. See
+        :meth:`doxa.session.chips.PaneChipsMixin.open_beliefs_browser`."""
+        await self.open_beliefs_browser()
 
     async def _cmd_settings(self, args: str) -> None:
         self.app.action_settings()

@@ -111,6 +111,7 @@ from claude_agent_sdk import (
 import lore_core
 from lore_core import context as lore_context
 from lore_core import deriver as lore_deriver
+from lore_core import pending as lore_pending
 from lore_core import store as lore_store
 from lore_core.config import PROJECTS_DIR, project_slug, stage_disabled
 from lore_core.scrub import scrub_secrets
@@ -159,6 +160,124 @@ BELIEF_LIST_LIMIT = 2000
 # the belief cap because a pending queue that ever gets near 500 is
 # already a signal to go review it, not to scroll further.
 PENDING_LIST_LIMIT = 500
+
+# How many evidence rows one belief's trail ever carries into the browser
+# (item V). Unlike the two caps above this one is per BELIEF, not per
+# store, and it is deliberately small: the trail is fetched lazily, one
+# belief at a time, precisely so a browser over 600 beliefs never has to
+# put 600 trails in a wire frame. A belief with more evidence than this
+# says so rather than showing a short trail as a complete one.
+BELIEF_EVIDENCE_LIMIT = 40
+
+
+# -- item V: is this lore_core one DOXA may write through? ---------------
+
+
+def _accepts_via(func: "Any") -> bool:
+    """Whether ``func`` takes a ``via=`` keyword -- MEASURED off the
+    signature, not inferred from a version string. This is the whole
+    provenance contract in one question: ``lore_core.pending.apply_item``
+    labels an approved write by passing ``via="approved"`` down into
+    ``memory_add``/``filemap_add``/``belief_insert``, and a copy of
+    lore_core whose writers do not take that keyword cannot record the
+    label however new it claims to be."""
+    import inspect
+
+    if func is None:
+        return False
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+    return "via" in params
+
+
+def lore_write_state() -> dict:
+    """Whether approve/reject may run against the ``lore_core`` THIS
+    process loaded, and -- when they may not -- the sentence the browser
+    prints instead.
+
+    Item V's mandatory degradation. LORE 0.36.0 shipped the write gate and
+    the provenance ledger (issue #43); before it, an approved write left
+    no record of having been approved. DOXA holds lore_core in-process, so
+    it is not gated by that CLI-layer classifier at all -- what makes an
+    approve from this browser defensible is that it is a human acting in a
+    UI, recorded as such. On a copy that cannot record it, the browser
+    goes READ-ONLY and says why, rather than writing into the model's
+    context with no honest label on it.
+
+    Measured three ways, all of which must hold:
+
+    * ``lore_core.gate`` imports -- the module 0.36.0 added, and the one
+      that owns ``record_entry``/``writer_class``.
+    * ``lore_core.pending`` still exposes the approve path DOXA drives
+      (``load_pending``/``apply_item``/``archive``). DOXA does not
+      reimplement any of it; it calls LORE's own functions so the label is
+      LORE's own.
+    * the writers those functions call accept ``via=`` (see
+      :func:`_accepts_via`).
+
+    A version STRING is reported but never decided on: the plugin checkout
+    wins over the pinned wheel (see :mod:`doxa._lore_bootstrap`), so what
+    is loaded on a given machine is not what ``pyproject.toml`` says, and
+    a capability read off a number would be a guess where a measurement
+    was available.
+
+    Reported the same way ``/about`` reports the carrier -- version and
+    source come from :mod:`doxa.version` and :mod:`doxa._lore_bootstrap`,
+    so a user chasing a difference reads one story in two places."""
+    from . import _lore_bootstrap
+    from . import version as version_mod
+
+    version = version_mod.lore_core_version()
+    source = _lore_bootstrap.resolved_source()
+    where = f"{source[0]} at {source[1]}" if source else "unknown source"
+    state = {
+        "capable": False,
+        "version": version,
+        "source": source[0] if source else None,
+        "location": source[1] if source else None,
+        "reason": "",
+    }
+    try:
+        from lore_core import gate as lore_gate  # noqa: F401
+        from lore_core import pending as lore_pending
+    except Exception:  # noqa: BLE001 -- an absent module is a reason, not a crash
+        state["reason"] = (
+            f"lore_core {version or 'of unknown version'} ({where}) has no write "
+            "gate or provenance ledger — approving here would write into the "
+            "model's context with no record that a human approved it. Approve "
+            "and reject are disabled; LORE 0.36.0 or newer enables them."
+        )
+        return state
+    missing = [
+        name for name in ("load_pending", "apply_item", "archive")
+        if not callable(getattr(lore_pending, name, None))
+    ]
+    if missing:
+        state["reason"] = (
+            f"lore_core {version or 'of unknown version'} ({where}) is missing "
+            f"{', '.join(missing)} — DOXA drives LORE's own approve path rather "
+            "than reimplementing it, so there is nothing here to drive. Approve "
+            "and reject are disabled."
+        )
+        return state
+    try:
+        from lore_core.beliefs import belief_insert
+        from lore_core.memory import memory_add
+    except Exception:  # noqa: BLE001
+        belief_insert = memory_add = None  # type: ignore[assignment]
+    if not (_accepts_via(belief_insert) and _accepts_via(memory_add)):
+        state["reason"] = (
+            f"lore_core {version or 'of unknown version'} ({where}) cannot label a "
+            "write as approved (its belief/memory writers take no `via`) — so an "
+            "approval from here would be indistinguishable from any other write. "
+            "Approve and reject are disabled."
+        )
+        return state
+    state["capable"] = True
+    return state
+
 
 # -- /context (item K): the breakdown, normalized ----------------------
 #
@@ -989,29 +1108,178 @@ class SessionEngine:
                 fresh.append(text)
         return fresh
 
+    def _pending_records(self) -> list[dict]:
+        """Every staged proposal this project's reviews can see, as the
+        RECORD lore_core wrote rather than the text the deriver would
+        repeat.
+
+        v0.31.0 read ``lore_deriver.pending_texts``, which returns
+        ``item["text"]`` and nothing else -- enough to LIST a proposal,
+        never enough to say what approving it would do, and with no id to
+        approve it BY. Item V reads ``lore_core.pending.load_pending``
+        instead: the same files, whole, with their pending id. The project
+        scoping is pending_texts' own, replicated exactly (a project-scoped
+        proposal for another project is destined for a different memory
+        file and says nothing about this one), so ``/pending`` still shows
+        the same set it always did.
+
+        Scrubbed at this boundary, like every other persistence-adjacent
+        surface here -- and field by field rather than wholesale, because
+        the record's structural fields (kind, action, scope, ids) are what
+        the verdict is computed from and must survive intact."""
+        try:
+            items = lore_pending.load_pending()
+        except Exception:  # noqa: BLE001 -- an unreadable spool is an empty one
+            return []
+        try:
+            cross_note = lore_pending.cross_project_note
+        except AttributeError:  # pre-0.35 lore_core
+            cross_note = lambda _item: None  # noqa: E731
+        out: list[dict] = []
+        for pid, item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("scope") == "project" and item.get("project") != self.slug:
+                continue
+            record = {"pid": pid}
+            for key in ("kind", "action", "scope", "project", "subject", "id",
+                        "confidence", "session_id", "derived_by", "created",
+                        "writer", "origin_project", "subject_unresolved", "to"):
+                if item.get(key) is not None:
+                    record[key] = item[key]
+            for key in ("text", "claim", "match", "path", "purpose", "name",
+                        "description", "evidence", "reason", "writer_evidence"):
+                if item.get(key):
+                    record[key] = _scrub_text(item[key])
+            try:
+                note = cross_note(item)
+            except Exception:  # noqa: BLE001
+                note = None
+            if note:
+                record["cross_project_note"] = _scrub_text(note)
+            out.append(record)
+        return out
+
     async def list_pending(
         self, limit: int = PENDING_LIST_LIMIT, offset: int = 0
-    ) -> list[str]:
-        """Staged proposal texts for ``/pending`` -- the READ half of the
-        review gate, and only the read half: DOXA lists and shows staged
-        proposals, it does not approve or reject them. The write path into
-        curated memory stays behind LORE's own approval command until the
-        plugin-API security review concludes (docs/plugin-api.md §6), and a
-        second door onto it is exactly what that review exists to prevent.
+    ) -> list[dict]:
+        """Staged proposals for ``/pending`` and the beliefs browser, as
+        RECORDS -- pending id, kind, action, target scope, what it would
+        supersede, when it was staged, and the proposal's own text.
 
-        Scrubbed here (the picker is a persistence-adjacent surface in the
-        same sense the transcript is -- see the module docstring's choke
-        point) and returned whole-text: the picker ellipsizes its own rows
-        and the detail block wants the full proposal.
+        v0.31.0 returned bare strings and shipped no approve/reject, both
+        for the same reason: the write path into curated memory was under
+        security review (docs/plugin-api.md §6, LORE issue #43). That
+        review concluded in LORE 0.36.0, which shipped the write gate and
+        the provenance ledger, so item V does two things v0.31.0 could
+        not. It says what each proposal WOULD DO if approved -- a row that
+        does not is not reviewable -- and it can approve one, through
+        :meth:`approve_pending`, which drives LORE's own approve path so
+        the write carries LORE's own ``via="approved"`` label.
+
+        The shape change is the wire's too (the daemon's ``pending`` RPC
+        now serves records). A row that arrives as bare text -- from a
+        daemon still running the older build, which an upgrade does not
+        restart -- still renders: see ``doxa.ui.labels.as_proposal``.
 
         async, and ``offset``, for the same two reasons
         :meth:`list_beliefs` has them: symmetry with the other "list, then
-        let the picker render it" calls the app awaits, and the daemon's
+        let the surface render it" calls the app awaits, and the daemon's
         ``pending`` RPC, which cannot put an unbounded list of free text in
         a single 64KB wire frame and therefore serves it in pages."""
-        texts = self._pending_texts()
-        window = texts[max(0, offset) : max(0, offset) + max(0, limit)]
-        return [_scrub_text(text) for text in window]
+        records = self._pending_records()
+        return records[max(0, offset) : max(0, offset) + max(0, limit)]
+
+    def lore_write_state(self) -> dict:
+        """Whether this engine may approve or reject -- see the module
+        function :func:`lore_write_state`. A method as well, because the
+        browser reaches its engine through the same ``getattr(engine, ...)``
+        it reaches every other capability through, and EngineClient has to
+        be able to answer for the DAEMON's lore_core rather than for the
+        client process's own."""
+        return lore_write_state()
+
+    async def approve_pending(self, pid: str) -> "str | None":
+        """Apply ONE staged proposal, by its pending id. Returns None on
+        success, or the sentence to show the user.
+
+        Every line of the actual write is LORE's:
+        ``lore_core.pending.apply_item`` performs it and passes
+        ``via="approved"`` into ``memory_add``/``memory_replace``/
+        ``filemap_add``/``filemap_replace``/``belief_insert``, and
+        ``lore_core.pending.archive`` moves the proposal to
+        ``pending/archive/`` with ``status: "approved"``. DOXA reimplements
+        neither. That is the whole provenance condition: the label on an
+        approved entry is the label LORE puts there for an approval, not a
+        scheme DOXA invented that happens to look like one.
+
+        ONE id, never a list. There is no bulk form of this method and
+        there is deliberately nothing to add one to: the gate exists
+        because a human looked at THIS proposal, and an API taking a
+        sequence is the first half of an "approve all" button.
+
+        Off-loop (``asyncio.to_thread``) -- it writes SQLite rows, markdown
+        files and a JSON ledger, and the UI must stay live while it does."""
+        state = lore_write_state()
+        if not state.get("capable"):
+            return state.get("reason") or "approving is not available here"
+        pid = str(pid or "").strip()
+        if not pid:
+            return "no proposal id"
+
+        def _apply() -> "str | None":
+            items = dict(lore_pending.load_pending())
+            item = items.get(pid)
+            if item is None:
+                return (
+                    f"{pid} is no longer staged — it was approved or rejected "
+                    "somewhere else while this list was open"
+                )
+            err = lore_pending.apply_item(pid, item, False)
+            if err:
+                return f"{pid}: NOT applied — {err}"
+            lore_pending.archive(pid, "approved")
+            return None
+
+        try:
+            return await asyncio.to_thread(_apply)
+        except Exception as exc:  # noqa: BLE001 -- a refusal is information
+            return f"{pid}: {type(exc).__name__}: {exc}"
+
+    async def reject_pending(self, pid: str) -> "str | None":
+        """Discard ONE staged proposal, by its pending id. Returns None on
+        success, or the sentence to show the user.
+
+        ``lore_core.pending.archive(pid, "rejected")`` -- the same call
+        ``lore reject`` makes, which moves the file into
+        ``pending/archive/`` with its status recorded. It is not a delete:
+        a rejected proposal stays on disk, which is what makes rejecting
+        the cheaper of the two actions to get wrong.
+
+        Gated by the SAME capability check approve is, deliberately. A
+        DOXA that cannot honestly record an approval should not be quietly
+        emptying the queue the approval path reads from either -- read-only
+        means read-only."""
+        state = lore_write_state()
+        if not state.get("capable"):
+            return state.get("reason") or "rejecting is not available here"
+        pid = str(pid or "").strip()
+        if not pid:
+            return "no proposal id"
+
+        def _reject() -> "str | None":
+            if pid not in {p for p, _item in lore_pending.load_pending()}:
+                return (
+                    f"{pid} is no longer staged — it was approved or rejected "
+                    "somewhere else while this list was open"
+                )
+            lore_pending.archive(pid, "rejected")
+            return None
+
+        try:
+            return await asyncio.to_thread(_reject)
+        except Exception as exc:  # noqa: BLE001
+            return f"{pid}: {type(exc).__name__}: {exc}"
 
     def _maybe_schedule_derive(self) -> None:
         """Turn-done hook for the streaming deriver: schedule ONE background
@@ -1603,21 +1871,190 @@ class SessionEngine:
         ``updated`` timestamp can repeat or skip a belief. With it, the
         pages concatenate to exactly the list one unpaged call returns --
         the parity EngineClient.list_beliefs has to keep with this
-        method."""
+        method.
+
+        ITEM V widened the SELECT. Four columns joined the four that were
+        already here, and each is a question the browser exists to answer
+        at a glance:
+
+        ``created``          when the belief entered the store -- the only
+                             one of the three timestamps that never moves,
+                             and what "how old is this belief" means read
+                             literally.
+        ``last_referenced``/ how long since anything CITED the belief.
+        ``updated``          v0.40.0 painted this as the staleness column
+                             and v0.46.0 took it off the row: being read
+                             back to the agent is not evidence a claim is
+                             still true. It survives for the tooltip. The
+                             staleness signal is the outcome ledger --
+                             see :meth:`_outcome_index`.
+        ``via``              provenance (LORE 0.36.0, issue #43): derived /
+                             dream / direct / approved, NULL on anything
+                             older. Selected THROUGH a column probe below,
+                             because DOXA can be pointed at a store an
+                             older lore_core migrated and a hard reference
+                             to a missing column fails the whole query --
+                             which would take the picker down with it.
+
+        ``evidence_count`` is a correlated count, not the trail itself: the
+        trail is unbounded and is fetched per belief, on demand, by
+        :meth:`belief_evidence`. A browser over 600 beliefs must not put
+        600 evidence trails through a 64KB frame, and this is how it
+        doesn't."""
         try:
             conn = lore_store.db_connect()
+            have = {
+                str(row[1]) for row in
+                conn.execute("PRAGMA table_info(beliefs)").fetchall()
+            }
+            optional = [c for c in ("created", "updated", "last_referenced", "via")
+                        if c in have]
+            columns = ", ".join(
+                ["b.id", "b.subject", "b.claim", "b.confidence"]
+                + [f"b.{c}" for c in optional]
+            )
             rows = conn.execute(
-                "SELECT id, subject, claim, confidence FROM beliefs "
-                "WHERE status = 'active' ORDER BY updated DESC, id "
+                f"SELECT {columns}, (SELECT count(*) FROM belief_evidence e "
+                "WHERE e.belief_id = b.id) FROM beliefs b "
+                "WHERE b.status = 'active' ORDER BY b.updated DESC, b.id "
                 "LIMIT ? OFFSET ?",
                 (limit, offset),
             ).fetchall()
         except Exception:
             return []
-        return [
-            {"id": r[0], "subject": r[1], "claim": r[2], "confidence": r[3]}
-            for r in rows
+        outcomes = self._outcome_index(conn)
+        out: list[dict] = []
+        for r in rows:
+            belief = {
+                "id": r[0], "subject": r[1], "claim": r[2], "confidence": r[3],
+                "evidence_count": r[-1],
+            }
+            for index, name in enumerate(optional, start=4):
+                if r[index] is not None:
+                    belief[name] = r[index]
+            if outcomes is not None:
+                belief.update(outcomes.get(r[0]) or {"outcomes": 0})
+            out.append(belief)
+        return out
+
+    @staticmethod
+    def _outcome_index(conn: "Any") -> "dict[int, dict] | None":
+        """Every ACTIVE belief's outcome ledger, keyed by belief id --
+        DOXA's staleness signal (v0.46.0).
+
+        WHY THIS IS THE SIGNAL. Through v0.40.0 the browser measured
+        staleness as ``coalesce(last_referenced, updated)``, which moves
+        when a belief is merely injected or cited. Being read back to the
+        agent is not evidence a claim is still true; ``belief_outcomes`` --
+        one append-only row per verdict, ``event`` CHECK-constrained by
+        lore_core.store to 'confirmed'/'contradicted'/'stale' -- is where
+        reality actually gets recorded, and it is what this returns.
+
+        TWO SET QUERIES, NOT 2N. The obvious shape is
+        ``lore_core.beliefs.outcome_counts(conn, bid)`` per row, which
+        DOXA already calls once per hit in ``doxa.operators``. It is the
+        wrong shape HERE: ``belief_outcomes`` carries no index on
+        ``belief_id``, so that is a full scan per belief, and this method
+        serves up to BELIEF_LIST_LIMIT of them on one click. So the counts
+        are computed set-wise instead -- with the SAME
+        ``sum(event = ...)`` expressions ``outcome_counts`` uses, and a
+        test (`test_the_page_wide_counts_equal_lore_s_own_outcome_counts`)
+        pins this function's per-belief answer equal to
+        ``outcome_counts``' for every belief in the store. Reuse of the
+        definition, without 2N scans of a growing table.
+
+        NO BOUND PARAMETERS, so no SQLITE_MAX_VARIABLE_NUMBER cliff on an
+        ``IN`` list of two thousand ids: both queries restrict by joining
+        the active beliefs themselves.
+
+        AND IT RIDES IN THE PAGE, deliberately -- unlike the evidence
+        trail, which is fetched per belief on expand. An outcome summary
+        is five short fixed-size fields where a trail is unbounded, so it
+        belongs inside the shared ``_fit_page`` byte budget where it can
+        be measured rather than outside it where it cannot. It is also
+        nearly free in practice: measured on this operator's store, 31
+        outcome rows against 628 active beliefs, so ~95% of rows carry
+        only the single ``outcomes: 0`` field.
+
+        ``outcomes`` is ALWAYS present (0 when the ledger is empty) and is
+        what makes "never tested" distinguishable from "this record came
+        from something that predates the column" -- a zero is a
+        measurement, an absent key is an admission. Returns None if the
+        ledger cannot be read at all, which renders as no column rather
+        than as a guess."""
+        try:
+            counts = conn.execute(
+                "SELECT o.belief_id,"
+                " coalesce(sum(o.event = 'confirmed'), 0),"
+                " coalesce(sum(o.event = 'contradicted'), 0),"
+                " coalesce(sum(o.event = 'stale'), 0)"
+                " FROM belief_outcomes o JOIN beliefs b ON b.id = o.belief_id"
+                " WHERE b.status = 'active' GROUP BY o.belief_id"
+            ).fetchall()
+            # The LATEST verdict per belief. Ordered by (created, id) so a
+            # tie on the timestamp -- two outcomes recorded inside the same
+            # second, which utcnow()'s one-second resolution makes real --
+            # resolves to the row that was actually inserted last.
+            latest = conn.execute(
+                "SELECT o.belief_id, o.event, o.created, o.source"
+                " FROM belief_outcomes o JOIN beliefs b ON b.id = o.belief_id"
+                " WHERE b.status = 'active' AND o.id = ("
+                "  SELECT i.id FROM belief_outcomes i WHERE i.belief_id = o.belief_id"
+                "  ORDER BY i.created DESC, i.id DESC LIMIT 1)"
+            ).fetchall()
+        except Exception:  # noqa: BLE001 -- an unreadable ledger is no column
+            return None
+        index: "dict[int, dict]" = {}
+        for bid, confirmed, contradicted, stale in counts:
+            record = {"outcomes": int(confirmed) + int(contradicted) + int(stale)}
+            for name, value in (("confirmed", confirmed),
+                                ("contradicted", contradicted), ("stale", stale)):
+                if int(value):
+                    # Emitted only when non-zero: three always-present
+                    # zeroes per row is payload spent saying nothing, on a
+                    # call whose whole design constraint is the frame cap.
+                    record[f"outcome_{name}s"] = int(value)
+            index[int(bid)] = record
+        for bid, event, created, source in latest:
+            record = index.setdefault(int(bid), {"outcomes": 0})
+            record["outcome_event"] = event
+            record["outcome_at"] = created
+            if source:
+                record["outcome_source"] = source
+        return index
+
+    async def belief_evidence(
+        self, belief_id: int, limit: int = BELIEF_EVIDENCE_LIMIT
+    ) -> list[dict]:
+        """One belief's EVIDENCE TRAIL: what it was derived from.
+
+        ``belief_evidence`` is lore_core's own table (belief_id, session_id,
+        project, note, created) -- one row per time the deriver concluded
+        this claim, plus whatever the dreamer moved onto it when it
+        superseded a source belief. Item V shows it because a belief
+        without its trail is an assertion, and the whole premise of a
+        browser you can audit is that you can see where a claim came from.
+
+        Lazy, one belief at a time, and capped -- see
+        :data:`BELIEF_EVIDENCE_LIMIT`. ``limit + 1`` rows are read so the
+        caller can be told the trail was cut without a second COUNT(*)."""
+        try:
+            conn = lore_store.db_connect()
+            rows = conn.execute(
+                "SELECT session_id, project, note, created FROM belief_evidence "
+                "WHERE belief_id = ? ORDER BY created, rowid LIMIT ?",
+                (int(belief_id), max(1, limit) + 1),
+            ).fetchall()
+        except Exception:
+            return []
+        trail = [
+            {"session_id": r[0], "project": r[1],
+             "note": _scrub_text(str(r[2] or "")), "created": r[3]}
+            for r in rows[:limit]
         ]
+        if len(rows) > limit and trail:
+            trail[-1] = dict(trail[-1], trail_truncated=True)
+        return trail
 
     async def finalize(self) -> EngineEvent:
         """Host-driven session-end finalization (PHASE0 redesign item 1 --

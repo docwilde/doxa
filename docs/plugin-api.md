@@ -206,6 +206,15 @@ The same principle applies to how DOXA itself is packaged as a Claude Code
 plugin, and to Claude Code plugins generally — see LORE issue on gating the
 belief/memory write path.
 
+*Unchanged by v0.40.0.* That issue (LORE #43) closed in LORE 0.36.0, which
+shipped the write gate and the provenance ledger, and DOXA's beliefs browser
+(item V) can now approve a staged proposal. None of that is a plugin
+capability. What approves there is a **human clicking a control on one row**,
+recorded through LORE's own approve path as `via approved`; a plugin is code,
+it has no row and no click, and it still gets read access only. The
+distinction this section draws — staging is the way in for everything that is
+not a person — is exactly the distinction item V is built on.
+
 ### 7. Settings
 
 Plugins contribute `config.Setting` rows, namespaced `plugin.<name>.<key>`,

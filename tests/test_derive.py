@@ -481,12 +481,24 @@ async def test_pending_is_a_real_doxa_command_and_lists_the_proposals(
 
 
 @pytest.mark.asyncio
-async def test_pending_offers_no_way_to_approve_or_reject(monkeypatch, tmp_path):
-    """Scope boundary, pinned: DOXA lists and shows staged proposals and
-    does NOT write. The approval gate stays single-doored while the plugin
-    write path is under security review (docs/plugin-api.md §6)."""
+async def test_the_pending_dropdown_itself_still_writes_nothing(
+    monkeypatch, tmp_path
+):
+    """Scope boundary, restated for v0.40.0 rather than dropped.
+
+    v0.31.0 pinned "DOXA does not write at all". Item V moves that line
+    rather than erasing it: approving is now possible, but only from a
+    per-row control in the full-height browser, never from this dropdown.
+    A one-cell-tall row in a list you opened for a glance is exactly the
+    accidental-click surface the review gate exists to prevent, so no row
+    HERE may offer an approve or a reject.
+
+    The one row that leaves the picker names the browser, not the verb."""
     fake = FakeEngine([])
-    fake.list_pending_result = ["one proposal"]
+    fake.list_pending_result = [
+        {"pid": "20260824-00", "kind": "memory", "action": "add",
+         "scope": "user", "text": "one proposal"},
+    ]
     monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: fake)
     app = DoxaApp(cwd=str(tmp_path))
     async with app.run_test() as pilot:
@@ -497,8 +509,11 @@ async def test_pending_offers_no_way_to_approve_or_reject(monkeypatch, tmp_path)
         assert await _wait(pilot, lambda: picker.is_open)
         labels = " ".join(label for _rid, label in picker._rows).lower()
         assert "approve" not in labels and "reject" not in labels
-        # Selecting a row only ever SHOWS the proposal.
-        picker._on_select(picker._rows[0][0])
+        # Selecting a proposal row only ever SHOWS the proposal.
+        proposal_row = next(
+            rid for rid, _l in picker._rows if rid.startswith("pending:")
+        )
+        picker._on_select(proposal_row)
         assert await _wait(pilot, lambda: _system_blocks(app))
         await pilot.pause()
         assert "one proposal" in _plain(_system_blocks(app)[0])

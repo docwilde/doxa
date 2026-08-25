@@ -4,6 +4,257 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.46.0 — 2026-08-25
+
+**The beliefs browser** — lettered item V. Every belief LORE holds and
+every proposal waiting on your approval, in one full-height tab: what a
+belief claims, how confident it is, when it was created, how long it has
+sat untouched, where it came from, what it was derived from — and, for a
+staged proposal, exactly what approving it would do, with its own approve
+and reject controls on its own row.
+
+**Provenance, stated up front.** The lettered spec for item V was lost
+before this work started. What shipped is re-derived from the item's name
+(*the beliefs browser*), from the codebase — v0.27.0's picker says in its
+own docstring that item V "still owns the real browser (evidence trails,
+approve/reject)", and v0.31.0's `/pending` says the write half was held
+back pending a security review — and from the user's own words: timestamps
+and age in the rows, the proposed verdict for each staged proposal, the
+full belief text on hover, per-row approve/reject buttons, and a surface
+"a bit bigger" than a dropdown. Every judgment call is marked below.
+
+- **A tab, not a dropdown and not a modal.** `SubagentTranscriptTab` and
+  `ArchivedSessionTab` are the house precedents for a non-session tab, and
+  this follows them: a plain `TabPane` in the same `#session-tabs` strip,
+  no engine, no prompt. *Judgment call, settled by measurement:* this
+  operator's store holds 619 active beliefs and 166 staged proposals. A
+  ten-row picker cannot make 166 proposals reviewable, which is the whole
+  point of a verdict column. Reviewing has a beginning and an end; a modal
+  that blocks the session is the wrong shape and one that closes when you
+  glance away loses your place.
+- **The chip picker stays, and gains a door.** *Judgment call.* Both
+  surfaces rather than one replacing the other, because "roughly what does
+  LORE believe about me" and "which of these 619 beliefs is stale" are not
+  the same question. The dropdown is the glance; its first row opens the
+  browser. That row names what the browser *has* — evidence, timestamps,
+  provenance — never a verb it performs: a row reading "approve" inside a
+  dropdown is exactly the accidental-click surface the gate exists to
+  prevent.
+- **No drag-resize.** *Judgment call, deliberately deferred.* Draggable
+  dividers between the transcript, the prompt and the status bar are a
+  general layout capability, and `docs/split-panes.md` now owns them as a
+  requirement rather than an open question — provoked by exactly this
+  surface, and specified there instead of here. The browser is
+  full-height, divides its own space with a fixed split, and ships no
+  handle of its own; it inherits real dividers when that lands. Building
+  the mechanism twice, differently, is how a layout system rots.
+
+**Which timestamp, and what staleness actually is.** The belief store keeps
+three timestamps on the belief row (`created`, `updated`,
+`last_referenced`), and the first draft of this work built the staleness
+column out of `coalesce(last_referenced, updated)` — LORE's own
+dormancy-sweep expression. **That was the wrong clock**, and the correction
+came from the user before this shipped: *"staleness is rather indicated by
+whether or not the belief was confirmed … recently or not"*.
+
+`last_referenced` moves when a belief is merely **injected or cited**. The
+agent reading a claim back to itself is not evidence the claim is still
+true. What makes a belief still-true is that reality **tested** it, and LORE
+keeps that somewhere else entirely: `belief_outcomes`, one append-only row
+per verdict, `event` CHECK-constrained by `lore_core.store` to
+`confirmed` / `contradicted` / `stale`. That ledger is the ground truth
+`calibrated_confidence` calibrates the deriver's self-report against, and it
+is now what the browser paints.
+
+So a belief row carries `created` as an absolute date — the one fact here
+that never moves — and then **LORE's last verdict on it**: `confirmed 2d`,
+`contradicted 2d`, `stale 40d`. The verdict is shown, never just the age:
+"confirmed 2d" and "contradicted 2d" are opposite facts about the same
+belief, so they also differ by colour (green / red / amber), with the words
+carrying it on a terminal that has none.
+
+- **"Never tested" is a state, not a large age**, and this is the
+  measurement that forced the design: **31 outcome rows against 628 active
+  beliefs** on this operator's store — roughly **95% of a real belief store
+  has never been tested at all**. Re-measured while building it, the number
+  is starker still: those 31 rows are carried by 29 beliefs, only 15 of
+  which are still `active`, against 635 active beliefs — **97.6% of the
+  live working set has never been tested by anything**. Rendering one of
+  those as `120d idle`
+  asserts something false: nothing went stale, nothing was ever checked. It
+  renders as the plain words `never tested`, in the muted body colour
+  because it is an *absence* of signal rather than a bad one, with no digits
+  and no unit so it cannot be misread as a duration. The tooltip says it in
+  a sentence.
+- **It does not sort as though it were merely old, either.** Inside a scope
+  group, beliefs reality has tested sort first, most recently tested first;
+  never-tested follows as a *bucket*, keeping `list_beliefs`' own
+  `updated DESC` order (Python's sort is stable). With 31 outcomes against
+  628 beliefs the tested ones are needles, and a list that scattered them
+  through six hundred untested claims would have hidden the only evidence
+  it holds.
+- **`last_referenced` came off the row and moved to the tooltip.** *Judgment
+  call.* It is not worthless — "cited three days ago and never once
+  confirmed" is a real and interesting state — but it is the
+  third-most-important thing on the line, and two age-shaped numbers side by
+  side, only one of which means anything, is precisely the confusion this
+  correction removes. In the tooltip it sits *below* the outcome and is
+  labelled for what it is: *cited, not confirmed*.
+- **A record that predates the ledger gets no column at all**, the same rule
+  a NULL `via` follows. `outcomes` is always present and is `0` when the
+  ledger was read and found empty; an *absent* key means the record came
+  from something older than this column. A zero is a measurement, an absent
+  key is an admission, and neither is a guess.
+- **The ledger rides in the page, inside the shared `_fit_page` budget** —
+  unlike the evidence trail, which is fetched per belief on expand. An
+  outcome summary is a few short fixed-size fields where a trail is
+  unbounded, so it belongs where its bytes can be measured. It is nearly
+  free in practice: the ~95% of rows with no verdict carry the single field
+  `outcomes: 0` and nothing else.
+- **Two set queries, not 2N, and pinned to LORE's own definition.**
+  `lore_core.beliefs.outcome_counts` *is* the definition of a belief's
+  tally, and `doxa/operators.py` already calls it once per search hit. It is
+  the wrong shape for the list: `belief_outcomes` carries no index on
+  `belief_id`, so per-row is one full scan per belief across a list capped
+  at 2000. The counts are computed set-wise with the same
+  `sum(event = …)` expressions, with no bound parameters (so no
+  `SQLITE_MAX_VARIABLE_NUMBER` cliff on a 2000-id `IN` list) — and a test
+  asserts this function's answer equals `outcome_counts`' for **every**
+  belief in the store, which is what stops the two drifting.
+
+*Skills are out of scope here.* The same correction mentioned skill usage;
+LORE tracks that separately (`lore_core.context.load_skill_usage`) and no
+skills surface exists in this item. Not built.
+
+- **One age format, extended rather than duplicated.** `_fmt_age` gained a
+  day tier (`3d4h`, `120d`). Beliefs are months old and `2904h0m` is
+  arithmetic homework. Everything under a day renders exactly as before, so
+  every existing caller is untouched — which is what keeps this one
+  function instead of two.
+- **A belief with no timestamps renders exactly as it used to.** No
+  placeholder column for a fact the store does not carry.
+- **The chip picker's rows did not get wider to make room.** *Judgment
+  call.* 72 columns is what fits an 80-column terminal inside a bordered
+  dropdown, so the stamp takes its space out of the claim rather than out
+  of the terminal. The picker is the glance; the browser is the
+  full-width surface, and a tooltip carries the claim whole on both.
+
+**The proposed verdict.** `/pending` listed proposals; it did not say what
+approving one would change, and a row that does not is not reviewable. Every
+row now leads with the verdict — `add → memory/user`, `replace →
+memory/project:doxa`, `retract → belief #42`, `retire → skill/foo` — plus
+what it would supersede, how long it has waited, and, when LORE's write gate
+staged it, which untrusted context wrote it. The verdict vocabulary is read
+off `lore_core.pending.apply_item`, the function that actually performs each
+of these, rather than invented alongside it, so a verdict and the write it
+predicts cannot disagree.
+
+- **Proposals became records.** `SessionEngine.list_pending` and the daemon's
+  `pending` RPC now serve the whole staged item, not `item["text"]`: a
+  proposal has to carry the pending id there is nothing to approve without,
+  and the fields a verdict is computed from. *Judgment call:* a row that
+  still arrives as a bare string — from a daemon on the older build, which
+  installing a new DOXA does not restart — renders without a verdict rather
+  than with a guessed one. A write path is the wrong place to guess.
+
+**Approve and reject, per row.** v0.31.0 shipped neither, because the write
+path into curated memory was under security review (`docs/plugin-api.md` §6,
+LORE issue #43). LORE **0.36.0** concluded it: the write gate classifies
+every CLI write by caller, and the provenance ledger records who wrote each
+entry and whether it came through approval. That gate is CLI-layer only and
+DOXA holds `lore_core` in-process, so it does not apply here — what makes
+approving from DOXA defensible is that it is a human acting in a UI,
+recorded as such.
+
+- **DOXA labels nothing.** Approve calls `lore_core.pending.apply_item`,
+  which passes `via="approved"` into `memory_add`/`memory_replace`/
+  `filemap_add`/`filemap_replace`/`belief_insert`, then
+  `lore_core.pending.archive(pid, "approved")`. Reject is
+  `archive(pid, "rejected")`. Not one line of the write is reimplemented
+  here: the label on an approved entry is the label LORE puts there for an
+  approval, and a test reads it back out of the store rather than trusting
+  what DOXA intended.
+- **Nothing is approved without an explicit per-item action.** One id per
+  call, no list parameter on either engine, no bulk RPC, no multi-select, no
+  "approve all". Approve **arms** on the first press or click and applies on
+  the second, on that same row; arming any row disarms every other. Reject
+  is one action. *Judgment call — misclick asymmetry:* approve writes into
+  the model's context, reject archives a file that stays on disk, so the
+  irreversible one is the one that costs two deliberate acts. It is an
+  in-row arm, not a modal confirm — a dialog on every approve would defeat
+  the per-row button the user asked for.
+- **Enter is not bound to either.** Enter expands a belief's evidence trail
+  and does nothing else anywhere in this browser, because Enter is the key a
+  hand rests on.
+- **Keyboard parity, not a click-only control.** `a` arms and applies, `r`
+  rejects, `Esc` disarms, `↑`/`↓` move between rows — all on the focused
+  row, which is the only row marked as focused. A control reachable only by
+  mouse is unreachable for most of how this app is used.
+- **Neither outcome is silent.** The row settles into a named resolved state
+  (`✓ approved` / `✗ rejected` / `✗ NOT applied`) and stays in the list —
+  a queue that swallows the line you just acted on gives you nothing to
+  check yourself against — and the owning session gets a block naming the
+  proposal, its verdict and the provenance label, because the browser may
+  not be the tab you are looking at when a write lands.
+
+**The pinned dependency is LORE 0.36.0** (bumped on `main` by
+`.github/workflows/lore-bump.yml` and taken here on rebase), so a bare
+clone gets the write gate and the provenance ledger and the browser is
+fully live out of the box. The degradation below is for the other case,
+which is real rather than theoretical.
+
+**Read-only on an older lore_core, and it says why.** The Claude Code plugin
+checkout wins over the pinned wheel (`doxa/_lore_bootstrap.py`), so what is
+loaded on a given machine is not what `pyproject.toml` says. When the loaded
+copy cannot record an approval honestly, the browser renders a banner naming
+the version, the carrier and the reason, and renders no approve or reject
+control at all — and the engine refuses the write even if asked directly.
+*Judgment call:* the capability is **measured, not inferred from a version
+string** — `lore_core.gate` must import, `pending.load_pending`/`apply_item`/
+`archive` must exist, and `belief_insert`/`memory_add` must accept `via=`.
+A copy whose writers take no `via` cannot record the label however new it
+claims to be. The banner reads the same measurement `/about`'s `lore from`
+row does, so a user chasing a difference is never told two things.
+
+**Full claim text on hover.** Each row is its own widget, so each carries its
+own tooltip — impossible on the `OptionList` the chip picker is built from,
+where a tooltip is a widget attribute and an `Option` has none. The tooltip
+is set from the same record, in the same constructor, that built the visible
+line: the v0.35.0 defect (a hint keyed by markup while the lookup ran against
+markup-stripped text, so it vanished at two tiers) cannot recur because there
+is no lookup. *Judgment call:* the tooltip carries the whole claim, its
+confidence, its provenance and its timestamps, but **not** the evidence
+trail — that is unbounded and lazily fetched, and a tooltip that waits on a
+query flickers. The trail is one keystroke away instead.
+
+**Evidence trails, without blowing the frame cap.** *Judgment call.* The
+belief page carries an evidence **count**, never the trail; the trail is
+fetched for the one belief a reader expanded, capped at 40 rows, over a new
+`belief_evidence` RPC that runs through the same shared `_fit_page` byte
+budget `beliefs` and `pending` already use — a third caller, not a third
+budget. Putting 619 trails through a 64KB frame is the v0.28.0 defect
+waiting to happen again.
+
+- `/beliefs` joins the registry, so it reaches `/help`, the Ctrl+P palette
+  and autocomplete like every other command. `/pending` keeps its dropdown
+  and stays write-free there; its summary now says where review happens.
+- Tests: 43 new — 40 in `tests/test_beliefs_browser.py`, three more in
+  `tests/test_daemon.py` for the new RPCs over a real socket. Rows are asserted to
+  have non-zero size and their age/verdict/provenance text read back off the
+  rendered widget, not off the formatter that fed it — the v0.28.0
+  invisible-buttons defect passed every structural assertion for a full
+  release. The security assertion drives the whole surface with everything a
+  careless hand plausibly hits and asserts the engine's ledger stayed empty.
+  Approve, reject and the already-resolved race run against the real
+  `lore_core` and read the provenance back out of the store — behind a
+  snapshot-and-restore fixture, because `conftest.py` shares one throwaway
+  belief store across the whole session and a stray claim left in it makes
+  `tests/test_consult.py`'s "an unrelated prompt matches nothing" quietly
+  false. That fixture clears `belief_outcomes` too, and not for tidiness:
+  `beliefs.id` is an `INTEGER PRIMARY KEY`, so SQLite hands a deleted id
+  straight back to the next insert and an orphaned outcome row silently
+  re-attaches itself to an unrelated belief in the next test — caught
+  exactly that way.
 ## 0.44.0 — 2026-08-25
 
 - **The transcript spent four blank rows on every one-line answer.** Measured

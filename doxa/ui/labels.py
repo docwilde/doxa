@@ -358,22 +358,493 @@ def _belief_scope_label(subject: str) -> str:
     return subject or "user"
 
 
+#: How wide one CHIP-PICKER row runs. Unchanged since v0.27.0, and the
+#: number is load-bearing rather than aesthetic: the picker is an
+#: OptionList with a border and a one-column margin, and the ` ▸ ` selection
+#: mark costs three more, so 72 is what fits an 80-column terminal without
+#: the row overflowing its own dropdown.
+#:
+#: Item V added a stamp segment in front of the claim and did NOT widen
+#: this to make room. The picker is the glance; the browser
+#: (doxa.ui.beliefs, CLAIM_WIDTH) is the full-width surface, and both of
+#: them are backstopped by a tooltip carrying the claim whole.
+PICKER_ROW_WIDTH = 72
+
+
 def _fmt_belief_row(belief: dict) -> str:
-    """One beliefs-picker row: the claim text, ellipsized -- filtering
-    (ChipPicker's type-to-filter) matches against exactly this string, so
-    the claim has to be IN it, not just referenced by an id."""
+    """One beliefs-picker row: when it was created, how long since anything
+    touched it, then the claim text, ellipsized -- filtering (ChipPicker's
+    type-to-filter) matches against exactly this string, so the claim has
+    to be IN it, not just referenced by an id.
+
+    The stamp segment is emitted only when the belief actually CARRIES
+    timestamps (item V added them to ``list_beliefs``' SELECT). A row that
+    has none renders exactly as it did before rather than growing a
+    placeholder column that says nothing -- and that is also what keeps a
+    belief arriving from an older daemon, over the wire, honest."""
+    stamp = belief_stamp(belief)
     claim = _one_line(str(belief.get("claim") or ""), 200)
-    return ellipsize(claim, 72)
+    return ellipsize(f"{stamp} · {claim}" if stamp else claim, PICKER_ROW_WIDTH)
 
 
-def _fmt_pending_row(text: str) -> str:
-    """One ``/pending`` row: the staged proposal's own text, ellipsized --
-    same rule :func:`_fmt_belief_row` follows and for the same reason,
-    ChipPicker's type-to-filter matches this string. A staged proposal has
-    no id, title or subject to fall back on (``lore_deriver.pending_texts``
-    returns text and nothing else), so the text is not merely the best row
-    label available, it is the only one."""
-    return ellipsize(_one_line(str(text or ""), 200), 72)
+def _fmt_pending_row(item: "dict | str") -> str:
+    """One ``/pending`` row: WHAT APPROVING IT WOULD DO, how long it has
+    been waiting, then the proposal's own text, ellipsized.
+
+    Item V's requirement in one line -- "a row that does not say what
+    approving it changes is not reviewable". The verdict comes first
+    because it is the part a reviewer scans; the text is still in the
+    string because ChipPicker's type-to-filter matches this exact label
+    and a row you cannot search by its own words is not a row.
+
+    Accepts a bare string as well as a record: see :func:`as_proposal`."""
+    proposal = as_proposal(item)
+    verdict = proposal_verdict(proposal)
+    age = proposal_age_text(proposal)
+    text = _one_line(proposal_text(proposal), 200)
+    lead = " · ".join(part for part in (verdict, age) if part)
+    return ellipsize(f"{lead} · {text}" if lead else text, PICKER_ROW_WIDTH)
+
+
+# -- item V: timestamps, age, provenance, and the proposed verdict --------
+#
+# The beliefs browser needs four things the v0.27.0 picker never carried,
+# and all four are pure functions of one record, so they live here beside
+# the row formatters that already read those records rather than inside
+# the widget that paints them.
+#
+# WHICH TIMESTAMP, and WHAT STALENESS ACTUALLY IS (corrected in v0.46.0).
+#
+# The belief store keeps three timestamps on the `beliefs` row itself
+# (lore_core.store: created, updated, last_referenced) and v0.40.0 built
+# the staleness column out of `coalesce(last_referenced, updated)` --
+# LORE's own dormancy-sweep expression. That was the wrong clock, and the
+# user said so: "staleness is rather indicated by whether or not the
+# belief was confirmed ... recently or not".
+#
+# The distinction is real. `last_referenced` moves when a belief is merely
+# INJECTED or CITED -- the agent reading a claim back to itself is not
+# evidence the claim is still true. What makes a belief still-true is that
+# reality tested it, and LORE keeps that in a different table:
+# `belief_outcomes`, one append-only row per verdict, `event` constrained
+# by the schema to 'confirmed' / 'contradicted' / 'stale'. That ledger is
+# the ground truth `calibrated_confidence` calibrates the deriver's
+# self-report against; it is the honest staleness signal and this module
+# now paints it.
+#
+# So a belief row carries:
+#
+#   created          as an absolute date -- "how old is this belief" read
+#                    literally, and the only fact here that never moves.
+#   last outcome     its EVENT and the age of that event: "confirmed 2d",
+#                    "contradicted 2d", "stale 40d". The verdict is shown,
+#                    never just the age -- confirmed and contradicted are
+#                    opposite facts about the same belief and must not
+#                    render alike.
+#   never tested     its own state, NOT a large age. MEASURED on this
+#                    machine: 31 outcome rows against 628 active beliefs,
+#                    so ~95% of a real store has never been tested at all.
+#                    Rendering one of those as "120d idle" asserts
+#                    something false -- nothing went stale, nothing was
+#                    ever checked.
+#
+# `last_referenced` is NOT on the row any more. It is not worthless -- a
+# belief cited three days ago and never once confirmed is a real and
+# interesting state -- but it is the third-most-important thing on the
+# line, and two age-shaped numbers side by side, only one of which means
+# anything, is exactly the confusion this correction removes. It moved to
+# the tooltip, where per-belief detail already lives.
+
+#: ``lore_core.config.utcnow``'s format -- the one every timestamp in the
+#: belief store and every ``created`` in a staged proposal is written in.
+LORE_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _parse_lore_time(stamp: "str | None") -> "float | None":
+    """A lore timestamp as a UNIX epoch, or None when it is absent or in
+    some shape this function did not measure. Never raises and never
+    guesses: an unparseable stamp produces no age row rather than an age
+    computed from a date nobody wrote."""
+    text = str(stamp or "").strip()
+    if not text:
+        return None
+    from datetime import datetime, timezone
+
+    try:
+        parsed = datetime.strptime(text, LORE_TIME_FORMAT)
+    except ValueError:
+        try:  # a store written by some other ISO-8601 producer
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _age_of(stamp: "str | None", now: "float | None" = None) -> "float | None":
+    """Seconds since ``stamp``, or None when there is no usable stamp.
+    Clamped at zero -- a clock skew must not paint a belief as being from
+    the future, which reads as a bug in the belief rather than in the
+    clock."""
+    when = _parse_lore_time(stamp)
+    if when is None:
+        return None
+    import time as _time
+
+    return max(0.0, (now if now is not None else _time.time()) - when)
+
+
+def belief_touched(belief: dict) -> "str | None":
+    """The belief's staleness clock: ``last_referenced``, falling back to
+    ``updated`` -- lore_core's own coalesce, see this section's lead."""
+    return (
+        str(belief.get("last_referenced") or "").strip()
+        or str(belief.get("updated") or "").strip()
+        or None
+    )
+
+
+def belief_created_text(belief: dict) -> str:
+    """The creation DATE, no clock time: a belief store is browsed by day,
+    and the seconds are noise in a column that has to fit beside a claim.
+    Empty when the row carries no ``created``."""
+    return str(belief.get("created") or "").strip()[:10]
+
+
+def belief_age_text(belief: dict, now: "float | None" = None) -> str:
+    """"34d idle" -- how long since anything REFERENCED or updated this
+    belief. Empty when neither timestamp is present.
+
+    No longer the row's staleness column (v0.46.0 -- see this section's
+    lead: being cited is not being confirmed). It survives because the
+    tooltip still reports it, and because "cited 3d ago, never once
+    confirmed" is a state worth being able to read."""
+    secs = _age_of(belief_touched(belief), now)
+    return f"{_fmt_age(secs)} idle" if secs is not None else ""
+
+
+#: LORE's own outcome vocabulary, verbatim: ``belief_outcomes.event`` is
+#: CHECK-constrained to exactly these three in ``lore_core.store``. Not a
+#: DOXA spelling of them -- a verdict this app invented would be a verdict
+#: nothing in the store can ever produce.
+OUTCOME_EVENTS: "tuple[str, ...]" = ("confirmed", "contradicted", "stale")
+
+#: What a belief with an outcome ledger but no rows in it says. A WORD,
+#: never a duration: it is a distinct state, not a large age, and the
+#: whole point of the v0.46.0 correction is that those two must not be
+#: mistakable for each other.
+NEVER_TESTED = "never tested"
+
+#: Per-verdict colour. "confirmed 2d" and "contradicted 2d" differ by one
+#: word at a glance and by their whole meaning in fact, so they differ by
+#: colour too; never-tested wears the muted body colour because it is an
+#: ABSENCE of signal rather than a bad one, and must not read as an alarm.
+OUTCOME_COLORS: "dict[str, str]" = {
+    "confirmed": "#7A9B6E",     # the shell block's green -- worn by nothing else
+    "contradicted": CTX_RED,
+    "stale": CTX_AMBER,
+    "untested": "#8A8073",      # .system-block's muted text
+}
+
+
+def belief_outcome_kind(belief: dict) -> str:
+    """Which of the four states this belief is in, or ``""`` when the
+    record cannot say.
+
+    ``"confirmed"`` / ``"contradicted"`` / ``"stale"`` -- LORE's own
+    verdicts, from the most recent row of the belief's outcome ledger.
+    ``"untested"`` -- the ledger was read and is empty for this belief.
+    ``""`` -- the record carries no ``outcomes`` field at all, which means
+    it came from something that predates this column (an older daemon
+    across the socket). That renders as NO column rather than as a guessed
+    one, the same rule ``belief_provenance`` follows for a NULL ``via``."""
+    if belief.get("outcomes") is None:
+        return ""
+    event = str(belief.get("outcome_event") or "").strip().lower()
+    if event in OUTCOME_EVENTS:
+        return event
+    return "untested"
+
+
+def belief_outcome_text(belief: dict, now: "float | None" = None) -> str:
+    """The staleness column: LORE's verdict and how long ago it landed --
+    ``"confirmed 2d"``, ``"contradicted 2d"``, ``"stale 40d"`` -- or
+    :data:`NEVER_TESTED`. Empty for a record with no ledger field."""
+    kind = belief_outcome_kind(belief)
+    if not kind:
+        return ""
+    if kind == "untested":
+        return NEVER_TESTED
+    secs = _age_of(belief.get("outcome_at"), now)
+    return f"{kind} {_fmt_age(secs)}" if secs is not None else kind
+
+
+def belief_outcome_color(belief: dict) -> str:
+    return OUTCOME_COLORS.get(belief_outcome_kind(belief), "")
+
+
+def belief_outcome_tally(belief: dict) -> str:
+    """"2 confirmed, 1 contradicted" -- the whole ledger for one belief, in
+    LORE's own vocabulary and LORE's own counts (see
+    ``lore_core.beliefs.outcome_counts``, which
+    ``SessionEngine.list_beliefs`` is pinned equal to by a test). Empty
+    when there is nothing to tally."""
+    parts = [f"{belief[f'outcome_{event}s']} {event}"
+             for event in OUTCOME_EVENTS
+             if isinstance(belief.get(f"outcome_{event}s"), int)
+             and belief[f"outcome_{event}s"] > 0]
+    return ", ".join(parts)
+
+
+def belief_sort_key(belief: dict) -> "tuple[int, float]":
+    """Inside one scope group: beliefs REALITY HAS TESTED first, most
+    recently tested first; everything else after them, untouched.
+
+    Not a cosmetic ordering. 31 outcome rows against 628 active beliefs
+    means the tested ones are needles, and a browser that interleaves them
+    with six hundred never-tested claims by date has hidden the only
+    evidence it holds. Never-tested sorts as a BUCKET rather than by age,
+    because it is a state and not a large age -- and Python's sort is
+    stable, so inside that bucket ``list_beliefs``' own ``updated DESC``
+    order survives untouched."""
+    secs = _age_of(belief.get("outcome_at"))
+    if belief_outcome_kind(belief) in OUTCOME_EVENTS and secs is not None:
+        return (0, secs)
+    return (1, 0.0)
+
+
+def belief_stamp(belief: dict, now: "float | None" = None) -> str:
+    """The row's two facts as one segment: when the belief was created, and
+    what reality last said about it."""
+    return " · ".join(
+        part for part in (belief_created_text(belief),
+                          belief_outcome_text(belief, now))
+        if part
+    )
+
+
+def belief_provenance(belief: dict) -> str:
+    """How this belief got into the store, in LORE's own vocabulary.
+
+    ``via`` is lore_core 0.36.0's provenance column (ISSUE #43): "derived"
+    (the deriver), "dream" (the reconciler), "direct" (a trusted CLI
+    write), "approved" (a staged proposal a human applied). It is NULL on
+    every belief written before that release and is deliberately never
+    back-filled there, so DOXA does not back-fill it either -- an
+    unlabelled belief reads "provenance unknown", which is a statement
+    about the ledger, not about the belief."""
+    via = str(belief.get("via") or "").strip()
+    return f"via {via}" if via else "provenance unknown"
+
+
+def belief_tooltip(belief: dict) -> str:
+    """What hovering a belief row shows: the claim IN FULL, then the facts
+    the row had to abbreviate.
+
+    The user asked for the full belief text on hover, and that is what
+    leads here -- a row is a glance, and the whole claim without losing
+    your place is the point. The evidence TRAIL is deliberately not in
+    here: it is an unbounded list of session ids and notes, it is fetched
+    lazily per belief (see ``SessionEngine.belief_evidence``), and a
+    tooltip that has to wait on a query is a tooltip that flickers. The
+    trail lives one keystroke away, in the row's own expansion."""
+    lines = [_one_line(str(belief.get("claim") or ""), 4000) or "(no claim text)"]
+    if belief.get("claim_truncated"):
+        lines.append("[claim truncated — larger than one wire frame]")
+    subject = str(belief.get("subject") or "")
+    confidence = belief.get("confidence")
+    conf = f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "?"
+    meta = [f"{_belief_scope_label(subject)} ({subject})" if subject else "",
+            f"confidence {conf}", belief_provenance(belief)]
+    lines.append("")
+    lines.append(" · ".join(part for part in meta if part))
+    created = belief_created_text(belief)
+    if created:
+        lines.append(f"created {created}")
+
+    # The staleness answer, said in full and said plainly. A never-tested
+    # belief gets a SENTENCE rather than a token here, because the row had
+    # only two words to spend on it and "never tested" is the fact a
+    # reader is most likely to want spelled out.
+    kind = belief_outcome_kind(belief)
+    if kind == "untested":
+        lines.append(
+            "never tested — no outcome has ever been recorded for this "
+            "belief, so nothing has confirmed it and nothing has "
+            "contradicted it"
+        )
+    elif kind:
+        at = str(belief.get("outcome_at") or "").strip()
+        secs = _age_of(at)
+        ago = f" ({_fmt_age(secs)} ago)" if secs is not None else ""
+        source = str(belief.get("outcome_source") or "").strip()
+        by = f", recorded by {source}" if source else ""
+        lines.append(f"last outcome: {kind} {at}{ago}{by}")
+        tally = belief_outcome_tally(belief)
+        if tally:
+            lines.append(f"outcome ledger: {tally}")
+
+    # Being REFERENCED is not being confirmed -- that is the whole v0.46.0
+    # correction -- so this sits below the outcome and never beside it.
+    touched = belief_touched(belief)
+    if touched:
+        secs = _age_of(touched)
+        age = f" ({_fmt_age(secs)} ago)" if secs is not None else ""
+        lines.append(f"last referenced {touched}{age} — cited, not confirmed")
+    return "\n".join(lines)
+
+
+def as_proposal(item: "dict | str") -> dict:
+    """A staged proposal as a RECORD, whatever shape it arrived in.
+
+    ``/pending`` carried bare strings from v0.31.0 until item V, and a
+    detached session talks to a daemon that may still be the older build
+    (the socket outlives an upgrade -- a running daemon is not restarted
+    by installing a new DOXA). A proposal that arrives as text still
+    renders as a row; it simply has no verdict to show, which the row then
+    says by omission rather than by inventing one."""
+    if isinstance(item, dict):
+        return item
+    return {"text": str(item or "")}
+
+
+#: What a proposal's ``kind``/``action`` pair DOES, as a verb a reviewer
+#: can act on. Read off lore_core.pending.apply_item -- the function that
+#: actually performs each of these -- rather than invented here, so a
+#: verdict row and the write it predicts cannot disagree. ``add`` is the
+#: default for a proposal with no action at all: that is apply_item's own
+#: fallback ("`add` stays its meaning -- so every proposal written before
+#: 0.36.0 applies exactly as it always did").
+PROPOSAL_ACTIONS: "dict[str, str]" = {
+    "add": "add",
+    "replace": "replace",
+    "remove": "remove",
+    "move": "move",
+    "retract": "retract",
+    "update": "update",
+    "retire": "retire",
+}
+
+
+def proposal_action(item: dict) -> str:
+    action = str(item.get("action") or "").strip().lower()
+    return PROPOSAL_ACTIONS.get(action, action or "add")
+
+
+def proposal_target(item: dict) -> str:
+    """WHERE the write would land -- the store, and the scope inside it."""
+    kind = str(item.get("kind") or "").strip().lower()
+    if kind == "memory":
+        scope = str(item.get("scope") or "").strip()
+        slug = str(item.get("project") or "").strip()
+        if scope == "project" and slug:
+            return f"memory/project:{slug}"
+        return f"memory/{scope}" if scope else "memory"
+    if kind == "belief":
+        subject = str(item.get("subject") or "").strip()
+        return f"belief/{subject}" if subject else "belief"
+    if kind == "filemap":
+        slug = str(item.get("project") or "").strip()
+        return f"filemap/{slug}" if slug else "filemap"
+    if kind == "skill" or item.get("name"):
+        name = str(item.get("name") or "").strip()
+        return f"skill/{name}" if name else "skill"
+    return kind or "?"
+
+
+def proposal_verdict(item: "dict | str") -> str:
+    """The PROPOSED VERDICT: what approving this row would actually do,
+    as one short phrase -- ``add → memory/user``, ``retract → belief #42``.
+
+    Empty for a proposal that arrived as bare text with no record behind
+    it (:func:`as_proposal`): no verdict is the honest answer there, and a
+    guessed one on a write path is exactly the wrong place to guess."""
+    proposal = as_proposal(item)
+    kind = str(proposal.get("kind") or "").strip()
+    if not kind and not proposal.get("action"):
+        return ""
+    action = proposal_action(proposal)
+    if kind == "belief" and action == "retract":
+        return f"retract → belief #{proposal.get('id')}"
+    return f"{action} → {proposal_target(proposal)}"
+
+
+def proposal_supersedes(item: dict) -> str:
+    """The existing entry this proposal would displace, when it names one
+    -- ``replace``/``remove``/``move`` all carry a ``match`` needle, and
+    ``retract`` names a belief id. Empty when nothing is superseded, which
+    is what an ``add`` is."""
+    action = proposal_action(item)
+    if action == "retract":
+        bid = item.get("id")
+        return f"belief #{bid}" if bid is not None else ""
+    needle = str(item.get("match") or "").strip()
+    if not needle:
+        return ""
+    return _one_line(needle, 200)
+
+
+def proposal_text(item: dict) -> str:
+    """The proposal's own body, whichever field its kind keeps it in --
+    the same precedence ``lore_core.pending.cmd_pending`` prints."""
+    for key in ("text", "claim", "purpose", "description"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            if key == "purpose" and item.get("path"):
+                return f"{item['path']} — {value}"
+            return value
+    for key in ("path", "name"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def proposal_age_text(item: dict, now: "float | None" = None) -> str:
+    """"staged 5d ago". Empty when the proposal carries no ``created``
+    stamp -- everything the deriver and the write gate stage does."""
+    secs = _age_of(item.get("created"), now)
+    return f"staged {_fmt_age(secs)} ago" if secs is not None else ""
+
+
+def proposal_tooltip(item: "dict | str") -> str:
+    """Hovering a proposal row: its full text, then exactly what approving
+    it would change -- the same "the whole thing without losing your
+    place" rule :func:`belief_tooltip` follows."""
+    proposal = as_proposal(item)
+    lines = [_one_line(proposal_text(proposal), 4000) or "(no proposal text)"]
+    if proposal.get("text_truncated"):
+        lines.append("[proposal truncated — larger than one wire frame]")
+    lines.append("")
+    verdict = proposal_verdict(proposal)
+    lines.append(
+        f"approving this would: {verdict}" if verdict
+        else "this proposal arrived without a record, so what approving it "
+             "would do cannot be shown"
+    )
+    supersedes = proposal_supersedes(proposal)
+    if supersedes:
+        lines.append(f"superseding: {supersedes}")
+    if proposal.get("to"):
+        lines.append(f"moving it to: project:{proposal['to']}")
+    age = proposal_age_text(proposal)
+    created = str(proposal.get("created") or "").strip()
+    if age:
+        lines.append(f"{age} ({created})" if created else age)
+    session = str(proposal.get("session_id") or "").strip()
+    if session:
+        lines.append(f"from session {session}")
+    writer = str(proposal.get("writer") or "").strip()
+    if writer:
+        lines.append(
+            f"!! staged by LORE's write gate: {writer} context "
+            f"({proposal.get('writer_evidence') or 'no evidence recorded'})"
+        )
+    note = str(proposal.get("cross_project_note") or "").strip()
+    if note:
+        lines.append(f"!! {note}")
+    return "\n".join(lines)
 
 
 def app_bindings() -> "list[tuple[str, str]]":
@@ -593,11 +1064,25 @@ def _chip_span(text: str, action: str) -> str:
 
 
 def _fmt_age(secs: float) -> str:
+    """One age, one format, everywhere -- session uptime, cache staleness,
+    and (item V) how long a belief has sat untouched or a proposal has sat
+    unreviewed.
+
+    The DAY tier is item V's addition and the reason there is still only
+    one of these functions. Beliefs and staged proposals are months old,
+    not hours: rendering a four-month-old belief as "2904h0m" is a number
+    a reader has to do arithmetic on, which is the opposite of what an age
+    column is for. Everything under a day is unchanged, so every existing
+    caller renders exactly as it did."""
     if secs < 60:
         return f"{int(secs)}s"
     if secs < 3600:
         return f"{int(secs // 60)}m"
-    return f"{int(secs // 3600)}h{int((secs % 3600) // 60)}m"
+    if secs < 86400:
+        return f"{int(secs // 3600)}h{int((secs % 3600) // 60)}m"
+    days = int(secs // 86400)
+    hours = int((secs % 86400) // 3600)
+    return f"{days}d{hours}h" if days < 10 else f"{days}d"
 
 
 CONTEXT_UNAVAILABLE = (

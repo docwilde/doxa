@@ -807,6 +807,18 @@ async def test_branch_rpc_switch_refusal_comes_back_without_raising(
 REAL_STORE_PAYLOAD_BYTES = 235_839
 
 
+def _staged_record(index, text):
+    """One staged proposal as ``SessionEngine._pending_records`` returns it
+    since item V -- a RECORD with the pending id the browser approves by
+    and the fields its proposed verdict is computed from, not the bare
+    string /pending carried in v0.31.0."""
+    return {
+        "pid": f"20260824120000-{index:02d}",
+        "kind": "memory", "action": "add", "scope": "user",
+        "created": "2026-08-24T12:00:00Z", "text": text,
+    }
+
+
 def _seed_big_belief_store(count=600, claim_chars=400):
     """`count` active beliefs whose serialized size exceeds the operator's
     real store. Returns (conn, subject) -- the caller deletes them again,
@@ -990,7 +1002,10 @@ async def test_the_beliefs_picker_opens_complete_and_filterable_over_the_socket(
                 # Complete: every seeded belief is resident, not just the
                 # first frame's worth.
                 labels = [label for _rid, label in picker._all_rows]
-                seeded = [l for l in labels if l.startswith("belief ")]
+                # "belief NNNN" is now preceded by item V's stamp segment
+                # (created date + idle age), so the claim is IN the row
+                # rather than at the head of it.
+                seeded = [l for l in labels if "belief " in l]
                 assert len(seeded) == 600
                 # ...and no caveat row, because nothing was actually capped.
                 assert picker._note == ""
@@ -1000,7 +1015,7 @@ async def test_the_beliefs_picker_opens_complete_and_filterable_over_the_socket(
                 await pilot.press("0", "5", "9", "9")
                 await pilot.pause()
                 visible = [label for rid, label in picker._rows if rid]
-                assert any(l.startswith("belief 0599") for l in visible), (
+                assert any("belief 0599" in l for l in visible), (
                     "a late-page belief must be findable by filtering"
                 )
     finally:
@@ -1060,11 +1075,11 @@ async def test_pending_call_survives_a_queue_bigger_than_one_frame(
     # anything that reads like a base64 blob, and a redacted fixture would
     # be testing the scrubber rather than the paging.
     filler = "the operator prefers uv over pip and keeps doxa in home. " * 40
-    staged = [f"proposal {i:04d} {filler}" for i in range(120)]
+    staged = [_staged_record(i, f"proposal {i:04d} {filler}") for i in range(120)]
     assert len(json.dumps(staged).encode("utf-8")) > peers.MAX_FRAME_BYTES * 3
     async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
         monkeypatch.setattr(
-            daemon.engine, "_pending_texts", lambda: list(staged)
+            daemon.engine, "_pending_records", lambda: [dict(r) for r in staged]
         )
         client = EngineClient(str(daemon.socket_path))
         await client.start()
@@ -1081,10 +1096,10 @@ async def test_client_and_engine_list_pending_stay_in_parity(
     -- doxa.app reaches both engines through one `getattr(engine,
     "list_pending")` and cannot tell them apart."""
     filler = "remember that the deriver stages proposals for review. " * 20
-    staged = [f"proposal {i} {filler}" for i in range(80)]
+    staged = [_staged_record(i, f"proposal {i} {filler}") for i in range(80)]
     async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
         monkeypatch.setattr(
-            daemon.engine, "_pending_texts", lambda: list(staged)
+            daemon.engine, "_pending_records", lambda: [dict(r) for r in staged]
         )
         client = EngineClient(str(daemon.socket_path))
         await client.start()
@@ -1097,10 +1112,10 @@ async def test_client_and_engine_list_pending_stay_in_parity(
 @pytest.mark.asyncio
 async def test_pending_paging_honours_an_explicit_limit(tmp_path, monkeypatch):
     filler = "remember that the deriver stages proposals for review. " * 20
-    staged = [f"proposal {i} {filler}" for i in range(200)]
+    staged = [_staged_record(i, f"proposal {i} {filler}") for i in range(200)]
     async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
         monkeypatch.setattr(
-            daemon.engine, "_pending_texts", lambda: list(staged)
+            daemon.engine, "_pending_records", lambda: [dict(r) for r in staged]
         )
         client = EngineClient(str(daemon.socket_path))
         await client.start()
@@ -1109,16 +1124,105 @@ async def test_pending_paging_honours_an_explicit_limit(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_the_daemon_exposes_no_approve_or_reject_rpc(tmp_path, monkeypatch):
-    """Scope boundary, pinned at the protocol: the read half of the review
-    gate crossed the socket in v0.31.0 and the write half deliberately did
-    not (docs/plugin-api.md §6). An unknown method must be refused, never
-    silently accepted by some future generic handler."""
+async def test_the_write_rpcs_take_one_id_and_there_is_no_bulk_form(
+    tmp_path, monkeypatch,
+):
+    """SECURITY ASSERTION, pinned at the protocol.
+
+    v0.31.0 crossed the socket with the read half of the review gate only.
+    Item V adds the write half, and the property that makes it defensible
+    is that nothing crosses without a per-item decision: `approve_pending`
+    and `reject_pending` take ONE `pid` and there is no bulk spelling of
+    either. If a future generic handler ever accepts "approve_all" or a
+    list parameter, this test is what says so."""
     async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
         client = EngineClient(str(daemon.socket_path))
         await client.start()
-        for method in ("approve", "reject", "approve_pending"):
+
+        # No bulk door, under any of the obvious spellings.
+        for method in ("approve", "reject", "approve_all", "reject_all",
+                       "approve_pending_all"):
             reply = await client._call(method)
             assert reply.get("ok") is False
-            assert "unknown method" in str(reply.get("error"))
+            assert "unknown method" in str(reply.get("error")), method
+
+        # The real methods exist, and refuse a call that names no ONE item.
+        for method in ("approve_pending", "reject_pending"):
+            reply = await client._call(method)
+            assert reply.get("ok") is False
+            assert "no proposal id" in str(reply.get("error")), method
+            # A list where an id belongs is not a bulk form either: it is
+            # stringified into an id that matches nothing, and applies
+            # nothing.
+            reply = await client._call(method, pid=["a", "b"])
+            assert reply.get("ok") is False
+
+        await client.finalize()
+
+
+# -- item V: the browser's own RPCs, over a real socket ------------------
+
+
+@pytest.mark.asyncio
+async def test_belief_evidence_crosses_the_socket_for_one_belief(
+    tmp_path, monkeypatch,
+):
+    """Engine parity for item V's lazy trail. Fetched per belief, capped,
+    and put through the shared byte budget -- the point being that a
+    browser over hundreds of beliefs never asks for hundreds of trails."""
+    trail = [{"session_id": "s1", "project": "p", "note": "derived here",
+              "created": "2026-05-02T09:00:00Z"}]
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+        async def fake_evidence(belief_id, limit=40):
+            assert belief_id == 7
+            return [dict(row) for row in trail]
+
+        monkeypatch.setattr(daemon.engine, "belief_evidence", fake_evidence)
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        assert await client.belief_evidence(7) == trail
+        await client.finalize()
+
+
+@pytest.mark.asyncio
+async def test_lore_write_state_is_the_daemons_answer_not_the_clients(
+    tmp_path, monkeypatch,
+):
+    """The daemon holds lore_core and the store, so it is the side that
+    knows whether an approval can be recorded honestly. A client with a
+    perfectly current wheel installed must still get the DAEMON's answer."""
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+        monkeypatch.setattr(daemon.engine, "lore_write_state", lambda: {
+            "capable": False, "version": "0.34.0", "source": "plugin",
+            "reason": "no provenance ledger over here",
+        })
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        state = await client.lore_write_state()
+        assert state["capable"] is False
+        assert state["version"] == "0.34.0"
+        assert "no provenance ledger over here" in state["reason"]
+        await client.finalize()
+
+
+@pytest.mark.asyncio
+async def test_one_approve_crosses_with_exactly_one_id(tmp_path, monkeypatch):
+    seen: list = []
+
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+        async def fake_approve(pid):
+            seen.append(pid)
+            return None
+
+        async def fake_reject(pid):
+            seen.append(("reject", pid))
+            return None
+
+        monkeypatch.setattr(daemon.engine, "approve_pending", fake_approve)
+        monkeypatch.setattr(daemon.engine, "reject_pending", fake_reject)
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        assert await client.approve_pending("20260824-00") is None
+        assert await client.reject_pending("20260824-01") is None
+        assert seen == ["20260824-00", ("reject", "20260824-01")]
         await client.finalize()

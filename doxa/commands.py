@@ -209,14 +209,24 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette_prefill=True,
     ),
     SlashCommand(
+        name="/beliefs",
+        group="Memory",
+        # Item V. The full-height browser, not the status-chip picker --
+        # the chip is still the glance and still opens its dropdown; this
+        # is where evidence trails, timestamps, provenance and the
+        # per-proposal approve/reject controls live.
+        summary="Browse every belief and staged proposal — evidence, age, verdicts",
+        palette="Beliefs: browse",
+    ),
+    SlashCommand(
         name="/pending",
         group="Memory",
-        # READ-ONLY, deliberately, and the summary says so where a user
-        # reads it. Approving or rejecting a staged proposal stays with
-        # LORE's own `/lore:approve` / `/lore:reject`: the write path into
-        # curated memory is under security review (docs/plugin-api.md §6)
-        # and must not gain a second door here.
-        summary="Staged memory proposals from the background reviewer (read-only)",
+        # A GLANCE, and the summary says so where a user reads it. Every
+        # row now carries the verdict approving it would apply (item V --
+        # a row that does not say what it changes is not reviewable), but
+        # the approve and reject controls themselves are per-row in the
+        # browser /beliefs opens, not in a dropdown.
+        summary="Staged proposals and what each would do (review them in /beliefs)",
         palette="Pending proposals",
     ),
     SlashCommand(

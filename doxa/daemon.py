@@ -32,7 +32,8 @@ client -> server
                                                on the event stream tagged with
                                                the reply's "turn" id
   {"type": "call", "id": N, "method": "status"|"peers"|"msg"|"stop"|
-   "set_model"|"branch"|"answer_needs_input"|"beliefs"|"pending"|"context",
+   "set_model"|"branch"|"answer_needs_input"|"beliefs"|"pending"|"context"|
+   "belief_evidence"|"lore_write"|"approve_pending"|"reject_pending",
    "params": {...}}
 
 Interactive permission (queue item 5): a pending ``AskUserQuestion`` or
@@ -92,6 +93,7 @@ from . import __version__
 from . import notify as notify_mod
 from . import worktrees as worktrees_mod
 from .engine import (
+    BELIEF_EVIDENCE_LIMIT,
     BELIEF_LIST_LIMIT,
     PENDING_LIST_LIMIT,
     EngineEvent,
@@ -241,13 +243,36 @@ def _trim_belief(belief: dict, budget: int) -> dict:
     return trimmed
 
 
-def _trim_pending(text: str, budget: int) -> str:
-    """One oversize staged proposal cut to fit. A proposal crosses the
-    wire as a bare string, with no row dict to hang a boolean flag off, so
-    the marker is the ellipsis itself -- the same "…" the picker's own row
-    ellipsis uses, which a reader already reads as "there was more"."""
-    keep = str(text).encode("utf-8")[: max(0, budget - 512)]
-    return keep.decode("utf-8", errors="ignore") + "…"
+def _trim_pending(item: "dict | str", budget: int) -> "dict | str":
+    """One oversize staged proposal cut to fit, marked ``text_truncated``.
+
+    Item V made a proposal a RECORD rather than a bare string (it has to
+    carry its pending id and the fields the proposed verdict is computed
+    from), so the marker is now a flag on the row, exactly like
+    :func:`_trim_belief`'s, instead of the bare "…" a string had no room
+    to explain. A string still trims the old way -- see
+    ``doxa.ui.labels.as_proposal`` for why one can still arrive."""
+    if not isinstance(item, dict):
+        keep = str(item).encode("utf-8")[: max(0, budget - 512)]
+        return keep.decode("utf-8", errors="ignore") + "…"
+    trimmed = dict(item)
+    field = "text" if trimmed.get("text") else "claim"
+    keep = str(trimmed.get(field) or "").encode("utf-8")[: max(0, budget - 512)]
+    trimmed[field] = keep.decode("utf-8", errors="ignore")
+    trimmed["text_truncated"] = True
+    return trimmed
+
+
+def _trim_evidence(row: dict, budget: int) -> dict:
+    """One oversize evidence row cut to fit -- see :func:`_trim_belief`.
+    A deriver note is capped at 300 chars by lore_core itself, so this
+    exists for the same reason the other two do rather than because it is
+    expected to fire."""
+    trimmed = dict(row)
+    keep = str(trimmed.get("note") or "").encode("utf-8")[: max(0, budget - 512)]
+    trimmed["note"] = keep.decode("utf-8", errors="ignore")
+    trimmed["note_truncated"] = True
+    return trimmed
 
 
 def _fit_belief_page(
@@ -258,10 +283,18 @@ def _fit_belief_page(
 
 
 def _fit_pending_page(
-    texts: "list[str]", offset: int
-) -> "tuple[list[str], int | None]":
+    items: "list[dict]", offset: int
+) -> "tuple[list[dict], int | None]":
     """:func:`_fit_page` for the ``pending`` RPC."""
-    return _fit_page(texts, offset, _trim_pending)
+    return _fit_page(items, offset, _trim_pending)
+
+
+def _fit_evidence_page(
+    rows: "list[dict]", offset: int
+) -> "tuple[list[dict], int | None]":
+    """:func:`_fit_page` for the ``belief_evidence`` RPC (item V) -- a
+    third CALLER of the one shared byte budget, not a third budget."""
+    return _fit_page(rows, offset, _trim_evidence)
 
 
 def daemon_socket_path(session_id: str) -> Path:
@@ -701,12 +734,58 @@ class SessionDaemon:
             await self._reply(
                 writer, req_id, ok=True, beliefs=page, next_offset=next_offset,
             )
+        elif method == "belief_evidence":
+            # Item V: ONE belief's evidence trail, fetched on demand.
+            #
+            # This is how a browser over hundreds of beliefs shows what
+            # each was derived from without blowing the frame cap: the
+            # trail is never part of the `beliefs` page (which carries a
+            # COUNT of it instead), and only the belief a reader actually
+            # expanded is ever asked for. One page, capped at
+            # BELIEF_EVIDENCE_LIMIT rows by the engine and put through the
+            # same shared byte budget as everything else here -- a trail
+            # that did not fit says so (`evidence_truncated`) rather than
+            # arriving short and silent. No client-side paging loop: a
+            # capped single-belief trail is not an unbounded list.
+            bid = int(params.get("belief_id") or 0)
+            limit = max(1, int(params.get("limit") or BELIEF_EVIDENCE_LIMIT))
+            rows = await self.engine.belief_evidence(bid, limit=limit)
+            page, next_offset = _fit_evidence_page(rows, 0)
+            await self._reply(
+                writer, req_id, ok=True, evidence=page,
+                evidence_truncated=next_offset is not None,
+            )
+        elif method == "lore_write":
+            # Item V's read-only degradation, asked of the side that holds
+            # the store. A detached session's lore_core is the DAEMON's,
+            # not the client process's -- an attached terminal could have a
+            # perfectly modern wheel installed while the daemon it is
+            # driving loaded a stale plugin checkout, so the browser has to
+            # ask the writer, not itself.
+            await self._reply(
+                writer, req_id, ok=True, state=self.engine.lore_write_state(),
+            )
+        elif method in ("approve_pending", "reject_pending"):
+            # Item V: the WRITE half of the review gate, which v0.31.0
+            # deliberately did not ship. LORE 0.36.0 concluded that review
+            # (the write gate + provenance ledger, issue #43), and these
+            # two drive lore_core's own approve path so an entry approved
+            # from DOXA carries LORE's own `via approved` label.
+            #
+            # ONE id per call. There is no list parameter here and adding
+            # one would be the whole security property gone: the gate
+            # exists because a human looked at THIS proposal.
+            pid = str(params.get("pid") or "")
+            runner = (self.engine.approve_pending if method == "approve_pending"
+                      else self.engine.reject_pending)
+            error = await runner(pid)
+            await self._reply(writer, req_id, ok=not error, error=error)
         elif method == "pending":
-            # `/pending` over the daemon split -- the READ half of the LORE
-            # review gate, and only the read half: there is deliberately no
-            # approve/reject RPC beside this one. The write path into
-            # curated memory is under security review (docs/plugin-api.md
-            # §6) and must not gain a second door before that concludes.
+            # `/pending` over the daemon split -- since item V, the read
+            # half of a surface that also has a write half (the two RPCs
+            # above). It stays a separate call from them on purpose: this
+            # one is what a glance costs, and it is safe to run without
+            # having decided anything.
             #
             # PAGED from the day it shipped rather than after a report,
             # because the beliefs RPC already paid for that lesson: staged

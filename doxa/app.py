@@ -136,6 +136,14 @@ from .peers import PeerSendError, age_secs
 # importers this file has no business knowing about. The guarantee is
 # mechanical, not curated -- ``dir(doxa.app)`` is unchanged.
 from .session.pane import SessionPane  # noqa: F401
+from .ui.beliefs import (  # noqa: F401
+    BeliefRow,
+    BeliefsBrowserTab,
+    BrowserNote,
+    BrowserRow,
+    EvidenceTrail,
+    ProposalRow,
+)
 from .ui.dialogs import (  # noqa: F401
     _NEEDS_INPUT_DIGIT_KEYS,
     AboutDialog,
@@ -157,6 +165,27 @@ from .ui.labels import (  # noqa: F401
     _fmt_pending_row,
     _needs_input_summary,
     _one_line,
+    as_proposal,
+    belief_age_text,
+    belief_created_text,
+    belief_outcome_color,
+    belief_outcome_kind,
+    belief_outcome_tally,
+    belief_outcome_text,
+    belief_provenance,
+    belief_sort_key,
+    belief_stamp,
+    belief_tooltip,
+    belief_touched,
+    NEVER_TESTED,
+    OUTCOME_COLORS,
+    OUTCOME_EVENTS,
+    proposal_age_text,
+    proposal_supersedes,
+    proposal_target,
+    proposal_text,
+    proposal_tooltip,
+    proposal_verdict,
     _pretty_key,
     _shrink,
     _subagent_label,
@@ -1002,12 +1031,14 @@ class DoxaApp(App):
         attach`). The cheapest outcome to recover from is what a close key
         does; ENDING a session is Ctrl+Q, which says so.
 
-        A subagent transcript tab (SubagentTranscriptTab) takes the SAME
-        key to a much simpler path: it is not a session (self.active_pane
-        -- SessionPane-only -- comes back None for one), so there is no
-        daemon to detach and no turn-in-flight question to ask; it just
-        closes. There is always at least one SessionPane, so a transcript
-        tab is never "the last tab" and never reaches the close-the-app
+        The three non-session tabs -- a subagent transcript
+        (SubagentTranscriptTab), a restored archive (ArchivedSessionTab)
+        and item V's beliefs browser (BeliefsBrowserTab) -- take the SAME
+        key to a much simpler path: none is a session (self.active_pane
+        -- SessionPane-only -- comes back None for all three), so there is
+        no daemon to detach and no turn-in-flight question to ask; they
+        just close. There is always at least one SessionPane, so none of
+        them is ever "the last tab" and none reaches the close-the-app
         branch _close_pane below falls back to.
 
         Closing the last SESSION tab closes the app, on the same detach
@@ -1022,6 +1053,24 @@ class DoxaApp(App):
                 await self._close_transcript_tab(active)
             elif isinstance(active, ArchivedSessionTab):
                 await self._close_archived_tab(active)
+            elif isinstance(active, BeliefsBrowserTab):
+                await self._close_beliefs_tab(active)
+
+    async def _close_beliefs_tab(self, tab: "BeliefsBrowserTab") -> None:
+        """Ctrl+W on the beliefs browser (item V): nothing to detach and
+        nothing to stop -- it holds no engine of its own. Remove it and
+        drop the owning pane's reference, the same two steps
+        :meth:`_close_transcript_tab` takes, so reopening builds a fresh
+        one instead of activating a tab that is no longer there.
+
+        Never persisted either way: the browser is not a session, and
+        _persist_tabset only ever records SessionPanes and archives."""
+        if getattr(tab.owner, "_beliefs_tab", None) is tab:
+            tab.owner._beliefs_tab = None
+        with contextlib.suppress(Exception):
+            await self.query_one("#session-tabs", TabbedContent).remove_pane(
+                tab.id or ""
+            )
 
     async def _close_archived_tab(self, tab: "ArchivedSessionTab") -> None:
         """Ctrl+W on an archived tab (v0.32.0): nothing to detach, nothing

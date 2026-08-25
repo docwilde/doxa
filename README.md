@@ -137,7 +137,7 @@ cannot physically send.
 - **Reasoning and tool calls, on the record.** Replies stream as real markdown through Textual's append-only delta path, so a table fills row by row rather than appearing whole at the end. Above each reply, the model's summarized reasoning streams into a collapsed `✻ Reasoning (N chars)` fold, and the turn's tool calls compact behind one `Tool calls (N)` fold whose chips open to their exact arguments and exact result. Both folds are created lazily on first content, so a turn that used neither grows neither section, and formatting happens only for a chip somebody actually opened. A call against the memory store is an ordinary chip, so the mechanism that decides what the agent believes opens with the same two clicks as a `Grep`. What the fold shows is the model's **summarized** thinking, not its raw chain of thought — the API does not return that on any model at any setting, and turning the fold off stops DOXA asking to see the summary, not the thinking (or its billing).
 - **Pictures, or a straight answer about why not.** Images take a ladder — kitty graphics protocol → sixel → half-block cells → a plain text line — settled by one probe that runs before the TUI takes stdin. The opening block spends that ladder on the DOXA mark itself, sized from a declared **six-row budget** rather than from the asset's pixels (`rows × cell aspect × content aspect ≈ 47 columns`) so the banner never outweighs the identity block beneath it, degrading under 64 columns to a hand-rolled half-block wordmark instead of a useless `[image: doxa logo]` line; `DOXA_BOOT_BANNER=0` removes it outright. `/img` with no argument reports what this terminal actually answered and then draws the same asset **in each tier it answered for**. Nothing in that report is inferred: a rung the ladder short-circuited past is named as never asked and not drawn, a cell size textual-image defaulted to is labelled defaulted rather than reported as measured, and a settled `text` mode says whether the terminal declined or whether there was never an interactive terminal to ask. Pushing a kitty escape at a terminal without kitty support produces litter, not a picture.
 - **Subagents you can follow while they run.** A `Task`-spawned subagent appears as a `⧉ N agents` chip plus a second status row under the status bar, one clickable entry per subagent in flight; clicking one opens a **read-only transcript tab** that mirrors what its live `Task` chip has buffered and stays fed from there, leaving the original chip exactly where the trace tree put it. Once the call lands, the same activity is a foldable tree under the parent chip. A nested subagent gets its **own row**, not a recursive tree inside its parent's tab — a tab shows one subagent's narration and its direct subcalls, nothing deeper — and the tab is a view only: no engine behind it, no prompt to type into, `ctrl+w` just removes it.
-- **Memory that is inert until it earns influence.** LORE's `lore_core` runs in-process — hard-capped curated memory (user + project), an uncapped belief store with an FTS index and evidence trails, one SQLite store shared with the LORE Claude Code plugin. A `mem u63% p39%` chip next to the belief count says how full each cap is — **two percentages, not one merged figure**, because the caps fill at different rates and a single number would hide whichever one is about to start refusing writes. It counts characters read from the file `lore_core` itself writes, against that same module's own cap (4500 and 8800 by default), so the chip cannot disagree with the write path the way an `st_size` approximation would on any multi-byte character; an unreadable store or an older `lore_core` makes it absent rather than wrong. The agent's whole tool surface is five operators: four read-only (`lore_belief_search`, `lore_belief_show`, `lore_memory_list`, `lore_session_search`) and one write, `lore_remember`, which only *stages* a proposal for the review gate. At act time a single FTS pass over the prompt may attach one belief note, labelled CITE-ONLY — no LLM call, no second injection path. Nothing writes into curated memory from DOXA: `/pending` here lists what a background reviewer staged and is **read-only**, because approving stays with LORE's own `/lore:approve`. No embeddings, no relevance model, no API call in any of it.
+- **Memory that is inert until it earns influence.** LORE's `lore_core` runs in-process — hard-capped curated memory (user + project), an uncapped belief store with an FTS index and evidence trails, one SQLite store shared with the LORE Claude Code plugin. A `mem u63% p39%` chip next to the belief count says how full each cap is — **two percentages, not one merged figure**, because the caps fill at different rates and a single number would hide whichever one is about to start refusing writes. It counts characters read from the file `lore_core` itself writes, against that same module's own cap (4500 and 8800 by default), so the chip cannot disagree with the write path the way an `st_size` approximation would on any multi-byte character; an unreadable store or an older `lore_core` makes it absent rather than wrong. The agent's whole tool surface is five operators: four read-only (`lore_belief_search`, `lore_belief_show`, `lore_memory_list`, `lore_session_search`) and one write, `lore_remember`, which only *stages* a proposal for the review gate. At act time a single FTS pass over the prompt may attach one belief note, labelled CITE-ONLY — no LLM call, no second injection path. One write path into curated memory exists and it is a human clicking a control on one row: `/beliefs` opens a full-height browser where each staged proposal states what approving it would do and carries its own approve and reject, arming before it applies, one item at a time, with no bulk form anywhere in the UI or the API — and every approval goes through LORE's own approve path, so the entry is labelled `via approved` by LORE rather than by DOXA. On a `lore_core` too old to record that, the browser degrades to read-only and says so. No embeddings, no relevance model, no API call in any of it.
 - **A shell the model cannot reach.** A prompt line starting with `!` (`!git status`, `!pytest -q`) runs in this session's own worktree under a Textual worker, with stdin on `/dev/null`, output capped at 64 KB, and the whole process group killed at 120 seconds so a stray `!tail -f` cannot outlive the tab. It is not a slash command and not a tool, so nothing that dispatches by name and no model call can land there; exactly one module imports the executor and a test asserts that. It runs with your full privileges and **asks nothing first** — `!rm -rf ~` deletes your home directory. Neither the command nor its output enters the model's context, which also means it never reaches LORE and never survives a tab restore.
 - **Sessions that can be made to talk to each other.** Independently launched sessions on the same repo discover each other through a same-user runtime registry (0700, per-session presence file, heartbeat, dead pids reaped by any reader); `/peers` and `/sessions` list them, and `/msg <session> <text>` delivers one framed line-JSON message over the target's own 0600 socket. Every received field is scrubbed before display, and peer text reaches the model only behind an untrusted-peer preamble that names it as data, never instructions. **The model has no send tool** — its five operators are the LORE ones above — so every peer message crosses because a human typed `/msg`. Sessions can be *made* to talk; they do not talk on their own, and nothing here schedules them, routes work between them, or supervises them.
 - **Numbers that were measured, not estimated.** The status bar carries model · `⚑ needs input` · effort · `repo ⎇ branch @sha` · subscription headroom · context % · belief count · curated-memory fill · session handle · peers; every chip has a one-line tooltip, the inert ones included, and seven are clickable. `/context` breaks the window down by component in tokens using the `claude` CLI's own accounting of its own request — DOXA runs no tokenizer and estimates nothing, a context limit the CLI never reported reads `?` and stays `?`, and the one component that can only be counted in characters is reported in characters. `/about` is the screen a bug report is copied from, down to which `lore_core` loaded and which keyboard protocol your terminal actually granted — a binding it cannot physically transmit is marked `✗` in `/help` instead of silently doing nothing, and silence from the terminal reads as *not measured*, never as "legacy". There is **no animated chrome**: two timers exist in the whole app and a test asserts no third is ever armed.
@@ -507,17 +507,56 @@ proposal blocks nothing and expires never, and a signal that shouted would
 be lying about the stakes.
 
 `/pending` — also on the palette, and one click from the block itself —
-lists everything currently staged, a selected row spilling its full text
-into the transcript. It is **read-only**: approving and rejecting stay
-with LORE's own `/lore:approve` and `/lore:reject`, because the write path
-into curated memory is under security review and the approval gate does
-not get a second door until that concludes.
+lists everything currently staged. Every row leads with the **proposed
+verdict**: what approving it would actually do (`add → memory/user`,
+`replace → memory/project:doxa`, `retract → belief #42`), what it would
+supersede, and how long it has waited. A row that does not say what
+approving it changes is not reviewable. The dropdown itself writes
+nothing; its first row opens the browser.
 
 The status bar's belief count is the standing version of the same
 question. Clicking it opens a filterable list grouped by scope (`user`,
 `project`, `user model`), and picking one shows its full claim and
-confidence inline. This is a light viewer, not a full beliefs browser with
-evidence trails and approve/reject flows — that is still to come.
+confidence inline. That is the **glance**.
+
+`/beliefs` is the session. A full-height tab holding every active belief
+and every staged proposal at once. A belief row carries its scope, its
+confidence, the date it was created, **what reality last said about it**,
+its provenance (`via derived` / `via approved`, or *provenance unknown* for
+anything predating LORE's ledger — never back-filled with a guess), and how
+many pieces of evidence it rests on. Hovering any row shows its **full**
+claim text; `Enter` expands the evidence trail underneath it, fetched for
+that belief alone so a store of several hundred never has to cross the wire
+with several hundred trails.
+
+That middle column is LORE's own outcome ledger, not an idle timer. Being
+*cited* is not being *confirmed* — a belief the agent read back to itself
+this morning has not been tested by anything — so the column shows the
+newest row of `belief_outcomes`: `confirmed 2d`, `contradicted 2d`,
+`stale 40d`, each in its own colour, because "confirmed" and "contradicted"
+are opposite facts about one belief. A belief nothing has ever tested says
+`never tested` — a state, not a large age, and by far the common case: on
+the author's store, 31 outcome rows against 635 active beliefs, only 15 of
+which carry a verdict at all. Tested beliefs sort to the top of their scope
+group so the needles are not buried in the haystack. When it was last
+*cited* is in the tooltip, labelled as what it is.
+
+A staged-proposal row carries its verdict and its own **approve** and
+**reject** controls. Reject is one click, or `r`. Approve *arms* on the
+first click or `a` and applies on the second, on that same row, in a
+different colour and different words — approve writes into the model's
+context and reject archives a file that stays on disk, so the
+irreversible one is the one that costs two deliberate acts. Arming a row
+disarms every other; `Esc` disarms; `Enter` is bound to neither. There is
+no "approve all" and no multi-select, on any surface or in any API: the
+approval gate exists because a human looked at *this* proposal.
+
+Every approval runs through LORE's own approve path, so an entry approved
+here is labelled `via approved` by LORE itself rather than by DOXA. On a
+`lore_core` that predates the provenance ledger (LORE 0.36.0) the browser
+degrades to **read-only**, renders no approve or reject control, and says
+which version it loaded and why — measured off the API it actually found,
+not inferred from a version string.
 
 ### 12. Make it yours
 
@@ -770,7 +809,6 @@ design that has been thought through and not yet implemented:
 
 - **Orchestration.** There is none, in any form. Nothing in DOXA schedules sessions, assigns work between them, supervises a fleet, or decides that one session should start another. `/msg` is the entire inter-session mechanism and a human is always the one who sends it — see the peers bullet above for exactly how far that goes.
 - **Resuming a finished session.** Detaching and reattaching work; *resuming* does not. Once a daemon has finalized — `--linger` expired, or `doxa stop` — its engine is gone, and the session returns as a read-only archived tab over its transcript. Handing that transcript back to a fresh engine so the conversation continues is planned and unwritten; nothing on `main` implements it.
-- **A beliefs browser** with evidence trails and approve/reject flows. The belief chip opens a light scope-grouped viewer today, and approval stays with LORE's own commands.
 - Session-history drill-in past `/search`'s result list, customizable keybindings, and a graphical context-window map.
 
 Run the test suite with `uv run pytest`.
