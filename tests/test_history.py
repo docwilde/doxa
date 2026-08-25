@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """`/search`: the live session-search popup over LORE's session FTS index.
 
 The queries run against a SEEDED tmp index (conftest points LORE_ROOT at a

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Item Z (/about): the surface a bug report is written from.
 
 DOXA had no single place that said which DOXA this is. The version lived
@@ -74,9 +75,9 @@ def test_about_rows_cover_everything_a_bug_report_has_to_state():
     values = dict(version_mod.about_rows())
     assert version_mod.resolve_version() in values["doxa"]
     assert "github.com/docwilde/doxa" in values["repo"]
-    # Public repo, NONCOMMERCIAL licence -- stated where a would-be
+    # Public repo, AGPL-3.0-only licence -- stated where a would-be
     # contributor or vendor actually looks, not only in LICENSE.
-    assert "Noncommercial" in values["licence"]
+    assert "AGPL-3.0-only" in values["licence"]
     # Dependencies: measured off the imported modules, not hardcoded.
     import textual
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.shell -- the ``!`` prefix: run a shell command, show its output.
 
 SECURITY, first, because everything else here is a detail of it.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.clock -- config precedence, format building, boundary math, and the
 visible-error fallback for a bad timezone or a bad custom format.
 

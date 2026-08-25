@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Peer layer tests -- registry, scoping, sockets, scrubbing -- all against
 a tmp_path runtime dir (DOXA_RUNTIME_DIR override; conftest.py additionally
 pins a process-wide throwaway default), so nothing here ever touches the

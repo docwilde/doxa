@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.naming -- ONE namer for a session, two consumers.
 
 A session outside a git repo has no repo/branch to label its tab with, and

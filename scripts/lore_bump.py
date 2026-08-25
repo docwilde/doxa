@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
 """Decide whether DOXA's pinned `lore-core` should move to a newer LORE tag.
 
 This is the brain of `.github/workflows/lore-bump.yml`; the workflow is the

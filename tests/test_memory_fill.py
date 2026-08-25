@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """The curated-memory fill chip (v0.44.0).
 
 The caps are the one LORE number that fails a WRITE when exceeded rather

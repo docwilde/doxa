@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Identity precision: the plan DOXA shows must be the plan the user has.
 
 The SDK's connect-time account block reports ``subscriptionType`` -- a

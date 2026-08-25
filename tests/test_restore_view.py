@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """v0.32.0 -- restore brings back the VIEW, not just the tab list.
 
 The reported defect, verbatim: "i meant to restore the view, also any

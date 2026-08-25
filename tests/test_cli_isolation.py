@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.cli_isolation -- item AA: the engine's spawned CLI gets its OWN
 config directory, never DOXA's own process environment. Every test here
 uses throwaway directories (monkeypatch), never the real ~/.claude or

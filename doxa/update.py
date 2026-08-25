@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.update -- ``/update``: fast-forward this checkout, and say what moved.
 
 Deliberately narrow. It runs ``git pull --ff-only`` from ``origin`` and

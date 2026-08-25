@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Streaming-deriver tests (DOXA_DERIVE_SECS): the debounced mid-session
 review that reuses the finalize/PreCompact deriver path.
 

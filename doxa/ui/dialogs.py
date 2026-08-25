@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.ui.dialogs -- the popups and modal screens a pane opens.
 
 Extracted from ``doxa/app.py`` unchanged: the slash-command dropdown, the

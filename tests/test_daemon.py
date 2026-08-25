@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Daemon-split tests: a real SessionDaemon hosting a real SessionEngine
 over a FakeClient (no subprocess, no network, no `claude` CLI), talked to by
 real EngineClients over a real Unix socket in a tmp DOXA_RUNTIME_DIR.

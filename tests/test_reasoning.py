@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """v0.25.0 reasoning stream: the model's summarized thinking, in a
 collapsed "Reasoning" fold above the response body -- same idiom as the
 v0.13.0 "Tool calls (N)" section (ToolCallsSection), applied to

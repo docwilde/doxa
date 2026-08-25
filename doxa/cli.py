@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.cli -- session lifecycle entry points.
 
 `uv run doxa` and friends. The daemon split (doxa/daemon.py) makes a DOXA

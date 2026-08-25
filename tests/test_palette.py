@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Command-palette tests (Ctrl+P): the DOXA provider is registered on the
 app, the command surface carries the Phase 2 commands, the attach picker
 lists live daemon sessions straight from the shared registry, and the

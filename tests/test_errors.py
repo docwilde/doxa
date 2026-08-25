@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """The error surface (v0.56.0) -- doxa/errors.py, ErrorBlock, and the
 app-level boundary that catches what Textual would otherwise exit on.
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Headless Textual pilot test: mounts DoxaApp with a scripted FakeEngine
 (no real SDK client underneath), submits one prompt, and asserts the turn
 block + tool chip appear live and the chip's body lazily formats on first

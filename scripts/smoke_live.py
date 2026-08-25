@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Live smoke test -- NOT part of `uv run pytest` (no test_*.py name, not
 under tests/), because it spends real Claude subscription quota on a real
 `claude` CLI subprocess. Run manually: `uv run python scripts/smoke_live.py`.

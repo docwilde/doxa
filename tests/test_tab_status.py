@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Per-tab status colors: -working while a turn is in flight, -done-unseen
 on a tab that finished a turn while you were looking elsewhere (cleared the
 moment you look), and the -attention blink mechanism (timer discipline

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Tab-system tests (Phase 3, the README sketch): SessionPane extraction
 under a TabbedContent -- one engine handle per tab. Covers the lifecycle
 headlines: Ctrl+T spawns a fresh session (new_session_factory) in a new

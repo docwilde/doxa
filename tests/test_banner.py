@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Opening banner + /img showcase (v0.41.0).
 
 Every assertion here is a USER-VISIBLE outcome, on the v0.28.0 rule: the

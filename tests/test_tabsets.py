@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Item D (tab restore): doxa.tabsets' own record store (save/load/resolve
 against the live peer registry), and doxa.app's wiring of it into the tab
 lifecycle -- persisted on open/close/rename, restored on launch with

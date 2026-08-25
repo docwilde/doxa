@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """v0.56.0: the tool-calls section condensed, and the in-flight marker
 turned into a spinner that costs no timer.
 

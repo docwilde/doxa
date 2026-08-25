@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.images -- terminal image rendering with a strict fallback ladder.
 
 Wraps ``textual-image``'s widgets behind one detection ladder:

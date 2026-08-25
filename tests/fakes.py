@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Test doubles shared by test_engine.py and test_app.py.
 
 FakeClient stands in for claude_agent_sdk.ClaudeSDKClient: no subprocess, no

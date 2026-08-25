@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Trace-tree tests: subagent activity nests under its Task chip.
 
 What the SDK actually surfaces for Task-tool calls (measured against

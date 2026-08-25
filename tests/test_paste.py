@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.paste -- pure functions, no running app needed.
 
 The behavioral half (multi-line paste never spuriously submits, the box

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """/doctor and `doxa doctor` -- read-only health checks.
 
 Every check is a pure function returning a Check (pass/fail/unknown +

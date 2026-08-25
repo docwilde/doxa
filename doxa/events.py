@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.events -- the event record and the list caps, with no SDK behind them.
 
 Split out of ``doxa.engine`` for a measured reason. Importing

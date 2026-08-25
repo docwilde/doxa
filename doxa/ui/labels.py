@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.ui.labels -- the small formatters, and the constants they read.
 
 Extracted from ``doxa/app.py`` unchanged. Everything in this module is a

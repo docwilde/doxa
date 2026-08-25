@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.worktrees -- worktree-per-session (#3).
 
 Real git repos throughout (tmp repos, real `git worktree` calls): this

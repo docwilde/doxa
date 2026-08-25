@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.gate -- the containment layer at the PreToolUse choke point.
 
 docs/phase0-findings.md redesign item 3: tool allowlisting is session-scoped in

@@ -4,6 +4,27 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.63.0 — 2026-08-26
+
+**Relicensed: DOXA Noncommercial License 1.0 to AGPL-3.0-only, dual-licensed
+with a commercial option.** The noncommercial terms failed OSI's
+no-field-of-use-restriction rule -- not open source by that definition,
+which blocks Debian/Fedora packaging and rules the code out for
+contributors and employers who require an OSI licence.
+
+- AGPL-3.0 keeps the part that mattered: a fork that becomes something new
+  must publish its source under the same terms, including when it's only
+  offered over a network.
+- A commercial licence remains available from the copyright holder for
+  uses AGPL's terms don't suit -- see `LICENSE-COMMERCIAL.md`.
+- The DOXA name and mark are now asserted as trademarks (`TRADEMARK.md`),
+  separate from the AGPL grant: a fork may say it's derived from DOXA, not
+  present itself as DOXA.
+- `SPDX-License-Identifier: AGPL-3.0-only` headers added across
+  `doxa/`, `tests/`, `scripts/`; `pyproject.toml`, the README badge and
+  licence section, and the `/about` screen's licence row all updated to
+  match.
+
 ## 0.62.0 — 2026-08-25
 
 **lore-core moves from v0.36.0 to v0.38.0.** DOXA runs `lore_core`

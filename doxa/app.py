@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.app -- the Textual shell: N session tabs over N engine handles.
 
 Phase 1 built this as one pane over an in-process SessionEngine; Phase 2's

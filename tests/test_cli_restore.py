@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Item D (cli wiring): plain `doxa` restores a saved tab set for its
 scope instead of the single-most-recent-session attach, falls back to
 that single-attach path when nothing was ever saved (or the setting is

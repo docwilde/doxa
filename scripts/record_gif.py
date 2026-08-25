@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Record the README's animated demos -- one step further than
 scripts/screenshot.py's single stills: each scene here drives the same
 Textual Pilot + FakeEngine harness through a SEQUENCE of interaction

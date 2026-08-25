@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Version resolution and `/update`.
 
 The version has ONE source (pyproject.toml) and two readers, and a source

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.doctor -- ``/doctor`` and ``doxa doctor``: read-only health checks.
 
 READ-ONLY, deliberately: every check here observes and reports, none of

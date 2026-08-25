@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
 # doxa installer -- POSIX sh, no bashisms (developed and tested against
 # dash, the strictest common /bin/sh).
 #

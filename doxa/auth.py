@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.auth -- ``/login`` and ``/logout``, delegated to the provider's own CLI.
 
 DOXA never handles a credential. It suspends the TUI (Textual's

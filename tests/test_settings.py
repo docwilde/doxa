@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Settings: the precedence rule, the file, and the modal that writes it.
 
 The rule under test is one line -- environment > config file > default --

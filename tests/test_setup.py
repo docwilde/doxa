@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """/setup -- check state, fix findings ONE at a time.
 
 The finding logic (doxa.setup's checks) is pure data-producing functions,

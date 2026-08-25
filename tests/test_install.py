@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """scripts/install.sh -- the curl-pipe installer.
 
 A shell script cannot be unit-tested by importing it, so these tests run

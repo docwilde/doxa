@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.cli -- item S #1: `doxa new --branch <name>` / `--checkout`.
 
 Real git throughout (house pattern). ``spawn_daemon``/``_run_attached`` are

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Tab labels: `Model@repo:branch`.
 
 A tab has room for the two things that differ between tabs -- which model

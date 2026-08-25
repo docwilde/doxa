@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.session.chips -- the status line, and every picker a chip opens.
 
 docs/plans/plugin-api.md's second extension point, and the reason

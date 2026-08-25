@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Item O (keyboard-protocol detection): which key combinations this
 terminal can physically send, and saying so where a user looks.
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """scripts/lore_bump.py -- the decision half of the LORE upgrade proposer.
 
 Everything here is offline. `decide()` takes measured facts and returns one

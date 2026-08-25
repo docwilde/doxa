@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Subagent tracker (queue item 4): live view of Task-spawned subagents.
 
 Covers the whole loop -- registry add/remove on the Task call's own

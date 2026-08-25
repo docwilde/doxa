@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.ui.statusline -- the status bar, and the two chips that own state.
 
 Extracted from ``doxa/app.py`` unchanged. :class:`StatusBar` renders the

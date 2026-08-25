@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """v0.37.0: lore_core is a declared dependency, and DOXA says which one it loaded.
 
 The defect this file exists to prevent from returning: ``lore_core`` was

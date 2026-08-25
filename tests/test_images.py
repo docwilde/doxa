@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Image-ladder tests (doxa/images.py + its two render sites).
 
 The ladder is unit-tested by forcing each tier -- via the DOXA_IMAGE_MODE

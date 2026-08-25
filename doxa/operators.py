@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.operators -- the registry of DOXA's native LORE tools.
 
 Registry discipline adopted from the DeepSeek-harness reference

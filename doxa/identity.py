@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.identity -- who this session bills as, at the best precision available.
 
 Two sources, deliberately ranked:

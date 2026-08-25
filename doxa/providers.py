@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.providers -- model-catalog seam: ONE Protocol between the UI (the
 model picker, doxa/session/chips.py) and however a provider's catalog gets
 resolved, so a second provider (DeepSeek, Codex -- the vault addendum 6 multi-

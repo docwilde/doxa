@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Ending a session vs detaching one, and telling them apart afterwards.
 
 Ctrl+W detaches BY DESIGN -- the session keeps running and can be

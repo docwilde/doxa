@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """DOXA -- a terminal for working with a Claude agent whose memory you can audit.
 
 See /README.md for the project pitch and docs/phase0-findings.md for the SDK

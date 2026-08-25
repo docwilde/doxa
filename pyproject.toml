@@ -1,9 +1,11 @@
 [project]
 name = "doxa"
-version = "0.62.0"
+version = "0.63.0"
 description = "A terminal for working with a Claude agent whose memory you can audit."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
 dependencies = [
     "claude-agent-sdk>=0.2.144",
     "textual>=5,<6",

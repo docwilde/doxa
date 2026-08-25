@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Item Q -- the ``!`` prefix: run a shell command from the DOXA prompt.
 
 Two halves, and the second is the important one.

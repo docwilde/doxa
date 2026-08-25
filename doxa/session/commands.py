@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """doxa.session.commands -- every slash command a pane executes.
 
 The registry side lives in :mod:`doxa.commands` (what a command IS: name,
