@@ -90,9 +90,20 @@ def _seed_index() -> None:
         (OTHER_ID, "some-project", "2026-08-21T11:05:00Z", "user",
          "docking bay chatter continued after breakfast"),
     )
+    # The SESSIONS rows are stamped ahead of any clock this suite can run
+    # under; the msg rows above keep their fixed dates, which the search,
+    # label and excerpt assertions quote literally.
+    #
+    # recent_sessions() orders by last_ts and pages at RESULT_LIMIT (20),
+    # and every engine-driven test in this suite indexes a real session
+    # stamped at RUN time -- always newer than a fixed 2026-08-2x seed. So
+    # "are the seeded sessions in the recents?" was really asking "have
+    # fewer than 20 other tests run first?", and it finally answered no
+    # (v0.43.0, four more engine tests). Ordering between the two seeds,
+    # which the assertion below does care about, is preserved.
     for sid, title, ts, count in (
-        (SESSION_ID, "delorean wiring", "2026-08-20T10:00:00Z", 12),
-        (OTHER_ID, "breakfast plans", "2026-08-21T11:00:00Z", 4),
+        (SESSION_ID, "delorean wiring", "2099-08-20T10:00:00Z", 12),
+        (OTHER_ID, "breakfast plans", "2099-08-21T11:00:00Z", 4),
     ):
         conn.execute(
             "INSERT INTO sessions(session_id, project, cwd, title, first_ts,"
