@@ -23,6 +23,7 @@ The four defects of 2026-08-24 are the specification:
 from __future__ import annotations
 
 import asyncio
+import io
 import types
 
 import pytest
@@ -514,10 +515,19 @@ async def test_the_reported_render_crash_no_longer_kills(tmp_path, monkeypatch):
     did. That is the ONE thing this test could get wrong by taking the
     easy route.
 
-    Layering, for the record: the specific CAUSE -- textual-image probing
-    stdin during a paint at all -- is fixed in doxa.images/doxa.banner on
-    its own branch. This test owns the general containment: whatever the
-    cause, a render raise must not be fatal.
+    Layering, and what this test asserts once BOTH layers are on main
+    (v0.56.0): the specific cause is fixed in doxa.images -- ``widget_for``
+    wraps ``render``/``get_content_width``/``get_content_height`` so a raise
+    from the library degrades to the ``[image: …]`` line. That guard is
+    NEARER the failure than the app-level surface, so it wins, and the
+    correct merged outcome is a surviving app with a degraded picture and
+    NO error block at all. The general containment -- any widget, any
+    cause, never fatal -- is owned by
+    :func:`test_a_render_raise_does_not_kill_the_app`, which uses a plain
+    widget with no near-side guard in front of it.
+
+    Asserting "an error block appears" here would now be asserting that
+    the nearer fix did NOT work.
 
     The boot banner is switched OFF so the only image widget on screen is
     the one mounted deliberately below -- otherwise the banner explodes
@@ -547,14 +557,22 @@ async def test_the_reported_render_crash_no_longer_kills(tmp_path, monkeypatch):
         await block_list.mount(widget)
         await _paint(app)
         assert app.is_running, "the reported crash still kills the app"
-        blocks = _blocks(app)
-        assert len(blocks) == 1
-        assert blocks[0].region.height > 0
-        assert "TimeoutError" in blocks[0].title
-        assert blocks[0].failure.origin == "textual_image", (
-            "a third-party render failure is being reported as a DOXA bug"
+        assert _blocks(app) == [], (
+            "doxa.images' own guard should have caught this before the "
+            "app-level surface ever saw it"
         )
-        assert widget.display is False
+        # Degraded, not quarantined: the picture is gone, the widget is not.
+        assert widget.display is True
+        from rich.console import Console
+
+        probe = Console(width=40, file=io.StringIO())
+        probe.print(widget.render())
+        assert images.fallback_line("doxa logo") in probe.file.getvalue(), (
+            "the picture should have degraded to the text line"
+        )
+        assert widget.get_content_height(app.screen, app.size, 40) >= 1, (
+            "a widget measuring to zero rows is the v0.28.0 defect"
+        )
 
 
 # -- never swallow -----------------------------------------------------
