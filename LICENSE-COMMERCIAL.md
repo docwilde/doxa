@@ -13,11 +13,10 @@ not here.
 
 ## How to ask
 
-Open an issue at
-[github.com/docwilde/doxa/issues](https://github.com/docwilde/doxa/issues)
-describing your intended use, or reach out via the profile at
-[github.com/docwilde](https://github.com/docwilde). Include enough detail
-about how you intend to use DOXA for a licence to be scoped sensibly.
+Write to <docwilde@proton.me>, or open an issue at
+[github.com/docwilde/doxa/issues](https://github.com/docwilde/doxa/issues).
+Include enough detail about how you intend to use DOXA for a licence to be
+scoped sensibly.
 
 ## Trademark
 
