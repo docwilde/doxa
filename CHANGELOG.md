@@ -6,6 +6,22 @@ not written from memory.
 
 ## 0.63.0 — 2026-08-26
 
+**`Ctrl+T` raised `NameError: name 'spawn_daemon' is not defined` and the
+tab hung at "connecting…".** Shipped in 0.61.0 and reported from a live
+session.
+
+- Deferring `spawn_daemon` behind a lazy import renamed most call sites and
+  missed three, two of them the closures `Ctrl+T` and the palette's "new
+  session" use. Fixed; all three route through the wrapper.
+- The suite passed on the broken code because every test reaching those
+  closures does `monkeypatch.setattr(cli_mod, "spawn_daemon", ...)`, which
+  *creates* the module global a bare name resolves against. The tests were
+  what made the code work.
+- `test_no_call_site_uses_the_bare_lazy_name` checks the source rather than
+  the behaviour: a behavioural test would have to patch the name and
+  reintroduce the blind spot, or really fork a daemon. It finds 3 offenders
+  in the shipped file and 0 now.
+
 **Relicensed: DOXA Noncommercial License 1.0 to AGPL-3.0-only, dual-licensed
 with a commercial option.** The noncommercial terms failed OSI's
 no-field-of-use-restriction rule -- not open source by that definition,

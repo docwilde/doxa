@@ -289,7 +289,7 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
             cwd=launch_cwd, model=model,
             engine_factory=lambda: EngineClient(dsock),
             new_session_factory=lambda: EngineClient(
-                spawn_daemon(launch_cwd, model=model, linger_secs=linger)[1]
+                _spawn_daemon(launch_cwd, model=model, linger_secs=linger)[1]
             ),
             new_session_factory_at=new_session_factory_at,
             resume_session_factory=resume_session_factory,
@@ -350,7 +350,7 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
         # compose() adds ONE fresh session beside the archives so the
         # window is usable, and this is what it spawns against.
         engine_factory=lambda: EngineClient(
-            spawn_daemon(app_cwd, model=model, linger_secs=linger)[1]
+            _spawn_daemon(app_cwd, model=model, linger_secs=linger)[1]
         ),
         new_session_factory=new_session_factory,
         new_session_factory_at=new_session_factory_at,
@@ -498,7 +498,7 @@ def main(argv: "list[str] | None" = None) -> int:
     base_branch = _resolve_branch_flag(cwd, args)
     if base_branch is _BRANCH_FLAG_FAILED:
         return 2
-    _sid, dsock = spawn_daemon(
+    _sid, dsock = _spawn_daemon(
         cwd, model=args.model, linger_secs=args.linger, base_branch=base_branch,
     )
     _run_attached(dsock, cwd, args.model, args.linger)

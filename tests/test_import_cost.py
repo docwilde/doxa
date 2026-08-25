@@ -66,3 +66,38 @@ def test_events_carries_no_engine_machinery():
         capture_output=True, text=True, check=True,
     )
     assert out.stdout.strip() == "NO"
+
+
+def test_no_call_site_uses_the_bare_lazy_name():
+    """The v0.61.0 regression, and the reason the suite missed it.
+
+    Deferring ``spawn_daemon`` left three call sites still naming it
+    bare -- inside the closures ``Ctrl+T`` and the palette's "new session"
+    call. In production that is a ``NameError`` at the moment a user opens
+    a tab. The suite passed anyway, because every test that reaches those
+    closures does ``monkeypatch.setattr(cli_mod, "spawn_daemon", ...)``:
+    the patch CREATES the module global the bare name needs, so the tests
+    were the only thing making the code work.
+
+    A source check rather than a behavioural one, deliberately. Any test
+    that exercised the path would have to either patch the name (and
+    reintroduce the blind spot) or really fork a daemon.
+    """
+    import pathlib
+    import re
+
+    import doxa.cli
+
+    source = pathlib.Path(doxa.cli.__file__).read_text(encoding="utf-8")
+    offenders = [
+        line.strip()
+        for line in source.splitlines()
+        # A call, not a mention: skip docstrings and comments.
+        if re.search(r"(?<![_\w])spawn_daemon\(", line)
+        and not line.lstrip().startswith(("#", '"', "'"))
+        and "getattr(" not in line
+    ]
+    assert offenders == [], (
+        "these call the lazily-imported name directly, which is a NameError "
+        f"outside a test that patches it in: {offenders}"
+    )
