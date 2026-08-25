@@ -2,10 +2,10 @@
 
 Wraps ``claude_agent_sdk.ClaudeSDKClient`` and exposes one thing to the TUI:
 an async generator of typed :class:`EngineEvent` objects per turn. Every
-LORE integration point below is wired at the boundary PHASE0_FINDINGS.md
+LORE integration point below is wired at the boundary docs/phase0-findings.md
 validated for it, not at the boundary the original plan assumed -- each site
 below cites the finding/redesign item it follows
-(``/home/docwilde/Schreibtisch/doxa/PHASE0_FINDINGS.md``).
+(``docs/phase0-findings.md``).
 
 Boundaries used, and why:
 

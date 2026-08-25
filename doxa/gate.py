@@ -1,6 +1,6 @@
 """doxa.gate -- the containment layer at the PreToolUse choke point.
 
-PHASE0_FINDINGS.md redesign item 3: tool allowlisting is session-scoped in
+docs/phase0-findings.md redesign item 3: tool allowlisting is session-scoped in
 ClaudeAgentOptions, not swappable per call -- so "this session may only use
 these tools" is enforced HERE, per tool call, at the one choke point the SDK
 guarantees (the PreToolUse hook) plus the executor every DOXA-native tool

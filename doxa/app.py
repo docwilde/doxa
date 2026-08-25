@@ -32,7 +32,7 @@ pretty-printing only happens once, on demand, not for every tool call
 that streams past -- and compact further behind ONE per-turn "Tool calls
 (N)" fold (ToolCallsSection), created lazily on the first call.
 
-Asyncio/Textual coexistence follows PHASE0_FINDINGS.md §4 exactly:
+Asyncio/Textual coexistence follows docs/phase0-findings.md §4 exactly:
 ``run_worker`` schedules the SDK-driving coroutine on Textual's own running
 event loop (default ``thread=False``) -- proven by the phase-0
 validation spike, whose result §4 records (the scripts themselves are gone;

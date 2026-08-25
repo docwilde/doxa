@@ -24,7 +24,7 @@ Two registries, deliberately:
 
 Projection: :func:`to_sdk_tools` turns the registry into
 ``claude_agent_sdk.SdkMcpTool`` definitions for an in-process SDK MCP
-server (the SDK's native custom-tool mechanism, PHASE0_FINDINGS.md SS6:
+server (the SDK's native custom-tool mechanism, docs/phase0-findings.md SS6:
 ``@tool`` + ``create_sdk_mcp_server`` run in-process, no subprocess/IPC per
 call). Three filters compose, harness-style: ``allowed`` (per-session
 policy -- the model cannot call what it cannot see), ``include_write``
