@@ -349,7 +349,7 @@ def test_run_checks_returns_one_per_check():
     assert [c.id for c in checks] == [
         "python", "doxa-version", "claude-cli", "cli-isolation", "lore-store",
         "config", "registry", "worktrees", "image-protocol",
-        "keyboard-enhancement", "mcp",
+        "keyboard-enhancement", "launcher", "mcp",
     ]
 
 

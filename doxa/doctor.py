@@ -373,6 +373,67 @@ def _worktrees_check() -> Check:
     )
 
 
+def _launcher_check() -> Check:
+    """Does the start-menu entry launch the DOXA that is running?
+
+    The check exists because the failure it catches is INVISIBLE from
+    inside DOXA: an entry written by an older version keeps working, keeps
+    appearing in the menu, and launches something else. The user who
+    reported "`doxa launcher install` shows version 0.8.0" was reading a
+    correct rendering of a stale file.
+
+    Not-installed is a PASS, not a gap. A tiling WM has no start menu to
+    put an entry in and plenty of people never run the command; failing
+    here would make ``doxa doctor`` exit non-zero on a perfectly good
+    install, which ``scripts/install.sh`` runs at the end of every
+    installation."""
+    from . import launcher as launcher_mod
+
+    if not sys.platform.startswith("linux"):
+        return Check(
+            id="launcher", title="start-menu entry", status=STATUS_PASS,
+            detail=f"not applicable on {sys.platform}",
+        )
+    entry = launcher_mod.desktop_path()
+    if not entry.is_file():
+        return Check(
+            id="launcher", title="start-menu entry", status=STATUS_PASS,
+            detail="not installed (`doxa launcher install` adds one)",
+        )
+    # The cost of pinning Exec to an absolute path (see
+    # launcher.exec_target) is that the shortcut dies when that path goes
+    # away -- a checkout moved or deleted. Paid loudly: it is a check, with
+    # the one command that fixes it, rather than a menu entry that silently
+    # does nothing when clicked.
+    target = launcher_mod.installed_exec()
+    if target is not None and not target.exists():
+        return Check(
+            id="launcher", title="start-menu entry", status=STATUS_FAIL,
+            detail=f"{entry} launches {target}, which no longer exists",
+            fix="doxa launcher install",
+        )
+    stale = launcher_mod.stale_entry()
+    if stale is None:
+        return Check(
+            id="launcher", title="start-menu entry", status=STATUS_PASS,
+            detail=(
+                f"{entry} → {launcher_mod.exec_target()} "
+                f"(DOXA {version_mod.resolve_version()})"
+            ),
+        )
+    was = (
+        "written before DOXA recorded a version in it, so it still runs "
+        "whatever `doxa` the desktop session finds on PATH"
+        if stale == launcher_mod.UNVERSIONED
+        else f"written by DOXA {stale}"
+    )
+    return Check(
+        id="launcher", title="start-menu entry", status=STATUS_FAIL,
+        detail=f"{entry} was {was}; this DOXA is {version_mod.resolve_version()}",
+        fix="doxa launcher install",
+    )
+
+
 def _mcp_check() -> Check:
     # DOXA has no setting for an external MCP server yet -- only its own
     # in-process tool server (doxa.operators). Honest "nothing configured"
@@ -394,6 +455,7 @@ CHECKS: "tuple[Callable[[], Check], ...]" = (
     _worktrees_check,
     _image_protocol_check,
     _keyboard_enhancement_check,
+    _launcher_check,
     _mcp_check,
 )
 

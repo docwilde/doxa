@@ -333,6 +333,43 @@ async def test_ctrl_w_closes_the_transcript_tab_without_a_stop_dialog(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_ctrl_q_closes_the_transcript_tab_and_never_ends_its_session(tmp_path):
+    """v0.57.0. Ctrl+Q is "end this session and close its tab"; on a tab
+    that HAS no session it did nothing at all, and the user was stuck on a
+    read-only transcript pressing a close key that never closed anything.
+
+    Two assertions, and the second is the one that keeps the keys honest:
+    the tab closes, and the session that SPAWNED the subagent is not
+    touched -- not finalized, not stopped, its turn still in flight. A key
+    aimed at the visible tab must never reach past it to the pane
+    underneath."""
+    engine = GatedSubagentEngine()
+    app = DoxaApp(cwd=str(tmp_path), engine_factory=lambda: engine,
+                  new_session_factory=lambda: engine)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        pane, tab = await _start_and_open(app, pilot)
+        tabbed = app.query_one("#session-tabs", TabbedContent)
+        assert tabbed.active == tab.id
+        assert pane.turn_in_flight
+
+        await pilot.press("ctrl+q")
+        assert await _wait(
+            pilot, lambda: tab.id not in [p.id for p in app.query(SubagentTranscriptTab)]
+        )
+        assert "task-1" not in pane._transcript_tabs
+
+        # The owning session is untouched: still mounted, still running.
+        assert pane in app.panes()
+        assert engine.finalized is False
+        assert pane.turn_in_flight
+
+        engine.open_gate.set()
+        engine.finish_gate.set()
+        await _wait(pilot, lambda: not pane.turn_in_flight)
+
+
+@pytest.mark.asyncio
 async def test_transcript_tab_gets_no_provider_glyph(tmp_path):
     from doxa.app import PROVIDER_GLYPHS
 

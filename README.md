@@ -132,8 +132,15 @@ uv run doxa new --branch <name>   # fork the session's worktree from <name>, not
 uv run doxa attach   # reattach by session id / title prefix
 uv run doxa stop     # finalize now (LORE review + index), daemon exits
 uv run doxa doctor   # read-only health checks, no TUI: pass/fail + fix per check
-uv run doxa launcher install      # XDG start-menu entry (uninstall removes both files)
+uv run doxa launcher install      # XDG start-menu entry + icons (uninstall removes them)
 ```
+
+The start-menu entry launches **the DOXA you ran that command from**, by
+absolute path, and the command prints that path with the version it reports —
+so a shortcut that would start something other than what you expected is
+visible when you install it rather than weeks later. If a *different* `doxa`
+is on your `PATH` (a stale `uv tool install`, say), the command names it and
+its version too, and changes nothing about it. `doxa doctor` re-checks both.
 
 The daemon finalizes the session — LORE's review and index pass — once every
 client has been detached for `--linger` seconds (120 by default), or
