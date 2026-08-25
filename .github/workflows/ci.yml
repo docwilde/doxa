@@ -64,7 +64,9 @@ jobs:
           path: .lore-plugin
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10
+        # Pinned to a real release tag: astral-sh/setup-uv publishes v10.0.1
+        # but no floating v10, so `@v10` fails to resolve at job setup.
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           # Keyed on uv.lock by default: a lockfile change busts it, an
           # unrelated source change reuses it.
