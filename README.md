@@ -11,6 +11,20 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Noncommercial%201.0-8a8073" alt="license"></a>
 </p>
 
+> [!WARNING]
+> **Alpha — work in progress.** DOXA is `0.x` and moves daily: interfaces,
+> keybindings, config keys and on-disk formats change between releases without
+> a migration path, and releases are cut in hours rather than weeks. It is
+> feature-incomplete by design — several surfaces documented under
+> [Status](#status) are specifications with nothing built behind them.
+>
+> What that means concretely for you: it runs an agent that edits your files
+> and, since v0.36.0, a shell that runs with your privileges. It is tested
+> (the suite is real and gates every release) but it is not battle-tested —
+> it has one author, and most defects so far were found by using it, not by
+> the tests. Read [Non-goals](#non-goals) before adopting it for anything you
+> would be upset to lose.
+
 **DOXA** is a terminal for Claude agents whose sessions outlive your
 window and whose memory of your own codebases you can actually watch
 form — built on the Claude Agent SDK and Textual, billed through your
