@@ -1897,7 +1897,7 @@ class DoxaApp(App):
         """Shift+Tab (and Ctrl+Tab where the terminal can send it): step
         the ACTIVE pane's session to the next permission mode.
 
-        The key can only ever reach :data:`doxa.engine.CYCLE_MODES` --
+        The key can only ever reach this SESSION's own ring --
         default → acceptEdits → plan → default. That is not a check
         performed here; it is a property of
         :func:`doxa.engine.next_cycle_mode`, which is total over that
@@ -1920,7 +1920,14 @@ class DoxaApp(App):
         pane = self.active_pane
         if pane is None or pane.engine is None:
             return
-        target = next_cycle_mode(getattr(pane.engine, "permission_mode", None))
+        # The ring is per-session since v0.59.0: a session not spawned
+        # with the arming flag has no bypassPermissions in it, so the key
+        # steps straight from auto back to default rather than offering a
+        # mode the CLI would refuse.
+        target = next_cycle_mode(
+            getattr(pane.engine, "permission_mode", None),
+            bool(getattr(pane.engine, "bypass_armed", False)),
+        )
         pane.run_worker(pane._cmd_mode(target), group="command")
 
     def _switch_to_tab(self, pane_id: str) -> None:

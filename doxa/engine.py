@@ -250,36 +250,135 @@ PERMISSION_MODES = CYCLE_MODES + GATED_MODES
 DEFAULT_PERMISSION_MODE = "default"
 
 
-def cycle_index(mode: "str | None") -> int:
-    """Where `mode` sits in :data:`CYCLE_MODES`, or -1.
+# -- launch-time arming (v0.59.0) --------------------------------------
+#
+# Reported: "i cannot cycle past auto to 'bypass': i get an error message
+# that the session didnt start with a specific parameter". Measured, by
+# driving the real CLI through the SDK and calling set_permission_mode for
+# every mode on an unarmed session and again on an armed one:
+#
+#   unarmed   acceptEdits OK · plan OK · auto OK · dontAsk OK ·
+#             default OK · bypassPermissions REFUSED --
+#             "Cannot set permission mode to bypassPermissions because the
+#              session was not launched with --dangerously-skip-permissions"
+#   armed     all six OK
+#
+# So exactly ONE mode carries a launch-time prerequisite. `auto` does not,
+# which was worth confirming rather than assuming -- a second mode with a
+# hidden requirement would have been the same defect twice.
+#
+# The CLI splits the capability across two flags on purpose:
+#
+#   --allow-dangerously-skip-permissions   ARMS it (launch time)
+#   --dangerously-skip-permissions         USES it
+#
+# DOXA passes the first through ``ClaudeAgentOptions.extra_args``, whose
+# None value the SDK renders as a bare ``--flag`` (verified in
+# subprocess_cli.py, not assumed). Arming is therefore a property of HOW
+# THIS SESSION WAS SPAWNED and cannot change while it runs -- which is the
+# whole reason the modes a session can reach are a function of the session
+# rather than a constant.
+BYPASS_ARM_FLAG = "allow-dangerously-skip-permissions"
 
-    A session parked on a GATED mode is off the cycle entirely, and this
-    is where that fact is expressed -- see :func:`next_cycle_mode` for
-    what the hotkey then does."""
+# The mode that flag exists for. Named so the rule below reads as a rule
+# rather than as a string comparison somebody has to recognise.
+BYPASS_MODE = "bypassPermissions"
+
+
+def bypass_arming_enabled() -> bool:
+    """``DOXA_ALLOW_BYPASS`` / the config file's ``allow_bypass`` row:
+    may sessions spawned from now on reach ``bypassPermissions`` at all?
+
+    Default OFF, and that is the substance of the fix rather than a
+    conservative default chosen out of habit.
+
+    Arming every session unconditionally would make the shipped cycle work
+    as advertised, and it was rejected: it would put every DOXA session one
+    keystroke from no permission checks at all, forever, including sessions
+    opened in repositories the user has never read. The CLI models this as
+    a launch-time decision rather than a runtime one, and that is a
+    considered design worth inheriting, not an obstacle to route around.
+
+    Read at spawn, once, and captured on the engine -- see
+    :attr:`SessionEngine.bypass_armed`. Turning this on does NOT arm
+    sessions that are already running, and that is correct: their CLI
+    process was started without the flag and no amount of configuration
+    can retrofit it."""
+    raw = config_mod.raw("DOXA_ALLOW_BYPASS").strip()
+    return bool(raw) and raw.lower() not in ("0", "false", "no", "off")
+
+
+def available_modes(armed: bool) -> "tuple[str, ...]":
+    """Every permission mode THIS session can actually be put into.
+
+    **This is the one function.** The user's instruction was "if it wasnt
+    started with that flag, the mode option should not even appear", and
+    the way to make that true of every surface at once -- the Shift+Tab
+    cycle, the chip's picker, ``/mode``'s listing and its validation -- is
+    for all of them to derive from here rather than each filtering for
+    itself. Three copies of a rule is three chances for one of them to
+    keep offering a mode that errors.
+
+    The principle, since it outlives this particular flag: **an option a
+    user can see is an option that works.** A mode that is listed and then
+    refused teaches the user that the feature is broken; a mode that is
+    absent, with a straight answer available for anyone who asks for it by
+    name, teaches them that their session is not armed. Same rule the
+    beliefs browser follows when the store is too old for a write path --
+    the control is gone and a line says why, rather than a button that
+    fails."""
+    if armed:
+        return PERMISSION_MODES
+    return tuple(m for m in PERMISSION_MODES if m != BYPASS_MODE)
+
+
+def cycle_modes(armed: bool) -> "tuple[str, ...]":
+    """The ring the hotkey walks for THIS session, in cycle order.
+
+    Derived from :func:`available_modes` by intersection rather than
+    computed a second time, so a mode can never be cyclable-but-not-
+    selectable or the reverse."""
+    allowed = set(available_modes(armed))
+    return tuple(m for m in CYCLE_MODES if m in allowed)
+
+
+def cycle_index(mode: "str | None", ring: "tuple[str, ...]") -> int:
+    """Where `mode` sits in `ring`, or -1."""
     try:
-        return CYCLE_MODES.index(str(mode or DEFAULT_PERMISSION_MODE))
+        return ring.index(str(mode or DEFAULT_PERMISSION_MODE))
     except ValueError:
         return -1
 
 
-def next_cycle_mode(mode: "str | None") -> str:
-    """The mode one press of the cycle key moves to.
+def next_cycle_mode(mode: "str | None", armed: bool = False) -> str:
+    """The mode one press of the cycle key moves to, for a session with
+    this arming.
 
-    A total function over :data:`CYCLE_MODES`: the return value is an
-    element of that tuple for every possible input, including None and
-    including a mode outside the ring. The set a keystroke can reach is
-    therefore exactly one named constant, and changing it is a deliberate
-    edit to that constant. ``dontAsk`` is not in it.
+    A total function over :func:`cycle_modes(armed) <cycle_modes>`: the
+    return value is an element of that tuple for every possible input,
+    including None and including a mode outside the ring. The set a
+    keystroke can reach is therefore exactly one derived sequence, and
+    changing it means changing :func:`available_modes`.
 
-    A session on a mode outside the ring (``dontAsk``, reached through
-    ``/mode`` and its confirmation) has no "next", so the first press
-    LEAVES it and lands on ``CYCLE_MODES[0]``. Wrapping from the last
-    element does the same, which is what makes one further press the way
-    back to ``default`` rather than a dead end."""
-    position = cycle_index(mode)
+    Since v0.59.0 that set is per-SESSION rather than global, which is a
+    better invariant than the constant it replaced: an unarmed session
+    reaches four modes, an armed one reaches five, and ``dontAsk`` is
+    unreachable in both. `armed` defaults to False so that any caller
+    which has not been taught about arming gets the narrower ring rather
+    than the wider one -- the safe direction for a default to fail in.
+
+    A session on a mode outside its ring (``dontAsk``, or
+    ``bypassPermissions`` on a session that was armed and no longer is --
+    which cannot happen today but is one config edit away from being
+    possible) has no "next", so the first press LEAVES it and lands on
+    the first element. Wrapping from the last does the same, which is what
+    makes one further press the way back to ``default`` rather than a dead
+    end."""
+    ring = cycle_modes(armed)
+    position = cycle_index(mode, ring)
     if position < 0:
-        return CYCLE_MODES[0]
-    return CYCLE_MODES[(position + 1) % len(CYCLE_MODES)]
+        return ring[0]
+    return ring[(position + 1) % len(ring)]
 
 
 def permission_mode_default() -> str:
@@ -1022,6 +1121,13 @@ class SessionEngine:
         # permission_mode_default() for why a config file cannot arm a
         # gated mode.
         self.permission_mode: str = permission_mode_default()
+        # Whether THIS session's CLI was spawned with the arming flag, and
+        # therefore whether bypassPermissions is reachable in it at all
+        # (v0.59.0). Read once, here, at construction -- not per call --
+        # because it describes how the subprocess was launched. Flipping
+        # the setting later cannot retrofit a running session's argv, and
+        # this attribute is what stops DOXA pretending otherwise.
+        self.bypass_armed: bool = bypass_arming_enabled()
         # Exact SIZE, in characters, of the LORE snapshot this session
         # appended to its system prompt at connect (_build_options). The
         # CLI's own context breakdown counts those tokens inside its
@@ -1680,6 +1786,14 @@ class SessionEngine:
         # rather than asserting "disabled" (which some models reject
         # outright -- see show_reasoning()'s docstring).
         reasoning = show_reasoning()
+        # Belt and braces: a session must never be spawned ASKING for a
+        # mode its own argv cannot support. permission_mode_default() can
+        # only return a PERSISTABLE mode today, so this cannot fire -- but
+        # a connect that the CLI rejects outright is a dead tab, and one
+        # `if` is cheaper than that failure mode being one config edit
+        # away.
+        if self.permission_mode not in available_modes(self.bypass_armed):
+            self.permission_mode = DEFAULT_PERMISSION_MODE
         return ClaudeAgentOptions(
             model=self.model,
             # -- session identity, and the whole reason /resume works ----
@@ -1733,6 +1847,14 @@ class SessionEngine:
             # permission_mode_default() -- so a mode never outlives the
             # session that chose it, and a gated one cannot be inherited.
             permission_mode=self.permission_mode,
+            # The arming flag, and ONLY when this session is armed. None
+            # renders as a bare `--allow-dangerously-skip-permissions`
+            # (SDK subprocess_cli.py). An unarmed session's argv is
+            # byte-identical to what it was before v0.59.0 -- adding a
+            # capability to every session by default is exactly what this
+            # change refused to do.
+            **({"extra_args": {BYPASS_ARM_FLAG: None}}
+               if self.bypass_armed else {}),
             **({"thinking": {"type": "adaptive", "display": "summarized"}}
                if reasoning else {}),
             cwd=self.cwd,
@@ -2163,6 +2285,17 @@ class SessionEngine:
         method) -- the caller reports that rather than pretending."""
         if mode not in PERMISSION_MODES:
             raise RuntimeError(f"unknown permission mode {mode!r}")
+        if mode not in available_modes(self.bypass_armed):
+            # The last line of defence rather than the first: every SURFACE
+            # already omits this mode on an unarmed session (see
+            # available_modes), so reaching here means something bypassed
+            # the UI -- a daemon RPC, a script, a stale client. The CLI
+            # would refuse it anyway; refusing here makes the reason
+            # legible instead of surfacing a raw control-request error.
+            raise RuntimeError(
+                f"{mode} needs a session started with --{BYPASS_ARM_FLAG}; "
+                "this one was not"
+            )
         if not self._connected or self._client is None:
             raise RuntimeError("session is not connected")
         setter = getattr(self._client, "set_permission_mode", None)

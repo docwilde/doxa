@@ -117,6 +117,7 @@ class FakeEngine:
         effort: "str | None" = None,
         cwd: str = "",
         permission_mode: str = "default",
+        bypass_armed: bool = False,
     ) -> None:
         self._script = script
         self.model = model
@@ -144,6 +145,11 @@ class FakeEngine:
         # already records model_switches, which is exactly what a test
         # asserting "the mode actually reached the engine" reads.
         self.permission_mode = permission_mode
+        # Engine parity (v0.59.0): whether this session's CLI was spawned
+        # able to reach bypassPermissions at all. Default False, matching
+        # the shipped default, so every pre-existing test exercises the
+        # UNARMED session -- which is the one a user actually gets.
+        self.bypass_armed = bypass_armed
         self.permission_mode_switches: list[str] = []
         # Set to an exception to make set_permission_mode refuse, the same
         # way the real engine refuses an unknown mode or a disconnected
@@ -337,9 +343,20 @@ class FakeEngine:
     async def set_permission_mode(self, mode: str) -> str:
         """Engine parity for /mode (v0.42.0). The real engines issue an SDK
         control request / a daemon RPC; the fake records the switch, which
-        is the whole surface the pane touches."""
+        is the whole surface the pane touches.
+
+        v0.59.0: refuses a mode this session is not armed for, exactly as
+        SessionEngine does, so a test cannot accidentally prove a UI path
+        works against a fake more permissive than the real thing."""
         if self.permission_mode_error is not None:
             raise self.permission_mode_error
+        from doxa import engine as _engine_mod
+
+        if mode not in _engine_mod.available_modes(self.bypass_armed):
+            raise RuntimeError(
+                f"{mode} needs a session started with "
+                f"--{_engine_mod.BYPASS_ARM_FLAG}; this one was not"
+            )
         self.permission_mode = mode
         self.permission_mode_switches.append(mode)
         return mode

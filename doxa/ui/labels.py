@@ -437,7 +437,7 @@ def mode_chip(mode: "str | None", *, short: bool = False) -> str:
     return f"[{weight}{colour}]{text}[/]"
 
 
-def mode_tooltip(mode: "str | None") -> str:
+def mode_tooltip(mode: "str | None", armed: bool = False) -> str:
     """The chip's hover row: what this mode DOES, in the terms the user
     cares about (does anything still ask me?), plus the exact SDK spelling
     so ``/mode <name>`` is copyable from the tooltip, plus the key.
@@ -451,7 +451,7 @@ def mode_tooltip(mode: "str | None") -> str:
 
     name = str(mode or engine_mod.DEFAULT_PERMISSION_MODE)
     what = MODE_EXPLAIN.get(name, "a permission mode DOXA does not know")
-    cycle = " → ".join(engine_mod.CYCLE_MODES)
+    cycle = " → ".join(engine_mod.cycle_modes(armed))
     tail = f"click to change, or /mode <name>; Shift+Tab cycles {cycle}"
     return f"permission mode {name} — {what} · {tail}"
 

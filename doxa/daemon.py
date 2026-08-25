@@ -583,6 +583,10 @@ class SessionDaemon:
             # showing this client's seeded guess rather than the daemon's
             # fact. A safety indicator must not have a guess-shaped hole.
             "permission_mode": getattr(self.engine, "permission_mode", None),
+            # Beside the mode for the same reason it is: a reattaching
+            # client must not paint a cycle that includes a mode this
+            # daemon's CLI would refuse.
+            "bypass_armed": bool(getattr(self.engine, "bypass_armed", False)),
             "cwd": self.cwd,
             "next_seq": self.ring.next_seq,
         }))
@@ -944,6 +948,11 @@ class SessionDaemon:
             # misreporting a safety property to the person who just came
             # back to check on it.
             "permission_mode": getattr(self.engine, "permission_mode", None),
+            # Whether THIS daemon's CLI was spawned with the arming flag
+            # (v0.59.0). A client cannot work this out for itself -- it did
+            # not build the argv -- and every surface it paints derives
+            # from it, so it rides the status reply like the mode does.
+            "bypass_armed": bool(getattr(self.engine, "bypass_armed", False)),
             "cwd": self.cwd,
             # Identity surface for the client's status cache: the account
             # block the CLI reported at connect (may be {}), and where the
