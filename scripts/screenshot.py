@@ -412,6 +412,145 @@ async def _drive_image_support(app: DoxaApp, pilot) -> None:
 
 
 # --------------------------------------------------------------------- #
+# Scene: beliefs-browser -- item V's full-height tab, not the ten-row
+# picker (already shown in `memory`): scope-grouped beliefs carrying
+# LORE's own outcome verbs (confirmed/contradicted/never tested), and the
+# staged-proposals half beneath them with one row armed mid-approve, so
+# the two-step "arm, then confirm" control reads as itself rather than as
+# an ordinary button.
+# --------------------------------------------------------------------- #
+
+_DAY = 86400.0
+
+
+def _stamp(secs_ago: float) -> str:
+    from time import gmtime, strftime, time as now
+
+    return strftime("%Y-%m-%dT%H:%M:%SZ", gmtime(now() - secs_ago))
+
+
+def _belief(bid, subject, claim, *, outcome=None, outcome_days=2,
+            confidence=0.91, evidence_count=4) -> dict:
+    belief = {
+        "id": bid, "subject": subject, "claim": claim,
+        "confidence": confidence,
+        "created": _stamp(120 * _DAY), "updated": _stamp(9 * _DAY),
+        "last_referenced": _stamp(9 * _DAY),
+        "via": "derived", "evidence_count": evidence_count,
+        "outcomes": 1 if outcome else 0,
+    }
+    if outcome:
+        belief.update({
+            "outcome_event": outcome, "outcome_at": _stamp(outcome_days * _DAY),
+            "outcome_source": "dream", f"outcome_{outcome}s": 1,
+        })
+    return belief
+
+
+def _proposal(pid, text, *, kind="memory", scope="project") -> dict:
+    return {
+        "pid": pid, "kind": kind, "action": "add", "scope": scope,
+        "text": text, "created": _stamp(3 * _DAY),
+        "session_id": "a1b2c3d4e5", "project": "doxa",
+    }
+
+
+def _live_lore_write_state() -> dict:
+    """FakeEngine's own `lore_write_state_result` default hard-codes
+    ``"version": "0.36.0"`` -- fine for a unit test, which scripts a
+    capability and does not care which real lore_core shipped it, but the
+    beliefs-browser scene renders that string straight into its header
+    (``lore_core {version} ({source})``), where it reads as a live fact
+    about this checkout. Read the two real answers instead -- the same
+    ones `doxa.version.lore_core_version()` and
+    `doxa._lore_bootstrap.resolved_source()` give the real engine, per
+    `test_write_state_reports_the_carrier_about_already_names` -- so the
+    number moves when the pin in pyproject.toml does, rather than sitting
+    fixed at whatever lore_core was current when this fixture was
+    written."""
+    from doxa import _lore_bootstrap, version as version_mod
+
+    source = _lore_bootstrap.resolved_source()
+    return {
+        "capable": True,
+        "version": version_mod.lore_core_version() or "unknown",
+        "source": (source[0] if source else "unknown"),
+        "location": (source[1] if source else ""),
+        "reason": "",
+    }
+
+
+def _beliefs_engine() -> FakeEngine:
+    engine = FakeEngine([], model="claude-opus-4-5")
+    engine.lore_write_state_result = _live_lore_write_state()
+    engine.belief_action_state_result = {
+        **engine.belief_action_state_result,
+        "version": engine.lore_write_state_result["version"],
+    }
+    engine.list_beliefs_result = [
+        _belief(184, "project:doxa",
+                "deploy checklist checks the runbook before tagging",
+                outcome="confirmed"),
+        _belief(201, "project:doxa",
+                "kg-stats batch job reuses the deploy gate", outcome=None),
+        _belief(77, "user", "prefers terse commit messages",
+                outcome="contradicted", outcome_days=6),
+    ]
+    engine.list_pending_result = [
+        _proposal("20260825-00", "remember uv, not pip, for this repo"),
+        _proposal("20260825-01",
+                   "belief #201 is superseded by a stricter version",
+                   kind="belief"),
+    ]
+    return engine
+
+
+async def _drive_beliefs_browser(app: DoxaApp, pilot) -> None:
+    from doxa.ui.beliefs import ProposalRow
+
+    await pilot.pause()
+    pane = app.active_pane
+    await pane.open_beliefs_browser()
+    tab = None
+    for _ in range(200):
+        tab = pane._beliefs_tab
+        if tab is not None and tab.rows:
+            break
+        await pilot.pause(0.02)
+    await pilot.pause(0.2)
+    # Arm the first proposal's approve control -- the second click that
+    # would actually apply it never happens, which is the point: the shot
+    # is the "you have to mean it" state, not the aftermath.
+    rows = [r for r in tab.rows if isinstance(r, ProposalRow)]
+    rows[0].action_approve()
+    await pilot.pause()
+
+
+# --------------------------------------------------------------------- #
+# Scene: error-block -- v0.53.0's whole point, on screen: a caught
+# exception rendered AS PART OF THE TRANSCRIPT, collapsed to one line by
+# default and expanded here to show the fold underneath it, instead of
+# taking the app down.
+# --------------------------------------------------------------------- #
+
+
+async def _drive_error_block(app: DoxaApp, pilot) -> None:
+    from doxa.app import ErrorBlock
+
+    await _settle(pilot)
+    try:
+        raise TimeoutError("lore_belief_search timed out after 30s")
+    except TimeoutError as exc:
+        app.report_exception(
+            exc, origin="LORE", context="tool call: lore_belief_search",
+        )
+    await pilot.pause()
+    block = app.query_one(ErrorBlock)
+    block.collapsed = False
+    await pilot.pause()
+
+
+# --------------------------------------------------------------------- #
 
 @dataclass
 class Scene:
@@ -445,24 +584,51 @@ class Scene:
 # canvas below existing content, never cuts anything off. `settings` is
 # the one exception: its rows were already tall enough that shrinking them
 # to hit 16:9 would have clipped the modal, so its COLUMNS grew instead.
+#
+# `WIDE`, below, replaces the bare `(172, 47)` every status-bar-carrying
+# scene used to share. MEASURED (not assumed): the permission-mode chip,
+# curated-memory fill and staged-proposals chip all shipped after 172 was
+# chosen, and a live status bar's own plain text -- read back off the
+# widget, not off a guess -- now runs to 228 characters on `hero` (three
+# open tabs, a worktree branch, peers and a session handle) against 168
+# content columns there, i.e. the row was losing everything from the
+# memory chip on. `settings`'s own precedent applies here too: the row is
+# not width-budgeted the way a tab label is, so the fix is more COLUMNS,
+# with rows re-solved for 16:9 rather than left to clip.
+WIDE = (250, 69)
+
+
 SCENES: list[Scene] = [
-    Scene("hero", _drive_hero, size=(172, 47), engine_factory=_hero_engine,
+    Scene("hero", _drive_hero, size=WIDE, engine_factory=_hero_engine,
           new_session_factory=_sibling_tab_factory()),
-    Scene("trace", _drive_trace, size=(172, 47),
+    Scene("trace", _drive_trace, size=WIDE,
           engine_factory=lambda: FakeEngine(TRACE_SCRIPT, model="claude-opus-4-5")),
-    Scene("transparent", _drive_transparent, size=(172, 47),
+    Scene("transparent", _drive_transparent, size=WIDE,
           engine_factory=lambda: FakeEngine(TRACE_SCRIPT, model="claude-opus-4-5")),
-    Scene("subagent-tracker", _drive_subagent_tracker, size=(172, 47),
+    Scene("subagent-tracker", _drive_subagent_tracker, size=WIDE,
           engine_factory=lambda: FakeEngine(SUBAGENT_TRACKER_SCRIPT, model="claude-opus-4-5")),
-    Scene("memory", _drive_memory, size=(172, 47),
+    Scene("memory", _drive_memory, size=WIDE,
           engine_factory=_hero_engine),
     Scene("settings", _drive_settings, size=(120, 32),
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5")),
     Scene("clock", _drive_clock, size=(120, 32),
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
           new_session_factory=lambda: FakeEngine([], model="claude-sonnet-4-5")),
-    Scene("sessions", _drive_sessions, size=(172, 47),
+    Scene("sessions", _drive_sessions, size=WIDE,
           engine_factory=_hero_engine),
+    # NOT `WIDE`: unlike hero/trace/memory/sessions/etc., this scene's tab
+    # replaces the whole pane -- no status bar, no prompt box beneath it --
+    # so none of the reasoning that widened those to 250 columns applies
+    # here. Measured instead off this scene's own content: at 134 columns
+    # the two staged proposals plus three scope-grouped belief rows (each
+    # wrapping its evidence/outcome line at that width) fill to row 29 of
+    # the scroll region, which starts 4 rows down from the frame top: 36
+    # rows leaves a 3-row margin rather than the ~40 blank rows `WIDE`
+    # left below this scene's much shorter content.
+    Scene("beliefs-browser", _drive_beliefs_browser, size=(134, 36),
+          engine_factory=_beliefs_engine),
+    Scene("error-block", _drive_error_block, size=(120, 32),
+          engine_factory=lambda: FakeEngine([], model="claude-opus-4-5")),
     # The `image` FORM of the banner. Pinned, because since v0.58.0 `auto`
     # draws the wordmark on half-block -- and half-block is the only tier
     # an SVG export can capture at all, so this shot stands in for what a
@@ -480,11 +646,15 @@ SCENES: list[Scene] = [
     # 25 rows, not 21: the drawn mark went from four rows to seven, so at
     # 21 the transcript overflowed, scrolled to its tail, and cut the top
     # of the ring off in the shot. A scene has to be tall enough to hold
-    # the thing it is a picture of.
-    Scene("banner-blocks", _drive_banner_degraded, size=(80, 25),
+    # the thing it is a picture of -- and 25 rows is CONTENT-mandated, the
+    # same bind `settings` above hit, so the columns are what moved to
+    # land back on 16:9 (95, not 80: measured, 994x660 at 80 columns was
+    # 1.51, 15% off; 1177x660 at 95 is 1.78, inside tolerance) rather than
+    # shrinking the rows and clipping the ring again.
+    Scene("banner-blocks", _drive_banner_degraded, size=(95, 25),
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
           env={"DOXA_IMAGE_MODE": "halfblock"}),
-    Scene("image-support", _drive_image_support, size=(172, 47),
+    Scene("image-support", _drive_image_support, size=WIDE,
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
           env=_HALFBLOCK),
 ]

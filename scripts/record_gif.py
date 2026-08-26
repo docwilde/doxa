@@ -633,6 +633,58 @@ async def _drive_chip_picker(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> No
 
 
 # --------------------------------------------------------------------- #
+# Scene: permission-mode -- v0.50.0's chip, FIRST on the row since it is
+# the one chip that must never fall off a narrow terminal: default (grey)
+# -> plan (teal, cycle-safe) -> auto (amber, a model classifier approves
+# instead of you) -> bypassPermissions (red, nothing left to decline). The
+# engine is armed (bypass_armed=True) so the red tier is even reachable --
+# see doxa.engine.available_modes: an unarmed session never lists it at
+# all, which is v0.58.0's whole point and not something a demo should
+# paper over by faking a wider ring than a real unarmed session gets.
+# --------------------------------------------------------------------- #
+
+
+async def _drive_permission_mode(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
+    await pilot.pause()
+    pane = app.active_pane
+    assert pane is not None
+    rec.snap(900, "default mode chip leads the row -- grey, painted even at rest")
+
+    await pane.open_mode_picker()
+    picker = pane.query_one(ChipPicker)
+    assert await _wait_until(pilot, lambda: picker.is_open)
+    await pilot.pause()
+    rec.snap(1000, "the SAME picker every chip opens -- six modes, grouped by "
+                   "how you reach them")
+
+    await pilot.press("p", "l", "a", "n")
+    await pilot.pause()
+    rec.snap(700, "typing 'plan' narrows to one row")
+
+    await pilot.press("enter")
+    assert await _wait_until(pilot, lambda: pane.engine.permission_mode == "plan")
+    await pilot.pause()
+    rec.snap(900, "Enter switches it -- the chip turns teal")
+
+    await pane.open_mode_picker()
+    await pilot.press("a", "u", "t", "o")
+    await pilot.press("enter")
+    assert await _wait_until(pilot, lambda: pane.engine.permission_mode == "auto")
+    await pilot.pause()
+    rec.snap(1000, "auto: amber -- a model classifier approves each call instead of you")
+
+    await pane.open_mode_picker()
+    await pilot.press("b", "y", "p", "a", "s", "s")
+    await pilot.press("enter")
+    assert await _wait_until(
+        pilot, lambda: pane.engine.permission_mode == "bypassPermissions"
+    )
+    await pilot.pause()
+    rec.snap(1300, "bypassPermissions: red -- every call runs unapproved, "
+                   "nothing left to decline")
+
+
+# --------------------------------------------------------------------- #
 
 @dataclass
 class Scene:
@@ -703,6 +755,13 @@ SCENES: list[Scene] = [
         "chip-picker", _drive_chip_picker, size=SIZE_TAB_BAR, min_frames=4,
         widgets=(ChipPicker,),
         engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
+    ),
+    Scene(
+        "permission-mode", _drive_permission_mode, size=SIZE_TAB_BAR, min_frames=6,
+        widgets=(ChipPicker,),
+        engine_factory=lambda: FakeEngine(
+            [], model="claude-opus-4-5", bypass_armed=True,
+        ),
     ),
 ]
 

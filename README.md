@@ -139,14 +139,23 @@ default — see the **[manual](docs/manual.md)**.
 <p align="center"><img src="assets/shots/memory.png" width="640" alt="A lore_belief_search chip expanded, showing a result listing one STEER belief with an outcome count and one CITE-only belief"></p>
 <p align="center"><em>A memory-store call is an ordinary chip — the mechanism deciding what the agent believes is inspectable like any other tool call.</em></p>
 
+<p align="center"><img src="assets/shots/beliefs-browser.png" width="640" alt="The /beliefs tab: staged proposals with one row armed mid-approve, and active beliefs grouped by scope carrying LORE's own outcome verbs — confirmed, contradicted, never tested"></p>
+<p align="center"><em>The full beliefs browser, for when the status-bar picker isn't enough — every belief and every staged proposal, reviewed one row at a time. Approving arms on the first action and applies on an explicit second one.</em></p>
+
 <p align="center"><img src="assets/shots/subagent-tracker.png" width="640" alt="A status row reading '1 agent' beneath the status bar, plus a second tab in the strip titled from the running subagent's own description"></p>
 <p align="center"><em>A running subagent gets its own status row and a live transcript tab.</em></p>
 
 <p align="center"><img src="assets/shots/needs-input.gif" width="640" alt="An AskUserQuestion dialog opening above the prompt asking which environment a migration should target"></p>
 <p align="center"><em>AskUserQuestion and permission requests get a real dialog instead of a silent auto-deny.</em></p>
 
+<p align="center"><img src="assets/shots/error-block.png" width="640" alt="A caught TimeoutError rendered as a collapsible red-ruled block inside the transcript, expanded to show its traceback and origin"></p>
+<p align="center"><em>A failure shows up as a block in the transcript, not a dead terminal — collapsed to one line by default, the full traceback one keystroke away.</em></p>
+
 <p align="center"><img src="assets/shots/chip-picker.gif" width="640" alt="Clicking the branch chip in the status bar opens a dropdown of local branches with the current one marked"></p>
 <p align="center"><em>Every selector chip in the status bar opens the same picker — type to filter, enter to apply.</em></p>
+
+<p align="center"><img src="assets/shots/permission-mode.gif" width="640" alt="The permission-mode chip cycling through the shared picker: grey 'default', teal 'plan', amber 'auto', red 'bypassPermissions'"></p>
+<p align="center"><em>The mode chip leads the status bar and is never hidden — auto and bypassPermissions turn it amber or red, because those are the two modes where nothing stops to ask you first.</em></p>
 
 <p align="center"><img src="assets/shots/tab-lifecycle.gif" width="640" alt="A second tab starts a turn and turns amber; switching to the first tab leaves it amber in the background; the turn finishes there and the tab turns green"></p>
 <p align="center"><em>A background tab reports its own state by color — amber while running, green once finished unseen.</em></p>
