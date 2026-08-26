@@ -10,6 +10,7 @@ not written from memory.
 - Draws the Greek letters from `█` rather than printing the Unicode characters, for the same reason the mark has never used half-blocks or Geometric Shapes triangles: a monospace font's Greek coverage is not guaranteed, and this sidesteps that tofu risk entirely instead of trading one glyph-coverage gamble for another.
 - Keeps the plain Latin `DOXA` wordmark as a fallback for terminals too narrow for the full Greek word, and drops to it alone when even the triangle does not fit — the same three-stage ladder as before, with the thresholds (`DRAWN_MARK_COLUMNS`, `DRAWN_FULL_COLUMNS`) recomputed from the new art's measured width.
 - Holds the total row budget at 9, same as the ring-era mark, despite giving Ξ and Α enough rows to read clearly: dropping the ring's moat frees the rows the tagline now spends on its own row below the word. The mid-width fallback (triangle + plain wordmark, no tagline) is shorter than before, at 7 rows rather than 9.
+- Ο's sides were drawn two columns wide to make the curve read as a curve; fixed to match Δ and Α's single-cell stroke, with the roundness coming from narrower cap and base rows instead. Word width is unchanged (`GREEK_COLUMNS` 40, `DRAWN_FULL_COLUMNS` 58).
 
 ## 0.70.0 — 2026-08-26
 
