@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 
+from textual.css.query import NoMatches
 from textual.containers import VerticalScroll
 from textual.widgets import Static, TabbedContent
 
@@ -131,7 +132,19 @@ class PaneRuntimeMixin:
         self._refresh_status()
         # Initial identity block: who/where this session actually is --
         # only fields the CLI/config really reported, never guesses.
-        block_list = self.query_one("#block-list", VerticalScroll)
+        #
+        # The block list may not be mounted yet. _boot runs as a worker and
+        # a restore mounts several panes at once, so this can reach a pane
+        # Textual has not composed. query_one raises NoMatches there, from a
+        # background task with no caller of ours to catch it, and the error
+        # surface turns it into a visible block -- a failure report for a
+        # frame nobody could have painted. Same shape and same reason as the
+        # #status-bar guard in doxa.session.chips (v0.70.0); measured under
+        # test_restore_view's saved-active-tab case, which mounts three.
+        try:
+            block_list = self.query_one("#block-list", VerticalScroll)
+        except NoMatches:
+            return
         # The banner introduces the identity block, so it mounts first and
         # only where there was nothing before it -- switch_engine re-runs
         # _boot into a pane that already has a transcript, and the mark

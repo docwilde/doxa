@@ -6,6 +6,8 @@ not written from memory.
 
 ## 0.75.0 — 2026-08-26
 
+- `_boot` queried `#block-list` on a pane Textual had not composed yet, raising `NoMatches` from a background task; the error surface turned it into a visible block during a multi-pane restore. Same guard as the `#status-bar` one in v0.70.0 — a boot with nowhere to draw returns rather than reporting a failure nobody could have seen.
+
 `/context` leads with a bar now: block art (full blocks only, the house
 rule the boot mark settled) showing the window's occupancy, colored per
 component, right above the exact numbers the command has always printed
