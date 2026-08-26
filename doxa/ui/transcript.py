@@ -39,6 +39,8 @@ from .labels import (
     _one_line,
     _write_tab_class,
     _write_tab_label,
+    context_bar_text,
+    context_breakdown_text,
 )
 
 
@@ -237,6 +239,52 @@ class SystemBlock(Static):
     def action_follow_link(self) -> None:
         if self._on_link is not None:
             self._on_link()
+
+
+class ContextBlock(SystemBlock):
+    """``/context`` (item K's newest form): the same measured breakdown
+    SystemBlock has always shown, now LED by a proportional bar of the
+    window -- :func:`doxa.ui.labels.context_bar_text`, built from the same
+    ``categories`` the numbers below it already come from. See that
+    function's own docstring for the honesty rules the bar keeps (no
+    reported window, no bar; a component under half a block draws zero,
+    never one; the bar's own width can never exceed what it was given).
+
+    A widget of its own, not a wider SystemBlock, for exactly
+    :class:`_DrawnMark`'s reason: the bar's WIDTH depends on the box this
+    widget is actually given, and that can change out from under it after
+    it mounts -- the transcript growing a scrollbar with no Resize message
+    following is v0.70.0's own precedent, found once already in the boot
+    mark. So :meth:`render` recomputes the bar from
+    ``self.content_size.width`` on every paint, the same discipline
+    :class:`_DrawnMark` keeps, rather than fitting once at construction
+    and trusting a resize to arrive. A box narrower than
+    ``CONTEXT_BAR_MIN_COLUMNS`` degrades to the numbers alone -- the same
+    thing a session with no reported window already does.
+
+    ``self.text`` is still SystemBlock's own plain-numbers rendering
+    (:func:`context_breakdown_text`), untouched -- every existing
+    ``/context`` assertion keeps reading exactly what it always did off
+    that attribute. Only :meth:`render` (what the screen actually paints)
+    gains the bar, spliced in right after the "context" heading line and
+    ahead of everything measured."""
+
+    def __init__(self, breakdown: dict) -> None:
+        self.breakdown = breakdown
+        super().__init__(context_breakdown_text(breakdown))
+
+    def render(self):
+        heading, _, rest = self.text.partition("\n")
+        body = f"▎ doxa\n{heading}"
+        bar = context_bar_text(self.breakdown, self.content_size.width)
+        if bar:
+            body += f"\n{bar}"
+        if rest:
+            body += f"\n{rest}"
+        if body != self._content:
+            self._content = body
+            self._visual = None
+        return self.visual
 
 
 class ErrorBlock(Collapsible):

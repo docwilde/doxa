@@ -26,10 +26,15 @@ import pytest
 from claude_agent_sdk import ResultMessage
 
 from doxa import commands, engine as engine_mod
-from doxa.app import DoxaApp, SlashComplete, SystemBlock
+from doxa.app import ContextBlock, DoxaApp, SlashComplete, SystemBlock
 from doxa.engine import SessionEngine, context_breakdown
 from doxa.ui.labels import (
+    CONTEXT_BAR_MAX_COLUMNS,
+    CONTEXT_BAR_MIN_COLUMNS,
+    CONTEXT_BAR_TRACK,
     CONTEXT_UNAVAILABLE,
+    context_bar_segments,
+    context_bar_text,
     context_breakdown_text,
     ctx_text,
     help_text,
@@ -478,3 +483,268 @@ def test_the_breakdown_applies_item_x_s_unknown_token_rule():
     assert "raw_max_tokens" not in breakdown
     assert breakdown["percentage"] == 12.0
     assert "in use" not in context_breakdown_text(breakdown)
+
+
+# -- the bar: block art in place of the numbers, numbers still below ------
+#
+# "instead of the numbers" is read here as LEADS the numbers, not replaces
+# them: a bar of ``█`` can show the SHAPE of the window at a glance but
+# cannot tell 4% from 6%, and item K's whole premise is that every figure
+# on this screen stays a reachable measurement. context_breakdown_text
+# (the numbers) is untouched by every test above this line -- deliberately,
+# since context_bar_text/context_bar_segments are new, additive functions
+# nothing else calls yet.
+
+
+def _plain(text: str) -> str:
+    """Strip this module's ``[#RRGGBB]...[/]`` color spans back off, the
+    same regex ``tests/test_banner.py``'s ``_plain_lines`` uses for the
+    drawn boot mark -- the bar is built out of the identical markup
+    shape."""
+    import re
+
+    return re.sub(r"\[/?#?[0-9A-Fa-f]{0,6}\]", "", text)
+
+
+def test_no_reported_window_no_bar_same_rule_as_the_numbers():
+    """Item K's central rule, restated for the bar: a limit the CLI never
+    sent reads ``?`` and stays ``?`` -- there is no denominator to be
+    proportional against, so there is no bar, not one drawn against a
+    guessed 200000."""
+    breakdown = context_breakdown({
+        "totalTokens": 100,
+        "categories": [{"name": "Messages", "tokens": 100}],
+    })
+    assert "max_tokens" not in breakdown
+    assert context_bar_segments(breakdown, 80) is None
+    assert context_bar_text(breakdown, 80) == ""
+
+
+def test_no_measured_categories_no_bar():
+    """A window size with nothing to divide it into is the other half of
+    the same rule: percentage and totals alone are not a shape."""
+    breakdown = context_breakdown({"totalTokens": 100, "maxTokens": 1000})
+    assert breakdown.get("categories") == []
+    assert context_bar_segments(breakdown, 80) is None
+
+
+def test_a_box_too_narrow_drops_the_bar_not_the_numbers():
+    """Below CONTEXT_BAR_MIN_COLUMNS the bar is 2-3 blocks of noise, not a
+    shape -- context_bar_text degrades to "" rather than ship it, and
+    context_breakdown_text (unexercised by width at all) keeps printing
+    the exact numbers regardless."""
+    breakdown = _breakdown()
+    assert context_bar_segments(breakdown, CONTEXT_BAR_MIN_COLUMNS - 1) is None
+    assert context_bar_text(breakdown, CONTEXT_BAR_MIN_COLUMNS - 1) == ""
+    assert context_bar_segments(breakdown, CONTEXT_BAR_MIN_COLUMNS) is not None
+    assert "60,650 / 180,000" in context_breakdown_text(breakdown)
+
+
+def test_a_sub_half_block_component_draws_no_visible_sliver():
+    """Rounding a 0.2% component up to one block is a lie at the small
+    end. A category worth 0.2% of a 60-wide bar (0.12 of a block) must
+    draw ZERO blocks, and every category ahead of it in the list must not
+    be inflated to cover for it -- the bar's own width still has to sum
+    correctly with the sliver gone."""
+    breakdown = context_breakdown({
+        "totalTokens": 100_000,
+        "maxTokens": 100_000,
+        "categories": [
+            {"name": "Sliver", "tokens": 200},        # 0.2% of the window
+            {"name": "Messages", "tokens": 49_800},   # 49.8%
+            {"name": "Free space", "tokens": 50_000},  # 50%
+        ],
+    })
+    segments = context_bar_segments(breakdown, 60)
+    assert segments is not None
+    colors = [color for color, _count in segments]
+    # The sliver's own palette slot (index 0) never appears -- it drew
+    # zero blocks and was skipped outright, not folded into a neighbor.
+    from doxa.ui.labels import CONTEXT_BAR_PALETTE
+
+    assert CONTEXT_BAR_PALETTE[0] not in colors
+    assert sum(count for _color, count in segments) == 60
+
+
+def test_segments_never_exceed_the_width_they_were_given():
+    """The v0.70.0 lesson, restated for the bar: independent per-category
+    rounding can overshoot (several categories each just over a half-block
+    boundary, each rounding up) -- the exact failure shape that let the
+    boot mark's own fit overflow its column once already. Pinned here
+    against a set of shares chosen to trip that: six categories at 15%
+    apiece (a share whose ``* width`` lands past the halfway mark at every
+    width tried) plus one at 10%, for widths spanning
+    CONTEXT_BAR_MIN_COLUMNS to CONTEXT_BAR_MAX_COLUMNS and a few points
+    past it."""
+    shares = [0.15] * 6 + [0.10]
+    window = 1_000_000
+    breakdown = context_breakdown({
+        "totalTokens": window,
+        "maxTokens": window,
+        "categories": [
+            {"name": f"cat{i}", "tokens": int(window * share)}
+            for i, share in enumerate(shares)
+        ],
+    })
+    for width in (
+        CONTEXT_BAR_MIN_COLUMNS,
+        30,
+        40,
+        CONTEXT_BAR_MAX_COLUMNS,
+        CONTEXT_BAR_MAX_COLUMNS + 40,
+    ):
+        segments = context_bar_segments(breakdown, width)
+        assert segments is not None
+        total = sum(count for _color, count in segments)
+        expected = min(width, CONTEXT_BAR_MAX_COLUMNS)
+        assert total == expected, f"width {width}: bar drew {total}, box is {expected}"
+
+
+def test_free_space_draws_in_the_track_color_not_a_content_color():
+    """"Free space" is the CLI's own name for the window's unspent
+    remainder (it is what makes ``categories`` sum to ``max_tokens`` in
+    the fixture at the top of this file) -- the bar reads it as the empty
+    part of the picture, in the same border-grey theme.tcss already uses
+    to mean "boundary, not content", never as one more colored component
+    competing for attention with what was actually spent."""
+    segments = context_bar_segments(_breakdown(), 60)
+    assert segments is not None
+    assert segments[-1] == (CONTEXT_BAR_TRACK, 40)  # Free space is 119_350/180_000
+
+
+def test_component_colors_are_stable_across_widths():
+    """A category's color comes from its OWN position in the CLI's list,
+    not from how many segments happened to draw a block at this
+    particular width -- otherwise a category that rounds to zero at 24
+    columns would silently push every later category into a different
+    hue than it wore at 60, which is exactly the kind of thing "the same
+    component, the same color" is supposed to rule out."""
+    from doxa.ui.labels import CONTEXT_BAR_PALETTE
+
+    breakdown = _breakdown()
+    wide = dict(context_bar_segments(breakdown, 60))
+    narrow = context_bar_segments(breakdown, CONTEXT_BAR_MIN_COLUMNS)
+    assert narrow is not None
+    # System tools (idx 1, the second-largest real category) survives at
+    # both widths and must keep the same color at both.
+    assert CONTEXT_BAR_PALETTE[1] in wide
+    assert CONTEXT_BAR_PALETTE[1] in dict(narrow)
+
+
+def test_context_bar_text_repeats_the_percentage_next_to_the_picture():
+    """A bar with no number beside it invites reading 4% as 6% -- the one
+    figure that belongs on the SAME line as a picture is the figure the
+    picture is a picture of, at the numbers view's own one-decimal
+    precision so the two never read as disagreeing over rounding."""
+    text = context_bar_text(_breakdown(), 60)
+    assert text.endswith("33.7%")
+    assert "█" in _plain(text)
+
+
+@pytest.mark.asyncio
+async def test_context_leads_with_a_bar_of_full_blocks_and_keeps_the_numbers(
+    monkeypatch, tmp_path
+):
+    """The rendered outcome, measured rather than assumed (the v0.28.0
+    rule: assert what actually painted, not that a matching widget
+    exists). At 80 columns the bar is real block art AND every number
+    /context has always printed is still on screen beneath it."""
+    fake = FakeEngine([])
+    fake.context_usage_result = _breakdown()
+    app, _fake = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.query_one("#prompt-input").value = "/context"
+        await pilot.press("enter")
+        block = None
+        for _ in range(300):
+            found = list(app.query(ContextBlock))
+            if found:
+                block = found[0]
+                break
+            await pilot.pause(0.02)
+        assert block is not None, "/context did not mount a ContextBlock"
+        assert block.region.height > 0
+        rendered = str(block.renderable)
+        plain = _plain(rendered)
+        assert "█" in plain
+        # The bar is only ONE glyph -- nothing but block art and spaces on
+        # its own line, never a half-block or a Geometric Shapes triangle.
+        bar_lines = [line for line in plain.splitlines() if "█" in line]
+        assert bar_lines, "no rendered line carries the bar"
+        stripped_glyphs = set(bar_lines[0].replace(" ", "").replace("%", ""))
+        assert stripped_glyphs <= set("█0123456789.")
+        # The numbers underneath are exactly what they always were.
+        assert "60,650 / 180,000" in rendered
+        assert "33.7%" in rendered
+        assert "System prompt" in rendered
+        assert "Free space" in rendered
+
+
+@pytest.mark.asyncio
+async def test_the_bar_never_overflows_the_content_box_it_was_measured_against(
+    monkeypatch, tmp_path
+):
+    """v0.70.0's own precedent (the boot mark overflowing a column a
+    scrollbar had since narrowed) is exactly the failure this pins for
+    ``/context``: at every width tried, no rendered row is wider than
+    ``content_size.width`` -- fit against the widget's OWN measured box,
+    never against ``columns``."""
+    for width in (20, 30, 40, 60, 80, 120):
+        fake = FakeEngine([])
+        fake.context_usage_result = _breakdown()
+        app, _fake = await _app(monkeypatch, tmp_path / f"w{width}", fake)
+        async with app.run_test(size=(width, 24)) as pilot:
+            await pilot.pause()
+            app.query_one("#prompt-input").value = "/context"
+            await pilot.press("enter")
+            block = None
+            for _ in range(300):
+                found = list(app.query(ContextBlock))
+                if found:
+                    block = found[0]
+                    break
+                await pilot.pause(0.02)
+            assert block is not None
+            available = block.content_size.width
+            rendered = _plain(str(block.renderable))
+            for line in rendered.splitlines():
+                if "█" not in line:
+                    continue
+                assert len(line) <= available, (
+                    f"at width {width} (content {available}) the bar row "
+                    f"{line!r} ({len(line)} cells) overflows"
+                )
+            if available < CONTEXT_BAR_MIN_COLUMNS:
+                assert "█" not in rendered, (
+                    f"width {width} (content {available}) drew a bar below "
+                    "CONTEXT_BAR_MIN_COLUMNS"
+                )
+
+
+@pytest.mark.asyncio
+async def test_a_narrow_pane_drops_the_bar_and_keeps_the_numbers(
+    monkeypatch, tmp_path
+):
+    """The degrade path named in the brief: too narrow for a shape, the
+    numbers stay -- /context never goes silent just because the bar
+    could not."""
+    fake = FakeEngine([])
+    fake.context_usage_result = _breakdown()
+    app, _fake = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(30, 24)) as pilot:
+        await pilot.pause()
+        app.query_one("#prompt-input").value = "/context"
+        await pilot.press("enter")
+        block = None
+        for _ in range(300):
+            found = list(app.query(ContextBlock))
+            if found:
+                block = found[0]
+                break
+            await pilot.pause(0.02)
+        assert block is not None
+        assert block.content_size.width < CONTEXT_BAR_MIN_COLUMNS
+        rendered = str(block.renderable)
+        assert "█" not in rendered
+        assert "60,650" in rendered
