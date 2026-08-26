@@ -1251,13 +1251,6 @@ class PaneChipsMixin:
             # contradiction that just retired a belief says so here.
             await self._system(f"belief {bid} · {event} · {error}\n\n{claim}")
             return
-        # A recorded outcome can retire the belief (LORE's own dormancy
-        # rule above), which moves the belief chip's count -- refresh AFTER
-        # the write lands, never before, so the chip never claims a change
-        # that has not actually happened yet. `_call`/the in-process engine
-        # both already await the write's own completion, so this is
-        # correct for a daemon-hosted session exactly as it is in-process.
-        self._refresh_status()
         await self._system(
             f"belief {bid} recorded as {event} (source: user)\n\n{claim}"
         )
@@ -1277,9 +1270,6 @@ class PaneChipsMixin:
         if error:
             await self._system(f"belief {bid} · NOT retracted — {error}\n\n{claim}")
             return
-        # Retracting moves the belief chip's count -- see the same refresh
-        # note above.
-        self._refresh_status()
         await self._system(
             f"belief {bid} retracted — it leaves the working set and the "
             f"model's context. Its evidence and outcome ledger stay on "
@@ -1609,15 +1599,6 @@ class PaneChipsMixin:
         if error:
             await self._system(f"proposal {pid} · NOT {action}d — {error}")
             return
-        # The proposal leaves the staging queue either way (moves the
-        # staged-proposals chip); an APPROVED memory proposal also writes
-        # MEMORY.md/USER.md (moves the memory-fill chip) and an approved
-        # belief proposal also lands in the active set (moves the belief
-        # chip). One refresh after the write settles all three correctly,
-        # because each reads its own store fresh rather than trusting a
-        # guess about which kind of proposal this was -- see the note on
-        # the two belief-write refreshes above for why AFTER, not before.
-        self._refresh_status()
         if action == "approve":
             await self._system(
                 f"proposal {pid} approved — {verdict}. LORE recorded it as "

@@ -812,9 +812,6 @@ class BeliefsBrowserTab(TabPane):
             )
             return
         row.settle("", await self._refetch(row.belief_id) or row.belief)
-        self._refresh_owner_status()  # a recorded outcome can retire the
-        # belief (LORE's own dormancy rule above), which moves the status
-        # bar's belief-count chip.
         await self._say(
             f"beliefs browser · belief {row.belief_id} recorded as {event} "
             "(source: user) — LORE's own outcome ledger, the one "
@@ -834,7 +831,6 @@ class BeliefsBrowserTab(TabPane):
             )
             return
         row.settle("⌫ retracted")
-        self._refresh_owner_status()  # moves the belief-count chip
         await self._say(
             f"beliefs browser · belief {row.belief_id} retracted — it leaves "
             "the working set and the model's context. Its evidence and "
@@ -876,14 +872,6 @@ class BeliefsBrowserTab(TabPane):
             row.settle("✗ NOT applied")
             await self._say(f"beliefs browser · {row.pid} — {_escape_markup(str(error))}")
             return
-        # The proposal leaves the staging queue either way (the
-        # staged-proposals chip); an approved MEMORY proposal also writes
-        # MEMORY.md/USER.md (the memory-fill chip) and an approved BELIEF
-        # proposal also lands in the active set (the belief chip). See
-        # PaneChipsMixin._resolve_pending's own note -- same rule, same
-        # single refresh after the write, here for the browser's own
-        # approve/reject rather than the status-bar chip's quick menu.
-        self._refresh_owner_status()
         if action == "approve":
             row.settle("✓ approved")
             await self._say(
@@ -896,18 +884,6 @@ class BeliefsBrowserTab(TabPane):
                 f"beliefs browser · rejected {row.pid} — {verdict}. "
                 "Nothing was written; the proposal is archived."
             )
-
-    def _refresh_owner_status(self) -> None:
-        """Nudge the OWNING pane's status bar to re-read the chips this
-        write can move (staged proposals, memory fill, belief count) --
-        same defensive reach-back as :meth:`_say`, which the owner may not
-        have (mid-teardown) and this must not be the reason a write that
-        already landed raises."""
-        refresh = getattr(self.owner, "_refresh_status", None)
-        if refresh is None:
-            return
-        with contextlib.suppress(Exception):
-            refresh()
 
     async def _say(self, text: str) -> None:
         say = getattr(self.owner, "_system", None)
