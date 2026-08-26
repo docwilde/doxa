@@ -42,7 +42,7 @@ def _banner(app):
 def test_the_drawn_mark_uses_full_blocks_and_nothing_else():
     """The user's constraint, reached by looking at rendered candidates:
     **"No, use the full block"**. One codepoint plus space -- true of the
-    triangle AND (v0.74.0) of ΔΟΞΑ, drawn in the same alphabet rather than
+    triangle AND (v0.72.0) of ΔΟΞΑ, drawn in the same alphabet rather than
     printed as Unicode Greek text.
 
     Every glyph excluded here was excluded for a reason that survives the
@@ -85,7 +85,7 @@ def test_the_drawn_mark_uses_full_blocks_and_nothing_else():
 
 
 def test_the_mark_is_a_solid_triangle_with_no_ring():
-    """v0.74.0 dropped the ring: the brief asked for "a simple, broader
+    """v0.72.0 dropped the ring: the brief asked for "a simple, broader
     triangle... not a narrow spike", and there is nothing left inside the
     mark for a ring to frame. Every row is exactly ONE run of ink (no
     ring/gap/triangle/gap/ring split any more), and the triangle widens
@@ -390,7 +390,7 @@ async def test_text_tier_shows_the_wordmark_and_never_the_fallback_line(tmp_path
         rendered = str(drawn.renderable)
         assert "[image:" not in rendered
         assert banner.TAGLINE in rendered
-        # v0.74.0: the full-width form draws ΔΟΞΑ in blocks, not the plain
+        # v0.72.0: the full-width form draws ΔΟΞΑ in blocks, not the plain
         # Latin WORDMARK -- that is now the mid-width degrade only (see
         # test_a_mid_width_terminal_shows_mark_and_wordmark_never_an_image).
         # Triangle and Greek word share one colour tag per row now (no
@@ -686,7 +686,7 @@ async def test_narrow_terminal_never_overflows_the_glyph_art(tmp_path, monkeypat
     the wordmark at three rows, so content too wide for its column was
     CLIPPED to exactly the height a passing test expected. The invariant
     that actually holds the line is that no rendered row is wider than the
-    column it goes into. Measured content widths (v0.74.0's triangle +
+    column it goes into. Measured content widths (v0.72.0's triangle +
     ΔΟΞΑ geometry) are 8, 20, 28, 44, 68 and 108 cells for terminals of
     20, 30, 40, 56, 80 and 120 -- narrow enough to cross every tier
     boundary (:data:`DRAWN_MARK_COLUMNS` 22, :data:`DRAWN_FULL_COLUMNS`
@@ -947,7 +947,7 @@ def test_a_scrollbar_appearing_after_first_layout_cannot_leave_a_stale_fit():
     narrows every child's content box by two, to 18 -- but a follow-up
     ``_lay_out``, the only thing that could re-fit a cached string, fired
     on just 1 of 3 runs. 20 was ``DRAWN_MARK_COLUMNS`` at the time (the
-    ring-era mark; v0.74.0's triangle+ΔΟΞΑ geometry moved that constant,
+    ring-era mark; v0.72.0's triangle+ΔΟΞΑ geometry moved that constant,
     but the mechanism this test pins -- a fit computed for a wider box
     surviving unrefitted into a narrower one -- does not depend on which
     width that was), so a row fitted there and never refitted overflowed

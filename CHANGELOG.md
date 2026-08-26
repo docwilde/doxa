@@ -4,13 +4,22 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
-## 0.74.0 — 2026-08-26
+## 0.72.0 — 2026-08-26
+
+Two branches, one tree state, one tag.
+
+### The boot mark
 
 - Redraws the boot mark: drops the grey ring, widens the triangle so it reads as solid and confident instead of a narrow spike, and spells ΔΟΞΑ out in full-block letters beside it, same colour as the triangle. `belief earns knowledge` sits below as plain text, replacing the old `doxa · belief earning knowledge` strapline.
 - Draws the Greek letters from `█` rather than printing the Unicode characters, for the same reason the mark has never used half-blocks or Geometric Shapes triangles: a monospace font's Greek coverage is not guaranteed, and this sidesteps that tofu risk entirely instead of trading one glyph-coverage gamble for another.
 - Keeps the plain Latin `DOXA` wordmark as a fallback for terminals too narrow for the full Greek word, and drops to it alone when even the triangle does not fit — the same three-stage ladder as before, with the thresholds (`DRAWN_MARK_COLUMNS`, `DRAWN_FULL_COLUMNS`) recomputed from the new art's measured width.
 - Holds the total row budget at 9, same as the ring-era mark, despite giving Ξ and Α enough rows to read clearly: dropping the ring's moat frees the rows the tagline now spends on its own row below the word. The mid-width fallback (triangle + plain wordmark, no tagline) is shorter than before, at 7 rows rather than 9.
 - Ο's sides were drawn two columns wide to make the curve read as a curve; fixed to match Δ and Α's single-cell stroke, with the roundness coming from narrower cap and base rows instead. Word width is unchanged (`GREEK_COLUMNS` 40, `DRAWN_FULL_COLUMNS` 58).
+
+### The curated-memory chip
+
+- Curated-memory chip (`mem u63% p39%`): the project half stayed absent past startup and never moved on a repo switch or a resume. `PaneChipsMixin._lore_slug` resolved the project slug from the pane's own construction-time `cwd`, never the connected engine's — the one reader in the pane still doing that (every other one already prefers `engine.cwd`). Now resolves through the engine's cwd first, falling back to the pane's only when there is no engine yet.
+- Approving or rejecting a staged proposal, recording a belief outcome, and retracting a belief never refreshed the status bar afterward — the memory-fill, belief-count and staged-proposals chips stayed exactly as stale as their last unrelated refresh. The three write paths in `doxa/session/chips.py` (the status bar's own quick pending/beliefs pickers) now trigger a refresh once the write actually lands — never on the arming selection, which writes nothing.
 
 ## 0.70.0 — 2026-08-26
 

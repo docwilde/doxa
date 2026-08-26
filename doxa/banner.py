@@ -8,7 +8,7 @@ beside the Greek word it names the app for -- ΔΟΞΑ, drawn in blocks
 :func:`drawn_lines` assembles whichever of the three degrades the width in
 front of it can hold; :func:`enabled` is the only decision left, on or off.
 
-**v0.74.0 dropped the ring.** Through v0.70.0 the mark was a grey ring
+**v0.72.0 dropped the ring.** Through v0.70.0 the mark was a grey ring
 around the triangle, with ``DOXA`` as plain Latin text beside it -- the
 owner's call there was that stylised letters were "something to squint
 at, where four ordinary capitals are simply legible" (v0.41.0's own
