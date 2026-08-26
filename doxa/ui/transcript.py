@@ -957,7 +957,7 @@ class ThinkingMarker(Static):
         the three places a turn genuinely BEGINS (not constructed, not
         mounted -- begins): ``PaneRuntimeMixin._run_turn`` for a turn this
         client drives, and the ``turn_started``/orphaned-turn branches of
-        ``_handle_event`` for one a peer drives. Never called from
+        ``_peer_pump`` for one a peer drives. Never called from
         ``__init__`` or ``on_mount``: :func:`mount_transcript` constructs
         and mounts this SAME widget for a turn that finished long ago, and
         calls :meth:`TurnBlock.hide_thinking` on it immediately after --
