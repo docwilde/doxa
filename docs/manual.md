@@ -251,11 +251,15 @@ read-only transcript tab mirroring that subagent's own narration and tool
 calls. Once the parent `Task` call finishes, the same activity becomes a
 foldable tree under the parent tool-calls chip.
 
-`/context` breaks the window down by component (system prompt, tools,
-messages, free space, loaded `CLAUDE.md` files, per-MCP-tool cost) using
-the `claude` CLI's own accounting — the same measurement the `ctx` chip
-reads. `/usage` prints the same cost and utilization figures the status
-bar chips show, with separators.
+`/context` leads with a proportional bar of the window (block art, one
+colored run per component) and keeps the exact breakdown below it —
+system prompt, tools, messages, free space, loaded `CLAUDE.md` files,
+per-MCP-tool cost — using the `claude` CLI's own accounting, the same
+measurement the `ctx` chip reads. No reported window size means no bar,
+the same way it means no percentage; a pane too narrow to draw a shape
+(under 24 columns of content) drops the bar and keeps the numbers alone.
+`/usage` prints the same cost and utilization figures the status bar
+chips show, with separators.
 
 ## LORE integration
 

@@ -298,7 +298,7 @@ design that has been thought through and not yet implemented:
 
 - **Orchestration.** There is none, in any form. Nothing in DOXA schedules sessions, assigns work between them, supervises a fleet, or decides that one session should start another. `/msg` is the entire inter-session mechanism and a human is always the one who sends it — see [Search, resume, and peers](docs/manual.md#search-resume-and-peers) for exactly how far that goes.
 - **Resuming a session that predates v0.56.0.** Resuming works now — a restored tab continues its conversation, and `/search` and `/resume` reopen any other in a new tab. It works because v0.56.0 stopped DOXA and the CLI minting *two* session ids and pinned them to one, which is a fix that cannot reach backwards: a conversation started before that release is addressed by an id the CLI's own store never knew, so it comes back read-only and says so before anything spawns.
-- Session-history drill-in past `/search`'s result list, customizable keybindings, and a graphical context-window map.
+- Session-history drill-in past `/search`'s result list, and customizable keybindings. (`/context` grew a proportional bar of the window in v0.76.0 — block art, one colored run per component, above the same measured breakdown it always printed — so a graphical context-window map is no longer on this list.)
 
 Run the test suite with `uv run pytest`.
 
