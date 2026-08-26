@@ -4,7 +4,7 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
-## 0.73.0
+## 0.73.0 — 2026-08-26
 
 Removed item V's standalone beliefs browser tab; its evidence trail moved
 into the chip picker.
