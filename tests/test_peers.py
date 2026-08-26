@@ -302,3 +302,43 @@ async def test_peer_message_queues_and_attaches_to_next_turn_only(tmp_path, monk
         assert created[0].queried[1][0] == "second user prompt"
     finally:
         await engine.finalize()
+
+
+def test_a_registry_entry_is_scrubbed_where_it_is_built(tmp_path, monkeypatch):
+    """Another process writes a peer's title and cwd, and `/peers` prints
+    both. The message receive path has scrubbed since it existed
+    (``PeerHost._read``); this path did not, so a token in a session title
+    reached the transcript verbatim.
+
+    Scrubbed at the single point an entry becomes a ``PeerInfo`` rather
+    than at each display site -- same reason the error surface scrubs at
+    construction: a consumer added later cannot forget.
+    """
+    import json
+    import os
+
+    from doxa import peers as peers_mod
+
+    monkeypatch.setenv("DOXA_HOME", str(tmp_path))
+    reg = peers_mod.registry_dir()
+    reg.mkdir(parents=True, exist_ok=True)
+    secret = "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJKKKKLLLL"
+    entry = {
+        "session_id": "s-scrub", "pid": os.getpid(),
+        "socket_path": str(tmp_path / "s.sock"),
+        "cwd": f"/tmp/{secret}", "repo_root": None,
+        "title": f"deploy with {secret}",
+        # Fresh, or the liveness filter drops the entry before the scrub
+        # is ever reached and the test passes by skipping.
+        "started_at": peers_mod._iso_now(),
+        "heartbeat_at": peers_mod._iso_now(),
+    }
+    (reg / "s-scrub.json").write_text(json.dumps(entry), encoding="utf-8")
+
+    entries = peers_mod.read_registry(probe=False)
+    mine = [e for e in entries if e.session_id == "s-scrub"]
+    assert mine, "the entry must survive liveness or this proves nothing"
+    got = mine[0]
+    assert secret not in got.title
+    assert secret not in got.cwd
+    assert "REDACTED" in got.title

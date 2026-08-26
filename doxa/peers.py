@@ -271,6 +271,17 @@ def read_registry(reap: bool = True, probe: bool = False) -> list[PeerInfo]:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             info = PeerInfo(**{k: data[k] for k in _ENTRY_FIELDS})
+            # Scrubbed HERE, at the one place a registry entry becomes a
+            # PeerInfo, for the same reason the message receive path scrubs
+            # at :meth:`PeerHost._read` rather than at each display site: a
+            # fourth consumer added later cannot forget. These two strings
+            # are the only free text in an entry and ANOTHER PROCESS wrote
+            # them -- a title is derived from the session's own first prompt
+            # and a cwd from a path, either of which can carry a token. The
+            # message path has scrubbed since it existed; this path did not,
+            # and `/peers` printed both raw.
+            info.title = scrub_secrets(str(info.title))
+            info.cwd = scrub_secrets(str(info.cwd))
             info.pid = int(info.pid)
             ds = data.get("daemon_socket")
             info.daemon_socket = str(ds) if ds else None
