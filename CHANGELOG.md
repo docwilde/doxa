@@ -4,6 +4,68 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.73.0
+
+Removed item V's standalone beliefs browser tab; its evidence trail moved
+into the chip picker.
+
+- The picker already carried confirmed/contradicted/stale/retract and
+  approve/reject inline on every row (v0.67.0); the browser tab was a
+  second surface for the same review, minus the evidence trail. Removed
+  `doxa/ui/beliefs.py` (`BeliefsBrowserTab`, `BeliefRow`, `ProposalRow`,
+  `EvidenceTrail`) and every "open the browser" door row.
+- Evidence now expands in place on the beliefs picker: `Right` on a
+  highlighted row fetches its derivation trail and inserts it as real
+  rows directly beneath the belief, one row per evidence event; `Left`
+  folds them away again. Fetched lazily, one belief at a time, never on
+  load. A belief with no evidence gets one row saying so, distinct from
+  the transient "loading" row; a trail past the cap says so in its own
+  trailing row. The evidence rows are disabled, so the highlight cannot
+  land on one and an action key always resolves against the belief that
+  owns the trail, never its evidence. Typing a filter hides an expanded
+  trail without forgetting it (evidence text is not itself searchable).
+  A belief whose own row already says it carries no evidence
+  (`evidence_count == 0`) never round-trips for Right at all — the same
+  silent nothing a proposal row already gives it.
+- Fixed a gap the removal surfaced: the beliefs/proposals pickers' inline
+  row actions (`y`/`c`/`s`/`r`, `a`/`r`) painted regardless of whether the
+  loaded `lore_core` could record the write, unlike the row's own action
+  sub-menu, which already hid them. Both surfaces now agree — a read-only
+  session sees no approve/reject/confirm/retract control at all, inline
+  or in the sub-menu — and the pending picker's own note row says why, up
+  front, rather than only after a row is selected.
+- `/beliefs` opens the picker instead of the removed tab. `doxa/session/
+  pane.py`'s `_beliefs_tab` and the matching Ctrl+W/Ctrl+Q tab-close
+  cases in `doxa/app.py` are gone with it.
+- Fixed the reported "underline runs past the word" defect on `approve`/
+  `retract`, the two row actions that ARM: their padded column, sized to
+  fit a longer armed wording, was being closed by `.ljust`ing that
+  padding INSIDE the row's own `[@click=...]` span -- so the padding was
+  itself clickable, which meant a stray click just past `approve` could
+  arm it. Padding now lives outside the span; the armed labels also
+  shortened (`"⌫ CONFIRM RETRACT"` → `"⌫ RETRACT"`, `"✓ CONFIRM APPROVE"`
+  → `"✓ APPROVE"`, both now the same length as their own resting label,
+  so the column no longer pads at all) and `retract`'s trailing "…"
+  (a sub-menu holdover) is gone.
+- The beliefs/proposals pickers' rows carry a column-name header now
+  (`date · status · age · text`), shown once at the top and hidden under
+  a typed filter -- alignment does not depend on it, every row's columns
+  are already fixed-width. `PICKER_AGE_COL`'s own comment was wrong
+  (claimed a 5-column ceiling; `_fmt_age`'s real one is 6, `"23h59m"`) --
+  the number was already right, only the reasoning was not, now fixed.
+  `PICKER_STATUS_COL` (28) stays: proposal verdicts carry free text
+  (project slugs, skill names) with no true ceiling, so it was already a
+  pragmatic size rather than a computable one, unchanged by anything
+  here.
+- The prompt-as-filter now debounces on both pickers (reusing
+  `doxa.history.DEBOUNCE_SECS`, the same interval and the same
+  stop-and-replace-the-timer shape `/search` already uses -- one debounce
+  meaning, not a second knob at a different value), with a sequence
+  number guarding against a stale rebuild painting over a fresher one
+  (the same race `/search` itself guards against) and a live in-flight
+  marker (`/query …`) so a keystroke never reads as a hang while a
+  rebuild is pending.
+
 ## 0.72.0 — 2026-08-26
 
 Two branches, one tree state, one tag.

@@ -213,12 +213,6 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         # stays open, marked done, until the user closes it) but never
         # outlives the tab itself -- popped in _close_transcript_tab.
         self._transcript_tabs: dict[str, SubagentTranscriptTab] = {}
-        # Item V: this pane's beliefs browser tab, or None when it has
-        # never been opened (or was closed). One per pane -- reopening
-        # activates this one rather than stacking a second, and the
-        # is_mounted re-check in open_beliefs_browser is what notices a
-        # tab the user closed behind DOXA's back.
-        self._beliefs_tab: "Any | None" = None
         # v0.48.0: whether this session's lore_core can record a belief
         # outcome or retract, fetched once when the beliefs picker first
         # opens (see PaneChipsMixin._prime_belief_action_state). None until

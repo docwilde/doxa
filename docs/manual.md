@@ -287,19 +287,33 @@ write, `lore_remember`, which only **stages a proposal** — it never writes
 directly into memory.
 
 **The review gate.** The only write path into curated memory or the
-belief store is a human approving a proposal, one row at a time:
+belief store is a human approving a proposal, one row at a time. Through
+v0.68.0 that review happened on two surfaces — a ten-row status-bar
+picker for a glance, and `/beliefs`'s own full-height browser tab for
+everything else. v0.69.0 retired the tab: the picker now carries
+everything it did (per-row actions, evidence included), so there is one
+surface, not two.
 
 - `/pending` (or the status bar's proposals chip) lists staged proposals
   grouped by kind (`memory/user`, `memory/project`, `filemap`, `belief`,
   `skill`), each row showing what approving it would do. There is no
   bulk approve, on any surface.
-- `/beliefs` opens a full-height browser tab holding every active belief
-  and every staged proposal. A belief row shows its scope, confidence,
-  creation date, the newest entry in its outcome ledger (`confirmed`,
-  `contradicted`, `stale`, or `never tested`), provenance (`via derived` /
-  `via approved`, or unknown for anything predating the provenance
-  ledger), and its evidence count; `Enter` fetches and expands the
-  evidence trail for that belief alone.
+- `/beliefs` (or the status bar's beliefs chip) lists every active
+  belief, grouped by scope. A row shows its stamp, the newest entry in
+  its outcome ledger (`confirmed`, `contradicted`, `stale`, or `never
+  tested`), and its claim; scope, confidence and provenance (`via
+  derived` / `via approved`, or unknown for anything predating the
+  provenance ledger) are one hover away, in the row's own tooltip.
+- **Evidence**, expanded in place: `Right` on a highlighted belief row
+  fetches and inserts its derivation trail as real rows directly beneath
+  it — one row per evidence event (session, project, note) — and `Left`
+  folds them away again. Fetched lazily, one belief at a time, and never
+  on load, so a store of hundreds of beliefs costs nothing until a row is
+  actually expanded. A belief with no evidence still gets one row saying
+  so; a trail longer than the picker's own cap says that too, in its own
+  trailing row, rather than reading as complete. The evidence rows are
+  disabled — the highlight cannot land on one, so an action key always
+  acts on the belief above them, never on its own trail.
 - A proposal row's controls are **approve** and **reject**. Reject applies
   immediately. Approve **arms** on the first selection and applies on a
   second, differently-worded selection — the write is the irreversible
@@ -312,30 +326,41 @@ belief store is a human approving a proposal, one row at a time:
   *staged proposal*, a different object.
 - Every approval and outcome record goes through LORE's own API, so an
   approved entry is labelled `via approved` by LORE, not by DOXA. On a
-  `lore_core` older than the provenance ledger, both browsers degrade to
-  read-only and say why.
+  `lore_core` older than the provenance ledger, the picker degrades to
+  read-only and says why, up front — before a row is ever selected — and
+  paints no approve/reject/confirm/retract control at all, on either
+  picker, inline or in a row's own action menu.
 
-**Inline row actions, in the two status-bar pickers.** The `N beliefs`
-and `N proposals` chips open dropdowns, not just glances: every row
-carries the same controls as its browser counterpart — approve/reject on
-a proposal, confirmed/contradicted/stale/retract on a belief — reachable
-without leaving the list. Click the action span on a row, or press its
-letter (`a`/`r` for proposals, `y`/`c`/`s`/`r` for beliefs) while that row
-is highlighted; approve and retract still arm on the first press and
-apply on the second, on the same row. Selecting a row outright (Enter, or
-a click that misses every action) still opens the per-row action menu
-these two pickers have carried since item V — the inline controls are a
-faster path alongside it, not a replacement. While either picker is open,
-the prompt line filters its rows instead of sending to the agent; typing
-narrows the list live, Enter acts on the highlighted row, Esc closes and
-clears it. The five action letters only fire while that filter is empty —
-once it holds text they are ordinary characters, so searching for a claim
-that happens to start with one of them costs one throwaway keystroke
-first rather than ever firing an action by accident.
+**Inline row actions.** The `N beliefs` and `N proposals` chips open
+dropdowns, not just glances: every row carries confirmed/contradicted/
+stale/retract (beliefs) or approve/reject (proposals) reachable without
+leaving the list. Click the action span on a row, or press its letter
+(`a`/`r` for proposals, `y`/`c`/`s`/`r` for beliefs) while that row is
+highlighted; approve and retract still arm on the first press and apply
+on the second, on the same row. Selecting a row outright (Enter, or a
+click that misses every action) opens a per-row action menu carrying the
+same verbs one selection deep — the inline controls are a faster path
+alongside it, not a replacement. While either picker is open, the prompt
+line filters its rows instead of sending to the agent; typing narrows the
+list a beat later (the rebuild debounces, so a fast typist gets one
+settled query per word rather than one per letter — a live `/query …`
+marker in the picker's own border shows a filter is pending until it
+does), `Right`/`Left` expand and fold a belief's evidence, Enter acts on
+the highlighted row, Esc closes and clears it. The five action letters
+only fire while that filter is empty — once it holds text they are
+ordinary characters, so searching for a claim that happens to start with
+one of them costs one throwaway keystroke first rather than ever firing
+an action by accident. Evidence text is not itself searchable (the filter
+only ever scores a row's own claim), so a typed filter hides any expanded
+trail without forgetting it — clearing the filter shows it again, with no
+second fetch.
 
 Both pickers' rows share one format: `YY-MM-DD HH:MM  status  age  text`,
-fixed-width columns so neighbouring rows line up as a table. The
-`user`/`user-model` group headers also carry LORE's own channel tag —
+fixed-width columns so neighbouring rows line up as a table, with a
+column-name header of its own naming them at the top of the list (hidden
+while a filter is typed — the alignment beneath it never depended on the
+header being there). The `user`/`user-model` group headers also carry
+LORE's own channel tag —
 `user · stated` (the user said it themselves; a later session may act on
 it) vs `user-model · inferred` (read off behaviour, never spelled out;
 shapes tone and authorizes nothing) — spelled out in full in a belief's
@@ -449,8 +474,8 @@ palette, the `/` autocomplete and `/help` from that single registry.
 
 | command | does |
 |---|---|
-| `/beliefs` | Browse every belief and staged proposal — evidence, age, verdicts |
-| `/pending` | Staged proposals and what each would do |
+| `/beliefs` | Browse active beliefs — confirmed/contradicted/stale/retract inline, evidence on Right |
+| `/pending` | Staged proposals — approve or reject inline |
 | `/search <terms>` | Search every past session (live results as you type) |
 
 **Panes & tabs**

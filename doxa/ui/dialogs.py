@@ -32,6 +32,7 @@ from textual.widgets.option_list import Option
 
 from .. import commands as commands_mod
 from .. import version as version_mod
+from ..history import DEBOUNCE_SECS
 from .labels import (
     PICKER_ROW_WIDTH,
     PICKER_TEXT_CAP,
@@ -56,11 +57,13 @@ class RowAction:
     picker does not hold real focus while in ``prompt_filter`` mode).
     ``arms`` marks the two destructive/high-value verbs (``approve``,
     ``retract``) that take a SECOND press, on the SAME row, to actually
-    fire -- the identical misclick asymmetry ``doxa.ui.beliefs`` already
-    documents at length for the full browser's own per-row buttons, now
-    enforced by :attr:`ChipPicker._armed_rid` instead of a per-row
-    ``armed`` flag (there is only ever one list open at a time here, so
-    one id is the whole state)."""
+    fire -- approving writes into curated memory or the belief store,
+    material injected into the model's context on every prompt, and
+    retracting takes a belief out of the working set; neither is equally
+    recoverable to a plain click, so neither is equally easy. Enforced by
+    :attr:`ChipPicker._armed_rid` rather than a per-row ``armed`` flag
+    (there is only ever one list open at a time here, so one id is the
+    whole state)."""
 
     key: str
     verb: str
@@ -492,12 +495,33 @@ class ChipPicker(OptionList):
         # any group header row inserted by `groups` (also `("", header)`).
         self._rows: list[tuple[str, str]] = []
         self._note = ""
+        #: v0.69.0: the one column-name header the beliefs/proposals
+        #: menus show (see :func:`doxa.ui.labels.format_picker_column_header`)
+        #: -- a caller-supplied, ALREADY fixed-width string. Rendered like
+        #: the note row (disabled, rid ``""``, so it is skipped by every
+        #: existing rid-based guard with no changes) but its own thing,
+        #: not folded into ``_note``: the note is a caveat about the LIST
+        #: (a cap, a read-only reason) and can be absent; the header names
+        #: what the columns ARE and is either always there or never
+        #: relevant, never conditional on the list's own state.
+        self._column_header: "str | None" = None
         self._groups: "dict[str, str] | None" = None
         self._collapsible = False
         self._collapsed: "set[str]" = set()
         self._group_notes: "dict[str, str]" = {}
         self._counted_noun = ""
         self._filter_text = ""
+        #: v0.69.0: the filter's own debounce -- see :meth:`sync_filter`.
+        #: One timer, reused (stopped and re-armed) rather than one per
+        #: keystroke, the same shape `doxa.history.SessionSearch` already
+        #: uses for `/search`'s live query. ``_filter_seq`` guards against
+        #: a stale re-render the same way that class's own query sequence
+        #: does, in case a future caller makes the render itself async;
+        #: today's render is synchronous, so stopping the old Timer before
+        #: arming a new one is already airtight on its own -- the seq is
+        #: defence in depth, not load-bearing yet.
+        self._filter_timer: "Any | None" = None
+        self._filter_seq = 0
         self._current_id: "str | None" = None
         self._on_select: "Callable[[str], Any] | None" = None
         # v0.67.0: the beliefs/proposals menus' inline row actions -- see
@@ -515,6 +539,40 @@ class ChipPicker(OptionList):
         #: `doxa.ui.prompt.PromptInput`'s new branch, which is what drives
         #: this widget instead while it is true.
         self._prompt_filter = False
+        # v0.69.0: Right/Left expand-in-place -- the beliefs menu's own
+        # evidence trail, the one thing the removed beliefs browser had
+        # that this widget did not (see EvidenceTrail's old docstring on
+        # why an OptionList couldn't hold one before this).
+        #
+        # A LIST OF ROWS, not one blob: each evidence event a caller's
+        # async fetcher returns becomes its OWN extra, disabled,
+        # non-selectable row inserted directly under the belief -- the
+        # exact fold mechanism `doxa.history.SessionSearch` already uses
+        # to insert a header's child rows for `/search`'s Right/Left,
+        # reused rather than a second one invented here (a mounted CHILD
+        # WIDGET is what the browser did and what an OptionList still
+        # cannot do; SEVERAL synthetic rows is what this widget already
+        # had the machinery for, via the group-header rows below).
+        # ``None`` means this menu carries no expand capability at all
+        # (every menu but beliefs -- a staged proposal has no evidence
+        # trail to expand).
+        self._expand_dispatch: "Callable[[str], Any] | None" = None
+        #: See ``open``'s own docstring -- a cheap sync pre-check so a row
+        #: KNOWN to have nothing stays silent under Right, no round trip.
+        self._expand_available: "Callable[[str], bool] | None" = None
+        #: rid -> already-fetched, formatted evidence rows (one list entry
+        #: per row this widget will insert). Never an empty list for a rid
+        #: that is a KEY of this dict -- the caller's own fetcher returns
+        #: at least one row (a "no evidence" line) rather than nothing, so
+        #: "fetched and empty" and "not fetched yet" (this rid absent from
+        #: both dicts below) stay two different, visibly different states.
+        self._expanded: "dict[str, list[str]]" = {}
+        #: rids with a fetch in flight -- render a placeholder, not a
+        #: crash, if a second Right lands before the first fetch answers
+        #: (guarded against in :meth:`expand_current` itself, but kept as
+        #: its own set rather than folded into ``_expanded`` so "loading"
+        #: and "loaded empty" stay visibly different states).
+        self._expanding: "set[str]" = set()
 
     @property
     def is_open(self) -> bool:
@@ -532,6 +590,7 @@ class ChipPicker(OptionList):
         *,
         note: str = "",
         title: str = "",
+        column_header: "str | None" = None,
         groups: "dict[str, str] | None" = None,
         collapsible: bool = False,
         group_notes: "dict[str, str] | None" = None,
@@ -541,6 +600,8 @@ class ChipPicker(OptionList):
         row_actions: "list[RowAction] | None" = None,
         row_action_dispatch: "Callable[[str, str], Any] | None" = None,
         prompt_filter: bool = False,
+        expand_dispatch: "Callable[[str], Any] | None" = None,
+        expand_available: "Callable[[str], bool] | None" = None,
     ) -> None:
         """Configure and show. Reopening (a click on a DIFFERENT chip
         while this one is already up -- or the SAME chip re-rendering
@@ -567,11 +628,50 @@ class ChipPicker(OptionList):
         own new branch in ``on_key`` -- through :meth:`sync_filter`,
         :meth:`move_highlight` and :meth:`try_action_key`. Every OTHER
         chip menu (model, branch, effort, mode, sessions, repo) leaves
-        this ``False`` and keeps taking real focus exactly as before."""
+        this ``False`` and keeps taking real focus exactly as before.
+
+        ``expand_dispatch`` (v0.69.0, the beliefs menu only): an async
+        ``rid -> list[str]`` fetcher. When set, Right on the highlighted
+        row fetches and inserts each returned string as its OWN extra
+        disabled row directly beneath it (see :meth:`expand_current`);
+        Left removes them again. The fetcher's contract: return at least
+        one row rather than an empty list (a "no evidence" line, not
+        nothing) -- an expanded-and-empty belief and a belief that was
+        never expanded must look different on screen, not just be
+        different internally. ``None`` (every other menu, including the
+        proposals one -- a staged proposal carries no evidence trail)
+        makes both a no-op.
+
+        ``expand_available`` (v0.69.0): a SYNC, cheap ``rid -> bool``
+        pre-check, consulted before ``expand_dispatch`` ever runs. Its
+        job is the case ``expand_dispatch`` alone cannot cover cheaply: a
+        belief the caller already knows carries no evidence (its own
+        ``evidence_count`` says so) must behave EXACTLY like a row with
+        no expand capability at all -- Right does nothing, quietly, no
+        loading row flashed and then resolved to empty, no round trip
+        spent to learn what the row already knew. Omitted (``None``)
+        means every row ``expand_dispatch`` covers is assumed available,
+        which is correct for every caller that has not opted into this.
+
+        ``column_header`` (v0.69.0): one ALREADY fixed-width string (see
+        :func:`doxa.ui.labels.format_picker_column_header`), rendered
+        ONCE at the very top -- after ``note`` if there is one, before
+        every group header and candidate -- naming what the fixed columns
+        are. Reuses the SAME disabled/rid-``""`` convention every other
+        inert row in this widget already uses (see :meth:`_render_rows`),
+        so it is skipped by cursor movement, unreachable by an action key
+        or Enter, was never the row this widget lands the initial
+        highlight on, and is not counted by anything that counts
+        ``_all_rows`` (the caller's own list never includes it). Hidden
+        under a typed filter, the same convention folded GROUP headers
+        already follow -- safe to drop rather than merely conventional:
+        every row's own columns are fixed-width by construction, so
+        losing the header costs a LABEL, never the alignment under it."""
         self._all_rows = list(rows)
         self._current_id = current_id
         self._on_select = on_select
         self._note = note
+        self._column_header = column_header
         self._groups = groups
         self._collapsible = bool(collapsible and groups)
         self._group_notes = dict(group_notes or {})
@@ -581,6 +681,10 @@ class ChipPicker(OptionList):
         self._armed_rid = None
         self._last_action_signature = None
         self._prompt_filter = prompt_filter
+        self._expand_dispatch = expand_dispatch
+        self._expand_available = expand_available
+        self._expanded = {}
+        self._expanding = set()
         self._counted_noun = counted_noun
         # Every group folded shut on open -- except when the whole list
         # already fits, see AUTOEXPAND_ROWS. The counts in the headers are
@@ -590,13 +694,20 @@ class ChipPicker(OptionList):
         # came for.
         #
         # ``open_groups`` is the exception that has to exist: a group whose
-        # rows are DOORS rather than data (the beliefs picker's "open the
-        # browser" row lives in one) must never start folded, or a large
-        # store hides the way out of itself behind a fold.
+        # rows are DOORS rather than data must never start folded, or a
+        # large store hides the way out of itself behind a fold. No
+        # current caller passes one (the beliefs picker's own "open the
+        # browser" door row was the original motivating case, removed in
+        # v0.69.0 along with the browser it opened) -- kept as a general
+        # capability for whichever caller needs it next, not beliefs-
+        # specific.
         self._collapsed = set()
         if self._collapsible and len(self._all_rows) > self.AUTOEXPAND_ROWS:
             self._collapsed = set(self._group_labels()) - set(open_groups or ())
         self._filter_text = ""
+        if self._filter_timer is not None:
+            self._filter_timer.stop()
+            self._filter_timer = None
         self.border_title = title
         self._render_rows()
         self.display = True
@@ -703,11 +814,32 @@ class ChipPicker(OptionList):
         :meth:`_render_rows`'s own branching).
 
         ARMED is drawn differently from the rest of :class:`RowAction`'s
-        own arming discipline. Same asymmetry `doxa.ui.beliefs` already
-        documents: while THIS row is armed, its other action spans
-        disappear -- replaced by the one armed control and a disarm hint
-        -- so there is nothing beside the destructive control for a stray
-        click to land on."""
+        own arming discipline: while THIS row is armed, its other action
+        spans disappear -- replaced by the one armed control and a
+        disarm hint -- so there is nothing beside the destructive control
+        for a stray click to land on.
+
+        PADDING LIVES OUTSIDE THE MARKUP SPAN (v0.69.0 fix). Reported: the
+        clickable underline on ``approve``/``retract`` -- the two ``arms``
+        verbs -- ran visibly past the word. Measured, not assumed: those
+        two are exactly the ones whose ``column_width`` (sized to the
+        WIDER of the resting and armed label, so the row does not jump
+        width when it arms) exceeded the resting label's own length, and
+        the padding that closed that gap used to be ``.ljust``ed INSIDE
+        the ``[@click=...][color]...[/][/]`` span -- so the trailing
+        spaces were themselves clickable and themselves painted, which is
+        what a wider-than-the-word underline actually was. It was also
+        the accidental-approve surface item V's own controls have avoided
+        since v0.48.0: a click landing in that padding carried ``@click``
+        in its style meta same as a click on the word, so a stray click
+        BESIDE ``approve`` armed it. Fixed at the source, not only by
+        shortening the armed labels below (which now also keeps
+        ``column_width`` equal to the resting label's own length for both
+        verbs, so this padding is usually empty in practice): the word is
+        wrapped in the markup, the padding is plain text appended AFTER
+        the closing tags, so the underline, the paint and the CLICK
+        TARGET all end exactly where the word does, regardless of how the
+        two labels' widths compare."""
         if not self._row_actions:
             return ""
         if rid == self._armed_rid:
@@ -723,17 +855,18 @@ class ChipPicker(OptionList):
         parts = []
         for spec in self._row_actions:
             call = f"row_action({json.dumps(rid)}, {json.dumps(spec.key)})"
-            padded = _escape_markup(spec.label.ljust(spec.column_width))
-            parts.append(f"[@click={call}][{spec.color}]{padded}[/][/]")
+            label = _escape_markup(spec.label)
+            pad = " " * (spec.column_width - len(spec.label))
+            parts.append(f"[@click={call}][{spec.color}]{label}[/][/]{pad}")
         return "  " + "  ".join(parts)
 
     async def _on_click(self, event: events.Click) -> None:
         """A click landing inside a ``[@click=...]`` action span (the
         inline row-action controls :meth:`_action_suffix` paints) is
         brokered against THIS widget's own ``action_*`` methods, the same
-        unprefixed-markup convention every other clickable span in this
-        app follows (see ``doxa.ui.beliefs``'s ``_span`` helper) -- rather
-        than OptionList's own click handling, which knows only "which
+        unprefixed ``[@click=...]`` convention every other clickable span
+        in this app follows -- rather than OptionList's own click
+        handling, which knows only "which
         OPTION was clicked" and would route it into :meth:`select_row`
         instead. Every other click (the row's own text, a group header, a
         different menu entirely) falls through to OptionList's stock
@@ -753,8 +886,7 @@ class ChipPicker(OptionList):
         first press on an ``arms`` action re-paints this row and returns
         without calling out at all; only a SECOND press on the SAME row
         applies it. Pressing an arming key on a DIFFERENT row re-arms
-        there instead of applying -- "arming any row disarms every other",
-        the identical rule the full browser's own per-row buttons keep.
+        there instead of applying -- "arming any row disarms every other".
 
         DEBOUNCED against the SAME (rid, key) arriving twice inside one
         refresh cycle -- measured, not assumed: Textual's own mouse-click
@@ -821,6 +953,110 @@ class ChipPicker(OptionList):
         self.action_row_action(rid, key)
         return True
 
+    def _highlighted_rid(self) -> "str | None":
+        """The candidate the cursor sits on, or ``None`` on a note/header
+        row or nothing selectable -- the same guard :meth:`try_action_key`
+        applies, factored out because :meth:`expand_current` and
+        :meth:`collapse_current` both need it and neither fires an
+        action."""
+        index = self.highlighted
+        if index is None or not (0 <= index < len(self._rows)):
+            return None
+        rid, _label = self._rows[index]
+        if not rid or rid.startswith(self.GROUP_ROW_PREFIX):
+            return None
+        return rid
+
+    def expand_current(self) -> None:
+        """Right: fetch and show the highlighted row's evidence, inserted
+        as an extra row directly beneath it -- see :meth:`open`'s own note
+        on ``expand_dispatch`` and :meth:`_render_rows`'s own insertion.
+
+        A no-op on every menu but the beliefs one (``_expand_dispatch`` is
+        ``None``), on a header/note row (:meth:`_highlighted_rid` already
+        excludes those), on a row ``expand_available`` says has nothing (a
+        belief whose own ``evidence_count`` is already zero -- no loading
+        row flashed only to resolve to "no evidence" a moment later, the
+        SAME silent nothing a proposal row already gives Right), and --
+        matching ``SessionSearch.expand_current``'s own "no-op on an
+        already-open header" contract, the ``/search`` fold gesture this
+        reuses rather than inventing a second one -- on a row that is
+        already expanded or already fetching.
+
+        NO DOUBLE-CLICK EQUIVALENT, considered and declined (v0.69.0).
+        The keyboard gesture above is complete on its own -- this is not a
+        missing convenience. A double-click handler here would have to be
+        built on top of a widget that ALREADY double-delivers a single
+        physical click's ``OptionSelected`` (measured, v0.67.0 --
+        :meth:`action_row_action`'s own docstring, and the reason that
+        method carries its own same-tick debounce). Distinguishing "one
+        click, delivered twice" from "two real clicks" reliably, on a row
+        that ALSO carries destructive arm-twice action spans on the same
+        line (a double-click landing on `retract`'s cell must not read as
+        two presses of it), was judged fiddlier than it is worth: a
+        keyboard fold that works beats a mouse gesture that occasionally
+        risks retracting a belief. Right/Left cover the requirement in
+        full; nothing here reaches for the mouse."""
+        rid = self._highlighted_rid()
+        if not rid or self._expand_dispatch is None:
+            return
+        if self._expand_available is not None and not self._expand_available(rid):
+            return
+        if rid in self._expanded or rid in self._expanding:
+            return
+        self._expanding.add(rid)
+        highlighted = self.highlighted
+        self._render_rows()
+        if highlighted is not None and highlighted < len(self._rows):
+            self.highlighted = highlighted
+        self.run_worker(self._fetch_expansion(rid), group="chip-picker-evidence")
+
+    def collapse_current(self) -> None:
+        """Left: fold an expanded row's evidence away again -- a no-op on
+        a row that was never expanded, matching ``SessionSearch.
+        collapse_current``'s own no-op contract on a leaf with nothing of
+        its own left to close."""
+        rid = self._highlighted_rid()
+        if not rid or rid not in self._expanded:
+            return
+        del self._expanded[rid]
+        highlighted = self.highlighted
+        self._render_rows()
+        if highlighted is not None and highlighted < len(self._rows):
+            self.highlighted = highlighted
+
+    async def _fetch_expansion(self, rid: str) -> None:
+        """The worker :meth:`expand_current` starts. Never raises into the
+        UI -- a fetch that fails paints the failure as the row's own
+        content (as a single-row list) rather than losing the keystroke
+        silently, the same "a caveat is never worth raising" posture every
+        other picker fetch in this app already takes."""
+        dispatch = self._expand_dispatch
+        if dispatch is None:
+            self._expanding.discard(rid)
+            return
+        try:
+            rows = [str(r) for r in (await dispatch(rid) or [])]
+        except Exception as exc:  # noqa: BLE001
+            rows = [f"    evidence unavailable — {type(exc).__name__}: {exc}"]
+        if not rows:
+            # The caller's own contract (see `open`'s docstring) is to
+            # return at least a "no evidence" row rather than an empty
+            # list -- but a caller that slips is a blank expansion, not a
+            # crash: fall back to the SAME "loaded but nothing there"
+            # wording rather than trusting an empty list to mean that.
+            rows = ["    no evidence rows"]
+        self._expanding.discard(rid)
+        if not self.display or rid not in {r for r, _l in self._all_rows}:
+            # Closed, or reconfigured onto a different row set, while the
+            # fetch was in flight -- nothing left to paint this onto.
+            return
+        self._expanded[rid] = rows
+        highlighted = self.highlighted
+        self._render_rows()
+        if highlighted is not None and highlighted < len(self._rows):
+            self.highlighted = highlighted
+
     @property
     def prompt_filter_active(self) -> bool:
         """Whether ``PromptInput`` should be driving THIS widget right
@@ -849,11 +1085,65 @@ class ChipPicker(OptionList):
         text has not actually moved (avoids re-rendering on every
         keystroke of a DIFFERENT widget's edit -- the two never fire for
         the same reason, but the guard is free and mirrors the shape of
-        every other early-return in this class)."""
+        every other early-return in this class).
+
+        DEBOUNCED (v0.69.0). MEASURED first, not assumed: with 600 rows
+        already loaded (the daemon's own belief-picker ceiling), one call
+        to :meth:`_render_rows` costs single-digit milliseconds -- an
+        in-memory fuzzy-match and re-render, never a query, so the cost
+        this debounce hides is NOT the render itself (a debounce that
+        only masked slow work would be the wrong fix, and the render here
+        is not slow work). What it buys instead is fewer REPAINTS during
+        a fast typist's burst -- one composited frame per settled word
+        rather than one per keystroke, the same reason `/search` debounces
+        even though its own query is often just as fast. Same interval,
+        reused rather than re-tuned: :data:`doxa.history.DEBOUNCE_SECS`
+        is calibrated to typing cadence (`history.py`'s own comment: long
+        enough for one query per word, short enough to feel live), which
+        is identical for both surfaces regardless of what either does
+        underneath.
+
+        The filter text and the border subtitle update INSTANTLY, every
+        keystroke, undebounced -- both are free (a string assignment, no
+        row rebuild), and painting the typed text immediately is what
+        proves the widget is not hung at the INPUT end while the row list
+        catches up a beat later. The trailing "…" is the in-flight
+        marker: hide-at-zero, present only while a rebuild is actually
+        pending, gone the instant :meth:`_apply_filter` runs -- no
+        separate timer or animation for it, it rides the SAME one this
+        method already arms."""
         if not self.display or text == self._filter_text:
             return
         self._filter_text = text
+        self.border_subtitle = f"/{text} …" if text else ""
+        self._filter_seq += 1
+        seq = self._filter_seq
+        if self._filter_timer is not None:
+            self._filter_timer.stop()
+        self._filter_timer = self.set_timer(
+            DEBOUNCE_SECS, lambda: self._apply_filter(seq)
+        )
+
+    def _apply_filter(self, seq: int) -> None:
+        """The debounce firing: the actual row rebuild, deferred out of
+        :meth:`sync_filter`. Guarded by sequence number (see that
+        method's own note on why this is not load-bearing today) and by
+        ``display`` -- the picker may have closed while this was pending."""
+        self._filter_timer = None
+        if seq != self._filter_seq or not self.display:
+            return
         self._render_rows()
+
+    def flush_filter(self) -> None:
+        """Run a pending debounced filter NOW, skipping the wait --
+        public so a caller (and the test suite) can see the settled
+        result without sleeping out :data:`doxa.history.DEBOUNCE_SECS`.
+        Same reason `SessionSearch.launch` is public for the identical
+        case. A no-op when nothing is pending."""
+        if self._filter_timer is not None:
+            self._filter_timer.stop()
+            self._filter_timer = None
+            self._render_rows()
 
     def _render_rows(self) -> None:
         self.clear_options()
@@ -861,6 +1151,20 @@ class ChipPicker(OptionList):
         if self._note:
             self.add_option(Option(self._note, disabled=True))
             self._rows.append(("", self._note))
+        # The column-name header (v0.69.0): ONCE, right after the note,
+        # never per group and never a candidate itself -- rid "" is this
+        # widget's own established "not a row anything counts" convention
+        # (the note above and the plain group header below both already
+        # use it). Hidden under a typed filter, matching folded GROUP
+        # headers, which drop for the identical reason: once the matcher
+        # is doing the ranking a header names nothing a hit doesn't
+        # already say better, and every row is fixed-width regardless of
+        # whether this one is on screen, so nothing below it drifts.
+        if self._column_header and not self._filter_text:
+            self.add_option(Option(
+                " " * self.ROW_CHROME_COLS + self._column_header, disabled=True,
+            ))
+            self._rows.append(("", self._column_header))
         candidates = self._all_rows
         grouped = self._groups and not self._filter_text
         if self._filter_text:
@@ -883,9 +1187,13 @@ class ChipPicker(OptionList):
                 if grouped and not group:
                     # An UNGROUPED row (v0.57.0): rendered where the caller
                     # put it, with no header above it and no fold around
-                    # it. The pickers' "open the browser" rows are the
-                    # case -- a door rather than data. Each had to be given
-                    # a group of its own purely so the header machinery
+                    # it -- for a row that is a DOOR rather than data (the
+                    # beliefs/proposals pickers' own "open the browser"
+                    # rows were the original case, removed with the
+                    # browser in v0.69.0; no current caller leaves a row
+                    # ungrouped, but the mechanism stays general rather
+                    # than beliefs-specific). Such a row had to be given a
+                    # group of its own purely so the header machinery
                     # would not paint a bare `▎`, which then became a fold
                     # around a single row whose only effect was hiding the
                     # way out.
@@ -911,7 +1219,19 @@ class ChipPicker(OptionList):
                             self._rows.append(("", f"▎ {group}"))
                     if group in self._collapsed:
                         continue
-                mark = "▸" if rid == self._current_id else " "
+                if rid == self._current_id:
+                    mark = "▸"
+                elif rid in self._expanded:
+                    # Reuses the SAME single-column mark slot the current-
+                    # selection marker above already reserves -- free,
+                    # because the beliefs/proposals menus never set
+                    # ``current_id`` (there is no "current" belief), so the
+                    # column is otherwise always blank for them.
+                    mark = "▾"
+                elif rid in self._expanding:
+                    mark = "…"
+                else:
+                    mark = " "
                 if self._row_prefix_width:
                     # v0.67.0: the beliefs/proposals shape. The stamp/
                     # status/age prefix is ALREADY fixed-width (built by
@@ -952,6 +1272,41 @@ class ChipPicker(OptionList):
                 option_text = f" {mark} {_escape_markup(shown)}" + suffix
                 self.add_option(Option(option_text))
                 self._rows.append((rid, label))
+                # The evidence trail, ALREADY fetched -- inserted as
+                # SEVERAL extra, disabled, unselectable rows directly
+                # under the belief they belong to, one per evidence
+                # event, exactly where the removed browser mounted its
+                # own single ``EvidenceTrail`` widget. Empty ``rid`` is
+                # this widget's own established convention for "not a
+                # candidate" (the note row and the plain, non-collapsible
+                # group header above both use it too), so every existing
+                # rid-based skip (select_row, try_action_key, the "first
+                # selectable row" scan below) already treats every one of
+                # these rows correctly with no changes -- and because
+                # OptionList's OWN cursor movement already skips disabled
+                # options (``find_next_enabled``, this class's own docstring),
+                # the highlight cannot land on one: an action key always
+                # acts on the belief that owns the evidence, never on the
+                # evidence itself.
+                #
+                # SUPPRESSED while a filter is typed, the same rule
+                # folded groups already follow just above (`grouped =
+                # self._groups and not self._filter_text`): a filter is
+                # scoring `_all_rows`' labels, which never included
+                # evidence text, so a filtered view showing rows a typed
+                # word cannot explain would be confusing on top of being
+                # unfindable. The fetched trail itself is NOT forgotten --
+                # `_expanded` is untouched here -- so clearing the filter
+                # restores exactly the expansion state that was there
+                # before, the same round-trip a folded group already
+                # makes.
+                if not self._filter_text:
+                    for evidence_row in self._expanded.get(rid, ()):
+                        self.add_option(Option(evidence_row, disabled=True))
+                        self._rows.append(("", ""))
+                    if rid in self._expanding:
+                        self.add_option(Option("      … loading", disabled=True))
+                        self._rows.append(("", ""))
         first = next((i for i, (rid, _l) in enumerate(self._rows) if rid), None)
         self.highlighted = first
         self.border_subtitle = f"/{self._filter_text}" if self._filter_text else ""
@@ -1034,12 +1389,19 @@ class ChipPicker(OptionList):
         self._collapsible = False
         self._counted_noun = ""
         self._filter_text = ""
+        if self._filter_timer is not None:
+            self._filter_timer.stop()
+            self._filter_timer = None
         self._row_prefix_width = 0
         self._row_actions = None
         self._row_action_dispatch = None
         self._armed_rid = None
         self._last_action_signature = None
         self._prompt_filter = False
+        self._expand_dispatch = None
+        self._expand_available = None
+        self._expanded = {}
+        self._expanding = set()
         self.border_title = ""
         self.border_subtitle = ""
         if was_prompt_filter:

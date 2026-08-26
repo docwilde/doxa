@@ -203,12 +203,13 @@ tooltip carries the long form. Note the row is already contended enough that
 v0.50.0's mode chip had to be measured at 40 columns before it could claim a
 place — this one must survive the same test or stand down.
 
-**The tab.** A non-session tab, which DOXA now has three precedents for:
-`SubagentTranscriptTab`, `ArchivedSessionTab`, and v0.46.0's beliefs browser.
-Reuse that shape rather than inventing a fourth; note Ctrl+W and Ctrl+Q both
-had to be taught about each new tab kind (v0.46.0 and v0.54.0), so a new one
-inherits that obligation — a tab that cannot be closed is a defect that has
-already shipped twice here.
+**The tab.** A non-session tab, which DOXA now has two precedents for:
+`SubagentTranscriptTab` and `ArchivedSessionTab` (v0.46.0's beliefs browser
+was a third, until v0.69.0 folded its behaviour into the chip picker and
+removed the tab). Reuse that shape rather than inventing a third; note
+Ctrl+W and Ctrl+Q both had to be taught about each new tab kind (v0.46.0
+and v0.54.0), so a new one inherits that obligation — a tab that cannot be
+closed is a defect that has already shipped twice here.
 
 **Drawing a graph in cells is the hard part, and this project has just learned
 how that goes.** Four independent attempts at a small block-drawn logo hit four
@@ -233,7 +234,7 @@ graph layout is strictly harder. So:
 **What the viewer must not become.** A second source of truth. It renders what
 the operators return; if the tab can show something the tools cannot, the tools
 are missing a query and the fix belongs there. The same rule kept the beliefs
-browser and the beliefs chip agreeing.
+picker honest.
 
 **Purpose is editable from here, or it is not editable at all.** The `purpose`
 attribute is memory and goes through the write gate — so if the tab offers

@@ -155,15 +155,15 @@ from .peers import PeerSendError, age_secs
 # trimming it to "what DoxaApp itself still uses" would quietly break
 # importers this file has no business knowing about. The guarantee is
 # mechanical, not curated -- ``dir(doxa.app)`` is unchanged.
+#
+# v0.69.0 is the one exception the mechanism cannot cover: the beliefs
+# browser's own six names (``BeliefRow``, ``BeliefsBrowserTab``,
+# ``BrowserNote``, ``BrowserRow``, ``EvidenceTrail``, ``ProposalRow``,
+# re-exported from the now-deleted ``doxa.ui.beliefs``) dropped OUT of
+# this facade, because a removed feature has no module left to re-export
+# from -- "nothing downstream has to know" holds for a refactor that
+# moves code, not for one that deletes it.
 from .session.pane import SessionPane  # noqa: F401
-from .ui.beliefs import (  # noqa: F401
-    BeliefRow,
-    BeliefsBrowserTab,
-    BrowserNote,
-    BrowserRow,
-    EvidenceTrail,
-    ProposalRow,
-)
 from .ui.dialogs import (  # noqa: F401
     _NEEDS_INPUT_DIGIT_KEYS,
     AboutDialog,
@@ -1182,8 +1182,8 @@ class DoxaApp(App):
         The active tab is the right answer when there is one -- a failure
         belongs next to whatever the user was doing when it happened. The
         fallback exists because the active tab is often not a SessionPane
-        at all (a beliefs browser, a subagent transcript, an archive) and
-        because ``active_pane`` is None for the whole window before Textual
+        at all (a subagent transcript, an archive) and because
+        ``active_pane`` is None for the whole window before Textual
         has decided which tab is active (see :meth:`_activation_pending`),
         which is exactly when a boot-time failure fires. A failure with
         nowhere at all to go is not dropped -- see
@@ -1755,24 +1755,22 @@ class DoxaApp(App):
         await self._close_read_only_tab()
 
     async def _close_read_only_tab(self) -> bool:
-        """Close the active tab when it is one of the three READ-ONLY
-        kinds, and say whether it closed one.
+        """Close the active tab when it is one of the two READ-ONLY kinds,
+        and say whether it closed one.
 
-        The three -- a subagent transcript (SubagentTranscriptTab), a
-        restored archive (ArchivedSessionTab) and item V's beliefs browser
-        (BeliefsBrowserTab) -- share the property that makes this one
-        method: none of them is a session. ``self.active_pane`` is
-        SessionPane-only and comes back None for all three, so there is no
+        The two -- a subagent transcript (SubagentTranscriptTab) and a
+        restored archive (ArchivedSessionTab) -- share the property that
+        makes this one method: neither is a session. ``self.active_pane``
+        is SessionPane-only and comes back None for both, so there is no
         daemon to detach, no engine to stop and no turn-in-flight question
-        to ask. Each still needs ITS own teardown (a transcript and a
-        browser drop the owning pane's reference so reopening builds a
-        fresh one; an archive re-persists the tab set so closing it is
-        what takes it out) -- hence the dispatch rather than one
-        remove_pane call.
+        to ask. Each still needs ITS own teardown (a transcript drops the
+        owning pane's reference so reopening builds a fresh one; an
+        archive re-persists the tab set so closing it is what takes it
+        out) -- hence the dispatch rather than one remove_pane call.
 
-        There is always at least one SessionPane beside them, so none is
-        ever "the last tab" and none reaches the close-the-app branch
-        :meth:`_close_pane` falls back to.
+        There is always at least one SessionPane beside them, so neither
+        is ever "the last tab" and neither reaches the close-the-app
+        branch :meth:`_close_pane` falls back to.
 
         Extracted in v0.58.0 so BOTH close keys reach it. Ctrl+W has
         called this path since these tabs existed; Ctrl+Q did not, and
@@ -1780,8 +1778,8 @@ class DoxaApp(App):
         the load-bearing part of the signature: it lets a caller tell
         "closed a read-only tab" from "there was nothing here I know how
         to close", which is what a NEW tab kind will hit -- v0.46.0 shipped
-        the beliefs browser unclosable for exactly one release by not
-        having a shared answer here."""
+        the (now-removed) beliefs browser unclosable for exactly one
+        release by not having a shared answer here."""
         active: "Any" = None
         with contextlib.suppress(Exception):
             active = self.query_one("#session-tabs", TabbedContent).active_pane
@@ -1791,26 +1789,7 @@ class DoxaApp(App):
         if isinstance(active, ArchivedSessionTab):
             await self._close_archived_tab(active)
             return True
-        if isinstance(active, BeliefsBrowserTab):
-            await self._close_beliefs_tab(active)
-            return True
         return False
-
-    async def _close_beliefs_tab(self, tab: "BeliefsBrowserTab") -> None:
-        """Ctrl+W on the beliefs browser (item V): nothing to detach and
-        nothing to stop -- it holds no engine of its own. Remove it and
-        drop the owning pane's reference, the same two steps
-        :meth:`_close_transcript_tab` takes, so reopening builds a fresh
-        one instead of activating a tab that is no longer there.
-
-        Never persisted either way: the browser is not a session, and
-        _persist_tabset only ever records SessionPanes and archives."""
-        if getattr(tab.owner, "_beliefs_tab", None) is tab:
-            tab.owner._beliefs_tab = None
-        with contextlib.suppress(Exception):
-            await self.query_one("#session-tabs", TabbedContent).remove_pane(
-                tab.id or ""
-            )
 
     async def _close_archived_tab(self, tab: "ArchivedSessionTab") -> None:
         """Ctrl+W on an archived tab (v0.32.0): nothing to detach, nothing
@@ -1839,22 +1818,22 @@ class DoxaApp(App):
         do -- so it asks; an idle session ends without a prompt.
 
         On a tab with NO session to end -- a subagent transcript, a
-        restored archive, the beliefs browser -- it closes the tab, and
-        that is the whole of what it does. Through v0.56.0 it did
-        NOTHING there: ``_end_session`` looked for a SessionPane, found
-        None and returned, so the user sat on a read-only tab pressing the
-        key they had been taught closes tabs. Same defect class as the
-        beliefs browser and Ctrl+W in v0.46.0, and it now takes the same
-        shared answer, :meth:`_close_read_only_tab`.
+        restored archive -- it closes the tab, and that is the whole of
+        what it does. Through v0.56.0 it did NOTHING there: ``_end_session``
+        looked for a SessionPane, found None and returned, so the user sat
+        on a read-only tab pressing the key they had been taught closes
+        tabs. Same defect class as the (then still shipping) beliefs
+        browser and Ctrl+W in v0.46.0, and it now takes the same shared
+        answer, :meth:`_close_read_only_tab`.
 
         That does NOT make the two keys the same key. The distinction is
         about the SESSION -- Ctrl+W leaves it running, Ctrl+Q finalizes it
         -- and on a tab with no session there is no distinction left to
         draw: the archive's session ended before the window opened, the
-        subagent's transcript is a copy, the browser holds no engine.
-        Two keys agreeing where the difference is meaningless is not
-        ambiguity, it is the absence of a trap. What would be wrong is
-        Ctrl+Q ending the tab's OWNING session -- a key aimed at the
+        subagent's transcript is a copy. Two keys agreeing where the
+        difference is meaningless is not ambiguity, it is the absence of a
+        trap. What would be wrong is Ctrl+Q ending the tab's OWNING
+        session -- a key aimed at the
         visible tab must never reach past it -- and it does not.
 
         Dispatched into a worker because awaiting a modal's answer

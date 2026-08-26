@@ -240,13 +240,19 @@ class PaneCommandsMixin:
         await self.open_pending_picker()
 
     async def _cmd_beliefs(self, args: str) -> None:
-        """``/beliefs`` (item V) -- open the full-height beliefs browser.
+        """``/beliefs`` -- open the beliefs picker, the SAME surface the
+        beliefs chip opens on a click.
 
-        A command as well as two picker rows and a chip, because it is a
-        destination: reachable from the prompt, the Ctrl+P palette and
+        Through v0.68.0 this opened a second, full-height destination
+        (item V's standalone browser tab); v0.69.0 removed that tab once
+        the picker carried everything it did except the evidence trail --
+        confirmed/contradicted/stale/retract inline on each row
+        (:data:`doxa.session.chips.BELIEF_ROW_ACTIONS`), and now Right on
+        a highlighted row expands its evidence trail in place. One door
+        left, reachable from the prompt, the Ctrl+P palette and
         autocomplete, exactly like every other row in the registry. See
-        :meth:`doxa.session.chips.PaneChipsMixin.open_beliefs_browser`."""
-        await self.open_beliefs_browser()
+        :meth:`doxa.session.chips.PaneChipsMixin.open_beliefs_picker`."""
+        await self.open_beliefs_picker()
 
     async def _cmd_settings(self, args: str) -> None:
         self.app.action_settings()

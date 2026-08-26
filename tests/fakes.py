@@ -200,11 +200,12 @@ class FakeEngine:
         self.list_pending_result: list = []
         self.list_pending_calls = 0
         self.list_pending_error: "Exception | None" = None
-        # Item V (the beliefs browser): the evidence trail a belief row
-        # expands to, keyed by belief id, plus the lore_core write-state
-        # the browser asks for before it renders any approve/reject
-        # control at all -- scripting it False is how the read-only
-        # degradation gets exercised without an old lore_core on disk.
+        # Item V: the evidence trail a belief row expands to (v0.69.0:
+        # inline, on the picker itself), keyed by belief id, plus the
+        # lore_core write-state the picker asks for before it renders any
+        # approve/reject control at all -- scripting it False is how the
+        # read-only degradation gets exercised without an old lore_core on
+        # disk.
         self.belief_evidence_result: "dict[Any, list[dict]]" = {}
         self.belief_evidence_calls: list = []
         self.lore_write_state_result: dict = {
@@ -278,7 +279,7 @@ class FakeEngine:
     def lore_write_state(self) -> dict:
         """Engine parity for item V's read-only degradation check.
         Sync here, like SessionEngine's; EngineClient's is async and the
-        browser awaits whichever it got."""
+        picker awaits whichever it got."""
         return dict(self.lore_write_state_result)
 
     async def approve_pending(self, pid: str) -> "str | None":

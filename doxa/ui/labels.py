@@ -560,8 +560,8 @@ BELIEF_CHANNEL_RULE: "dict[str, str]" = {
 
 def _belief_scope_label(subject: str) -> str:
     """Which GROUP a belief's row falls under in the beliefs chip's picker
-    (item 3) and the full browser's own row lead -- derived from
-    lore_core's own subject vocabulary (``lore_core.beliefs.
+    (item 3) -- derived from lore_core's own subject vocabulary
+    (``lore_core.beliefs.
     belief_subject``: ``"user"``, ``"user-model"``, or ``"project:<slug>"``
     -- verified against the installed lore_core, there is no separate
     ``scope`` column), data-driven rather than a hardcoded two-way branch
@@ -639,15 +639,33 @@ PICKER_ROW_MAX = 400
 #: ``"25-08-24 14:32"`` -- belief_created_text's own fixed width (14) plus
 #: one gutter column.
 PICKER_STAMP_COL = 15
-#: Widest realistic verdict this store produces, padded to: LORE's own
-#: outcome words top out at "contradicted" (12); a proposal's verdict can
-#: run to "replace → memory/project:<slug>", so this is sized for that
-#: shape rather than the shorter belief one -- a column sized for its
-#: narrower user never overflows, sized for its wider one never wastes a
-#: belief row's blank space (spaces are cheap; a shifted text column is
-#: the defect this whole formatter exists to remove).
+#: Widest realistic verdict this store produces, padded to. NOT a
+#: computable ceiling -- v0.69.0 measured `proposal_verdict` against real
+#: shapes and it is unbounded in principle (``memory/project:<slug>`` and
+#: ``skill/<name>`` both carry FREE TEXT with no length cap of their own;
+#: measured examples already run past this column on both fields, e.g.
+#: "retract → memory/project:doxa-mode" at 34 and a real skill name from
+#: this very store's own skill list, "add → skill/curate-deepseek-stdin-
+#: launch", at 40). ``ellipsize`` already handles what does not fit, the
+#: same way the claim/text column handles a claim longer than its own
+#: cap -- so this stays a PRAGMATIC size, not an attempt at a true
+#: maximum: LORE's own outcome words top out at "contradicted"/"never
+#: tested" (12, so beliefs are never the constraint), and 28 covers every
+#: `memory`/`user`, most `memory/project` and most `belief retract`
+#: verdicts actually seen without truncation, at the cost of ellipsizing
+#: the occasional long project slug or skill name -- which would need
+#: truncating at any width short of "unbounded". Merging the two menus'
+#: formatters (v0.67.0) did not change what proposals need, so this
+#: number is unchanged by it and remains the size that decides the
+#: column: sized for its wider user, same as before.
 PICKER_STATUS_COL = 28
-#: `_fmt_age`'s own ceiling is 5 columns; +2 for the gutter.
+#: `_fmt_age`'s TRUE ceiling, measured (v0.69.0) rather than assumed: not
+#: 5 as an earlier comment here claimed, but 6 -- `_fmt_age(86399)` reads
+#: "23h59m", the sub-day branch's own widest case (a belief confirmed, or
+#: a proposal staged, just under 24h ago -- a routine value, not an edge
+#: case) and wider than anything the day-tier branches can produce short
+#: of implausible multi-century ages. 6 + 1 gutter = 7: the NUMBER below
+#: was already correct, only the reasoning written above it was not.
 PICKER_AGE_COL = 7
 #: The text column's own cap -- independent of the fixed columns before
 #: it, per spec: ``min(100, terminal width)``.
@@ -682,6 +700,28 @@ def format_picker_prefix(stamp: str, status: str, age: str) -> str:
     status_col = ellipsize(status or "", PICKER_STATUS_COL - 1).ljust(PICKER_STATUS_COL)
     age_col = ellipsize(age or "", PICKER_AGE_COL - 1).ljust(PICKER_AGE_COL)
     return f"{stamp_col}{status_col}{age_col}"
+
+
+def format_picker_column_header() -> str:
+    """The one column-name header both LORE chip-picker menus show
+    (v0.69.0), in the EXACT same fixed columns :func:`format_picker_prefix`
+    gives every data row -- so it is built the same way, through the same
+    function, rather than a second hand-aligned string that could drift
+    from the columns it is supposed to name.
+
+    ``status`` and ``text``, not ``verdict``/``claim``: the header is
+    SHARED between the beliefs picker (where the column holds an outcome
+    kind and the free text is a claim) and the proposals picker (where it
+    holds a proposed verdict and the text is the proposal itself) -- a
+    word that reads correctly for only one of the two menus would be
+    wrong the other half of the time it is on screen.
+
+    Callers prepend :attr:`ChipPicker.ROW_CHROME_COLS` worth of blank
+    space themselves (the same three columns every data row spends on its
+    own leading mark/selection glyph) -- this function only knows about
+    the columns after that point, the ones :func:`format_picker_prefix`
+    already owns."""
+    return format_picker_prefix("date", "status", "age") + "text"
 
 
 def format_picker_row(
@@ -769,10 +809,11 @@ def _fmt_pending_row(item: "dict | str", *, width: int = PICKER_ROW_MAX) -> str:
 
 # -- item V: timestamps, age, provenance, and the proposed verdict --------
 #
-# The beliefs browser needs four things the v0.27.0 picker never carried,
-# and all four are pure functions of one record, so they live here beside
-# the row formatters that already read those records rather than inside
-# the widget that paints them.
+# Four things the v0.27.0 picker never carried, first built for item V's
+# beliefs browser (since removed, v0.69.0, in favour of putting all four
+# on the picker's own row) -- and all four are pure functions of one
+# record, so they live here beside the row formatters that already read
+# those records rather than inside whatever widget paints them.
 #
 # WHICH TIMESTAMP, and WHAT STALENESS ACTUALLY IS (corrected in v0.46.0).
 #
@@ -890,11 +931,14 @@ def belief_created_text(
     v0.57.0 a picker row is trimmed by the WIDGET against its own measured
     width rather than by this function against a constant.
 
-    ``full=True`` spells the century out (``YYYY-MM-DD HH:MM``) for the
-    browser's own rows, which are read as a record rather than as a glance
-    and have the width for it. Both forms are fixed-width, both carry
-    HH:MM, and neither has ever carried seconds -- a precision nobody acts
-    on for a claim a background reviewer derived."""
+    ``full=True`` spells the century out (``YYYY-MM-DD HH:MM``) -- built
+    for the now-removed beliefs browser's own rows, which were read as a
+    record rather than as a glance and had the width for it; no picker
+    caller sets it today, but the form stays (and stays tested) rather
+    than being ripped out from under whatever next wants a record-length
+    stamp. Both forms are fixed-width, both carry HH:MM, and neither has
+    ever carried seconds -- a precision nobody acts on for a claim a
+    background reviewer derived."""
     stamp = str(belief.get("created") or "").strip()
     when = _parse_lore_time(stamp)
     if when is None:
@@ -998,7 +1042,7 @@ def belief_sort_key(belief: dict) -> "tuple[int, float]":
     recently tested first; everything else after them, untouched.
 
     Not a cosmetic ordering. 31 outcome rows against 628 active beliefs
-    means the tested ones are needles, and a browser that interleaves them
+    means the tested ones are needles, and a picker that interleaves them
     with six hundred never-tested claims by date has hidden the only
     evidence it holds. Never-tested sorts as a BUCKET rather than by age,
     because it is a state and not a large age -- and Python's sort is
@@ -1034,6 +1078,66 @@ def belief_provenance(belief: dict) -> str:
     about the ledger, not about the belief."""
     via = str(belief.get("via") or "").strip()
     return f"via {via}" if via else "provenance unknown"
+
+
+def belief_evidence_rows(rows: "list[dict]") -> "list[str]":
+    """One belief's derivation trail as PICKER ROWS -- one entry per
+    evidence event (session, project, note), each meant to become its OWN
+    disabled row beneath the expanded belief.
+
+    v0.69.0 removed the beliefs browser's ``EvidenceTrail`` widget (which
+    mounted the whole trail as one Static under the row) in favour of
+    expanding a belief's evidence in place on the chip picker itself:
+    Right on a highlighted row inserts these as real rows directly under
+    it -- disabled, so the highlight (and every action key) still lands
+    only on the belief, never on its own evidence -- and Left removes
+    them again. A LIST, not one joined blob, because the picker already
+    has the machinery for "many rows belong to one thing" (the fold
+    header's own child rows) and reusing it is simpler than inventing a
+    second shape for one blob widget to hold.
+
+    NEVER EMPTY: a belief with no evidence at all still gets ONE row
+    saying so -- ``[]`` would render as nothing, and "no evidence" and
+    "not fetched yet" (the picker's own transient "loading" row, painted
+    before this function is even called) have to look different on
+    screen, not merely be different internally.
+
+    The fetch itself is unchanged: still lazy, still one belief at a time,
+    still capped (see ``SessionEngine.belief_evidence`` /
+    :data:`BELIEF_EVIDENCE_LIMIT`) -- a picker over hundreds of beliefs
+    must not pull hundreds of trails just because the list is open, and a
+    trail past the cap says so in its own trailing row rather than being
+    shown as if it were complete."""
+    if not rows:
+        return [
+            "    no evidence rows — this belief carries no derivation "
+            "trail in the store"
+        ]
+    out: "list[str]" = []
+    for row in rows:
+        when = str(row.get("created") or "?")
+        session = str(row.get("session_id") or "?")
+        project = str(row.get("project") or "")
+        note = _one_line(str(row.get("note") or ""), 200)
+        head = f"    {when}  session {session}"
+        if project:
+            head += f"  [{project}]"
+        text = _escape_markup(head)
+        if note:
+            text += "\n" + _escape_markup(f"        {note}")
+        if row.get("note_truncated"):
+            text += "\n        [note truncated — larger than one wire frame]"
+        out.append(text)
+    if rows[-1].get("trail_truncated"):
+        # Set on the LAST row DOXA actually read (SessionEngine.
+        # belief_evidence fetches limit+1 to detect this) -- its OWN
+        # trailing row, never appended onto the last citation's text, so
+        # the honesty note can never be mistaken for part of that
+        # citation.
+        out.append(
+            "    … trail continues — more evidence than one page holds"
+        )
+    return out
 
 
 def belief_tooltip(belief: dict) -> str:
