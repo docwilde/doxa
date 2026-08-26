@@ -4,7 +4,7 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
-## 0.77.0 — 2026-08-26
+## 0.76.0 — 2026-08-26
 
 - Adopted Claude Code plugin commands now reach DOXA's own "/" autocomplete,
   the Ctrl+P palette and `/help` — measured against a real adopted plugin
