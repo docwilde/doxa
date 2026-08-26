@@ -716,8 +716,9 @@ async def test_beliefs_chip_click_opens_grouped_picker(monkeypatch, tmp_path):
         headers = [label for rid, label in picker._rows
                    if rid.startswith(ChipPicker.GROUP_ROW_PREFIX)]
         assert any("project (1 belief)" in h for h in headers), headers
-        assert any("user (1 belief)" in h for h in headers), headers
-        assert any("user model (1 belief)" in h for h in headers), headers
+        # v0.67.0: `· stated`/`· inferred` -- LORE's channel tag.
+        assert any("user · stated (1 belief)" in h for h in headers), headers
+        assert any("user-model · inferred (1 belief)" in h for h in headers), headers
         # Cost discipline: list_beliefs() is a CLICK-only call.
         assert fake.list_beliefs_calls == 1
 
