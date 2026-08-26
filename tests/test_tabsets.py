@@ -641,6 +641,71 @@ async def test_the_active_tab_survives_a_persist_that_beats_activation(tmp_path)
         assert record.active_session_id == "sid-2"
 
 
+def test_initial_active_tab_id_is_decided_before_anything_mounts():
+    """A SECOND write-ordering race, distinct from the one fixed above.
+
+    ``test_the_active_tab_survives_a_persist_that_beats_activation`` pins
+    v0.38.0's race: a restored pane boots and persists before Textual has
+    resolved ANY active tab, so ``_persist_tabset`` has to fall back to
+    the restored id. This test's failure was different -- ``assert
+    'sid-1' == 'sid-2'``, a WRONG id, not a missing one -- which means
+    something DID resolve an active tab, just the wrong one.
+
+    Measured cause, reading Textual's own ``Tabs``/``TabbedContent``:
+    ``Tabs`` defaults itself to its first child tab on ITS OWN mount
+    whenever nothing else names one, and that default reaches
+    ``TabbedContent.active`` as a QUEUED MESSAGE
+    (``Tabs.TabActivated`` -> ``_on_tabs_tab_activated``), not a
+    synchronous write. The old ``_activate_initial_tab`` set
+    ``tabbed.active`` directly from ``App.on_mount``, which usually runs
+    after that default -- but the queued message from the default does
+    not stop existing just because something else wrote ``active`` in the
+    meantime; whenever it is finally handled, it overwrites ``active``
+    with whatever tab IT named, unconditionally. Two writers, and under
+    load the wrong one can land last.
+
+    The fix -- ``_initial_active_tab_id`` -- removes the SECOND writer
+    instead of racing it: it is read by ``compose()`` and handed to
+    ``TabbedContent`` as ``initial=``, so ``Tabs`` never defaults to the
+    wrong tab in the first place and there is no stray message left to
+    land late. This test pins the SELECTION alone -- a pure function of
+    ``_restore_tabs``/``_restore_active_id``, decided before any widget
+    exists, so it needs no pilot and cannot itself race."""
+    def app_for(specs, active_id):
+        return DoxaApp(cwd=".", restore_tabs=specs, restore_active_id=active_id)
+
+    # No restore at all: a single pane, Tabs' own default is already
+    # right, so there is nothing to name.
+    assert app_for([], None)._initial_active_tab_id() == ""
+
+    live1 = RestoreTabSpec("sid-1", _fake_factory("sid-1"))
+    live2 = RestoreTabSpec("sid-2", _fake_factory("sid-2"))
+    archived1 = RestoreTabSpec("sid-a", None, archived=True)
+
+    # The saved active tab, when the record named one and it live.
+    app = app_for([live1, live2], "sid-2")
+    assert app._initial_active_tab_id() == "restore-sid-2"
+
+    # The saved active tab even when IT is the archived one -- "live pane
+    # or archived tab alike, it is where the user was".
+    app = app_for([archived1, live1], "sid-a")
+    assert app._initial_active_tab_id() == "restore-sid-a"
+
+    # No saved active id: the first SESSION spec, archived ones skipped.
+    app = app_for([archived1, live1, live2], None)
+    assert app._initial_active_tab_id() == "restore-sid-1"
+
+    # A saved active id that names a tab NOT in this restore: falls back
+    # to the same "first session spec" rule as no id at all.
+    app = app_for([live1, live2], "sid-does-not-exist")
+    assert app._initial_active_tab_id() == "restore-sid-1"
+
+    # Every resolved tab archived: the fixed fallback id, matching the one
+    # compose() gives the fresh pane it adds in that exact case.
+    app = app_for([archived1], None)
+    assert app._initial_active_tab_id() == app._FALLBACK_PANE_ID
+
+
 @pytest.mark.asyncio
 async def test_a_later_tab_switch_still_wins_over_the_restored_active_id(tmp_path):
     """The fallback above must not outlive the window it exists for: once
