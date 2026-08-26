@@ -245,8 +245,22 @@ class PaneChipsMixin:
         """This session's LORE project slug -- the one lore_core uses to
         pick MEMORY.md.
 
-        Resolved through the MAIN repo root, not the pane's raw cwd, and
-        that distinction is the whole point: since v0.17.0 every repo
+        Resolved through the ENGINE's cwd first, falling back to the
+        pane's own only when there is no engine yet to ask -- the same
+        "engine cwd wins" rule :meth:`_boot`'s own ``git_cwd`` and
+        :meth:`open_repo_picker` already apply, and for the same reason:
+        ``self.cwd`` is frozen at construction (the before-boot guess),
+        while the engine reports where the session actually landed once
+        it connects -- a daemon attach, a worktree-per-session substitution
+        (doxa.worktrees), or a resume can all put the live session
+        somewhere the pane's own cwd never learns about on its own
+        (reported: the memory chip's project half stayed absent past
+        startup, and never moved on a repo switch or a resume, because
+        this was the one reader in the pane still asking ``self.cwd``
+        instead of the engine).
+
+        Resolved through the MAIN repo root, not the raw cwd either way,
+        and that distinction is the whole point: since v0.17.0 every repo
         session runs in a worktree, so `project_slug(cwd)` answers "which
         DIRECTORY" when the question is "which PROJECT". A worktree at
         /tmp/claude-1000/doxa-mode resolves to the slug
@@ -263,7 +277,8 @@ class PaneChipsMixin:
         try:
             from lore_core.config import project_slug
 
-            root = peers_mod.main_repo_root_of(self.cwd) or self.cwd
+            cwd = str(getattr(self.engine, "cwd", None) or self.cwd)
+            root = peers_mod.main_repo_root_of(cwd) or cwd
             return project_slug(root)
         except Exception:
             return ""
@@ -1150,6 +1165,13 @@ class PaneChipsMixin:
             # contradiction that just retired a belief says so here.
             await self._system(f"belief {bid} · {event} · {error}\n\n{claim}")
             return
+        # A recorded outcome can retire the belief (LORE's own dormancy
+        # rule above), which moves the belief chip's count -- refresh AFTER
+        # the write lands, never before, so the chip never claims a change
+        # that has not actually happened yet. `_call`/the in-process engine
+        # both already await the write's own completion, so this is
+        # correct for a daemon-hosted session exactly as it is in-process.
+        self._refresh_status()
         await self._system(
             f"belief {bid} recorded as {event} (source: user)\n\n{claim}"
         )
@@ -1169,6 +1191,9 @@ class PaneChipsMixin:
         if error:
             await self._system(f"belief {bid} · NOT retracted — {error}\n\n{claim}")
             return
+        # Retracting moves the belief chip's count -- see the same refresh
+        # note above.
+        self._refresh_status()
         await self._system(
             f"belief {bid} retracted — it leaves the working set and the "
             f"model's context. Its evidence and outcome ledger stay on "
@@ -1477,6 +1502,15 @@ class PaneChipsMixin:
         if error:
             await self._system(f"proposal {pid} · NOT {action}d — {error}")
             return
+        # The proposal leaves the staging queue either way (moves the
+        # staged-proposals chip); an APPROVED memory proposal also writes
+        # MEMORY.md/USER.md (moves the memory-fill chip) and an approved
+        # belief proposal also lands in the active set (moves the belief
+        # chip). One refresh after the write settles all three correctly,
+        # because each reads its own store fresh rather than trusting a
+        # guess about which kind of proposal this was -- see the note on
+        # the two belief-write refreshes above for why AFTER, not before.
+        self._refresh_status()
         if action == "approve":
             await self._system(
                 f"proposal {pid} approved — {verdict}. LORE recorded it as "

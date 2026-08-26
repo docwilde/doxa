@@ -4,6 +4,11 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.68.0 — 2026-08-26
+
+- Curated-memory chip (`mem u63% p39%`): the project half stayed absent past startup and never moved on a repo switch or a resume. `PaneChipsMixin._lore_slug` resolved the project slug from the pane's own construction-time `cwd`, never the connected engine's — the one reader in the pane still doing that (every other one already prefers `engine.cwd`). Now resolves through the engine's cwd first, falling back to the pane's only when there is no engine yet.
+- Approving or rejecting a staged proposal, recording a belief outcome, and retracting a belief never refreshed the status bar afterward — the memory-fill, belief-count and staged-proposals chips stayed exactly as stale as their last unrelated refresh. Each of the four write paths (the status bar's own quick pickers in `doxa/session/chips.py`, and the full beliefs browser's `apply`/`record_outcome`/`retract` in `doxa/ui/beliefs.py`) now triggers a refresh once the write actually lands — never on the arming selection, which writes nothing.
+
 ## 0.65.0 — 2026-08-26
 
 - `/peers` printed a peer's `title` and `cwd` raw. Another process writes both — a title derives from that session's first prompt, a cwd from a path — and the message receive path has scrubbed since it existed while the registry-read path never did. Scrubbed at the single point an entry becomes a `PeerInfo`, so a consumer added later cannot forget.
