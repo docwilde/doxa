@@ -139,10 +139,14 @@ def test_fmt_age_gained_a_day_tier_and_kept_every_old_one():
 
 
 def test_a_belief_row_carries_its_creation_time_and_its_last_verdict():
+    """v0.67.0: the outcome KIND and its AGE are two separate fixed
+    columns now (status, then age), not one merged "confirmed 3d" string
+    -- see doxa.ui.labels.format_picker_row."""
     row = _fmt_belief_row(_belief(1, "prefers terse commits", created_days=120,
                                   outcome="confirmed", outcome_days=3))
     assert "prefers terse commits" in row
-    assert "confirmed 3d" in row
+    assert "confirmed" in row
+    assert "3d0h" in row
     assert time.strftime("%m-%d %H:%M",
                          time.gmtime(time.time() - 120 * DAY)) in row
 
@@ -258,10 +262,19 @@ def test_tested_beliefs_sort_ahead_of_never_tested_ones():
     assert belief_sort_key(untested_recent) == belief_sort_key(untested_ancient)
 
 
-def test_a_belief_with_no_timestamps_renders_exactly_as_it_used_to():
-    """No placeholder column for a fact the store does not carry -- and it
-    is what keeps a belief arriving from an older daemon honest."""
-    assert _fmt_belief_row({"id": 1, "claim": "x"}) == "x"
+def test_a_belief_with_no_timestamps_renders_a_blank_not_a_guessed_column():
+    """v0.67.0: the picker row is now FIXED-WIDTH columns, so a fact the
+    store does not carry renders as BLANK columns (padded, held open)
+    rather than the column disappearing outright -- the same "an absent
+    key is an admission, a zero is a measurement" rule this row already
+    followed, extended to a table shape. Never a GUESSED stamp/status/age
+    for a belief arriving from an older daemon, which is the invariant
+    that actually matters here."""
+    from doxa.ui.labels import PICKER_PREFIX_WIDTH
+
+    row = _fmt_belief_row({"id": 1, "claim": "x"})
+    assert row == " " * PICKER_PREFIX_WIDTH + "x"
+    assert row[PICKER_PREFIX_WIDTH:] == "x"
     assert belief_age_text({"id": 1, "claim": "x"}) == ""
 
 
@@ -272,7 +285,8 @@ def test_last_referenced_survives_in_the_tooltip_and_only_there():
     labelled for what it is, below the outcome and never beside it."""
     belief = _belief(1, "x", idle_days=3, outcome="confirmed", outcome_days=40)
     row = _fmt_belief_row(belief)
-    assert "confirmed 40d" in row
+    assert "confirmed" in row
+    assert "40d" in row
     assert "idle" not in row
     tip = belief_tooltip(belief)
     assert "cited, not confirmed" in tip
@@ -317,9 +331,17 @@ def test_a_replacing_proposal_names_what_it_supersedes():
 
 
 def test_a_pending_row_leads_with_the_verdict_and_the_wait():
+    """v0.67.0: stamp, verdict and age are three separate FIXED columns
+    now (the shared beliefs/proposals shape -- see
+    doxa.ui.labels.format_picker_row), not a `` · ``-joined string that
+    drifted with every field's own length. The verdict still leads --
+    right after the fixed-width stamp column -- because it is the part a
+    reviewer scans."""
+    from doxa.ui.labels import PICKER_STAMP_COL
+
     row = _fmt_pending_row(_proposal("p", "remember uv, not pip", staged_days=5))
-    assert row.index("add → memory/user") == 0
-    assert "staged 5d" in row
+    assert row.index("add → memory/user") == PICKER_STAMP_COL
+    assert "5d0h" in row
     assert "remember uv, not pip" in row  # still filterable by its own words
 
 
@@ -1335,7 +1357,13 @@ async def test_scope_groups_are_headers_carrying_their_own_count(
     """Asked for directly: `project (N beliefs)`. The counts follow the
     labels _belief_scope_label actually emits -- which keeps `user-model`
     its own group rather than folding it into plain `user`, so a store
-    with both shows three headers and not two."""
+    with both shows three headers and not two.
+
+    v0.67.0: `user`/`user-model` headers also carry LORE's own channel
+    tag (`· stated` / `· inferred` -- see BELIEF_CHANNEL_RULE) so the
+    "may a later session act on this" distinction is legible at a glance,
+    not only in a hover. `project` carries no such tag -- it has no
+    channel to distinguish."""
     fake = FakeEngine([])
     fake.list_beliefs_result = (
         _many(8) + _many(3, group="user") + _many(2, group="user-model")
@@ -1346,8 +1374,8 @@ async def test_scope_groups_are_headers_carrying_their_own_count(
         _pane, picker = await _picker(pilot, app, beliefs=None)
         headers = _headers(picker)
         assert any("project (8 beliefs)" in h for h in headers), headers
-        assert any("user (3 beliefs)" in h for h in headers), headers
-        assert any("user model (2 beliefs)" in h for h in headers), headers
+        assert any("user · stated (3 beliefs)" in h for h in headers), headers
+        assert any("user-model · inferred (2 beliefs)" in h for h in headers), headers
 
 
 @pytest.mark.asyncio
@@ -1358,7 +1386,7 @@ async def test_a_group_of_one_is_not_pluralised(monkeypatch, tmp_path):
     async with app.run_test(size=(160, 48)) as pilot:
         await pilot.pause()
         _pane, picker = await _picker(pilot, app, beliefs=None)
-        assert any("user (1 belief)" in h for h in _headers(picker))
+        assert any("user · stated (1 belief)" in h for h in _headers(picker))
 
 
 @pytest.mark.asyncio
@@ -1381,8 +1409,8 @@ async def test_the_header_says_how_many_of_a_group_reality_has_tested(
         headers = _headers(picker)
         assert any("project (10 beliefs, 1 tested)" in h for h in headers), headers
         # A group with none says nothing rather than "0 tested".
-        assert any(h.strip().startswith("▸ user (3 beliefs)")
-                   or h.strip().startswith("▾ user (3 beliefs)")
+        assert any(h.strip().startswith("▸ user · stated (3 beliefs)")
+                   or h.strip().startswith("▾ user · stated (3 beliefs)")
                    for h in headers), headers
 
 
@@ -1412,7 +1440,7 @@ async def test_a_large_list_opens_folded_and_a_header_unfolds_it(
         assert len(opened) == 40
         assert all("claim number" in label for _rid, label in opened)
         # ...and the user group beside it stays folded.
-        assert any("▸ user (6 beliefs)" in h for h in _headers(picker))
+        assert any("▸ user · stated (6 beliefs)" in h for h in _headers(picker))
 
         # A second selection folds it back, and the highlight is still on
         # the header so it can be toggled again without hunting for it.
@@ -1972,7 +2000,16 @@ def _pending_rows(picker):
 
 
 def _shown(picker):
-    return [str(picker.get_option_at_index(i).prompt)
+    """Each row as a READER sees it -- markup resolved, same rule
+    `_status_plain` follows. v0.67.0's inline row actions add real
+    `[@click=...]` control markup to a beliefs/pending row's raw
+    `Option.prompt` string (never rendered as visible cells, same as any
+    other markup span in this app); measuring THAT raw string's length
+    instead of the plain text it resolves to would count control
+    sequences as if they were columns on screen."""
+    from textual.content import Content
+
+    return [Content.from_markup(str(picker.get_option_at_index(i).prompt)).plain
             for i in range(picker.option_count)]
 
 

@@ -260,10 +260,11 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         yield dropdown
         needs_input = NeedsInputPopup()
         yield needs_input
-        yield ChipPicker(self)
+        picker = ChipPicker(self)
+        yield picker
         # No ``placeholder=`` -- TextArea has no built-in placeholder text
         # (Input did); a deliberate drop, not an oversight, see item N.
-        yield PromptInput(dropdown, search, needs_input, id="prompt-input")
+        yield PromptInput(dropdown, search, needs_input, picker, id="prompt-input")
 
     async def on_mount(self) -> None:
         self.engine = self._engine_factory()
@@ -546,8 +547,20 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         a query (this app does not poll, and it does not hit SQLite on a
         keystroke either). PromptInput's OWN ``on_text_area_changed``
         (box-height resize) has already run by the time this bubbles here
-        -- it deliberately does not stop the event."""
+        -- it deliberately does not stop the event.
+
+        v0.67.0: a THIRD sync target, the beliefs/proposals ChipPicker --
+        only while it is actually driving the prompt (``prompt_filter_
+        active``; every other chip menu ignores this entirely, unchanged).
+        Checked regardless of the needs-input guard below: PromptInput's
+        own ``on_key`` already gives needs-input priority over the picker
+        for KEYSTROKES, but a Changed event fires from whatever text is on
+        screen NOW, and the picker's filter must track that text exactly
+        the same way the other two popups' do."""
         event.stop()
+        picker = self.query_one("#chip-picker", ChipPicker)
+        if picker.prompt_filter_active:
+            picker.sync_filter(event.text_area.text)
         if self.query_one("#needs-input-popup", NeedsInputPopup).is_open:
             # A pending question owns this row while it is up -- typing
             # still works (composing a note is fine), but the two ordinary

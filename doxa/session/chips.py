@@ -41,8 +41,8 @@ from .. import identity as identity_mod
 from .. import peers as peers_mod
 from ..events import BELIEF_LIST_LIMIT, PENDING_LIST_LIMIT
 from ..history import SessionSearch
-from ..ui.beliefs import BeliefsBrowserTab
-from ..ui.dialogs import ChipPicker, CompactConfirm, NeedsInputPopup, SlashComplete
+from ..ui.beliefs import ARMED_COLOR, REJECT_COLOR, BeliefsBrowserTab
+from ..ui.dialogs import ChipPicker, CompactConfirm, NeedsInputPopup, RowAction, SlashComplete
 from ..ui.labels import (
     memory_fill,
     memory_fill_chip,
@@ -56,6 +56,8 @@ from ..ui.labels import (
     CTX_ABSOLUTE_MIN_COLS,
     MODE_CHIP_MIN_COLS,
     MODE_EXPLAIN,
+    OUTCOME_COLORS,
+    PICKER_PREFIX_WIDTH,
     _belief_scope_label,
     _chip_span,
     _fmt_belief_row,
@@ -105,6 +107,37 @@ REVIEW_ALL_ROW = (
     "review:all",
     "▸ open the proposal review — approve or reject, one at a time",
 )
+
+
+# v0.67.0: inline row actions for the two pickers above -- reachable
+# without ever leaving the top-level list (a click on the row's own
+# action span, or the reserved letter while that row is highlighted and
+# the filter is empty; see ChipPicker.try_action_key). ADDITIVE, not a
+# replacement: selecting a row outright (Enter, or a click that misses
+# every action span) still opens the per-row action SUB-menu these two
+# pickers have carried since v0.46.0/v0.48.0 (_open_belief_actions /
+# _open_pending_actions, below, both unchanged) -- that flow's own
+# "nothing acts without a deliberate second selection" tests keep passing
+# unmodified, and a mouse user who has not discovered the inline controls
+# loses nothing. The verbs themselves are unchanged from those two
+# menus: beliefs get LORE's own outcome vocabulary plus retract (never
+# approve/reject -- see _open_belief_actions's docstring on why), the
+# proposals menu keeps approve/reject.
+BELIEF_ROW_ACTIONS = [
+    RowAction("y", "confirmed", "y confirmed", color=OUTCOME_COLORS["confirmed"]),
+    RowAction("c", "contradicted", "c contradicted",
+              color=OUTCOME_COLORS["contradicted"]),
+    RowAction("s", "stale", "s stale", color=OUTCOME_COLORS["stale"]),
+    RowAction("r", "retract", "r retract…",
+              armed_label="⌫ CONFIRM RETRACT", color=REJECT_COLOR,
+              armed_color=ARMED_COLOR, arms=True),
+]
+PENDING_ROW_ACTIONS = [
+    RowAction("a", "approve", "a approve",
+              armed_label="✓ CONFIRM APPROVE", color=CLICKABLE_CHIP_ACCENT,
+              armed_color=ARMED_COLOR, arms=True),
+    RowAction("r", "reject", "r reject", color=REJECT_COLOR),
+]
 
 
 def _ctx_tooltip_absolute(used: "int | None", limit: "int | None") -> str:
@@ -598,12 +631,20 @@ class PaneChipsMixin:
         group_notes: "dict[str, str] | None" = None,
         counted_noun: str = "",
         open_groups: "set[str] | None" = None,
+        row_prefix_width: int = 0,
+        row_actions: "list[RowAction] | None" = None,
+        row_action_dispatch: "Callable[[str, str], Any] | None" = None,
+        prompt_filter: bool = False,
     ) -> None:
         """Shared entry point for every chip that opens :class:`ChipPicker`
         -- guards against opening UNDER a pending needs-input request (same
         "the question owns this row" rule ``_on_prompt_changed`` already
         applies to the two prompt-driven popups) and closes those two
-        popups first, so at most one of the four ever shows at once."""
+        popups first, so at most one of the four ever shows at once.
+
+        The last four keywords (v0.67.0) only ever arrive from
+        :meth:`open_beliefs_picker`/:meth:`open_pending_picker` -- see
+        ``RowAction``'s own docstring for what they turn on."""
         if self.query_one("#needs-input-popup", NeedsInputPopup).is_open:
             return
         self.query_one("#slash-complete", SlashComplete).close()
@@ -612,6 +653,8 @@ class PaneChipsMixin:
             rows, current_id, on_select, note=note, title=title, groups=groups,
             collapsible=collapsible, group_notes=group_notes,
             counted_noun=counted_noun, open_groups=open_groups,
+            row_prefix_width=row_prefix_width, row_actions=row_actions,
+            row_action_dispatch=row_action_dispatch, prompt_filter=prompt_filter,
         )
 
     @staticmethod
@@ -985,7 +1028,36 @@ class PaneChipsMixin:
             # way into the browser behind exactly the fold a 635-belief
             # store makes necessary.
             open_groups={"browse"},
+            row_prefix_width=PICKER_PREFIX_WIDTH, row_actions=BELIEF_ROW_ACTIONS,
+            row_action_dispatch=lambda rid, key: self._dispatch_belief_row_action(
+                rid, key, by_id),
+            prompt_filter=True,
         )
+
+    def _dispatch_belief_row_action(
+        self, rid: str, key: str, by_id: "dict[str, dict]",
+    ) -> None:
+        """One inline row action, fired from ``ChipPicker.action_row_action``
+        -- a click on the row's own action span, or the reserved letter
+        while it is highlighted (v0.67.0). Never acts on more than the
+        belief named by ``rid``: no id list anywhere on this path, same as
+        the per-row action sub-menu these verbs already had.
+
+        The arm-twice discipline for ``retract`` already happened, inside
+        the picker itself, before this is ever called -- by the time
+        ``key == "r"`` reaches here the SECOND press has already landed on
+        the SAME row (see ``RowAction.arms`` / ``ChipPicker._armed_rid``),
+        so this fires unconditionally rather than re-checking anything."""
+        belief = by_id.get(rid)
+        if belief is None:
+            return
+        if key == "r":
+            self.run_worker(self._retract_belief(belief), group="command")
+            return
+        event = {"y": "confirmed", "c": "contradicted", "s": "stale"}.get(key)
+        if event:
+            self.run_worker(
+                self._record_belief_outcome(belief, event), group="command")
 
     def _pick_belief_row(self, rid: str, by_id: "dict[str, dict]") -> None:
         """A picker row's destination: the browser, or THIS belief's own
@@ -1333,7 +1405,28 @@ class PaneChipsMixin:
             lambda rid: self._pick_pending_row(rid, by_id),
             title="pending", note=note, groups=groups,
             collapsible=True, counted_noun="proposal",
+            row_prefix_width=PICKER_PREFIX_WIDTH, row_actions=PENDING_ROW_ACTIONS,
+            row_action_dispatch=lambda rid, key: self._dispatch_pending_row_action(
+                rid, key, by_id),
+            prompt_filter=True,
         )
+
+    def _dispatch_pending_row_action(
+        self, rid: str, key: str, by_id: "dict[str, Any]",
+    ) -> None:
+        """One inline row action for a staged proposal (v0.67.0) -- same
+        shape as :meth:`_dispatch_belief_row_action`, reusing the SAME
+        engine call :meth:`_resolve_pending` (and its own ``approve_
+        pending``/``reject_pending`` methods) the per-row action sub-menu
+        already drives, so an approval from either surface carries LORE's
+        identical ``via approved`` provenance."""
+        item = by_id.get(rid)
+        if item is None:
+            return
+        if key == "a":
+            self.run_worker(self._resolve_pending(item, "approve"), group="command")
+        elif key == "r":
+            self.run_worker(self._resolve_pending(item, "reject"), group="command")
 
     def _pick_pending_row(self, rid: str, by_id: "dict[str, Any]") -> None:
         """A pending row's destination: the browser, or one proposal

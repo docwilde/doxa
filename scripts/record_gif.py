@@ -37,8 +37,10 @@ rather than silently shipping a file that blew past the ~1MB target.
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -47,6 +49,21 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+# v0.67.0: isolation, BEFORE any doxa import -- see scripts/screenshot.py's
+# own copy of this block for the measured defect it closes (`N proposals`/
+# `mem u%p%` reading this machine's real, ambient lore_core state, neither
+# scripted anywhere in this file either) and why this is `setdefault`, not
+# a bare assignment (tests/test_record_gif.py imports this module under
+# pytest, where conftest.py has already established its OWN isolated
+# directory -- this must never clobber that).
+_tmp = Path(tempfile.mkdtemp(prefix="doxa-gifs-"))
+os.environ.setdefault("LORE_ROOT", str(_tmp / "lore"))
+os.environ.setdefault("LORE_PROJECTS_DIR", str(_tmp / "projects"))
+os.environ.setdefault("DOXA_RUNTIME_DIR", str(_tmp / "runtime"))
+os.environ.setdefault("DOXA_HOME", str(_tmp / "doxa-home"))
+os.environ.setdefault("XDG_CONFIG_HOME", str(_tmp / "xdg"))
+os.environ.setdefault("DOXA_SKIP_FIRST_RUN", "1")
 
 from PIL import Image  # noqa: E402
 
@@ -87,12 +104,14 @@ SEARCH_HITS = [
      "snippet": "linked the release [checklist] from the team's [deploy] doc"},
 ]
 
-# The same 16:9-within-~2% terminal sizes scripts/screenshot.py already
-# solved for its own scenes -- reused here rather than re-derived, since
-# every frame in a scene shares one app size throughout.
-SIZE_TAB_BAR = (120, 32)   # rename / palette / tab-lifecycle / attention-blink
-SIZE_WIDE = (172, 47)      # tool-calls / markdown-stream: room for a turn body
-SIZE_SEARCH = (100, 26)    # search: matches screenshot.py's own search scene
+# v0.67.0: every scene here shares scripts/screenshot.py's own `WIDE` --
+# see that module's geometry comment for the full derivation (250 columns
+# is the floor a live status bar needs, 69 rows solves 16:9 at that
+# floor). The three named tiers this file used to pick between
+# (SIZE_TAB_BAR/SIZE_WIDE/SIZE_SEARCH) are retired along with the mixed
+# gallery they produced -- kept as ONE name below, still called out by
+# scene below so a reader can see which scenes used to need which room.
+SIZE_TAB_BAR = SIZE_WIDE = SIZE_SEARCH = WIDE = (250, 69)
 
 
 # --------------------------------------------------------------------- #
@@ -194,6 +213,29 @@ async def _mount_bare_turn(app: DoxaApp, prompt: str) -> TurnBlock:
     return block
 
 
+async def _mount_filler_exchange(app: DoxaApp, pilot: Any) -> None:
+    """One quick, already-FINISHED exchange, mounted before a scene's own
+    scripted content -- v0.67.0's answer to every GIF scene here growing
+    to the shared 250x69 (see scripts/screenshot.py's `WIDE`): most of
+    these used to run at 120x32 or 172x47, sized for exactly the one
+    interaction each demos, and simply widening/heightening that to the
+    new floor would leave a tall blank scrollback above it. A prior turn
+    is what a real session actually has by the time anything interesting
+    happens in it, so this is the same discipline `hero`'s own three-tab
+    conversation already established, sized down to one quick exchange
+    rather than a whole scripted script -- every OTHER frame in the scene
+    is still the thing the scene is actually about."""
+    block = await _mount_bare_turn(
+        app, "what's the shared frame size for the gallery now?")
+    await block.append_text(
+        "250 columns, 69 rows -- solved once for 16:9 at the widest floor "
+        "any scene needs (a live status bar), and every scene shares it "
+        "now instead of picking its own."
+    )
+    await block.mark_done(0.0014, 380, False)
+    await pilot.pause()
+
+
 def _show_search_hits(popup: SessionSearch, query: str, hits: list[dict]) -> None:
     """Paint scripted hits without ever touching the real session index --
     same trick scripts/screenshot.py's search scene uses (skip `sync()`'s
@@ -239,6 +281,7 @@ class GatedEngine(FakeEngine):
 async def _drive_tab_lifecycle(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
     await pilot.pause()
     first = app.active_pane
+    await _mount_filler_exchange(app, pilot)
     rec.snap(1000, "one tab, idle")
 
     await app.action_new_tab()
@@ -278,6 +321,7 @@ async def _drive_tab_lifecycle(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> 
 
 async def _drive_tool_calls(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
     await pilot.pause()
+    await _mount_filler_exchange(app, pilot)
     block = await _mount_bare_turn(app, "what changed in the token refresh path?")
     await block.append_text("Checking a few places before I answer.\n\n")
     await pilot.pause()
@@ -329,6 +373,7 @@ MD_CHUNKS = [
 
 async def _drive_markdown_stream(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
     await pilot.pause()
+    await _mount_filler_exchange(app, pilot)
     block = await _mount_bare_turn(app, "summarize the last trace")
     last = len(MD_CHUNKS) - 1
     for i, chunk in enumerate(MD_CHUNKS):
@@ -357,6 +402,7 @@ REASONING_CHUNKS = [
 
 async def _drive_reasoning(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
     await pilot.pause()
+    await _mount_filler_exchange(app, pilot)
     block = await _mount_bare_turn(app, "what changed in the token refresh path?")
     await pilot.pause()
     rec.snap(700, "turn starts: the ⋯ thinking marker is the only sign of life")
@@ -398,6 +444,10 @@ async def _drive_rename(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
     await app.action_new_tab()
     await pilot.pause()
     pane = app.panes()[1]
+    tabbed_early = app.query_one("#session-tabs", TabbedContent)
+    tabbed_early.active = pane.id or tabbed_early.active
+    await pilot.pause()
+    await _mount_filler_exchange(app, pilot)
     rec.snap(900, "three tabs, before rename")
 
     tabbed = app.query_one("#session-tabs", TabbedContent)
@@ -435,6 +485,11 @@ async def _drive_palette(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
     await pilot.pause()
     await app.action_new_tab()
     await pilot.pause()
+    # The palette is one of the dimmed-wash modals (CommandPalette in
+    # theme.tcss's own list) -- the ACTIVE tab shows through it, so the
+    # filler goes on THIS (the new, now-active) tab rather than the one
+    # left behind.
+    await _mount_filler_exchange(app, pilot)
     daemons = [_peer("9988aabb04", "midnight repro session", clients=0)]
     with mock.patch("doxa.peers.list_daemons", return_value=daemons):
         await pilot.press("ctrl+p")
@@ -469,6 +524,21 @@ async def _drive_search(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
     # patched stand-ins, never the real on-disk session index.
     with mock.patch("doxa.history.search_sessions", return_value=[]), \
          mock.patch("doxa.history.recent_sessions", return_value=[]):
+        await pilot.pause()
+        await _mount_filler_exchange(app, pilot)
+        # A second, scene-specific exchange -- the search popup anchors
+        # directly above the prompt regardless of scroll content, so the
+        # one filler every other scene uses left a tall gap between it
+        # and the popup here. A real prior turn about the very thing
+        # being searched for is honest filler, not padding for its own
+        # sake.
+        block = await _mount_bare_turn(app, "has deploy checklist history come up before?")
+        await block.append_text(
+            "Yes -- three sessions touch it: a rewrite, the kg-stats "
+            "refactor reusing its gate, and the onboarding notes linking "
+            "it. `/search deploy checklist` finds all three."
+        )
+        await block.mark_done(0.0011, 310, False)
         await pilot.pause()
         prompt = app.query_one("#prompt-input", PromptInput)
         popup = app.query_one("#session-search", SessionSearch)
@@ -509,6 +579,7 @@ async def _drive_search(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
 
 async def _drive_attention_blink(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
     await pilot.pause()
+    await _mount_filler_exchange(app, pilot)
     pane = app.active_pane
     assert pane is not None
     pane.set_needs_input(True)
@@ -542,6 +613,7 @@ async def _drive_needs_input(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> No
     drives is the actual doxa.app.NeedsInputPopup, not just the bare
     tab-blink mechanism the attention-blink scene demos on its own."""
     await pilot.pause()
+    await _mount_filler_exchange(app, pilot)
     pane = app.active_pane
     assert pane is not None
     pane.engine.push_peer_event(EngineEvent("needs_input", {
@@ -599,6 +671,7 @@ async def _drive_chip_picker(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> No
     assert pane is not None
     assert await _wait_until(pilot, lambda: pane._git is not None)
     assert await _wait_until(pilot, lambda: "⎇" in _status_plain(app))
+    await _mount_filler_exchange(app, pilot)
     fake = pane.engine
     fake.branch_list_result = {
         "branches": ["main", "feature/observability", "hotfix/timeout"],
@@ -648,6 +721,7 @@ async def _drive_permission_mode(app: DoxaApp, pilot: Any, rec: FrameRecorder) -
     await pilot.pause()
     pane = app.active_pane
     assert pane is not None
+    await _mount_filler_exchange(app, pilot)
     rec.snap(900, "default mode chip leads the row -- grey, painted even at rest")
 
     await pane.open_mode_picker()

@@ -16,6 +16,8 @@ panel over a ``TabbedContent`` would need.
 from __future__ import annotations
 
 import contextlib
+import json
+from dataclasses import dataclass
 from typing import Any, Callable  # noqa: F401 -- annotation-only
 
 from textual import events, on
@@ -30,7 +32,49 @@ from textual.widgets.option_list import Option
 
 from .. import commands as commands_mod
 from .. import version as version_mod
-from .labels import PICKER_ROW_WIDTH, _escape_markup, ellipsize
+from .labels import (
+    PICKER_ROW_WIDTH,
+    PICKER_TEXT_CAP,
+    _escape_markup,
+    ellipsize,
+)
+
+
+@dataclass(frozen=True)
+class RowAction:
+    """One inline action a beliefs/proposals chip-picker row carries --
+    e.g. proposals' ``approve``/``reject``, beliefs' ``confirmed``/
+    ``contradicted``/``stale``/``retract`` (v0.67.0: these used to live one
+    selection deep, behind a per-row action SUB-menu -- see
+    ``PaneChipsMixin._open_belief_actions``/``_open_pending_actions``, both
+    still there and still reachable by selecting a row outright; this is
+    the faster, inline path the row's own text now also carries).
+
+    ``key`` is the bare keyboard letter this fires on (routed through
+    :class:`doxa.ui.prompt.PromptInput` -- see :meth:`ChipPicker.
+    try_action_key` -- rather than caught here directly, because the
+    picker does not hold real focus while in ``prompt_filter`` mode).
+    ``arms`` marks the two destructive/high-value verbs (``approve``,
+    ``retract``) that take a SECOND press, on the SAME row, to actually
+    fire -- the identical misclick asymmetry ``doxa.ui.beliefs`` already
+    documents at length for the full browser's own per-row buttons, now
+    enforced by :attr:`ChipPicker._armed_rid` instead of a per-row
+    ``armed`` flag (there is only ever one list open at a time here, so
+    one id is the whole state)."""
+
+    key: str
+    verb: str
+    label: str
+    armed_label: str = ""
+    color: str = ""
+    armed_color: str = ""
+    arms: bool = False
+
+    @property
+    def column_width(self) -> int:
+        """Padded to the wider of its two wordings, so a row does not
+        shift its neighbours' columns the moment it (and only it) arms."""
+        return max(len(self.label), len(self.armed_label or self.label))
 
 
 class BeliefInspector(Vertical):
@@ -456,10 +500,29 @@ class ChipPicker(OptionList):
         self._filter_text = ""
         self._current_id: "str | None" = None
         self._on_select: "Callable[[str], Any] | None" = None
+        # v0.67.0: the beliefs/proposals menus' inline row actions -- see
+        # RowAction's own docstring. Every OTHER chip menu leaves these at
+        # their defaults and nothing below changes for it.
+        self._row_prefix_width = 0
+        self._row_actions: "list[RowAction] | None" = None
+        self._row_action_dispatch: "Callable[[str, str], Any] | None" = None
+        self._armed_rid: "str | None" = None
+        #: See action_row_action's own docstring -- the debounce guard
+        #: against Textual's own double-delivered click.
+        self._last_action_signature: "tuple[str, str] | None" = None
+        #: True for exactly the two menus this widget does NOT take real
+        #: focus for -- see :meth:`open`'s own note on why, and
+        #: `doxa.ui.prompt.PromptInput`'s new branch, which is what drives
+        #: this widget instead while it is true.
+        self._prompt_filter = False
 
     @property
     def is_open(self) -> bool:
         return bool(self.display)
+
+    @property
+    def has_row_actions(self) -> bool:
+        return bool(self._row_actions)
 
     def open(
         self,
@@ -474,13 +537,37 @@ class ChipPicker(OptionList):
         group_notes: "dict[str, str] | None" = None,
         counted_noun: str = "",
         open_groups: "set[str] | None" = None,
+        row_prefix_width: int = 0,
+        row_actions: "list[RowAction] | None" = None,
+        row_action_dispatch: "Callable[[str, str], Any] | None" = None,
+        prompt_filter: bool = False,
     ) -> None:
         """Configure and show. Reopening (a click on a DIFFERENT chip
         while this one is already up -- or the SAME chip re-rendering
         itself with new candidates, see the repo picker's descend-a-
         directory callback) just reconfigures the same instance -- there
         is only ever one picker, so no prior-close bookkeeping is needed
-        here."""
+        here.
+
+        ``row_prefix_width``/``row_actions``/``row_action_dispatch``
+        (v0.67.0, the beliefs and proposals menus only): each row's label
+        is expected to already carry :data:`doxa.ui.labels.
+        PICKER_PREFIX_WIDTH` columns of fixed stamp/status/age prefix
+        (built by ``_fmt_belief_row``/``_fmt_pending_row``) followed by
+        free text -- :meth:`_render_rows` re-trims ONLY the text half at
+        that boundary instead of blindly ellipsizing the whole label, and
+        appends each :class:`RowAction` as its own fixed-width clickable
+        span so the columns line up as a table.
+
+        ``prompt_filter=True`` is the other half of that pair: this widget
+        does NOT take real keyboard focus (the ``self.focus()`` call below
+        is skipped), so it never competes with the prompt for keystrokes.
+        Typing, arrow navigation and the reserved action letters are all
+        driven from :class:`doxa.ui.prompt.PromptInput` instead -- see its
+        own new branch in ``on_key`` -- through :meth:`sync_filter`,
+        :meth:`move_highlight` and :meth:`try_action_key`. Every OTHER
+        chip menu (model, branch, effort, mode, sessions, repo) leaves
+        this ``False`` and keeps taking real focus exactly as before."""
         self._all_rows = list(rows)
         self._current_id = current_id
         self._on_select = on_select
@@ -488,6 +575,12 @@ class ChipPicker(OptionList):
         self._groups = groups
         self._collapsible = bool(collapsible and groups)
         self._group_notes = dict(group_notes or {})
+        self._row_prefix_width = row_prefix_width
+        self._row_actions = list(row_actions) if row_actions else None
+        self._row_action_dispatch = row_action_dispatch
+        self._armed_rid = None
+        self._last_action_signature = None
+        self._prompt_filter = prompt_filter
         self._counted_noun = counted_noun
         # Every group folded shut on open -- except when the whole list
         # already fits, see AUTOEXPAND_ROWS. The counts in the headers are
@@ -507,7 +600,19 @@ class ChipPicker(OptionList):
         self.border_title = title
         self._render_rows()
         self.display = True
-        self.focus()
+        if self._prompt_filter:
+            # The visibility half of the "prompt becomes a filter" spec: a
+            # mode with no on-screen sign is a mode nobody notices they are
+            # in. TextArea carries no placeholder (see PromptInput's own
+            # docstring on why), so the border title -- already visible,
+            # already this widget's own name for what it opened -- is what
+            # changes instead.
+            with contextlib.suppress(Exception):
+                self.pane.query_one("#prompt-input").border_title = (
+                    f"filter: {title} — type to search, Esc to close"
+                )
+        else:
+            self.focus()
 
     def _row_budget(self) -> int:
         """How many columns a row's text may use, right now.
@@ -576,6 +681,180 @@ class ChipPicker(OptionList):
         inside = f"{count}{plural}" + (f", {note}" if note else "")
         return f"{marker} {group} ({inside})"
 
+    def _action_reserve(self) -> int:
+        """Plain-text columns the UNARMED action suffix spends -- reserved
+        out of the text column's own budget (see :meth:`_render_rows`) so
+        the two never compete for the same terminal cells. The armed
+        suffix (one row, transiently) is not budgeted for separately: it
+        replaces every other action on that one row rather than adding to
+        them, and is close enough in width that a single row occasionally
+        running a few cells past this reserve is not the defect a whole
+        list silently overflowing its own dropdown would be."""
+        if not self._row_actions:
+            return 0
+        widths = [spec.column_width for spec in self._row_actions]
+        return 2 + sum(widths) + 2 * max(0, len(widths) - 1)
+
+    def _action_suffix(self, rid: str) -> str:
+        """This row's inline action controls, fixed-width and clickable --
+        the v0.67.0 addition. Empty for every menu but beliefs/pending
+        (:attr:`_row_actions` is only ever set there) and for the group
+        headers/door rows that never reach this call (see
+        :meth:`_render_rows`'s own branching).
+
+        ARMED is drawn differently from the rest of :class:`RowAction`'s
+        own arming discipline. Same asymmetry `doxa.ui.beliefs` already
+        documents: while THIS row is armed, its other action spans
+        disappear -- replaced by the one armed control and a disarm hint
+        -- so there is nothing beside the destructive control for a stray
+        click to land on."""
+        if not self._row_actions:
+            return ""
+        if rid == self._armed_rid:
+            spec = next((s for s in self._row_actions if s.arms), None)
+            if spec is not None:
+                call = f"row_action({json.dumps(rid)}, {json.dumps(spec.key)})"
+                color = spec.armed_color or spec.color
+                painted = _escape_markup(spec.armed_label or spec.label)
+                return (
+                    f"  [@click={call}][{color}]{painted}[/][/]"
+                    "  (Esc, or any other row, disarms)"
+                )
+        parts = []
+        for spec in self._row_actions:
+            call = f"row_action({json.dumps(rid)}, {json.dumps(spec.key)})"
+            padded = _escape_markup(spec.label.ljust(spec.column_width))
+            parts.append(f"[@click={call}][{spec.color}]{padded}[/][/]")
+        return "  " + "  ".join(parts)
+
+    async def _on_click(self, event: events.Click) -> None:
+        """A click landing inside a ``[@click=...]`` action span (the
+        inline row-action controls :meth:`_action_suffix` paints) is
+        brokered against THIS widget's own ``action_*`` methods, the same
+        unprefixed-markup convention every other clickable span in this
+        app follows (see ``doxa.ui.beliefs``'s ``_span`` helper) -- rather
+        than OptionList's own click handling, which knows only "which
+        OPTION was clicked" and would route it into :meth:`select_row`
+        instead. Every other click (the row's own text, a group header, a
+        different menu entirely) falls through to OptionList's stock
+        behaviour, unchanged."""
+        meta = event.style.meta or {}
+        if "@click" in meta:
+            await self.broker_event("click", event)
+            return
+        await super()._on_click(event)
+
+    def action_row_action(self, rid: str, key: str) -> None:
+        """Dispatch one inline row action -- a click on its span (via
+        :meth:`_on_click`) or a reserved letter (via :meth:`try_action_key`,
+        routed from ``PromptInput``) both land here identically.
+
+        Arming lives HERE, not in the caller's dispatch function: the
+        first press on an ``arms`` action re-paints this row and returns
+        without calling out at all; only a SECOND press on the SAME row
+        applies it. Pressing an arming key on a DIFFERENT row re-arms
+        there instead of applying -- "arming any row disarms every other",
+        the identical rule the full browser's own per-row buttons keep.
+
+        DEBOUNCED against the SAME (rid, key) arriving twice inside one
+        refresh cycle -- measured, not assumed: Textual's own mouse-click
+        delivery posts a SINGLE physical click's ``OptionSelected``
+        TWICE (confirmed against this widget's stock, unmodified
+        ``select_row`` too, so it is a Textual/OptionList property, not
+        something this method introduced). Harmless for a plain row
+        select -- the second delivery bounces off an already-closed
+        picker's emptied row list -- but not here: an undebounced second
+        delivery would arm AND immediately apply an ``arms`` action on
+        ONE physical press, silently defeating the whole reason it arms.
+        A genuinely separate second press (the deliberate "arm, then
+        press again") is always at least one refresh apart in practice
+        and is never the one this suppresses."""
+        spec = next((s for s in (self._row_actions or []) if s.key == key), None)
+        if spec is None or not rid:
+            return
+        signature = (rid, key)
+        if signature == self._last_action_signature:
+            return
+        self._last_action_signature = signature
+        self.call_after_refresh(self._clear_last_action_signature)
+        # _render_rows() ALWAYS resets the highlight to the first
+        # selectable row (the normal, correct behaviour after a FILTER
+        # keystroke, where the candidate set itself just changed) --
+        # wrong here, where arming changes nothing about which rows exist
+        # or match. Preserved by INDEX, same pattern _on_resize already
+        # uses for the identical reason.
+        highlighted = self.highlighted
+        if spec.arms and rid != self._armed_rid:
+            self._armed_rid = rid
+            self._render_rows()
+            if highlighted is not None and highlighted < len(self._rows):
+                self.highlighted = highlighted
+            return
+        self._armed_rid = None
+        dispatch = self._row_action_dispatch
+        self._render_rows()
+        if highlighted is not None and highlighted < len(self._rows):
+            self.highlighted = highlighted
+        if dispatch is not None:
+            dispatch(rid, key)
+
+    def _clear_last_action_signature(self) -> None:
+        self._last_action_signature = None
+
+    def try_action_key(self, key: str) -> bool:
+        """One reserved letter against the CURRENTLY HIGHLIGHTED row --
+        ``PromptInput.on_key`` calls this, before it lets an ordinary
+        keystroke fall through to the text buffer, only while the filter
+        is empty (see that method's own docstring on why the filter wins
+        the moment it is not). Returns whether the key was one of this
+        menu's own action keys at all, so the caller knows whether to keep
+        treating it as ordinary text."""
+        if not self._row_actions or self.highlighted is None:
+            return False
+        if not (0 <= self.highlighted < len(self._rows)):
+            return False
+        rid, _label = self._rows[self.highlighted]
+        if not rid or rid.startswith(self.GROUP_ROW_PREFIX):
+            return False
+        if not any(s.key == key for s in self._row_actions):
+            return False
+        self.action_row_action(rid, key)
+        return True
+
+    @property
+    def prompt_filter_active(self) -> bool:
+        """Whether ``PromptInput`` should be driving THIS widget right
+        now -- open, and opened with ``prompt_filter=True``. The two
+        beliefs/proposals menus only; every other chip menu keeps taking
+        real focus and this is always False for them."""
+        return bool(self.display and self._prompt_filter)
+
+    def move(self, delta: int) -> None:
+        """Arrow navigation for the menus this widget does not hold real
+        focus for -- OptionList's own up/down BINDINGS never fire here
+        (nothing ever focuses this widget while ``prompt_filter`` is
+        active), so ``PromptInput.on_key`` calls this instead, reusing
+        OptionList's own cursor actions rather than reimplementing
+        "skip disabled rows, wrap, keep the highlight visible"."""
+        if delta > 0:
+            self.action_cursor_down()
+        else:
+            self.action_cursor_up()
+
+    def sync_filter(self, text: str) -> None:
+        """The prompt's current text, mirrored in as this menu's filter --
+        ``PromptInput``'s own ``Changed`` handler calls this the same way
+        it already syncs ``SlashComplete``/``SessionSearch``. A no-op
+        while closed (a stray Changed from some other cause) and when the
+        text has not actually moved (avoids re-rendering on every
+        keystroke of a DIFFERENT widget's edit -- the two never fire for
+        the same reason, but the guard is free and mirrors the shape of
+        every other early-return in this class)."""
+        if not self.display or text == self._filter_text:
+            return
+        self._filter_text = text
+        self._render_rows()
+
     def _render_rows(self) -> None:
         self.clear_options()
         self._rows = []
@@ -633,12 +912,45 @@ class ChipPicker(OptionList):
                     if group in self._collapsed:
                         continue
                 mark = "▸" if rid == self._current_id else " "
-                # Trimmed HERE, against the measured width, rather than by
-                # the formatter against a constant -- which also means the
-                # matcher above scored the WHOLE row, so a word past the
-                # visible cut stays findable.
-                shown = ellipsize(label, budget)
-                self.add_option(Option(f" {mark} {_escape_markup(shown)}"))
+                if self._row_prefix_width:
+                    # v0.67.0: the beliefs/proposals shape. The stamp/
+                    # status/age prefix is ALREADY fixed-width (built by
+                    # _fmt_belief_row/_fmt_pending_row) and must never be
+                    # cut -- only the free-text tail past it is re-trimmed
+                    # here, to min(PICKER_TEXT_CAP, budget) rather than to
+                    # budget alone, matching the operator's literal spec --
+                    # MINUS whatever the row's own action controls reserve
+                    # (see _action_reserve), so text and actions never
+                    # compete for the same terminal cells and a row with
+                    # actions degrades the same way a plain one already
+                    # did rather than overflowing its own dropdown. The
+                    # matcher still scored the WHOLE untrimmed label
+                    # above, prefix and all.
+                    prefix = label[: self._row_prefix_width]
+                    rest = label[self._row_prefix_width:]
+                    reserve = self._action_reserve()
+                    room = max(0, budget - self._row_prefix_width)
+                    # Room for the actions is checked before they are
+                    # drawn -- on a terminal too narrow for the prefix,
+                    # the text AND the actions (the prefix alone can run
+                    # past half of an 80-column terminal), the actions
+                    # drop rather than the row overflowing its own
+                    # dropdown. The row is still reachable then, just
+                    # through the per-row action sub-menu (select it
+                    # outright) instead of inline.
+                    fits_actions = reserve and reserve <= room
+                    text_cap = min(PICKER_TEXT_CAP, room) - (reserve if fits_actions else 0)
+                    shown = prefix + ellipsize(rest, max(0, text_cap))
+                    suffix = self._action_suffix(rid) if fits_actions else ""
+                else:
+                    # Trimmed HERE, against the measured width, rather than
+                    # by the formatter against a constant -- which also
+                    # means the matcher above scored the WHOLE row, so a
+                    # word past the visible cut stays findable.
+                    shown = ellipsize(label, budget)
+                    suffix = ""
+                option_text = f" {mark} {_escape_markup(shown)}" + suffix
+                self.add_option(Option(option_text))
                 self._rows.append((rid, label))
         first = next((i for i, (rid, _l) in enumerate(self._rows) if rid), None)
         self.highlighted = first
@@ -711,6 +1023,7 @@ class ChipPicker(OptionList):
             callback(rid)
 
     def close(self) -> None:
+        was_prompt_filter = self._prompt_filter
         if self.display:
             self.display = False
         self._on_select = None
@@ -721,8 +1034,23 @@ class ChipPicker(OptionList):
         self._collapsible = False
         self._counted_noun = ""
         self._filter_text = ""
+        self._row_prefix_width = 0
+        self._row_actions = None
+        self._row_action_dispatch = None
+        self._armed_rid = None
+        self._last_action_signature = None
+        self._prompt_filter = False
         self.border_title = ""
         self.border_subtitle = ""
+        if was_prompt_filter:
+            # The filter does not survive the close (item 2's own spec) --
+            # and the border-title mode indicator goes with it. The prompt
+            # never lost real focus in this mode (see open()'s own note),
+            # so there is nothing to focus back -- only content to clear.
+            with contextlib.suppress(Exception):
+                prompt = self.pane.query_one("#prompt-input")
+                prompt.border_title = ""
+                prompt.clear()
 
 
 class CloseWithTurnRunning(ModalScreen[str]):

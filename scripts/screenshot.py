@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -31,6 +32,40 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+# v0.67.0: isolation, BEFORE any doxa import -- doxa.config's ROOT/
+# PROJECTS_DIR (and doxa.setup's home paths) are read from the
+# environment at IMPORT time, the same ordering constraint
+# tests/conftest.py's own module docstring states for exactly this
+# reason. Without this, two status-bar chips read straight off this
+# machine's REAL, ambient state and neither is scripted anywhere in this
+# file: `N proposals` (`doxa.ui.labels.staged_count`, over the real
+# `lore_core.pending` spool) and `mem u%p%` (`memory_fill`, over the real
+# curated-memory files) -- both bypass the FakeEngine entirely, reading
+# lore_core's own on-disk store directly. MEASURED, not assumed: run
+# without this, `N proposals` read 205 one run and 78 the next on this
+# shared dev machine, changing between two invocations of the same
+# script with no scene edited -- exactly the leak `_fake_identity` below
+# already exists to close for account numbers, now closed for these two
+# chips as well. `/settings` reads `DOXA_HOME`-backed config the same
+# way, so that is isolated here too.
+#
+# ``setdefault``, not a bare assignment: tests/test_record_gif.py imports
+# this module's sibling (scripts/record_gif.py, which carries the
+# identical block) to check its SCENES registry, no rendering -- under
+# pytest, conftest.py has ALREADY pointed these at ITS OWN throwaway
+# directory before any test module is collected, and this must never
+# clobber that isolation out from under the rest of the suite. Run
+# standalone (`python scripts/screenshot.py`), nothing has set these yet,
+# and setdefault establishes this file's own throwaway directory exactly
+# as a bare assignment would have.
+_tmp = Path(tempfile.mkdtemp(prefix="doxa-shots-"))
+os.environ.setdefault("LORE_ROOT", str(_tmp / "lore"))
+os.environ.setdefault("LORE_PROJECTS_DIR", str(_tmp / "projects"))
+os.environ.setdefault("DOXA_RUNTIME_DIR", str(_tmp / "runtime"))
+os.environ.setdefault("DOXA_HOME", str(_tmp / "doxa-home"))
+os.environ.setdefault("XDG_CONFIG_HOME", str(_tmp / "xdg"))
+os.environ.setdefault("DOXA_SKIP_FIRST_RUN", "1")
 
 from datetime import datetime, timezone  # noqa: E402
 
@@ -132,7 +167,15 @@ def _sibling_tab_factory() -> Callable[[], FakeEngine]:
     return factory
 
 
-async def _drive_hero(app: DoxaApp, pilot) -> None:
+async def _fill_hero_conversation(app: DoxaApp, pilot) -> None:
+    """Three tabs and one real Q&A, run to completion in the first one --
+    the SAME content `hero` itself shows, reused (v0.67.0) as background
+    filling for every scene whose OWN subject (a modal, a clock chip, an
+    error block) does not by itself reach 250x69: a shot that is two-
+    thirds empty canvas around its subject reads as a mistake, and a
+    plausible three-tab session actually doing something is honest filler
+    where "the transcript behind it" is the whole ask -- never fabricated
+    content, the exact same script this file already ships as `hero`."""
     await pilot.pause()
     await app.action_new_tab()
     await pilot.pause()
@@ -149,6 +192,10 @@ async def _drive_hero(app: DoxaApp, pilot) -> None:
             break
         await pilot.pause(0.02)
     await pilot.pause(0.2)
+
+
+async def _drive_hero(app: DoxaApp, pilot) -> None:
+    await _fill_hero_conversation(app, pilot)
 
 
 # --------------------------------------------------------------------- #
@@ -313,7 +360,15 @@ async def _drive_memory(app: DoxaApp, pilot) -> None:
 async def _drive_settings(app: DoxaApp, pilot) -> None:
     from doxa import config as config_mod
 
-    await pilot.pause()
+    # Fills the frame BEHIND the modal (v0.67.0's uniform 250x69 -- see
+    # WIDE's own docstring) with the same three-tab, real-Q&A session
+    # `hero` shows: the modal itself stays its own designed width
+    # (#settings-panel's `max-width: 100`, a deliberate cap unrelated to
+    # screenshot geometry), so what fills the rest of a wide terminal
+    # honestly is what is actually still visible around and through the
+    # dimmed wash -- the tab strip and the status bar of a session doing
+    # something, not blank canvas invented for the shot.
+    await _fill_hero_conversation(app, pilot)
     os.environ["DOXA_NERD_FONT"] = "1"
     config_mod.invalidate()
     try:
@@ -341,9 +396,10 @@ async def _drive_clock(app: DoxaApp, pilot) -> None:
 
     from doxa import config as config_mod
 
-    await pilot.pause()
-    await app.action_new_tab()
-    await pilot.pause()
+    # v0.67.0: the same three-tab, real-Q&A fill `settings` uses -- the
+    # clock chip's own subject is one row of the status bar, and the rest
+    # of a 250x69 frame is what needs the content, not the chip itself.
+    await _fill_hero_conversation(app, pilot)
     env = {
         "DOXA_CLOCK_SHOW": "1", "DOXA_CLOCK_DATE": "1",
         "DOXA_CLOCK_SECONDS": "1", "DOXA_CLOCK_TZ": "UTC",
@@ -399,10 +455,36 @@ _HALFBLOCK = {"DOXA_IMAGE_MODE": "halfblock"}
 
 async def _drive_banner(app: DoxaApp, pilot) -> None:
     await _settle(pilot)
+    # v0.67.0: two more tabs, for the same reason `settings`/`clock` fill
+    # with a running conversation -- unlike those, running one HERE would
+    # scroll the banner this scene exists to show right out of the frame
+    # (it lives in the same scrolling block list a turn appends to), so
+    # that filler is not honest for this surface. Two more tabs in the
+    # strip is: each boots its own identical banner under the same env,
+    # genuinely true of a multi-tab session, and the one thing available
+    # here that does not touch the transcript. The blank canvas below the
+    # identity block is real and left as itself, not padded with
+    # anything invented -- see this file's own module docstring /
+    # CHANGELOG for the explicit call-out.
+    await app.action_new_tab()
+    await pilot.pause()
+    await app.action_new_tab()
+    await pilot.pause()
+    tabbed = app.query_one("#session-tabs")
+    tabbed.active = app.panes()[0].id or tabbed.active
+    await pilot.pause()
 
 
 async def _drive_banner_degraded(app: DoxaApp, pilot) -> None:
     await _settle(pilot)
+    # Same reasoning as _drive_banner just above.
+    await app.action_new_tab()
+    await pilot.pause()
+    await app.action_new_tab()
+    await pilot.pause()
+    tabbed = app.query_one("#session-tabs")
+    tabbed.active = app.panes()[0].id or tabbed.active
+    await pilot.pause()
 
 
 async def _drive_image_support(app: DoxaApp, pilot) -> None:
@@ -481,6 +563,14 @@ def _live_lore_write_state() -> dict:
 
 
 def _beliefs_engine() -> FakeEngine:
+    """v0.67.0: this scene retired its own bespoke 134x36 for the shared
+    WIDE geometry every scene now shares (see WIDE's own docstring) --
+    which means the three beliefs and two proposals that fit THAT frame
+    are no longer enough; a scrolling browser sized for a real store
+    showing three rows reads as an empty product, not a full one. Scaled
+    up to a plausible slice of an active repo's memory instead: still
+    every claim genuine-sounding and every id fictional, same discipline
+    the rest of this fake-identity gallery holds to throughout."""
     engine = FakeEngine([], model="claude-opus-4-5")
     engine.lore_write_state_result = _live_lore_write_state()
     engine.belief_action_state_result = {
@@ -493,14 +583,55 @@ def _beliefs_engine() -> FakeEngine:
                 outcome="confirmed"),
         _belief(201, "project:doxa",
                 "kg-stats batch job reuses the deploy gate", outcome=None),
+        _belief(219, "project:doxa",
+                "the daemon socket is per-worktree, not per-repo",
+                outcome="confirmed", outcome_days=14),
+        _belief(233, "project:doxa",
+                "CI runs the full suite on every push to main",
+                outcome=None),
+        _belief(240, "project:doxa",
+                "screenshot scenes must never spend real API credit",
+                outcome="confirmed", outcome_days=40),
+        _belief(255, "project:doxa",
+                "the changelog is written in the concise house style",
+                outcome=None),
+        _belief(261, "project:doxa",
+                "worktrees under doxa-worktrees/ are throwaway, never pushed to directly",
+                outcome="stale", outcome_days=21),
         _belief(77, "user", "prefers terse commit messages",
                 outcome="contradicted", outcome_days=6),
+        _belief(91, "user", "reviews diffs before approving a merge",
+                outcome="confirmed", outcome_days=2),
+        _belief(103, "user", "wants AGPL license headers on every source file",
+                outcome="confirmed", outcome_days=30),
+        _belief(118, "user", "asks for the SPDX line first when a file is new",
+                outcome=None),
+        _belief(52, "user-model",
+                "answers in the house voice: plain, no filler openers",
+                outcome="confirmed", outcome_days=1),
+        _belief(64, "user-model",
+                "over-hedges when a claim is actually well-supported",
+                outcome="contradicted", outcome_days=11),
+        _belief(70, "user-model",
+                "runs the full test suite before calling a change done",
+                outcome=None),
     ]
     engine.list_pending_result = [
         _proposal("20260825-00", "remember uv, not pip, for this repo"),
         _proposal("20260825-01",
                    "belief #201 is superseded by a stricter version",
                    kind="belief"),
+        _proposal("20260825-02",
+                   "the gallery's geometry constants live in scripts/screenshot.py"),
+        _proposal("20260825-03",
+                   "belief #261 is stale -- worktrees now get pruned weekly",
+                   kind="belief"),
+        _proposal("20260825-04",
+                   "record_gif.py shares scripts/screenshot.py's fake-identity helpers",
+                   scope="project"),
+        _proposal("20260825-05",
+                   "user prefers PICKER-style fixed columns over ad hoc joins",
+                   scope="user"),
     ]
     return engine
 
@@ -537,7 +668,10 @@ async def _drive_beliefs_browser(app: DoxaApp, pilot) -> None:
 async def _drive_error_block(app: DoxaApp, pilot) -> None:
     from doxa.app import ErrorBlock
 
-    await _settle(pilot)
+    # v0.67.0: the same three-tab, real-Q&A fill `settings`/`clock` use --
+    # the error block reads as itself sitting BELOW a real turn, not
+    # floating alone in an otherwise-empty transcript.
+    await _fill_hero_conversation(app, pilot)
     try:
         raise TimeoutError("lore_belief_search timed out after 30s")
     except TimeoutError as exc:
@@ -574,27 +708,52 @@ class Scene:
 # The 24.375/12.2 ~= 2.0 cell-height-to-width ratio is a terminal cell
 # being roughly twice as tall as it is wide, exactly as expected.
 #
-# Every shot targets 16:9 (chosen over 4:3 -- a terminal strip's own shape
-# is already landscape, so 16:9 is the smaller stretch from a tab bar's
-# natural aspect) within ~2%, picked by solving each formula for the ROW
-# count at the scene's existing COLUMN count and rounding. Never the other
-# way: shrinking cols to hit the ratio risks clipping the status bar and
-# tab strip, which are not width-budgeted the way tab LABELS are (see
-# TAB_LABEL_MAX in doxa/app.py) -- growing rows only ever adds blank
-# canvas below existing content, never cuts anything off. `settings` is
-# the one exception: its rows were already tall enough that shrinking them
-# to hit 16:9 would have clipped the modal, so its COLUMNS grew instead.
+# v0.67.0: EVERY scene in this file now shares ONE geometry, `WIDE`
+# below -- not a per-scene choice any more. The README gallery visibly
+# changed pixel size scene to scene (five different sizes measured across
+# what shipped before this release, `beliefs-browser` a sixth of its
+# own); "every one is within 2% of 16:9" was exactly why that slipped
+# through, since ratio uniformity is not size uniformity. Ratio still
+# matters (16:9, chosen over 4:3 -- a terminal strip's own shape is
+# already landscape, so 16:9 is the smaller stretch from a tab bar's
+# natural aspect), but now it is solved ONCE, for the widest floor every
+# scene has to clear, rather than once per scene.
 #
-# `WIDE`, below, replaces the bare `(172, 47)` every status-bar-carrying
-# scene used to share. MEASURED (not assumed): the permission-mode chip,
-# curated-memory fill and staged-proposals chip all shipped after 172 was
-# chosen, and a live status bar's own plain text -- read back off the
-# widget, not off a guess -- now runs to 228 characters on `hero` (three
-# open tabs, a worktree branch, peers and a session handle) against 168
-# content columns there, i.e. the row was losing everything from the
-# memory chip on. `settings`'s own precedent applies here too: the row is
-# not width-budgeted the way a tab label is, so the fix is more COLUMNS,
-# with rows re-solved for 16:9 rather than left to clip.
+# THE FLOOR: 250 columns. Measured, not assumed -- the permission-mode
+# chip, curated-memory fill and staged-proposals chip all shipped after
+# 172 (the previous shared width) was chosen, and a live status bar's own
+# plain text -- read back off the widget, not off a guess -- now runs to
+# 228 characters on `hero` (three open tabs, a worktree branch, peers and
+# a session handle) against 168 content columns at 172, i.e. the row was
+# losing everything from the memory chip on. `hero`/`trace`/`transparent`/
+# `subagent-tracker`/`memory`/`sessions`/`image-support` -- the seven
+# scenes that carry a live status bar -- are what actually NEED 250; every
+# other scene here is held to the same number for uniformity, not because
+# its own content demands it.
+#
+# THE ROWS: solved for 16:9 at 250 columns, the same way each scene used
+# to solve its own -- height = width * 9/16, then invert `height =
+# 24.375*rows + 51` and round: (3068*9/16 - 51) / 24.375 ~= 68.7 -> 69.
+# 3068x1734 at 69 rows is 1.7693 against 16:9's 1.7778, 0.48% off, inside
+# the ~2% tolerance every prior scene held to -- and happens to be exactly
+# the WIDE the seven status-bar scenes already used, so THEY need no
+# change at all; every other scene grows to match instead.
+#
+# WHERE A SCENE HAD LESS CONTENT THAN 250x69 -- content is added, never
+# left as blank canvas (a shot that is two-thirds background reads as a
+# mistake):
+# `settings`/`clock`/`error-block` now run the SAME three-tab, real Q&A
+# `hero` shows underneath their own subject (see
+# `_fill_hero_conversation`); `beliefs-browser` (whose own bespoke
+# 134x36 this release retires -- uniformity now outranks the content-fit
+# case it was solving) gets a substantially larger scripted store instead
+# of three beliefs and two proposals. `banner`/`banner-blocks` get two
+# more tabs in the strip but NOT a running conversation -- one would
+# scroll the boot banner these two scenes exist to show right out of the
+# frame, since it lives in the same scrolling block list a turn appends
+# to. Their own body below the identity block stays genuinely blank: a
+# compact boot screen has nothing more truthful to add without inventing
+# it, and this is named here rather than padded over.
 WIDE = (250, 69)
 
 
@@ -609,49 +768,34 @@ SCENES: list[Scene] = [
           engine_factory=lambda: FakeEngine(SUBAGENT_TRACKER_SCRIPT, model="claude-opus-4-5")),
     Scene("memory", _drive_memory, size=WIDE,
           engine_factory=_hero_engine),
-    Scene("settings", _drive_settings, size=(120, 32),
-          engine_factory=lambda: FakeEngine([], model="claude-opus-4-5")),
-    Scene("clock", _drive_clock, size=(120, 32),
-          engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
-          new_session_factory=lambda: FakeEngine([], model="claude-sonnet-4-5")),
+    Scene("settings", _drive_settings, size=WIDE,
+          engine_factory=_hero_engine, new_session_factory=_sibling_tab_factory()),
+    Scene("clock", _drive_clock, size=WIDE,
+          engine_factory=_hero_engine, new_session_factory=_sibling_tab_factory()),
     Scene("sessions", _drive_sessions, size=WIDE,
           engine_factory=_hero_engine),
-    # NOT `WIDE`: unlike hero/trace/memory/sessions/etc., this scene's tab
-    # replaces the whole pane -- no status bar, no prompt box beneath it --
-    # so none of the reasoning that widened those to 250 columns applies
-    # here. Measured instead off this scene's own content: at 134 columns
-    # the two staged proposals plus three scope-grouped belief rows (each
-    # wrapping its evidence/outcome line at that width) fill to row 29 of
-    # the scroll region, which starts 4 rows down from the frame top: 36
-    # rows leaves a 3-row margin rather than the ~40 blank rows `WIDE`
-    # left below this scene's much shorter content.
-    Scene("beliefs-browser", _drive_beliefs_browser, size=(134, 36),
+    Scene("beliefs-browser", _drive_beliefs_browser, size=WIDE,
           engine_factory=_beliefs_engine),
-    Scene("error-block", _drive_error_block, size=(120, 32),
-          engine_factory=lambda: FakeEngine([], model="claude-opus-4-5")),
+    Scene("error-block", _drive_error_block, size=WIDE,
+          engine_factory=_hero_engine, new_session_factory=_sibling_tab_factory()),
     # The `image` FORM of the banner. Pinned, because since v0.58.0 `auto`
     # draws the wordmark on half-block -- and half-block is the only tier
     # an SVG export can capture at all, so this shot stands in for what a
     # kitty-graphics or sixel terminal draws from the same asset at its
     # own far higher resolution.
-    Scene("banner", _drive_banner, size=(120, 32),
+    Scene("banner", _drive_banner, size=WIDE,
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
           env={**_HALFBLOCK, "DOXA_BOOT_BANNER": "image"}),
     # v0.58.0: what a terminal that cannot draw the logo sees. The whole
     # of the defect report it came from was "the logo image is not
-    # rendering"; this is the screen that now answers that in place.
-    # v0.58.0: the wordmark at 80 columns, which is where the user who
-    # filed "quite pixelated" is. This is now the COMMON banner -- a
-    # half-block terminal gets drawn glyphs, not a downscaled photograph.
-    # 25 rows, not 21: the drawn mark went from four rows to seven, so at
-    # 21 the transcript overflowed, scrolled to its tail, and cut the top
-    # of the ring off in the shot. A scene has to be tall enough to hold
-    # the thing it is a picture of -- and 25 rows is CONTENT-mandated, the
-    # same bind `settings` above hit, so the columns are what moved to
-    # land back on 16:9 (95, not 80: measured, 994x660 at 80 columns was
-    # 1.51, 15% off; 1177x660 at 95 is 1.78, inside tolerance) rather than
-    # shrinking the rows and clipping the ring again.
-    Scene("banner-blocks", _drive_banner_degraded, size=(95, 25),
+    # rendering"; this is the screen that now answers that in place --
+    # the wordmark at half-block, which is where the user who filed
+    # "quite pixelated" is. v0.67.0 retires this scene's own bespoke
+    # 95x25 (it was CONTENT-mandated then: the drawn mark needs at least
+    # 25 rows not to overflow and scroll its own top off; at 250x69 there
+    # is no such ceiling to hit) for the shared WIDE, with two more tabs
+    # in the strip for the same reason `banner` above has them.
+    Scene("banner-blocks", _drive_banner_degraded, size=WIDE,
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
           env={"DOXA_IMAGE_MODE": "halfblock"}),
     Scene("image-support", _drive_image_support, size=WIDE,
