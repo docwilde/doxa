@@ -136,7 +136,7 @@ class PaneRuntimeMixin:
         # only where there was nothing before it -- switch_engine re-runs
         # _boot into a pane that already has a transcript, and the mark
         # appearing halfway down one is not an opening block, it is
-        # litter. banner_mod.enabled() is a plain config read (v0.66.0
+        # litter. banner_mod.enabled() is a plain config read (v0.70.0
         # dropped the raster form and the terminal-mode probe that used
         # to pick between it and the drawn one), so this costs nothing
         # boot-critical either way.

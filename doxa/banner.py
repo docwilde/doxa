@@ -7,7 +7,7 @@ with :data:`WORDMARK` and :data:`TAGLINE` beside it as plain text,
 assembled by :func:`drawn_lines`. That is the whole banner now --
 :func:`enabled` is the only decision left, on or off.
 
-**v0.66.0 removed the raster ``logo.png`` form this module used to draw
+**v0.70.0 removed the raster ``logo.png`` form this module used to draw
 on ``kgp``/``sixel`` terminals** (``boot_banner=auto``/``image``), and
 with it the three-way choice between that raster, the drawn mark and a
 plain wordmark that v0.58.0 built. The owner's call: the drawn form reads
@@ -44,7 +44,7 @@ ENV_VAR = "DOXA_BOOT_BANNER"
 # The row budget and the two aspect ratios it is spent against -- ONLY
 # for /img's showcase now (ImageShowcaseBlock), which still renders
 # assets/logo.png at real resolution on every tier a terminal answers
-# for. The boot banner itself never reads these (v0.66.0). CELL_ASPECT
+# for. The boot banner itself never reads these (v0.70.0). CELL_ASPECT
 # is the height-to-width ratio of a terminal cell, ~2 everywhere, and the
 # same constant scripts/screenshot.py derives from its own measured SVG
 # export (24.375 / 12.2).
@@ -226,7 +226,7 @@ def _mark_markup(index: int) -> str:
 def drawn_lines(content_columns: int) -> "list[str]":
     """The drawn banner as Textual markup rows, fitted to the width it has.
 
-    THIS IS THE ONLY PATH (v0.66.0 retired the raster alternative
+    THIS IS THE ONLY PATH (v0.70.0 retired the raster alternative
     v0.58.0-0.65.0 drew on kgp/sixel terminals) -- every terminal, every
     tier, gets these rows.
 
@@ -255,7 +255,7 @@ def drawn_lines(content_columns: int) -> "list[str]":
 # Every spelling this knob has ever shipped that means OFF: the plain
 # "off", and the bool spelling it launched with in v0.41.0 ("0"/"false"/
 # "no", back when 1/0 read as on/off). v0.58.0 added "auto"/"blocks"/
-# "image" as ON spellings on top of that; v0.66.0 retired the three-way
+# "image" as ON spellings on top of that; v0.70.0 retired the three-way
 # choice those named, and rather than add a matching _LEGACY_ON tuple to
 # keep recognising them, every string that is not a recognised OFF
 # spelling now reads as on -- the same permissive rule form() used to
@@ -272,7 +272,7 @@ def enabled() -> bool:
     default on) -- see :data:`_LEGACY_OFF` for exactly what still reads
     as off, everything else reads as on, and there is no longer a
     choice of WHAT gets drawn: :func:`drawn_lines` is the only form
-    (v0.66.0 dropped the raster ``logo.png`` alternative). ON by default
+    (v0.70.0 dropped the raster ``logo.png`` alternative). ON by default
     is a judgment call and it rests on the drawn form rather than on a
     picture: there is no terminal and no width at which this costs more
     than a few rows of something legible."""
@@ -284,7 +284,7 @@ def asset_path() -> "Path | None":
     """The logo file, or None when neither copy is on disk.
 
     Only :func:`_prepared` (in turn only ``/img``'s
-    :class:`~doxa.ui.transcript.ImageShowcaseBlock`, since v0.66.0
+    :class:`~doxa.ui.transcript.ImageShowcaseBlock`, since v0.70.0
     retired the banner's own raster form) calls this now, but the
     lookup itself is unchanged: installed wheel --
     ``pyproject.toml``'s force-include put it at ``doxa/assets/logo.png``,
@@ -336,7 +336,7 @@ def _prepared() -> Any:
     return a mountable widget, but this function is DOXA's own code on
     the near side of that guarantee: it runs during
     ``ImageShowcaseBlock.compose`` (``/img``'s -- see this module's own
-    docstring for why that is the only caller left since v0.66.0), and an
+    docstring for why that is the only caller left since v0.70.0), and an
     exception there does not degrade a decoration, it breaks a debug
     command. Pillow is a declared dependency now, so the import "cannot"
     fail -- which is exactly the class of assumption that produces a bug
@@ -363,7 +363,7 @@ def _prepared() -> Any:
 def image_source() -> Any:
     """What to hand :func:`doxa.images.widget_for` -- a fresh copy of the
     prepared image, or None when there is nothing to prepare. ``/img``'s
-    showcase is the only caller since v0.66.0 retired the banner's own
+    showcase is the only caller since v0.70.0 retired the banner's own
     raster form."""
     prepared = _prepared()
     return prepared.copy() if prepared is not None else None

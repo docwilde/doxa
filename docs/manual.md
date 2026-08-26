@@ -315,6 +315,32 @@ belief store is a human approving a proposal, one row at a time:
   `lore_core` older than the provenance ledger, both browsers degrade to
   read-only and say why.
 
+**Inline row actions, in the two status-bar pickers.** The `N beliefs`
+and `N proposals` chips open dropdowns, not just glances: every row
+carries the same controls as its browser counterpart — approve/reject on
+a proposal, confirmed/contradicted/stale/retract on a belief — reachable
+without leaving the list. Click the action span on a row, or press its
+letter (`a`/`r` for proposals, `y`/`c`/`s`/`r` for beliefs) while that row
+is highlighted; approve and retract still arm on the first press and
+apply on the second, on the same row. Selecting a row outright (Enter, or
+a click that misses every action) still opens the per-row action menu
+these two pickers have carried since item V — the inline controls are a
+faster path alongside it, not a replacement. While either picker is open,
+the prompt line filters its rows instead of sending to the agent; typing
+narrows the list live, Enter acts on the highlighted row, Esc closes and
+clears it. The five action letters only fire while that filter is empty —
+once it holds text they are ordinary characters, so searching for a claim
+that happens to start with one of them costs one throwaway keystroke
+first rather than ever firing an action by accident.
+
+Both pickers' rows share one format: `YY-MM-DD HH:MM  status  age  text`,
+fixed-width columns so neighbouring rows line up as a table. The
+`user`/`user-model` group headers also carry LORE's own channel tag —
+`user · stated` (the user said it themselves; a later session may act on
+it) vs `user-model · inferred` (read off behaviour, never spelled out;
+shapes tone and authorizes nothing) — spelled out in full in a belief's
+own tooltip.
+
 **Streaming review.** With `derive_secs` set, a background reviewer runs
 over the live transcript between turns and stages whatever it judges worth
 remembering, behind the same approval gate. Session-end review (LORE's

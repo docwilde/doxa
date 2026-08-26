@@ -230,7 +230,7 @@ SETTINGS: tuple[Setting, ...] = (
         category="Appearance", kind="bool_on", default="1",
         help="Draw the DOXA mark above the session's opening identity "
              "block (doxa.banner.enabled)",
-        note="A plain on/off knob since v0.66.0 -- the drawn ring-and-"
+        note="A plain on/off knob since v0.70.0 -- the drawn ring-and-"
              "triangle mark is the only form there is now, on every "
              "terminal; v0.58.0-0.65.0 also drew a raster logo.png on "
              "kitty-graphics/sixel terminals ('auto'/'image'), which "

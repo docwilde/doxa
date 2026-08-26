@@ -661,7 +661,7 @@ ToolChip > Contents {
 }
 
 /* The opening banner (doxa/banner.py) -- the drawn mark, the only form
-   there is since v0.66.0 retired the raster one. No border, no
+   there is since v0.70.0 retired the raster one. No border, no
    background: the banner introduces the identity block below it and
    must not read as a block of its own. */
 .boot-banner {
@@ -671,7 +671,7 @@ ToolChip > Contents {
 }
 
 /* /img's showcase only now (ImageShowcaseBlock) -- the boot banner
-   itself never draws an image (v0.66.0). Width is set on the widget in
+   itself never draws an image (v0.70.0). Width is set on the widget in
    CELLS -- see doxa.banner.COLUMNS -- and height is deliberately auto so
    the image derives its rows from THIS terminal's real cell aspect
    rather than from an assumed 2:1; max-height is the row budget's

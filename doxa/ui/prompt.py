@@ -175,6 +175,7 @@ class PromptInput(TextArea):
         dropdown: SlashComplete,
         search: SessionSearch,
         needs_input: "NeedsInputPopup",
+        chip_picker: Any,
         **kwargs: Any,
     ) -> None:
         kwargs.setdefault("tab_behavior", "focus")
@@ -185,6 +186,17 @@ class PromptInput(TextArea):
         self.dropdown = dropdown
         self.search = search
         self.needs_input_popup = needs_input
+        # v0.67.0: the beliefs/proposals chip menus' "prompt becomes a
+        # filter" mode -- a FOURTH prompt-driven popup, in spirit, though
+        # ChipPicker itself is not can_focus=False like the other three
+        # (every OTHER chip menu still takes real focus; only these two
+        # ever set `prompt_filter=True`, checked live via
+        # `chip_picker.prompt_filter_active` below rather than a
+        # constructor-time distinction, since one widget instance serves
+        # every chip menu). Typed here for the same reason the other
+        # three are: `doxa.ui.dialogs.ChipPicker` importing this module
+        # back for the annotation would be circular.
+        self.chip_picker: Any = chip_picker
         # (placeholder text, original text) for every paste collapsed in
         # THIS message -- resolved back into the real content at submit
         # time regardless of whether the operator ever expanded it to
@@ -361,6 +373,62 @@ class PromptInput(TextArea):
             event.stop()
             event.prevent_default()
             return
+        if self.chip_picker.prompt_filter_active:
+            # v0.67.0: the beliefs/proposals chip menus. Checked ahead of
+            # `search`/`dropdown` (mutually exclusive with both anyway --
+            # opening a ChipPicker closes them, see
+            # `PaneChipsMixin._open_chip_picker`) and BEHIND needs-input,
+            # for the same reason the other three defer to it: a pending
+            # AskUserQuestion/permission request is something ELSE waiting
+            # on you, not a UI surface you opened yourself -- it can, in
+            # principle, arrive WHILE a chip menu happens to be open, even
+            # though opening one is itself guarded against an ALREADY
+            # pending question (see `_open_chip_picker`).
+            #
+            # THE COLLISION RULE, stated once, here: the reserved letters
+            # (`a`/`r` for proposals, `y`/`c`/`s`/`r` for beliefs) act on
+            # the highlighted row ONLY while the filter is EMPTY. The
+            # moment any filter text exists, every key -- including those
+            # five -- is ordinary text, synced to the filter like anything
+            # else (`_on_prompt_changed`, this pane's Changed handler).
+            # This is a real, stated trade-off: searching for a claim
+            # that happens to START with one of those five letters costs
+            # one throwaway keystroke first. The alternative -- letting a
+            # bare letter act UNCONDITIONALLY -- is the one this rule
+            # exists to rule out: typing "stale" into the filter must
+            # never retract, confirm or approve anything on the way
+            # through, and gating on an empty filter is what makes that
+            # true by construction rather than by care at each call site.
+            picker = self.chip_picker
+            handled = True
+            if event.key == "escape":
+                picker.close()
+            elif event.key == "down":
+                picker.move(1)
+            elif event.key == "up":
+                picker.move(-1)
+            elif event.key == "enter":
+                if picker.highlighted is not None:
+                    picker.select_row(picker.highlighted)
+            elif (
+                self.text == "" and event.is_printable and event.character
+                and picker.try_action_key(event.character)
+            ):
+                pass  # consumed as a row action -- never reaches the buffer
+            else:
+                handled = False
+            if handled:
+                event.stop()
+                event.prevent_default()
+                return
+            # Anything else -- a printable character, backspace, a cursor
+            # key this branch does not name -- falls through to ordinary
+            # TextArea editing below, exactly like the three popups
+            # beneath this one. `_on_prompt_changed` syncs the RESULT into
+            # the picker's filter a moment later; Enter is never reached
+            # from here without the `event.key == "enter"` arm above
+            # having already returned, so a filter string can never be
+            # submitted as a turn.
         if self.search.is_open:
             if event.key == "escape":
                 # Close, but KEEP what was typed: the query is prompt text

@@ -537,23 +537,54 @@ def ctx_chip(
     return text
 
 
+#: The CHANNEL RULE, verbatim from lore_core's own schema comment
+#: (``lore_core/deriver.py``: ``"user (the user STATED it) | project |
+#: user-model (you INFERRED it from behaviour)"``) and its deriver
+#: docstring (``deriver.py:221-230``). Not this app's own wording --
+#: LORE refuses to merge the two subjects for exactly this reason, and a
+#: user-model belief that READS as authoritative in the UI is the
+#: failure that separation exists to prevent. The operative difference
+#: is not confidence or age: it is whether a future session may ACT on
+#: the claim.
+BELIEF_CHANNEL_RULE: "dict[str, str]" = {
+    "user": (
+        "stated — the user said this themselves, in their own words; a "
+        "later session may ACT on it"
+    ),
+    "user-model": (
+        "inferred — derived from how a session went, never spelled out; "
+        "shapes tone and approach and authorizes nothing"
+    ),
+}
+
+
 def _belief_scope_label(subject: str) -> str:
     """Which GROUP a belief's row falls under in the beliefs chip's picker
-    (item 3) -- derived from lore_core's own subject vocabulary
-    (``lore_core.beliefs.belief_subject``: ``"user"``, ``"user-model"``, or
-    ``"project:<slug>"`` -- verified against the installed lore_core, there
-    is no separate ``scope`` column), data-driven rather than a hardcoded
-    two-way branch so a future subject prefix (LORE issue #41's proposed
-    ``machine:<id>``, still an open, unimplemented proposal -- NOT built
-    here) slots into its own group the moment lore_core starts writing one,
-    with no change to this function. ``"user-model"`` stays its own group
-    (interaction-model beliefs, never folded into plain "user") -- the same
-    distinction belief_subject's own docstring draws."""
+    (item 3) and the full browser's own row lead -- derived from
+    lore_core's own subject vocabulary (``lore_core.beliefs.
+    belief_subject``: ``"user"``, ``"user-model"``, or ``"project:<slug>"``
+    -- verified against the installed lore_core, there is no separate
+    ``scope`` column), data-driven rather than a hardcoded two-way branch
+    so a future subject prefix (LORE issue #41's proposed ``machine:<id>``,
+    still an open, unimplemented proposal -- NOT built here) slots into
+    its own group the moment lore_core starts writing one, with no change
+    to this function. ``"user-model"`` stays its own group (interaction-
+    model beliefs, never folded into plain "user") -- the same distinction
+    belief_subject's own docstring draws.
+
+    The ``· stated``/``· inferred`` suffix (v0.67.0) makes LORE's CHANNEL
+    RULE legible wherever this label appears, not only in a tooltip a
+    mouse has to find: a user-model claim that reads as authoritative in
+    a glance-only surface like the picker is the exact failure the
+    channel split exists to prevent. See :data:`BELIEF_CHANNEL_RULE` for
+    the rule those two words stand for. ``"project"`` carries no such
+    suffix -- it is scoped by repo, not by how the claim was arrived at,
+    and has no channel distinction to surface."""
     if subject == "user-model":
-        return "user model"
+        return "user-model · inferred"
     if ":" in subject:
         return subject.split(":", 1)[0]  # "project:<slug>" -> "project"
-    return subject or "user"
+    return f"{subject or 'user'} · stated"
 
 
 #: FLOOR for one chip-picker row, and since v0.57.0 only a floor.
@@ -578,44 +609,162 @@ PICKER_ROW_WIDTH = 72
 #: through every render pass.
 PICKER_ROW_MAX = 400
 
+# -- the ONE row shape both LORE chip pickers render (post-v0.67.0) -------
+#
+# The beliefs picker and the proposals picker used to format their own
+# rows independently -- "stamp · outcome age · claim" for one, "verdict ·
+# age · text" for the other -- and drifted: the proposals row had no fixed
+# columns at all (a `` · `` join drifts with every field's own length), so
+# neighbouring rows never lined up. One formatter now, used by both:
+#
+#     YY-MM-DD HH:MM   status   age   text
+#
+# STAMP, STATUS and AGE are fixed-width -- padded, never omitted, so a
+# record with nothing to say in one of them (a belief never tested, a
+# proposal with no verdict) still holds the column open with blanks rather
+# than shifting the text start left. TEXT is the one variable-width field,
+# capped to :data:`PICKER_TEXT_CAP` or the ROOM LEFT after the fixed
+# prefix (and, for the two menus that carry them, the row's own inline
+# actions -- see ``ChipPicker._action_reserve``) at the caller's measured
+# width, whichever is smaller -- so a wide terminal always shows up to 100
+# columns of claim/proposal text, and a narrow one shrinks the text
+# column rather than ever pushing the row past its own dropdown's edge.
+#
+# The STORED row (what ChipPicker's matcher scores) still carries the
+# FULL text out to :data:`PICKER_ROW_MAX` -- only the DRAWN copy is
+# capped, at render time, by the widget -- same "trim by the widget, not
+# by the formatter" rule v0.57.0 established, extended to a fixed-column
+# shape instead of a flat ellipsize.
 
-def _fmt_belief_row(belief: dict) -> str:
-    """One beliefs-picker row: when it was created, what reality last said
-    about it, then the claim.
+#: ``"25-08-24 14:32"`` -- belief_created_text's own fixed width (14) plus
+#: one gutter column.
+PICKER_STAMP_COL = 15
+#: Widest realistic verdict this store produces, padded to: LORE's own
+#: outcome words top out at "contradicted" (12); a proposal's verdict can
+#: run to "replace → memory/project:<slug>", so this is sized for that
+#: shape rather than the shorter belief one -- a column sized for its
+#: narrower user never overflows, sized for its wider one never wastes a
+#: belief row's blank space (spaces are cheap; a shifted text column is
+#: the defect this whole formatter exists to remove).
+PICKER_STATUS_COL = 28
+#: `_fmt_age`'s own ceiling is 5 columns; +2 for the gutter.
+PICKER_AGE_COL = 7
+#: The text column's own cap -- independent of the fixed columns before
+#: it, per spec: ``min(100, terminal width)``.
+PICKER_TEXT_CAP = 100
+#: How many columns the fixed stamp/status/age prefix spends before the
+#: text column starts -- callers that need to split a rendered row back
+#: into "prefix" and "text" (ChipPicker's own render-time trim) read this
+#: rather than re-deriving it from the three constants above.
+PICKER_PREFIX_WIDTH = PICKER_STAMP_COL + PICKER_STATUS_COL + PICKER_AGE_COL
 
-    Returned WHOLE (to :data:`PICKER_ROW_MAX`) since v0.57.0 and trimmed to
-    fit by the widget that paints it. That is not only about width: the
-    filter scores this string, so a claim already cut to 72 characters here
-    was a claim whose tail could not be searched for. The matcher now sees
-    the whole row and the reader sees as much of it as the terminal holds.
 
-    The stamp segment is emitted only when the belief actually CARRIES
-    timestamps (item V added them to ``list_beliefs``' SELECT). A row that
-    has none renders exactly as it did before rather than growing a
-    placeholder column that says nothing -- and that is also what keeps a
-    belief arriving from an older daemon, over the wire, honest."""
-    stamp = belief_stamp(belief)
+def lore_created_text(record: dict, *, now: "float | None" = None) -> str:
+    """``YY-MM-DD HH:MM`` a belief or a staged proposal entered the store --
+    the timestamp column both chip pickers lead with.
+
+    A record-shape-agnostic rename of what :func:`belief_created_text`
+    already computes: it only ever reads ``created``, and a proposal
+    carries that field in the same ``lore_core.config.utcnow`` format a
+    belief does (see :func:`_parse_lore_time`), so one function serves
+    both rather than two copies of the same four lines drifting apart."""
+    return belief_created_text(record, now=now)
+
+
+def format_picker_prefix(stamp: str, status: str, age: str) -> str:
+    """The fixed-width stamp/status/age columns every picker row in the
+    shared shape leads with -- always exactly :data:`PICKER_PREFIX_WIDTH`
+    columns, independent of terminal width. Padded, never omitted (a blank
+    field still holds its column open) and ellipsized if a caller somehow
+    hands one over-length, rather than letting it push the text column out
+    of alignment with the row above and below it."""
+    stamp_col = ellipsize(stamp or "", PICKER_STAMP_COL - 1).ljust(PICKER_STAMP_COL)
+    status_col = ellipsize(status or "", PICKER_STATUS_COL - 1).ljust(PICKER_STATUS_COL)
+    age_col = ellipsize(age or "", PICKER_AGE_COL - 1).ljust(PICKER_AGE_COL)
+    return f"{stamp_col}{status_col}{age_col}"
+
+
+def format_picker_row(
+    stamp: str, status: str, age: str, text: str, *, width: int,
+) -> str:
+    """The one row both the beliefs and proposals chip-picker menus render:
+    ``YY-MM-DD HH:MM   status   age   text``, in fixed-width columns so
+    neighbouring rows line up as a table rather than drifting with content
+    length (the proposals row's own defect before this -- see this
+    section's lead).
+
+    ``width`` bounds the TEXT column only -- the fixed prefix before it is
+    never cut. Two callers, two different meanings for it:
+
+    * **Storage** (:func:`_fmt_belief_row` / :func:`_fmt_pending_row`, no
+      ``width`` given by their own callers): ``width=PICKER_ROW_MAX``, i.e.
+      as long as a claim or proposal body ever gets -- the string
+      ChipPicker's matcher scores, so a word past what any screen could
+      show is still findable. This function applies NO 100-column cap of
+      its own; that cap is a DISPLAY decision, made once real geometry is
+      known (see below), not a storage one.
+    * **Display** (``ChipPicker._render_rows``, ``row_prefix_width`` set):
+      the widget slices its own stored label at :data:`PICKER_PREFIX_WIDTH`
+      and re-ellipsizes only the text half to ``min(PICKER_TEXT_CAP,
+      measured_budget)`` -- literally the operator's spec -- without
+      calling back into this function at all, since the prefix it already
+      has is already correctly padded."""
+    prefix = format_picker_prefix(stamp, status, age)
+    shown_text = ellipsize(text, max(0, width))
+    return f"{prefix}{shown_text}"
+
+
+def _fmt_belief_row(belief: dict, *, width: int = PICKER_ROW_MAX) -> str:
+    """One beliefs-picker row, in the shared :func:`format_picker_row`
+    shape: when it was created, what reality last said about it (its
+    OUTCOME KIND and the age of that verdict, as two separate fixed
+    columns rather than one merged "confirmed 2d" string), then the claim.
+
+    Returned against ``width=PICKER_ROW_MAX`` by default -- i.e. as long
+    as :data:`PICKER_ROW_MAX` allows -- since v0.57.0 and trimmed to fit
+    by the widget that paints it (v0.67.0 extends that trim to a
+    fixed-column shape instead of a flat ellipsize; see
+    :data:`PICKER_PREFIX_WIDTH`). That is not only about width: the filter
+    scores this string, so a claim already cut here was a claim whose tail
+    could not be searched for.
+
+    Status and age are blank (padded, not omitted) for a belief with no
+    outcome ledger at all -- the same "an absent key is an admission, a
+    zero is a measurement" rule :func:`belief_outcome_kind` already
+    follows, extended to the picker row so a belief arriving from an
+    older daemon renders a blank column rather than a guessed one."""
+    stamp = lore_created_text(belief)
+    kind = belief_outcome_kind(belief)
+    status = NEVER_TESTED if kind == "untested" else kind
+    age = ""
+    if kind in OUTCOME_EVENTS:
+        secs = _age_of(belief.get("outcome_at"))
+        age = _fmt_age(secs) if secs is not None else ""
     claim = _one_line(str(belief.get("claim") or ""), PICKER_ROW_MAX)
-    return ellipsize(f"{stamp} · {claim}" if stamp else claim, PICKER_ROW_MAX)
+    return format_picker_row(stamp, status, age, claim, width=width)
 
 
-def _fmt_pending_row(item: "dict | str") -> str:
-    """One ``/pending`` row: WHAT APPROVING IT WOULD DO, how long it has
-    been waiting, then the proposal's own text, ellipsized.
+def _fmt_pending_row(item: "dict | str", *, width: int = PICKER_ROW_MAX) -> str:
+    """One ``/pending`` row, in the shared :func:`format_picker_row` shape:
+    when it was staged, WHAT APPROVING IT WOULD DO (the status column) and
+    how long it has waited (the age column), then the proposal's own text.
 
     Item V's requirement in one line -- "a row that does not say what
-    approving it changes is not reviewable". The verdict comes first
-    because it is the part a reviewer scans; the text is still in the
-    string because ChipPicker's type-to-filter matches this exact label
-    and a row you cannot search by its own words is not a row.
+    approving it changes is not reviewable". The verdict is now a FIXED
+    column rather than leading a `` · ``-joined string, which is what lets
+    it line up against the row below it instead of drifting with its own
+    length; the text is still in the string because ChipPicker's
+    type-to-filter matches this exact label and a row you cannot search by
+    its own words is not a row.
 
     Accepts a bare string as well as a record: see :func:`as_proposal`."""
     proposal = as_proposal(item)
-    verdict = proposal_verdict(proposal)
-    age = proposal_age_text(proposal)
+    stamp = lore_created_text(proposal)
+    status = proposal_verdict(proposal)
+    secs = _age_of(proposal.get("created"))
+    age = _fmt_age(secs) if secs is not None else ""
     text = _one_line(proposal_text(proposal), 200)
-    lead = " · ".join(part for part in (verdict, age) if part)
-    return ellipsize(f"{lead} · {text}" if lead else text, PICKER_ROW_MAX)
+    return format_picker_row(stamp, status, age, text, width=width)
 
 
 # -- item V: timestamps, age, provenance, and the proposed verdict --------
@@ -908,6 +1057,13 @@ def belief_tooltip(belief: dict) -> str:
             f"confidence {conf}", belief_provenance(belief)]
     lines.append("")
     lines.append(" · ".join(part for part in meta if part))
+    channel = BELIEF_CHANNEL_RULE.get(subject)
+    if channel:
+        # The rule in full, not just the two-word tag the scope label
+        # already carries -- a hover is where "authorizes nothing" (the
+        # consequence a user-model belief's own confidence number cannot
+        # convey) actually gets said.
+        lines.append(channel)
     created = belief_created_text(belief)
     if created:
         lines.append(f"created {created}")

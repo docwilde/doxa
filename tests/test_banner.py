@@ -20,7 +20,7 @@ from doxa import banner, images
 from doxa.app import _DrawnMark, BootBanner, DoxaApp, ImageShowcaseBlock, SystemBlock
 
 # A realistic terminal size for scenes that just need room -- the default
-# run_test size (80x24) is fine for the banner itself (v0.66.0: it is the
+# run_test size (80x24) is fine for the banner itself (v0.70.0: it is the
 # same drawn form at every width above DRAWN_FULL_COLUMNS), but several
 # /img showcase scenes want more vertical room than 24 rows gives.
 WIDE = (120, 34)
@@ -151,7 +151,7 @@ def test_drawn_lines_fit_the_width_they_are_given():
 def test_geometry_is_derived_from_the_row_budget():
     """47 cells is not a magic number -- it is 6 rows spent through the
     cell aspect and the INKED aspect of the asset, and the docstring's
-    arithmetic has to be the code's. /img's showcase only, since v0.66.0
+    arithmetic has to be the code's. /img's showcase only, since v0.70.0
     -- the boot banner itself never spends this budget any more."""
     assert banner.COLUMNS == round(
         banner.ROWS * banner.CELL_ASPECT * banner.CONTENT_ASPECT
@@ -197,7 +197,7 @@ def test_each_caller_gets_its_own_image():
 
 
 def test_old_multi_value_settings_still_read_as_on(monkeypatch):
-    """v0.66.0 collapsed boot_banner from a four-way choice
+    """v0.70.0 collapsed boot_banner from a four-way choice
     (auto/blocks/image/off) to plain on/off -- the raster form auto and
     image used to reach for is gone, so there is no longer a distinction
     between them worth keeping. A config.toml written by the OLD settings
@@ -218,7 +218,7 @@ def test_old_multi_value_settings_still_read_as_on(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_every_tier_gets_the_drawn_mark_never_a_raster(tmp_path, monkeypatch):
-    """v0.66.0: there is no raster tier for the banner any more, on any
+    """v0.70.0: there is no raster tier for the banner any more, on any
     terminal. kgp/sixel used to earn a raster ``logo.png`` here
     (``use_image``'s old ``auto`` rule, now removed), and ``image`` could
     force it on every tier including half-block. Both are gone -- the
@@ -283,7 +283,7 @@ async def test_a_mid_width_terminal_shows_mark_and_wordmark_never_an_image(
 ):
     """Between DRAWN_MARK_COLUMNS and DRAWN_FULL_COLUMNS: wide enough for
     the mark plus the wordmark, too narrow for the tagline too -- and,
-    unconditionally now (v0.66.0), never the raster."""
+    unconditionally now (v0.70.0), never the raster."""
     monkeypatch.setenv("DOXA_IMAGE_MODE", "halfblock")
     width = (banner.DRAWN_MARK_COLUMNS + banner.DRAWN_FULL_COLUMNS) // 2 + 4
     app = DoxaApp(cwd=str(tmp_path))
@@ -328,7 +328,7 @@ async def test_the_setting_genuinely_removes_it(tmp_path, monkeypatch):
 
 
 def test_setting_defaults_on_and_has_a_settings_row(monkeypatch):
-    """v0.66.0 collapsed this from a 4-way ``choice`` to a plain
+    """v0.70.0 collapsed this from a 4-way ``choice`` to a plain
     ``bool_on`` -- there is only one form to turn on or off now."""
     from doxa import config as config_mod
 
@@ -479,7 +479,7 @@ def _unforced(monkeypatch, detected: str) -> None:
 def test_the_legacy_bool_spelling_still_means_what_it_meant(monkeypatch):
     """v0.41.0 shipped this knob as a bool. A config.toml written by that
     settings modal says 1 or 0 and must not start meaning something else,
-    even after v0.66.0 collapsed the auto/blocks/image middle ground that
+    even after v0.70.0 collapsed the auto/blocks/image middle ground that
     sat between v0.41.0's bool and today."""
     monkeypatch.setenv("DOXA_BOOT_BANNER", "1")
     assert banner.enabled() is True
@@ -585,7 +585,7 @@ async def test_a_terminal_too_narrow_for_the_glyphs_drops_to_the_name(
         drawn = block.query_one(".banner-wordmark")
         assert drawn.region.height == 1
         assert banner.WORDMARK in str(drawn.renderable)
-        # v0.66.0: there is no fallback-reason line left to stay silent --
+        # v0.70.0: there is no fallback-reason line left to stay silent --
         # the raster it explained was never given IS the thing that is
         # gone, so the class itself no longer exists anywhere in the DOM.
         assert not block.query(".banner-reason")
@@ -595,7 +595,7 @@ def test_the_showcase_path_never_raises_without_pillow(monkeypatch):
     """doxa.images.widget_for is documented never to raise, but the
     crop/flatten step is DOXA's own code on the near side of that
     guarantee -- and it runs inside ``ImageShowcaseBlock.compose`` (the
-    only caller left since v0.66.0 retired the banner's own raster path),
+    only caller left since v0.70.0 retired the banner's own raster path),
     where an exception does not degrade a decoration, it breaks a debug
     command."""
     import builtins

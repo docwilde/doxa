@@ -377,7 +377,7 @@ class _DrawnMark(Static):
 class BootBanner(Vertical):
     """The DOXA mark above a session's opening identity block.
 
-    **One form, drawn, on every terminal** (v0.66.0). Through v0.65.0 this
+    **One form, drawn, on every terminal** (v0.70.0). Through v0.65.0 this
     widget also had a raster path -- ``logo.png`` on ``kgp``/``sixel``
     terminals, decided by the now-removed ``doxa.banner.use_image`` -- and
     a fallback-reason line for when that raster was asked for and not

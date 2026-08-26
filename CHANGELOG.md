@@ -4,12 +4,72 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
-## 0.66.0 — 2026-08-26
+## 0.70.0 — 2026-08-26
 
 - The drawn boot mark could overflow its column in CI (`test_narrow_terminal_never_overflows_the_glyph_art`): the transcript's scrollbar can appear after the banner's last resize and narrow its box without a Resize message following, leaving a fit computed for a wider box painted into a narrower one. The art now fits itself inside `render()`, against its own live `content_size`, on every paint — not a string cached by `_lay_out` on mount/resize — so a stale fit cannot survive a frame regardless of whether a resize arrives.
 - The mark itself: nine rows instead of seven, with a real gap between the ring and the triangle (they read as one blob at the old size), and the ring now renders in a muted grey while the triangle keeps the orange accent — two shapes, not one two-tone blob.
 - The raster boot banner is gone. `logo.png` used to draw on `kgp`/`sixel` terminals (`boot_banner=auto`/`image`); the drawn block mark reads better than a downscaled photograph even there, so there is no longer a case where the raster is the right answer. `boot_banner` collapses from a four-way choice to plain on/off — a `config.toml` still holding `auto`, `blocks` or `image` from before this change keeps meaning on. `/img`'s showcase is unaffected and still renders the raster logo in every tier a terminal answers for.
 - `test_restore_tabs_open_in_saved_order_with_names_and_active_tab` failed in CI with a wrong active tab id, not the null one v0.38.0 already guards against. Textual's `Tabs` widget defaults itself to its first child tab on its own mount, and that default reaches `TabbedContent.active` as a queued message rather than a synchronous write — a later explicit write can still be overwritten once the stale default message is finally processed. Fixed by computing the correct starting tab before anything mounts and handing it to `TabbedContent` as `initial=`, so the wrong default is never posted in the first place.
+
+## 0.67.0 — 2026-08-26
+
+Gallery uniformity, one row shape for both LORE pickers, and inline
+actions on their rows.
+
+- Every asset in `assets/shots/` — 13 PNG/SVG pairs and 11 GIFs — now
+  renders at the identical 3068x1734 (250x69 columns/rows, 16:9 within
+  0.5%). Previously five different pixel sizes shipped side by side (a
+  sixth, bespoke one for `beliefs-browser`), so the README visibly
+  changed image size scene to scene. 250 columns is a measured floor:
+  the seven scenes carrying a live status bar (`hero`, `trace`,
+  `transparent`, `subagent-tracker`, `memory`, `sessions`,
+  `image-support`) already needed it, and every other scene now matches
+  for uniformity rather than its own smaller content-fit size.
+- Scenes that had less content than the new frame got more, not blank
+  canvas: `settings`/`clock`/`error-block` and every GIF scene now run
+  behind or alongside a real three-tab session already mid-conversation;
+  `beliefs-browser` gained a much larger scripted store (14 beliefs, 6
+  proposals) in place of three and two. `banner`/`banner-blocks` gained
+  two more tabs in the strip but not a running conversation — one would
+  scroll the boot banner these two scenes exist to show out of frame —
+  and their own blank space below the identity block is real, not
+  padded over.
+- `scripts/screenshot.py`/`scripts/record_gif.py` leaked real machine
+  state into the gallery: `N proposals` and `mem u%p%` read straight off
+  this machine's actual `lore_core` store (neither is scripted anywhere
+  in either file), and `/settings` showed this machine's real config
+  defaults. Measured, not assumed — `N proposals` read 205 one run and
+  78 the next on the same unedited scene. Both scripts now isolate
+  `LORE_ROOT`/`DOXA_HOME` the same way the test suite already does,
+  before any `doxa` import.
+- The beliefs and proposals chip pickers used to format their rows two
+  different ways (a `belief_stamp` join with no fixed columns, a `` · ``
+  string for proposals that drifted with every field's own length). One
+  formatter now — `doxa.ui.labels.format_picker_row` — used by both:
+  `YY-MM-DD HH:MM  status  age  text`, fixed-width prefix columns, text
+  capped to `min(100, measured terminal width)` by the widget at render
+  time. The matcher still scores the full untrimmed row, so a word past
+  the visible cut stays findable.
+- Both pickers gained inline row actions — approve/reject on a proposal,
+  confirmed/contradicted/stale/retract on a belief — reachable without
+  leaving the list: a click on the row's own action span, or the
+  reserved letter while that row is highlighted. Retract and approve
+  still arm on the first press and apply on the second, on the same row.
+  Additive: selecting a row outright still opens the existing per-row
+  action sub-menu unchanged, and its own tests keep passing as written.
+- While either picker is open, the prompt input filters its rows instead
+  of sending to the agent — typed text syncs live, Enter acts on the
+  highlighted row rather than submitting a turn, Escape closes and clears
+  it. The five reserved action letters only fire while the filter is
+  empty; the moment it holds text they are ordinary characters, so typing
+  a word that starts with one of them never fires an action on the way
+  through.
+- The `user`/`user-model` group headers (picker and full browser) now
+  carry LORE's own channel tag — `user · stated` (the user said it
+  themselves; a later session may act on it) vs `user-model · inferred`
+  (read off behaviour, never spelled out; shapes tone and authorizes
+  nothing) — and the full rule is in the belief tooltip. `project` is
+  unaffected — it has no channel to distinguish.
 
 ## 0.65.0 — 2026-08-26
 
