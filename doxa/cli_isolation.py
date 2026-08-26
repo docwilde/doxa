@@ -120,6 +120,23 @@ building a cwd-based heuristic filter on top would be exactly the kind of
 invented scoping the beliefs-chip work was told not to ship, so this
 carries every skill, unfiltered, same as the CLI would have anyway.
 
+PLUGINS ARE A SEPARATE, OPT-IN CONCERN (:mod:`doxa.claude_plugins`, added
+for the same "discover and use Claude Code's plugins and skills" request
+this module's own defect note made necessary reading first): the skills
+carried above are only the ones that reached ``~/.claude/skills`` directly
+(learned skills, on this machine all LORE's). A skill or command BUNDLED
+INSIDE a plugin (``~/.claude/plugins/cache/<name>/.../skills/``,
+``commands/``) is not reached by :func:`ensure_skills_link` at all, and
+is not carried by this module. ``doxa.claude_plugins`` decides that
+question on its own, per capability rather than per plugin (commands/
+skills/agents adopted, hooks/MCP servers refused unconditionally --
+see its own module docstring and ``docs/plans/plugins.md``), and is
+opt-in, default OFF -- unlike the skills symlink above, which has run
+unconditionally since item AA shipped. This module's OWNED_SETTINGS stays
+empty either way: adoption never asks the isolated CLI to load anything
+AS a plugin (that channel is what item AA closed); it hands the SDK a
+per-session ``--plugin-dir`` pointing at a sanitized copy instead.
+
 THE SPLIT: ``doxa.identity`` deliberately keeps reading the REAL user
 config (``CLAUDE_CONFIG_DIR`` or ``~/.claude``, read directly from THIS
 process's own environment, which this module never modifies) for the

@@ -106,6 +106,26 @@ SETTINGS: tuple[Setting, ...] = (
              "repository you open.",
     ),
     Setting(
+        key="adopt_plugins", env="DOXA_ADOPT_PLUGINS",
+        label="adopt claude plugins", category="Session",
+        kind="bool", default="",
+        help="Load the commands, skills and agents from your OWN "
+             "installed Claude Code plugins into NEW sessions "
+             "(doxa.claude_plugins.adopt) -- never their hooks or MCP "
+             "servers, and never the LORE plugin",
+        note="OFF by default: isolation (doxa.cli_isolation, item AA) stays "
+             "the resting posture, and adopting your plugins is a choice "
+             "you make, not something a fresh install does for you. Turning "
+             "this on does not undo the isolation fix -- hooks and MCP "
+             "servers stay refused unconditionally (see docs/plans/"
+             "plugins.md), only commands/skills/agents from plugins your "
+             "own ~/.claude/settings.json already has enabled are staged "
+             "into a sanitized copy and loaded via --plugin-dir, one "
+             "session-scoped flag per adopted plugin. /plugins previews "
+             "what this would adopt before you turn it on; /reload-plugins "
+             "re-scans for NEW sessions without restarting doxa.",
+    ),
+    Setting(
         key="permission_mode", env="DOXA_PERMISSION_MODE",
         label="permission mode", category="Session",
         kind="choice", choices=("", "default", "acceptEdits", "plan"),

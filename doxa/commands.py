@@ -144,6 +144,22 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette="Doctor",
     ),
     SlashCommand(
+        name="/plugins",
+        group="Tools & config",
+        # docs/plans/plugins.md. Deliberately not "/plugin" (singular) --
+        # the CLI's own `claude plugin|plugins` subcommand already owns
+        # that name, and this is a different thing: what DOXA discovered
+        # in the OPERATOR'S OWN ~/.claude, not a package manager.
+        summary="Your Claude Code plugins/skills: discovered, adopted or refused, and why",
+        palette="Plugins: list",
+    ),
+    SlashCommand(
+        name="/reload-plugins",
+        group="Tools & config",
+        summary="Re-scan Claude Code plugins/skills now (new sessions/tabs only)",
+        palette="Plugins: reload",
+    ),
+    SlashCommand(
         name="/model",
         group="Session",
         summary="Switch the model for the rest of this session (no reconnect)",
