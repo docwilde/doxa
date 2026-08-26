@@ -41,12 +41,11 @@ from ..ui.labels import (
     MODE_EXPLAIN,
     MODEL_ALIASES,
     _fmt_age,
-    context_breakdown_text,
     help_text,
     memory_entries,
     memory_fill,
 )
-from ..ui.transcript import ImageBlock, ImageShowcaseBlock
+from ..ui.transcript import ContextBlock, ImageBlock, ImageShowcaseBlock
 
 
 @dataclass(frozen=True)
@@ -606,7 +605,17 @@ class PaneCommandsMixin:
         one.
 
         Takes no arguments; a stray one is ignored rather than refused, the
-        same way ``/usage`` and ``/help`` treat theirs."""
+        same way ``/usage`` and ``/help`` treat theirs.
+
+        Mounts :class:`~doxa.ui.transcript.ContextBlock` directly rather
+        than going through :meth:`_system` -- the same door
+        :meth:`_cmd_shell`'s ``ShellBlock`` already uses for a block that
+        is not plain text. ``ContextBlock`` leads with a proportional bar
+        of the window (block art, one colored run per measured category)
+        and keeps every number this method has always printed right below
+        it, unchanged; see that class's own docstring for why the bar has
+        to be a widget that fits itself at paint time rather than a string
+        computed once here."""
         engine = self.engine
         fetch = getattr(engine, "context_usage", None)
         if fetch is None:
@@ -617,7 +626,12 @@ class PaneCommandsMixin:
         except Exception as exc:  # noqa: BLE001 -- a refusal is information
             await self._system(f"context: {type(exc).__name__}: {exc}")
             return
-        await self._system(context_breakdown_text(breakdown))
+        if not breakdown:
+            await self._system(CONTEXT_UNAVAILABLE)
+            return
+        block_list = self.query_one("#block-list", VerticalScroll)
+        await block_list.mount(ContextBlock(breakdown))
+        block_list.scroll_end(animate=False)
 
     def _usage_text(self) -> str:
         """/usage: the session's REAL numbers, and the account's real

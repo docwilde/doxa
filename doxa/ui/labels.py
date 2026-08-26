@@ -1713,6 +1713,176 @@ def _context_section(
     return out
 
 
+# -- /context (item K, continued): the bar -----------------------------
+#
+# The owner's ask was "a visual representation of context occupancy in
+# block art" instead of the numbers. Read as a straight swap that would
+# mean deleting them -- but item K's whole premise is that every figure on
+# this screen is a measurement, and a measurement stays reachable. A bar of
+# ``█`` shows the SHAPE of the window (a handful of colored runs and a grey
+# remainder) at a glance; it cannot tell 4% from 6%, which is exactly the
+# distinction a screen like this exists to preserve. So the bar LEADS --
+# it is the first thing under the "context" heading, which is where the
+# owner's ask puts it -- and context_breakdown_text's exact numbers still
+# follow it, unchanged, one screen down. Nothing here reads or edits that
+# function; :class:`doxa.ui.transcript.ContextBlock` stacks the two.
+#
+# **Full blocks only.** The house rule the boot mark settled this session:
+# half-blocks read as mush at the sizes a widget actually gets, and the
+# Geometric Shapes triangles carry a tofu risk on fonts that do not cover
+# that block -- ``█`` is the one glyph doxa/banner.py leans on for the same
+# reason (see that module's GREEK_ROWS).
+#
+# **The colors are reused, not invented.** Every hex literal below already
+# paints something else in theme.tcss: PROVIDER_GLYPH_COLOR is the accent
+# every clickable chip already wears, the other four are the
+# ``#session-tabs`` status ladder (``-done-unseen``, ``-staged``,
+# ``-working``) plus SystemBlock's own left rule. A segment's color was
+# never picked for this bar specifically -- it is the same vocabulary the
+# rest of the app already reads.
+CONTEXT_BAR_PALETTE: "tuple[str, ...]" = (
+    PROVIDER_GLYPH_COLOR,  # "#D97757" -- the app's own accent
+    "#6FCF97",             # #session-tabs Tab.-done-unseen
+    "#A98FD1",             # #session-tabs Tab.-staged
+    "#E0A83C",             # #session-tabs Tab.-working
+    "#7A9B6E",             # SystemBlock's own left rule (theme.tcss)
+)
+
+CONTEXT_BAR_TRACK = "#3A3429"
+"""theme.tcss's own border grey -- the top rung of the surface ramp, used
+everywhere else in this app to mean "a boundary, not content." The bar
+reuses it for the window's unspent remainder for the same reason: that
+remainder is not a component competing for a color, it is the absence of
+one, and drawing it in a content color would read as tokens nobody spent."""
+
+CONTEXT_BAR_FREE_NAMES = frozenset({"free space"})
+"""The one category name (matched case-insensitively, exactly -- no
+substring, no near-miss) this module treats as the window's own unspent
+remainder rather than a component. Narrow on purpose: an SDK that ever
+renames or drops this category degrades to "one more colored segment",
+never to a silently mislabeled one."""
+
+CONTEXT_BAR_MIN_COLUMNS = 24
+"""Below this the bar is not drawing a shape, it is drawing two or three
+blocks of noise -- /context drops to the numbers alone (context_bar_text
+returns "") rather than ship a bar too coarse to answer the question it
+exists for."""
+
+CONTEXT_BAR_MAX_COLUMNS = 60
+"""A voluntary ceiling, not a defect: past roughly 60 blocks each extra
+column buys less resolution than the exact percentage already sitting one
+line below it."""
+
+
+def context_bar_segments(
+    breakdown: "dict | None", width: int
+) -> "list[tuple[str, int]] | None":
+    """``[(color, block_count), ...]`` for one row of ``█`` -- pure and
+    total, the bar's half of :func:`context_breakdown`'s own discipline:
+    every block traces to a measured category, nothing is estimated, and
+    this returns ``None`` rather than a bar drawn against a guessed
+    denominator.
+
+    ``None`` when there is nothing honest to draw: no breakdown, no
+    reported window (``max_tokens`` -- a limit the CLI never sent reads
+    ``?`` and stays ``?``; there is no denominator to be proportional
+    against), no measured categories, or a box too narrow
+    (:data:`CONTEXT_BAR_MIN_COLUMNS`) to hold a shape rather than noise.
+
+    Block counts are assigned by rounding each category's CUMULATIVE share
+    of the window to the nearest block and taking the difference from the
+    previous category's rounded position -- not by rounding each category
+    independently. Independent rounding can overshoot the bar's own width
+    (several categories each just over a half-block, each rounding up,
+    summing past ``width``) -- precisely the kind of fit-computed-wrong
+    overflow v0.70.0 already found once, in the boot mark. Cumulative
+    rounding cannot: the running position is clamped to ``[0, width]`` by
+    construction, so the sum of every block count this returns, plus its
+    own trailing remainder, is always exactly ``width``, never more.
+
+    The same rounding is what keeps a sliver honest: a category under half
+    a block's width moves the cumulative position by less than one whole
+    block, so the difference against the previous position is zero --
+    rounding a 0.2% component up to one visible block would be exactly the
+    kind of small lie item K's own docstring already rules out for the
+    numbers, and cumulative rounding never produces it. The category named
+    "free space" (:data:`CONTEXT_BAR_FREE_NAMES`) draws in
+    :data:`CONTEXT_BAR_TRACK` rather than a content color; whatever width
+    is left over once every category has drawn its share is appended as
+    more track, so the bar always reads as content blocks followed by
+    however much window is genuinely unspent -- never as a component that
+    was never told about."""
+    if not breakdown:
+        return None
+    window = breakdown.get("max_tokens")
+    if not isinstance(window, (int, float)) or window <= 0:
+        return None
+    categories = breakdown.get("categories")
+    if not isinstance(categories, list) or not categories:
+        return None
+    bar_width = min(int(width), CONTEXT_BAR_MAX_COLUMNS)
+    if bar_width < CONTEXT_BAR_MIN_COLUMNS:
+        return None
+
+    segments: list[tuple[str, int]] = []
+    cumulative_share = 0.0
+    prev_pos = 0
+    for idx, row in enumerate(categories):
+        # Color keyed to the category's OWN position in the CLI's list, not
+        # to how many segments have actually drawn a block so far -- a
+        # category that rounds to zero blocks at a narrow width must not
+        # bump every later category into a different color than it wore at
+        # a wider one. The same component reads as the same color on every
+        # paint, whether or not this particular paint has room to show it.
+        color = CONTEXT_BAR_PALETTE[idx % len(CONTEXT_BAR_PALETTE)]
+        tokens = row.get("tokens")
+        if not isinstance(tokens, (int, float)):
+            continue  # no number, no block -- same omission rule as the text
+        cumulative_share = min(1.0, cumulative_share + float(tokens) / float(window))
+        pos = round(cumulative_share * bar_width)
+        blocks = pos - prev_pos
+        prev_pos = pos
+        if blocks <= 0:
+            continue
+        name = str(row.get("name") or "").strip().lower()
+        if name in CONTEXT_BAR_FREE_NAMES:
+            color = CONTEXT_BAR_TRACK
+        segments.append((color, blocks))
+
+    remainder = bar_width - prev_pos
+    if remainder > 0:
+        segments.append((CONTEXT_BAR_TRACK, remainder))
+    return segments or None
+
+
+def context_bar_text(breakdown: "dict | None", width: int) -> str:
+    """One markup line -- the bar, two spaces, the exact percentage it
+    depicts -- or ``""`` when there is nothing honest to draw at this
+    width. The percentage is repeated here even though
+    :func:`context_breakdown_text` prints it again below: a bar with no
+    number beside it invites reading 4% as 6%, and the one figure that
+    belongs on the SAME line as a picture is the figure the picture is a
+    picture of. Formatted to the same one decimal place as the numbers
+    view, so the two never appear to disagree over a rounding choice.
+
+    The percentage's OWN rendered width is measured first and subtracted
+    from ``width`` before :func:`context_bar_segments` ever sees a block
+    budget -- not a padded worst-case reservation, the exact length of the
+    suffix this call is about to append. Skipping that step was a bug
+    caught by measuring, not by reasoning about it: a bar sized to the
+    full width with the percentage appended afterward overflows the same
+    box it was just fitted to (v0.70.0's own overflow, reproduced one
+    layer up, from string concatenation instead of a stale resize)."""
+    percent = (breakdown or {}).get("percentage")
+    pct = f"{float(percent):.1f}%" if isinstance(percent, (int, float)) else "?%"
+    suffix = f"  {pct}"
+    segments = context_bar_segments(breakdown, width - len(suffix))
+    if not segments:
+        return ""
+    bar = "".join(f"[{color}]{'█' * count}[/]" for color, count in segments)
+    return f"{bar}{suffix}"
+
+
 def git_branch_symbol() -> str:
     """The nerd-font branch glyph (U+E0A0) when the user opted in via
     DOXA_NERD_FONT (a TUI cannot detect font glyph coverage itself);

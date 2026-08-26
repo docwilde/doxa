@@ -4,6 +4,52 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.75.0 — 2026-08-26
+
+`/context` leads with a bar now: block art (full blocks only, the house
+rule the boot mark settled) showing the window's occupancy, colored per
+component, right above the exact numbers the command has always printed
+-- "instead of the numbers" read as LEADS them, not replaces them, since a
+bar cannot tell 4% from 6% and item K's whole premise is that every figure
+here stays a reachable measurement.
+
+- `doxa.ui.labels.context_bar_segments`/`context_bar_text` build the bar
+  from the same `categories` `context_breakdown_text` already reads --
+  nothing new is measured. No reported window (`max_tokens`), no
+  denominator, no bar: the same rule that leaves an unknown context limit
+  reading `?` in the numbers leaves it undrawn here. A category under half
+  a block's own share of the width draws ZERO blocks -- rounding a 0.2%
+  sliver up to a visible one would be exactly the small lie item K's own
+  docstring already rules out for the numbers -- and every category's
+  block count is apportioned by rounding its CUMULATIVE share rather than
+  each category independently, so the bar's own width can never exceed
+  what it was asked to fit into (independent rounding can overshoot; this
+  cannot). The CLI's own "Free space" category draws in the app's border
+  grey (theme.tcss's own boundary color) rather than a content color, so
+  the bar reads as spent-then-headroom rather than one more component
+  competing for attention. Every other segment's color comes from its
+  OWN position in the CLI's category list, reusing four hex literals that
+  already paint something else in this app (the accent every clickable
+  chip wears, the `#session-tabs` status ladder) -- not invented, and
+  stable across widths: a category that rounds to zero blocks at a narrow
+  terminal does not push every later one into a different hue than it
+  wore at a wide one.
+- `doxa.ui.transcript.ContextBlock` (a `SystemBlock` subclass) is what
+  `/context` mounts now, in place of a plain text block -- the same door
+  `ShellBlock` already uses for output that isn't just a string. Its
+  `render()` recomputes the bar from `self.content_size.width` on every
+  paint, the same discipline `_DrawnMark` keeps for the boot mark and for
+  the same reason: the box this widget is given can narrow out from under
+  it after it mounts (a scrollbar appearing with no `Resize` message
+  following is v0.70.0's own precedent), so a bar fitted once at
+  construction and trusted to stay correct is the same defect found
+  there. Below `CONTEXT_BAR_MIN_COLUMNS` (24) the bar drops out entirely
+  and `/context` shows the numbers alone -- the same degrade a session
+  with no reported window already gets.
+- `context_breakdown_text` itself is untouched; every existing `/context`
+  assertion in `tests/test_context.py` keeps passing unmodified, because
+  `ContextBlock.text` is still exactly what it always was.
+
 ## 0.74.0 — 2026-08-26
 
 Claude Code plugins and skills, adopted without reopening item AA's
