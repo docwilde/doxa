@@ -4,6 +4,46 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.65.0 — 2026-08-26
+
+Gallery regenerated end to end: every asset in `assets/shots/` predated the
+full-block banner, the permission-mode chip, curated-memory fill and the
+staged-proposals chip, so the README was showing a mixture of eras.
+
+- All 11 PNG/SVG pairs and 10 GIFs re-captured at this version.
+  `banner-blocks` was also fixed in the process: its 80-column frame
+  measured 1.51 against a 16:9 target (15% off, outside the ~2% the rest of
+  the gallery holds to) — widened to 95 columns, rows unchanged, now 1.78.
+- Six status-bar-carrying scenes (`hero`, `trace`, `transparent`,
+  `subagent-tracker`, `memory`, `sessions`, `image-support`) widened from
+  172 to 250 columns. Measured, not assumed: the live status bar's own
+  plain text now runs past 200 characters with the mode chip, memory fill
+  and proposals chip added since 172 was chosen, and `hero` was losing
+  everything from the memory chip on.
+- Three new pairs: `beliefs-browser` (the full `/beliefs` tab —
+  scope-grouped beliefs carrying LORE's own outcome verbs, one staged
+  proposal armed mid-approve), `error-block` (a caught exception rendered
+  inline instead of killing the app), and `permission-mode` (the chip
+  cycling default → plan → auto → bypassPermissions, teal/amber/red).
+  Captioned in the README's gallery.
+- `beliefs-browser`'s header rendered `lore_write_state_result`'s test
+  fixture default straight into the image (`lore_core 0.36.0 (package)`)
+  instead of asking `doxa.version.lore_core_version()` and
+  `doxa._lore_bootstrap.resolved_source()` the way the real engine does —
+  a hard-coded fact in a scene fixture, exactly the class of bug this
+  release exists to catch, just not limited to the boot banner's version
+  line this time. `scripts/screenshot.py`'s `_beliefs_engine()` now reads
+  both live. The number on screen is unchanged on this machine (still
+  0.36.0) but the source label corrects from `(package)` to `(plugin)` —
+  this checkout's LORE plugin checkout wins over the pip-pinned v0.38.0
+  per `doxa/_lore_bootstrap.py`'s own documented precedence, which the
+  fixture default could not have known to say.
+- `beliefs-browser` also stopped sharing the other new `WIDE` (250×69)
+  geometry: its tab has no status bar or prompt box beneath it, so none
+  of the reasoning that widened those scenes applied, and the content
+  (two staged proposals, three belief rows) filled barely a third of the
+  frame. Resized to its own content-fit 134×36.
+
 ## 0.64.0 — 2026-08-26
 
 - CHANGELOG entries rewritten to state what changed and why: 5139 lines to 947. Narrative, process accounts and quoted reports are gone.
