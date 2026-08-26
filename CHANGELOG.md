@@ -4,6 +4,13 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.74.0 — 2026-08-26
+
+- Redraws the boot mark: drops the grey ring, widens the triangle so it reads as solid and confident instead of a narrow spike, and spells ΔΟΞΑ out in full-block letters beside it, same colour as the triangle. `belief earns knowledge` sits below as plain text, replacing the old `doxa · belief earning knowledge` strapline.
+- Draws the Greek letters from `█` rather than printing the Unicode characters, for the same reason the mark has never used half-blocks or Geometric Shapes triangles: a monospace font's Greek coverage is not guaranteed, and this sidesteps that tofu risk entirely instead of trading one glyph-coverage gamble for another.
+- Keeps the plain Latin `DOXA` wordmark as a fallback for terminals too narrow for the full Greek word, and drops to it alone when even the triangle does not fit — the same three-stage ladder as before, with the thresholds (`DRAWN_MARK_COLUMNS`, `DRAWN_FULL_COLUMNS`) recomputed from the new art's measured width.
+- Holds the total row budget at 9, same as the ring-era mark, despite giving Ξ and Α enough rows to read clearly: dropping the ring's moat frees the rows the tagline now spends on its own row below the word. The mid-width fallback (triangle + plain wordmark, no tagline) is shorter than before, at 7 rows rather than 9.
+
 ## 0.70.0 — 2026-08-26
 
 - A status refresh on a pane whose status bar had not mounted yet raised `NoMatches` from a background task, which the error surface turned into a visible block. Refreshes are event-driven — a peer joining, a turn finishing, a restore reporting its session id — and those arrive before compose finishes. A refresh with nowhere to draw is now a no-op; the next event repaints. Surfaced by this release's mount-ordering change, but the race predates it: it was reported during the v0.60.0 work as reproducible only against a real daemon and left unfixed.

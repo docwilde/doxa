@@ -41,84 +41,141 @@ def _banner(app):
 
 def test_the_drawn_mark_uses_full_blocks_and_nothing_else():
     """The user's constraint, reached by looking at rendered candidates:
-    **"No, use the full block"**. One codepoint plus space.
+    **"No, use the full block"**. One codepoint plus space -- true of the
+    triangle AND (v0.74.0) of ΔΟΞΑ, drawn in the same alphabet rather than
+    printed as Unicode Greek text.
 
     Every glyph excluded here was excluded for a reason that survives the
     font it was tested in, so this asserts the codepoints rather than the
     appearance:
 
     * ``▀``/``▄`` (U+2580/U+2584) -- *"do not use half-blocks / it leaves
-      gaps"*: drawn against the font's baseline and leading, so a column
-      of them seams instead of reading as one stroke.
+      gaps"*: drawn against the font's own baseline and leading, so a
+      column of them seams instead of reading as one stroke.
     * ``◢``/``◣`` (U+25E2/U+25E3) -- Geometric Shapes, not Block Elements.
       A font can cover one and not the other, and the failure is tofu.
+    * The Greek letters THEMSELVES (``Δ``, ``Ο``, ``Ξ``, ``Α``) -- printing
+      them as text would trade the tofu risk above for an equivalent one:
+      Greek coverage in a monospace font is not guaranteed the way Block
+      Elements coverage is. Drawing them from ``█`` sidesteps it instead
+      of reintroducing it under a different name.
     """
     assert banner.MARK_ROWS
-    used = set("".join(banner.MARK_ROWS))
+    assert banner.GREEK_ROWS
+    used = set("".join(banner.MARK_ROWS) + "".join(banner.GREEK_ROWS))
     assert used <= {"█", " "}, (
         f"mark uses {sorted(f'U+{ord(c):04X}' for c in used)}; "
         "only U+2588 FULL BLOCK and space are allowed"
     )
     assert "█" in used, "a mark of pure whitespace is not a mark"
     for row in banner.MARK_ROWS:
-        assert len(row) == banner.MARK_COLUMNS, "the mark must be rectangular"
-    # The wordmark is PLAIN TEXT, not glyph art -- the user's own call.
+        assert len(row) == banner.MARK_COLUMNS, "the triangle must be rectangular"
+    for row in banner.GREEK_ROWS:
+        assert len(row) == banner.GREEK_COLUMNS, "the Greek word must be rectangular"
+    assert len(banner.MARK_ROWS) == len(banner.GREEK_ROWS), (
+        "triangle and word must share a row count to sit beside each other"
+    )
+    # Unicode Greek does not appear anywhere in the drawn output -- it is
+    # ALL block art, per the constraint above.
+    assert not (used & set("ΔΟΞΑ"))
+    # The Latin fallback is PLAIN TEXT, not glyph art -- v0.41.0's own call,
+    # now the MID-width degrade rather than the full-width form.
     assert banner.WORDMARK == "DOXA"
     assert set(banner.WORDMARK).isdisjoint("▀▄█▌▐")
 
 
-def test_the_mark_is_a_ring_around_a_triangle():
-    """Shape, not just palette. The ring must be closed and the triangle
-    must widen downward -- a regression that broke either would still pass
-    the codepoint test above."""
+def test_the_mark_is_a_solid_triangle_with_no_ring():
+    """v0.74.0 dropped the ring: the brief asked for "a simple, broader
+    triangle... not a narrow spike", and there is nothing left inside the
+    mark for a ring to frame. Every row is exactly ONE run of ink (no
+    ring/gap/triangle/gap/ring split any more), and the triangle widens
+    monotonically from a single-cell apex to a full-width base."""
     rows = banner.MARK_ROWS
-    assert len(rows) == 9, "nine rows: the v0.60.0 geometry -- two more than " \
-        "v0.58.0's seven, spent entirely on the moat between ring and " \
-        "triangle (see MARK_ROWS's docstring)"
-    center = len(rows) // 2
-    # Closed ring: every row has ink, and the outer edges bow in at the
-    # poles rather than running straight down a rectangle.
-    first_ink = [r.index("█") for r in rows]
-    assert all(r.strip() for r in rows), "a gap in the ring"
-    assert first_ink[0] > first_ink[center], "the top does not curve inward"
-    assert first_ink[-1] > first_ink[center], "the bottom does not curve inward"
-    # Triangle: apex a single run, widening on the rows it spans.
-    triangle_widths = [
-        end - start
-        for row in rows
-        for spans in [banner._runs(row)]
-        if len(spans) == 3
-        for start, end in [spans[1]]
-    ]
-    assert triangle_widths == sorted(triangle_widths) and (
-        triangle_widths[0] < triangle_widths[-1]
-    ), f"the inner triangle does not widen downward: {triangle_widths}"
+    widths = []
+    for row in rows:
+        stripped = row.strip()
+        assert stripped, "a blank row in the triangle"
+        assert row.count("█") == len(stripped), (
+            f"row {row!r} is not one contiguous run of ink -- the ring is back"
+        )
+        widths.append(len(stripped))
+    assert widths[0] == 1, "the apex must be a single cell"
+    assert widths[-1] == banner.MARK_COLUMNS, "the base must span the full width"
+    assert widths == sorted(widths), f"the triangle does not widen monotonically: {widths}"
+    # "Broader... not a narrow spike": base width relative to row count,
+    # against the ~2:1 height-to-width a terminal cell actually draws at
+    # (CELL_ASPECT). A visually-square triangle needs base ~= 2*rows; this
+    # one clears that rather than merely approaching it.
+    assert banner.MARK_COLUMNS >= 2 * len(rows), (
+        f"base {banner.MARK_COLUMNS} over {len(rows)} rows reads as a spike, "
+        "not a broad triangle, once cell aspect is accounted for"
+    )
 
 
-def test_every_row_is_pure_ring_or_ring_gap_triangle_gap_ring():
-    """``_mark_markup`` colours a row by its RUN COUNT, not a second
-    hand-authored grid: one run of ink is the cap/shoulder rows (all
-    ring), three runs is ring/triangle/ring. A row with any other run
-    count is a shape ``_mark_markup`` cannot colour correctly -- this is
-    what makes that fail loudly here instead of mis-colouring silently."""
-    for row in banner.MARK_ROWS:
-        n_runs = len(banner._runs(row))
-        assert n_runs in (1, 3), f"row {row!r} has {n_runs} runs of ink, not 1 or 3"
+def test_delta_is_the_hollow_outline_of_the_same_triangle():
+    """Design intent, pinned as shape: Δ echoes :data:`MARK_ROWS`' own
+    triangle -- same apex-to-base widening -- but hollow (edges only, plus
+    a solid base), the way a real capital delta is drawn, rather than a
+    second filled triangle sitting redundantly next to the icon."""
+    rows = banner._DELTA_ROWS
+    assert len(rows) == len(banner.MARK_ROWS)
+    for row in rows[:-1]:
+        assert 1 <= row.count("█") <= 2, (
+            f"row {row!r} of Δ is not an outline (edges only) above the base"
+        )
+    assert rows[-1] == "█" * len(rows[-1]), "Δ's base must be solid, closing the shape"
+    apex_col = rows[0].index("█")
+    assert rows[0].count("█") == 1, "Δ's apex must be a single cell"
+    # The two edges spread outward from the apex column on every row above
+    # the base.
+    for row in rows[1:-1]:
+        cols = [i for i, c in enumerate(row) if c == "█"]
+        assert len(cols) == 2, f"row {row!r} does not have exactly two edge cells"
+        assert cols[0] <= apex_col <= cols[1]
 
 
-def test_the_ring_and_triangle_never_touch():
-    """The defect this geometry exists to fix, pinned directly: at
-    v0.58.0's size the ring and the triangle inside it touched and read
-    as one blob. Wherever a row holds both (three runs), there must be a
-    real gap -- at least one blank column -- on each side of the
-    triangle."""
-    for row in banner.MARK_ROWS:
-        spans = banner._runs(row)
-        if len(spans) != 3:
-            continue
-        (_, ring_left_end), (tri_start, tri_end), (ring_right_start, _) = spans
-        assert tri_start - ring_left_end >= 1, f"no gap before the triangle: {row!r}"
-        assert ring_right_start - tri_end >= 1, f"no gap after the triangle: {row!r}"
+def test_xi_is_three_separated_bars():
+    """The letter named as hard in the brief: Ξ is three horizontal bars
+    and nothing else, and the risk at block resolution is them fusing
+    into one dark rectangle. Pinned directly: exactly three ink rows, each
+    a single unbroken run, each separated from its neighbour by at least
+    one fully blank row."""
+    rows = banner._XI_ROWS
+    ink_rows = [i for i, row in enumerate(rows) if row.strip()]
+    assert len(ink_rows) == 3, f"Ξ must be exactly three bars, found ink on rows {ink_rows}"
+    for i in ink_rows:
+        stripped = rows[i].strip()
+        assert rows[i].count("█") == len(stripped), f"row {rows[i]!r} is not one unbroken bar"
+    gaps = [b - a for a, b in zip(ink_rows, ink_rows[1:])]
+    assert all(g >= 2 for g in gaps), (
+        f"bars are only {gaps} rows apart -- not enough separation to read as three"
+    )
+    # Top and bottom bars run the letter's full width; a middle bar equal
+    # to the outer two would be indistinguishable from a solid block at
+    # this resolution, so it is deliberately narrower and centred.
+    top, mid, bottom = (rows[i] for i in ink_rows)
+    assert len(top.strip()) == len(bottom.strip()) == len(top)
+    assert len(mid.strip()) < len(top)
+    assert mid == mid.strip().center(len(mid))
+
+
+def test_alpha_has_a_full_width_crossbar():
+    """The other letter named as hard: Α needs a crossbar that reads as a
+    crossbar, not a floating dash. Pinned as shape: there is a row whose
+    ink is one unbroken run spanning at least half the letter's width (not
+    a short run centred under the apex), with two legs above it (the apex
+    splitting into a V) and two legs below it running to the base."""
+    rows = banner._ALPHA_ROWS
+    run_lengths = [row.count("█") for row in rows]
+    crossbar_index = max(range(len(rows)), key=lambda i: run_lengths[i])
+    crossbar = rows[crossbar_index]
+    stripped = crossbar.strip()
+    assert crossbar.count("█") == len(stripped), f"crossbar row {crossbar!r} has a gap in it"
+    assert len(stripped) >= len(crossbar) // 2, "the crossbar must span real width, not a dash"
+    for row in rows[:crossbar_index]:
+        assert row.count("█") in (1, 2), f"row {row!r} above the crossbar is not legs/apex"
+    for row in rows[crossbar_index + 1:]:
+        assert row.count("█") == 2, f"row {row!r} below the crossbar is not two legs"
 
 
 def test_drawn_lines_fit_the_width_they_are_given():
@@ -130,13 +187,22 @@ def test_drawn_lines_fit_the_width_they_are_given():
         return re.sub(r"\[/?(?:b )?#?[0-9A-Fa-f]{0,6}\]", "", line)
 
     full = banner.drawn_lines(banner.DRAWN_FULL_COLUMNS)
-    assert len(full) == len(banner.MARK_ROWS)
+    assert len(full) == banner.FULL_ROWS
     joined = " ".join(plain(l) for l in full)
-    assert banner.WORDMARK in joined and banner.TAGLINE in joined
+    for row in banner.GREEK_ROWS:
+        assert row in joined, "the Greek word is missing from the full-width form"
+    assert banner.TAGLINE in joined
+    assert banner.WORDMARK not in plain(full[0]), (
+        "the full-width form draws ΔΟΞΑ in blocks, not the Latin fallback"
+    )
 
     mid = banner.drawn_lines(banner.DRAWN_MARK_COLUMNS)
+    assert len(mid) == len(banner.MARK_ROWS)
     joined = " ".join(plain(l) for l in mid)
     assert banner.WORDMARK in joined and banner.TAGLINE not in joined
+    assert banner.GREEK_ROWS[0] not in joined, (
+        "the mid-width form must not draw the wider Greek glyphs"
+    )
 
     tiny = banner.drawn_lines(banner.DRAWN_MARK_COLUMNS - 1)
     assert [plain(l) for l in tiny] == [banner.WORDMARK]
@@ -146,6 +212,30 @@ def test_drawn_lines_fit_the_width_they_are_given():
             assert len(plain(line)) <= max(width, len(banner.WORDMARK)), (
                 f"width {width}: {plain(line)!r} overflows"
             )
+
+
+def test_full_rows_accounts_for_the_blank_and_tagline_rows():
+    """FULL_ROWS is the triangle's own row count plus a blank separator
+    plus the tagline row -- derived, not a second number to keep in sync
+    by hand."""
+    assert banner.FULL_ROWS == len(banner.MARK_ROWS) + 2
+    full = banner.drawn_lines(banner.DRAWN_FULL_COLUMNS)
+    assert len(full) == banner.FULL_ROWS
+    assert full[len(banner.MARK_ROWS)] == "", "no blank separator before the tagline"
+    assert banner.TAGLINE in full[-1]
+
+
+def test_full_and_mark_columns_are_derived_from_the_art():
+    """The two thresholds are arithmetic over the glyphs' own measured
+    widths, not chosen freehand -- change a glyph and these move with it,
+    same discipline the old ring-era constants held to."""
+    assert banner.DRAWN_FULL_COLUMNS == (
+        banner.MARK_COLUMNS + banner.MARK_GAP + banner.GREEK_COLUMNS
+    )
+    assert banner.DRAWN_MARK_COLUMNS == (
+        banner.MARK_COLUMNS + banner.MARK_GAP + len(banner.WORDMARK)
+    )
+    assert banner.DRAWN_FULL_COLUMNS > banner.DRAWN_MARK_COLUMNS
 
 
 def test_geometry_is_derived_from_the_row_budget():
@@ -234,7 +324,9 @@ async def test_every_tier_gets_the_drawn_mark_never_a_raster(tmp_path, monkeypat
             assert block is not None
             assert not block.query(".banner-image"), f"{mode} drew the raster"
             drawn = block.query_one(".banner-wordmark")
-            assert drawn.region.height == len(banner.MARK_ROWS), (
+            # WIDE is comfortably past DRAWN_FULL_COLUMNS, so this is the
+            # full-width form: triangle + GREEK_ROWS + tagline.
+            assert drawn.region.height == banner.FULL_ROWS, (
                 f"{mode}: banner mounted at zero rows -- invisible"
             )
 
@@ -262,17 +354,21 @@ async def test_text_tier_shows_the_wordmark_and_never_the_fallback_line(tmp_path
         assert block is not None
         assert block.region.height > 0
         drawn = block.query_one(".banner-wordmark")
-        assert drawn.region.height == len(banner.MARK_ROWS)
+        assert drawn.region.height == banner.FULL_ROWS
         rendered = str(drawn.renderable)
         assert "[image:" not in rendered
         assert banner.TAGLINE in rendered
-        assert banner.WORDMARK in rendered
-        # Ring and triangle are two colours now (v0.60.0), so a bare row
-        # of MARK_ROWS is no longer a literal substring of the markup --
-        # it is split by the colour tags between its ring and triangle
-        # runs. Strip markup back off before checking.
+        # v0.74.0: the full-width form draws ΔΟΞΑ in blocks, not the plain
+        # Latin WORDMARK -- that is now the mid-width degrade only (see
+        # test_a_mid_width_terminal_shows_mark_and_wordmark_never_an_image).
+        # Triangle and Greek word share one colour tag per row now (no
+        # ring to keep apart from the triangle any more), so a bare row of
+        # MARK_ROWS/GREEK_ROWS IS still a literal substring once markup is
+        # stripped.
         plain = "\n".join(_plain_lines(drawn))
         for row in banner.MARK_ROWS:
+            assert row in plain
+        for row in banner.GREEK_ROWS:
             assert row in plain
         assert not block.query(".banner-image")
 
@@ -507,19 +603,21 @@ async def test_half_block_terminal_gets_the_wordmark_not_the_raster(
         assert not block.query(".banner-image"), "raster drawn on half-block"
         drawn = block.query_one(".banner-wordmark")
         assert drawn.region.height > 0
-        rendered = str(drawn.renderable)
-        # Ring and triangle are two colours (v0.60.0), so this checks the
-        # markup-stripped text -- see the comment on the same pattern in
+        # WIDE is comfortably past DRAWN_FULL_COLUMNS: triangle + Greek
+        # word + tagline, one colour tag per row now that there is no
+        # ring to keep apart from the triangle -- markup-stripped text
+        # still contains a bare MARK_ROWS/GREEK_ROWS row as a literal
+        # substring, same pattern as
         # test_text_tier_shows_the_wordmark_and_never_the_fallback_line.
         plain = "\n".join(_plain_lines(drawn))
-        assert banner.MARK_ROWS[1] in plain, "the drawn mark is missing"
-        assert banner.WORDMARK in rendered, "the plain wordmark is missing"
+        assert banner.MARK_ROWS[1] in plain, "the drawn triangle is missing"
+        assert banner.GREEK_ROWS[1] in plain, "the drawn Greek word is missing"
 
 
 @pytest.mark.asyncio
 async def test_the_drawn_banner_is_legible_at_eighty_columns(tmp_path, monkeypatch):
-    """80 columns is where the user is. Legible means: the whole mark, the
-    wordmark and the strapline are all present, and no row overflows."""
+    """80 columns is where the user is. Legible means: the triangle, the
+    Greek word and the strapline are all present, and no row overflows."""
     monkeypatch.delenv("DOXA_BOOT_BANNER", raising=False)
     _unforced(monkeypatch, "halfblock")
     app = DoxaApp(cwd=str(tmp_path))
@@ -528,15 +626,16 @@ async def test_the_drawn_banner_is_legible_at_eighty_columns(tmp_path, monkeypat
         block = _banner(app)
         drawn = block.query_one(".banner-wordmark")
         lines = _plain_lines(drawn)
-        assert len(lines) == len(banner.MARK_ROWS)
+        assert len(lines) == banner.FULL_ROWS
         for row, mark_row in zip(lines, banner.MARK_ROWS):
-            assert row.startswith(mark_row), f"{row!r} is not the drawn mark"
+            assert row.startswith(mark_row), f"{row!r} is not the drawn triangle"
         joined = " ".join(lines)
-        assert banner.WORDMARK in joined
+        for row in banner.GREEK_ROWS:
+            assert row in joined
         assert banner.TAGLINE in joined
         available = block.content_size.width
         assert all(len(line) <= available for line in lines)
-        assert drawn.region.height == len(banner.MARK_ROWS)
+        assert drawn.region.height == banner.FULL_ROWS
 
 
 def _plain_lines(widget) -> "list[str]":
@@ -555,10 +654,13 @@ async def test_narrow_terminal_never_overflows_the_glyph_art(tmp_path, monkeypat
     the wordmark at three rows, so content too wide for its column was
     CLIPPED to exactly the height a passing test expected. The invariant
     that actually holds the line is that no rendered row is wider than the
-    column it goes into. Measured content widths are 8, 20, 30, 44 and 110
-    cells for terminals of 20, 30, 40, 56 and 120."""
+    column it goes into. Measured content widths (v0.74.0's triangle +
+    ΔΟΞΑ geometry) are 8, 20, 28, 44, 68 and 108 cells for terminals of
+    20, 30, 40, 56, 80 and 120 -- narrow enough to cross every tier
+    boundary (:data:`DRAWN_MARK_COLUMNS` 22, :data:`DRAWN_FULL_COLUMNS`
+    58) at least once."""
     _unforced(monkeypatch, "text")
-    for width in (20, 30, 40, 56, 120):
+    for width in (20, 30, 40, 56, 80, 120):
         app = DoxaApp(cwd=str(tmp_path))
         async with app.run_test(size=(width, 24)) as pilot:
             await _settle(pilot)
@@ -812,9 +914,13 @@ def test_a_scrollbar_appearing_after_first_layout_cannot_leave_a_stale_fit():
     transcript outgrows the 24-row viewport the scrollbar that appears
     narrows every child's content box by two, to 18 -- but a follow-up
     ``_lay_out``, the only thing that could re-fit a cached string, fired
-    on just 1 of 3 runs. 20 is exactly ``DRAWN_MARK_COLUMNS``, so a row
-    fitted there and never refitted overflows an 18-cell box by exactly
-    the scrollbar's width -- the CI failure verbatim.
+    on just 1 of 3 runs. 20 was ``DRAWN_MARK_COLUMNS`` at the time (the
+    ring-era mark; v0.74.0's triangle+ΔΟΞΑ geometry moved that constant,
+    but the mechanism this test pins -- a fit computed for a wider box
+    surviving unrefitted into a narrower one -- does not depend on which
+    width that was), so a row fitted there and never refitted overflowed
+    an 18-cell box by exactly the scrollbar's width -- the CI failure
+    verbatim.
 
     Reproduced here by fitting once at 20, then narrowing the box to 18
     with NOTHING telling the widget to refit -- no resize, no second

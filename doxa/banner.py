@@ -1,11 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """doxa.banner -- the DOXA mark at the top of a session's opening block.
 
-**One form, on every terminal.** :data:`MARK_ROWS` (a ring around a
-triangle, authored cell by cell out of ``█`` and spaces and NOTHING ELSE)
-with :data:`WORDMARK` and :data:`TAGLINE` beside it as plain text,
-assembled by :func:`drawn_lines`. That is the whole banner now --
-:func:`enabled` is the only decision left, on or off.
+**One form, on every terminal.** A broad, solid triangle (:data:`MARK_ROWS`)
+beside the Greek word it names the app for -- ΔΟΞΑ, drawn in blocks
+(:data:`GREEK_ROWS`) the same colour as the triangle -- with
+``belief earns knowledge`` (:data:`TAGLINE`) beneath both as ordinary text.
+:func:`drawn_lines` assembles whichever of the three degrades the width in
+front of it can hold; :func:`enabled` is the only decision left, on or off.
+
+**v0.74.0 dropped the ring.** Through v0.70.0 the mark was a grey ring
+around the triangle, with ``DOXA`` as plain Latin text beside it -- the
+owner's call there was that stylised letters were "something to squint
+at, where four ordinary capitals are simply legible" (v0.41.0's own
+resolution). The Greek original changes that calculus: ΔΟΞΑ *is* the
+word this app is named for, and doxa means belief -- spelling it out in
+the alphabet it is actually spelled in, rather than transliterating it
+to four Latin capitals, is worth the block art four plain letters did
+not need. See :data:`GREEK_ROWS` for the letterforms and why full blocks
+were the only safe way to draw them.
 
 **v0.70.0 removed the raster ``logo.png`` form this module used to draw
 on ``kgp``/``sixel`` terminals** (``boot_banner=auto``/``image``), and
@@ -72,155 +84,206 @@ COLUMNS = round(ROWS * CELL_ASPECT * CONTENT_ASPECT)  # 47
 #: :func:`prepared_image`.
 BASE_COLOR = (0x17, 0x15, 0x12)
 
-#: The DOXA mark -- ring and triangle -- DRAWN, not downscaled.
+MARK_COLOR = "#D97757"
+MUTED_COLOR = "#8A8073"
+
+#: The DOXA mark -- a solid triangle, DRAWN, not downscaled, no ring.
 #:
-#: **One codepoint and one space.** ``█`` (U+2588 FULL BLOCK) and ``" "``,
-#: nothing else. That constraint is the user's, arrived at by looking at
-#: rendered candidates rather than by argument, and each rejection closed
-#: off a whole family of solutions:
+#: **One codepoint and one space, still.** ``█`` (U+2588 FULL BLOCK) and
+#: ``" "``, nothing else -- the user's own constraint from the ring-era
+#: mark, reached by looking at rendered candidates rather than by
+#: argument, and it still holds here with nothing new to reconsider:
 #:
 #: * Half blocks (``▀`` U+2580, ``▄`` U+2584) -- *"do not use half-blocks
 #:   / it leaves gaps"*. They are drawn against the font's own baseline
 #:   and leading, so a column of them seams horizontally instead of
-#:   reading as one stroke.
+#:   reading as one stroke, and a triangle this size has no slack to
+#:   spend on a seam.
 #: * Quadrant triangles (``◢``/``◣`` U+25E2/U+25E3), which an earlier
 #:   revision used for a sloped edge -- they live in Geometric Shapes
 #:   rather than Block Elements, so a font covering one need not cover the
 #:   other, and the mark degrades to tofu rather than to something plainer.
-#: * Dropping the mark for a wordmark-only banner, which was offered when
-#:   even ``█`` was observed to render short, and was overruled: **"No,
-#:   use the full block"**.
 #:
-#: **The construction**, so this is tunable rather than magic. A circle of
-#: radius ``(rows - 1) / 2`` rasterised on a grid twice as wide as it is
-#: tall -- terminal cells run about 1:2, so widening the grid is what makes
-#: the ring round instead of an ellipse -- with a one-cell stroke, and a
-#: triangle whose apex sits at ``cy - R*0.55``, whose base sits at
-#: ``cy + R*0.62``, and whose half-width is ``t * R * 0.60``.
+#: **No ring.** The ring existed to frame a narrow, spiky triangle and
+#: needed a hand-tightened moat (see this module's git history) to keep
+#: from reading as one blob with it. Dropping it does not reopen that
+#: problem: there is nothing left inside the mark for the triangle to
+#: touch. What replaces the ring's job of "something else in the shot"
+#: is :data:`GREEK_ROWS` beside it -- two shapes again, but two shapes
+#: that both carry meaning instead of one carrying a frame.
 #:
-#: **Nine rows, not seven, and that is v0.58.0's own escape hatch used.**
-#: Reported against the 7-row mark: the ring and the triangle inside it
-#: TOUCH -- the triangle's widest row sits directly against the ring's
-#: inner face with only the ordinary word-spacing between them, and at
-#: this size that reads as one blob rather than two shapes. Widening the
-#: ring's inner radius while holding it to seven rows only shrank the
-#: triangle to a sliver; there was nowhere left to put a moat. v0.58.0's
-#: own docstring already named the way out -- *"A 9x17 version reads well
-#: too, ... if seven rows ever feels tight beside the text"* -- and a
-#: gap the mark did not have before is exactly that. Two more rows buys a
-#: full blank cell of separation on every row where ring and triangle
-#: share a line (rows 2-6 below), checked by rendering through the real
-#: SVG exporter at true 2:1 cell metrics, not guessed at from the source.
-#:
-#: **The rows below are hand-tightened, same as v0.58.0's were, and do not
-#: come out of the formula verbatim.** The moat itself is the hand
-#: adjustment: the formula's own triangle radius left rows 2 and 6
-#: touching the ring at the width this mark actually ships. Every row is
-#: still exactly one of two shapes -- a single run of ink (the cap and
-#: shoulder rows) or ring/gap/triangle/gap/ring (three runs) -- which is
-#: what lets :func:`drawn_lines` colour the two apart without a second
-#: hand-authored grid; see ``_mark_markup``.
-#:
-#: **The accepted caveat.** Some monospace fonts render Block Elements at
-#: reduced height, and some terminals add leading, so stacked full blocks
-#: can show faint horizontal banding. That is the terminal drawing the
-#: glyph, not DOXA drawing the mark, and there is no cell-level fix for it
-#: from this side. Shown to the user, accepted, and written down in the
-#: CHANGELOG so a reader who hits it does not think the mark is broken.
+#: **Broader, on purpose.** The ring-era triangle spanned about 5 columns
+#: over its 7 inner rows -- a spike, not a triangle, and only that narrow
+#: because the ring's moat left it nowhere to grow. Unframed, this one
+#: is free to be the shape the brief asked for: apex a single cell,
+#: widening by two columns a row, base the full 15-column width -- a
+#: rise of 15 columns over 7 rows against a terminal cell's own ~2:1
+#: height-to-width, i.e. visually almost as wide as it is tall rather
+#: than the old spike's ~0.7:2 sliver. Solid fill, not an outline --
+#: :data:`GREEK_ROWS`' own Δ is the outline version of the same shape,
+#: right beside it, and the contrast between solid icon and hollow
+#: letter is doing work: the same triangle, read two ways, is the reason
+#: the two sit next to each other at all.
 MARK_ROWS: tuple[str, ...] = (
-    "       █████████       ",
-    "    ███████████████    ",
-    "  ██████   █   ██████  ",
-    " ████     ███     ████ ",
-    "█████     ███     █████",
-    " ████    █████    ████ ",
-    "  ██████ █████ ██████  ",
-    "    ███████████████    ",
-    "       █████████       ",
+    "       █       ",
+    "      ███      ",
+    "    ███████    ",
+    "   █████████   ",
+    "  ███████████  ",
+    " █████████████ ",
+    "███████████████",
 )
 
-#: Width of :data:`MARK_ROWS`, and the blank gutter between mark and text.
+#: Width of :data:`MARK_ROWS`, and the height every row of :data:`GREEK_ROWS`
+#: has to match to sit beside it without a seam.
 MARK_COLUMNS = max(len(row) for row in MARK_ROWS)
+#: The blank gutter between the triangle and whatever sits beside it --
+#: the Greek word at full width, the plain Latin :data:`WORDMARK` at mid
+#: width.
 MARK_GAP = 3
 
-#: The wordmark, as PLAIN TEXT. v0.41.0 drew it in block glyphs too; the
-#: user's own resolution of that was "the wordmark as plain text", and
-#: they are right -- stylised letters at two rows are something to squint
-#: at, where four ordinary capitals are simply legible. The font already
-#: knows how to draw an A.
+#: The Greek word this app is named for, drawn in the same block alphabet
+#: as the triangle, and the same colour (:data:`MARK_COLOR`) -- the
+#: brief's own instruction, and also the thing that makes wrapping every
+#: row in one colour tag (:func:`drawn_lines`) enough: there is no second
+#: colour left to keep apart from the first, the way the old ring and
+#: triangle needed to be.
+#:
+#: **Why blocks and not the Unicode letters themselves.** ``Δ``, ``Ο``,
+#: ``Ξ`` and ``Α`` are ordinary characters DOXA could just print --
+#: cheaper than authoring a 7-row grid for each. It is not done that way
+#: for the same reason ``◢``/``◣`` were rejected above: Greek coverage in
+#: a monospace font is not guaranteed the way Block Elements coverage is
+#: (``█`` is used constantly across this whole UI, everywhere, and has
+#: never once been the tofu), so printing the letters as text risks the
+#: exact failure this module already rejected a glyph family for once.
+#: Drawing them from ``█`` sidesteps that risk entirely rather than
+#: trading it for a new one -- one constraint, paying for two decisions.
+#:
+#: **Ξ and Α were the hard letters, named as such in the brief.**
+#:
+#: * Ξ (xi) is three horizontal bars and nothing else. The failure mode
+#:   at block resolution is the bars fusing into one dark rectangle, so
+#:   the fix was rows, not cleverness: two full-blank rows between each
+#:   bar (rows 0/3/6 are ink, 1-2 and 4-5 are not) rather than the one row
+#:   a 5-row letter would have been forced to spend. Reads as three bars
+#:   at every width this module still draws it at -- checked by rendering
+#:   through the real Textual SVG exporter at true 2:1 cell metrics, the
+#:   same way the ring/triangle mark's own geometry was chosen, not
+#:   guessed at from the source grid.
+#: * Α (alpha) needs a crossbar that reads as a crossbar and not a
+#:   floating dash. Two diagonal legs spread by one column a row from a
+#:   single-cell apex, a crossbar filling the FULL span between the legs
+#:   at the row they reach the letter's half-width (not a short dash
+#:   centred under the apex), then the legs run straight down to a flat
+#:   base. The crossbar's width is what reads: a short one is a Latin
+#:   `n` with a hat, not an Α.
+#:
+#: Both are legible at 7 rows with the letter widths below; neither
+#: needed to grow past that to get there, which is why the row budget
+#: did not have to grow past what :data:`MARK_ROWS` already spends (see
+#: :data:`TAGLINE`'s own note on the total).
+_DELTA_ROWS: tuple[str, ...] = (
+    "    █    ",
+    "   █ █   ",
+    "  █   █  ",
+    " █     █ ",
+    "█       █",
+    "█       █",
+    "█████████",
+)
+_OMICRON_ROWS: tuple[str, ...] = (
+    " █████ ",
+    "███████",
+    "██   ██",
+    "██   ██",
+    "██   ██",
+    "███████",
+    " █████ ",
+)
+_XI_ROWS: tuple[str, ...] = (
+    "█████████",
+    "         ",
+    "         ",
+    "  █████  ",
+    "         ",
+    "         ",
+    "█████████",
+)
+_ALPHA_ROWS: tuple[str, ...] = (
+    "    █    ",
+    "   █ █   ",
+    "  █   █  ",
+    " ███████ ",
+    "█       █",
+    "█       █",
+    "█       █",
+)
+#: Blank columns between one letter and the next -- narrower than
+#: :data:`MARK_GAP` (the triangle needs more air around it, standing
+#: alone as the icon; letters of one word read as a word with less).
+_LETTER_GAP = "  "
+
+assert len({len(_DELTA_ROWS), len(_OMICRON_ROWS), len(_XI_ROWS), len(_ALPHA_ROWS),
+            len(MARK_ROWS)}) == 1, "every letter and the triangle must share one row count"
+
+#: ΔΟΞΑ, assembled letter by letter with :data:`_LETTER_GAP` between them
+#: -- one row per index of :data:`MARK_ROWS`, so ``zip`` against it in
+#: :func:`drawn_lines` never runs one out before the other.
+GREEK_ROWS: tuple[str, ...] = tuple(
+    _LETTER_GAP.join(letters)
+    for letters in zip(_DELTA_ROWS, _OMICRON_ROWS, _XI_ROWS, _ALPHA_ROWS)
+)
+GREEK_COLUMNS = max(len(row) for row in GREEK_ROWS)
+
+#: The wordmark, as PLAIN TEXT -- now the MID-width fallback rather than
+#: the full-width form. v0.41.0 drew "DOXA" in block glyphs, and the
+#: user's own resolution of that was "the wordmark as plain text": four
+#: ordinary capitals are simply legible where stylised letters are
+#: something to squint at. That is still true of a terminal too narrow
+#: for :data:`GREEK_ROWS`' 40 columns but wide enough for the triangle --
+#: it gets the plain Latin name beside the mark instead of nothing, the
+#: same shape v0.60.0's full form used to be. Only a terminal too narrow
+#: even for the triangle drops to this alone (see :func:`drawn_lines`).
 WORDMARK = "DOXA"
 
-#: The strapline set into the asset, as real text for the same reason.
-TAGLINE = "doxa · belief earning knowledge"
+#: The strapline, as real text for the same reason -- and BELOW the mark
+#: now rather than beside it, the brief's own instruction. Dropped the
+#: "doxa · " prefix the old copy carried: ΔΟΞΑ already spells the word
+#: out above it, in the alphabet it is actually spelled in, so repeating
+#: the transliteration here would be saying the same thing twice.
+TAGLINE = "belief earns knowledge"
 
-#: Widths at which the drawn form can show mark + tagline, and mark +
-#: wordmark. Below the second it is the bare wordmark: a mark with nothing
-#: to name it is a shape, not a banner.
-DRAWN_FULL_COLUMNS = MARK_COLUMNS + MARK_GAP + len(TAGLINE)
+#: Widths at which the drawn form can show the triangle beside the Greek
+#: word, and the triangle beside the plain Latin fallback. Below the
+#: second it is the bare :data:`WORDMARK`: a mark with nothing to name it
+#: is a shape, not a banner. Both derived from the art's own measured
+#: width, not chosen freehand -- change a glyph and these move with it.
+DRAWN_FULL_COLUMNS = MARK_COLUMNS + MARK_GAP + GREEK_COLUMNS
 DRAWN_MARK_COLUMNS = MARK_COLUMNS + MARK_GAP + len(WORDMARK)
 
-# Row indices the text sits on (0-based): rows 3 and 5 of the nine, with a
-# blank row between them. That straddles the ring's vertical centre -- row
-# 4 -- so the two lines sit either side of the middle rather than crowding
-# the top, and the block of text has the same optical centre as the mark
-# it stands beside.
+#: Row index (0-based, into :data:`MARK_ROWS`/:data:`GREEK_ROWS`) the
+#: plain :data:`WORDMARK` sits on at MID width -- the middle row of the
+#: seven, so the Latin fallback keeps the same vertical placement the
+#: Greek word has at full width instead of hugging the triangle's apex or
+#: its base.
 _WORDMARK_ROW = 3
-_TAGLINE_ROW = 5
 
-MARK_COLOR = "#D97757"
-MUTED_COLOR = "#8A8073"
-
-#: The ring's colour -- distinct from :data:`MARK_COLOR`, which is now the
-#: TRIANGLE's alone. A single flat colour was the other half of why ring
-#: and triangle read as one blob: even with a moat between them, the same
-#: colour on both sides of a one-cell gap reads as one shape with a
-#: notch, not two shapes. Reuses :data:`MUTED_COLOR` rather than
-#: introducing a third constant -- it is already the mark's own quiet
-#: tone (the tagline wears it beside the wordmark), so the ring becomes
-#: the mark's frame and the triangle stays the one accent-coloured thing
-#: in it, same relationship the wordmark/tagline pair already has.
-RING_COLOR = MUTED_COLOR
-
-
-def _runs(row: str) -> "list[tuple[int, int]]":
-    """``[(start, end)]`` for each maximal run of ``█`` in ``row`` (``end``
-    exclusive) -- how :func:`_mark_markup` tells the ring from the
-    triangle without a second hand-authored grid: see :data:`MARK_ROWS`."""
-    spans: "list[tuple[int, int]]" = []
-    start = None
-    for i, cell in enumerate(row + " "):
-        if cell == "█" and start is None:
-            start = i
-        elif cell != "█" and start is not None:
-            spans.append((start, i))
-            start = None
-    return spans
-
-
-def _mark_markup(index: int) -> str:
-    """Row ``index`` of :data:`MARK_ROWS` as Textual markup, the ring in
-    :data:`RING_COLOR` and the triangle in :data:`MARK_COLOR`.
-
-    Classified by RUN COUNT, not a second grid to keep in sync by hand:
-    every row of this mark is either pure ring -- one run of ink, the cap
-    and shoulder rows -- or ring/gap/triangle/gap/ring -- three runs, the
-    moat being what makes this unambiguous.
-    ``test_the_mark_is_a_ring_around_a_triangle`` pins that every row is
-    one of those two shapes, so an edit that breaks the pattern fails
-    loudly there rather than mis-colouring silently here."""
-    row = MARK_ROWS[index]
-    spans = _runs(row)
-    colors = (RING_COLOR,) if len(spans) == 1 else (RING_COLOR, MARK_COLOR, RING_COLOR)
-    parts = []
-    pos = 0
-    for (start, end), color in zip(spans, colors):
-        if start > pos:
-            parts.append(row[pos:start])
-        parts.append(f"[{color}]{row[start:end]}[/]")
-        pos = end
-    if pos < len(row):
-        parts.append(row[pos:])
-    return "".join(parts)
+#: Total rows :func:`drawn_lines` returns at FULL width: the triangle's
+#: own :data:`MARK_ROWS` (also the row count at MID width, mark alone),
+#: plus one blank row and one for :data:`TAGLINE`.
+#:
+#: **Same nine as the ring-era mark, not more, despite ΔΟΞΑ needing real
+#: rows Α and Ξ could be told apart in.** The ring's own moat was two
+#: rows of the old nine's budget, spent on keeping the ring from reading
+#: as one blob with the triangle it framed; dropping the ring gives those
+#: rows back. What used to be nine rows of ring-plus-triangle is now
+#: seven of triangle-plus-word (this module's own :data:`MARK_ROWS`
+#: height) with two spent on the tagline dropping BELOW instead of being
+#: squeezed onto a row already carrying glyph art -- the same total, a
+#: different shape, and the mid-width form (triangle alone, seven rows)
+#: is now shorter than the old mark ever was at any width.
+FULL_ROWS = len(MARK_ROWS) + 2
 
 
 def drawn_lines(content_columns: int) -> "list[str]":
@@ -231,25 +294,30 @@ def drawn_lines(content_columns: int) -> "list[str]":
     tier, gets these rows.
 
     Three shapes, widest first, so what survives at any width is the part
-    that still reads: mark + wordmark + tagline, mark + wordmark, then the
-    bare wordmark. A drawn mark that has shrunk past legibility is dropped
-    rather than crushed, on the same rule the rest of this module follows.
-    Dropped is ALL OF IT, ring included -- the two-colour mark has nothing
-    left to colour once it is gone, so there is no separate case to keep
-    in sync with this one."""
+    that still reads: triangle + ΔΟΞΑ + tagline, triangle + the plain
+    name, then the bare name alone. A drawn form that has shrunk past
+    legibility is dropped rather than crushed, on the same rule the rest
+    of this module follows -- and each drop is a whole tier, not a
+    partial one: there is no state where half a letter or the tagline
+    without the word it sits under is on screen."""
     if content_columns >= DRAWN_FULL_COLUMNS:
-        beside = {_WORDMARK_ROW: f"[b {MARK_COLOR}]{WORDMARK}[/]",
-                  _TAGLINE_ROW: f"[{MUTED_COLOR}]{TAGLINE}[/]"}
-    elif content_columns >= DRAWN_MARK_COLUMNS:
-        beside = {_WORDMARK_ROW: f"[b {MARK_COLOR}]{WORDMARK}[/]"}
-    else:
-        return [f"[b {MARK_COLOR}]{WORDMARK}[/]"]
-    gap = " " * MARK_GAP
-    lines = []
-    for index in range(len(MARK_ROWS)):
-        text = beside.get(index)
-        lines.append(_mark_markup(index) + (gap + text if text else ""))
-    return lines
+        gap = " " * MARK_GAP
+        lines = [
+            f"[{MARK_COLOR}]{mark_row}{gap}{greek_row}[/]"
+            for mark_row, greek_row in zip(MARK_ROWS, GREEK_ROWS)
+        ]
+        lines.append("")
+        indent = " " * (MARK_COLUMNS + MARK_GAP)
+        lines.append(f"{indent}[{MUTED_COLOR}]{TAGLINE}[/]")
+        return lines
+    if content_columns >= DRAWN_MARK_COLUMNS:
+        gap = " " * MARK_GAP
+        beside = f"{gap}[b {MARK_COLOR}]{WORDMARK}[/]"
+        return [
+            f"[{MARK_COLOR}]{row}[/]" + (beside if index == _WORDMARK_ROW else "")
+            for index, row in enumerate(MARK_ROWS)
+        ]
+    return [f"[b {MARK_COLOR}]{WORDMARK}[/]"]
 
 
 # Every spelling this knob has ever shipped that means OFF: the plain
