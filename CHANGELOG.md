@@ -6,6 +6,8 @@ not written from memory.
 
 ## 0.65.0 — 2026-08-26
 
+- `/peers` printed a peer's `title` and `cwd` raw. Another process writes both — a title derives from that session's first prompt, a cwd from a path — and the message receive path has scrubbed since it existed while the registry-read path never did. Scrubbed at the single point an entry becomes a `PeerInfo`, so a consumer added later cannot forget.
+
 Gallery regenerated end to end: every asset in `assets/shots/` predated the
 full-block banner, the permission-mode chip, curated-memory fill and the
 staged-proposals chip, so the README was showing a mixture of eras.
