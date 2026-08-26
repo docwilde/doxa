@@ -4,6 +4,31 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.77.0 — 2026-08-26
+
+- Adopted Claude Code plugin commands now reach DOXA's own "/" autocomplete,
+  the Ctrl+P palette and `/help` — measured against a real adopted plugin
+  first: `--plugin-dir` already worked and `/plugins` already named the
+  setting when off, but `doxa.commands` (the one registry every "/" surface
+  reads) never learned a plugin existed, and the underlying CLI registers a
+  plugin's commands NAMESPACED (`caveman:caveman`, not the bare `caveman` a
+  plugin's own docs advertise) — typing the bare form got `Unknown command`
+  back even when unique. `doxa.claude_plugins.command_names()` now reads
+  the correct invocable spelling and front-matter description; `doxa.commands._plugin_rows`
+  folds them in as passthrough rows under a new "Plugins" group, so they
+  ride the same wiring `/compact` already does rather than needing a DOXA
+  handler. `/plugins`' report states the exact spelling per command and
+  tallies "would adopt if the setting were on" separately from "refused".
+- A user's own prompt, shown in the turn fold's title, was sliced with a
+  bare `[:70]` character cut — no word boundary, no ellipsis, and 70 had
+  nothing to do with the terminal actually open, so a narrow terminal still
+  hit the fold's own silent column clip underneath that guess, and the full
+  prompt was reachable nowhere else once cut. `TurnBlock` now fits the title
+  to its own measured width, cuts at a word boundary with a trailing
+  ellipsis, redoes the cut on every resize, and — when it has to cut — shows
+  the full prompt in the fold body, the same "never silently drop content"
+  rule a restored transcript's own truncation markers already keep.
+
 ## 0.75.0 — 2026-08-26
 
 - `_boot` queried `#block-list` on a pane Textual had not composed yet, raising `NoMatches` from a background task; the error surface turned it into a visible block during a multi-pane restore. Same guard as the `#status-bar` one in v0.70.0 — a boot with nowhere to draw returns rather than reporting a failure nobody could have seen.

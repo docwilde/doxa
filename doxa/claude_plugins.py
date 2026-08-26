@@ -217,6 +217,115 @@ def _count_skill_dirs(directory: Path) -> int:
         return 0
 
 
+def _front_matter_field(md_path: Path, key: str) -> str:
+    """One ``key: value`` line out of a command file's YAML front matter
+    (between the opening and closing ``---`` fences) -- no YAML dependency,
+    every real command file measured on this machine (LORE, caveman, codex)
+    uses this exact flat shape for ``description``/``argument-hint``, and a
+    hand-rolled parser that only ever reads a flat string field cannot
+    silently misparse the nested cases a real YAML lib would have to
+    handle. Empty when the file is missing, has no front matter, or the
+    key is absent -- never a guess."""
+    try:
+        text = md_path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    if not text.startswith("---"):
+        return ""
+    end = text.find("\n---", 3)
+    if end == -1:
+        return ""
+    prefix = key + ":"
+    for line in text[3:end].splitlines():
+        line = line.strip()
+        if line.lower().startswith(prefix.lower()):
+            return line.split(":", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
+@dataclass(frozen=True)
+class PluginCommand:
+    """One command a plugin carries -- what to actually TYPE for it to
+    work, not the bare name the plugin's own docs may advertise.
+
+    Measured directly (this module's own docstring, and reconfirmed
+    against a real adopted plugin for this fix): a plugin loaded via
+    ``--plugin-dir`` registers its commands NAMESPACED,
+    ``<plugin>:<command-stem>`` -- typing the bare
+    ``/<command-stem>`` a marketplace install would answer to gets
+    ``Unknown command: /<command-stem>`` back from the CLI instead, even
+    when the name is unique across every loaded plugin. :attr:`invocable`
+    is that namespaced form, with NO leading slash (every caller adds its
+    own, the same convention :class:`doxa.commands.SlashCommand` uses)."""
+
+    invocable: str
+    """``<plugin>:<command-stem>`` -- what the underlying CLI actually
+    matches. No leading slash."""
+    summary: str
+    """The command file's own ``description:`` front-matter field, or
+    empty when it does not have one."""
+    argument_hint: str
+    """The command file's own ``argument-hint:`` front-matter field, or
+    empty. Used to build a usage string so the prompt's autocomplete can
+    tell a caller whether to leave room for arguments."""
+
+
+def command_names(plugin: DiscoveredPlugin) -> "list[PluginCommand]":
+    """Every command ``plugin`` carries, as the EXACT invocable spelling
+    plus whatever the file itself says about it -- the whole fix for the
+    reported defect starts here: a discoverable command whose name still
+    fails when typed is not discoverable, it is a trap. Sorted by stem for
+    a deterministic listing; empty for a plugin with no ``commands/``
+    directory at all (skills and agents are adopted too but are not
+    something a user TYPES, so they have no analog here)."""
+    directory = plugin.install_path / "commands"
+    if not directory.is_dir():
+        return []
+    try:
+        paths = sorted(
+            (p for p in directory.iterdir() if p.is_file() and p.suffix == ".md"),
+            key=lambda p: p.stem,
+        )
+    except OSError:
+        return []
+    return [
+        PluginCommand(
+            invocable=f"{plugin.plugin}:{path.stem}",
+            summary=_front_matter_field(path, "description"),
+            argument_hint=_front_matter_field(path, "argument-hint"),
+        )
+        for path in paths
+    ]
+
+
+def adopted_commands(
+    discovered: "list[DiscoveredPlugin] | None" = None,
+) -> "list[tuple[DiscoveredPlugin, PluginCommand]]":
+    """Every command that would actually run if typed into a session
+    started RIGHT NOW -- the exact same eligibility :func:`adopt` applies
+    (opted in, not blocklisted, enabled in the operator's own CLI, at
+    least one command/skill/agent), computed read-only, with no staging
+    copy: this is a PREVIEW surface (``/plugins``, the prompt's
+    autocomplete, the Ctrl+P palette), not a second place adoption itself
+    happens -- :func:`adopt` is still the only function that writes
+    anything to disk or hands anything to the SDK.
+
+    Empty whenever :func:`adoption_enabled` is False, matching
+    :func:`adopt`'s own empty return in that state -- a command a live
+    session cannot reach must not be offered as though it could, on any
+    surface."""
+    if not adoption_enabled():
+        return []
+    discovered = discover() if discovered is None else discovered
+    out: "list[tuple[DiscoveredPlugin, PluginCommand]]" = []
+    for plugin in discovered:
+        if plugin.refused:
+            continue
+        for command in command_names(plugin):
+            out.append((plugin, command))
+    return out
+
+
 def _has_hooks(install_path: Path, manifest: dict) -> bool:
     if manifest.get("hooks"):
         return True
@@ -411,6 +520,7 @@ def report(discovered: "list[DiscoveredPlugin] | None" = None) -> str:
         lines.append("no Claude Code plugins installed there.")
     else:
         n_adopted = 0
+        n_would_adopt = 0  # could_adopt, but the setting is off
         for plugin in discovered:
             will_adopt = on and not plugin.refused
             could_adopt = not plugin.refused
@@ -418,6 +528,7 @@ def report(discovered: "list[DiscoveredPlugin] | None" = None) -> str:
                 n_adopted += 1
                 glyph = "✓"
             elif could_adopt:
+                n_would_adopt += 1
                 glyph = "○"  # would adopt if the setting were on
             else:
                 glyph = "✗"
@@ -441,11 +552,44 @@ def report(discovered: "list[DiscoveredPlugin] | None" = None) -> str:
             lines.append(f"    {detail}")
             if plugin.refused:
                 lines.append(f"    refused: {plugin.refusal_reason()}")
+            elif plugin.n_commands:
+                # The reported defect, closed here: DOXA's own autocomplete
+                # and Ctrl+P palette fold these rows in too (see
+                # doxa.commands._plugin_rows) once adoption is actually ON,
+                # but /plugins is the one place they are spelled out
+                # regardless of that setting -- a plugin marked "would
+                # adopt" (○) still deserves to say what typing its
+                # commands would require, not just how many there are.
+                # NAMESPACED, never the bare name a plugin's own docs
+                # advertise for its marketplace-installed form -- measured
+                # against a real adopted plugin: the bare form gets
+                # "Unknown command" back from the CLI even when unique.
+                for command in command_names(plugin):
+                    text = f"    /{command.invocable}"
+                    if command.argument_hint:
+                        text += f" {command.argument_hint}"
+                    if command.summary:
+                        text += f"  -- {command.summary}"
+                    lines.append(text)
             lines.append("")
-        lines.append(
+        n_refused = len(discovered) - n_adopted - n_would_adopt
+        tally = (
             f"{len(discovered)} plugin(s) discovered, {n_adopted} adopted, "
-            f"{len(discovered) - n_adopted} refused."
+            f"{n_refused} refused"
         )
+        if n_would_adopt:
+            # Named separately from n_refused on purpose: these are not
+            # blocked, disabled or empty -- they are otherwise-adoptable
+            # and idle for exactly one reason, the setting above, and a
+            # tally that folded them into "refused" would say the wrong
+            # thing about why (the actual reported gap this report exists
+            # to close: nothing adopted because the setting is OFF is not
+            # the same finding as a plugin refused on its own merits).
+            tally += (
+                f", {n_would_adopt} more would adopt if 'adopt claude "
+                "plugins' were on"
+            )
+        lines.append(tally + ".")
     lines.append("")
     lines.append(
         "hooks and MCP servers are refused for every plugin, always -- "

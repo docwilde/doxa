@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import Any, Callable  # noqa: F401 -- annotation-only, see below
 
+from textual import events
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Collapsible, Markdown, Static, TabbedContent, TabPane
@@ -894,19 +895,66 @@ class ThinkingMarker(Static):
         self.update(f"{SPINNER_FRAMES[self.frame]} {phase}")
 
 
+# A Collapsible title is ONE ROW that cannot wrap (theme.tcss pins
+# ``TurnBlock > CollapsibleTitle`` to ``width: 1fr``, not ``auto`` -- see
+# that rule's own comment): whatever does not fit gets clipped by Textual
+# at the box edge, silently, mid-glyph. Through v0.76.0 ``_render_title``
+# handed it a prompt cut with a bare ``_one_line(...)[:70]`` slice -- no
+# word boundary, no ellipsis, and 70 was a guess that had nothing to do
+# with the terminal actually open, so a wide terminal wasted columns and a
+# narrow one still hit Textual's own silent clip UNDER that guess. Fixed
+# here two ways: the cut is made ourselves, at a word boundary, with a
+# trailing ellipsis, against the box's OWN measured width (recomputed on
+# every resize, never cached -- see ``_title_budget``); and reported (item
+# 2), the full prompt still LOSES ITSELF NOWHERE else, the same rule
+# ``mount_transcript``'s own truncation markers already keep for a cut
+# restored answer or a dropped tool chip -- see ``_sync_prompt_full``.
+_TITLE_LEAD = "▎ "
+_TITLE_GLYPH_COLS = 2  # CollapsibleTitle._update_label(): "▶ " / "▼ "
+_TITLE_PADDING_COLS = 4  # theme.tcss: CollapsibleTitle's own `padding: 0 2`
+_TITLE_CHROME_COLS = _TITLE_GLYPH_COLS + _TITLE_PADDING_COLS
+# Before the first layout (the title is computed once in __init__, ahead
+# of mount) no box width is known at all yet -- kept at the same 70
+# columns the old fixed slice always used, so the very first frame is
+# never narrower than it already was.
+_TITLE_FALLBACK_COLS = 70
+
+
+def _truncate_at_word(text: str, limit: int) -> "tuple[str, bool]":
+    """Cut ``text`` to at most ``limit`` columns at a WORD boundary, with a
+    trailing ellipsis whenever it had to cut at all -- never mid-word,
+    never silent. A single word already wider than the whole budget still
+    ends in the ellipsis rather than a bare slice with nothing marking it
+    as one."""
+    if limit <= 0 or len(text) <= limit:
+        return text, False
+    if limit == 1:
+        return "…", True
+    head = text[: limit - 1]
+    boundary = head.rfind(" ")
+    cut = head[:boundary] if boundary > 0 else head
+    cut = cut.rstrip() or head
+    return cut + "…", True
+
+
 class TurnBlock(Collapsible):
     """One user turn + the assistant's response, foldable. The user's
-    prompt lives in the fold header (title) only -- it is never re-set
-    after construction, so it stays literal plain text no matter what the
-    response below does (typed text must not reflow). The response body
-    streams as MARKDOWN: ``self.body`` is a ``Markdown`` widget fed
-    through ``Markdown.get_stream`` (textual 5's append-only streaming
-    path, built for exactly this -- LLM deltas arriving chunk by chunk),
-    so tables/bold/fences/inline code render as they complete without a
-    full-document re-parse on every ``text_delta``. Top-level tool chips
-    compact into ``self.tool_section`` (a ``ToolCallsSection``, created
-    lazily on the first one -- see its own docstring); a Task call's
-    subagent chips still nest inside THAT chip's own ``subcalls``,
+    prompt lives in the fold header (title) -- re-rendered on every
+    resize (never re-typed: ``self.prompt_text`` itself is set once and
+    stays literal plain text no matter what the response below does)
+    because the title is fit to the box it is CURRENTLY painted into, not
+    to the box it had when the turn was created; see ``_truncate_at_word``
+    above for why a stale fit is exactly the bug this replaced. When that
+    fit had to cut, the un-cut prompt is not lost: it grows a second home,
+    ``self.prompt_full``, in the fold body -- see ``_sync_prompt_full``.
+    The response body streams as MARKDOWN: ``self.body`` is a ``Markdown``
+    widget fed through ``Markdown.get_stream`` (textual 5's append-only
+    streaming path, built for exactly this -- LLM deltas arriving chunk by
+    chunk), so tables/bold/fences/inline code render as they complete
+    without a full-document re-parse on every ``text_delta``. Top-level
+    tool chips compact into ``self.tool_section`` (a ``ToolCallsSection``,
+    created lazily on the first one -- see its own docstring); a Task
+    call's subagent chips still nest inside THAT chip's own ``subcalls``,
     unaffected by any of this. The turn's own summarized reasoning (v0.25.0)
     compacts the SAME way into ``self.reasoning_section`` (a
     ``ReasoningSection``, created lazily on the first reasoning_delta --
@@ -922,6 +970,13 @@ class TurnBlock(Collapsible):
         self._stream: MarkdownStream | None = None
         self.tools = Vertical(classes="turn-tools")
         self.tool_section: ToolCallsSection | None = None
+        self._title_suffix = ""
+        # The fold body's home for a prompt the title had to cut -- mounted
+        # FIRST so it reads right under the fold it is explaining, hidden
+        # whenever the title is wide enough to hold the whole line (see
+        # _sync_prompt_full, which is what actually flips .display).
+        self.prompt_full = Static("", classes="turn-prompt-full")
+        self.prompt_full.display = False
         super().__init__(
             # The marker is LAST (v0.56.0; it used to lead). A spinner
             # nobody can see is not a spinner: the block list scroll_end()s
@@ -931,12 +986,75 @@ class TurnBlock(Collapsible):
             # also matches how it reads -- "here is what has arrived, and
             # here is doxa still working" -- rather than announcing work
             # above material that has already landed.
-            self.reasoning_holder, self.body, self.tools, self.thinking,
+            self.prompt_full, self.reasoning_holder, self.body, self.tools,
+            self.thinking,
             title=self._render_title(), collapsed=False,
         )
 
+    def _title_budget(self) -> int:
+        """Columns available for the prompt text inside the fold's title
+        bar RIGHT NOW. Read from the actual ``CollapsibleTitle`` child once
+        one exists and has been laid out -- its own ``content_size``
+        already nets out its ``padding: 0 2`` (theme.tcss), so only the
+        toggle glyph is left to subtract -- else from this widget's own
+        box, else the pre-layout fallback. Computed fresh on every call
+        (construction AND every ``_on_resize``) rather than cached: the
+        same discipline ``_DrawnMark`` keeps for the banner art, because a
+        title fitted to yesterday's width is exactly the stale cut this
+        method exists to prevent."""
+        title_widget = getattr(self, "_title", None)
+        if title_widget is not None:
+            try:
+                width = int(title_widget.content_size.width or 0)
+            except Exception:  # noqa: BLE001 -- an unlaid-out widget is a tier
+                width = 0
+            if width > 0:
+                return max(width - _TITLE_GLYPH_COLS, 8)
+        try:
+            width = int(self.size.width or 0)
+        except Exception:  # noqa: BLE001
+            width = 0
+        if width > 0:
+            return max(width - _TITLE_CHROME_COLS, 8)
+        return _TITLE_FALLBACK_COLS
+
     def _render_title(self, suffix: str = "") -> str:
-        return f"▎ {_one_line(self.prompt_text)}{suffix}"
+        self._title_suffix = suffix
+        # _one_line's own slicing is given a budget nothing realistic will
+        # ever hit -- only its whitespace-collapsing is wanted here; the
+        # word-boundary cut below is what actually enforces the limit.
+        collapsed = _one_line(self.prompt_text, limit=1_000_000)
+        budget = max(self._title_budget() - len(suffix), 8)
+        shown, truncated = _truncate_at_word(collapsed, budget)
+        self._sync_prompt_full(collapsed, truncated)
+        return f"{_TITLE_LEAD}{shown}{suffix}"
+
+    def _sync_prompt_full(self, collapsed: str, truncated: bool) -> None:
+        """The fold-body half of the truncation fix (item 2): whenever the
+        title had to cut, the un-cut prompt is reachable right below it --
+        a truncated title with nowhere else the words appear would LOSE
+        them, the one thing ``mount_transcript``'s own truncation markers
+        already forbid for a cut restored answer or a dropped tool chip.
+        Not yet mounted (construction, before ``super().__init__`` returns)
+        is a no-op rather than an error: the initial title is set from the
+        SAME call this runs inside of, so there is nothing to update on a
+        widget that does not exist until that call returns."""
+        prompt_full = getattr(self, "prompt_full", None)
+        if prompt_full is None:
+            return
+        prompt_full.display = truncated
+        if truncated:
+            prompt_full.update(
+                f"⤒ title truncated -- full prompt:\n"
+                f"{_escape_markup(self.prompt_text)}"
+            )
+
+    def _on_resize(self, event: events.Resize) -> None:
+        """A title fitted to yesterday's width lies about what it holds --
+        the fold's own box just changed size, so the cut is redone against
+        the box it is actually painted into now, not the one it had when
+        this turn was created or last finished."""
+        self.title = self._render_title(self._title_suffix)
 
     def hide_thinking(self) -> None:
         if self.thinking.display:

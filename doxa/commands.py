@@ -38,11 +38,18 @@ from dataclasses import dataclass
 # later addition from inventing a sixth ordering. An empty group renders
 # nowhere -- a header with nothing under it is a placeholder row, and this
 # house does not ship those.
+#
+# "Plugins" (below /reload-plugins's own group, since that IS what governs
+# it) holds rows :func:`ordered` folds in dynamically -- see
+# :func:`_plugin_rows` -- so it is empty, and therefore invisible, on
+# every install with adoption off or nothing adopted, exactly like every
+# other empty group here.
 GROUPS: tuple[str, ...] = (
     "Session",
     "Memory",
     "Panes & tabs",
     "Tools & config",
+    "Plugins",
     "Maintenance",
 )
 
@@ -327,13 +334,78 @@ REGISTRY: tuple[SlashCommand, ...] = (
 )
 
 
+def _plugin_rows() -> "list[SlashCommand]":
+    """Adopted Claude Code plugin commands (``doxa.claude_plugins``),
+    folded into the SAME registry every surface below reads.
+
+    THE REPORTED DEFECT, closed here: v0.74.0 adopted plugin commands all
+    the way to the underlying ``claude`` CLI (one ``--plugin-dir`` per
+    plugin) -- and a plugin's own command genuinely runs when typed, e.g.
+    ``/caveman:caveman ultra`` (measured against a real adopted plugin,
+    isolated CLI, this exact stream-json path) -- but neither the prompt's
+    autocomplete dropdown nor the Ctrl+P palette had ever HEARD of one,
+    because both read only :data:`REGISTRY` and this module never learned
+    plugins existed. A command that reaches the CLI but not DOXA's own "/"
+    surfaces exists on one surface and not the other, which is exactly
+    what docs/plans/plugin-api.md's "no second ordering" design was meant
+    to rule out -- this row is the fold-in that design already implies,
+    for the plugin system that document does not itself cover.
+
+    Every row is PASSTHROUGH: DOXA never runs one of these (there is no
+    pane handler, and there must not be -- the underlying CLI is what
+    expands a plugin command, the exact mechanism ``/compact`` already
+    rides, see ``doxa.session.pane.on_prompt_submitted``), so
+    :func:`interactive`/:func:`interactive_names` -- and therefore the
+    pane's own handler dict and its closure test -- read :data:`REGISTRY`
+    directly and never see these at all. ``palette_prefill=True`` for the
+    same reason: the palette's OTHER path (``DoxaApp._cmd_run_slash``)
+    calls a pane handler these rows do not have; prefilling and letting
+    the user press Enter routes through the passthrough path instead,
+    identically to how the dropdown's own ``PromptInput.complete()``
+    already treats a ``usage``-bearing row.
+
+    Computed fresh on every call rather than cached -- discovery measured
+    under 1ms/call on a real 5-plugin install, and a cache here would go
+    stale exactly when ``/reload-plugins`` changes what is adopted. Never
+    raises: a broken plugin scan must cost this one row, not every other
+    command surface in the app."""
+    try:
+        from . import claude_plugins as claude_plugins_mod
+    except Exception:  # noqa: BLE001 -- see docstring
+        return []
+    try:
+        adopted = claude_plugins_mod.adopted_commands()
+    except Exception:  # noqa: BLE001 -- discovery reads files DOXA does
+        # not own; a malformed one must not cost the whole registry.
+        return []
+    rows = []
+    for plugin, command in adopted:
+        name = f"/{command.invocable}"
+        usage = f"{name} {command.argument_hint}" if command.argument_hint else ""
+        rows.append(SlashCommand(
+            name=name,
+            group="Plugins",
+            summary=command.summary or f"{plugin.plugin} plugin command",
+            usage=usage,
+            palette=f"Plugin: {name}",
+            palette_prefill=True,
+            passthrough=True,
+        ))
+    return rows
+
+
 def ordered() -> list[SlashCommand]:
     """The registry in DISPLAY order: group order (:data:`GROUPS`), then
-    alphabetical by name inside each group. The one sequence every surface
-    iterates -- palette, autocomplete dropdown, generated /help."""
+    alphabetical by name inside each group -- :data:`REGISTRY`'s built-in
+    rows plus whatever :func:`_plugin_rows` currently contributes. The one
+    sequence every surface iterates -- palette, autocomplete dropdown,
+    generated ``/help``: a plugin command folded in here needs no second
+    wiring anywhere else, which is the whole point of there being one
+    registry rather than three."""
     index = {group: position for position, group in enumerate(GROUPS)}
+    all_rows: "tuple[SlashCommand, ...]" = REGISTRY + tuple(_plugin_rows())
     return sorted(
-        REGISTRY, key=lambda cmd: (index.get(cmd.group, len(GROUPS)), cmd.name)
+        all_rows, key=lambda cmd: (index.get(cmd.group, len(GROUPS)), cmd.name)
     )
 
 
