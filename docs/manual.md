@@ -368,12 +368,14 @@ the TUI takes stdin: **kitty graphics protocol → sixel → half-block cells
 cached and never repeated (re-probing after Textual has taken over stdin
 would read a stale reply).
 
-`boot_banner` (default `auto`) controls how the opening identity block
-draws the DOXA mark: `auto` draws a hand-authored wordmark in unicode
-blocks on the half-block and text tiers, and only spends the raster
-`logo.png` where a real bitmap tier exists (`kgp`/`sixel`); `blocks` pins
-the wordmark everywhere; `image` pins the raster wherever any pixel tier
-exists; `off` removes the banner.
+`boot_banner` (default on) draws the DOXA mark above the opening identity
+block: a ring around a triangle, hand-authored in block characters, the
+same on every terminal regardless of what tier `image_mode` settled on.
+`off` removes it. There is no raster form any more — v0.66.0 dropped the
+raster `logo.png` this used to draw on `kgp`/`sixel` terminals, so the
+knob is a plain on/off switch now rather than a choice of which form to
+draw; a config.toml still holding `auto`, `blocks` or `image` from before
+that change keeps reading as on.
 
 `/img` with no argument reports which tier this terminal actually
 answered for and draws the same asset in each tier it answered for,
@@ -505,7 +507,7 @@ environment is winning is read-only in the modal.
 | `nerd_font` | `DOXA_NERD_FONT` | off | use a Nerd Font glyph for the branch chip |
 | `ctx_absolute` | `DOXA_CTX_ABSOLUTE` | off | print `24k/200k` beside the `ctx%` chip (below 100 columns it drops again) |
 | `image_mode` | `DOXA_IMAGE_MODE` | probe | force a rung of the image ladder (`kgp`/`sixel`/`halfblock`/`text`) |
-| `boot_banner` | `DOXA_BOOT_BANNER` | `auto` | how the opening identity block draws the DOXA mark |
+| `boot_banner` | `DOXA_BOOT_BANNER` | on | draw the DOXA mark above the opening identity block |
 | *keyboard override* | `DOXA_KEYBOARD_PROTOCOL` | probe | `kitty`/`legacy`/`unknown`, for a terminal that lies about it; env-only |
 | `show_reasoning` | `DOXA_SHOW_REASONING` | on | stream the model's summarized reasoning into a collapsed fold |
 | `background` | `DOXA_BACKGROUND` | `opaque` | `opaque` paints DOXA's own base; `transparent` stops painting it |

@@ -4,6 +4,15 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.70.0 — 2026-08-26
+
+- A status refresh on a pane whose status bar had not mounted yet raised `NoMatches` from a background task, which the error surface turned into a visible block. Refreshes are event-driven — a peer joining, a turn finishing, a restore reporting its session id — and those arrive before compose finishes. A refresh with nowhere to draw is now a no-op; the next event repaints. Surfaced by this release's mount-ordering change, but the race predates it: it was reported during the v0.60.0 work as reproducible only against a real daemon and left unfixed.
+
+- The drawn boot mark could overflow its column in CI (`test_narrow_terminal_never_overflows_the_glyph_art`): the transcript's scrollbar can appear after the banner's last resize and narrow its box without a Resize message following, leaving a fit computed for a wider box painted into a narrower one. The art now fits itself inside `render()`, against its own live `content_size`, on every paint — not a string cached by `_lay_out` on mount/resize — so a stale fit cannot survive a frame regardless of whether a resize arrives.
+- The mark itself: nine rows instead of seven, with a real gap between the ring and the triangle (they read as one blob at the old size), and the ring now renders in a muted grey while the triangle keeps the orange accent — two shapes, not one two-tone blob.
+- The raster boot banner is gone. `logo.png` used to draw on `kgp`/`sixel` terminals (`boot_banner=auto`/`image`); the drawn block mark reads better than a downscaled photograph even there, so there is no longer a case where the raster is the right answer. `boot_banner` collapses from a four-way choice to plain on/off — a `config.toml` still holding `auto`, `blocks` or `image` from before this change keeps meaning on. `/img`'s showcase is unaffected and still renders the raster logo in every tier a terminal answers for.
+- `test_restore_tabs_open_in_saved_order_with_names_and_active_tab` failed in CI with a wrong active tab id, not the null one v0.38.0 already guards against. Textual's `Tabs` widget defaults itself to its first child tab on its own mount, and that default reaches `TabbedContent.active` as a queued message rather than a synchronous write — a later explicit write can still be overwritten once the stale default message is finally processed. Fixed by computing the correct starting tab before anything mounts and handing it to `TabbedContent` as `initial=`, so the wrong default is never posted in the first place.
+
 ## 0.67.0 — 2026-08-26
 
 Gallery uniformity, one row shape for both LORE pickers, and inline

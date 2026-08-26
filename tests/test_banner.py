@@ -17,11 +17,12 @@ from __future__ import annotations
 import pytest
 
 from doxa import banner, images
-from doxa.app import BootBanner, DoxaApp, ImageShowcaseBlock, SystemBlock
+from doxa.app import _DrawnMark, BootBanner, DoxaApp, ImageShowcaseBlock, SystemBlock
 
-# Wide enough for banner.use_image's width test: the default run_test size
-# (80x24) is over MIN_COLUMNS but leaves the 47-cell banner most of the
-# line, so the pixel scenes ask for a realistic terminal instead.
+# A realistic terminal size for scenes that just need room -- the default
+# run_test size (80x24) is fine for the banner itself (v0.70.0: it is the
+# same drawn form at every width above DRAWN_FULL_COLUMNS), but several
+# /img showcase scenes want more vertical room than 24 rows gives.
 WIDE = (120, 34)
 
 
@@ -71,19 +72,53 @@ def test_the_mark_is_a_ring_around_a_triangle():
     must widen downward -- a regression that broke either would still pass
     the codepoint test above."""
     rows = banner.MARK_ROWS
-    assert len(rows) == 7, "seven rows: the approved geometry"
+    assert len(rows) == 9, "nine rows: the v0.60.0 geometry -- two more than " \
+        "v0.58.0's seven, spent entirely on the moat between ring and " \
+        "triangle (see MARK_ROWS's docstring)"
+    center = len(rows) // 2
     # Closed ring: every row has ink, and the outer edges bow in at the
     # poles rather than running straight down a rectangle.
     first_ink = [r.index("█") for r in rows]
     assert all(r.strip() for r in rows), "a gap in the ring"
-    assert first_ink[0] > first_ink[3], "the top does not curve inward"
-    assert first_ink[-1] > first_ink[3], "the bottom does not curve inward"
-    # Triangle: apex a single cell, widening on each row below it.
-    middles = [r[banner.MARK_COLUMNS // 2 - 3 : banner.MARK_COLUMNS // 2 + 4] for r in rows[2:5]]
-    widths = [m.count("█") for m in middles]
-    assert widths == sorted(widths) and widths[0] < widths[-1], (
-        f"the inner triangle does not widen downward: {widths}"
-    )
+    assert first_ink[0] > first_ink[center], "the top does not curve inward"
+    assert first_ink[-1] > first_ink[center], "the bottom does not curve inward"
+    # Triangle: apex a single run, widening on the rows it spans.
+    triangle_widths = [
+        end - start
+        for row in rows
+        for spans in [banner._runs(row)]
+        if len(spans) == 3
+        for start, end in [spans[1]]
+    ]
+    assert triangle_widths == sorted(triangle_widths) and (
+        triangle_widths[0] < triangle_widths[-1]
+    ), f"the inner triangle does not widen downward: {triangle_widths}"
+
+
+def test_every_row_is_pure_ring_or_ring_gap_triangle_gap_ring():
+    """``_mark_markup`` colours a row by its RUN COUNT, not a second
+    hand-authored grid: one run of ink is the cap/shoulder rows (all
+    ring), three runs is ring/triangle/ring. A row with any other run
+    count is a shape ``_mark_markup`` cannot colour correctly -- this is
+    what makes that fail loudly here instead of mis-colouring silently."""
+    for row in banner.MARK_ROWS:
+        n_runs = len(banner._runs(row))
+        assert n_runs in (1, 3), f"row {row!r} has {n_runs} runs of ink, not 1 or 3"
+
+
+def test_the_ring_and_triangle_never_touch():
+    """The defect this geometry exists to fix, pinned directly: at
+    v0.58.0's size the ring and the triangle inside it touched and read
+    as one blob. Wherever a row holds both (three runs), there must be a
+    real gap -- at least one blank column -- on each side of the
+    triangle."""
+    for row in banner.MARK_ROWS:
+        spans = banner._runs(row)
+        if len(spans) != 3:
+            continue
+        (_, ring_left_end), (tri_start, tri_end), (ring_right_start, _) = spans
+        assert tri_start - ring_left_end >= 1, f"no gap before the triangle: {row!r}"
+        assert ring_right_start - tri_end >= 1, f"no gap after the triangle: {row!r}"
 
 
 def test_drawn_lines_fit_the_width_they_are_given():
@@ -116,13 +151,12 @@ def test_drawn_lines_fit_the_width_they_are_given():
 def test_geometry_is_derived_from_the_row_budget():
     """47 cells is not a magic number -- it is 6 rows spent through the
     cell aspect and the INKED aspect of the asset, and the docstring's
-    arithmetic has to be the code's."""
+    arithmetic has to be the code's. /img's showcase only, since v0.70.0
+    -- the boot banner itself never spends this budget any more."""
     assert banner.COLUMNS == round(
         banner.ROWS * banner.CELL_ASPECT * banner.CONTENT_ASPECT
     )
     assert banner.COLUMNS == 47
-    # The drawn form has to fit where the raster does not.
-    assert banner.DRAWN_FULL_COLUMNS < banner.MIN_COLUMNS
 
 
 def test_asset_is_the_readme_banner_and_is_on_disk():
@@ -162,46 +196,51 @@ def test_each_caller_gets_its_own_image():
     assert banner.image_source() is not banner.image_source()
 
 
-def test_use_image_degrades_on_the_text_tier_and_on_narrow_terminals(monkeypatch):
-    # Pinned to `image` so this stays a test of the two IMPOSSIBILITIES
-    # (no pixels, no room) rather than of the auto rule, which
-    # test_auto_draws_blocks_where_a_raster_would_only_be_a_downscale owns.
-    monkeypatch.setenv("DOXA_BOOT_BANNER", "image")
-    assert banner.use_image("kgp", 120) is True
-    assert banner.use_image("halfblock", 120) is True
-    # No pixels at any width...
-    assert banner.use_image("text", 200) is False
-    # ...and pixels with nowhere to put them.
-    assert banner.use_image("kgp", banner.MIN_COLUMNS - 1) is False
+def test_old_multi_value_settings_still_read_as_on(monkeypatch):
+    """v0.70.0 collapsed boot_banner from a four-way choice
+    (auto/blocks/image/off) to plain on/off -- the raster form auto and
+    image used to reach for is gone, so there is no longer a distinction
+    between them worth keeping. A config.toml written by the OLD settings
+    modal still holds one of those words, and none of them may error or
+    silently start meaning off: every spelling but a recognised OFF one
+    reads as on, the same permissive rule the pre-collapse form() used to
+    fall back to for a value it did not recognise at all."""
+    for value in ("auto", "blocks", "image", "AUTO", " image ", "sideways"):
+        monkeypatch.setenv("DOXA_BOOT_BANNER", value)
+        assert banner.enabled() is True, f"{value!r} must still mean on"
+    for value in ("off", "OFF", "0", "false", "no"):
+        monkeypatch.setenv("DOXA_BOOT_BANNER", value)
+        assert banner.enabled() is False, f"{value!r} must still mean off"
 
 
 # -- the banner a user actually sees -----------------------------------
 
 
 @pytest.mark.asyncio
-async def test_banner_has_non_zero_height_on_a_pixel_tier(tmp_path, monkeypatch):
-    """The v0.28.0 guard: mounted is not the claim, VISIBLE is. Half-block
-    is the tier every terminal can draw, so it is the one that must hold up
-    headlessly."""
-    monkeypatch.setenv("DOXA_IMAGE_MODE", "halfblock")
-    monkeypatch.setenv("DOXA_BOOT_BANNER", "image")
-    app = DoxaApp(cwd=str(tmp_path))
-    async with app.run_test(size=WIDE) as pilot:
-        await _settle(pilot)
-        block = _banner(app)
-        assert block is not None
-        assert block.region.height > 0
-        assert block.region.width > 0
-        image = block.query_one(".banner-image")
-        assert image.region.height > 0, "banner mounted at zero rows -- invisible"
-        # The row budget is a promise, not a hope.
-        assert image.region.height <= banner.ROWS + 3
-        assert image.region.width == banner.COLUMNS
+async def test_every_tier_gets_the_drawn_mark_never_a_raster(tmp_path, monkeypatch):
+    """v0.70.0: there is no raster tier for the banner any more, on any
+    terminal. kgp/sixel used to earn a raster ``logo.png`` here
+    (``use_image``'s old ``auto`` rule, now removed), and ``image`` could
+    force it on every tier including half-block. Both are gone -- the
+    drawn mark, VISIBLE (the v0.28.0 guard: mounted is not the claim), is
+    what every terminal gets now, unconditionally on the image ladder."""
+    monkeypatch.delenv("DOXA_BOOT_BANNER", raising=False)
+    for mode in ("kgp", "sixel", "halfblock", "text"):
+        _unforced(monkeypatch, mode)
+        app = DoxaApp(cwd=str(tmp_path))
+        async with app.run_test(size=WIDE) as pilot:
+            await _settle(pilot)
+            block = _banner(app)
+            assert block is not None
+            assert not block.query(".banner-image"), f"{mode} drew the raster"
+            drawn = block.query_one(".banner-wordmark")
+            assert drawn.region.height == len(banner.MARK_ROWS), (
+                f"{mode}: banner mounted at zero rows -- invisible"
+            )
 
 
 @pytest.mark.asyncio
-async def test_banner_sits_above_the_identity_block(tmp_path, monkeypatch):
-    monkeypatch.setenv("DOXA_IMAGE_MODE", "halfblock")
+async def test_banner_sits_above_the_identity_block(tmp_path):
     app = DoxaApp(cwd=str(tmp_path))
     async with app.run_test(size=WIDE) as pilot:
         await _settle(pilot)
@@ -228,20 +267,35 @@ async def test_text_tier_shows_the_wordmark_and_never_the_fallback_line(tmp_path
         assert "[image:" not in rendered
         assert banner.TAGLINE in rendered
         assert banner.WORDMARK in rendered
+        # Ring and triangle are two colours now (v0.60.0), so a bare row
+        # of MARK_ROWS is no longer a literal substring of the markup --
+        # it is split by the colour tags between its ring and triangle
+        # runs. Strip markup back off before checking.
+        plain = "\n".join(_plain_lines(drawn))
         for row in banner.MARK_ROWS:
-            assert row in rendered
+            assert row in plain
         assert not block.query(".banner-image")
 
 
 @pytest.mark.asyncio
-async def test_narrow_terminal_degrades_to_the_wordmark(tmp_path, monkeypatch):
+async def test_a_mid_width_terminal_shows_mark_and_wordmark_never_an_image(
+    tmp_path, monkeypatch
+):
+    """Between DRAWN_MARK_COLUMNS and DRAWN_FULL_COLUMNS: wide enough for
+    the mark plus the wordmark, too narrow for the tagline too -- and,
+    unconditionally now (v0.70.0), never the raster."""
     monkeypatch.setenv("DOXA_IMAGE_MODE", "halfblock")
+    width = (banner.DRAWN_MARK_COLUMNS + banner.DRAWN_FULL_COLUMNS) // 2 + 4
     app = DoxaApp(cwd=str(tmp_path))
-    async with app.run_test(size=(banner.MIN_COLUMNS - 6, 24)) as pilot:
+    async with app.run_test(size=(width, 24)) as pilot:
         await _settle(pilot)
         block = _banner(app)
         assert block is not None
-        assert block.query_one(".banner-wordmark").region.height == len(banner.MARK_ROWS)
+        drawn = block.query_one(".banner-wordmark")
+        assert drawn.region.height == len(banner.MARK_ROWS)
+        rendered = str(drawn.renderable)
+        assert banner.WORDMARK in rendered
+        assert banner.TAGLINE not in rendered
         assert not block.query(".banner-image")
 
 
@@ -274,15 +328,16 @@ async def test_the_setting_genuinely_removes_it(tmp_path, monkeypatch):
 
 
 def test_setting_defaults_on_and_has_a_settings_row(monkeypatch):
+    """v0.70.0 collapsed this from a 4-way ``choice`` to a plain
+    ``bool_on`` -- there is only one form to turn on or off now."""
     from doxa import config as config_mod
 
     monkeypatch.delenv("DOXA_BOOT_BANNER", raising=False)
     assert banner.enabled() is True
     row = config_mod.SETTINGS_BY_ENV["DOXA_BOOT_BANNER"]
     assert row.key == "boot_banner"
-    assert row.kind == "choice"
-    assert row.default == "auto"
-    assert set(banner.FORMS) <= set(row.choices)
+    assert row.kind == "bool_on"
+    assert row.default == "1"
     assert row.category == "Appearance"
 
 
@@ -421,44 +476,20 @@ def _unforced(monkeypatch, detected: str) -> None:
     monkeypatch.setattr(images, "_detected", detected)
 
 
-def test_auto_draws_blocks_where_a_raster_would_only_be_a_downscale(monkeypatch):
-    """The v0.58.0 rule, from a user looking at a half-block render and
-    calling it "quite pixelated". Six rows of half-block is twelve
-    vertical samples for a 238-row image; a drawn glyph wins there."""
-    monkeypatch.delenv("DOXA_BOOT_BANNER", raising=False)
-    assert banner.form() == "auto"
-    for tier in ("kgp", "sixel"):
-        assert banner.use_image(tier, 120) is True, f"{tier} carries real pixels"
-    for tier in ("halfblock", "text"):
-        assert banner.use_image(tier, 120) is False, f"{tier} is a downscale"
-
-
-def test_the_form_setting_overrides_the_rule_both_ways(monkeypatch):
-    monkeypatch.setenv("DOXA_BOOT_BANNER", "blocks")
-    assert banner.form() == "blocks"
-    assert banner.use_image("kgp", 120) is False, "blocks must never raster"
-
-    monkeypatch.setenv("DOXA_BOOT_BANNER", "image")
-    assert banner.form() == "image"
-    assert banner.use_image("halfblock", 120) is True, "image is v0.41.0's look"
-    # ...but the two genuine impossibilities still hold.
-    assert banner.use_image("text", 120) is False
-    assert banner.use_image("halfblock", banner.MIN_COLUMNS - 1) is False
-
-    monkeypatch.setenv("DOXA_BOOT_BANNER", "off")
-    assert banner.enabled() is False
-
-
 def test_the_legacy_bool_spelling_still_means_what_it_meant(monkeypatch):
     """v0.41.0 shipped this knob as a bool. A config.toml written by that
-    settings modal says 1 or 0 and must not start meaning something else."""
+    settings modal says 1 or 0 and must not start meaning something else,
+    even after v0.70.0 collapsed the auto/blocks/image middle ground that
+    sat between v0.41.0's bool and today."""
     monkeypatch.setenv("DOXA_BOOT_BANNER", "1")
-    assert banner.form() == "auto" and banner.enabled() is True
+    assert banner.enabled() is True
     monkeypatch.setenv("DOXA_BOOT_BANNER", "0")
-    assert banner.form() == "off" and banner.enabled() is False
-    # Anything unrecognised falls back to the rule rather than to nothing.
+    assert banner.enabled() is False
+    # Anything unrecognised reads as on rather than off -- see
+    # test_old_multi_value_settings_still_read_as_on for the values that
+    # actually matter here (this module's own former choices).
     monkeypatch.setenv("DOXA_BOOT_BANNER", "sideways")
-    assert banner.form() == "auto"
+    assert banner.enabled() is True
 
 
 @pytest.mark.asyncio
@@ -477,7 +508,11 @@ async def test_half_block_terminal_gets_the_wordmark_not_the_raster(
         drawn = block.query_one(".banner-wordmark")
         assert drawn.region.height > 0
         rendered = str(drawn.renderable)
-        assert banner.MARK_ROWS[1] in rendered, "the drawn mark is missing"
+        # Ring and triangle are two colours (v0.60.0), so this checks the
+        # markup-stripped text -- see the comment on the same pattern in
+        # test_text_tier_shows_the_wordmark_and_never_the_fallback_line.
+        plain = "\n".join(_plain_lines(drawn))
+        assert banner.MARK_ROWS[1] in plain, "the drawn mark is missing"
         assert banner.WORDMARK in rendered, "the plain wordmark is missing"
 
 
@@ -502,65 +537,6 @@ async def test_the_drawn_banner_is_legible_at_eighty_columns(tmp_path, monkeypat
         available = block.content_size.width
         assert all(len(line) <= available for line in lines)
         assert drawn.region.height == len(banner.MARK_ROWS)
-
-
-@pytest.mark.asyncio
-async def test_a_pixel_tier_still_gets_the_raster(tmp_path, monkeypatch):
-    """kgp/sixel carry a real bitmap, so the logo keeps earning its place."""
-    monkeypatch.delenv("DOXA_BOOT_BANNER", raising=False)
-    monkeypatch.setenv("DOXA_IMAGE_MODE", "kgp")
-    app = DoxaApp(cwd=str(tmp_path))
-    async with app.run_test(size=WIDE) as pilot:
-        await _settle(pilot)
-        image = _banner(app).query_one(".banner-image")
-        assert image.region.height > 0
-
-
-def test_fallback_reason_speaks_only_when_the_raster_was_asked_for(monkeypatch):
-    """Under `auto` the wordmark is the INTENDED output, so announcing
-    "logo not drawn" over it would be noise on most sessions."""
-    monkeypatch.delenv("DOXA_BOOT_BANNER", raising=False)
-    assert banner.fallback_reason("halfblock", 120) == ""
-    assert banner.fallback_reason("text", 120) == ""
-    assert banner.fallback_reason("kgp", 120) == ""
-
-    monkeypatch.setenv("DOXA_BOOT_BANNER", "blocks")
-    assert banner.fallback_reason("kgp", 120) == ""
-
-    # Pinned to the raster and unable to deliver it: now it must explain.
-    monkeypatch.setenv("DOXA_BOOT_BANNER", "image")
-    narrow = banner.fallback_reason("halfblock", 50)
-    assert "50 columns" in narrow and str(banner.MIN_COLUMNS) in narrow
-    assert "/img" in narrow
-    no_pixels = banner.fallback_reason("text", 120)
-    assert "no pixel mode" in no_pixels and "/img" in no_pixels
-
-
-@pytest.mark.asyncio
-async def test_a_degraded_banner_says_why_on_screen(tmp_path, monkeypatch):
-    """When the raster WAS asked for and could not be drawn, the banner
-    says so in place rather than leaving the user to discover /img."""
-    monkeypatch.setenv("DOXA_BOOT_BANNER", "image")
-    _unforced(monkeypatch, "text")
-    app = DoxaApp(cwd=str(tmp_path))
-    async with app.run_test(size=WIDE) as pilot:
-        await _settle(pilot)
-        block = _banner(app)
-        reason = block.query_one(".banner-reason")
-        assert reason.region.height > 0, "the explanation mounted invisible"
-        rendered = str(reason.renderable)
-        assert "logo not drawn" in rendered
-        assert "/img" in rendered
-
-
-@pytest.mark.asyncio
-async def test_a_drawn_logo_is_told_nothing(tmp_path, monkeypatch):
-    monkeypatch.setenv("DOXA_BOOT_BANNER", "image")
-    monkeypatch.setenv("DOXA_IMAGE_MODE", "halfblock")
-    app = DoxaApp(cwd=str(tmp_path))
-    async with app.run_test(size=WIDE) as pilot:
-        await _settle(pilot)
-        assert not _banner(app).query(".banner-reason")
 
 
 def _plain_lines(widget) -> "list[str]":
@@ -609,15 +585,19 @@ async def test_a_terminal_too_narrow_for_the_glyphs_drops_to_the_name(
         drawn = block.query_one(".banner-wordmark")
         assert drawn.region.height == 1
         assert banner.WORDMARK in str(drawn.renderable)
-        # The reason is prose and would have wrapped to seven rows here.
-        assert not any(w.display for w in block.query(".banner-reason"))
+        # v0.70.0: there is no fallback-reason line left to stay silent --
+        # the raster it explained was never given IS the thing that is
+        # gone, so the class itself no longer exists anywhere in the DOM.
+        assert not block.query(".banner-reason")
 
 
-def test_the_banner_path_never_raises_without_pillow(monkeypatch):
+def test_the_showcase_path_never_raises_without_pillow(monkeypatch):
     """doxa.images.widget_for is documented never to raise, but the
     crop/flatten step is DOXA's own code on the near side of that
-    guarantee -- and it runs inside BootBanner.compose, where an exception
-    does not degrade a decoration, it takes the pane boot with it."""
+    guarantee -- and it runs inside ``ImageShowcaseBlock.compose`` (the
+    only caller left since v0.70.0 retired the banner's own raster path),
+    where an exception does not degrade a decoration, it breaks a debug
+    command."""
     import builtins
 
     banner._prepared.cache_clear()
@@ -629,18 +609,14 @@ def test_the_banner_path_never_raises_without_pillow(monkeypatch):
         return real(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", no_pillow)
-    assert banner.use_image("halfblock", 120) is False
     assert banner.image_source() is None
-    reason = banner.fallback_reason("halfblock", 120)
-    assert "could not be decoded" in reason
     banner._prepared.cache_clear()
 
 
-def test_the_banner_path_never_raises_without_an_asset(monkeypatch):
+def test_the_showcase_path_never_raises_without_an_asset(monkeypatch):
     banner._prepared.cache_clear()
     monkeypatch.setattr(banner, "asset_path", lambda: None)
-    assert banner.use_image("halfblock", 120) is False
-    assert "missing from this install" in banner.fallback_reason("halfblock", 120)
+    assert banner.image_source() is None
     banner._prepared.cache_clear()
 
 
@@ -772,59 +748,97 @@ def test_the_guarded_widget_is_still_the_real_widget(monkeypatch):
 
 
 def test_no_real_width_draws_the_name_and_never_the_terminal_width():
-    """The CI-only defect of v0.58.0, made deterministic.
+    """The CI-only defect of v0.58.0/v0.59.0, made deterministic.
 
-    ``_lay_out`` used ``self.content_size.width or self.columns``. The
-    fallback is the TERMINAL's width; this widget's content box is
-    narrower by chrome whose size is not a constant (v0.55.0 measured the
-    scrollbar alone moving it by two). At 30 columns the guess built a
-    20-cell row into an 18-cell box -- and nothing corrected it, because
-    no resize follows a widget whose own size never changed.
+    v0.59.0's ``_lay_out`` fitted the art on ``on_mount``/``on_resize``
+    against ``self.content_size.width or self.columns`` -- the fallback is
+    the TERMINAL's width, wider than this widget's own content box, and a
+    guess from it could build a row too wide for the column it goes into.
+    v0.60.0 moved the fit into ``_DrawnMark.render`` (paint time, against
+    this widget's OWN content_size, never ``columns``) because that guess
+    was not the whole defect: even a correct fit computed only on resize
+    could go stale when a scrollbar appeared later without a Resize
+    message reaching this widget -- see ``_DrawnMark``'s docstring for the
+    measurement. Testing at the ``_DrawnMark`` level rather than through
+    ``BootBanner`` is what pins the RIGHT layer down: with no measured
+    width, the mark must draw the bare name, which fits any column, no
+    matter what a container around it happens to be."""
+    from textual.geometry import Size
 
-    A local run passed and three CI jobs did not, which is the signature
-    of a fallback that happens to be right on one machine.
-    """
-    block = BootBanner(columns=30)
-    block._drawn = _Recorder()
-    block._lay_out()
-    drawn = block._drawn.text
-    assert drawn == banner.WORDMARK, (
-        "with no measured width the banner must draw the name, which fits "
+    class _Zero(_DrawnMark):
+        @property
+        def content_size(self) -> Size:  # type: ignore[override]
+            return Size(0, 0)
+
+    mark = _Zero("", classes="banner-wordmark")
+    mark.render()
+    drawn = _plain_lines(mark)
+    assert drawn == [banner.WORDMARK], (
+        "with no measured width the mark must draw the name, which fits "
         f"any column -- got {drawn!r}"
     )
-    for line in drawn.splitlines():
-        assert len(line) <= len(banner.WORDMARK)
 
 
 def test_a_measured_width_is_used_verbatim():
     """The other half: once a real content width exists it is the number
-    fitted against, not the terminal's."""
+    fitted against -- read straight from :attr:`content_size` at paint
+    time, not a value some earlier resize handler cached."""
     from textual.geometry import Size
 
-    class _Sized(BootBanner):
+    width = banner.DRAWN_MARK_COLUMNS
+
+    class _Sized(_DrawnMark):
         @property
         def content_size(self) -> Size:  # type: ignore[override]
-            return Size(20, 7)
+            return Size(width, len(banner.MARK_ROWS))
 
-    block = _Sized(columns=120)
-    block._drawn = _Recorder()
-    block._lay_out()
-    rows = block._drawn.text.splitlines()
-    assert len(rows) > 1, "20 columns is wide enough for the mark"
+    mark = _Sized("", classes="banner-wordmark")
+    mark.render()
+    rows = _plain_lines(mark)
+    assert len(rows) > 1, f"{width} columns is wide enough for the mark"
     for line in rows:
-        assert len(line) <= 20
+        assert len(line) <= width
 
 
-class _Recorder:
-    """A stand-in for the Static the banner writes into, so the fit can be
-    read without mounting an app -- the mounted path is covered by
-    test_narrow_terminal_never_overflows_the_glyph_art above, and this one
-    is about the branch that runs BEFORE a layout exists."""
+def test_a_scrollbar_appearing_after_first_layout_cannot_leave_a_stale_fit():
+    """Pins the exact CI sequence down, deterministically -- no app, no
+    asyncio scheduling to get lucky or unlucky on.
 
-    def __init__(self) -> None:
-        self.text = ""
+    Measured against the real app (drive DoxaApp at 30 columns, log every
+    ``BootBanner._lay_out`` call against the transcript's
+    ``VerticalScroll.show_vertical_scrollbar``): laying the banner out
+    fits it against a 20-cell box -- no scrollbar yet. The identity block
+    mounts right after it (``PaneRuntimeMixin._boot``), and once the
+    transcript outgrows the 24-row viewport the scrollbar that appears
+    narrows every child's content box by two, to 18 -- but a follow-up
+    ``_lay_out``, the only thing that could re-fit a cached string, fired
+    on just 1 of 3 runs. 20 is exactly ``DRAWN_MARK_COLUMNS``, so a row
+    fitted there and never refitted overflows an 18-cell box by exactly
+    the scrollbar's width -- the CI failure verbatim.
 
-    def update(self, text: str) -> None:
-        import re
+    Reproduced here by fitting once at 20, then narrowing the box to 18
+    with NOTHING telling the widget to refit -- no resize, no second
+    ``_lay_out`` call. Only the next paint (``render()``) is asked for
+    anything, which is the same thing the compositor asks for, and it
+    must still be correct."""
+    from textual.geometry import Size
 
-        self.text = re.sub(r"\[[^]]*\]", "", text)
+    class _Narrowing(_DrawnMark):
+        width = 20
+
+        @property
+        def content_size(self) -> Size:  # type: ignore[override]
+            return Size(self.width, 7)
+
+    mark = _Narrowing("", classes="banner-wordmark")
+    mark.render()  # first layout pass: the box is 20 wide, no scrollbar
+    first = _plain_lines(mark)
+    assert max(len(line) for line in first) <= 20, "sanity: 20 fits 20"
+
+    mark.width = 18  # the scrollbar appears; nothing else is told
+    mark.render()  # the next paint -- not a resize, not a second _lay_out
+    for line in _plain_lines(mark):
+        assert len(line) <= 18, (
+            f"row {line!r} ({len(line)} cells) overflows the 18-cell box "
+            "the scrollbar left behind"
+        )

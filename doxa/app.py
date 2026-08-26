@@ -254,6 +254,7 @@ from .ui.statusline import ClockChip, GitLine, StatusBar  # noqa: F401
 from .ui.transcript import (  # noqa: F401
     _clone_chip,
     _composed,
+    _DrawnMark,
     _restore_pane_id,
     ArchivedSessionTab,
     BootBanner,
@@ -361,6 +362,14 @@ class DoxaApp(App):
     # Ctrl+P (App.COMMAND_PALETTE_BINDING's default) opens the built-in
     # CommandPalette; DoxaCommandProvider feeds it doxa_commands() below.
     COMMANDS = App.COMMANDS | {DoxaCommandProvider}
+
+    #: The id of the one fresh pane compose() adds when EVERY restored tab
+    #: was archived (see its own comment) -- fixed and distinct from
+    #: :func:`_restore_pane_id`'s ``restore-<session id>`` shape so it can
+    #: never collide with a real one, and known up front so
+    #: :meth:`_initial_active_tab_id` can name that pane before compose()
+    #: has actually built it.
+    _FALLBACK_PANE_ID = "restore-fallback-pane"
     # Ctrl+R: prefills "/search " -- the live session-search popup
     # (doxa/history.py) is the one search surface; the key is a shortcut to
     # it, not a second door.
@@ -1484,7 +1493,7 @@ class DoxaApp(App):
     def compose(self) -> ComposeResult:
         yield BeliefInspector()  # hidden stub, palette-toggled
         yield ClockChip()  # upper-right, own layer -- see theme.tcss
-        with TabbedContent(id="session-tabs"):
+        with TabbedContent(id="session-tabs", initial=self._initial_active_tab_id()):
             if self._restore_tabs:
                 # Item D: one tab per resolved saved tab, IN SAVED ORDER --
                 # never the single default pane below. v0.32.0 mixes two
@@ -1549,8 +1558,11 @@ class DoxaApp(App):
                     # nothing Ctrl+W could close without closing the app.
                     # One fresh tab alongside the archives, carrying the
                     # report, is the same answer doxa.cli's own "everything
-                    # is dead" branch gives.
+                    # is dead" branch gives. Explicit id -- _FALLBACK_
+                    # PANE_ID -- so _initial_active_tab_id (which runs
+                    # BEFORE this pane exists) can already name it.
                     pane = self._make_pane(self._engine_factory)
+                    pane.id = self._FALLBACK_PANE_ID
                     pane._boot_report = self._restore_report
                     yield pane
             else:
@@ -2292,37 +2304,86 @@ class DoxaApp(App):
 
         self.push_screen(SetupScreen(), callback=_done)
 
+    def _initial_active_tab_id(self) -> str:
+        """Which tab should be ACTIVE on first mount -- decided here,
+        before anything is mounted, and handed to ``TabbedContent``'s own
+        ``initial=`` (see :meth:`compose`) rather than set reactively
+        later from :meth:`_activate_initial_tab`, which is what this
+        replaces and is where the OLD long version of this comment lived.
+
+        **The race this closes, measured rather than assumed.** Textual's
+        ``Tabs`` widget defaults itself to its first tab on ITS OWN mount
+        (``Tabs._on_mount``) whenever nothing else names one at
+        construction, and that default reaches ``TabbedContent.active`` as
+        a MESSAGE -- ``Tabs.TabActivated``, handled by
+        ``TabbedContent._on_tabs_tab_activated`` -- not a synchronous
+        write. The old code set ``tabbed.active`` directly from
+        ``App.on_mount``, which runs later than ``Tabs._on_mount`` and so
+        USUALLY reads as "after the default, and therefore winning." But
+        the queued default-tab message does not evaporate because
+        something else wrote ``active`` in between: whenever THAT message
+        is finally processed, its handler sets ``active`` to whatever tab
+        IT named, unconditionally -- silently overwriting an explicit
+        choice made after it was queued but before it was handled. Under
+        load (CI: 1 failure; never reproduced locally at any rep count)
+        that two-writer race can resolve either way, and the FakeEngine
+        specs in ``tests/test_tabsets.py`` resolve fast enough for it to
+        matter. The exact failure -- ``'sid-1' == 'sid-2'`` -- is a WRONG
+        id, not the null v0.38.0 already fixed (:meth:`_persist_tabset`'s
+        own ``_activation_pending`` guard), because this is a different
+        mechanism: two competing writers, not one write that never came.
+
+        The fix is not to win that race, it is to not run it: if the
+        CORRECT tab is the one ``Tabs`` defaults to in the first place --
+        because it was TOLD to, via ``initial=`` -- there is no stray
+        message from a wrong default left to land later. One writer, one
+        value, converges to the right answer however long it takes to
+        propagate.
+
+        Selection rule, unchanged from the method this replaces: the saved
+        active tab if the record named one -- live pane or archived tab
+        alike, it is where the user was -- otherwise the first SESSION
+        spec. Read off :attr:`_restore_tabs` rather than mounted panes,
+        because nothing is mounted yet; :data:`_FALLBACK_PANE_ID` is the
+        one case that needs a name before it exists -- every restored tab
+        archived, so :meth:`compose` adds one fresh pane under that fixed
+        id, purely so this method has something to call it."""
+        if not self._restore_tabs:
+            return ""  # one pane; Tabs' own first-tab default is already right
+        if self._restore_active_id:
+            for spec in self._restore_tabs:
+                if spec.session_id == self._restore_active_id:
+                    return _restore_pane_id(spec.session_id)
+        for spec in self._restore_tabs:
+            if not spec.archived:
+                return _restore_pane_id(spec.session_id)
+        return self._FALLBACK_PANE_ID
+
     def _activate_initial_tab(self) -> None:
-        """Startup's own explicit tab choice: ACTIVATE the tab this launch
-        is about, and FOCUS it. Both halves, said once, here.
+        """Startup's own explicit FOCUS -- activation itself is decided
+        earlier now, by :meth:`_initial_active_tab_id` (handed to
+        ``TabbedContent`` as ``initial=`` in :meth:`compose`, before
+        anything mounts), so this is left with the half of the old
+        combined method that a widget only has AFTER it exists: putting
+        the keyboard on it.
 
-        Activation of a RESTORED set was already explicit (item D: land on
-        the tab that was active when the set was saved, not whichever one
-        Textual defaults to). The other two cases were not. An ordinary
-        launch, and a restore with no saved active tab, got their active
-        tab as a side effect of the first pane focusing its own prompt on
-        mount -- and that focus is what v0.38.0 removed.
-
-        The risk that raised, tested rather than assumed: with no
-        mount-time focus, does the first pane still end up focused?
-        Measured -- Textual DOES post TabActivated for the initially
-        active tab (``Tabs._on_mount`` picks the first tab, its watcher
-        posts it), so _on_tab_activated would in fact focus the prompt on
-        its own. That is still not good enough to rely on: "the first
+        An ordinary launch, and a restore with no saved active tab, used
+        to get their active tab and their focus as a side effect of the
+        first pane focusing its own prompt on mount -- v0.38.0 removed
+        that (see :meth:`_focus_tab`'s own docstring) because "the first
         prompt is focused because a widget we do not own happens to
-        announce itself" is the same implicitness this release exists to
-        remove, and docs/plans/split-panes.md needs the startup leaf to be a
-        DECISION before a window can hold two panes at once. So startup
-        says what it means, and the event becomes a no-op refocus.
+        announce itself" is exactly the implicitness split-panes needs the
+        startup leaf not to have. So this still runs from ``App.on_mount``
+        and still says explicitly what v0.38.0 wanted said: focus the tab
+        that ended up active.
 
-        Which tab: the saved active one if the record named one -- live
-        pane or archived tab alike, it is where the user was -- otherwise
-        the first SESSION pane in the strip. That second rule reproduces
-        what the old mount-time focus picked, including its one non-obvious
-        case: when every restored tab was archived, the tab that came up
-        active was the FRESH pane compose() adds beside them, not the first
-        archive, because the archives have no prompt to focus and the
-        fresh pane does."""
+        The lookup here is independent of whether ``TabbedContent.active``
+        has itself finished propagating by this point (that is a SEPARATE
+        question from the one ``_initial_active_tab_id`` answers, and this
+        method does not need it resolved) -- it re-derives the same target
+        by id, the same way :meth:`_initial_active_tab_id` chose it,
+        querying the mounted tree instead of :attr:`_restore_tabs` because
+        panes exist now."""
         try:
             tabbed = self.query_one("#session-tabs", TabbedContent)
         except Exception:  # noqa: BLE001 -- no tab strip, nothing to choose
@@ -2335,8 +2396,6 @@ class DoxaApp(App):
             target = next(iter(self.panes()), None)
         if target is None or not target.id:
             return
-        with contextlib.suppress(Exception):
-            tabbed.active = target.id
         self._focus_tab(target)
 
     def run(self, *args: "Any", **kwargs: "Any") -> "Any":

@@ -34,6 +34,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable  # noqa: F401 -- annotation-only
 
+from textual.css.query import NoMatches
 from textual.widgets import TabbedContent
 
 from .. import config as config_mod
@@ -235,7 +236,20 @@ class PaneChipsMixin:
             return
         self.refresh_tab_label()
         chips = self._status_chips()
-        bar = self.query_one("#status-bar", StatusBar)
+        # The status bar may not be mounted yet. A refresh is driven by
+        # events -- a peer joining, a turn finishing, a restore reporting a
+        # session id -- and those arrive on their own schedule, which can be
+        # before this pane has composed. query_one raises NoMatches there,
+        # from inside a background task with no caller of ours to catch it,
+        # and the error surface turns it into a block: a visible failure for
+        # a frame nobody could have painted anyway. Measured under
+        # test_restore_view's saved-active-tab case once mount ordering
+        # changed. A refresh with nowhere to draw is a no-op; the next
+        # event repaints, and there is always a next event.
+        try:
+            bar = self.query_one("#status-bar", StatusBar)
+        except NoMatches:
+            return
         bar.update("  ·  ".join(chip.render() for chip in chips))
         bar.set_chip_hints([hint for chip in chips for hint in chip.hints])
 

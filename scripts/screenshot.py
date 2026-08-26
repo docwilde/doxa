@@ -778,23 +778,11 @@ SCENES: list[Scene] = [
           engine_factory=_beliefs_engine),
     Scene("error-block", _drive_error_block, size=WIDE,
           engine_factory=_hero_engine, new_session_factory=_sibling_tab_factory()),
-    # The `image` FORM of the banner. Pinned, because since v0.58.0 `auto`
-    # draws the wordmark on half-block -- and half-block is the only tier
-    # an SVG export can capture at all, so this shot stands in for what a
-    # kitty-graphics or sixel terminal draws from the same asset at its
-    # own far higher resolution.
-    Scene("banner", _drive_banner, size=WIDE,
-          engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
-          env={**_HALFBLOCK, "DOXA_BOOT_BANNER": "image"}),
-    # v0.58.0: what a terminal that cannot draw the logo sees. The whole
-    # of the defect report it came from was "the logo image is not
-    # rendering"; this is the screen that now answers that in place --
-    # the wordmark at half-block, which is where the user who filed
-    # "quite pixelated" is. v0.67.0 retires this scene's own bespoke
-    # 95x25 (it was CONTENT-mandated then: the drawn mark needs at least
-    # 25 rows not to overflow and scroll its own top off; at 250x69 there
-    # is no such ceiling to hit) for the shared WIDE, with two more tabs
-    # in the strip for the same reason `banner` above has them.
+    # THE banner, since v0.70.0 dropped the raster tier: every terminal
+    # draws this. The scene name is kept rather than renamed to `banner`
+    # so the README's asset path and caption stay valid; there is no
+    # second form left for it to be distinguished from. v0.67.0 retired
+    # its bespoke 95x25 for the shared WIDE.
     Scene("banner-blocks", _drive_banner_degraded, size=WIDE,
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
           env={"DOXA_IMAGE_MODE": "halfblock"}),

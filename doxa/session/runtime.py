@@ -134,12 +134,14 @@ class PaneRuntimeMixin:
         block_list = self.query_one("#block-list", VerticalScroll)
         # The banner introduces the identity block, so it mounts first and
         # only where there was nothing before it -- switch_engine re-runs
-        # _boot into a pane that already has a transcript, and a logo
-        # appearing halfway down one is not an opening block, it is litter.
-        # No probe of its own: doxa.images.detect_mode() was settled in
-        # DoxaApp.__init__ and this reads the cache (boot cost: zero).
+        # _boot into a pane that already has a transcript, and the mark
+        # appearing halfway down one is not an opening block, it is
+        # litter. banner_mod.enabled() is a plain config read (v0.70.0
+        # dropped the raster form and the terminal-mode probe that used
+        # to pick between it and the drawn one), so this costs nothing
+        # boot-critical either way.
         if banner_mod.enabled() and not block_list.children:
-            await block_list.mount(BootBanner(self.app.size.width))
+            await block_list.mount(BootBanner())
         # Staged-proposal count for the `lore` line (v0.56.0). A socket
         # round trip, and affordable exactly HERE and nowhere else: the
         # opening block is drawn once, before the first prompt, on a pane
