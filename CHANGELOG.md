@@ -4,6 +4,11 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.75.0 — 2026-08-26
+
+- Curated-memory chip (`mem u63% p39%`): the project half stayed absent past startup and never moved on a repo switch or a resume. `PaneChipsMixin._lore_slug` resolved the project slug from the pane's own construction-time `cwd`, never the connected engine's — the one reader in the pane still doing that (every other one already prefers `engine.cwd`). Now resolves through the engine's cwd first, falling back to the pane's only when there is no engine yet.
+- Approving or rejecting a staged proposal, recording a belief outcome, and retracting a belief never refreshed the status bar afterward — the memory-fill, belief-count and staged-proposals chips stayed exactly as stale as their last unrelated refresh. The three write paths in `doxa/session/chips.py` (the status bar's own quick pending/beliefs pickers) now trigger a refresh once the write actually lands — never on the arming selection, which writes nothing.
+
 ## 0.70.0 — 2026-08-26
 
 - A status refresh on a pane whose status bar had not mounted yet raised `NoMatches` from a background task, which the error surface turned into a visible block. Refreshes are event-driven — a peer joining, a turn finishing, a restore reporting its session id — and those arrive before compose finishes. A refresh with nowhere to draw is now a no-op; the next event repaints. Surfaced by this release's mount-ordering change, but the race predates it: it was reported during the v0.60.0 work as reproducible only against a real daemon and left unfixed.
