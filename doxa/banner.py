@@ -1,50 +1,33 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """doxa.banner -- the DOXA mark at the top of a session's opening block.
 
-**Read the ladder in this order, because v0.58.0 inverted it.** The DRAWN
-mark is the normal path. The raster ``logo.png`` is the exception, for the
-terminals that earn it.
+**One form, on every terminal.** :data:`MARK_ROWS` (a ring around a
+triangle, authored cell by cell out of ``█`` and spaces and NOTHING ELSE)
+with :data:`WORDMARK` and :data:`TAGLINE` beside it as plain text,
+assembled by :func:`drawn_lines`. That is the whole banner now --
+:func:`enabled` is the only decision left, on or off.
 
-1. **Drawn** -- :data:`MARK_ROWS` (a ring around a triangle, authored cell
-   by cell out of ``█`` and spaces and NOTHING ELSE) with :data:`WORDMARK`
-   and :data:`TAGLINE` beside it as plain text, assembled by
-   :func:`drawn_lines`. Nine rows. This is what every terminal without a
-   real pixel protocol gets, which is most of them.
-2. **Raster** -- ``assets/logo.png`` through :mod:`doxa.images`' existing
-   ladder, but ONLY on ``kgp``/``sixel`` (:data:`PIXEL_TIERS`), the
-   protocols that carry an actual bitmap. See :func:`use_image`.
+**v0.66.0 removed the raster ``logo.png`` form this module used to draw
+on ``kgp``/``sixel`` terminals** (``boot_banner=auto``/``image``), and
+with it the three-way choice between that raster, the drawn mark and a
+plain wordmark that v0.58.0 built. The owner's call: the drawn form reads
+better than a downscaled photograph even where a terminal COULD carry
+real pixels, so there is no longer a case where the raster is the right
+answer -- see v0.58.0's own CHANGELOG entry (and this module's git
+history) for the arithmetic that first made that true for half-block
+terminals; it generalises. ``boot_banner`` is a plain on/off knob now
+(:func:`enabled`); a ``config.toml`` still holding ``auto``, ``blocks``
+or ``image`` from before this collapse keeps meaning "on" -- every value
+but a recognised OFF spelling does.
 
-**Why that way round, since v0.41.0 shipped it the other way.** A user
-ran it and said: "quite pixelated -- then i would prefer to just show it
-as unicode/ASCI blocks", and "the real logo png just in terminals that
-support it". They were right, and the arithmetic says why: half-block is
-not a pixel protocol with fewer pixels, it is a 2x-vertical approximation
-made of ``▀``, so six rows of it is twelve vertical samples for a 238-row
-image. A downscale AVERAGES, and averaging at that ratio is mush. A drawn
-glyph is chosen, cell by cell, and is therefore exactly as sharp as the
-font. The ``boot_banner`` setting (:func:`form`) pins either form for
-anyone who disagrees.
-
-**The raster half, when it does run.** ``logo.png`` (1100x320) rather than
-``icon.png`` (512x512): a banner is a wide thing. The file is not handed
-to the renderer as-is -- see :func:`_prepared` for the crop and the
-alpha flatten, both of which a screenshot caught and a green suite did
-not. Geometry is derived from a declared ROW BUDGET rather than from the
-pixel size, because what an image occupies in a terminal is CELLS:
-
-    columns = rows x cell_aspect x content_aspect = 6 x 2 x 3.899 ~= 47
-
-Six rows is that budget -- a quarter of a classic 24-row terminal, about
-the height of the identity block it introduces, so the banner never
-outweighs the information beneath it. Only WIDTH is pinned; height comes
-from the image widget using the terminal's own cell aspect, so a terminal
-whose cells are not 2:1 gets the right number of rows rather than a
-letterboxed six. Below :data:`MIN_COLUMNS` the raster has nowhere to go
-and the drawn form takes over regardless of setting.
-
-Nothing here ever renders ``[image: doxa logo]``. That line exists to tell
-you an image you ASKED for could not be drawn; it is not fit to be the
-permanent first line of every session.
+**``/img`` still shows the raster.** ``assets/logo.png`` through
+:mod:`doxa.images`' own ladder is not gone, only the BANNER's use of it
+-- :func:`asset_path`, :func:`_prepared` and :func:`image_source` back
+``ImageShowcaseBlock`` (:mod:`doxa.ui.transcript`), which demonstrates
+every tier a terminal answers for, boot banner setting or not. Nothing
+here ever renders ``[image: doxa logo]`` on the banner path; that line
+was for a raster the user ASKED for and did not get, and asking is no
+longer a thing the banner does.
 """
 
 from __future__ import annotations
@@ -58,10 +41,13 @@ from . import config as config_mod
 
 ENV_VAR = "DOXA_BOOT_BANNER"
 
-# The row budget (see module docstring) and the two aspect ratios it is
-# spent against. CELL_ASPECT is the height-to-width ratio of a terminal
-# cell, ~2 everywhere, and the same constant scripts/screenshot.py derives
-# from its own measured SVG export (24.375 / 12.2).
+# The row budget and the two aspect ratios it is spent against -- ONLY
+# for /img's showcase now (ImageShowcaseBlock), which still renders
+# assets/logo.png at real resolution on every tier a terminal answers
+# for. The boot banner itself never reads these (v0.66.0). CELL_ASPECT
+# is the height-to-width ratio of a terminal cell, ~2 everywhere, and the
+# same constant scripts/screenshot.py derives from its own measured SVG
+# export (24.375 / 12.2).
 ROWS = 6
 CELL_ASPECT = 2.0
 
@@ -73,7 +59,8 @@ CELL_ASPECT = 2.0
 #: constant cannot quietly drift away from the asset it describes.
 CONTENT_ASPECT = 928 / 238
 
-#: Banner width in CELLS -- what the widget's ``width`` style is set to.
+#: /img's demonstration width in CELLS -- what each rendered tier's
+#: widget ``width`` style is set to (ImageShowcaseBlock).
 COLUMNS = round(ROWS * CELL_ASPECT * CONTENT_ASPECT)  # 47
 
 #: The background the logo's transparency is flattened onto -- theme.tcss's
@@ -84,12 +71,6 @@ COLUMNS = round(ROWS * CELL_ASPECT * CONTENT_ASPECT)  # 47
 #: which is what PIL's RGBA->RGB conversion does unaided -- see
 #: :func:`prepared_image`.
 BASE_COLOR = (0x17, 0x15, 0x12)
-
-#: Narrower than this and the image is dropped for the wordmark. A 47-cell
-#: banner inside 2 cells of padding needs 51 columns merely to fit; 64 is
-#: where it stops being most of the line and the identity block beneath it
-#: stops wrapping.
-MIN_COLUMNS = 64
 
 #: The DOXA mark -- ring and triangle -- DRAWN, not downscaled.
 #:
@@ -245,9 +226,9 @@ def _mark_markup(index: int) -> str:
 def drawn_lines(content_columns: int) -> "list[str]":
     """The drawn banner as Textual markup rows, fitted to the width it has.
 
-    THIS IS THE NORMAL PATH, not a fallback. Since v0.58.0 the raster is
-    the exception -- see :func:`use_image` -- and every terminal without a
-    real pixel protocol gets these rows.
+    THIS IS THE ONLY PATH (v0.66.0 retired the raster alternative
+    v0.58.0-0.65.0 drew on kgp/sixel terminals) -- every terminal, every
+    tier, gets these rows.
 
     Three shapes, widest first, so what survives at any width is the part
     that still reads: mark + wordmark + tagline, mark + wordmark, then the
@@ -271,65 +252,55 @@ def drawn_lines(content_columns: int) -> "list[str]":
     return lines
 
 
-#: What the ``boot_banner`` setting can say. ``auto`` is the rule in
-#: :func:`use_image`; the other three take the decision away from it.
-FORMS = ("auto", "blocks", "image", "off")
-
-#: Tiers carrying REAL pixels at real resolution. Half-block is not one of
-#: them: it is a 2x-vertical approximation built out of ``▀``, and at the
-#: banner's six rows that is twelve vertical samples for a 238-row image.
-#: This tuple is the whole of :func:`use_image`'s ``auto`` rule.
-PIXEL_TIERS = ("kgp", "sixel")
-
-# The bool spelling this knob shipped with in v0.41.0. A config.toml
-# written by that settings modal still says 1 or 0, and it has to keep
-# meaning what it meant.
+# Every spelling this knob has ever shipped that means OFF: the plain
+# "off", and the bool spelling it launched with in v0.41.0 ("0"/"false"/
+# "no", back when 1/0 read as on/off). v0.58.0 added "auto"/"blocks"/
+# "image" as ON spellings on top of that; v0.66.0 retired the three-way
+# choice those named, and rather than add a matching _LEGACY_ON tuple to
+# keep recognising them, every string that is not a recognised OFF
+# spelling now reads as on -- the same permissive rule form() used to
+# fall back to for a value it did not recognise at all. A config.toml
+# still holding "auto", "blocks" or "image" from before this collapse
+# therefore keeps meaning exactly what it always meant here: draw it.
 _LEGACY_OFF = ("0", "false", "no", "off")
-_LEGACY_ON = ("1", "true", "yes", "on")
-
-
-def form() -> str:
-    """How the opening banner should be drawn: one of :data:`FORMS`.
-
-    ``auto`` (default) is the v0.58.0 rule -- drawn blocks where a raster
-    would only be a downscale, the raster where the terminal has real
-    pixels. ``blocks`` and ``image`` pin it either way; ``off`` removes the
-    banner. Legacy ``1``/``0`` read as ``auto``/``off``."""
-    raw = config_mod.raw(ENV_VAR).strip().lower()
-    if not raw:
-        return "auto"
-    if raw in _LEGACY_OFF:
-        return "off"
-    if raw in _LEGACY_ON:
-        return "auto"
-    return raw if raw in FORMS else "auto"
 
 
 def enabled() -> bool:
     """Is the opening banner drawn at all? Default yes.
 
-    ON by default is a judgment call and it rests on the fallback rather
-    than on the picture: there is no terminal and no width at which this
-    costs more than three rows of something legible."""
-    return form() != "off"
+    ``boot_banner`` is a plain on/off knob (a ``bool_on`` Setting,
+    default on) -- see :data:`_LEGACY_OFF` for exactly what still reads
+    as off, everything else reads as on, and there is no longer a
+    choice of WHAT gets drawn: :func:`drawn_lines` is the only form
+    (v0.66.0 dropped the raster ``logo.png`` alternative). ON by default
+    is a judgment call and it rests on the drawn form rather than on a
+    picture: there is no terminal and no width at which this costs more
+    than a few rows of something legible."""
+    raw = config_mod.raw(ENV_VAR).strip().lower()
+    return raw not in _LEGACY_OFF
 
 
 def asset_path() -> "Path | None":
     """The logo file, or None when neither copy is on disk.
 
-    Installed wheel: ``pyproject.toml``'s force-include put it at
-    ``doxa/assets/logo.png``, the arrangement ``doxa.launcher`` already
-    uses for ``icon.png`` -- one file in git, no duplicate under ``doxa/``.
-    Source checkout: it is still only at the repo's own ``assets/``.
-    Neither present is not an error; it is a banner that does not draw --
-    and neither is a loader that cannot answer the question, which is why
-    the whole lookup is guarded rather than just the packaged half."""
+    Only :func:`_prepared` (in turn only ``/img``'s
+    :class:`~doxa.ui.transcript.ImageShowcaseBlock`, since v0.66.0
+    retired the banner's own raster form) calls this now, but the
+    lookup itself is unchanged: installed wheel --
+    ``pyproject.toml``'s force-include put it at ``doxa/assets/logo.png``,
+    the arrangement ``doxa.launcher`` already uses for ``icon.png`` -- one
+    file in git, no duplicate under ``doxa/``. Source checkout: it is
+    still only at the repo's own ``assets/``. Neither present is not an
+    error; it is a showcase that says so (``ImageShowcaseBlock``'s own
+    fallback line) -- and neither is a loader that cannot answer the
+    question, which is why the whole lookup is guarded rather than just
+    the packaged half."""
     try:
         packaged = importlib.resources.files("doxa") / "assets" / "logo.png"
         if packaged.is_file():
             return Path(str(packaged))
     except Exception:  # noqa: BLE001 -- a zipped/frozen/odd loader is a
-        # banner that falls through to the checkout copy, never a crash
+        # showcase that falls through to the checkout copy, never a crash
         # on the boot path (see _prepared on why that matters here).
         pass
     try:
@@ -362,12 +333,14 @@ def _prepared() -> Any:
 
     **Everything is inside the try, including the import** (v0.58.0).
     ``doxa.images.widget_for`` is documented never to raise and always to
-    return a mountable widget, but this function is DOXA's own code on the
-    near side of that guarantee: it runs during ``BootBanner.compose``,
-    and an exception there does not degrade a decoration, it takes the
-    pane boot down with it. Pillow is a declared dependency now, so the
-    import "cannot" fail -- which is exactly the class of assumption that
-    produces a bug report, and it costs one indent to not make it."""
+    return a mountable widget, but this function is DOXA's own code on
+    the near side of that guarantee: it runs during
+    ``ImageShowcaseBlock.compose`` (``/img``'s -- see this module's own
+    docstring for why that is the only caller left since v0.66.0), and an
+    exception there does not degrade a decoration, it breaks a debug
+    command. Pillow is a declared dependency now, so the import "cannot"
+    fail -- which is exactly the class of assumption that produces a bug
+    report, and it costs one indent to not make it."""
     try:
         from PIL import Image
 
@@ -381,86 +354,16 @@ def _prepared() -> Any:
         flat = Image.new("RGB", source.size, BASE_COLOR)
         flat.paste(source, (0, 0), source)
         return flat
-    except Exception:  # noqa: BLE001 -- a banner that cannot be prepared is
-        # a banner that does not draw; use_image's caller falls to the
-        # wordmark, which needs no file at all.
+    except Exception:  # noqa: BLE001 -- a showcase that cannot prepare the
+        # logo says so (ImageShowcaseBlock's own fallback line) rather
+        # than crash the command that asked for it.
         return None
 
 
 def image_source() -> Any:
     """What to hand :func:`doxa.images.widget_for` -- a fresh copy of the
-    prepared image, or None when there is nothing to prepare."""
+    prepared image, or None when there is nothing to prepare. ``/img``'s
+    showcase is the only caller since v0.66.0 retired the banner's own
+    raster form."""
     prepared = _prepared()
     return prepared.copy() if prepared is not None else None
-
-
-def use_image(mode: str, columns: int) -> bool:
-    """Should the banner be the RASTER logo rather than the drawn mark?
-
-    **The v0.58.0 rule, and it came from a user looking at the thing.**
-    The report was "quite pixelated -- then i would prefer to just show it
-    as unicode/ASCI blocks", against a half-block render on an ordinary
-    Linux terminal. That is not a bug; it is arithmetic. Six rows of
-    half-block is twelve vertical samples for a 238-row image, and the
-    tagline inside the asset gets under one sample per stroke. A drawn
-    glyph beats a resampled photograph at those dimensions, so under
-    ``auto`` the raster has to EARN its place by having real pixels to
-    spend -- :data:`PIXEL_TIERS`, the protocols that carry an actual
-    bitmap. ``halfblock`` does not qualify, and that is the whole change.
-
-    The other forms take the decision away: ``blocks`` never draws the
-    raster, ``image`` draws it wherever any pixel tier exists at all
-    (half-block included -- the way back to v0.41.0's look), ``off`` never
-    reaches here.
-
-    The remaining two nos are unchanged, and are failures rather than
-    choices: the ``text`` tier has no pixels to spend at any size, and a
-    terminal under :data:`MIN_COLUMNS` has pixels but nowhere to put
-    them."""
-    chosen = form()
-    if chosen in ("off", "blocks"):
-        return False
-    if mode == "text":
-        return False
-    if columns < MIN_COLUMNS:
-        return False
-    if chosen == "auto" and mode not in PIXEL_TIERS:
-        return False
-    return _prepared() is not None
-
-
-def fallback_reason(mode: str, columns: int) -> str:
-    """One line naming why the raster was not drawn, or "" when there is
-    nothing worth saying -- which is now the common case.
-
-    **Narrower than the version written a day earlier, on purpose.** While
-    the wordmark was only ever a fallback, reaching it always meant
-    something had gone wrong and saying so was a service. Under ``auto``
-    the wordmark is the INTENDED output on a half-block terminal, and
-    announcing "logo not drawn" over a banner drawing exactly as designed
-    would be noise on most sessions -- trading the report this line was
-    written for against a worse one.
-
-    So it speaks only where the user asked for the raster and did not get
-    it: ``image`` pinned and not honorable, or the asset missing or
-    unreadable. Everything else is ``/img``'s to answer, which is what
-    this line points at when it does appear."""
-    if use_image(mode, columns) or form() in ("off", "blocks"):
-        return ""
-    if asset_path() is None:
-        return "logo not drawn: assets/logo.png is missing from this install — /img"
-    if _prepared() is None:
-        return "logo not drawn: the logo file could not be decoded here — /img"
-    if form() != "image":
-        # auto, and this tier simply has no real pixels: the wordmark IS
-        # the answer here, not a consolation for one.
-        return ""
-    if mode == "text":
-        return (
-            "logo not drawn: this terminal has no pixel mode — "
-            "headless, a pipe, or a remote relay — /img"
-        )
-    return (
-        f"logo not drawn: terminal is {columns} columns, the logo needs "
-        f"{MIN_COLUMNS} — /img"
-    )

@@ -227,23 +227,20 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     Setting(
         key="boot_banner", env="DOXA_BOOT_BANNER", label="boot banner",
-        category="Appearance", kind="choice",
-        choices=("", "auto", "blocks", "image", "off"), default="auto",
-        help="How to draw the DOXA mark above the session's opening "
-             "identity block (doxa.banner.form)",
-        note="auto (default) draws the WORDMARK in unicode blocks on the "
-             "half-block and text tiers, and the raster logo only where "
-             "the terminal carries real pixels (kitty graphics, sixel). "
-             "That split is v0.49.0's, from a user looking at a half-block "
-             "render and calling it 'quite pixelated -- then i would "
-             "prefer to just show it as unicode/ASCI blocks': six rows of "
-             "half-block is twelve vertical samples for a 238-row image, "
-             "and a drawn glyph beats a resampled photograph at that size. "
-             "blocks pins the wordmark everywhere; image pins the raster "
-             "wherever any pixel tier exists, which is v0.41.0's "
-             "behaviour; off removes the banner. 1 and 0 still read as "
-             "auto and off. /img reports which tier your terminal "
-             "actually granted.",
+        category="Appearance", kind="bool_on", default="1",
+        help="Draw the DOXA mark above the session's opening identity "
+             "block (doxa.banner.enabled)",
+        note="A plain on/off knob since v0.66.0 -- the drawn ring-and-"
+             "triangle mark is the only form there is now, on every "
+             "terminal; v0.58.0-0.65.0 also drew a raster logo.png on "
+             "kitty-graphics/sixel terminals ('auto'/'image'), which "
+             "read better than a half-block downscale but not better "
+             "than the drawn mark, so it is gone rather than kept as a "
+             "second look. A config.toml still holding 'auto', 'blocks' "
+             "or 'image' from before this collapse keeps meaning on -- "
+             "only an explicit off (or the pre-v0.49.0 0/false/no) turns "
+             "the banner off. /img still shows the raster logo on "
+             "request, in every tier this terminal answers for.",
     ),
     Setting(
         key="show_reasoning", env="DOXA_SHOW_REASONING", label="show reasoning",

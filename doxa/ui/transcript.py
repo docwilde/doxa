@@ -377,115 +377,30 @@ class _DrawnMark(Static):
 class BootBanner(Vertical):
     """The DOXA mark above a session's opening identity block.
 
-    **The DRAWN mark is the normal path; the raster is the exception.**
-    That reads backwards from v0.41.0 and is the point of v0.49.0. A
-    terminal without a real pixel protocol gets
-    :func:`doxa.banner.drawn_lines` -- a ring-and-triangle authored cell
-    by cell in half-blocks, with the wordmark and strapline as plain text
-    beside it. Only ``kgp``/``sixel``, which carry an actual bitmap, get
-    ``logo.png``. :func:`doxa.banner.use_image` owns that decision and the
-    ``boot_banner`` setting can pin it either way.
+    **One form, drawn, on every terminal** (v0.66.0). Through v0.65.0 this
+    widget also had a raster path -- ``logo.png`` on ``kgp``/``sixel``
+    terminals, decided by the now-removed ``doxa.banner.use_image`` -- and
+    a fallback-reason line for when that raster was asked for and not
+    honorable. Both are gone: the owner's call was that the drawn mark
+    reads better than a downscaled photograph even where a terminal COULD
+    carry real pixels, so there is no longer a case where the raster is
+    the right answer, and nothing is ever "asked for and not given" any
+    more either. ``/img`` still shows the raster on request
+    (:class:`ImageShowcaseBlock`) -- this widget just never reaches for it
+    on its own.
 
-    Never the ``[image: ...]`` line: this widget is decoration, and a
-    fallback line announcing a decoration that failed is worse than the
-    decoration's absence.
+    Composing straight to :class:`_DrawnMark` and nothing else is
+    therefore the whole of this class now: no ``columns`` to decide a
+    raster/drawn split with, no resize handler, no retry loop. The mark
+    fits ITSELF at every paint, against its own live ``content_size`` --
+    see :class:`_DrawnMark`'s own docstring for why that has to be true
+    regardless of what widget composes it in."""
 
-    On the raster path WIDTH is set here and height is not, deliberately:
-    the image widget derives its rows from the terminal's own cell aspect
-    (see :mod:`doxa.banner`), so a terminal whose cells are not 2:1 gets
-    the right number of rows rather than a letterboxed six.
-
-    **The drawn form fits itself at every paint, not just on resize**, and
-    that is not fussiness either. The chrome between the terminal's width
-    and this widget's content width is not a constant: the block list
-    contributes padding and a vertical scrollbar comes and goes with the
-    transcript, moving it by two. Fitting the art against a GUESSED chrome
-    wrapped it into mush -- measured, at 40 and 20 columns (v0.55.0) --
-    which is why it is fitted to :attr:`content_size` rather than a guess.
-    Fitting it only ON RESIZE was ALSO not enough (v0.59.0): a scrollbar
-    that appears after the transcript outgrows the viewport narrows this
-    widget's box without reliably delivering a ``Resize`` message, so a
-    fit computed once and cached can go stale and overflow. See
-    :class:`_DrawnMark`, which the art now lives in, for the measurement
-    that pinned that down and the fix -- fitting at paint time, against
-    the widget's own live :attr:`content_size`, so a stale fit cannot
-    survive a frame."""
-
-    #: Below this the explanation line is prose in a column too narrow to
-    #: be prose, so it is dropped rather than wrapped into a paragraph.
-    REASON_COLUMNS = 30
-
-    #: How many refreshes _lay_out will wait for a real content width
-    #: before it stops asking, for the reason line's sake (see _lay_out).
-    #: Bounded because the retry re-enters _lay_out: a widget that never
-    #: gets a width must settle, not spin.
-    FIT_RETRIES = 3
-
-    def __init__(self, columns: int) -> None:
-        self.columns = columns
-        self._drawn: "_DrawnMark | None" = None
-        self._reason_widget: "Static | None" = None
-        self._reason = ""
-        self._fit_retries = 0
+    def __init__(self) -> None:
         super().__init__(classes="boot-banner")
 
     def compose(self) -> ComposeResult:
-        from .. import banner as banner_mod
-
-        mode = images_mod.detect_mode()
-        if banner_mod.use_image(mode, self.columns):
-            source = banner_mod.image_source()
-            widget = images_mod.widget_for(source, "doxa logo", mode=mode)
-            widget.styles.width = banner_mod.COLUMNS
-            widget.add_class("banner-image")
-            yield widget
-            return
-        # The drawn mark, plus -- only when the raster was ASKED for and
-        # could not be given -- one line saying why (banner.fallback_reason
-        # on why that is rare). The art fits itself at paint time (see
-        # _DrawnMark); _lay_out below only ever touches the reason line.
-        self._reason = banner_mod.fallback_reason(mode, self.columns)
-        self._drawn = _DrawnMark("", classes="banner-wordmark")
-        yield self._drawn
-        if self._reason:
-            self._reason_widget = Static("", classes="banner-reason")
-            yield self._reason_widget
-
-    def on_mount(self) -> None:
-        self._lay_out()
-
-    def on_resize(self) -> None:
-        self._lay_out()
-
-    def _lay_out(self) -> None:
-        """Show/hide and fill in the fallback-reason line for the width
-        this widget actually has.
-
-        **The art is no longer this method's job.** Until v0.59.0 this was
-        also where the drawn mark was fitted -- ``self._drawn.update(...)``
-        against ``self.content_size.width`` -- and that is exactly the
-        state a scrollbar-narrowing could leave stale (see
-        :class:`_DrawnMark`'s docstring for the measurement). The reason
-        line has no such invariant: it is prose that gets hidden below
-        :attr:`REASON_COLUMNS` rather than art that must never overflow
-        its column, so being one frame late costs nothing worth chasing
-        with the same fix. It still needs a real width to decide anything
-        with, hence the retry while ``content_size`` is still zero."""
-        if self._drawn is None:
-            return
-        width = self.content_size.width
-        if not width:
-            # No real width yet -- ask again once Textual has laid us out.
-            # Bounded (FIT_RETRIES): a widget that never gets a width must
-            # settle rather than spin.
-            if self._fit_retries < self.FIT_RETRIES:
-                self._fit_retries += 1
-                self.call_after_refresh(self._lay_out)
-            return
-        self._fit_retries = 0
-        if self._reason_widget is not None:
-            self._reason_widget.display = width >= self.REASON_COLUMNS
-            self._reason_widget.update(self._reason)
+        yield _DrawnMark("", classes="banner-wordmark")
 
 
 class ImageShowcaseBlock(Vertical):

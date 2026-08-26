@@ -629,11 +629,16 @@ SCENES: list[Scene] = [
           engine_factory=_beliefs_engine),
     Scene("error-block", _drive_error_block, size=(120, 32),
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5")),
-    # The `image` FORM of the banner. Pinned, because since v0.58.0 `auto`
-    # draws the wordmark on half-block -- and half-block is the only tier
-    # an SVG export can capture at all, so this shot stands in for what a
-    # kitty-graphics or sixel terminal draws from the same asset at its
-    # own far higher resolution.
+    # STALE since v0.66.0: this scene exists to shoot the RASTER form of
+    # the banner (`DOXA_BOOT_BANNER=image` used to pin it), which v0.66.0
+    # removed outright -- the drawn mark is the only form the app can
+    # draw now, on every terminal, so `image` reads as plain "on" (same
+    # as every other value but a recognised off) and this scene now
+    # renders the SAME drawn mark `banner-blocks` already shoots, just at
+    # a different size. assets/shots/banner.png/.svg are therefore
+    # documenting a feature that no longer exists; left as-is for
+    # whoever owns the gallery regeneration to consolidate or retire
+    # rather than decided here.
     Scene("banner", _drive_banner, size=(120, 32),
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
           env={**_HALFBLOCK, "DOXA_BOOT_BANNER": "image"}),
@@ -641,16 +646,19 @@ SCENES: list[Scene] = [
     # of the defect report it came from was "the logo image is not
     # rendering"; this is the screen that now answers that in place.
     # v0.58.0: the wordmark at 80 columns, which is where the user who
-    # filed "quite pixelated" is. This is now the COMMON banner -- a
-    # half-block terminal gets drawn glyphs, not a downscaled photograph.
-    # 25 rows, not 21: the drawn mark went from four rows to seven, so at
-    # 21 the transcript overflowed, scrolled to its tail, and cut the top
-    # of the ring off in the shot. A scene has to be tall enough to hold
-    # the thing it is a picture of -- and 25 rows is CONTENT-mandated, the
-    # same bind `settings` above hit, so the columns are what moved to
-    # land back on 16:9 (95, not 80: measured, 994x660 at 80 columns was
-    # 1.51, 15% off; 1177x660 at 95 is 1.78, inside tolerance) rather than
-    # shrinking the rows and clipping the ring again.
+    # filed "quite pixelated" is. v0.66.0 made this THE banner, not just
+    # the common one -- there is no raster form left to fall back FROM
+    # (see the now-stale "banner" scene above). The drawn mark went from
+    # four rows to seven at v0.58.0 (nine at v0.60.0's ring/triangle
+    # redesign, which needed a moat between ring and triangle at the size
+    # that now carries the WHOLE first impression) -- a scene sized for
+    # the smaller mark overflowed the transcript, scrolled to its tail,
+    # and cut the top of the ring off in the shot. 25 rows is
+    # CONTENT-mandated, the same bind `settings` above hit, so the
+    # columns are what moved to land back on 16:9 (95, not 80: measured,
+    # 994x660 at 80 columns was 1.51, 15% off; 1177x660 at 95 is 1.78,
+    # inside tolerance) rather than shrinking the rows and clipping the
+    # ring again.
     Scene("banner-blocks", _drive_banner_degraded, size=(95, 25),
           engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
           env={"DOXA_IMAGE_MODE": "halfblock"}),
