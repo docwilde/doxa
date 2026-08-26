@@ -8,7 +8,7 @@ terminals that earn it.
 1. **Drawn** -- :data:`MARK_ROWS` (a ring around a triangle, authored cell
    by cell out of ``█`` and spaces and NOTHING ELSE) with :data:`WORDMARK`
    and :data:`TAGLINE` beside it as plain text, assembled by
-   :func:`drawn_lines`. Seven rows. This is what every terminal without a
+   :func:`drawn_lines`. Nine rows. This is what every terminal without a
    real pixel protocol gets, which is most of them.
 2. **Raster** -- ``assets/logo.png`` through :mod:`doxa.images`' existing
    ladder, but ONLY on ``kgp``/``sixel`` (:data:`PIXEL_TIERS`), the
@@ -117,15 +117,28 @@ MIN_COLUMNS = 64
 #: triangle whose apex sits at ``cy - R*0.55``, whose base sits at
 #: ``cy + R*0.62``, and whose half-width is ``t * R * 0.60``.
 #:
-#: **The rows below are hand-tightened at the poles and do not come out of
-#: that formula verbatim.** Re-rasterising gives seven cells on the top and
-#: bottom rows where these have five; at this size the pure result reads as
-#: a flattened cap rather than a curve. The formula is the intent, this is
-#: the artifact that was rendered and approved, and the difference is
-#: recorded here so nobody "corrects" the constant back to the generator's
-#: output. A 9x17 version reads well too, and is the thing to reach for if
-#: seven rows ever feels tight beside the text -- at the cost of three more
-#: rows of transcript per session.
+#: **Nine rows, not seven, and that is v0.58.0's own escape hatch used.**
+#: Reported against the 7-row mark: the ring and the triangle inside it
+#: TOUCH -- the triangle's widest row sits directly against the ring's
+#: inner face with only the ordinary word-spacing between them, and at
+#: this size that reads as one blob rather than two shapes. Widening the
+#: ring's inner radius while holding it to seven rows only shrank the
+#: triangle to a sliver; there was nowhere left to put a moat. v0.58.0's
+#: own docstring already named the way out -- *"A 9x17 version reads well
+#: too, ... if seven rows ever feels tight beside the text"* -- and a
+#: gap the mark did not have before is exactly that. Two more rows buys a
+#: full blank cell of separation on every row where ring and triangle
+#: share a line (rows 2-6 below), checked by rendering through the real
+#: SVG exporter at true 2:1 cell metrics, not guessed at from the source.
+#:
+#: **The rows below are hand-tightened, same as v0.58.0's were, and do not
+#: come out of the formula verbatim.** The moat itself is the hand
+#: adjustment: the formula's own triangle radius left rows 2 and 6
+#: touching the ring at the width this mark actually ships. Every row is
+#: still exactly one of two shapes -- a single run of ink (the cap and
+#: shoulder rows) or ring/gap/triangle/gap/ring (three runs) -- which is
+#: what lets :func:`drawn_lines` colour the two apart without a second
+#: hand-authored grid; see ``_mark_markup``.
 #:
 #: **The accepted caveat.** Some monospace fonts render Block Elements at
 #: reduced height, and some terminals add leading, so stacked full blocks
@@ -134,13 +147,15 @@ MIN_COLUMNS = 64
 #: from this side. Shown to the user, accepted, and written down in the
 #: CHANGELOG so a reader who hits it does not think the mark is broken.
 MARK_ROWS: tuple[str, ...] = (
-    "    █████    ",
-    " ███     ███ ",
-    "██    █    ██",
-    "██   ███   ██",
-    "██  █████  ██",
-    " ███     ███ ",
-    "    █████    ",
+    "       █████████       ",
+    "    ███████████████    ",
+    "  ██████   █   ██████  ",
+    " ████     ███     ████ ",
+    "█████     ███     █████",
+    " ████    █████    ████ ",
+    "  ██████ █████ ██████  ",
+    "    ███████████████    ",
+    "       █████████       ",
 )
 
 #: Width of :data:`MARK_ROWS`, and the blank gutter between mark and text.
@@ -163,16 +178,68 @@ TAGLINE = "doxa · belief earning knowledge"
 DRAWN_FULL_COLUMNS = MARK_COLUMNS + MARK_GAP + len(TAGLINE)
 DRAWN_MARK_COLUMNS = MARK_COLUMNS + MARK_GAP + len(WORDMARK)
 
-# Row indices the text sits on (0-based): rows 3 and 5 of the seven, with
-# a blank row between them. That straddles the ring's vertical centre --
-# row 4 -- so the two lines sit either side of the middle rather than
-# crowding the top, and the block of text has the same optical centre as
-# the mark it stands beside.
-_WORDMARK_ROW = 2
-_TAGLINE_ROW = 4
+# Row indices the text sits on (0-based): rows 3 and 5 of the nine, with a
+# blank row between them. That straddles the ring's vertical centre -- row
+# 4 -- so the two lines sit either side of the middle rather than crowding
+# the top, and the block of text has the same optical centre as the mark
+# it stands beside.
+_WORDMARK_ROW = 3
+_TAGLINE_ROW = 5
 
 MARK_COLOR = "#D97757"
 MUTED_COLOR = "#8A8073"
+
+#: The ring's colour -- distinct from :data:`MARK_COLOR`, which is now the
+#: TRIANGLE's alone. A single flat colour was the other half of why ring
+#: and triangle read as one blob: even with a moat between them, the same
+#: colour on both sides of a one-cell gap reads as one shape with a
+#: notch, not two shapes. Reuses :data:`MUTED_COLOR` rather than
+#: introducing a third constant -- it is already the mark's own quiet
+#: tone (the tagline wears it beside the wordmark), so the ring becomes
+#: the mark's frame and the triangle stays the one accent-coloured thing
+#: in it, same relationship the wordmark/tagline pair already has.
+RING_COLOR = MUTED_COLOR
+
+
+def _runs(row: str) -> "list[tuple[int, int]]":
+    """``[(start, end)]`` for each maximal run of ``█`` in ``row`` (``end``
+    exclusive) -- how :func:`_mark_markup` tells the ring from the
+    triangle without a second hand-authored grid: see :data:`MARK_ROWS`."""
+    spans: "list[tuple[int, int]]" = []
+    start = None
+    for i, cell in enumerate(row + " "):
+        if cell == "█" and start is None:
+            start = i
+        elif cell != "█" and start is not None:
+            spans.append((start, i))
+            start = None
+    return spans
+
+
+def _mark_markup(index: int) -> str:
+    """Row ``index`` of :data:`MARK_ROWS` as Textual markup, the ring in
+    :data:`RING_COLOR` and the triangle in :data:`MARK_COLOR`.
+
+    Classified by RUN COUNT, not a second grid to keep in sync by hand:
+    every row of this mark is either pure ring -- one run of ink, the cap
+    and shoulder rows -- or ring/gap/triangle/gap/ring -- three runs, the
+    moat being what makes this unambiguous.
+    ``test_the_mark_is_a_ring_around_a_triangle`` pins that every row is
+    one of those two shapes, so an edit that breaks the pattern fails
+    loudly there rather than mis-colouring silently here."""
+    row = MARK_ROWS[index]
+    spans = _runs(row)
+    colors = (RING_COLOR,) if len(spans) == 1 else (RING_COLOR, MARK_COLOR, RING_COLOR)
+    parts = []
+    pos = 0
+    for (start, end), color in zip(spans, colors):
+        if start > pos:
+            parts.append(row[pos:start])
+        parts.append(f"[{color}]{row[start:end]}[/]")
+        pos = end
+    if pos < len(row):
+        parts.append(row[pos:])
+    return "".join(parts)
 
 
 def drawn_lines(content_columns: int) -> "list[str]":
@@ -186,7 +253,9 @@ def drawn_lines(content_columns: int) -> "list[str]":
     that still reads: mark + wordmark + tagline, mark + wordmark, then the
     bare wordmark. A drawn mark that has shrunk past legibility is dropped
     rather than crushed, on the same rule the rest of this module follows.
-    """
+    Dropped is ALL OF IT, ring included -- the two-colour mark has nothing
+    left to colour once it is gone, so there is no separate case to keep
+    in sync with this one."""
     if content_columns >= DRAWN_FULL_COLUMNS:
         beside = {_WORDMARK_ROW: f"[b {MARK_COLOR}]{WORDMARK}[/]",
                   _TAGLINE_ROW: f"[{MUTED_COLOR}]{TAGLINE}[/]"}
@@ -196,9 +265,9 @@ def drawn_lines(content_columns: int) -> "list[str]":
         return [f"[b {MARK_COLOR}]{WORDMARK}[/]"]
     gap = " " * MARK_GAP
     lines = []
-    for index, row in enumerate(MARK_ROWS):
+    for index in range(len(MARK_ROWS)):
         text = beside.get(index)
-        lines.append(f"[{MARK_COLOR}]{row}[/]" + (gap + text if text else ""))
+        lines.append(_mark_markup(index) + (gap + text if text else ""))
     return lines
 
 

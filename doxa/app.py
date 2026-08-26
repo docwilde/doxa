@@ -254,6 +254,7 @@ from .ui.statusline import ClockChip, GitLine, StatusBar  # noqa: F401
 from .ui.transcript import (  # noqa: F401
     _clone_chip,
     _composed,
+    _DrawnMark,
     _restore_pane_id,
     ArchivedSessionTab,
     BootBanner,

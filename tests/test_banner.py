@@ -17,7 +17,7 @@ from __future__ import annotations
 import pytest
 
 from doxa import banner, images
-from doxa.app import BootBanner, DoxaApp, ImageShowcaseBlock, SystemBlock
+from doxa.app import _DrawnMark, BootBanner, DoxaApp, ImageShowcaseBlock, SystemBlock
 
 # Wide enough for banner.use_image's width test: the default run_test size
 # (80x24) is over MIN_COLUMNS but leaves the 47-cell banner most of the
@@ -71,19 +71,53 @@ def test_the_mark_is_a_ring_around_a_triangle():
     must widen downward -- a regression that broke either would still pass
     the codepoint test above."""
     rows = banner.MARK_ROWS
-    assert len(rows) == 7, "seven rows: the approved geometry"
+    assert len(rows) == 9, "nine rows: the v0.60.0 geometry -- two more than " \
+        "v0.58.0's seven, spent entirely on the moat between ring and " \
+        "triangle (see MARK_ROWS's docstring)"
+    center = len(rows) // 2
     # Closed ring: every row has ink, and the outer edges bow in at the
     # poles rather than running straight down a rectangle.
     first_ink = [r.index("█") for r in rows]
     assert all(r.strip() for r in rows), "a gap in the ring"
-    assert first_ink[0] > first_ink[3], "the top does not curve inward"
-    assert first_ink[-1] > first_ink[3], "the bottom does not curve inward"
-    # Triangle: apex a single cell, widening on each row below it.
-    middles = [r[banner.MARK_COLUMNS // 2 - 3 : banner.MARK_COLUMNS // 2 + 4] for r in rows[2:5]]
-    widths = [m.count("█") for m in middles]
-    assert widths == sorted(widths) and widths[0] < widths[-1], (
-        f"the inner triangle does not widen downward: {widths}"
-    )
+    assert first_ink[0] > first_ink[center], "the top does not curve inward"
+    assert first_ink[-1] > first_ink[center], "the bottom does not curve inward"
+    # Triangle: apex a single run, widening on the rows it spans.
+    triangle_widths = [
+        end - start
+        for row in rows
+        for spans in [banner._runs(row)]
+        if len(spans) == 3
+        for start, end in [spans[1]]
+    ]
+    assert triangle_widths == sorted(triangle_widths) and (
+        triangle_widths[0] < triangle_widths[-1]
+    ), f"the inner triangle does not widen downward: {triangle_widths}"
+
+
+def test_every_row_is_pure_ring_or_ring_gap_triangle_gap_ring():
+    """``_mark_markup`` colours a row by its RUN COUNT, not a second
+    hand-authored grid: one run of ink is the cap/shoulder rows (all
+    ring), three runs is ring/triangle/ring. A row with any other run
+    count is a shape ``_mark_markup`` cannot colour correctly -- this is
+    what makes that fail loudly here instead of mis-colouring silently."""
+    for row in banner.MARK_ROWS:
+        n_runs = len(banner._runs(row))
+        assert n_runs in (1, 3), f"row {row!r} has {n_runs} runs of ink, not 1 or 3"
+
+
+def test_the_ring_and_triangle_never_touch():
+    """The defect this geometry exists to fix, pinned directly: at
+    v0.58.0's size the ring and the triangle inside it touched and read
+    as one blob. Wherever a row holds both (three runs), there must be a
+    real gap -- at least one blank column -- on each side of the
+    triangle."""
+    for row in banner.MARK_ROWS:
+        spans = banner._runs(row)
+        if len(spans) != 3:
+            continue
+        (_, ring_left_end), (tri_start, tri_end), (ring_right_start, _) = spans
+        assert tri_start - ring_left_end >= 1, f"no gap before the triangle: {row!r}"
+        assert ring_right_start - tri_end >= 1, f"no gap after the triangle: {row!r}"
 
 
 def test_drawn_lines_fit_the_width_they_are_given():
@@ -228,8 +262,13 @@ async def test_text_tier_shows_the_wordmark_and_never_the_fallback_line(tmp_path
         assert "[image:" not in rendered
         assert banner.TAGLINE in rendered
         assert banner.WORDMARK in rendered
+        # Ring and triangle are two colours now (v0.60.0), so a bare row
+        # of MARK_ROWS is no longer a literal substring of the markup --
+        # it is split by the colour tags between its ring and triangle
+        # runs. Strip markup back off before checking.
+        plain = "\n".join(_plain_lines(drawn))
         for row in banner.MARK_ROWS:
-            assert row in rendered
+            assert row in plain
         assert not block.query(".banner-image")
 
 
@@ -477,7 +516,11 @@ async def test_half_block_terminal_gets_the_wordmark_not_the_raster(
         drawn = block.query_one(".banner-wordmark")
         assert drawn.region.height > 0
         rendered = str(drawn.renderable)
-        assert banner.MARK_ROWS[1] in rendered, "the drawn mark is missing"
+        # Ring and triangle are two colours (v0.60.0), so this checks the
+        # markup-stripped text -- see the comment on the same pattern in
+        # test_text_tier_shows_the_wordmark_and_never_the_fallback_line.
+        plain = "\n".join(_plain_lines(drawn))
+        assert banner.MARK_ROWS[1] in plain, "the drawn mark is missing"
         assert banner.WORDMARK in rendered, "the plain wordmark is missing"
 
 
@@ -772,59 +815,97 @@ def test_the_guarded_widget_is_still_the_real_widget(monkeypatch):
 
 
 def test_no_real_width_draws_the_name_and_never_the_terminal_width():
-    """The CI-only defect of v0.58.0, made deterministic.
+    """The CI-only defect of v0.58.0/v0.59.0, made deterministic.
 
-    ``_lay_out`` used ``self.content_size.width or self.columns``. The
-    fallback is the TERMINAL's width; this widget's content box is
-    narrower by chrome whose size is not a constant (v0.55.0 measured the
-    scrollbar alone moving it by two). At 30 columns the guess built a
-    20-cell row into an 18-cell box -- and nothing corrected it, because
-    no resize follows a widget whose own size never changed.
+    v0.59.0's ``_lay_out`` fitted the art on ``on_mount``/``on_resize``
+    against ``self.content_size.width or self.columns`` -- the fallback is
+    the TERMINAL's width, wider than this widget's own content box, and a
+    guess from it could build a row too wide for the column it goes into.
+    v0.60.0 moved the fit into ``_DrawnMark.render`` (paint time, against
+    this widget's OWN content_size, never ``columns``) because that guess
+    was not the whole defect: even a correct fit computed only on resize
+    could go stale when a scrollbar appeared later without a Resize
+    message reaching this widget -- see ``_DrawnMark``'s docstring for the
+    measurement. Testing at the ``_DrawnMark`` level rather than through
+    ``BootBanner`` is what pins the RIGHT layer down: with no measured
+    width, the mark must draw the bare name, which fits any column, no
+    matter what a container around it happens to be."""
+    from textual.geometry import Size
 
-    A local run passed and three CI jobs did not, which is the signature
-    of a fallback that happens to be right on one machine.
-    """
-    block = BootBanner(columns=30)
-    block._drawn = _Recorder()
-    block._lay_out()
-    drawn = block._drawn.text
-    assert drawn == banner.WORDMARK, (
-        "with no measured width the banner must draw the name, which fits "
+    class _Zero(_DrawnMark):
+        @property
+        def content_size(self) -> Size:  # type: ignore[override]
+            return Size(0, 0)
+
+    mark = _Zero("", classes="banner-wordmark")
+    mark.render()
+    drawn = _plain_lines(mark)
+    assert drawn == [banner.WORDMARK], (
+        "with no measured width the mark must draw the name, which fits "
         f"any column -- got {drawn!r}"
     )
-    for line in drawn.splitlines():
-        assert len(line) <= len(banner.WORDMARK)
 
 
 def test_a_measured_width_is_used_verbatim():
     """The other half: once a real content width exists it is the number
-    fitted against, not the terminal's."""
+    fitted against -- read straight from :attr:`content_size` at paint
+    time, not a value some earlier resize handler cached."""
     from textual.geometry import Size
 
-    class _Sized(BootBanner):
+    width = banner.DRAWN_MARK_COLUMNS
+
+    class _Sized(_DrawnMark):
         @property
         def content_size(self) -> Size:  # type: ignore[override]
-            return Size(20, 7)
+            return Size(width, len(banner.MARK_ROWS))
 
-    block = _Sized(columns=120)
-    block._drawn = _Recorder()
-    block._lay_out()
-    rows = block._drawn.text.splitlines()
-    assert len(rows) > 1, "20 columns is wide enough for the mark"
+    mark = _Sized("", classes="banner-wordmark")
+    mark.render()
+    rows = _plain_lines(mark)
+    assert len(rows) > 1, f"{width} columns is wide enough for the mark"
     for line in rows:
-        assert len(line) <= 20
+        assert len(line) <= width
 
 
-class _Recorder:
-    """A stand-in for the Static the banner writes into, so the fit can be
-    read without mounting an app -- the mounted path is covered by
-    test_narrow_terminal_never_overflows_the_glyph_art above, and this one
-    is about the branch that runs BEFORE a layout exists."""
+def test_a_scrollbar_appearing_after_first_layout_cannot_leave_a_stale_fit():
+    """Pins the exact CI sequence down, deterministically -- no app, no
+    asyncio scheduling to get lucky or unlucky on.
 
-    def __init__(self) -> None:
-        self.text = ""
+    Measured against the real app (drive DoxaApp at 30 columns, log every
+    ``BootBanner._lay_out`` call against the transcript's
+    ``VerticalScroll.show_vertical_scrollbar``): laying the banner out
+    fits it against a 20-cell box -- no scrollbar yet. The identity block
+    mounts right after it (``PaneRuntimeMixin._boot``), and once the
+    transcript outgrows the 24-row viewport the scrollbar that appears
+    narrows every child's content box by two, to 18 -- but a follow-up
+    ``_lay_out``, the only thing that could re-fit a cached string, fired
+    on just 1 of 3 runs. 20 is exactly ``DRAWN_MARK_COLUMNS``, so a row
+    fitted there and never refitted overflows an 18-cell box by exactly
+    the scrollbar's width -- the CI failure verbatim.
 
-    def update(self, text: str) -> None:
-        import re
+    Reproduced here by fitting once at 20, then narrowing the box to 18
+    with NOTHING telling the widget to refit -- no resize, no second
+    ``_lay_out`` call. Only the next paint (``render()``) is asked for
+    anything, which is the same thing the compositor asks for, and it
+    must still be correct."""
+    from textual.geometry import Size
 
-        self.text = re.sub(r"\[[^]]*\]", "", text)
+    class _Narrowing(_DrawnMark):
+        width = 20
+
+        @property
+        def content_size(self) -> Size:  # type: ignore[override]
+            return Size(self.width, 7)
+
+    mark = _Narrowing("", classes="banner-wordmark")
+    mark.render()  # first layout pass: the box is 20 wide, no scrollbar
+    first = _plain_lines(mark)
+    assert max(len(line) for line in first) <= 20, "sanity: 20 fits 20"
+
+    mark.width = 18  # the scrollbar appears; nothing else is told
+    mark.render()  # the next paint -- not a resize, not a second _lay_out
+    for line in _plain_lines(mark):
+        assert len(line) <= 18, (
+            f"row {line!r} ({len(line)} cells) overflows the 18-cell box "
+            "the scrollbar left behind"
+        )
