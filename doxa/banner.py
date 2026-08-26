@@ -183,6 +183,18 @@ MARK_GAP = 3
 #: needed to grow past that to get there, which is why the row budget
 #: did not have to grow past what :data:`MARK_ROWS` already spends (see
 #: :data:`TAGLINE`'s own note on the total).
+#:
+#: **One stroke weight for all four letters.** Every diagonal or vertical
+#: stroke below is exactly one column wide -- Δ's and Α's legs, Ο's
+#: sides. An earlier pass drew Ο's sides two columns wide (``██   ██``)
+#: to make the curve read as a curve rather than a straight edge, and
+#: that was wrong: three letters at one stroke weight and a fourth at
+#: double it reads as uneven type, not a rounder letterform, and at
+#: wordmark scale that unevenness is exactly what stops four letters
+#: from reading as one word. Ο's roundness comes from the CORNER cells
+#: instead -- the cap row narrower than the body, stepping out by one
+#: column on the row below it (the same diagonal-adjacency a single-cell
+#: apex already uses for Δ and Α above) -- never from a thicker line.
 _DELTA_ROWS: tuple[str, ...] = (
     "    █    ",
     "   █ █   ",
@@ -193,13 +205,13 @@ _DELTA_ROWS: tuple[str, ...] = (
     "█████████",
 )
 _OMICRON_ROWS: tuple[str, ...] = (
-    " █████ ",
-    "███████",
-    "██   ██",
-    "██   ██",
-    "██   ██",
-    "███████",
-    " █████ ",
+    "  ███  ",
+    " █   █ ",
+    "█     █",
+    "█     █",
+    "█     █",
+    " █   █ ",
+    "  ███  ",
 )
 _XI_ROWS: tuple[str, ...] = (
     "█████████",

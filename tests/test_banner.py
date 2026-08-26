@@ -178,6 +178,38 @@ def test_alpha_has_a_full_width_crossbar():
         assert row.count("█") == 2, f"row {row!r} below the crossbar is not two legs"
 
 
+def test_omicron_is_round_with_the_same_single_cell_stroke_as_its_neighbours():
+    """A review pass caught this one directly: an earlier Ο drew its sides
+    two columns wide (``██   ██``) to make the curve read as a curve,
+    which left three letters at one stroke weight and a fourth at double
+    it -- uneven type, not a rounder O, and at wordmark scale that
+    unevenness is exactly what stops four letters reading as one word.
+
+    Pinned on the side rows specifically (top/bottom caps are a short
+    horizontal run, same idea as Δ's solid base, and not what the
+    original defect was about): each is exactly two ink cells, one column
+    wide apiece -- never a doubled-width ``██`` edge -- and the two are
+    on OPPOSITE sides of the letter, not adjacent. Roundness comes from
+    the caps being narrower than the body instead, checked directly."""
+    rows = banner._OMICRON_ROWS
+    assert len(rows) == len(banner.MARK_ROWS)
+    sides = rows[1:-1]
+    for row in sides:
+        cols = [i for i, c in enumerate(row) if c == "█"]
+        assert len(cols) == 2, (
+            f"row {row!r} of Ο is not two single-cell edges -- got {len(cols)} ink cells"
+        )
+        assert cols[1] - cols[0] > 1, (
+            f"row {row!r} of Ο has adjacent ink -- a doubled-width stroke, not two edges"
+        )
+    # The caps (rows 0 and -1) are narrower than the body -- that
+    # narrowing, not stroke thickness, is where the roundness lives.
+    cap_width = rows[0].count("█")
+    body_width = max(cols[-1] - cols[0] + 1 for row in sides for cols in [[i for i, c in enumerate(row) if c == "█"]])
+    assert 0 < cap_width < body_width, "Ο's cap must be narrower than its body -- that is its roundness"
+    assert rows[-1] == rows[0], "Ο must be symmetric top to bottom"
+
+
 def test_drawn_lines_fit_the_width_they_are_given():
     """Three shapes, widest first. Nothing may overflow its column: art
     that wraps is mush, which is what this whole release is about."""
