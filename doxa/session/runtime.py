@@ -259,6 +259,11 @@ class PaneRuntimeMixin:
                 self._oob_turn = TurnBlock(str(ev.data.get("prompt") or ""))
                 self._oob_chips = {}
                 await block_list.mount(self._oob_turn)
+                # This client did not drive the turn but IS watching it --
+                # same freeze-during-dead-air defect either way, so the
+                # elapsed-time ticker (ThinkingMarker.start's own docstring)
+                # arms here too, not only in _run_turn below.
+                self._oob_turn.thinking.start()
                 block_list.scroll_end(animate=False)
                 # A new turn starting (even one another client is driving)
                 # is itself "seen" -- the same stale-dot clear _run_turn
@@ -286,6 +291,9 @@ class PaneRuntimeMixin:
                     self._oob_turn = TurnBlock("(turn already in progress)")
                     self._oob_chips = {}
                     await block_list.mount(self._oob_turn)
+                    # Genuinely in flight (we just don't know since when) --
+                    # ticks from "now", the best estimate available.
+                    self._oob_turn.thinking.start()
                     # Same compose wait mount_transcript needs: an event
                     # arriving in the same cycle as the mount would find
                     # the block's Markdown body not yet there.
@@ -321,6 +329,11 @@ class PaneRuntimeMixin:
         block = TurnBlock(prompt)
         block_list = self.query_one("#block-list", VerticalScroll)
         await block_list.mount(block)
+        # The turn genuinely begins here -- arms the per-second elapsed
+        # ticker (ThinkingMarker.start's own docstring has the full
+        # argument); block.mark_done (both below and on the error path)
+        # is what stops it, on every way this turn can end.
+        block.thinking.start()
         block_list.scroll_end(animate=False)
 
         chips: dict[str, ToolChip] = {}

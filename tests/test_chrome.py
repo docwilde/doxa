@@ -238,8 +238,20 @@ def test_the_in_flight_marker_is_static():
 @pytest.mark.asyncio
 async def test_no_armed_timers_while_a_turn_is_in_flight(monkeypatch, tmp_path):
     """The regression that mattered: the old indicator armed its 16 Hz
-    animation the moment a turn started. Nothing arms one now -- not
-    during the turn, and not after it."""
+    ``auto_refresh`` animation the moment a turn started. Nothing arms an
+    ``auto_refresh`` timer now -- not during the turn, and not after it --
+    which is what :func:`_armed` (an ``_auto_refresh_timer`` scan) checks
+    below, unchanged by v0.78.0.
+
+    v0.78.0 DOES arm a different, plain (non-``auto_refresh``) ``Timer`` on
+    the marker itself for as long as the turn runs -- the per-second
+    elapsed-time ticker, see ``ThinkingMarker.start``. That is checked
+    here too, directly on the widget rather than through ``_armed``: the
+    amended rule this test protects is no longer "nothing is ever armed",
+    it is "nothing survives the turn it was armed for" -- see
+    ``tests/test_transcript_density.py``'s
+    ``test_the_tick_timer_lives_no_longer_than_the_turn_it_belongs_to``
+    for the same assertion driven by real deltas instead of a bare sleep."""
     monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
 
     import asyncio
@@ -261,17 +273,24 @@ async def test_no_armed_timers_while_a_turn_is_in_flight(monkeypatch, tmp_path):
         # load the turn can finish between two pauses, and a timing race
         # is not what this test is about.
         saw_in_flight = False
+        saw_tick_timer_armed = False
         for _ in range(400):
             blocks = list(app.query(TurnBlock))
             if blocks:
                 assert _armed(app) == []
                 if blocks[0].thinking.display:
                     saw_in_flight = True
+                    if blocks[0].thinking._tick_timer is not None:
+                        saw_tick_timer_armed = True
                 elif saw_in_flight:
                     break
             await pilot.pause(0.02)
         assert saw_in_flight, "the marker never showed -- nothing was sampled"
+        assert saw_tick_timer_armed, "the elapsed-time ticker never armed"
         assert _armed(app) == []
+        # Gone, not just hidden: the turn ended, so the timer that WAS
+        # armed above must be cancelled, not merely invisible.
+        assert app.query_one(TurnBlock).thinking._tick_timer is None
 
 
 @pytest.mark.asyncio

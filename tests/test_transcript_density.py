@@ -461,10 +461,32 @@ async def test_a_delta_burst_does_not_buy_a_repaint_per_delta(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_the_spinner_arms_nothing_during_or_after_a_turn(monkeypatch, tmp_path):
-    """The whole reason this is a delta-driven spinner and not a
-    set_interval one. Sampled across a live turn, exactly like
-    test_chrome.py's own guard, plus an explicit check on the marker."""
+async def test_the_tick_timer_lives_no_longer_than_the_turn_it_belongs_to(
+    monkeypatch, tmp_path
+):
+    """v0.56.0's rule here used to be "delta-driven, not set_interval" --
+    full stop, and this test's name used to say so. v0.78.0 amends it on
+    purpose (see ThinkingMarker's own docstring for the full argument):
+    an in-flight turn now arms exactly ONE per-second ``Timer``
+    (``ThinkingMarker._tick_timer``), because a purely delta-driven
+    spinner freezes for the whole length of a tool call, and that read as
+    hung. The rule this test protects was never "no timer, ever" -- see
+    :class:`doxa.ui.statusline.GitLine`'s own "no CPU spent when nothing
+    is happening" -- it is that ONLY while a turn is genuinely in flight,
+    and never a moment longer.
+
+    So this test now checks the amended rule directly instead of a global
+    absence:
+
+    * ``_armed()`` -- an ``_auto_refresh_timer`` scan -- still returns
+      ``[]`` throughout, because ``_tick_timer`` is a plain ``Timer``, not
+      Textual's ``auto_refresh``. This mechanism is UNCHANGED by v0.78.0.
+    * ``blocks[0].thinking.auto_refresh is None`` -- same reason, still
+      true through a whole live turn.
+    * ``blocks[0].thinking._tick_timer`` -- the actual new state -- is
+      armed (not None) at some point while the marker is displayed, and
+      is None again (not just hidden) once the turn ends. An idle app,
+      sampled before the turn starts, arms none at all."""
     import asyncio as _asyncio
 
     from doxa.ui.statusline import ClockChip
@@ -484,27 +506,86 @@ async def test_the_spinner_arms_nothing_during_or_after_a_turn(monkeypatch, tmp_
     app = DoxaApp(cwd=str(tmp_path))
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
-        app.query_one("#prompt-input").value = "go"
-        await pilot.press("enter")
 
         armed = lambda: [
             node for node in app.query("*")
             if not isinstance(node, ClockChip)
             and getattr(node, "_auto_refresh_timer", None) is not None
         ]
+        # Idle, before the turn: no tick timer anywhere either.
+        assert all(m._tick_timer is None for m in app.query(ThinkingMarker))
+
+        app.query_one("#prompt-input").value = "go"
+        await pilot.press("enter")
+
         spun = False
+        tick_timer_seen_armed = False
         for _ in range(300):
             blocks = list(app.query(TurnBlock))
             if blocks:
                 assert armed() == []
                 assert blocks[0].thinking.auto_refresh is None
+                if blocks[0].thinking.display and blocks[0].thinking._tick_timer is not None:
+                    tick_timer_seen_armed = True
                 if blocks[0].thinking.phase:
                     spun = True
                 if not blocks[0].thinking.display and spun:
                     break
             await pilot.pause(0.02)
         assert spun, "the marker never advanced -- nothing was sampled"
+        assert tick_timer_seen_armed, "the tick timer never armed during the turn"
         assert armed() == []
+        # Turn done: the timer that WAS armed is gone, not just hidden --
+        # sampled on every marker in the app, not only this turn's, so a
+        # second finished turn cannot leave a second one behind either.
+        assert all(m._tick_timer is None for m in app.query(ThinkingMarker))
+
+
+@pytest.mark.asyncio
+async def test_the_marker_ticks_once_a_second_with_no_events_at_all(
+    monkeypatch, tmp_path,
+):
+    """The reported defect, reproduced directly: between two engine
+    events (a slow tool call, a model silently thinking) the v0.56.0
+    marker froze on whatever frame the last delta left it on. It must not
+    any more -- and it must SHOW the wait rather than merely not-look-
+    frozen, which is why this asserts the ELAPSED SECONDS incrementing,
+    not just "the glyph changed" (a glyph that kept moving while the
+    second count silently stalled would still pass a glyph-only check,
+    and would still read as a lie about how long the wait has been).
+
+    Real wall-clock waits, not a mocked clock -- the v0.28.0 rule this
+    file already follows (assert rendered text, not query matches) and
+    the bar this feature was built against (measure, don't assume):
+    ``pilot.pause()`` actually advances the event loop the tick timer
+    runs on, so a real ``Timer`` firing is what makes this pass, not an
+    assumption that it would."""
+    app = _app(tmp_path, monkeypatch)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        block_list = app.active_pane.query_one("#block-list", VerticalScroll)
+        block = TurnBlock("hi")
+        await block_list.mount(block)
+        await pilot.pause()
+
+        # What _run_turn does the instant a real turn begins -- no engine
+        # event follows this in the whole test, on purpose.
+        block.thinking.start()
+        try:
+            first = _rows(app, block.thinking)[0]
+            assert "(0s)" in first, first
+
+            await pilot.pause(1.2)
+            second = _rows(app, block.thinking)[0]
+            assert second != first, "the marker's text did not change across a tick"
+            assert "(1s)" in second, second
+
+            await pilot.pause(1.2)
+            third = _rows(app, block.thinking)[0]
+            assert third != second, "the marker's text did not change across a tick"
+            assert "(2s)" in third, third
+        finally:
+            block.thinking.stop()
 
 
 def test_the_section_still_declares_no_transition_and_no_indicator():

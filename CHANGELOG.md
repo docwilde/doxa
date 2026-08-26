@@ -4,6 +4,45 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.78.0 — 2026-08-27
+
+**Spinner freeze during dead air.** The in-flight marker only advanced on
+an SSE delta, so a 30s `Bash`, a slow `WebFetch`, or a silent subagent
+froze it on whatever frame the last event left it at — reading as hung
+exactly when reassurance mattered most.
+
+- `ThinkingMarker` now arms a per-second `Timer` (`start()`/`stop()`) for
+  the life of a turn, in addition to its existing delta-driven `advance()`.
+  It shows elapsed seconds — `⠋ working (14s)` — since turn start, not
+  since the last event: since-last-event resets to 0 on every delta, and a
+  chatty turn would never show more than a second or two no matter how
+  long it actually ran.
+- Armed at the three places a turn genuinely begins (`_run_turn`, and the
+  `turn_started`/orphaned-turn branches of a peer-driven turn); cancelled
+  from `hide_thinking()` on every completion path (turn_done, the error
+  path, restore) and — belt and braces — by Textual's own message-pump
+  teardown on any abrupt one (pane close, app quit), verified against
+  `textual.message_pump` rather than assumed.
+- Amends the no-third-timer rule from v0.56.0/v0.28.0, on purpose: that
+  rule's real target was idle CPU, not timer count — `GitLine`'s own
+  wording is "no CPU spent when nothing is happening". A timer that exists
+  only while a turn is in flight and is gone the instant it ends spends
+  none. `tests/test_transcript_density.py`'s
+  `test_the_tick_timer_lives_no_longer_than_the_turn_it_belongs_to`
+  (renamed from `test_the_spinner_arms_nothing_during_or_after_a_turn`)
+  and `tests/test_chrome.py`'s `test_no_armed_timers_while_a_turn_is_in_flight`
+  now assert that directly — armed during the turn, gone after, none while
+  idle — instead of a global absence.
+- Glyph cycle unchanged (doxa's own Braille frames, already chosen for
+  font coverage); the shape (glyph, phase, elapsed) follows Claude Code's
+  own "esc to interrupt" line, reverse-engineered from the installed CLI
+  binary (`strings -n6 --unicode=escape` + a raw UTF-8 byte scan) rather
+  than guessed — its own rotating asterisk glyph could not be sourced the
+  same way and is not reproduced.
+- `assets/shots/markdown-stream.gif` and `assets/shots/tool-calls.gif`
+  (README) show the old frozen-glyph, no-elapsed-time marker and are
+  stale as of this release; not regenerated.
+
 ## 0.77.0 — 2026-08-27
 
 Fixed a staged proposal losing its own timestamp on the pending picker.
