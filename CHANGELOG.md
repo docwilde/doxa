@@ -4,6 +4,39 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.74.0 — 2026-08-26
+
+Claude Code plugins and skills, adopted without reopening item AA's
+duplicate-snapshot defect. See
+[`docs/plans/plugins.md`](docs/plans/plugins.md).
+
+- `doxa/claude_plugins.py` discovers the operator's OWN installed Claude
+  Code plugins (`~/.claude/plugins/installed_plugins.json`, resolving each
+  entry's `installPath` directly rather than guessing at the versioned
+  cache) and adopts them per CAPABILITY, not per plugin: commands, skills
+  and agents are additive and inert until invoked, so they are adopted;
+  hooks and MCP servers execute unasked at session start — the exact shape
+  of item AA's original defect — so they are refused unconditionally,
+  regardless of the setting below. A sanitized, copy-then-exclude staged
+  copy per plugin (never the CLI's own plugin-management files) is handed
+  to the SDK as one `--plugin-dir` flag per adopted plugin.
+  `ClaudeAgentOptions.env`/isolation is untouched either way.
+- The LORE plugin is blocked outright, always: `lore_core` already runs
+  in-process inside DOXA, and every one of LORE's own commands shells out
+  to a `bin/` path this module deliberately never stages, so adopting it
+  would ship broken commands on top of a redundant, out-of-band carrier
+  into the same belief store.
+- New setting `adopt_plugins` / `DOXA_ADOPT_PLUGINS`, default OFF —
+  isolation stays the resting posture; adopting the operator's own plugins
+  is opt-in.
+- `/plugins`: what was discovered, what is enabled in your own
+  `~/.claude/settings.json`, what is (or would be) adopted, and what is
+  refused and why — every refusal states its reason.
+- `/reload-plugins`: re-scans and re-stages without restarting DOXA, and
+  says plainly that it only affects new sessions/tabs — a running
+  session's CLI already connected with whatever `--plugin-dir` flags its
+  own start resolved.
+
 ## 0.73.0 — 2026-08-26
 
 Removed item V's standalone beliefs browser tab; its evidence trail moved

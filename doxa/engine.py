@@ -83,6 +83,7 @@ from pathlib import Path
 from typing import Any
 
 from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see module docstring
+from . import claude_plugins as claude_plugins_mod
 from . import cli_isolation as cli_isolation_mod
 from . import config as config_mod
 from . import gate as gate_mod
@@ -1841,6 +1842,15 @@ class SessionEngine:
             # them, injecting a SECOND memory snapshot on top of the one
             # above). LORE_SKIP=1 rides the same dict as belt-and-braces.
             env=cli_isolation_mod.spawn_env(),
+            # Opt-in adoption of the operator's OWN Claude Code plugins
+            # (docs/plans/plugins.md, doxa.claude_plugins): commands,
+            # skills and agents only, staged into a sanitized copy per
+            # plugin and passed one --plugin-dir per entry -- empty, with
+            # nothing staged, unless DOXA_ADOPT_PLUGINS/'adopt claude
+            # plugins' is on. Hooks and MCP servers never reach this list
+            # regardless of the setting; that is item AA's actual fix and
+            # this list does not get to relitigate it.
+            plugins=claude_plugins_mod.adopt(),
         )
 
     async def start(self) -> EngineEvent:

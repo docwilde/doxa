@@ -90,6 +90,8 @@ PANE_COMMANDS: "tuple[CommandBinding, ...]" = (
     CommandBinding("/settings", "_cmd_settings"),
     CommandBinding("/setup", "_cmd_setup"),
     CommandBinding("/doctor", "_cmd_doctor"),
+    CommandBinding("/plugins", "_cmd_plugins"),
+    CommandBinding("/reload-plugins", "_cmd_reload_plugins"),
     CommandBinding("/model", "_cmd_model"),
     CommandBinding("/branch", "_cmd_branch"),
     CommandBinding("/mode", "_cmd_mode"),
@@ -268,6 +270,49 @@ class PaneCommandsMixin:
 
         checks = await asyncio.to_thread(doctor_mod.run_checks)
         await self._system(doctor_mod.report(checks))
+
+    async def _cmd_plugins(self, args: str) -> None:
+        """``/plugins`` -- docs/plans/plugins.md. Read-only, like
+        ``/doctor``: what DOXA found under the operator's REAL
+        ``~/.claude``, what is enabled there, what would be (or is)
+        adopted, and what is refused and why. Off the event loop because
+        discovery reads several JSON files and, for an adopted plugin,
+        may copy one -- see ``doxa.claude_plugins.report``."""
+        from .. import claude_plugins as claude_plugins_mod
+
+        text = await asyncio.to_thread(claude_plugins_mod.report)
+        await self._system(text)
+
+    async def _cmd_reload_plugins(self, args: str) -> None:
+        """``/reload-plugins`` -- re-scan the operator's ``~/.claude``
+        plugins/skills now, without restarting DOXA.
+
+        States plainly what a reload can and cannot reach (the task's own
+        requirement): THIS session's CLI already spawned with the
+        ``--plugin-dir`` flags its own connect resolved
+        (``SessionEngine._build_options``, read once at ``start()``) --
+        there is no live control request that can hand a running `claude`
+        subprocess a new plugin, the same way there is none for a model
+        switch's cousin questions. A reload only changes what the NEXT
+        session (a new tab, ``/clear``, or a fresh ``doxa``) is spawned
+        with. Re-runs discovery AND re-stages every adoptable plugin (if
+        adoption is on) so the report reflects the freshly rebuilt staged
+        copies, not a cached one."""
+        from .. import claude_plugins as claude_plugins_mod
+
+        discovered = await asyncio.to_thread(claude_plugins_mod.discover)
+        staged = await asyncio.to_thread(claude_plugins_mod.adopt, discovered)
+        report = await asyncio.to_thread(claude_plugins_mod.report, discovered)
+        lines = [report, ""]
+        lines.append(
+            f"reload-plugins: re-scanned and re-staged {len(staged)} "
+            "plugin(s). This takes effect for NEW sessions and tabs only "
+            "-- this session's CLI already connected with whatever "
+            "--plugin-dir flags its own start resolved, and nothing can "
+            "hand a running claude process a new one. Open a new tab "
+            "(ctrl+t) or /clear this one to pick up the change."
+        )
+        await self._system("\n".join(lines))
 
     async def _cmd_model(self, args: str) -> None:
         """/model -- switch the model for subsequent turns, in place.

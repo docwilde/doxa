@@ -498,6 +498,8 @@ palette, the `/` autocomplete and `/help` from that single registry.
 | `/settings` | Open the settings modal (`ctrl+,`) |
 | `/setup` | Check state, fix findings one at a time |
 | `/doctor` | Read-only health checks: pass/fail and the fix command for each |
+| `/plugins` | Your Claude Code plugins/skills: discovered, adopted or refused, and why (see [docs/plans/plugins.md](plans/plugins.md)) |
+| `/reload-plugins` | Re-scan Claude Code plugins/skills now (new sessions/tabs only) |
 
 **Maintenance**
 
@@ -521,6 +523,7 @@ environment is winning is read-only in the modal.
 | `model` | `DOXA_MODEL` | CLI default | model for new turns |
 | `effort` | `DOXA_EFFORT` | CLI default | reasoning effort, new sessions only |
 | `allow_bypass` | `DOXA_ALLOW_BYPASS` | off | let new sessions reach `bypassPermissions` at all |
+| `adopt_plugins` | `DOXA_ADOPT_PLUGINS` | off | load commands/skills/agents from your OWN installed Claude Code plugins into new sessions — never their hooks or MCP servers, never LORE (see [docs/plans/plugins.md](plans/plugins.md)) |
 | `permission_mode` | `DOXA_PERMISSION_MODE` | `default` | mode new sessions connect in; accepts `default`/`acceptEdits`/`plan` only |
 | `linger_secs` | `DOXA_LINGER_SECS` | 120 | seconds a daemon outlives its last detached client |
 | `worktree_per_session` | `DOXA_WORKTREE` | on | give each session its own git worktree |

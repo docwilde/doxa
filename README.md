@@ -115,6 +115,14 @@ the same way, by [`scripts/screenshot.py`](scripts/screenshot.py) and
   each other. A clean, unmerged worktree vanishes with the session;
   anything real is kept for you to merge by hand. See
   [Worktrees and finalize](docs/manual.md#worktrees-and-finalize).
+- **The spawned CLI gets its own config, plugins and hooks excluded by
+  default.** Every session's `claude` process is isolated behind its own
+  `CLAUDE_CONFIG_DIR` — none of your installed Claude Code plugins, their
+  hooks or their commands load into it unasked. `/plugins` previews what
+  you have installed; turning `adopt_plugins` on (off by default) carries
+  in their commands, skills and agents only — never their hooks or MCP
+  servers, and never the LORE plugin, since `lore_core` already runs
+  in-process here. See [`docs/plans/plugins.md`](docs/plans/plugins.md).
 
 Three smaller invariants hold the rest together: the palette and `/`
 autocomplete read one command registry, so a command cannot exist on one
@@ -284,7 +292,7 @@ features**, and are written that way on purpose — specifying a thing before
 building it is cheaper than discovering the design in the diff. Each one is a
 design that has been thought through and not yet implemented:
 
-- [`docs/plans/plugin-api.md`](docs/plans/plugin-api.md) — **the plugin API.** There is no loader: no entry-point discovery, no `~/.doxa/plugins` scan, no allowlist, no `Plugin`/`PLUGIN` object, nothing in DOXA that loads third-party code at all. What v0.34.0 actually shipped is the *shape* — the `app.py` split landed along four seams (the command registry `PANE_COMMANDS`, the status-chip records `_status_chips()`, the event dispatch map `EVENT_RENDERERS`, and the `ModelProvider` protocol), so each extension point in the spec names a real structure a loader could bind to. That is the whole claim. The spec also settles two decisions ahead of time: a plugin is never loaded from the working repository, and no plugin-facing write into the belief store will exist.
+- [`docs/plans/plugin-api.md`](docs/plans/plugin-api.md) — **the plugin API.** There is no loader: no entry-point discovery, no `~/.doxa/plugins` scan, no allowlist, no `Plugin`/`PLUGIN` object, nothing in DOXA that loads third-party PYTHON code into its own process at all. What v0.34.0 actually shipped is the *shape* — the `app.py` split landed along four seams (the command registry `PANE_COMMANDS`, the status-chip records `_status_chips()`, the event dispatch map `EVENT_RENDERERS`, and the `ModelProvider` protocol), so each extension point in the spec names a real structure a loader could bind to. That is the whole claim. The spec also settles two decisions ahead of time: a plugin is never loaded from the working repository, and no plugin-facing write into the belief store will exist. Not to be confused with [`docs/plans/plugins.md`](docs/plans/plugins.md) (shipped, v0.74.0) — a different system entirely: adopting the OPERATOR'S OWN Claude Code plugins (commands/skills/agents only, never hooks or MCP servers) into the CLI process the engine spawns.
 - [`docs/plans/split-panes.md`](docs/plans/split-panes.md) — **split panes.** DOXA is a tab strip today; nothing here is built, and a saved tab set restores no layout because there is none to save.
 - [`docs/plans/remote.md`](docs/plans/remote.md) — **remote control and a web client.** Nothing here is built. The daemon's sequenced event stream is what a second renderer would consume, which is why the spec exists, but there is no network transport, no authorization model and no client. Note that this document reasons about a permission-mode feature that has also not landed on `main`.
 - [`docs/plans/mermaid.md`](docs/plans/mermaid.md) — **mermaid diagrams in the transcript.** Nothing implemented. A ```` ```mermaid ```` fence renders as a fenced code block today, which is what every other terminal client does; v0.41.0's image ladder is what a rendered diagram would arrive through, and the open question the spec is actually about is where the renderer's dependency lives.

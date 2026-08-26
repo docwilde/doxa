@@ -22,6 +22,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
+from doxa import claude_plugins as claude_plugins_mod
 from doxa import cli_isolation as cli_isolation_mod
 from doxa.engine import SessionEngine
 from tests.fakes import factory_with_script
@@ -178,6 +179,37 @@ async def test_start_isolates_the_spawned_cli_from_the_real_claude_config(tmp_pa
     # The mechanism actually provisioned the directory, not just named it.
     settings_path = cli_isolation_mod.cli_config_dir() / cli_isolation_mod.SETTINGS_NAME
     assert settings_path.exists()
+    await engine.finalize()
+
+
+@pytest.mark.asyncio
+async def test_start_adopts_no_plugins_by_default(tmp_path):
+    """docs/plans/plugins.md: adoption is opt-in, default OFF -- a session
+    started with nothing configured gets ClaudeAgentOptions.plugins == [],
+    byte-identical to before this feature existed."""
+    factory, created = factory_with_script([])
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+
+    await engine.start()
+
+    assert created[0].options.plugins == []
+    await engine.finalize()
+
+
+@pytest.mark.asyncio
+async def test_start_wires_adopted_plugins_through_to_the_sdk_options(tmp_path, monkeypatch):
+    """The other half: when doxa.claude_plugins.adopt() has something to
+    say, _build_options passes it straight through -- this is the ONE
+    place ClaudeAgentOptions.plugins gets set, so proving the wiring here
+    means every session, not just this test's fake, gets it."""
+    sentinel = [{"type": "local", "path": str(tmp_path / "staged" / "caveman@caveman")}]
+    monkeypatch.setattr(claude_plugins_mod, "adopt", lambda *a, **k: sentinel)
+    factory, created = factory_with_script([])
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+
+    await engine.start()
+
+    assert created[0].options.plugins == sentinel
     await engine.finalize()
 
 
