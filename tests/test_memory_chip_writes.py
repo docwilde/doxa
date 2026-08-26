@@ -10,11 +10,13 @@ stayed exactly as stale as whatever it last happened to read.
 Scoped to ``doxa/session/chips.py``'s own write functions
 (``_resolve_pending``, ``_record_belief_outcome``, ``_retract_belief``)
 deliberately: those are reached from BOTH the picker's per-row action
-sub-menu (tests/test_beliefs_browser.py) and v0.67.0's inline row actions
+sub-menu (tests/test_beliefs_picker.py) and v0.67.0's inline row actions
 (tests/test_picker_row_actions.py) -- one write function, one refresh,
-covering both surfaces without a test per entry point. The full beliefs
-browser tab (``doxa/ui/beliefs.py``) is a separate surface with its own
-call sites and is out of scope here.
+covering both surfaces without a test per entry point. (The standalone
+beliefs browser tab, ``doxa/ui/beliefs.py``, was a third surface reaching
+the same write functions; v0.69.0/v0.73.0 removed it, folding its one
+distinct feature -- an evidence trail -- into the picker itself, so there
+is no longer a third entry point to cover here.)
 
 Which chip moves depends on the action AND the proposal's kind, and
 getting that wrong is its own bug (a chip moving for the wrong reason
@@ -45,7 +47,8 @@ from __future__ import annotations
 
 import pytest
 
-from test_beliefs_browser import (  # noqa: F401 -- reused fixtures/helpers
+from tests.fakes import FakeEngine
+from tests.helpers import (  # noqa: F401 -- reused fixtures/helpers
     _belief,
     _many,
     _open,
@@ -54,7 +57,6 @@ from test_beliefs_browser import (  # noqa: F401 -- reused fixtures/helpers
     _proposals,
     _status_plain,
 )
-from tests.fakes import FakeEngine
 
 
 async def _select(picker, rid: str) -> None:

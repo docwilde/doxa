@@ -35,14 +35,12 @@ from pathlib import Path
 from typing import Any, Callable  # noqa: F401 -- annotation-only
 
 from textual.css.query import NoMatches
-from textual.widgets import TabbedContent
 
 from .. import config as config_mod
 from .. import identity as identity_mod
 from .. import peers as peers_mod
 from ..events import BELIEF_LIST_LIMIT, PENDING_LIST_LIMIT
 from ..history import SessionSearch
-from ..ui.beliefs import ARMED_COLOR, REJECT_COLOR, BeliefsBrowserTab
 from ..ui.dialogs import ChipPicker, CompactConfirm, NeedsInputPopup, RowAction, SlashComplete
 from ..ui.labels import (
     memory_fill,
@@ -53,8 +51,11 @@ from ..ui.labels import (
     proposal_verdict,
     staged_chip,
     staged_count,
+    belief_evidence_rows,
     CLICKABLE_CHIP_ACCENT,
     CTX_ABSOLUTE_MIN_COLS,
+    CTX_AMBER,
+    CTX_RED,
     MODE_CHIP_MIN_COLS,
     MODE_EXPLAIN,
     OUTCOME_COLORS,
@@ -63,6 +64,7 @@ from ..ui.labels import (
     _chip_span,
     _fmt_belief_row,
     _fmt_pending_row,
+    format_picker_column_header,
     _one_line,
     as_proposal,
     belief_outcome_kind,
@@ -79,35 +81,30 @@ from ..ui.labels import ctx_text as ctx_text_of
 from ..ui.statusline import StatusBar
 
 
-# Item V: the one row in each of the two LORE pickers that LEAVES the
-# picker. The chip stays a glance and the browser is the session -- both,
-# rather than one replacing the other, because "roughly what does LORE
-# believe about me" and "which of these 619 beliefs is stale and should
-# these 166 proposals be applied" are not the same question and a dropdown
-# only answers the first.
+# v0.69.0: item V's standalone beliefs browser is gone (`doxa/ui/beliefs.py`
+# -- evidence trails, approve/reject, one belief/proposal per row) and
+# these two pickers are now the whole surface, not a glance in front of a
+# second one. What the browser had that neither picker's inline row
+# actions ever carried was the evidence trail; that is now the beliefs
+# picker's own Right-to-expand gesture (`ChipPicker.expand_current`, wired
+# through `open_beliefs_picker`'s `expand_dispatch`) -- the proposals
+# picker gets no such gesture because a staged proposal carries no
+# evidence trail to expand.
 #
-# EACH DOOR NAMES ITS OWN DESTINATION (v0.57.0). Both open the same tab --
-# it holds this session's whole LORE state, and splitting it would
-# duplicate the surface rather than clarify it -- but they open it FOCUSED
-# on the half the reader came from, and they say which.
-#
-# Before this both rows read "open the beliefs browser", including the one
-# in the PROPOSALS picker, which sent a reader looking for approve/reject
-# to a door labelled beliefs. Reported as misleading, and it was: the door
-# did not say where it led, because it led to two places at once.
-#
-# Neither label names a verb the picker itself performs. The picker has no
-# write affordance and gains none by pointing at one -- a row reading
-# "approve" in a dropdown is the accidental-click surface item V exists to
-# avoid.
-BROWSE_ALL_ROW = (
-    "browse:all",
-    "▸ open the belief browser — evidence trails, outcomes, retract",
-)
-REVIEW_ALL_ROW = (
-    "review:all",
-    "▸ open the proposal review — approve or reject, one at a time",
-)
+# The armed-approve/reject colours the row actions below paint with used
+# to be re-exported from `doxa.ui.beliefs` (`ARMED_COLOR`/`REJECT_COLOR`);
+# defined here directly now that that module is gone. Same values, same
+# reasoning: an armed irreversible control must not wear the accent every
+# ordinary clickable span in this app wears.
+ARMED_COLOR = CTX_RED
+REJECT_COLOR = CTX_AMBER
+
+# v0.69.0: the one column-name header both pickers show, computed once --
+# it is a pure function of constants (see format_picker_column_header's
+# own docstring on why "status"/"text" rather than "verdict"/"claim"),
+# not per-belief or per-proposal data, so there is nothing to rebuild it
+# against on every open.
+PICKER_COLUMN_HEADER = format_picker_column_header()
 
 
 # v0.67.0: inline row actions for the two pickers above -- reachable
@@ -124,18 +121,36 @@ REVIEW_ALL_ROW = (
 # menus: beliefs get LORE's own outcome vocabulary plus retract (never
 # approve/reject -- see _open_belief_actions's docstring on why), the
 # proposals menu keeps approve/reject.
+# v0.69.0: the two ARMING labels shortened, and the trailing "…" dropped
+# from "retract" -- three corrections, one change. First, the ellipsis:
+# it read as "opens something further" back when retract lived only in
+# the per-row sub-menu; inline, it costs a column and promises a
+# destination this control does not have. Second, and the real reason:
+# RowAction.column_width sizes the RESTING label's own padded column to
+# the WIDER of the resting and armed label so the row does not visibly
+# jump width the moment it arms -- and "⌫ CONFIRM RETRACT"/"✓ CONFIRM
+# APPROVE" were so much wider than "r retract…"/"a approve" that the
+# padding closing that gap became the reported defect (the clickable
+# underline visibly outran the word; see ChipPicker._action_suffix's own
+# docstring for the fix on the rendering side). Shortened to "⌫ RETRACT"/
+# "✓ APPROVE" -- the glyph switch, the colour switch to ARMED_COLOR and
+# the disarm hint already say "this is now armed"; doubling the word in
+# full caps was not carrying weight the rest of the control was not
+# already carrying. Chosen to land at the SAME LENGTH as their own
+# resting labels (9 characters each) specifically so column_width needs
+# no padding at all for either verb -- the fix on both ends, not just one.
 BELIEF_ROW_ACTIONS = [
     RowAction("y", "confirmed", "y confirmed", color=OUTCOME_COLORS["confirmed"]),
     RowAction("c", "contradicted", "c contradicted",
               color=OUTCOME_COLORS["contradicted"]),
     RowAction("s", "stale", "s stale", color=OUTCOME_COLORS["stale"]),
-    RowAction("r", "retract", "r retract…",
-              armed_label="⌫ CONFIRM RETRACT", color=REJECT_COLOR,
+    RowAction("r", "retract", "r retract",
+              armed_label="⌫ RETRACT", color=REJECT_COLOR,
               armed_color=ARMED_COLOR, arms=True),
 ]
 PENDING_ROW_ACTIONS = [
     RowAction("a", "approve", "a approve",
-              armed_label="✓ CONFIRM APPROVE", color=CLICKABLE_CHIP_ACCENT,
+              armed_label="✓ APPROVE", color=CLICKABLE_CHIP_ACCENT,
               armed_color=ARMED_COLOR, arms=True),
     RowAction("r", "reject", "r reject", color=REJECT_COLOR),
 ]
@@ -547,8 +562,8 @@ class PaneChipsMixin:
             f"{engine.belief_count()} beliefs",
             "open_beliefs_picker",
             "active beliefs LORE holds for this session -- click for the "
-            "grouped list, or /beliefs for the full browser (evidence, "
-            "age, provenance, staged proposals)",
+            "grouped list; confirmed/contradicted/stale/retract are inline "
+            "on each row, Right expands its evidence trail",
         ))
         # Curated-memory fill, right after the belief count: both answer
         # "what does LORE hold for this session", and the caps are the one
@@ -655,6 +670,7 @@ class PaneChipsMixin:
         *,
         note: str = "",
         title: str = "",
+        column_header: "str | None" = None,
         groups: "dict[str, str] | None" = None,
         collapsible: bool = False,
         group_notes: "dict[str, str] | None" = None,
@@ -664,6 +680,8 @@ class PaneChipsMixin:
         row_actions: "list[RowAction] | None" = None,
         row_action_dispatch: "Callable[[str, str], Any] | None" = None,
         prompt_filter: bool = False,
+        expand_dispatch: "Callable[[str], Any] | None" = None,
+        expand_available: "Callable[[str], bool] | None" = None,
     ) -> None:
         """Shared entry point for every chip that opens :class:`ChipPicker`
         -- guards against opening UNDER a pending needs-input request (same
@@ -671,19 +689,25 @@ class PaneChipsMixin:
         applies to the two prompt-driven popups) and closes those two
         popups first, so at most one of the four ever shows at once.
 
-        The last four keywords (v0.67.0) only ever arrive from
-        :meth:`open_beliefs_picker`/:meth:`open_pending_picker` -- see
-        ``RowAction``'s own docstring for what they turn on."""
+        ``row_prefix_width``/``row_actions``/``row_action_dispatch``/
+        ``prompt_filter``/``column_header`` (v0.67.0/v0.69.0) only ever
+        arrive from :meth:`open_beliefs_picker`/:meth:`open_pending_picker`
+        -- see ``RowAction``'s own docstring for what they turn on.
+        ``expand_dispatch``/``expand_available`` (v0.69.0) only ever
+        arrive from :meth:`open_beliefs_picker` -- see
+        :meth:`_fetch_belief_evidence`."""
         if self.query_one("#needs-input-popup", NeedsInputPopup).is_open:
             return
         self.query_one("#slash-complete", SlashComplete).close()
         self.query_one("#session-search", SessionSearch).close()
         self.query_one("#chip-picker", ChipPicker).open(
-            rows, current_id, on_select, note=note, title=title, groups=groups,
+            rows, current_id, on_select, note=note, title=title,
+            column_header=column_header, groups=groups,
             collapsible=collapsible, group_notes=group_notes,
             counted_noun=counted_noun, open_groups=open_groups,
             row_prefix_width=row_prefix_width, row_actions=row_actions,
             row_action_dispatch=row_action_dispatch, prompt_filter=prompt_filter,
+            expand_dispatch=expand_dispatch, expand_available=expand_available,
         )
 
     @staticmethod
@@ -957,14 +981,19 @@ class PaneChipsMixin:
         self.app._cmd_attach(entry)
 
     async def open_beliefs_picker(self) -> None:
-        """The beliefs chip's click target (item 3) -- v0.22.0 left it
-        plain ("no `/beliefs`-ish surface exists to route to", per its own
-        release notes). This is a LIGHTWEIGHT viewer, not lettered item V
-        (the full beliefs browser -- evidence trails, approve/reject); a
-        row's selection surfaces its full claim + confidence inline (a
-        SystemBlock) -- the least-surprising small thing a claim-summary
-        row can do, and a deliberately narrow judgment call (see
-        CHANGELOG: item V still owns the real browser).
+        """The beliefs chip's click target (item 3), and -- since v0.69.0
+        removed the standalone beliefs browser (`doxa/ui/beliefs.py`,
+        item V) -- the ONLY beliefs surface left. Selecting a row still
+        opens its own action sub-menu (confirmed/contradicted/stale/
+        retract) via :meth:`_pick_belief_row`; the row also carries those
+        same verbs INLINE (v0.67.0, ``y``/``c``/``s``/``r`` while it is
+        highlighted, or a click on the row's own action span -- see
+        :data:`BELIEF_ROW_ACTIONS`). What the removed browser had that
+        neither of those carried is the evidence trail: Right on a
+        highlighted row fetches and expands it in place, Left folds it
+        away again (:meth:`_fetch_belief_evidence`, wired in below as
+        this picker's ``expand_dispatch`` -- the same fold gesture
+        ``/search``'s own result list already uses).
 
         Cost discipline: ``belief_count()`` (the chip's own number) runs on
         EVERY status refresh and must stay free of the belief BODIES --
@@ -1022,13 +1051,7 @@ class PaneChipsMixin:
             key=lambda b: (_belief_scope_label(str(b.get("subject") or "")),
                            belief_sort_key(b)),
         )
-        rows: "list[tuple[str, str]]" = [BROWSE_ALL_ROW]
-        # UNGROUPED, deliberately: ChipPicker renders a row with no group
-        # where the caller put it, with no header and no fold. Until
-        # v0.57.0 this row was given a group of its own purely so the
-        # header machinery would not paint a bare "▎", which then became a
-        # fold around a single row once groups folded -- a fold whose only
-        # effect was hiding the way out.
+        rows: "list[tuple[str, str]]" = []
         groups: "dict[str, str]" = {}
         by_id: "dict[str, dict]" = {}
         tested: "dict[str, int]" = {}
@@ -1047,21 +1070,72 @@ class PaneChipsMixin:
         # tested" has answered a question the expanded list would have
         # taken six hundred rows to answer.
         group_notes = {group: f"{n} tested" for group, n in tested.items()}
+        # v0.69.0: MANDATORY degradation, now enforced on the INLINE path
+        # too. The removed browser rendered NO approve/reject control at
+        # all on a lore_core that could not record one honestly (never
+        # present-but-disabled); the row's own action sub-menu
+        # (_open_belief_actions) already held that line, but the inline
+        # y/c/s/r controls this picker painted regardless of capability --
+        # a read-only session still SAW writable-looking controls on every
+        # row, even though the real engine refuses the write server-side.
+        # Gating the row actions themselves (not just the sub-menu) is
+        # what makes "the control is gone, not merely inert" true here
+        # too -- an option a user can see is an option that works, the
+        # same rule ``doxa.engine.available_modes`` states for permission
+        # modes.
+        belief_writable = bool((self._belief_action_state_cached() or {}).get("capable"))
         self._open_chip_picker(
             rows, None,
             lambda rid: self._pick_belief_row(rid, by_id),
-            title="beliefs", groups=groups,
-            note=self._belief_cap_note(engine, len(rows) - 1),
+            title="beliefs", column_header=PICKER_COLUMN_HEADER, groups=groups,
+            note=self._belief_cap_note(engine, len(rows)),
             collapsible=True, group_notes=group_notes, counted_noun="belief",
-            # The browse row is a DOOR, not data: folding it would hide the
-            # way into the browser behind exactly the fold a 635-belief
-            # store makes necessary.
-            open_groups={"browse"},
-            row_prefix_width=PICKER_PREFIX_WIDTH, row_actions=BELIEF_ROW_ACTIONS,
-            row_action_dispatch=lambda rid, key: self._dispatch_belief_row_action(
-                rid, key, by_id),
+            row_prefix_width=PICKER_PREFIX_WIDTH,
+            row_actions=BELIEF_ROW_ACTIONS if belief_writable else None,
+            row_action_dispatch=(
+                (lambda rid, key: self._dispatch_belief_row_action(rid, key, by_id))
+                if belief_writable else None
+            ),
             prompt_filter=True,
+            expand_dispatch=lambda rid: self._fetch_belief_evidence(rid, by_id),
+            # A belief whose OWN row already carries evidence_count == 0
+            # is known, cheaply and synchronously, to have nothing --
+            # Right on it stays silent, the same nothing a proposal row
+            # already gives, rather than a round trip that flashes
+            # "loading" only to resolve to "no evidence" a moment later.
+            expand_available=lambda rid: bool((by_id.get(rid) or {}).get(
+                "evidence_count")),
         )
+
+    async def _fetch_belief_evidence(
+        self, rid: str, by_id: "dict[str, dict]",
+    ) -> "list[str]":
+        """The beliefs picker's ``expand_dispatch`` -- one belief's
+        derivation trail, fetched lazily (never on load: v0.69.0's whole
+        reason this is a callback and not a field already sitting on the
+        row) and formatted as ROWS: one entry per evidence event, each of
+        which :meth:`ChipPicker.expand_current` mounts as its own row
+        directly under the belief -- never one joined blob.
+
+        Drives the SAME engine call the removed browser's own
+        ``EvidenceTrail`` used (``SessionEngine.belief_evidence`` /
+        ``EngineClient.belief_evidence`` -- engine parity, unchanged by
+        the UI that reaches it), and the SAME formatting
+        (:func:`doxa.ui.labels.belief_evidence_rows`, moved out of that
+        widget rather than reimplemented). Never raises: a fetch that
+        fails is one row a reader can see, not a crash mid-keystroke."""
+        belief = by_id.get(rid)
+        if belief is None:
+            return []
+        engine = self.engine
+        fetcher = getattr(engine, "belief_evidence", None) if engine else None
+        if fetcher is None:
+            return ["    evidence unavailable — this session's handle cannot fetch it"]
+        try:
+            rows = await fetcher(belief.get("id"))
+        except Exception as exc:  # noqa: BLE001 -- a caveat is never worth raising
+            return [f"    evidence unavailable — {type(exc).__name__}: {exc}"]
+        return belief_evidence_rows(list(rows or []))
 
     def _dispatch_belief_row_action(
         self, rid: str, key: str, by_id: "dict[str, dict]",
@@ -1089,8 +1163,7 @@ class PaneChipsMixin:
                 self._record_belief_outcome(belief, event), group="command")
 
     def _pick_belief_row(self, rid: str, by_id: "dict[str, dict]") -> None:
-        """A picker row's destination: the browser, or THIS belief's own
-        actions.
+        """A picker row's destination: THIS belief's own actions.
 
         v0.27.0 spilled the claim inline and stopped there; v0.48.0 makes
         that the first row of a per-belief menu instead, because the user
@@ -1102,14 +1175,9 @@ class PaneChipsMixin:
 
         That shape is also the right one for safety rather than a
         consolation for the wrong one. A dropdown row is one Enter away
-        from whatever the highlight is sitting on, which makes it a MORE
-        accidental surface than the browser's full-height rows, not less --
-        so nothing here acts on the belief you selected. It shows you what
-        can be done to it, named for what it actually does."""
-        if rid == BROWSE_ALL_ROW[0]:
-            self.run_worker(self.open_beliefs_browser(focus="beliefs"),
-                            group="command")
-            return
+        from whatever the highlight is sitting on -- so nothing here acts
+        on the belief you selected. It shows you what can be done to it,
+        named for what it actually does."""
         belief = by_id.get(rid)
         if belief is not None:
             # Deferred one refresh cycle, for the reason
@@ -1131,9 +1199,10 @@ class PaneChipsMixin:
         approve/reject on every belief row, and those two are not
         operations on a belief. Approving applies a STAGED PROPOSAL -- an
         entry that does not exist yet -- and every proposal already carries
-        approve and reject in the browser. A belief is a claim that is
-        already in the store and already steering the model; the things
-        LORE can actually do to one are record what reality did to it
+        approve and reject on its OWN row, in the proposals picker
+        (:data:`PENDING_ROW_ACTIONS`). A belief is a claim that is already
+        in the store and already steering the model; the things LORE can
+        actually do to one are record what reality did to it
         (``belief_outcomes``: confirmed / contradicted / stale) and end it
         (retract). So those are the verbs, spelled LORE's way.
 
@@ -1145,8 +1214,8 @@ class PaneChipsMixin:
         RETRACT ARMS. It is the destructive verb -- the belief leaves the
         working set and the model's context -- and this is a dropdown, so
         it takes a second, separately-worded selection on the same menu.
-        Same misclick asymmetry the browser's approve control carries, in
-        the idiom this widget has."""
+        Same misclick asymmetry a proposal's armed approve carries, in the
+        idiom this widget has."""
         bid = belief.get("id")
         claim = ellipsize(_one_line(str(belief.get("claim") or ""), 200), 46)
         rows: "list[tuple[str, str]]" = [
@@ -1289,44 +1358,6 @@ class PaneChipsMixin:
             f"disk.\n\n{claim}"
         )
 
-    async def open_beliefs_browser(self, focus: str = "beliefs") -> None:
-        """Item V: open (or bring forward) this pane's beliefs browser.
-
-        A TabPane in the shared ``#session-tabs`` strip, mounted the same
-        way :meth:`PaneRuntimeMixin.open_transcript` mounts a subagent's
-        transcript tab -- one browser per pane, reopening activates the
-        existing one rather than stacking a second, and focus moves into
-        the new tab so the keyboard route to a row's own approve/reject
-        works the moment it opens.
-
-        The pane keeps its own reference (``_beliefs_tab``) rather than
-        searching the strip by id: a tab the user closed must not be
-        resurrected by a stale query, and a dropped reference is how this
-        pane learns that happened (see the guard below, which re-checks
-        the tab is still mounted before activating it)."""
-        try:
-            tabbed = self.app.query_one("#session-tabs", TabbedContent)
-        except Exception:  # noqa: BLE001 -- app mid-teardown; nothing to open
-            return
-        existing = getattr(self, "_beliefs_tab", None)
-        if existing is not None and existing.is_mounted:
-            tabbed.active = existing.id or tabbed.active
-            # Activate, then take focus, synchronously -- the same two
-            # lines PaneRuntimeMixin.open_transcript uses for an already
-            # open subagent tab. It works here for the same reason it works
-            # there, PROVIDED the caller is not racing ChipPicker's own
-            # focus hand-off; the picker's row callbacks defer this whole
-            # call by a refresh for exactly that reason (see
-            # _pick_belief_row).
-            existing.focus_target = focus
-            existing._apply_focus(force=True)
-            return
-        tab = BeliefsBrowserTab(self, focus=focus, id=f"beliefs-{self.id}")
-        self._beliefs_tab = tab
-        await tabbed.add_pane(tab)
-        tabbed.active = tab.id or tabbed.active
-        tab.scroll.focus()
-
     @staticmethod
     def _belief_cap_note(engine: "Any", shown: int) -> str:
         """The picker's row-0 caveat when the list is SHORTER than the
@@ -1386,13 +1417,13 @@ class PaneChipsMixin:
         a dead end, and the fix is a native surface, not a better
         sentence.
 
-        STILL READ-ONLY, and since item V that is a division of labour
-        rather than a scope boundary. Every row now says WHAT APPROVING IT
-        WOULD DO (:func:`doxa.ui.labels._fmt_pending_row`), because a row
-        that does not is not reviewable -- but a dropdown is a glance, and
-        approving is not something to do at a glance. The approve and
-        reject controls live on the rows of the beliefs browser, one per
-        proposal, and this picker's first row is the door to it."""
+        Every row says WHAT APPROVING IT WOULD DO
+        (:func:`doxa.ui.labels._fmt_pending_row`), because a row that does
+        not is not reviewable. Approve and reject are inline on the row
+        itself (v0.67.0, ``a``/``r`` while it is highlighted, or a click
+        on the row's own action span -- :data:`PENDING_ROW_ACTIONS`), or
+        one selection away in the row's own action sub-menu
+        (:meth:`_pick_pending_row` -> :meth:`_open_pending_actions`)."""
         engine = self.engine
         if engine is None:
             return
@@ -1425,7 +1456,7 @@ class PaneChipsMixin:
         # timestamps) survives. The oldest proposal in a kind has waited
         # longest, and that belongs at the top.
         ordered = sorted(proposals, key=proposal_group_label)
-        rows = [REVIEW_ALL_ROW]      # ungrouped: a door, not data
+        rows: "list[tuple[str, str]]" = []
         groups: "dict[str, str]" = {}
         by_id: "dict[str, Any]" = {}
         for index, item in enumerate(ordered):
@@ -1442,14 +1473,29 @@ class PaneChipsMixin:
                 f"showing the first {len(proposals)} staged proposals -- this "
                 f"list is capped at {PENDING_LIST_LIMIT}"
             )
+        write_state = self._pending_write_state() or {}
+        writable = bool(write_state.get("capable"))
+        if not writable:
+            # The MANDATORY degradation, said where the removed browser's
+            # own banner said it -- up front, before a row is ever
+            # selected, not only inside the per-row action sub-menu.
+            reason = write_state.get("reason") or (
+                "this session cannot approve or reject"
+            )
+            readonly = f"read-only — {reason}"
+            note = f"{note}\n{readonly}" if note else readonly
         self._open_chip_picker(
             rows, None,
             lambda rid: self._pick_pending_row(rid, by_id),
-            title="pending", note=note, groups=groups,
+            title="pending", column_header=PICKER_COLUMN_HEADER,
+            note=note, groups=groups,
             collapsible=True, counted_noun="proposal",
-            row_prefix_width=PICKER_PREFIX_WIDTH, row_actions=PENDING_ROW_ACTIONS,
-            row_action_dispatch=lambda rid, key: self._dispatch_pending_row_action(
-                rid, key, by_id),
+            row_prefix_width=PICKER_PREFIX_WIDTH,
+            row_actions=PENDING_ROW_ACTIONS if writable else None,
+            row_action_dispatch=(
+                (lambda rid, key: self._dispatch_pending_row_action(rid, key, by_id))
+                if writable else None
+            ),
             prompt_filter=True,
         )
 
@@ -1471,12 +1517,8 @@ class PaneChipsMixin:
             self.run_worker(self._resolve_pending(item, "reject"), group="command")
 
     def _pick_pending_row(self, rid: str, by_id: "dict[str, Any]") -> None:
-        """A pending row's destination: the browser, or one proposal
-        inline. Same shape as :meth:`_pick_belief_row`."""
-        if rid == REVIEW_ALL_ROW[0]:
-            self.run_worker(self.open_beliefs_browser(focus="proposals"),
-                            group="command")
-            return
+        """A pending row's destination: one proposal's own action
+        sub-menu. Same shape as :meth:`_pick_belief_row`."""
         item = by_id.get(rid)
         if item is not None:
             # Deferred a refresh cycle for the reason _select_repo_row
@@ -1592,9 +1634,10 @@ class PaneChipsMixin:
 
         Drives the engine methods v0.46.0 already built, which drive
         ``lore_core.pending``'s own approve path -- so an entry approved
-        from this dropdown carries LORE's own ``via approved`` label,
-        exactly as one approved from the browser does. No second write
-        path."""
+        from this dropdown carries LORE's own ``via approved`` label, the
+        identical label whichever of this menu's own approve controls
+        (the row's inline action, or its action sub-menu) triggered it.
+        No second write path."""
         engine = self.engine
         proposal = as_proposal(item)
         pid = str(proposal.get("pid") or "")
@@ -1639,10 +1682,11 @@ class PaneChipsMixin:
         picker row is ellipsized, and the least surprising thing a
         truncated row can do is show you the rest.
 
-        Since item V it leads with the proposed VERDICT, because what
-        approving would change is the thing a reader of this block is
-        deciding about. Still read-only: the block names the browser as
-        where the decision is made rather than making it here."""
+        Leads with the proposed VERDICT, because what approving would
+        change is the thing a reader of this block is deciding about.
+        Still read-only: the block is a detail VIEW, not a decision --
+        approve and reject stay on the row itself (inline, or its own
+        action sub-menu), never a click target inside a system message."""
         if not item:
             return
         proposal = as_proposal(item)

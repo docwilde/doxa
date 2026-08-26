@@ -804,7 +804,7 @@ class SessionDaemon:
         elif method == "belief_evidence":
             # Item V: ONE belief's evidence trail, fetched on demand.
             #
-            # This is how a browser over hundreds of beliefs shows what
+            # This is how a picker over hundreds of beliefs shows what
             # each was derived from without blowing the frame cap: the
             # trail is never part of the `beliefs` page (which carries a
             # COUNT of it instead), and only the belief a reader actually
@@ -853,7 +853,7 @@ class SessionDaemon:
             # the store. A detached session's lore_core is the DAEMON's,
             # not the client process's -- an attached terminal could have a
             # perfectly modern wheel installed while the daemon it is
-            # driving loaded a stale plugin checkout, so the browser has to
+            # driving loaded a stale plugin checkout, so the picker has to
             # ask the writer, not itself.
             await self._reply(
                 writer, req_id, ok=True, state=self.engine.lore_write_state(),

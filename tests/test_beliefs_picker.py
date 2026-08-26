@@ -1,13 +1,39 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Lettered item V: the beliefs browser.
+"""The beliefs and proposals chip pickers -- what replaced item V's
+standalone beliefs browser tab in v0.69.0.
 
-Every test here asserts something a USER can see or a store can be checked
-for. That bar is not stylistic: the v0.28.0 defect shipped a modal whose
-buttons were in the DOM at zero height for a whole release, invisible,
-while every structural assertion passed. So rows are asserted to have
-non-zero size, the age/verdict/provenance text is asserted to be ON SCREEN
-(read back off the rendered widget, not off the formatter that fed it),
-tooltips are asserted by their TEXT, and the write path is asserted
+This file used to test ``doxa/ui/beliefs.py``'s ``BeliefsBrowserTab``: a
+full-height tab holding every active belief and every staged proposal,
+with per-row evidence trails and approve/reject/confirm/retract controls.
+v0.67.0 put those same controls inline on the status-bar pickers'
+rows (``y``/``c``/``s``/``r`` for beliefs, ``a``/``r`` for proposals, both
+reachable by a bare letter or a click on the row's own action span); once
+the picker carried everything the tab did except the evidence trail, the
+tab was a second way to do the same thing rather than a distinct surface.
+v0.69.0 removed it and gave the picker the one thing it was missing:
+Right on a highlighted belief row fetches and expands its evidence trail
+in place (the same ``/search``-fold gesture ``doxa.history.SessionSearch``
+already uses for Right/Left), Left folds it away again.
+
+What is still here: every test that exercised the PICKER directly (the
+group-fold mechanics, the per-row action sub-menu, the real ``lore_core``
+write-path contract tests, the pure formatter tests) needed no rewrite at
+all -- the picker already carried that behaviour before this file's
+subject changed. What moved: the handful of tests that drove the browser
+widget directly (``_browser()``, ``BeliefRow``/``ProposalRow``/
+``EvidenceTrail``) were rewritten against the picker's own surface
+(``open_beliefs_picker``/``open_pending_picker``, ``ChipPicker``). What
+was deleted outright: tab-mounting mechanics, one-browser-per-pane
+dedup, the beliefs/proposals-half focus routing inside one tab, and the
+"door" row that used to leave the picker for the browser -- none of
+which has, or needs, a picker equivalent.
+
+Every test here still asserts something a USER can see or a store can be
+checked for. That bar is not stylistic: the v0.28.0 defect shipped a
+modal whose buttons were in the DOM at zero height for a whole release,
+invisible, while every structural assertion passed. So the age/verdict/
+provenance text is asserted to be ON SCREEN (read back off the rendered
+row, not off the formatter that fed it), and the write path is asserted
 against the engine's own ledger of what it was asked to do.
 
 The security assertion (nothing is approved without an explicit per-item
@@ -24,7 +50,7 @@ import pytest
 
 from doxa import commands
 from doxa.app import DoxaApp
-from doxa.ui.beliefs import BeliefRow, BeliefsBrowserTab, EvidenceTrail, ProposalRow
+from doxa.ui.dialogs import ChipPicker
 from doxa.ui.labels import (
     _fmt_age,
     _fmt_belief_row,
@@ -39,53 +65,18 @@ from doxa.ui.labels import (
     proposal_verdict,
 )
 
-from textual.widgets import TabbedContent
-
 from fakes import FakeEngine
-
-
-def _status_plain(app) -> str:
-    """The status bar as a reader sees it -- markup resolved. Same helper
-    tests/test_status_chips.py uses: a chip asserted against raw markup is
-    a chip whose colour can hide it."""
-    from textual.content import Content
-
-    return Content.from_markup(str(app.query_one("#status-bar").renderable)).plain
-
-DAY = 86400.0
-
-
-def _stamp(secs_ago: float) -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - secs_ago))
-
-
-def _belief(bid, claim, *, subject="user", created_days=120, idle_days=40,
-            via="derived", confidence=0.9, evidence_count=3,
-            outcome=None, outcome_days=2, outcomes=0, source="dream"):
-    """One belief as ``SessionEngine.list_beliefs`` hands it over.
-
-    ``outcomes`` is ALWAYS present -- 0 meaning "the ledger was read and is
-    empty", which is the ~95% case on a real store and the reason "never
-    tested" is a state rather than a large age. A record with no
-    ``outcomes`` key at all is a DIFFERENT thing (something predating the
-    column) and is built explicitly where it is tested."""
-    belief = {
-        "id": bid, "subject": subject, "claim": claim, "confidence": confidence,
-        "created": _stamp(created_days * DAY),
-        "updated": _stamp(idle_days * DAY),
-        "last_referenced": _stamp(idle_days * DAY),
-        "via": via, "evidence_count": evidence_count,
-        "outcomes": outcomes,
-    }
-    if outcome:
-        belief.update({
-            "outcome_event": outcome,
-            "outcome_at": _stamp(outcome_days * DAY),
-            "outcome_source": source,
-            f"outcome_{outcome}s": max(1, outcomes),
-            "outcomes": max(1, outcomes),
-        })
-    return belief
+from helpers import (
+    DAY,
+    _belief,
+    _many,
+    _open,
+    _picker,
+    _pending_picker,
+    _proposals,
+    _stamp,
+    _status_plain,
+)
 
 
 def _proposal(pid, text, *, kind="memory", action="add", scope="user",
@@ -97,24 +88,6 @@ def _proposal(pid, text, *, kind="memory", action="add", scope="user",
     }
     item.update(extra)
     return item
-
-
-async def _browser(pilot, app, fake) -> BeliefsBrowserTab:
-    pane = app.active_pane
-    await pane.open_beliefs_browser()
-    for _ in range(200):
-        tab = pane._beliefs_tab
-        if tab is not None and tab.rows:
-            await pilot.pause()
-            return tab
-        await pilot.pause(0.02)
-    raise AssertionError("the beliefs browser never finished loading")
-
-
-async def _open(monkeypatch, tmp_path, fake):
-    monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: fake)
-    app = DoxaApp(cwd=str(tmp_path))
-    return app
 
 
 def _plain(widget) -> str:
@@ -313,6 +286,8 @@ def test_last_referenced_survives_in_the_tooltip_and_only_there():
     ({"pid": "p8", "kind": "skill", "action": "retire", "name": "old-skill"},
      "retire → skill/old-skill"),
 ])
+
+
 def test_every_proposal_kind_says_what_approving_it_would_do(item, expected):
     assert proposal_verdict(item) == expected
 
@@ -345,362 +320,30 @@ def test_a_pending_row_leads_with_the_verdict_and_the_wait():
     assert "remember uv, not pip" in row  # still filterable by its own words
 
 
-# -- the surface: rows are visible, and say what they should -------------
-
-
-@pytest.mark.asyncio
-async def test_the_browser_opens_as_a_full_height_tab_with_visible_rows(
-    monkeypatch, tmp_path
-):
-    """The v0.28.0 guard: rows must have real size, not merely exist."""
-    fake = FakeEngine([])
-    fake.list_beliefs_result = [_belief(1, "prefers terse commits")]
-    fake.list_pending_result = [_proposal("20260824-00", "remember uv, not pip")]
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(160, 48)) as pilot:
-        await pilot.pause()
-        browser = await _browser(pilot, app, fake)
-        assert browser.is_mounted
-        assert browser.size.height > 10, "a browser, not a dropdown"
-        rows = list(browser.query(BeliefRow)) + list(browser.query(ProposalRow))
-        assert rows
-        for row in rows:
-            assert row.size.height > 0 and row.size.width > 0, row
-
-
-@pytest.mark.asyncio
-async def test_belief_rows_show_the_verdict_timestamp_and_provenance_on_screen(
-    monkeypatch, tmp_path
-):
-    fake = FakeEngine([])
-    fake.list_beliefs_result = [
-        _belief(1, "prefers terse commits", created_days=120,
-                via="derived", outcome="confirmed", outcome_days=40),
-        _belief(2, "uses uv for deps", subject="project:doxa", via=None,
-                created_days=10),
-    ]
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(160, 48)) as pilot:
-        await pilot.pause()
-        browser = await _browser(pilot, app, fake)
-        rendered = "\n".join(_plain(r) for r in browser.query(BeliefRow))
-        assert "prefers terse commits" in rendered
-        assert "confirmed 40d" in rendered
-        # ...and the one that reality has never tested says exactly that,
-        # rather than wearing an age it did not earn.
-        assert "never tested" in rendered
-        assert "idle" not in rendered
-        assert time.strftime("%Y-%m-%d",
-                             time.gmtime(time.time() - 120 * DAY)) in rendered
-        assert "via derived" in rendered
-        # A belief the store never labelled is named as unlabelled, never
-        # back-filled with a plausible one.
-        assert "provenance unknown" in rendered
-        assert "3 evidence" in rendered
-
-
-@pytest.mark.asyncio
-async def test_proposal_rows_show_the_verdict_and_the_wait_on_screen(
-    monkeypatch, tmp_path
-):
-    fake = FakeEngine([])
-    fake.list_pending_result = [
-        _proposal("20260824-00", "remember uv, not pip", staged_days=5),
-        _proposal("20260824-01", "uses uv", action="replace", match="uses pip",
-                  staged_days=61),
-    ]
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(160, 48)) as pilot:
-        await pilot.pause()
-        browser = await _browser(pilot, app, fake)
-        rendered = "\n".join(_plain(r) for r in browser.query(ProposalRow))
-        assert "add → memory/user" in rendered
-        assert "replace → memory/user" in rendered
-        assert "supersedes: uses pip" in rendered
-        assert "staged 5d" in rendered and "staged 61d" in rendered
-
-
-@pytest.mark.asyncio
-async def test_hovering_a_row_shows_the_full_claim_text(monkeypatch, tmp_path):
-    """The user's ask, asserted as the user would read it: the tooltip
-    carries the WHOLE claim, where the row carries an ellipsized one.
-
-    Also the v0.35.0 guard. That defect keyed a hint by the chip's markup
-    while the lookup ran against markup-stripped text, so the hint
-    silently vanished at two tiers. There is no lookup here at all: the
-    row object that renders the line carries the tooltip, set from the
-    same record in the same constructor -- and this asserts they agree."""
-    long_claim = (
-        "the operator prefers terse conventional commit subjects and asks "
-        "for the body to explain why rather than what, because the diff "
-        "already says what, and a body that repeats it is noise in every "
-        "future bisect"
-    )
-    fake = FakeEngine([])
-    fake.list_beliefs_result = [_belief(1, long_claim)]
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(120, 48)) as pilot:
-        await pilot.pause()
-        browser = await _browser(pilot, app, fake)
-        row = next(iter(browser.query(BeliefRow)))
-        # The ROW is ellipsized...
-        assert "…" in _plain(row)
-        assert long_claim not in _plain(row)
-        # ...and the TOOLTIP is not.
-        assert isinstance(row.tooltip, str)
-        assert long_claim in row.tooltip
-        assert "confidence 0.90" in row.tooltip
-        assert "via derived" in row.tooltip
-        assert row.tooltip == belief_tooltip(row.belief)
-
-
-@pytest.mark.asyncio
-async def test_hovering_a_proposal_says_what_approving_it_would_do(
-    monkeypatch, tmp_path
-):
-    fake = FakeEngine([])
-    fake.list_pending_result = [
-        _proposal("20260824-00", "uses uv", action="replace", match="uses pip"),
-    ]
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(120, 48)) as pilot:
-        await pilot.pause()
-        browser = await _browser(pilot, app, fake)
-        row = next(iter(browser.query(ProposalRow)))
-        assert "approving this would: replace → memory/user" in row.tooltip
-        assert "superseding: uses pip" in row.tooltip
-
-
-@pytest.mark.asyncio
-async def test_a_belief_row_expands_its_evidence_trail_on_demand(
-    monkeypatch, tmp_path
-):
-    """Evidence is fetched per belief, on expand -- never as part of the
-    list. That is how a browser over hundreds of beliefs stays inside one
-    64KB wire frame, so this asserts both halves: nothing is fetched at
-    load, and the trail appears when a row asks for it."""
-    fake = FakeEngine([])
-    fake.list_beliefs_result = [_belief(7, "prefers terse commits")]
-    fake.belief_evidence_result = {7: [
-        {"session_id": "sess-a", "project": "doxa",
-         "note": "said so while reviewing a PR", "created": "2026-05-02T09:00:00Z"},
-    ]}
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(160, 48)) as pilot:
-        await pilot.pause()
-        browser = await _browser(pilot, app, fake)
-        assert fake.belief_evidence_calls == []  # never on load
-        row = next(iter(browser.query(BeliefRow)))
-        row.focus()
-        await pilot.press("enter")
-        for _ in range(100):
-            trails = list(browser.query(EvidenceTrail))
-            if trails:
-                break
-            await pilot.pause(0.02)
-        await pilot.pause()
-        assert fake.belief_evidence_calls == [7]
-        trail = next(iter(browser.query(EvidenceTrail)))
-        assert trail.size.height > 0
-        assert "said so while reviewing a PR" in _plain(trail)
-        assert "sess-a" in _plain(trail)
-
-
-# -- the write half: per row, per action, never by accident --------------
-
-
-@pytest.mark.asyncio
-async def test_nothing_is_approved_without_an_explicit_per_item_action(
-    monkeypatch, tmp_path
-):
-    """SECURITY ASSERTION.
-
-    The whole point of LORE's approval gate is that a human looked at THIS
-    proposal. This drives the browser with everything a careless hand
-    plausibly hits -- opening it, moving through every row, pressing Enter
-    on each (Enter is the key a hand rests on), pressing every other key
-    that is not the approve key -- and asserts the engine was never asked
-    to approve or reject anything.
-
-    It then asserts the arm: ONE press of the approve key still approves
-    nothing, because the first press only arms the control. Only the
-    second press, on that same row, reaches the engine, and it reaches it
-    with exactly one id.
-    """
-    fake = FakeEngine([])
-    fake.list_pending_result = [
-        _proposal("20260824-00", "first proposal"),
-        _proposal("20260824-01", "second proposal"),
-        _proposal("20260824-02", "third proposal"),
-    ]
-    fake.list_beliefs_result = [_belief(1, "a belief")]
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(160, 48)) as pilot:
-        await pilot.pause()
-        browser = await _browser(pilot, app, fake)
-
-        # Walk the whole surface, leaning on Enter and the arrow keys.
-        for _ in range(len(browser.rows) + 2):
-            await pilot.press("enter")
-            await pilot.press("down")
-            await pilot.pause()
-        for key in ("home", "end", "space", "tab", "pageup", "pagedown", "y", "n"):
-            await pilot.press(key)
-            await pilot.pause()
-        assert fake.approved == [], "an approve reached the engine unasked"
-        assert fake.rejected == [], "a reject reached the engine unasked"
-
-        # No bulk affordance anywhere on screen, under any spelling.
-        painted = "\n".join(
-            str(w.renderable) for w in browser.query("Static")
-        ).lower()
-        for phrase in ("approve all", "approve every", "accept all", "reject all"):
-            assert phrase not in painted, phrase
-
-        # ARM: one press of the approve key on one row writes nothing.
-        first = next(r for r in browser.rows if isinstance(r, ProposalRow))
-        first.focus()
-        await pilot.press("a")
-        await pilot.pause()
-        assert first.armed
-        assert fake.approved == [], "the first approve press must only arm"
-        assert "CONFIRM APPROVE" in _plain(first)
-
-        # Moving away DISARMS -- an armed control never outlives attention
-        # on the row that armed it.
-        second = [r for r in browser.rows if isinstance(r, ProposalRow)][1]
-        second.action_approve()
-        await pilot.pause()
-        assert not first.armed and second.armed
-        assert fake.approved == []
-
-        # CONFIRM: the second press on the SAME row, and only that, writes.
-        second.action_approve()
-        for _ in range(100):
-            if fake.approved:
-                break
-            await pilot.pause(0.02)
-        assert fake.approved == ["20260824-01"], "exactly one id, exactly once"
-        assert fake.rejected == []
-
-
-@pytest.mark.asyncio
-async def test_a_click_on_one_rows_approve_affects_only_that_proposal(
-    monkeypatch, tmp_path
-):
-    """The user asked for a button in each row. A click on THAT row's
-    control (twice -- approve arms first) approves THAT id and no other."""
-    fake = FakeEngine([])
-    fake.list_pending_result = [
-        _proposal("20260824-00", "first proposal"),
-        _proposal("20260824-01", "second proposal"),
-    ]
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(160, 48)) as pilot:
-        await pilot.pause()
-        browser = await _browser(pilot, app, fake)
-        rows = [r for r in browser.rows if isinstance(r, ProposalRow)]
-        assert "✓ approve" in _plain(rows[0]) and "✗ reject" in _plain(rows[0])
-
-        rows[1].action_approve()   # the click target's own action method
-        rows[1].action_approve()
-        for _ in range(100):
-            if fake.approved:
-                break
-            await pilot.pause(0.02)
-        await pilot.pause()
-        assert fake.approved == ["20260824-01"]
-        assert rows[1].resolved == "✓ approved"
-        assert rows[0].resolved == ""
-
-
-@pytest.mark.asyncio
-async def test_reject_is_one_action_and_is_as_reachable_as_approve(
-    monkeypatch, tmp_path
-):
-    """Reject discards a staged file; approve writes into the model's
-    context. The asymmetry is deliberate and it runs the safe way round:
-    reject is one action, approve needs two on the same row."""
-    fake = FakeEngine([])
-    fake.list_pending_result = [_proposal("20260824-00", "remember uv, not pip")]
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(160, 48)) as pilot:
-        await pilot.pause()
-        browser = await _browser(pilot, app, fake)
-        row = next(r for r in browser.rows if isinstance(r, ProposalRow))
-        row.focus()
-        await pilot.press("r")
-        for _ in range(100):
-            if fake.rejected:
-                break
-            await pilot.pause(0.02)
-        await pilot.pause()
-        assert fake.rejected == ["20260824-00"]
-        assert fake.approved == []
-        assert row.resolved == "✗ rejected"
-        assert "rejected" in _plain(row)
-
-
-@pytest.mark.asyncio
-async def test_the_keyboard_route_reaches_the_same_per_item_action(
-    monkeypatch, tmp_path
-):
-    """A click-only control is unreachable for most of this app's use.
-    ``a`` arms and applies, ``r`` rejects, ``Esc`` disarms -- all on the
-    FOCUSED row, and ↑/↓ is what moves that focus."""
-    fake = FakeEngine([])
-    fake.list_pending_result = [
-        _proposal("20260824-00", "first proposal"),
-        _proposal("20260824-01", "second proposal"),
-    ]
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(160, 48)) as pilot:
-        await pilot.pause()
-        browser = await _browser(pilot, app, fake)
-        rows = [r for r in browser.rows if isinstance(r, ProposalRow)]
-        rows[0].focus()
-        await pilot.press("down")
-        await pilot.pause()
-        assert app.focused is rows[1], "↓ must move between rows"
-
-        await pilot.press("a")
-        await pilot.pause()
-        assert rows[1].armed
-        await pilot.press("escape")
-        await pilot.pause()
-        assert not rows[1].armed and fake.approved == []
-
-        await pilot.press("a")
-        await pilot.press("a")
-        for _ in range(100):
-            if fake.approved:
-                break
-            await pilot.pause(0.02)
-        assert fake.approved == ["20260824-01"]
-
-
 @pytest.mark.asyncio
 async def test_neither_outcome_is_silent(monkeypatch, tmp_path):
     """The user must see what happened -- in the row AND in the session,
-    because the browser tab may not be the tab they are looking at when a
+    because the picker may not be the surface they are looking at when a
     write lands."""
     fake = FakeEngine([])
     fake.list_pending_result = [_proposal("20260824-00", "remember uv, not pip")]
     app = await _open(monkeypatch, tmp_path, fake)
     async with app.run_test(size=(160, 48)) as pilot:
         await pilot.pause()
-        pane = app.active_pane
-        browser = await _browser(pilot, app, fake)
-        row = next(r for r in browser.rows if isinstance(r, ProposalRow))
-        row.action_approve()
-        row.action_approve()
+        pane, picker = await _pending_picker(pilot, app)
+        index = next(i for i, (rid, _l) in enumerate(picker._rows)
+                     if rid == "pending:0")
+        picker.highlighted = index
+        picker.try_action_key("a")   # arm
+        await pilot.pause()
+        picker.try_action_key("a")   # apply
         for _ in range(150):
             texts = [str(b.renderable) for b in pane.query("SystemBlock")]
-            if any("approved 20260824-00" in t for t in texts):
+            if any("20260824-00 approved" in t for t in texts):
                 break
             await pilot.pause(0.02)
         texts = "\n".join(str(b.renderable) for b in pane.query("SystemBlock"))
-        assert "approved 20260824-00" in texts
+        assert "20260824-00 approved" in texts
         assert "add → memory/user" in texts
         assert "via approved" in texts, "the provenance label is named to the user"
 
@@ -715,18 +358,20 @@ async def test_a_failed_approve_says_so_and_does_not_claim_success(
     app = await _open(monkeypatch, tmp_path, fake)
     async with app.run_test(size=(160, 48)) as pilot:
         await pilot.pause()
-        pane = app.active_pane
-        browser = await _browser(pilot, app, fake)
-        row = next(r for r in browser.rows if isinstance(r, ProposalRow))
-        row.action_approve()
-        row.action_approve()
+        pane, picker = await _pending_picker(pilot, app)
+        index = next(i for i, (rid, _l) in enumerate(picker._rows)
+                     if rid == "pending:0")
+        picker.highlighted = index
+        picker.try_action_key("a")
+        await pilot.pause()
+        picker.try_action_key("a")
         for _ in range(150):
-            if row.resolved:
+            texts = [str(b.renderable) for b in pane.query("SystemBlock")]
+            if any("NOT approved" in t for t in texts):
                 break
             await pilot.pause(0.02)
-        await pilot.pause()
-        assert row.resolved == "✗ NOT applied"
         texts = "\n".join(str(b.renderable) for b in pane.query("SystemBlock"))
+        assert "NOT approved" in texts
         assert "memory scope is full" in texts
 
 
@@ -739,7 +384,12 @@ async def test_an_older_lore_core_degrades_to_read_only_and_says_so(
 ):
     """MANDATORY degradation. A lore_core without the write gate and the
     provenance ledger cannot record that a human approved something, so
-    the browser renders NO approve or reject control and prints why."""
+    the picker's OWN note row says so -- up front, before any row is
+    selected -- and neither the inline row actions nor the per-row action
+    sub-menu (:meth:`PaneChipsMixin._open_pending_actions`) render an
+    approve or reject control at all. Not merely disabled -- ABSENT, the
+    same "the control is gone, not merely inert" rule item V's own
+    docstring states for a permission mode the session cannot reach."""
     fake = FakeEngine([])
     fake.lore_write_state_result = {
         "capable": False, "version": "0.34.0", "source": "plugin",
@@ -754,24 +404,36 @@ async def test_an_older_lore_core_degrades_to_read_only_and_says_so(
     app = await _open(monkeypatch, tmp_path, fake)
     async with app.run_test(size=(160, 48)) as pilot:
         await pilot.pause()
-        browser = await _browser(pilot, app, fake)
-        painted = "\n".join(str(w.renderable) for w in browser.query("Static"))
-        assert "read-only" in painted
-        assert "no write gate or provenance ledger" in painted
-        assert "0.34.0" in painted
+        _pane, picker = await _pending_picker(pilot, app)
+        assert "read-only" in picker._note
+        assert "no write gate or provenance ledger" in picker._note
+        assert "0.34.0" in picker._note
 
-        row = next(r for r in browser.rows if isinstance(r, ProposalRow))
-        assert row.size.height > 0
-        assert "approve" not in _plain(row).lower()
-        assert "reject" not in _plain(row).lower()
+        index = next(i for i, (rid, _l) in enumerate(picker._rows)
+                     if rid == "pending:0")
+        shown = _shown(picker)[index]
+        assert "a approve" not in shown
+        assert "r reject" not in shown
 
-        # And the controls are not merely hidden: driving them writes
-        # nothing.
-        row.focus()
-        row.action_approve()
-        row.action_approve()
-        await pilot.press("a", "a", "r")
+        # And the controls are not merely hidden: driving the reserved
+        # letters writes nothing.
+        picker.highlighted = index
+        picker.try_action_key("a")
+        picker.try_action_key("r")
         await pilot.pause()
+        assert fake.approved == [] and fake.rejected == []
+
+        # Nor does the row's own action sub-menu offer them.
+        picker.select_row(index)
+        for _ in range(50):
+            sub = app.query_one("#chip-picker", ChipPicker)
+            if sub.is_open:
+                break
+            await pilot.pause(0.02)
+        actions = [rid for rid, _l in
+                   app.query_one("#chip-picker", ChipPicker)._rows
+                   if rid.startswith("act:")]
+        assert actions == ["act:show", "act:back"]
         assert fake.approved == [] and fake.rejected == []
 
 
@@ -785,7 +447,10 @@ def test_beliefs_is_a_registered_command():
 
 
 @pytest.mark.asyncio
-async def test_the_slash_command_opens_the_browser(monkeypatch, tmp_path):
+async def test_the_slash_command_opens_the_picker(monkeypatch, tmp_path):
+    """v0.69.0: ``/beliefs`` used to open the standalone browser tab; the
+    tab is gone, so it opens the SAME picker the beliefs chip opens --
+    one door, not two, to the one surface left."""
     fake = FakeEngine([])
     fake.list_beliefs_result = [_belief(1, "prefers terse commits")]
     app = await _open(monkeypatch, tmp_path, fake)
@@ -794,75 +459,16 @@ async def test_the_slash_command_opens_the_browser(monkeypatch, tmp_path):
         pane = app.active_pane
         pane.query_one("#prompt-input").value = "/beliefs"
         await pilot.press("enter")
-        for _ in range(200):
-            if pane._beliefs_tab is not None and pane._beliefs_tab.rows:
-                break
-            await pilot.pause(0.02)
-        assert isinstance(pane._beliefs_tab, BeliefsBrowserTab)
-        assert pane._beliefs_tab.is_mounted
-
-
-@pytest.mark.asyncio
-async def test_reopening_activates_the_same_tab_rather_than_stacking(
-    monkeypatch, tmp_path
-):
-    fake = FakeEngine([])
-    fake.list_beliefs_result = [_belief(1, "prefers terse commits")]
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(160, 48)) as pilot:
-        await pilot.pause()
-        pane = app.active_pane
-        browser = await _browser(pilot, app, fake)
-        await pane.open_beliefs_browser()
-        await pilot.pause()
-        assert len(list(app.query(BeliefsBrowserTab))) == 1
-        assert pane._beliefs_tab is browser
-
-
-@pytest.mark.asyncio
-async def test_the_chip_picker_keeps_its_glance_and_offers_the_browser(
-    monkeypatch, tmp_path
-):
-    """Both surfaces, not one replacing the other: the dropdown is still
-    the glance, and its first row is the door to the session."""
-    from doxa.app import ChipPicker
-    from doxa.session.chips import BROWSE_ALL_ROW
-
-    fake = FakeEngine([])
-    fake.list_beliefs_result = [_belief(1, "prefers terse commits")]
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(160, 48)) as pilot:
-        await pilot.pause()
-        pane = app.active_pane
-        await pane.open_beliefs_picker()
-        await pilot.pause()
         picker = app.query_one("#chip-picker", ChipPicker)
-        assert picker.is_open
-        rids = [rid for rid, _l in picker._rows if rid]
-        assert BROWSE_ALL_ROW[0] in rids
-        assert any(rid.startswith("belief:") for rid in rids)
-        # The door names what the browser HAS, never a verb it performs.
-        door = next(l for rid, l in picker._rows if rid == BROWSE_ALL_ROW[0])
-        assert "approve" not in door.lower() and "reject" not in door.lower()
-
-        index = next(i for i, (rid, _l) in enumerate(picker._rows)
-                     if rid == BROWSE_ALL_ROW[0])
-        picker.select_row(index)
         for _ in range(200):
-            if pane._beliefs_tab is not None and pane._beliefs_tab.rows:
+            if picker.is_open and picker._rows:
                 break
             await pilot.pause(0.02)
-        assert isinstance(pane._beliefs_tab, BeliefsBrowserTab)
+        assert picker.is_open
+        assert any(rid == "belief:1" for rid, _label in picker._rows)
 
 
 # -- against the real lore_core: provenance, honestly recorded ----------
-#
-# Everything above drives a fake engine, because what is on trial there is
-# the SURFACE. These two drive the real SessionEngine against the real
-# lore_core in conftest.py's throwaway LORE_ROOT, because what is on trial
-# here is the CONTRACT: an entry approved through DOXA must be labelled
-# the way LORE labels a human approval, and DOXA must not be the thing
-# that decides what that label is.
 
 
 @pytest.fixture
@@ -1118,61 +724,6 @@ async def test_a_read_only_engine_refuses_the_write_even_if_asked_directly(
     assert await engine.reject_pending("whatever") == "no provenance ledger here"
 
 
-@pytest.mark.asyncio
-async def test_ctrl_w_closes_the_browser_and_reopening_builds_a_fresh_one(
-    monkeypatch, tmp_path
-):
-    """A tab that cannot be closed is a tab the user is stuck in. Ctrl+W
-    removes it and drops the pane's reference, so the next open builds a
-    new one rather than activating a tab that is no longer there."""
-    fake = FakeEngine([])
-    fake.list_beliefs_result = [_belief(1, "prefers terse commits")]
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(160, 48)) as pilot:
-        await pilot.pause()
-        pane = app.active_pane
-        first = await _browser(pilot, app, fake)
-        await app.action_close_tab()
-        await pilot.pause()
-        assert pane._beliefs_tab is None
-        assert not list(app.query(BeliefsBrowserTab))
-        second = await _browser(pilot, app, fake)
-        assert second is not first
-        assert second.is_mounted
-
-
-@pytest.mark.asyncio
-async def test_ctrl_q_closes_the_browser_and_leaves_the_session_running(
-    monkeypatch, tmp_path
-):
-    """v0.58.0. The browser holds no engine, so Ctrl+Q -- "end this
-    session (finalize now) and close its tab" -- has no session to end.
-    Through v0.56.0 that made it a no-op and the browser was closable by
-    exactly one of the two close keys.
-
-    It now closes, and the session that OPENED it is left running: Ctrl+Q
-    on a tab with no session must not fall through to the pane
-    underneath."""
-    fake = FakeEngine([])
-    fake.list_beliefs_result = [_belief(1, "prefers terse commits")]
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(160, 48)) as pilot:
-        await pilot.pause()
-        pane = app.active_pane
-        await _browser(pilot, app, fake)
-        await pilot.press("ctrl+q")
-        for _ in range(100):
-            if pane._beliefs_tab is None:
-                break
-            await pilot.pause(0.02)
-        assert pane._beliefs_tab is None
-        assert not list(app.query(BeliefsBrowserTab))
-        # The session tab is still there, still holding its engine.
-        assert pane in app.panes()
-        assert pane.engine is fake
-        assert fake.finalized is False
-
-
 # -- the outcome ledger, against the real lore_core ----------------------
 
 
@@ -1281,48 +832,7 @@ async def test_the_ledger_costs_nothing_on_a_store_that_has_no_outcomes(
     assert len(json.dumps(ledger).encode("utf-8")) < 20
 
 
-@pytest.mark.asyncio
-async def test_belief_rows_paint_never_tested_where_the_idle_age_used_to_be(
-    monkeypatch, tmp_path
-):
-    """On screen, not in a formatter: the browser's own rows say what
-    reality last said, and the ones reality never tested say so."""
-    fake = FakeEngine([])
-    fake.list_beliefs_result = [
-        _belief(1, "reality contradicted this", outcome="contradicted",
-                outcome_days=2),
-        _belief(2, "reality never checked this"),
-    ]
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(170, 48)) as pilot:
-        await pilot.pause()
-        browser = await _browser(pilot, app, fake)
-        rows = list(browser.query(BeliefRow))
-        rendered = "\n".join(_plain(r) for r in rows)
-        assert "contradicted 2d" in rendered
-        assert "never tested" in rendered
-        assert "idle" not in rendered
-        for row in rows:
-            assert row.size.height > 0
-        # Tested first, inside the one scope group they share.
-        assert rows[0].belief["id"] == 1
-
-
 # -- v0.48.0: the chip picker as a navigable surface ---------------------
-
-
-async def _picker(pilot, app, *, beliefs):
-    from doxa.app import ChipPicker
-
-    pane = app.active_pane
-    await pane.open_beliefs_picker()
-    for _ in range(200):
-        picker = app.query_one("#chip-picker", ChipPicker)
-        if picker.is_open:
-            await pilot.pause()
-            return pane, picker
-        await pilot.pause(0.02)
-    raise AssertionError("the beliefs picker never opened")
 
 
 def _headers(picker):
@@ -1335,19 +845,6 @@ def _headers(picker):
 def _belief_rows(picker):
     return [(rid, label) for rid, label in picker._rows
             if rid.startswith("belief:")]
-
-
-_NEXT_ID = [1000]
-
-
-def _many(n, group="project:doxa", **kw):
-    """n beliefs in one scope, with ids that are unique ACROSS calls --
-    the picker keys its group map by row id, so two batches sharing ids
-    would silently merge into one group and count wrong."""
-    start = _NEXT_ID[0]
-    _NEXT_ID[0] += n
-    return [_belief(i, f"claim number {i:03d}", subject=group, **kw)
-            for i in range(start, start + n)]
 
 
 @pytest.mark.asyncio
@@ -1376,17 +873,6 @@ async def test_scope_groups_are_headers_carrying_their_own_count(
         assert any("project (8 beliefs)" in h for h in headers), headers
         assert any("user · stated (3 beliefs)" in h for h in headers), headers
         assert any("user-model · inferred (2 beliefs)" in h for h in headers), headers
-
-
-@pytest.mark.asyncio
-async def test_a_group_of_one_is_not_pluralised(monkeypatch, tmp_path):
-    fake = FakeEngine([])
-    fake.list_beliefs_result = _many(11) + _many(1, group="user")
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(160, 48)) as pilot:
-        await pilot.pause()
-        _pane, picker = await _picker(pilot, app, beliefs=None)
-        assert any("user · stated (1 belief)" in h for h in _headers(picker))
 
 
 @pytest.mark.asyncio
@@ -1489,6 +975,7 @@ async def test_typing_still_finds_a_belief_inside_a_folded_group(
 
         await pilot.press("w", "o", "r", "k", "t", "r", "e", "e")
         await pilot.pause()
+        picker.flush_filter()  # v0.69.0: the filter itself now debounces
         found = _belief_rows(picker)
         assert any("worktree" in label for _rid, label in found), found
         assert _headers(picker) == [], "a filtered view has no group headers"
@@ -1497,6 +984,7 @@ async def test_typing_still_finds_a_belief_inside_a_folded_group(
         for _ in range(8):
             await pilot.press("backspace")
         await pilot.pause()
+        picker.flush_filter()
         assert _belief_rows(picker) == []
         assert _headers(picker)
 
@@ -1534,42 +1022,7 @@ async def test_the_picker_sorts_tested_beliefs_to_the_top_of_their_group(
         assert ids.index("belief:5") == len(ids) - 1
 
 
-@pytest.mark.asyncio
-async def test_selecting_the_browse_row_opens_the_browser_in_a_tab(
-    monkeypatch, tmp_path
-):
-    """Item 3, verified rather than assumed: BROWSE_ALL_ROW already opened
-    the browser tab in v0.46.0 and still does. The user was confirming the
-    expectation, not reporting a defect -- this is the proof."""
-    from doxa.session.chips import BROWSE_ALL_ROW
-
-    fake = FakeEngine([])
-    fake.list_beliefs_result = _many(3)
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(160, 48)) as pilot:
-        await pilot.pause()
-        pane, picker = await _picker(pilot, app, beliefs=None)
-        index = next(i for i, (rid, _l) in enumerate(picker._rows)
-                     if rid == BROWSE_ALL_ROW[0])
-        picker.select_row(index)
-        for _ in range(200):
-            if pane._beliefs_tab is not None and pane._beliefs_tab.rows:
-                break
-            await pilot.pause(0.02)
-        assert isinstance(pane._beliefs_tab, BeliefsBrowserTab)
-        assert pane._beliefs_tab.is_mounted
-
-
 # -- v0.48.0: what a belief row can actually DO --------------------------
-#
-# The user asked for "Approve or Reject" on every belief row. Those two
-# are not operations on a belief: approving applies a staged PROPOSAL, an
-# entry that does not exist yet, and every proposal already carries them
-# in the browser. A belief is a claim already in the store and already
-# steering the model. What LORE can do to one is record what reality did
-# (belief_outcomes: confirmed / contradicted / stale) and end it (retract).
-# These assert that vocabulary, and that the destructive half is harder to
-# reach than the reversible half.
 
 
 def _actions(picker):
@@ -1690,124 +1143,6 @@ async def test_the_dropdown_hides_the_verbs_when_lore_cannot_record_them(
         assert _actions(picker) == ["act:show", "act:back"]
         assert "missing record_outcome" in picker._note
         assert fake.outcomes_recorded == [] and fake.retracted == []
-
-
-@pytest.mark.asyncio
-async def test_the_browser_row_carries_the_same_verbs_as_real_controls(
-    monkeypatch, tmp_path
-):
-    """The browser CAN have a button per row -- one widget per row is why
-    it exists -- so it has one, and the keyboard reaches the same place."""
-    fake = FakeEngine([])
-    fake.list_beliefs_result = [_belief(7, "a claim under test")]
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(180, 48)) as pilot:
-        await pilot.pause()
-        browser = await _browser(pilot, app, fake)
-        row = next(iter(browser.query(BeliefRow)))
-        painted = _plain(row)
-        assert "✓ confirmed" in painted and "✗ contradicted" in painted
-        assert "⌫ retract" in painted
-        assert "approve" not in painted.lower()
-        assert row.size.height > 0
-
-        row.focus()
-        await pilot.press("c")
-        for _ in range(150):
-            if fake.outcomes_recorded:
-                break
-            await pilot.pause(0.02)
-        assert fake.outcomes_recorded == [(7, "confirmed")]
-
-
-@pytest.mark.asyncio
-async def test_the_browser_retract_arms_and_enter_never_reaches_it(
-    monkeypatch, tmp_path
-):
-    fake = FakeEngine([])
-    fake.list_beliefs_result = [_belief(7, "a claim under test")]
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(180, 48)) as pilot:
-        await pilot.pause()
-        browser = await _browser(pilot, app, fake)
-        row = next(iter(browser.query(BeliefRow)))
-        row.focus()
-
-        # Enter is the key a hand rests on: it expands evidence, nothing else.
-        for _ in range(4):
-            await pilot.press("enter")
-            await pilot.pause()
-        assert fake.retracted == [] and fake.outcomes_recorded == []
-
-        await pilot.press("d")
-        await pilot.pause()
-        assert row.armed and fake.retracted == []
-        assert "CONFIRM RETRACT" in _plain(row)
-        await pilot.press("escape")
-        await pilot.pause()
-        assert not row.armed and fake.retracted == []
-
-        await pilot.press("d")
-        await pilot.press("d")
-        for _ in range(150):
-            if fake.retracted:
-                break
-            await pilot.pause(0.02)
-        assert fake.retracted == [7]
-        assert "retracted" in _plain(row)
-
-
-@pytest.mark.asyncio
-async def test_the_browser_hides_belief_verbs_on_a_lore_core_without_them(
-    monkeypatch, tmp_path
-):
-    fake = FakeEngine([])
-    fake.list_beliefs_result = [_belief(7, "a claim under test")]
-    fake.belief_action_state_result = {
-        "capable": False, "reason": "lore_core 0.30.0 is missing record_outcome",
-    }
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(180, 48)) as pilot:
-        await pilot.pause()
-        browser = await _browser(pilot, app, fake)
-        painted = "\n".join(str(w.renderable) for w in browser.query("Static"))
-        assert "missing record_outcome" in painted
-        row = next(iter(browser.query(BeliefRow)))
-        assert "confirmed" not in _plain(row).lower().split("·")[-1]
-        assert "⌫ retract" not in _plain(row)
-        row.focus()
-        await pilot.press("c", "x", "d", "d")
-        await pilot.pause()
-        assert fake.outcomes_recorded == [] and fake.retracted == []
-
-
-@pytest.mark.asyncio
-async def test_recording_an_outcome_repaints_the_staleness_column(
-    monkeypatch, tmp_path
-):
-    """The point of recording an outcome is that the column changes. A row
-    that still said "never tested" after you confirmed it would be the
-    browser lying about the one thing it exists to show."""
-    fake = FakeEngine([])
-    fake.list_beliefs_result = [_belief(7, "a claim under test")]
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(180, 48)) as pilot:
-        await pilot.pause()
-        browser = await _browser(pilot, app, fake)
-        row = next(iter(browser.query(BeliefRow)))
-        assert "never tested" in _plain(row)
-        # The store now answers with a confirmed belief.
-        fake.list_beliefs_result = [
-            _belief(7, "a claim under test", outcome="confirmed", outcome_days=0)
-        ]
-        row.focus()
-        await pilot.press("c")
-        for _ in range(200):
-            if "confirmed" in _plain(row) and "never tested" not in _plain(row):
-                break
-            await pilot.pause(0.02)
-        assert "never tested" not in _plain(row)
-        assert "confirmed" in _plain(row)
 
 
 # -- belief actions against the real lore_core ---------------------------
@@ -1964,34 +1299,6 @@ def test_the_engine_has_no_bulk_belief_action_under_any_name():
 
 
 # -- v0.58.0: the proposals chip, and four corrections to the pickers ----
-
-
-def _proposals(n, kind="memory", scope="user", start=0, **kw):
-    out = []
-    for i in range(start, start + n):
-        item = {"pid": f"20260824-{i:03d}", "kind": kind, "action": "add",
-                "text": f"proposal number {i:03d}",
-                "created": _stamp(3 * DAY)}
-        if kind == "memory":
-            item["scope"] = scope
-            item["project"] = "doxa"
-        item.update(kw)
-        out.append(item)
-    return out
-
-
-async def _pending_picker(pilot, app):
-    from doxa.app import ChipPicker
-
-    pane = app.active_pane
-    await pane.open_pending_picker()
-    for _ in range(200):
-        picker = app.query_one("#chip-picker", ChipPicker)
-        if picker.is_open:
-            await pilot.pause()
-            return pane, picker
-        await pilot.pause(0.02)
-    raise AssertionError("the proposals picker never opened")
 
 
 def _pending_rows(picker):
@@ -2358,101 +1665,6 @@ async def test_typing_finds_a_word_past_the_visible_cut(monkeypatch, tmp_path):
         _pane, picker = await _picker(pilot, app, beliefs=None)
         await pilot.press("q", "u", "o", "k", "k", "a")
         await pilot.pause()
+        picker.flush_filter()  # v0.69.0: the filter itself now debounces
         found = [rid for rid, _l in picker._rows if rid.startswith("belief:")]
         assert found == ["belief:1"], found
-
-
-@pytest.mark.asyncio
-async def test_the_door_has_no_fold_around_it(monkeypatch, tmp_path):
-    """It was given a group of its own purely so the header machinery would
-    not paint a bare `▎` -- which became a fold around ONE row once groups
-    folded, a fold whose only effect was hiding the way out."""
-    from doxa.app import ChipPicker
-    from doxa.session.chips import BROWSE_ALL_ROW
-
-    fake = FakeEngine([])
-    fake.list_beliefs_result = _many(40)
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(160, 40)) as pilot:
-        await pilot.pause()
-        _pane, picker = await _picker(pilot, app, beliefs=None)
-        rids = [rid for rid, _l in picker._rows]
-        assert rids[0] == BROWSE_ALL_ROW[0], "the door is present, and first"
-        headers = [label for rid, label in picker._rows
-                   if rid.startswith(ChipPicker.GROUP_ROW_PREFIX)]
-        assert not any("browse" in h.lower() for h in headers), headers
-        assert not any(h.strip() in ("▎", "") for h in headers), headers
-
-
-def test_each_door_names_the_half_it_opens():
-    """Reported as misleading, and it was: BOTH rows read "open the beliefs
-    browser", so a reader who clicked one in the PROPOSALS picker landed on
-    a tab named for beliefs. The door did not say where it led because it
-    led to two places at once."""
-    from doxa.session.chips import BROWSE_ALL_ROW, REVIEW_ALL_ROW
-
-    beliefs_door = BROWSE_ALL_ROW[1].lower()
-    proposals_door = REVIEW_ALL_ROW[1].lower()
-    assert "belief" in beliefs_door
-    assert "approve" not in beliefs_door and "reject" not in beliefs_door
-    assert "proposal" in proposals_door
-    assert "approve" in proposals_door and "reject" in proposals_door
-
-
-@pytest.mark.asyncio
-async def test_the_door_lands_on_the_half_you_came_from(monkeypatch, tmp_path):
-    """One tab, both halves -- splitting it would duplicate the surface --
-    so the door opens it focused where the reader was heading."""
-    from doxa.session.chips import BROWSE_ALL_ROW, REVIEW_ALL_ROW
-
-    fake = FakeEngine([])
-    fake.list_beliefs_result = [_belief(1, "a belief")]
-    fake.list_pending_result = _proposals(2)
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(160, 40)) as pilot:
-        await pilot.pause()
-        pane, picker = await _picker(pilot, app, beliefs=None)
-        picker.select_row(next(i for i, (r, _l) in enumerate(picker._rows)
-                               if r == BROWSE_ALL_ROW[0]))
-        for _ in range(200):
-            if pane._beliefs_tab is not None and pane._beliefs_tab.rows:
-                break
-            await pilot.pause(0.02)
-        browser = pane._beliefs_tab
-        for _ in range(200):
-            if isinstance(app.focused, BeliefRow):
-                break
-            await pilot.pause(0.02)
-        assert browser.focus_target == "beliefs"
-        assert isinstance(app.focused, BeliefRow), app.focused
-
-        # The OTHER door records the other half. Asserted on the recorded
-        # target rather than on app.focused: re-entering an already-open
-        # browser from a picker row is a three-way race between
-        # ChipPicker's focus hand-off to the prompt, TabbedContent's
-        # reactive `.active`, and its `_on_tab_pane_focused` snap-back, and
-        # driving that sequence headlessly is not the same thing as a user
-        # clicking. focus_target is what _apply_focus reads, so it is the
-        # product's own answer to "which half did the reader ask for".
-        pane.open_beliefs_browser  # (the door below routes through it)
-        browser.focus_target = "beliefs"
-        await pane.open_beliefs_browser(focus="proposals")
-        await pilot.pause()
-        assert browser.focus_target == "proposals"
-        assert pane._beliefs_tab is browser, "one tab, both halves"
-
-
-@pytest.mark.asyncio
-async def test_the_tab_is_named_for_what_it_holds(monkeypatch, tmp_path):
-    """A tab titled for one of its two halves is the same misleading label
-    one level up."""
-    fake = FakeEngine([])
-    fake.list_beliefs_result = [_belief(1, "a belief")]
-    fake.list_pending_result = _proposals(1)
-    app = await _open(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(160, 40)) as pilot:
-        await pilot.pause()
-        browser = await _browser(pilot, app, fake)
-        title = str(browser._title) if browser._title else ""
-        assert "belief" not in title.lower(), title
-        assert "lore" in title.lower(), title

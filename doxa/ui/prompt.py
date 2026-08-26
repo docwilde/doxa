@@ -410,6 +410,21 @@ class PromptInput(TextArea):
             elif event.key == "enter":
                 if picker.highlighted is not None:
                     picker.select_row(picker.highlighted)
+            elif event.key == "right" and self.text == "":
+                # v0.69.0: the evidence trail the removed beliefs browser
+                # carried, now expanded in place on the highlighted row --
+                # same gesture `/search`'s own result list already uses to
+                # open a fold (`self.search.expand_current()` below), and
+                # gated on an empty filter for the identical collision
+                # reason the reserved letters two lines down are: with
+                # text already typed, Right is cursor movement inside it,
+                # not a row command. A no-op on every OTHER chip menu
+                # (ChipPicker.expand_current itself declines when the menu
+                # carries no `expand_dispatch`), so this line changes
+                # nothing for them.
+                picker.expand_current()
+            elif event.key == "left" and self.text == "":
+                picker.collapse_current()
             elif (
                 self.text == "" and event.is_printable and event.character
                 and picker.try_action_key(event.character)

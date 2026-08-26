@@ -122,9 +122,11 @@ while reviewing 166 staged proposals in a surface that was too short for them.
 This lands here rather than in the feature that provoked it. Dividers,
 proportional weights and minimum sizes are one mechanism; implementing a
 one-off resizer inside the beliefs browser and a second one for splits is how a
-layout system rots. The beliefs browser therefore ships as a full-height
-surface with no drag handle of its own (v0.40.0), and inherits real dividers
-when this lands.
+layout system rots. The beliefs browser itself shipped as a full-height
+surface with no drag handle of its own (v0.40.0) and was removed in v0.69.0,
+folded into the chip picker; the transcript/prompt/status-bar proportions
+inside a single pane (the case that provoked this request in the first place,
+see above) are what actually inherits real dividers when this lands.
 
 Requirements:
 

@@ -810,7 +810,7 @@ REAL_STORE_PAYLOAD_BYTES = 235_839
 
 def _staged_record(index, text):
     """One staged proposal as ``SessionEngine._pending_records`` returns it
-    since item V -- a RECORD with the pending id the browser approves by
+    since item V -- a RECORD with the pending id the picker approves by
     and the fields its proposed verdict is computed from, not the bare
     string /pending carried in v0.31.0."""
     return {
@@ -1002,12 +1002,11 @@ async def test_the_beliefs_picker_opens_complete_and_filterable_over_the_socket(
 
                 # Complete: every seeded belief is resident, not just the
                 # first frame's worth.
-                # Matched by row id AND by this fixture's own claim text:
-                # the id excludes the door row (which since v0.57.0 reads
-                # "open the belief browser" and a bare "belief " substring
-                # match counted as a 601st belief), and the claim text
-                # excludes any belief another test left in the shared
-                # store.
+                # Matched by row id (v0.69.0 removed the "open the belief
+                # browser" door row this used to have to exclude by hand --
+                # every row is a real belief now) AND by this fixture's own
+                # claim text, which excludes any belief another test left
+                # in the shared store.
                 seeded = [label for rid, label in picker._all_rows
                           if rid.startswith("belief:") and "belief 0" in label]
                 assert len(seeded) == 600
@@ -1018,6 +1017,7 @@ async def test_the_beliefs_picker_opens_complete_and_filterable_over_the_socket(
                 # typing, with no further round trip.
                 await pilot.press("0", "5", "9", "9")
                 await pilot.pause()
+                picker.flush_filter()  # v0.69.0: the filter now debounces
                 visible = [label for rid, label in picker._rows if rid]
                 assert any("belief 0599" in l for l in visible), (
                     "a late-page belief must be findable by filtering"
@@ -1164,7 +1164,7 @@ async def test_the_write_rpcs_take_one_id_and_there_is_no_bulk_form(
         await client.finalize()
 
 
-# -- item V: the browser's own RPCs, over a real socket ------------------
+# -- item V: the beliefs picker's own RPCs, over a real socket -----------
 
 
 @pytest.mark.asyncio
@@ -1173,7 +1173,7 @@ async def test_belief_evidence_crosses_the_socket_for_one_belief(
 ):
     """Engine parity for item V's lazy trail. Fetched per belief, capped,
     and put through the shared byte budget -- the point being that a
-    browser over hundreds of beliefs never asks for hundreds of trails."""
+    picker over hundreds of beliefs never asks for hundreds of trails."""
     trail = [{"session_id": "s1", "project": "p", "note": "derived here",
               "created": "2026-05-02T09:00:00Z"}]
     async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):

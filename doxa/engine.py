@@ -325,9 +325,9 @@ def available_modes(armed: bool) -> "tuple[str, ...]":
     refused teaches the user that the feature is broken; a mode that is
     absent, with a straight answer available for anyone who asks for it by
     name, teaches them that their session is not armed. Same rule the
-    beliefs browser follows when the store is too old for a write path --
-    the control is gone and a line says why, rather than a button that
-    fails."""
+    beliefs/proposals picker follows when the store is too old for a
+    write path -- the control is gone and a line says why, rather than a
+    button that fails."""
     if armed:
         return PERMISSION_MODES
     return tuple(m for m in PERMISSION_MODES if m != BYPASS_MODE)
@@ -450,15 +450,15 @@ def _accepts_via(func: "Any") -> bool:
 
 def lore_write_state() -> dict:
     """Whether approve/reject may run against the ``lore_core`` THIS
-    process loaded, and -- when they may not -- the sentence the browser
+    process loaded, and -- when they may not -- the sentence the picker
     prints instead.
 
     Item V's mandatory degradation. LORE 0.36.0 shipped the write gate and
     the provenance ledger (issue #43); before it, an approved write left
     no record of having been approved. DOXA holds lore_core in-process, so
     it is not gated by that CLI-layer classifier at all -- what makes an
-    approve from this browser defensible is that it is a human acting in a
-    UI, recorded as such. On a copy that cannot record it, the browser
+    approve from this picker defensible is that it is a human acting in a
+    UI, recorded as such. On a copy that cannot record it, the picker
     goes READ-ONLY and says why, rather than writing into the model's
     context with no honest label on it.
 
@@ -1541,7 +1541,7 @@ class SessionEngine:
     async def list_pending(
         self, limit: int = PENDING_LIST_LIMIT, offset: int = 0
     ) -> list[dict]:
-        """Staged proposals for ``/pending`` and the beliefs browser, as
+        """Staged proposals for ``/pending`` and the beliefs picker, as
         RECORDS -- pending id, kind, action, target scope, what it would
         supersede, when it was staged, and the proposal's own text.
 
@@ -1571,7 +1571,7 @@ class SessionEngine:
     def lore_write_state(self) -> dict:
         """Whether this engine may approve or reject -- see the module
         function :func:`lore_write_state`. A method as well, because the
-        browser reaches its engine through the same ``getattr(engine, ...)``
+        picker reaches its engine through the same ``getattr(engine, ...)``
         it reaches every other capability through, and EngineClient has to
         be able to answer for the DAEMON's lore_core rather than for the
         client process's own."""
@@ -2433,7 +2433,7 @@ class SessionEngine:
         method.
 
         ITEM V widened the SELECT. Four columns joined the four that were
-        already here, and each is a question the browser exists to answer
+        already here, and each is a question the picker exists to answer
         at a glance:
 
         ``created``          when the belief entered the store -- the only
@@ -2457,7 +2457,7 @@ class SessionEngine:
 
         ``evidence_count`` is a correlated count, not the trail itself: the
         trail is unbounded and is fetched per belief, on demand, by
-        :meth:`belief_evidence`. A browser over 600 beliefs must not put
+        :meth:`belief_evidence`. A picker over 600 beliefs must not put
         600 evidence trails through a 64KB frame, and this is how it
         doesn't."""
         try:
@@ -2652,7 +2652,7 @@ class SessionEngine:
             return f"{belief_id}: {type(exc).__name__}: {exc}"
 
     async def retract_belief(
-        self, belief_id: int, reason: str = "retracted from the DOXA beliefs browser",
+        self, belief_id: int, reason: str = "retracted from DOXA",
     ) -> "str | None":
         """End one belief. None on success, or the sentence to show.
 
@@ -2664,8 +2664,17 @@ class SessionEngine:
         resolution text and all. DOXA invents no second way to end a
         belief.
 
-        This is the destructive one, and the surfaces treat it that way:
-        the browser row arms it, and the picker's action menu makes it a
+        The default ``reason`` matches :meth:`EngineClient.retract_belief`
+        and ``doxa.daemon``'s own fallback (both ``"retracted from
+        DOXA"``) -- one string, on-process or over the socket, rather than
+        this path writing something different into the same ledger
+        column. (v0.69.0: it used to say "the DOXA beliefs browser"; that
+        tab is gone, and a resolution string that outlives the UI that
+        wrote it should not name one.)
+
+        This is the destructive one, and the surface treats it that way:
+        the picker's inline row action arms on the first press and fires
+        on the second, and its own per-row action menu makes retracting a
         second, separately-named selection. Not irreversible in the sense
         of lost data -- the row survives with `status='retracted'` and its
         evidence and outcome ledger intact -- but it is out of the working
@@ -2706,7 +2715,7 @@ class SessionEngine:
         this claim, plus whatever the dreamer moved onto it when it
         superseded a source belief. Item V shows it because a belief
         without its trail is an assertion, and the whole premise of a
-        browser you can audit is that you can see where a claim came from.
+        store you can audit is that you can see where a claim came from.
 
         Lazy, one belief at a time, and capped -- see
         :data:`BELIEF_EVIDENCE_LIMIT`. ``limit + 1`` rows are read so the

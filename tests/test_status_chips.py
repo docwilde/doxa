@@ -757,6 +757,7 @@ async def test_beliefs_picker_type_to_filter_matches_claim_text(monkeypatch, tmp
         picker = app.query_one("#chip-picker", ChipPicker)
         await pilot.press("u", "v")
         await pilot.pause()
+        picker.flush_filter()  # v0.69.0: the filter itself now debounces
         real_rows = [(rid, label) for rid, label in picker._rows if rid]
         assert real_rows and all("uv" in label for _rid, label in real_rows)
 

@@ -139,9 +139,6 @@ default — see the **[manual](docs/manual.md)**.
 <p align="center"><img src="assets/shots/memory.png" width="640" alt="A lore_belief_search chip expanded, showing a result listing one STEER belief with an outcome count and one CITE-only belief"></p>
 <p align="center"><em>A memory-store call is an ordinary chip — the mechanism deciding what the agent believes is inspectable like any other tool call.</em></p>
 
-<p align="center"><img src="assets/shots/beliefs-browser.png" width="640" alt="The /beliefs tab: staged proposals with one row armed mid-approve, and active beliefs grouped by scope carrying LORE's own outcome verbs — confirmed, contradicted, never tested"></p>
-<p align="center"><em>The full beliefs browser, for when the status-bar picker isn't enough — every belief and every staged proposal, reviewed one row at a time. Approving arms on the first action and applies on an explicit second one.</em></p>
-
 <p align="center"><img src="assets/shots/subagent-tracker.png" width="640" alt="A status row reading '1 agent' beneath the status bar, plus a second tab in the strip titled from the running subagent's own description"></p>
 <p align="center"><em>A running subagent gets its own status row and a live transcript tab.</em></p>
 

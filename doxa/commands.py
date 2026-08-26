@@ -243,22 +243,21 @@ REGISTRY: tuple[SlashCommand, ...] = (
     SlashCommand(
         name="/beliefs",
         group="Memory",
-        # Item V. The full-height browser, not the status-chip picker --
-        # the chip is still the glance and still opens its dropdown; this
-        # is where evidence trails, timestamps, provenance and the
-        # per-proposal approve/reject controls live.
-        summary="Browse every belief and staged proposal — evidence, age, verdicts",
+        # v0.69.0 retired item V's standalone browser tab: the chip
+        # picker now carries everything it did -- confirmed/contradicted/
+        # stale/retract inline on each row, and Right on a highlighted
+        # row expands its evidence trail in place (Left folds it away).
+        # This command opens that SAME picker, not a second surface.
+        summary="Browse active beliefs — confirmed/contradicted/stale/retract inline",
         palette="Beliefs: browse",
     ),
     SlashCommand(
         name="/pending",
         group="Memory",
-        # A GLANCE, and the summary says so where a user reads it. Every
-        # row now carries the verdict approving it would apply (item V --
-        # a row that does not say what it changes is not reviewable), but
-        # the approve and reject controls themselves are per-row in the
-        # browser /beliefs opens, not in a dropdown.
-        summary="Staged proposals and what each would do (review them in /beliefs)",
+        # Approve and reject are inline on each row too (v0.67.0,
+        # ``a``/``r``), or one selection away in the row's own action
+        # sub-menu -- reviewing no longer hands off to a second surface.
+        summary="Staged proposals — approve or reject inline, right here",
         palette="Pending proposals",
     ),
     SlashCommand(

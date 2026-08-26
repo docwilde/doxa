@@ -46,10 +46,10 @@ BELIEF_LIST_LIMIT = 2000
 # already a signal to go review it, not to scroll further.
 PENDING_LIST_LIMIT = 500
 
-# How many evidence rows one belief's trail ever carries into the browser
+# How many evidence rows one belief's trail ever carries into the picker
 # (item V). Unlike the two caps above this one is per BELIEF, not per
 # store, and it is deliberately small: the trail is fetched lazily, one
-# belief at a time, precisely so a browser over 600 beliefs never has to
+# belief at a time, precisely so a picker over 600 beliefs never has to
 # put 600 trails in a wire frame. A belief with more evidence than this
 # says so rather than showing a short trail as a complete one.
 BELIEF_EVIDENCE_LIMIT = 40

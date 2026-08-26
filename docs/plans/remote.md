@@ -100,7 +100,7 @@ constraint of a TUI on a phone, and it spends none of the advantage above.
 **(b) A web client over the event stream.** The daemon's protocol is already
 the API: attach with a cursor, replay, follow the tail. A browser client
 renders turns as HTML, and things that are awkward in a terminal — images,
-long tables, a beliefs browser with 600 rows, a diff — become easy. This is the
+long tables, a belief store with 600 rows, a diff — become easy. This is the
 design worth having, and it is roughly the same amount of work as the beliefs
 browser was, plus transport.
 
