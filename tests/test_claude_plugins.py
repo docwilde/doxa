@@ -387,3 +387,120 @@ def test_report_counts_adopted_only_when_the_setting_is_on(tmp_path, monkeypatch
     monkeypatch.setenv("DOXA_ADOPT_PLUGINS", "1")
     on_report = cp_mod.report(discovered)
     assert "1 plugin(s) discovered, 1 adopted" in on_report
+
+
+def test_report_would_adopt_tally_is_named_separately_from_refused(tmp_path):
+    """Reported: the discovered plugins' commands are not available. One
+    of the four candidate causes was "the setting is off, and /plugins
+    does not say so plainly" -- it already named the setting, but its
+    tally line folded an otherwise-good, merely-idle plugin into the same
+    "refused" bucket a blocklisted/disabled one lands in, which answers
+    the wrong question about WHY nothing was adopted."""
+    base = tmp_path / "real-claude"
+    cache = tmp_path / "cache"
+    plugin = _make_plugin(cache, "caveman", commands=1)
+    _install(base, "caveman@caveman", plugin)
+
+    text = cp_mod.report(cp_mod.discover(base=base))
+    assert "0 refused" in text
+    assert "1 more would adopt if 'adopt claude plugins' were on" in text
+
+
+# -- command_names() / adopted_commands(): the actual invocable spelling --
+#
+# The measured cause of the reported defect: a plugin loaded via
+# --plugin-dir registers its commands NAMESPACED (<plugin>:<command-stem>)
+# in the underlying claude CLI -- typing the bare stem a plugin's own docs
+# advertise for its marketplace-installed form gets "Unknown command"
+# back, even when the name is unique. Measured directly against a real
+# adopted plugin on the machine this fix was written on (caveman's own
+# /caveman command): bare "/caveman" -> "Unknown command: /caveman";
+# namespaced "/caveman:caveman" -> the plugin's own prompt actually runs.
+
+
+def _write_command_md(plugin_dir: Path, stem: str, *, description="", argument_hint=""):
+    commands_dir = plugin_dir / "commands"
+    commands_dir.mkdir(parents=True, exist_ok=True)
+    lines = ["---"]
+    if description:
+        lines.append(f"description: {description}")
+    if argument_hint:
+        lines.append(f'argument-hint: "{argument_hint}"')
+    lines += ["---", "body text the model reads when this command runs"]
+    (commands_dir / f"{stem}.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def test_command_names_uses_the_namespaced_invocable_form(tmp_path):
+    base = tmp_path / "real-claude"
+    cache = tmp_path / "cache"
+    plugin_dir = cache / "caveman"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(plugin_dir / ".claude-plugin" / "plugin.json", {"name": "caveman"})
+    _write_command_md(
+        plugin_dir, "caveman",
+        description="Switch caveman intensity level",
+        argument_hint="[lite|full|ultra|wenyan]",
+    )
+    _install(base, "caveman@caveman", plugin_dir)
+    [found] = cp_mod.discover(base=base)
+
+    [cmd] = cp_mod.command_names(found)
+    assert cmd.invocable == "caveman:caveman"
+    assert cmd.summary == "Switch caveman intensity level"
+    assert cmd.argument_hint == "[lite|full|ultra|wenyan]"
+
+
+def test_command_names_tolerates_a_command_file_with_no_front_matter(tmp_path):
+    """_make_plugin's own fixture files (used by every OTHER test in this
+    module) carry no front matter at all -- the parser must read that as
+    "no description", never raise."""
+    base = tmp_path / "real-claude"
+    cache = tmp_path / "cache"
+    plugin = _make_plugin(cache, "caveman", commands=1)
+    _install(base, "caveman@caveman", plugin)
+    [found] = cp_mod.discover(base=base)
+
+    [cmd] = cp_mod.command_names(found)
+    assert cmd.invocable == "caveman:cmd0"
+    assert cmd.summary == ""
+    assert cmd.argument_hint == ""
+
+
+def test_adopted_commands_empty_while_the_setting_is_off(tmp_path):
+    base = tmp_path / "real-claude"
+    cache = tmp_path / "cache"
+    plugin = _make_plugin(cache, "caveman", commands=2)
+    _install(base, "caveman@caveman", plugin)
+
+    assert cp_mod.adopted_commands(cp_mod.discover(base=base)) == []
+
+
+def test_adopted_commands_excludes_the_blocklisted_plugin(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOXA_ADOPT_PLUGINS", "1")
+    base = tmp_path / "real-claude"
+    cache = tmp_path / "cache"
+    caveman = _make_plugin(cache, "caveman", commands=2)
+    lore = _make_plugin(cache, "lore", commands=15)
+    _install(base, "caveman@caveman", caveman)
+    _install(base, "lore@lore", lore)
+
+    rows = cp_mod.adopted_commands(cp_mod.discover(base=base))
+    invocables = sorted(command.invocable for _plugin, command in rows)
+    assert invocables == ["caveman:cmd0", "caveman:cmd1"]
+
+
+def test_report_lists_the_exact_invocable_spelling(tmp_path):
+    """The discoverability half of the fix: /plugins has to print the
+    spelling a user can actually type, not just a count -- "2 commands"
+    tells nobody what to type."""
+    base = tmp_path / "real-claude"
+    cache = tmp_path / "cache"
+    plugin_dir = cache / "caveman"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(plugin_dir / ".claude-plugin" / "plugin.json", {"name": "caveman"})
+    _write_command_md(plugin_dir, "caveman", description="Switch intensity")
+    _install(base, "caveman@caveman", plugin_dir)
+
+    text = cp_mod.report(cp_mod.discover(base=base))
+    assert "/caveman:caveman" in text
+    assert "Switch intensity" in text

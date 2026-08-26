@@ -1,7 +1,8 @@
 # Claude Code plugins and skills, adopted without the duplicate snapshot — specification
 
-Status: **implemented, v0.74.0**. `doxa/claude_plugins.py`, the
-`adopt_plugins` setting (default OFF), `/plugins` and `/reload-plugins`.
+Status: **implemented, v0.74.0**; command discoverability fixed, **v0.77.0**.
+`doxa/claude_plugins.py`, the `adopt_plugins` setting (default OFF),
+`/plugins` and `/reload-plugins`.
 
 Not to be confused with [`docs/plans/plugin-api.md`](plugin-api.md), which
 specifies a *different* thing — DOXA's own extension points, for Python code
@@ -252,6 +253,63 @@ knob (`ClaudeAgentOptions.effort` has no live setter either). So
 this in plain words rather than leaving a user to discover it by watching a
 staged plugin do nothing in the tab they typed the command in.
 
+## Typing an adopted command: the namespaced spelling, and where it shows up
+
+**Reported, v0.77.0: "the discovered plugins' commands are not
+available."** Measured against a real adopted plugin (isolated
+`CLAUDE_CONFIG_DIR`, the exact stream-json path DOXA drives the CLI
+through) before changing anything, to find which of four candidate causes
+it actually was:
+
+- the setting was off, so nothing was adopted — already true, and
+  `/plugins` already named the setting; ruled out as the FULL story.
+- the staged copy strips something a command needs — already false for
+  everything but LORE (refused outright, see above); a staged `caveman`
+  command ran fine once typed correctly.
+- `--plugin-dir` reaches a spawned session but the CLI does not surface
+  the command — false: the CLI's own `system.init` message lists it, in
+  its `slash_commands` array.
+- DOXA's own `/` autocomplete and Ctrl+P palette read one registry
+  (`doxa.commands`) that never learned about adopted plugins — **true**,
+  and compounded by a second, sharper problem the investigation surfaced:
+
+**The CLI registers a plugin's commands NAMESPACED, not bare.** A plugin
+loaded via `--plugin-dir` shows up in `slash_commands` as
+`<plugin>:<command-stem>` — e.g. `caveman:caveman`, not `caveman`. Typing
+the bare stem a plugin's own docs advertise (the form its
+marketplace-installed self answers to) gets `Unknown command: /caveman`
+back from the CLI, even when the name is unique across every loaded
+plugin — measured directly, not assumed. So even a user who somehow knew
+a command existed would type the wrong thing and read the CLI's refusal
+as confirmation that adoption itself was broken.
+
+Both are fixed together in `doxa.commands._plugin_rows`, which folds
+`doxa.claude_plugins.adopted_commands()` — the exact eligibility
+`adopt()` uses, computed read-only with no staging copy — into
+`doxa.commands.ordered()`/`grouped()`/`names()` under a `Plugins` group,
+using the CORRECT namespaced spelling as the row's `name`. Every surface
+that already reads that registry (the prompt's autocomplete, the Ctrl+P
+palette, `/help`) picks the rows up with no separate wiring — which is
+exactly the guarantee docs/plans/plugin-api.md's own extension point 1
+describes for DOXA's *native* plugin commands, now honored for an adopted
+Claude-Code-plugin command too. Each row is `passthrough=True` and
+`palette_prefill=True`: DOXA has no handler for a plugin command and must
+never pretend to (`interactive()`/`interactive_names()` — and therefore
+the pane's own handler dict and its closure test — read `REGISTRY`
+directly and never see these rows at all), so completing one always lands
+the text in the prompt for the user to submit, the same passthrough path
+`/compact` already rides to the underlying CLI.
+
+`/plugins`' own listing also states the exact spelling and description for
+every adoptable command (`✓`/`○` rows), read from the command file's own
+`description:`/`argument-hint:` front matter when present — a plugin
+marked `○` ("would adopt if the setting were on") still says what typing
+its commands would require, and the report's closing tally now counts
+"would adopt if the setting were on" separately from "refused": an
+otherwise-good plugin idle only because `adopt_plugins` is off is not the
+same finding as one blocklisted, disabled, or carrying nothing adoptable,
+and the tally no longer says so.
+
 ## Failure modes
 
 - **A staging copy fails** (permissions, a half-written cache entry mid-
@@ -305,6 +363,23 @@ and non-zero geometry, not that a query merely matched something.
   reaches the SDK options object, and the untouched default reaches `[]`.
 - A stale hazard file placed directly in a previously-staged directory does
   not survive a rebuild.
+- v0.77.0: `command_names()` reads the NAMESPACED invocable spelling
+  (`<plugin>:<stem>`) plus `description:`/`argument-hint:` front matter,
+  tolerating a command file with neither. `adopted_commands()` is empty
+  with the setting off and excludes the blocklisted plugin with it on. A
+  plugin row folded into `doxa.commands.ordered()`/`grouped()` carries
+  `group="Plugins"`, `passthrough=True`, `palette_prefill=True`, and is
+  absent from `interactive_names()`/`find()`/`lookup()` (REGISTRY-only,
+  unaffected — the closure invariant survives the fold-in untouched).
+  Driven end to end against a real `DoxaApp` pilot: the prompt's
+  autocomplete dropdown lists the adopted row and paints a non-zero
+  region; completing it prefills without submitting; the palette's own
+  entry prefills too (never `_cmd_run_slash`, which has no handler for a
+  plugin row); the exact namespaced text, submitted, reaches the fake
+  engine untouched (`received_prompts`), the same passthrough path
+  `/compact` already proves. `/plugins`' report states the exact
+  spelling and description for an adoptable command, and its tally names
+  "would adopt if the setting were on" separately from "refused".
 
 ## Open questions
 
