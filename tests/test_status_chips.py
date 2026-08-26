@@ -324,37 +324,163 @@ async def test_effort_picker_notes_it_cannot_change_this_session(monkeypatch, tm
         assert "high" in picker._note
 
 
-# -- ACTIONABLE tier: peers -> /sessions, ctx% -> /compact, handle -> clip --
+# -- ACTIONABLE tier: peers -> a roster picker, ctx% -> /compact ---------
+#
+# v0.79.0: the peers chip stops shortcutting to `/sessions` (pinned
+# through v0.78.0 by the test this block replaced) and opens a real
+# roster in the shared ChipPicker instead -- each row the peer, the
+# beginning of its transcript (PeerInfo.title, now actually derived from
+# the first prompt -- see tests/test_peers.py's
+# test_first_turn_sets_peer_title_from_first_prompt_only), and tokens
+# consumed so far (PeerInfo.usage_tokens).
+
+
+def _peer(tmp_path, sid, title, *, usage_tokens=None, daemon_socket=None,
+          clients=None, cwd=None):
+    now = peers_mod._iso_now()
+    return peers_mod.PeerInfo(
+        session_id=sid, pid=os.getpid(), socket_path=f"/tmp/{sid}.sock",
+        cwd=str(cwd or tmp_path), repo_root=str(tmp_path), title=title,
+        started_at=now, heartbeat_at=now, usage_tokens=usage_tokens,
+        daemon_socket=daemon_socket, clients=clients,
+    )
 
 
 @pytest.mark.asyncio
-async def test_peers_chip_click_runs_the_sessions_command(monkeypatch, tmp_path):
-    import os
+async def test_peers_chip_click_opens_the_peers_picker(monkeypatch, tmp_path):
+    peer = _peer(tmp_path, "peer00001111", "fix the flaky test", usage_tokens=12345)
+    fake = FakeEngine([], peers=[peer])
+    app, _engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test() as pilot:
+        assert await _wait_status(pilot, app, "peers 1")
+        picker = app.query_one("#chip-picker", ChipPicker)
+        assert not picker.is_open
+        await pilot.click("#status-bar", offset=_offset_of(app, "peers 1"))
+        await pilot.pause()
+        assert picker.is_open
+        assert picker.border_title == "peers"
+        labels = {rid: label for rid, label in picker._rows}
+        row = labels.get("peer00001111", "")
+        # Rendered row text, not a query match: which peer, what it's
+        # working on, and tokens so far -- fmt_tokens(12345) == "12k".
+        assert "fix the flaky test" in row
+        assert "12k tok" in row
 
-    from doxa import peers as peers_mod
 
-    now = peers_mod._iso_now()
-    peer = peers_mod.PeerInfo(
-        session_id="peer00001111", pid=os.getpid(), socket_path="/tmp/peer.sock",
-        cwd=str(tmp_path), repo_root=str(tmp_path), title="other",
-        started_at=now, heartbeat_at=now,
+@pytest.mark.asyncio
+async def test_peers_picker_unknown_tokens_render_as_dash_never_zero(
+    monkeypatch, tmp_path,
+):
+    """PeerInfo.usage_tokens is None for a peer that has not completed a
+    turn yet (or an older build's entry) -- the row must say so, not
+    claim "0 tok", which would be a confident lie the same way an
+    uncoerced ctx-tokens field would be (item X's own rule)."""
+    peer = _peer(tmp_path, "peer00002222", "just started", usage_tokens=None)
+    fake = FakeEngine([], peers=[peer])
+    app, _engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test() as pilot:
+        assert await _wait_status(pilot, app, "peers 1")
+        pane = app.active_pane
+        pane.open_peers_picker()
+        await pilot.pause()
+        picker = app.query_one("#chip-picker", ChipPicker)
+        labels = {rid: label for rid, label in picker._rows}
+        row = labels.get("peer00002222", "")
+        assert "tok —" in row
+        assert "0 tok" not in row
+
+
+@pytest.mark.asyncio
+async def test_peers_picker_row_attaches_via_the_existing_attach_path(
+    monkeypatch, tmp_path,
+):
+    peer = _peer(
+        tmp_path, "peer00003333", "working on it", usage_tokens=500,
+        daemon_socket="/tmp/daemon-peer3.sock",
     )
     fake = FakeEngine([], peers=[peer])
     app, _engines = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test() as pilot:
         assert await _wait_status(pilot, app, "peers 1")
+        calls = []
+        monkeypatch.setattr(app, "_cmd_attach", lambda e: calls.append(e.session_id))
+        pane = app.active_pane
+        pane.open_peers_picker()
+        await pilot.pause()
+        picker = app.query_one("#chip-picker", ChipPicker)
+        index = next(
+            i for i, (rid, _l) in enumerate(picker._rows) if rid == "peer00003333"
+        )
+        picker.select_row(index)
+        await pilot.pause()
+        # Asserts the CALL, not just the UI -- the SAME path the sessions
+        # picker's own detached-row test asserts, never a second
+        # implementation.
+        assert calls == ["peer00003333"]
+
+
+@pytest.mark.asyncio
+async def test_peers_picker_row_without_daemon_socket_is_not_attachable(
+    monkeypatch, tmp_path,
+):
+    """A peer with no daemon_socket (an in-process engine) cannot be
+    reached by `doxa attach` at all -- the sessions picker never has this
+    case (list_daemons only returns daemon-hosted entries); the peers
+    picker reads the full peer list, so it must say so rather than
+    silently doing nothing on selection."""
+    peer = _peer(tmp_path, "peer00004444", "in-process only", usage_tokens=500)
+    fake = FakeEngine([], peers=[peer])
+    app, _engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test() as pilot:
+        assert await _wait_status(pilot, app, "peers 1")
+        calls = []
+        monkeypatch.setattr(app, "_cmd_attach", lambda e: calls.append(e.session_id))
         before = len(_system_texts(app))
-        await pilot.click("#status-bar", offset=_offset_of(app, "peers 1"))
+        pane = app.active_pane
+        pane.open_peers_picker()
+        await pilot.pause()
+        picker = app.query_one("#chip-picker", ChipPicker)
+        index = next(
+            i for i, (rid, _l) in enumerate(picker._rows) if rid == "peer00004444"
+        )
+        picker.select_row(index)
         for _ in range(100):
             if len(_system_texts(app)) > before:
                 break
             await pilot.pause(0.02)
-        # /sessions reads the REAL on-disk registry (empty here, hence
-        # "none live") -- a DIFFERENT data source than the chip's own
-        # engine.peer_count(); what this test actually pins is that the
-        # click ran /sessions (its output always starts with "sessions"),
-        # not /peers or anything else.
-        assert _system_texts(app)[-1].startswith("sessions")
+        assert calls == []
+        assert "not attachable" in _system_texts(app)[-1]
+
+
+@pytest.mark.asyncio
+async def test_peers_picker_title_markup_is_escaped_not_interpreted(
+    monkeypatch, tmp_path,
+):
+    """title is written by ANOTHER process (PEER_UNTRUSTED_INTRO's own
+    trust boundary) -- this pins that a peer cannot smuggle Rich markup
+    through the row this picker paints. ChipPicker escapes every row
+    centrally (_escape_markup at render); this proves it still holds for
+    THIS new caller by re-parsing the actual painted Option text the same
+    way Textual itself would, and asserting the malicious text survives
+    as literal, inert characters -- rendered text, not a query match."""
+    peer = _peer(
+        tmp_path, "peer00005555", "[bold red]hacked[/]", usage_tokens=10,
+    )
+    fake = FakeEngine([], peers=[peer])
+    app, _engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test() as pilot:
+        assert await _wait_status(pilot, app, "peers 1")
+        pane = app.active_pane
+        pane.open_peers_picker()
+        await pilot.pause()
+        picker = app.query_one("#chip-picker", ChipPicker)
+        index = next(
+            i for i, (rid, _l) in enumerate(picker._rows) if rid == "peer00005555"
+        )
+        prompt = str(picker.get_option_at_index(index).prompt)
+        rendered = Content.from_markup(prompt).plain
+        assert "hacked" in rendered
+        assert "[bold red]" in rendered
 
 
 @pytest.mark.asyncio

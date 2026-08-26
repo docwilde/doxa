@@ -113,6 +113,99 @@ async def test_registration_heartbeat_and_clean_shutdown(tmp_path, monkeypatch):
     assert not host.socket_path.exists()
 
 
+@pytest.mark.asyncio
+async def test_update_usage_piggybacks_on_heartbeat_not_written_immediately(
+    tmp_path, monkeypatch,
+):
+    """usage_tokens is the hard part of the peers-picker feature: writing
+    the registry on every SSE event/turn would hammer the filesystem for a
+    number a human reads occasionally, so PeerHost.update_usage() only
+    touches the in-memory value -- the NEXT heartbeat write (refresh(),
+    what _beat_loop calls every HEARTBEAT_SECS) is what actually moves it
+    to disk. This pins that contract directly rather than trusting the
+    docstring: the on-disk entry is unchanged immediately after
+    update_usage(), and only picks up the new value once refresh() runs."""
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path))
+    host = peers.PeerHost(session_id="u1", cwd=str(tmp_path), title="alpha")
+    await host.start()
+    try:
+        reg_file = tmp_path / "registry" / "u1.json"
+        before = json.loads(reg_file.read_text(encoding="utf-8"))
+        assert "usage_tokens" not in before
+
+        host.update_usage(4242)
+        # No heartbeat has run yet -- the write is still the one start()
+        # made, unchanged.
+        after_update = json.loads(reg_file.read_text(encoding="utf-8"))
+        assert "usage_tokens" not in after_update
+
+        # A heartbeat tick, called directly (same technique
+        # test_registration_heartbeat_and_clean_shutdown already uses for
+        # heartbeat_at) rather than sleeping the real HEARTBEAT_SECS.
+        host.refresh()
+        after_beat = json.loads(reg_file.read_text(encoding="utf-8"))
+        assert after_beat["usage_tokens"] == 4242
+    finally:
+        await host.stop()
+
+
+def test_usage_tokens_read_from_registry_unknown_when_absent_or_malformed(
+    tmp_path, monkeypatch,
+):
+    """PeerInfo.usage_tokens follows the SAME never-assume-zero rule
+    PeerInfo.clients already states: an entry with no usage_tokens key at
+    all (an older build's entry) reads as None, not 0; a malformed value
+    (wrong type) also reads as None rather than raising or reaping the
+    whole entry."""
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path))
+    with_tokens = _entry(tmp_path, "has-tokens", os.getpid(), listening=True)
+    data = json.loads(with_tokens.read_text(encoding="utf-8"))
+    data["usage_tokens"] = 1234
+    with_tokens.write_text(json.dumps(data), encoding="utf-8")
+
+    _entry(tmp_path, "no-tokens", os.getpid(), listening=True)
+
+    bad_tokens = _entry(tmp_path, "bad-tokens", os.getpid(), listening=True)
+    bad_data = json.loads(bad_tokens.read_text(encoding="utf-8"))
+    bad_data["usage_tokens"] = "a lot"
+    bad_tokens.write_text(json.dumps(bad_data), encoding="utf-8")
+
+    got = {p.session_id: p for p in peers.read_registry(reap=False)}
+    assert got["has-tokens"].usage_tokens == 1234
+    assert got["no-tokens"].usage_tokens is None
+    assert got["bad-tokens"].usage_tokens is None
+
+
+@pytest.mark.asyncio
+async def test_set_title_writes_immediately_and_ignores_blank_or_unchanged(
+    tmp_path, monkeypatch,
+):
+    """set_title is the OTHER half of the peers-picker roster (the
+    "beginning of its transcript" column) -- unlike update_usage, it
+    writes right away (the same "presence has to move when the answer
+    changes" discipline set_client_count already applies), because a
+    title changes once, not every turn."""
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path))
+    host = peers.PeerHost(session_id="t1", cwd=str(tmp_path), title="fallback")
+    await host.start()
+    try:
+        reg_file = tmp_path / "registry" / "t1.json"
+        host.set_title("fix the flaky spinner test")
+        assert host.title == "fix the flaky spinner test"
+        on_disk = json.loads(reg_file.read_text(encoding="utf-8"))
+        assert on_disk["title"] == "fix the flaky spinner test"
+
+        # Blank: no-op, keeps the real title rather than blanking it.
+        host.set_title("   ")
+        assert host.title == "fix the flaky spinner test"
+
+        # Unchanged value: no crash, title stays put.
+        host.set_title("fix the flaky spinner test")
+        assert host.title == "fix the flaky spinner test"
+    finally:
+        await host.stop()
+
+
 def test_stale_entries_reaped_never_trusted(tmp_path, monkeypatch):
     monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path))
     # Dead pid: spawn-and-reap a real process so the pid is guaranteed dead.
@@ -300,6 +393,71 @@ async def test_peer_message_queues_and_attaches_to_next_turn_only(tmp_path, monk
         async for _ in engine.send("second user prompt"):
             pass
         assert created[0].queried[1][0] == "second user prompt"
+    finally:
+        await engine.finalize()
+
+
+@pytest.mark.asyncio
+async def test_first_turn_sets_peer_title_from_first_prompt_only(tmp_path, monkeypatch):
+    """PeerInfo.title's own docstring (and a v0.75.0 CHANGELOG entry)
+    already claimed it derives from the session's first prompt -- through
+    v0.78.0 nothing actually wired that up (PeerHost.title stayed the
+    cwd basename SessionEngine.connect() left it at). This pins the fix:
+    the FIRST send() call captures a one-line excerpt, and no later turn
+    overwrites it."""
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    factory, created = factory_with_script([
+        ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+            num_turns=1, session_id="s", total_cost_usd=0.0,
+        ),
+    ])
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+    await engine.start()
+    try:
+        assert engine.peer_host is not None
+        default_title = engine.peer_host.title
+        async for _ in engine.send(
+            "  fix the flaky spinner test  \nmore context on another line"
+        ):
+            pass
+        assert engine.peer_host.title == "fix the flaky spinner test"
+        assert engine.peer_host.title != default_title
+
+        # Second turn: title captured once, not re-derived every send().
+        async for _ in engine.send("a totally different second prompt"):
+            pass
+        assert engine.peer_host.title == "fix the flaky spinner test"
+    finally:
+        await engine.finalize()
+
+
+@pytest.mark.asyncio
+async def test_result_message_updates_peer_usage_tokens_in_memory(tmp_path, monkeypatch):
+    """The other half of the hard part: SessionEngine.send()'s own
+    ResultMessage handling feeds PeerHost.update_usage() the SAME sum
+    /usage prints, once per completed turn -- no dedicated write path,
+    see PeerHost.update_usage's own docstring and the piggyback test in
+    this file for why the write itself is deferred to the heartbeat."""
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    factory, created = factory_with_script([
+        ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+            num_turns=1, session_id="s", total_cost_usd=0.0,
+            usage={
+                "input_tokens": 100, "output_tokens": 50,
+                "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5,
+            },
+        ),
+    ])
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+    await engine.start()
+    try:
+        assert engine.peer_host is not None
+        assert engine.peer_host.usage_tokens is None
+        async for _ in engine.send("first turn"):
+            pass
+        assert engine.peer_host.usage_tokens == 165
     finally:
         await engine.finalize()
 

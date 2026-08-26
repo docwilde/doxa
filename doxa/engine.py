@@ -72,6 +72,7 @@ own; this is the one place doxa's own ingestion path is required to.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import time
@@ -896,6 +897,38 @@ def _as_tokens(value: Any) -> "int | None":
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return int(value) if value >= 0 else None
+
+
+PEER_TITLE_MAX = 72
+"""Cap on the first-prompt excerpt :func:`_peer_title_from_prompt` hands
+to ``PeerHost.set_title``: long enough to be recognizable as "what is
+this peer working on" in a picker row, short enough that a pasted essay
+does not sit in the registry file (and every peer's read of it) at full
+length. Independent of any UI truncation constant (doxa.ui.labels) --
+this module never imports the UI layer, by design (see peers.py's own
+"deliberately model-agnostic" module docstring)."""
+
+
+def _peer_title_from_prompt(prompt: str) -> str:
+    """The peer layer's title, derived from a user's first prompt: the
+    first line, internal whitespace collapsed to single spaces, capped at
+    :data:`PEER_TITLE_MAX`. Called exactly once per session, from
+    :meth:`SessionEngine.send`, on the first turn -- see that call site
+    for why later turns never re-derive it.
+
+    Peer text is scrubbed on READ (``peers.read_registry``), not on
+    write: this is a session describing ITSELF, the same posture
+    ``PeerHost``'s own ``title``/``cwd`` already have at connect, not a
+    receive path. An empty or whitespace-only prompt yields ``""``, which
+    ``PeerHost.set_title`` treats as a no-op -- the cwd-basename fallback
+    stays rather than a title going blank."""
+    text = str(prompt or "").strip()
+    if not text:
+        return ""
+    first_line = " ".join(text.splitlines()[0].split())
+    if len(first_line) > PEER_TITLE_MAX:
+        first_line = first_line[: PEER_TITLE_MAX - 1].rstrip() + "…"
+    return first_line
 
 
 def _tool_result_text(content: Any) -> str:
@@ -1969,6 +2002,17 @@ class SessionEngine:
         if not self._connected:
             raise RuntimeError("SessionEngine.start() must run before send()")
 
+        # First-turn peer title (checked BEFORE num_turns increments, so
+        # this is true on exactly one call): replace the cwd-basename
+        # PeerHost was born with with an excerpt of what the user
+        # actually asked for -- see _peer_title_from_prompt and
+        # PeerHost.set_title. Peer awareness is strictly additive
+        # (connect()'s own rule): a failure here must never interrupt a
+        # turn that has not even sent yet.
+        if self.peer_host is not None and self.num_turns == 0:
+            with contextlib.suppress(Exception):
+                self.peer_host.set_title(_peer_title_from_prompt(prompt))
+
         outbound = prompt
         if self._pending_peer_frames:
             # Model visibility for peer messages happens HERE and only here:
@@ -2170,6 +2214,16 @@ class SessionEngine:
                         value = message.usage.get(field_name)
                         if isinstance(value, (int, float)):
                             self.usage_totals[field_name] += int(value)
+                # Peer-visible running total (PeerInfo.usage_tokens): the
+                # SAME sum /usage prints across its four rows, handed to
+                # the peer host once per completed turn. This does NOT
+                # write to disk -- PeerHost.update_usage only updates the
+                # in-memory value; the next heartbeat flushes it (see that
+                # method's own docstring for why a write-per-turn was
+                # rejected). Peer awareness is strictly additive.
+                if self.peer_host is not None:
+                    with contextlib.suppress(Exception):
+                        self.peer_host.update_usage(sum(self.usage_totals.values()))
                 # One measurement, read three ways. The caching happens
                 # inside _safe_context_usage (which _safe_ctx_usage reads),
                 # so there are no assignments to repeat here -- a second

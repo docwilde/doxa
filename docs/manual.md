@@ -242,7 +242,7 @@ shown empty. Every chip carries a tooltip on hover, including the plain
 | `N proposals` | staged LORE proposals awaiting review (hidden at zero) | yes — pending-proposals picker |
 | `⧉ N agents` | Task-spawned subagents currently running (hidden at zero) | no (see subagent row below) |
 | `⌁ session <id>` | this session's reattach handle (only while attached to a daemon) | yes — sessions picker |
-| `peers N (k⌁)` | other DOXA sessions on this repo; `k⌁` is how many are detached | yes — runs `/sessions` |
+| `peers N (k⌁)` | other DOXA sessions on this repo; `k⌁` is how many are detached | yes — peers picker: each row is the peer, the beginning of its transcript, and tokens consumed so far (self-reported, up to one heartbeat stale) |
 | `⊘ <tool>` | a tool disabled after two failures this session | no |
 
 A `⧉ N agents` chip is accompanied by a second row under the status bar

@@ -214,6 +214,23 @@ class PeerInfo:
     session does not report it (an in-process engine, or an entry written
     by an older build): unknown, never assumed to be zero."""
 
+    usage_tokens: "int | None" = None
+    """Total tokens (input + output + cache read + cache create) this
+    session has consumed so far, as of its OWN last heartbeat write --
+    same accounting :meth:`doxa.engine.SessionEngine.usage_summary` sums
+    for ``/usage``, just added up into one number for a picker row rather
+    than broken out by kind. Piggybacked on the heartbeat
+    (:meth:`PeerHost.update_usage` only updates the in-memory value; the
+    write happens on the next scheduled :meth:`PeerHost._write_entry`,
+    same as every other heartbeat field) rather than written on every
+    turn -- a number a human reads occasionally does not need a dedicated
+    write path, and the existing heartbeat cadence (``HEARTBEAT_SECS``)
+    is the staleness bound: this can be up to that many seconds behind
+    the peer's own live count. None means the session does not report it
+    (an older build, or one that has not sent a heartbeat since its first
+    turn): unknown, never assumed to be zero -- the same rule
+    :attr:`clients` already states, applied to a second field."""
+
     @property
     def scope_key(self) -> str:
         return self.repo_root or self.cwd
@@ -287,6 +304,15 @@ def read_registry(reap: bool = True, probe: bool = False) -> list[PeerInfo]:
             info.daemon_socket = str(ds) if ds else None
             clients = data.get("clients")
             info.clients = int(clients) if isinstance(clients, (int, float)) else None
+            # Same defensive shape as clients/daemon_socket immediately
+            # above: an individual .get(), coerced, defaulting to None --
+            # never added to _ENTRY_FIELDS, so an entry written by an
+            # OLDER build (no usage_tokens key at all) is still read as a
+            # live peer rather than reaped for a missing key.
+            usage_tokens = data.get("usage_tokens")
+            info.usage_tokens = (
+                int(usage_tokens) if isinstance(usage_tokens, (int, float)) else None
+            )
         except (OSError, ValueError, TypeError, KeyError):
             if reap:
                 with contextlib.suppress(OSError):
@@ -500,6 +526,16 @@ class PeerHost:
         # daemon owns the number (it holds the sockets); an in-process
         # engine leaves it at None, which reads as "unknown", not "zero".
         self.client_count: "int | None" = None
+        # Usage total (see PeerInfo.usage_tokens): unlike client_count,
+        # this is NOT flushed the moment it changes -- it changes every
+        # turn, sometimes every few seconds, and a write per turn is
+        # exactly the "hammer the filesystem for a number a human reads
+        # occasionally" outcome the peer-publishing design argues against.
+        # update_usage() below only ever touches this attribute; the next
+        # scheduled heartbeat (_beat_loop -> refresh -> _write_entry)
+        # picks it up, same as it already does for title/cwd/anything
+        # else that can change between beats.
+        self.usage_tokens: "int | None" = None
         self._on_message = on_message
         self._on_peer_joined = on_peer_joined
         self._on_peer_left = on_peer_left
@@ -557,6 +593,8 @@ class PeerHost:
             entry["daemon_socket"] = self.daemon_socket
         if self.client_count is not None:
             entry["clients"] = int(self.client_count)
+        if self.usage_tokens is not None:
+            entry["usage_tokens"] = int(self.usage_tokens)
         tmp = self.registry_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
         os.chmod(tmp, 0o600)
@@ -569,6 +607,43 @@ class PeerHost:
         if self.client_count == count:
             return
         self.client_count = int(count)
+        with contextlib.suppress(OSError):
+            self._write_entry()
+
+    def update_usage(self, tokens: int) -> None:
+        """The engine's own running total (input + output + cache read +
+        cache create, summed exactly as :attr:`SessionEngine.usage_totals`
+        already is for ``/usage``) -- called once per completed turn.
+
+        Deliberately NOT a write path: this only updates
+        :attr:`usage_tokens` in memory. The next heartbeat tick
+        (``HEARTBEAT_SECS``, 15s by default) flushes it via the write
+        ``refresh()`` already schedules -- see the attribute's own comment
+        in :meth:`__init__` for why a per-turn write was rejected. A peer
+        reading this value is therefore looking at a number up to one
+        heartbeat interval old, never the instant one; nothing here claims
+        otherwise."""
+        self.usage_tokens = int(tokens)
+
+    def set_title(self, title: str) -> None:
+        """Replace the connect-time cwd-basename fallback with a real
+        title -- the engine's own first-turn hook
+        (:meth:`SessionEngine.send`) calls this once, with an excerpt of
+        the first prompt, so a peer's roster shows what a session is
+        actually doing rather than only where it is running.
+
+        Unlike :meth:`update_usage` (piggybacked on the heartbeat because
+        it changes every turn and nobody needs it instantly), a title
+        changes ONCE per session in the ordinary case -- so this writes
+        immediately, the same discipline :meth:`set_client_count` already
+        applies to attach counts: "presence has to move when the answer
+        changes, not on the next heartbeat." A blank title, or one that
+        would not actually change anything, is a no-op -- never blanks out
+        an existing title."""
+        title = str(title or "").strip()
+        if not title or title == self.title:
+            return
+        self.title = title
         with contextlib.suppress(OSError):
             self._write_entry()
 

@@ -71,6 +71,7 @@ from ..ui.labels import (
     belief_sort_key,
     ctx_chip,
     ellipsize,
+    fmt_tokens,
     mode_chip,
     mode_text,
     mode_tooltip,
@@ -626,9 +627,11 @@ class PaneChipsMixin:
             detached = sum(1 for peer in engine.list_peers() if peer.clients == 0)
             chips.append(StatusChip.clickable(
                 f"peers {peer_count}" + (f" ({detached}⌁)" if detached else ""),
-                "open_sessions",
+                "open_peers_picker",
                 "other DOXA sessions working on this repo -- click for the "
-                "full list; (N⌁) counts how many are detached",
+                "roster: what each is doing and tokens consumed so far "
+                "(self-reported, up to a heartbeat stale); (N⌁) counts how "
+                "many are detached",
             ))
         disabled = engine.disabled_tools()
         if disabled:  # two-strikes containment note -- hidden when empty
@@ -860,10 +863,13 @@ class PaneChipsMixin:
         )
 
     def run_status_command(self, name: str) -> None:
-        """The peers chip's click target -- runs a slash command exactly
-        as if it had been typed and submitted (``_run_command`` is the
-        SAME dispatch ``on_prompt_submitted`` uses for a non-passthrough
-        row)."""
+        """Runs a slash command exactly as if it had been typed and
+        submitted (``_run_command`` is the SAME dispatch
+        ``on_prompt_submitted`` uses for a non-passthrough row) -- a
+        general primitive for a chip whose click target IS a command,
+        rather than a picker. The peers chip used this through v0.78.0
+        (``/sessions``); v0.79.0 moved it to :meth:`open_peers_picker`,
+        a real roster in the shared ChipPicker."""
         self.run_worker(self._run_command(name), group="command")
 
     def run_compact_now(self) -> None:
@@ -977,6 +983,116 @@ class PaneChipsMixin:
             return
         entry = next((e for e in daemons if e.session_id == rid), None)
         if entry is None:
+            return
+        self.app._cmd_attach(entry)
+
+    def open_peers_picker(self) -> None:
+        """The peers chip's click target -- v0.79.0 replaces the old
+        ACTIONABLE-tier ``/sessions`` shortcut with a real roster, in the
+        SAME shared :class:`ChipPicker` every other chip opens, rather
+        than a second dropdown.
+
+        Row shape is the plain ``(id, label)`` convention the model/
+        branch/effort/sessions pickers already use -- not the
+        stamp/status/age grid the beliefs/proposals pickers built for
+        THEIR own multi-field rows (``row_prefix_width``,
+        ``PICKER_COLUMN_HEADER``): that convention is under active rework
+        elsewhere and this row does not share its shape (no stamp, no
+        status glyph), so a plain string kept the diff here to what
+        :meth:`_open_chip_picker` already supports. ``ChipPicker`` escapes
+        every row's text before painting it (``_escape_markup`` at render)
+        regardless of which convention a caller uses -- the SAME
+        protection :meth:`open_sessions_picker`'s rows already ride,
+        needed here for exactly the same reason: ``title`` is written by
+        ANOTHER process (:data:`peers_mod.PEER_UNTRUSTED_INTRO`'s own
+        boundary) and ``read_registry`` scrubs it for secrets but never
+        for terminal/markup content -- that job is this widget's.
+
+        Each row: the peer's directory name + short session id (the
+        "peer" column -- ``cwd`` is scrubbed at ``read_registry``, same
+        as ``title``), the first-prompt excerpt :attr:`PeerInfo.title` now
+        carries (see :func:`doxa.engine._peer_title_from_prompt` -- "the
+        beginning of its transcript"), and tokens consumed so far via
+        :func:`fmt_tokens`. ``usage_tokens`` is ``None`` for an older
+        build's entry or a peer that has not completed a turn yet, and
+        renders as ``fmt_tokens``'s own em-dash for exactly that reason --
+        never ``0 tok``, which would claim a peer has done nothing rather
+        than admit nothing is known.
+
+        Selecting a row reuses the SAME attach path
+        :meth:`_select_session_row` already established (never a second
+        implementation): the current session is a no-op, a peer already
+        open in another tab of this window switches to that tab, and a
+        daemon-hosted peer elsewhere attaches through
+        ``DoxaApp._cmd_attach``. A peer with no ``daemon_socket`` (an
+        in-process engine, not attachable at all) says so rather than
+        silently doing nothing -- the sessions picker never had this case
+        because ``list_daemons`` only ever returns daemon-hosted entries;
+        this reads the full peer list, which can include either kind."""
+        engine = self.engine
+        if engine is None:
+            return
+        live = engine.list_peers()
+        if not live:
+            self.run_worker(self._system("peers: none right now"), group="command")
+            return
+        open_by_sid = {
+            str(getattr(p.engine, "session_id", "") or ""): p
+            for p in self.app.panes()
+        }
+        rows: "list[tuple[str, str]]" = []
+        for peer in live:
+            name = Path(peer.cwd).name or peer.scope_key or "session"
+            marker = "  ⌁ detached" if peer.clients == 0 else ""
+            excerpt = peer.title or "(no prompt yet)"
+            tokens = (
+                f"{fmt_tokens(peer.usage_tokens)} tok"
+                if peer.usage_tokens is not None else "tok —"
+            )
+            rows.append((
+                peer.session_id,
+                f"{name}  {peer.session_id[:8]}{marker}   {excerpt}   {tokens}",
+            ))
+        self._open_chip_picker(
+            rows, None,
+            lambda rid: self._select_peer_row(rid, live, open_by_sid),
+            title="peers",
+            note=(
+                "tokens are self-reported and up to "
+                f"{int(peers_mod.HEARTBEAT_SECS)}s stale (piggybacked on "
+                "each peer's own heartbeat, not a live read)"
+            ),
+        )
+
+    def _select_peer_row(
+        self,
+        rid: str,
+        live: "list[peers_mod.PeerInfo]",
+        open_by_sid: "dict[str, Any]",
+    ) -> None:
+        """A peers-picker row's destination -- see :meth:`open_peers_picker`
+        for the shape this mirrors from :meth:`_select_session_row`. The
+        one case that picker never has: a peer with no ``daemon_socket``
+        (an in-process engine) cannot be attached to at all, and this says
+        so rather than the row quietly doing nothing on selection."""
+        current_sid = str(getattr(self.engine, "session_id", "") or "")
+        if rid == current_sid:
+            return
+        other_pane = open_by_sid.get(rid)
+        if other_pane is not None and other_pane is not self:
+            self.app._switch_to_tab(getattr(other_pane, "id", None) or "")
+            return
+        entry = next((p for p in live if p.session_id == rid), None)
+        if entry is None:
+            return
+        if not entry.daemon_socket:
+            self.run_worker(
+                self._system(
+                    f"peers: {entry.title}  {rid[:8]} is not attachable "
+                    "(not daemon-hosted)"
+                ),
+                group="command",
+            )
             return
         self.app._cmd_attach(entry)
 

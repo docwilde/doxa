@@ -447,10 +447,11 @@ class StatusBar(Static):
     v0.24.0 widened the tiers the release-notes' "for every chip?" answer
     drew: model/branch/effort/the repo name (item 4 -- overrides v0.22.0's
     "repo name is INERT") open the shared :class:`ChipPicker`; peers/ctx%/
-    the session handle/beliefs are ACTIONABLE (peers -> /sessions, ctx% ->
-    a confirm THEN /compact -- see :class:`CompactConfirm`, the session
-    handle -> a sessions picker, beliefs -> a beliefs picker); cost, sha
-    and usage headroom stay plain -- INERT never meant "unexplained", see
+    the session handle/beliefs are ACTIONABLE (peers -> a picker roster
+    since v0.79.0 (through v0.78.0: /sessions), ctx% -> a confirm THEN
+    /compact -- see :class:`CompactConfirm`, the session handle -> a
+    sessions picker, beliefs -> a beliefs picker); cost, sha and usage
+    headroom stay plain -- INERT never meant "unexplained", see
     :meth:`set_chip_hints` below. One action per chip rather than a single
     dispatcher taking an argument: simpler markup (no `json.dumps`-escaped
     action params to get wrong), and every action here is a fixed, known
@@ -526,8 +527,11 @@ class StatusBar(Static):
     def action_open_repo_picker(self) -> None:
         self.pane.open_repo_picker()
 
-    def action_open_sessions(self) -> None:
-        self.pane.run_status_command("/sessions")
+    def action_open_peers_picker(self) -> None:
+        """The peers chip's click target (v0.79.0) -- replaces the old
+        ``/sessions`` shortcut (``action_open_sessions``, removed here as
+        dead: nothing else called it) with the shared ChipPicker roster."""
+        self.pane.open_peers_picker()
 
     def action_compact_now(self) -> None:
         self.pane.run_compact_now()

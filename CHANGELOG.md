@@ -4,6 +4,13 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.79.0 — 2026-08-27
+
+- The peers chip is a real roster now instead of a `/sessions` shortcut: click it and the shared `ChipPicker` lists every live peer sharing this repo, each row showing what it's working on and tokens consumed so far. Selecting a row reuses the same attach path the sessions picker already established (`DoxaApp._cmd_attach`); the current session is a no-op and a peer open in another tab switches to it instead of attaching a second client.
+- `PeerInfo.usage_tokens` (`doxa/peers.py`) -- the session's own running token total (input + output + cache read + cache create, the same sum `/usage` prints), piggybacked on the existing 15-second heartbeat rather than written on every turn: `PeerHost.update_usage()` only updates the in-memory value, and the next scheduled heartbeat flushes it. A peers-picker token count can therefore be up to `HEARTBEAT_SECS` (15s) stale, stated in the picker's own note row -- never presented as instantaneous. `None` means unknown (an older build's entry, or a peer that hasn't completed a turn yet), never `0 tok`, the same rule `PeerInfo.clients` already states.
+- `PeerInfo.title` is now actually what its own docstring and a v0.75.0 changelog entry already claimed: derived from the session's first prompt (`doxa.engine._peer_title_from_prompt`, capped at 72 chars), not the cwd basename it silently fell back to at every call site through v0.78.0 -- `PeerHost` was never wired to update it after connect. `PeerHost.set_title()` writes immediately on the first turn (same "presence has to move when the answer changes" discipline `set_client_count` already applies), so every consumer of `title` (`/peers`, the sessions picker, and the new peers picker) gets the real excerpt, not a repeated directory name.
+- `docs/plans/peer-publishing.md`'s rejection of live telemetry ("tokens burned... would turn a 15-second heartbeat write into... a much heavier write path") assumed the only mechanism was a write per delta. Piggybacking on the already-scheduled heartbeat removes that cost for a monotonic total; the doc is corrected to ship `usage_tokens` while keeping cost-so-far and context% out (both remain local-only, `/usage`/`/context`, for reasons unrelated to write frequency).
+
 ## 0.78.0 — 2026-08-27
 
 **Spinner freeze during dead air.** The in-flight marker only advanced on

@@ -1,7 +1,11 @@
 # Peer publishing — what a session says about itself
 
-Status: **draft for review**. Nothing implemented. `doxa/peers.py` and
-`PeerInfo` are exactly as they are today; this spec proposes fields, not code.
+Status: **draft for review** for `provider`/`model`/`engine` — nothing
+below implements them; `PeerInfo` does not yet carry any of the three.
+**One field shipped ahead of the rest of this draft:** `usage_tokens`
+(v0.79.0), for reasons that revise this document's own reasoning rather
+than sitting outside it — see "Live telemetry, revisited" below before
+reading the numbered field proposals as unimplemented.
 
 ## What exists today
 
@@ -101,12 +105,15 @@ the catalog disagrees with a session's stale entry. `PeerInfo` publishes
 `"sonnet"` can do looks it up once, in one place. See "One vocabulary, two
 directions" below.
 
-The same reasoning excludes live numeric telemetry — context-used
-percentage, cost so far, tokens burned. Those change every turn, are
-already reported locally by `/usage` and `/context`, and would turn a
-15-second heartbeat write into either stale telemetry or a much heavier
-write path for no decision a peer actually needs to make from another
-process. `PeerInfo` is presence plus identity; it is not a second `/usage`.
+The same reasoning excludes MOST live numeric telemetry — context-used
+percentage and cost so far stay local-only, `/usage`/`/context`. **Tokens
+burned is the one exception, shipped in v0.79.0 as `PeerInfo.usage_tokens`
+— see "Live telemetry, revisited" below for why the write-path objection
+this paragraph originally raised turned out not to apply to it.**
+`PeerInfo` is presence plus identity plus, now, one running total; it is
+still not a second `/usage` — the four-way breakdown (`tokens in`/
+`tokens out`/`cache read`/`cache write`) that command prints stays local,
+only the one summed figure crosses the wire.
 
 ## Schema evolution on a file other builds read
 
@@ -225,12 +232,74 @@ and stops there; it does not attempt it.
   Argued above — that data lives once, in the model catalog
   (`docs/plans/model-registry.md`), keyed by the `model` string this spec
   publishes.
-- **No live telemetry** (context-used %, cost-so-far, tokens burned).
-  Already available locally via `/usage`/`/context`; publishing it to
-  peers turns a 15-second heartbeat into either stale numbers or a much
-  heavier write path for a decision no peer needs to make.
+- **No context-used % or cost-so-far on `PeerInfo`.** Still true, still
+  local-only (`/usage`/`/context`) — see "Live telemetry, revisited" for
+  why tokens burned is no longer in this bullet.
 - **No model-callable read of any of this.** The roster stays
   human/TUI-facing, same as `/peers` today.
+
+## Live telemetry, revisited (v0.79.0)
+
+The original draft rejected ALL live numeric telemetry — context-used %,
+cost-so-far, tokens burned — as one bullet, on one shared argument: it
+"would turn a 15-second heartbeat write into either stale telemetry or a
+much heavier write path for no decision a peer actually needs to make."
+The peers chip shipping in v0.79.0 needed exactly one of those three
+(tokens consumed, for a roster row: "the peer, the beginning of its
+transcript, and the tokens it has consumed so far"), which is what
+prompted checking the argument against an actual implementation rather
+than leaving it standing on the strength of its own prose.
+
+**The write-path half of the argument does not survive contact.** It
+assumed the only way to publish a changing number was a write per
+change. `PeerHost` already has a write that fires on a fixed schedule
+regardless of whether anything changed — the heartbeat
+(`HEARTBEAT_SECS`, 15s). `PeerInfo.usage_tokens` piggybacks on it:
+`PeerHost.update_usage()` (`doxa/peers.py`) only updates an in-memory
+attribute, called once per completed turn from
+`SessionEngine.send`'s `ResultMessage` handling (`doxa/engine.py`); the
+next scheduled heartbeat's `_write_entry()` picks it up along with
+everything else that changed since the last one. Net new filesystem
+writes: zero. The number a peer reads is therefore up to 15 seconds
+behind the peer's own live count — stated in the picker's note row
+(`doxa/session/chips.py:open_peers_picker`), never presented as
+instantaneous, and stated here so this document does not repeat a claim
+its own code no longer supports.
+
+**The "stale telemetry" half is a real cost, and it is the price paid,
+not avoided.** A picker built on this data is showing token counts up to
+one heartbeat old. That is acceptable for a roster a human glances at
+occasionally and unacceptable for anything that would make a decision
+from it — which is exactly the existing "advisory, never authoritative"
+rule this document already states for `provider`/`model`/`engine`,
+extended to cover a fourth field rather than argued anew.
+
+**Cost-so-far and context-used % stay out, and not merely because nobody
+has asked yet.** Both differ from tokens burned in ways the write-path
+fix does not touch:
+
+- Cost is a linear function of the same token counts `usage_tokens`
+  already publishes (input/output/cache rates), computed per-model. A
+  peer wanting cost-so-far can already estimate it from
+  `usage_tokens` plus whatever it separately knows about the model's
+  price — publishing both is redundant in the way `context_window`
+  living in a model catalog rather than on `PeerInfo` already argues
+  against duplicated derived data (see "Identity ages differently than
+  capability" above).
+- Context-used % is not a property of the SESSION the way a running
+  total is — it is "how full is this window's conversation RIGHT NOW,"
+  which resets on `/compact` and means nothing compared across two
+  peers running different models with different windows (the same
+  "DOXA drives several models with very different windows" argument
+  `ctx_absolute_text` already encodes). A monotonic total tokens
+  travels across a heartbeat gap without becoming misleading; a
+  percentage that can drop to near-zero mid-conversation does not.
+
+Net: one field shipped where the spec said none would, because the
+specific objection to it (write cost) turned out to be an assumption
+about mechanism, not a fact about the number. The other two stay
+rejected, on narrower grounds than the original one-size bullet gave
+them.
 
 ## Testing bar
 
@@ -250,6 +319,11 @@ and stops there; it does not attempt it.
   `PeerInfo` fields to the model — a peer's self-description stays
   TUI-facing until a future spec explicitly says otherwise, and argues the
   framing for it
+- (shipped, v0.79.0) `usage_tokens`: an entry missing the key entirely
+  reads as a live peer with `usage_tokens is None`, never `0`; calling
+  `PeerHost.update_usage()` does NOT write to disk by itself — only the
+  next heartbeat tick does, asserted by reading the on-disk entry before
+  and after a manual `refresh()`
 
 ## Open questions
 
