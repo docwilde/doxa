@@ -784,6 +784,36 @@ def _fmt_belief_row(belief: dict, *, width: int = PICKER_ROW_MAX) -> str:
     return format_picker_row(stamp, status, age, claim, width=width)
 
 
+def _pending_id_stamp(pid: str) -> str:
+    """A proposal's own staged-at moment, recovered from its pending id
+    when the record carries no ``created`` field of its own.
+
+    Every pending id lore_core has ever minted -- ``lore_core.gate.
+    stage_write``'s and ``lore_core.deriver``'s own staging ``put``, the
+    two and only writers of ``pending/*.json`` -- is the SAME shape:
+    ``<14-digit UTC timestamp>-<counter>``, the filename an id this
+    proposal cannot exist without. ``created`` was added to the payload
+    later; a proposal staged before that landed still has its moment, in
+    its own id, and a stamp column that reads only ``created`` throws that
+    away for exactly those rows -- blank where a real timestamp was
+    recoverable the whole time.
+
+    Not a guess: the id's digits ARE the clock the proposal was minted
+    from, only not duplicated into the JSON body yet. ``""`` for anything
+    that is not 14 digits followed by a dash -- a foreign or
+    hand-authored id renders blank rather than a wrong date."""
+    digits = str(pid or "").split("-", 1)[0]
+    if len(digits) != 14 or not digits.isdigit():
+        return ""
+    from datetime import datetime, timezone
+
+    try:
+        parsed = datetime.strptime(digits, "%Y%m%d%H%M%S")
+    except ValueError:
+        return ""
+    return parsed.replace(tzinfo=timezone.utc).strftime(LORE_TIME_FORMAT)
+
+
 def _fmt_pending_row(item: "dict | str", *, width: int = PICKER_ROW_MAX) -> str:
     """One ``/pending`` row, in the shared :func:`format_picker_row` shape:
     when it was staged, WHAT APPROVING IT WOULD DO (the status column) and
@@ -797,11 +827,19 @@ def _fmt_pending_row(item: "dict | str", *, width: int = PICKER_ROW_MAX) -> str:
     type-to-filter matches this exact label and a row you cannot search by
     its own words is not a row.
 
-    Accepts a bare string as well as a record: see :func:`as_proposal`."""
+    Accepts a bare string as well as a record: see :func:`as_proposal`.
+
+    ``created`` first, :func:`_pending_id_stamp` as fallback -- stamp AND
+    age both derive from the SAME resolved value, so a recovered stamp
+    also recovers the wait beside it rather than leaving that column
+    blank on its own."""
     proposal = as_proposal(item)
-    stamp = lore_created_text(proposal)
+    created = str(proposal.get("created") or "").strip() or _pending_id_stamp(
+        str(proposal.get("pid") or "")
+    )
+    stamp = lore_created_text({"created": created}) if created else ""
     status = proposal_verdict(proposal)
-    secs = _age_of(proposal.get("created"))
+    secs = _age_of(created) if created else None
     age = _fmt_age(secs) if secs is not None else ""
     text = _one_line(proposal_text(proposal), 200)
     return format_picker_row(stamp, status, age, text, width=width)

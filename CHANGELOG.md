@@ -4,6 +4,30 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.75.0 — 2026-08-26
+
+Fixed a staged proposal losing its own timestamp on the pending picker.
+
+- `_fmt_pending_row` read only the record's `created` field for the stamp
+  and age columns. A proposal staged before `created` was added to the
+  payload (`lore_core.gate.stage_write` / `lore_core.deriver`'s staging
+  `put`) rendered both blank, even though its own pending id — `<14-digit
+  UTC timestamp>-<counter>`, minted by both writers — carries the same
+  moment. `doxa.ui.labels._pending_id_stamp` recovers it from the id when
+  `created` is absent or unparseable; stamp and age both derive from the
+  same resolved value, so a recovered stamp also recovers the wait beside
+  it. A foreign or hand-authored id (not 14 digits) still renders blank
+  rather than a guessed date.
+- Measured, not assumed: `PICKER_STAMP_COL` (15), `PICKER_STATUS_COL`
+  (28) and `PICKER_AGE_COL` (7) were re-checked against both row types
+  sharing the grid and against `_fmt_age`'s own real ceiling
+  (`"23h59m"`, 6 columns) rather than its comment — all three already sat
+  at their measured maxima and are unchanged.
+- Added the assertion the shared formatter never had: one belief row and
+  one pending row, rendered together, now have a test asserting their
+  claim/text columns start at the identical offset — not just each row
+  type's own `PICKER_PREFIX_WIDTH` checked in isolation.
+
 ## 0.74.0 — 2026-08-26
 
 Claude Code plugins and skills, adopted without reopening item AA's
