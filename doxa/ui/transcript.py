@@ -796,24 +796,66 @@ a kind of block, and reusing one as motion would make a running turn look
 like a section header. The braille cycle is the one spinner shape every
 terminal font in wide use carries a glyph for, and it occupies exactly one
 cell in all of them -- a two-cell frame would make the label jitter
-sideways on every tick, which is worse than no spinner."""
+sideways on every tick, which is worse than no spinner.
+
+v0.78.0 kept this cycle rather than matching the reference point named for
+this feature -- Claude Code's own "esc to interrupt" line, which rotates a
+Dingbats-block asterisk (the same font-coverage class as the Geometric
+Shapes glyphs the banner work already rejected for a tofu risk, see
+doxa/banner.py). That glyph was not something this change could SOURCE:
+`strings -n6 --unicode=escape` on the installed CLI (the same technique
+that pulled the permission-mode color table out of the binary for that
+earlier feature) surfaces the verb list ("Thinking", "Working",
+"Wrangling", ... -- one picked per turn) and the elapsed-time convention
+(a `Date.now()`-at-mode-start timestamp, floored to whole seconds -- see
+below) in plain text, because those are ordinary bundled strings. A single
+rotating glyph assigned one character per array slot is not: each element
+is below the 6-byte run `strings` needs, and direct UTF-8 byte-scanning
+the binary for the usual candidates (✢ ✳ ✶ ✻ ✽) found none outside
+unrelated compressed asset bytes. The one frame set the binary DOES yield
+intact is unrelated: an Inquirer.js "dots" prompt spinner (80ms interval,
+this SAME Braille block) bundled for setup-wizard-style prompts elsewhere
+in the CLI, not the turn indicator. Shipping a guessed asterisk would be
+exactly the un-sourced lookalike this investigation was told not to ship,
+so the glyph stays doxa's own -- already deliberately chosen, already
+safe -- and only the SHAPE (glyph, phase word, elapsed time) and the
+elapsed-since-start semantics (sourced, below) are adopted."""
 
 SPINNER_MIN_INTERVAL = 0.1
-"""Seconds between two spinner repaints, at most ~10 Hz.
+"""Seconds between two DELTA-driven spinner repaints, at most ~10 Hz.
 
-Not a timer -- there is no clock here at all. This is a floor on how often
-an ARRIVING DELTA is allowed to cost a repaint. A long answer streams
-hundreds of deltas (see SessionPane's own note about a 700-delta answer),
-and repainting the marker for each of them would trade the old
+Not the tick timer below -- this is a floor on how often an ARRIVING
+DELTA is allowed to cost a repaint. A long answer streams hundreds of
+deltas (see SessionPane's own note about a 700-delta answer), and
+repainting the marker for each of them would trade the old
 LoadingIndicator's fixed 16 Hz for something worse: a repaint rate set by
-the model's token rate. The floor caps the cost while a turn runs; when no
-turn is running no delta arrives, nothing calls advance(), and the cost is
-exactly zero."""
+the model's token rate. The floor caps the cost while deltas are
+arriving; it says nothing about the seconds between them, which is what
+:data:`TICK_INTERVAL` now covers."""
+
+TICK_INTERVAL = 1.0
+"""Seconds between two elapsed-time ticks -- the SECOND timer this widget
+arms, and a deliberate amendment to the "delta-driven, timerless" rule
+v0.56.0 shipped (see ThinkingMarker's own docstring for the full argument;
+tests/test_transcript_density.py's test_the_tick_timer_lives_no_longer_
+than_the_turn_it_belongs_to for what the amended invariant asserts).
+
+Reported defect: between two engine events -- a 30-second Bash, a slow
+WebFetch, a subagent thinking -- the v0.56.0 marker was frozen on
+whatever frame the last delta left it on, which reads as hung exactly
+when reassurance matters most. A delta-only spinner cannot fix that; it
+needs a clock. 1.0s (not SPINNER_MIN_INTERVAL's 0.1s) because the
+information this timer exists to show -- elapsed SECONDS -- has no finer
+resolution to offer; a 10Hz clock-driven glyph would cost ten times the
+CPU to display a number that only changes once a second anyway."""
 
 
 class ThinkingMarker(Static):
     """The in-flight marker on a running turn -- a spinner since v0.56.0,
-    and still TIMERLESS, which is the whole design.
+    delta-driven since the same release, and since v0.78.0 ALSO driven by
+    one timer of its own, deliberately: this docstring is the argument for
+    why that is still the design v0.56.0 committed to rather than a
+    reopening of it.
 
     This originally replaced a ``LoadingIndicator``, whose 16 Hz
     auto-refresh animation was the same class of cost as the leaked-timer
@@ -826,25 +868,59 @@ class ThinkingMarker(Static):
     was the CLOCK behind it: a timer ticks whether or not anything is
     happening, and DOXA's status line is built under an explicit
     no-timer, no-per-frame rule (see :class:`doxa.ui.statusline.GitLine`).
+    That rule survives here unbroken: GitLine's own wording is "no CPU
+    spent when nothing is happening", not "no timer, ever" -- and a timer
+    that exists ONLY while a turn is genuinely in flight, and is gone
+    (not merely stopped -- :meth:`stop` clears the reference) the instant
+    it ends, spends no CPU on anything else. An idle DOXA still arms none.
 
-    So this spinner is driven by the DELTA STREAM instead. A token
-    arriving is a tick; :meth:`advance` moves the glyph on one frame and
-    names the phase it arrived from. When nothing is arriving nothing
-    ticks, which is precisely the behaviour wanted: an idle DOXA has no
-    turn in flight, no deltas, no repaints, and ``auto_refresh`` stays
-    ``None`` on every widget in the app. :data:`SPINNER_MIN_INTERVAL`
-    keeps the other end honest -- a fast model must not be able to buy
-    itself a 200 Hz repaint loop.
+    So this spinner is driven by the DELTA STREAM, same as before --
+    :meth:`advance` moves the glyph on one frame and names the phase a
+    ``text_delta``/``reasoning_delta``/``tool_call`` arrived from, floored
+    to ~10Hz by :data:`SPINNER_MIN_INTERVAL` so a fast model cannot buy a
+    200Hz repaint loop -- PLUS one ``set_interval`` (see :data:`TICK_INTERVAL`)
+    that fires once a second for as long as the turn runs, whether or not a
+    delta ever arrives inside that second. This is the fix for the
+    reported defect: between a ``tool_call`` and its ``tool_result`` --
+    a 30-second Bash, a slow WebFetch, a subagent thinking -- no delta
+    lands at all, and a purely delta-driven spinner freezes exactly when
+    "is this still working?" is the question the user is actually asking.
+    :meth:`start` arms the timer; :meth:`stop` -- called from every path a
+    turn can end, see below -- cancels it. Textual's own
+    ``MessagePump._close_messages``/``_process_messages`` ALSO stop every
+    timer a widget armed via ``set_interval``/``set_timer`` the moment
+    that widget's message pump closes (verified against
+    ``textual.message_pump`` directly, not assumed), so an abrupt teardown
+    that never reaches :meth:`stop` -- a pane closed mid-turn, the app
+    quitting under a live turn -- still cannot leak this timer past the
+    widget it belongs to.
+
+    ELAPSED TIME is the second half of the fix, and the one that actually
+    turns "maybe hung" into "no, still going, N seconds": :meth:`_elapsed`
+    floors ``monotonic() - self._started_at`` to whole seconds -- the SAME
+    convention this feature's own reference point (Claude Code's CLI,
+    reverse-engineered via ``strings -n6 --unicode=escape`` against the
+    installed binary rather than guessed) uses for its own elapsed
+    figures: a start timestamp captured once, `Math.floor`d on read,
+    never a running counter re-armed off the last tick. Since-turn-start
+    was chosen over since-last-event for the same reason a stopped stopwatch
+    beats a re-triggered one: since-last-event would reset to 0 on every
+    delta, and a turn generating a thousand short deltas would never show
+    more than a second or two of elapsed time no matter how long it had
+    actually been running -- exactly backwards for a number whose one job
+    is to make a genuinely long wait visible.
 
     PHASES. The user named two, and both are real events on the wire:
     ``reasoning`` (reasoning_delta) and ``generating`` (text_delta). A
     third, ``working``, covers a tool call in flight -- between a
     ``tool_call`` and its ``tool_result`` no delta arrives at all, so the
-    glyph legitimately stops moving, and it must not sit there claiming
-    to be generating text while a Bash command runs. The opening state is
-    the original static ``⋯ thinking``: before the first event there is
-    genuinely nothing to tick on, and inventing motion for it would be
-    the animation-for-its-own-sake this app keeps refusing.
+    named phase legitimately stops changing (the GLYPH does not: the tick
+    timer keeps moving it, which is the whole point). The opening phase,
+    before the first event, renders as ``thinking`` -- v0.56.0 kept this
+    frozen on the grounds that "there is genuinely nothing to tick on";
+    v0.78.0 disagrees on purpose, because there is now something to tick
+    on (real elapsed time) even before the model has said a word, and that
+    silent opening gap is exactly the case the reported defect names.
 
     v0.25.0's decision is REVERSED here, deliberately. That release had
     the first reasoning_delta HIDE this marker, on the grounds that a live
@@ -859,16 +935,103 @@ class ThinkingMarker(Static):
     saying "working": ThinkingMarker is the widget that already said it,
     given the whole turn instead of its first second.
 
-    Teardown is unchanged and total: :meth:`TurnBlock.hide_thinking` --
-    called from ``mark_done`` on turn_done, from ``mark_done`` on the
-    error path in ``_run_turn``, and from the restore path -- sets
-    ``display`` False and reasserts ``auto_refresh = None``."""
+    Teardown is unchanged in SHAPE, widened in substance:
+    :meth:`TurnBlock.hide_thinking` -- called from ``mark_done`` on
+    turn_done, from ``mark_done`` on the error path in ``_run_turn``, and
+    from the restore path -- sets ``display`` False, reasserts
+    ``auto_refresh = None`` (still never set by this widget -- the tick
+    timer is a plain ``Timer``, not Textual's ``auto_refresh``, so every
+    existing ``auto_refresh is None`` assertion stays true through a whole
+    in-flight turn), and now also calls :meth:`stop`."""
 
     def __init__(self) -> None:
         self.frame = 0
         self.phase = ""
         self._last_tick = 0.0
+        self._started_at: float | None = None
+        self._tick_timer: Any = None
         super().__init__("⋯ thinking", classes="thinking")
+
+    def start(self) -> None:
+        """Arm the elapsed-time ticker. Called exactly once per turn, from
+        the three places a turn genuinely BEGINS (not constructed, not
+        mounted -- begins): ``PaneRuntimeMixin._run_turn`` for a turn this
+        client drives, and the ``turn_started``/orphaned-turn branches of
+        ``_peer_pump`` for one a peer drives. Never called from
+        ``__init__`` or ``on_mount``: :func:`mount_transcript` constructs
+        and mounts this SAME widget for a turn that finished long ago, and
+        calls :meth:`TurnBlock.hide_thinking` on it immediately after --
+        arming a timer there just to cancel it a message-pump cycle later
+        would be the leak this method exists to prevent, not cause."""
+        self._started_at = monotonic()
+        # Arm only on a MOUNTED widget. Measured, deterministic: set_interval
+        # plus update() on a marker whose message pump has not started yet
+        # poisons the compositor -- every later reflow dies with 'NoneType'
+        # has no attribute 'get_height', for the life of the screen. And
+        # this is the normal case, not an edge: _composed's own docstring
+        # (top of this file) records that a TurnBlock's children land a
+        # message-pump cycle after mount(), so _run_turn's start() can
+        # arrive first. on_mount below picks the timer up.
+        if self.is_mounted:
+            self._arm()
+
+    def _arm(self) -> None:
+        if self._tick_timer is None:
+            self._tick_timer = self.set_interval(TICK_INTERVAL, self._tick)
+        self._repaint()
+
+    def on_mount(self) -> None:
+        # start() before mount: the timestamp is set, the timer is not.
+        if self._started_at is not None and self._tick_timer is None:
+            self._arm()
+
+    def stop(self) -> None:
+        """Cancel the ticker. Idempotent: safe on a marker :meth:`start`
+        never touched (the restore path) and safe to call twice (mark_done
+        AND an abrupt unmount could both reach for it)."""
+        if self._tick_timer is not None:
+            self._tick_timer.stop()
+            self._tick_timer = None
+        self._started_at = None
+
+    def _elapsed(self) -> int:
+        if self._started_at is None:
+            return 0
+        return int(monotonic() - self._started_at)
+
+    def _repaint(self) -> None:
+        # NOT named _render: Widget._render is a FRAMEWORK method that must
+        # return a Visual (widget.py:4270 in this Textual version), and an
+        # override returning None makes every paint of this widget die with
+        # 'NoneType' has no attribute 'get_height' -- measured, and the
+        # whole cause of the 9-failure/35-error suite this branch first
+        # produced.
+        # Guarded on is_mounted AND display -- both measured, not assumed.
+        # A queued tick can land after hide_thinking: Textual stops a
+        # widget's timers at pump close, but a tick already queued still
+        # fires. And in this Textual version, Static.update() on a
+        # display=False widget leaves a None visual the compositor then
+        # queries ('NoneType' has no attribute 'get_height', from inside a
+        # paint with no caller of ours on the stack) -- reproduced in
+        # isolation with three lines: start(), display=False, update().
+        if not (self.is_mounted and self.display):
+            return
+        self.update(
+            f"{SPINNER_FRAMES[self.frame]} {self.phase or 'thinking'} "
+            f"({self._elapsed()}s)"
+        )
+
+    def _tick(self) -> None:
+        """:data:`TICK_INTERVAL`'s own callback -- fires once a second for
+        as long as :meth:`start` has been called and never :meth:`stop`,
+        REGARDLESS of whether a delta has arrived. This is the fix: the
+        glyph moves and the elapsed count grows even through a tool call
+        that never sends one."""
+        if not self.display:
+            return
+        self.frame = (self.frame + 1) % len(SPINNER_FRAMES)
+        self._last_tick = monotonic()
+        self._repaint()
 
     def advance(self, phase: str) -> None:
         """One delta (or one tool call) arrived: move the glyph on, and
@@ -892,7 +1055,7 @@ class ThinkingMarker(Static):
         self._last_tick = now
         self.frame = (self.frame + 1) % len(SPINNER_FRAMES)
         self.phase = phase
-        self.update(f"{SPINNER_FRAMES[self.frame]} {phase}")
+        self._repaint()
 
 
 # A Collapsible title is ONE ROW that cannot wrap (theme.tcss pins
@@ -1064,9 +1227,16 @@ class TurnBlock(Collapsible):
             # else stopped, so every finished turn leaked a live timer and
             # idle CPU grew linearly with scrollback (measured ~0.2%/turn
             # headless; clearing it took 40 idle turn blocks from ~8.7% CPU
-            # to baseline). ThinkingMarker arms nothing at all -- this line
-            # now guarantees the invariant rather than repairing a widget.
+            # to baseline). This widget still never touches auto_refresh --
+            # this line guarantees the invariant rather than repairing one.
             self.thinking.auto_refresh = None
+        # v0.78.0: the SAME belt-and-braces, for the per-second tick timer
+        # ThinkingMarker.start() now arms. Unconditional (outside the `if`
+        # above) and idempotent -- a restored turn (mount_transcript) calls
+        # this on a marker whose start() was NEVER called, and stop() on
+        # that marker is just as safe a no-op as this whole method already
+        # is on one that was never shown.
+        self.thinking.stop()
 
     async def append_text(self, chunk: str) -> None:
         # v0.56.0: the marker advances instead of hiding. A delta arriving
