@@ -320,6 +320,64 @@ def test_a_pending_row_leads_with_the_verdict_and_the_wait():
     assert "remember uv, not pip" in row  # still filterable by its own words
 
 
+def test_a_pending_row_recovers_its_stamp_from_its_own_id_when_created_is_missing():
+    """A proposal has a timestamp the moment lore_core mints it: every
+    pending id -- ``lore_core.gate.stage_write``'s and
+    ``lore_core.deriver``'s own staging ``put`` both mint the same shape,
+    ``<14-digit UTC timestamp>-<counter>`` -- IS that moment, filename and
+    all. A proposal staged before the ``created`` field existed in the
+    payload still carries it there. A stamp column that only ever reads
+    ``created`` throws that away silently for exactly those rows -- blank
+    where a real timestamp was recoverable the whole time. This is the
+    fallback that stops it."""
+    import time
+
+    from doxa.ui.labels import PICKER_STAMP_COL
+
+    when = time.gmtime(time.time() - 5 * DAY)
+    pid = time.strftime("%Y%m%d%H%M%S", when) + "-00"
+    old_style = {
+        "pid": pid, "kind": "memory", "scope": "user", "action": "add",
+        "text": "remember uv, not pip",
+    }  # no "created" key at all -- exactly a pre-that-field proposal
+    row = _fmt_pending_row(old_style)
+    assert row[:PICKER_STAMP_COL].strip() == time.strftime("%y-%m-%d %H:%M", when)
+    # the wait recovers off the SAME recovered stamp, not a second blank
+    assert "5d0h" in row
+
+
+def test_a_pending_row_with_neither_created_nor_a_dated_id_renders_blank():
+    """A foreign or hand-authored id (no 14 digits to read a clock off of)
+    must never be guessed at -- the same "absent is an admission, not a
+    guess" rule the belief row already follows."""
+    from doxa.ui.labels import PICKER_STAMP_COL
+
+    row = _fmt_pending_row({
+        "pid": "not-a-timestamp", "kind": "memory", "scope": "user",
+        "action": "add", "text": "remember uv, not pip",
+    })
+    assert row[:PICKER_STAMP_COL].strip() == ""
+
+
+def test_a_belief_row_and_a_pending_row_start_their_claim_at_the_same_column():
+    """The whole point of ONE shared formatter (v0.67.0): a belief row and
+    a proposal row share not just a WIDTH but a GRID, column for column,
+    so the two menus' rows read as one table rather than two differently
+    -shaped strings that happen to be the same length. Nothing asserted
+    this directly before -- every existing test checks one row type's own
+    :data:`doxa.ui.labels.PICKER_PREFIX_WIDTH` in isolation, never both
+    row types side by side."""
+    from doxa.ui.labels import PICKER_PREFIX_WIDTH
+
+    belief_row = _fmt_belief_row(
+        _belief(1, "deploy checklist checks the staging tag before prod push")
+    )
+    pending_row = _fmt_pending_row(_proposal("p", "remember uv, not pip"))
+    assert belief_row.index("deploy") == PICKER_PREFIX_WIDTH
+    assert pending_row.index("remember") == PICKER_PREFIX_WIDTH
+    assert belief_row.index("deploy") == pending_row.index("remember")
+
+
 @pytest.mark.asyncio
 async def test_neither_outcome_is_silent(monkeypatch, tmp_path):
     """The user must see what happened -- in the row AND in the session,
