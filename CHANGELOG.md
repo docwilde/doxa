@@ -4,6 +4,52 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.81.0 — 2026-08-27
+
+`/context` redrawn to look like Claude Code's own: a fixed 10x20 grid of
+200 cells (0.5% each) leads the numbers, model and headline beside the top
+rows, a per-category legend beside the lower rows -- replacing v0.75.0's
+single proportional bar of `█`.
+
+- `doxa.ui.labels.context_grid_cells`/`context_grid_text` -- the grid.
+  Fixed geometry (unlike the old bar, it never stretches to the pane; it
+  draws at its one true 200-cell size or, below `GRID_COLUMNS *
+  GRID_CELL_WIDTH` columns, not at all -- numbers-only, same final degrade
+  the old bar had). Cell counts are assigned by FLOORING each category's
+  cumulative share of 200, not rounding: a category that has not yet
+  earned a whole cell draws zero, never one -- item K's small-lie rule,
+  now pinned in the picture as well as the numbers. No reported window,
+  no grid, same as always.
+- Two cell styles, one geometry: Claude Code's own draughts glyphs (⛀ ⛁
+  ⛶) by default, `[#]`/`[ ]` ascii behind the new `context_grid` setting
+  (`DOXA_CONTEXT_GRID=ascii`) for a terminal font that tofu's Miscellaneous
+  Symbols -- DOXA cannot probe a terminal's own glyph coverage, so this is
+  a manual switch, not detection. Both read the identical measured cells;
+  only the two characters change, and the cell width (3 columns either
+  way) is fixed so flipping the setting never moves the layout.
+- Category color is now keyed by NAME (`CONTEXT_GRID_CATEGORY_COLORS`),
+  not list position, reusing the same five theme.tcss hex values the old
+  bar already wore (PROVIDER_GLYPH_COLOR plus the `#session-tabs` status
+  ladder) -- nothing invented, and a legend needs a name to label
+  consistently across a CLI that reorders its own list.
+- `doxa.ui.labels.context_sources_text` -- the per-source summary Claude
+  Code prints below its own grid (MCP tools by server, agents, adopted-
+  plugin skills), hide-at-zero throughout. `agents` is a real
+  `get_context_usage` field (`claude_agent_sdk/types.py`) no `/context`
+  surface before this normalized at all; `doxa.engine.context_breakdown`
+  now carries it the same capped/omitted way as `memory_files`/
+  `mcp_tools`. Skills has no CLI field to read (`get_context_usage` does
+  not report them), so it is the one figure here DOXA measures itself --
+  `doxa.claude_plugins.adopted_skill_summary`, a bare count, never a token
+  total, gated on the existing `adopt_plugins` setting.
+- "Usage by category", not "Estimated usage by category" -- Claude Code's
+  own heading. DOXA does not estimate anything on this screen; keeping the
+  word would have been a claim item K's own docstring already rules out.
+- `tests/test_context.py`'s bar tests (`CONTEXT_BAR_*`, `context_bar_
+  segments`/`_text`) are rewritten for the grid's shape, keeping both
+  lessons the bar tests paid for: poll for the PAINTED state, not the
+  mount, and assert rendered text rather than a matching widget existing.
+
 ## 0.80.0 — 2026-08-27
 
 - A session running in its own git worktree (`doxa/<id>`, v0.17.0+) is now told so: `SessionEngine._build_options` appends a `[SESSION WORKTREE]` block after the LORE snapshot, naming the session's actual branch, base ref and main repo root, and stating the real removal rule (`doxa.worktrees.FINALIZE_RULE`) so the agent knows what finalize keeps versus discards. Fixes agents pushing their private branch upstream, trying to switch to `main`, or burning a turn on git archaeology to find their own base.

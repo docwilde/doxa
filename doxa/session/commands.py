@@ -610,10 +610,10 @@ class PaneCommandsMixin:
         Mounts :class:`~doxa.ui.transcript.ContextBlock` directly rather
         than going through :meth:`_system` -- the same door
         :meth:`_cmd_shell`'s ``ShellBlock`` already uses for a block that
-        is not plain text. ``ContextBlock`` leads with a proportional bar
-        of the window (block art, one colored run per measured category)
+        is not plain text. ``ContextBlock`` leads with a 10x20 grid of the
+        window (Claude Code's own look, one colored cell per 0.5% of it)
         and keeps every number this method has always printed right below
-        it, unchanged; see that class's own docstring for why the bar has
+        it, unchanged; see that class's own docstring for why the grid has
         to be a widget that fits itself at paint time rather than a string
         computed once here."""
         engine = self.engine

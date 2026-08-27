@@ -489,6 +489,44 @@ def test_adopted_commands_excludes_the_blocklisted_plugin(tmp_path, monkeypatch)
     assert invocables == ["caveman:cmd0", "caveman:cmd1"]
 
 
+# -- adopted_skill_summary(): /context's "skills" per-source section -----
+
+
+def test_adopted_skill_summary_zero_while_the_setting_is_off(tmp_path):
+    base = tmp_path / "real-claude"
+    cache = tmp_path / "cache"
+    plugin = _make_plugin(cache, "caveman", skills=3)
+    _install(base, "caveman@caveman", plugin)
+
+    assert cp_mod.adopted_skill_summary(cp_mod.discover(base=base)) == (0, 0)
+
+
+def test_adopted_skill_summary_counts_skills_across_adopted_plugins(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOXA_ADOPT_PLUGINS", "1")
+    base = tmp_path / "real-claude"
+    cache = tmp_path / "cache"
+    caveman = _make_plugin(cache, "caveman", commands=1, skills=2)
+    lore = _make_plugin(cache, "lore", skills=5)  # blocked outright, regardless
+    codex = _make_plugin(cache, "codex", skills=1)
+    _install(base, "caveman@caveman", caveman)
+    _install(base, "lore@lore", lore)
+    _install(base, "codex@codex", codex)
+
+    total, plugins = cp_mod.adopted_skill_summary(cp_mod.discover(base=base))
+    assert total == 3  # 2 (caveman) + 1 (codex) -- lore's 5 never count
+    assert plugins == 2
+
+
+def test_adopted_skill_summary_ignores_a_plugin_with_no_skills(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOXA_ADOPT_PLUGINS", "1")
+    base = tmp_path / "real-claude"
+    cache = tmp_path / "cache"
+    plugin = _make_plugin(cache, "caveman", commands=2)  # no skills at all
+    _install(base, "caveman@caveman", plugin)
+
+    assert cp_mod.adopted_skill_summary(cp_mod.discover(base=base)) == (0, 0)
+
+
 def test_report_lists_the_exact_invocable_spelling(tmp_path):
     """The discoverability half of the fix: /plugins has to print the
     spelling a user can actually type, not just a count -- "2 commands"

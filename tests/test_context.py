@@ -29,13 +29,17 @@ from doxa import commands, engine as engine_mod
 from doxa.app import ContextBlock, DoxaApp, SlashComplete, SystemBlock
 from doxa.engine import SessionEngine, context_breakdown
 from doxa.ui.labels import (
-    CONTEXT_BAR_MAX_COLUMNS,
-    CONTEXT_BAR_MIN_COLUMNS,
-    CONTEXT_BAR_TRACK,
+    CONTEXT_GRID_TRACK,
     CONTEXT_UNAVAILABLE,
-    context_bar_segments,
-    context_bar_text,
+    GRID_CELL_WIDTH,
+    GRID_CELLS,
+    GRID_COLUMNS,
+    GRID_ROWS,
     context_breakdown_text,
+    context_grid_cells,
+    context_grid_mode,
+    context_grid_text,
+    context_sources_text,
     ctx_text,
     help_text,
 )
@@ -507,97 +511,108 @@ def test_the_breakdown_applies_item_x_s_unknown_token_rule():
     assert "in use" not in context_breakdown_text(breakdown)
 
 
-# -- the bar: block art in place of the numbers, numbers still below ------
+# -- the grid: Claude Code's own look, in place of the v0.75.0 bar --------
 #
-# "instead of the numbers" is read here as LEADS the numbers, not replaces
-# them: a bar of ``█`` can show the SHAPE of the window at a glance but
-# cannot tell 4% from 6%, and item K's whole premise is that every figure
-# on this screen stays a reachable measurement. context_breakdown_text
-# (the numbers) is untouched by every test above this line -- deliberately,
-# since context_bar_text/context_bar_segments are new, additive functions
-# nothing else calls yet.
+# "instead of the numbers" is read here exactly as v0.75.0 read it: LEADS
+# the numbers, not replaces them. context_breakdown_text (the numbers) is
+# untouched by every test above this line, and stays untouched below --
+# context_grid_text/context_grid_cells/context_sources_text are additive
+# functions nothing else calls yet, spliced in by ContextBlock.render the
+# same way context_bar_text used to be.
+
+GRID_WIDTH = GRID_COLUMNS * GRID_CELL_WIDTH  # 30 -- the grid's one true width
 
 
 def _plain(text: str) -> str:
     """Strip this module's ``[#RRGGBB]...[/]`` color spans back off, the
     same regex ``tests/test_banner.py``'s ``_plain_lines`` uses for the
-    drawn boot mark -- the bar is built out of the identical markup
-    shape."""
+    drawn boot mark -- the grid is built out of the identical markup
+    shape.
+
+    The ascii cell style's own content, a literal ``[#]``/``[ ]``, is
+    escaped in production (``doxa.ui.labels._escape_markup``) because it
+    is otherwise indistinguishable from a color tag with zero hex digits
+    -- exactly the shape the strip regex below matches. A dumb regex does
+    not know an escaped ``\\[`` should be left alone, so the escaped
+    bracket is hidden behind a sentinel the regex cannot match BEFORE
+    stripping, then restored to a plain ``[`` afterward -- the same two-
+    step a real Rich/Textual markup parser performs in one."""
     import re
 
-    return re.sub(r"\[/?#?[0-9A-Fa-f]{0,6}\]", "", text)
+    sentinel = ""
+    protected = text.replace("\\[", sentinel)
+    stripped = re.sub(r"\[/?#?[0-9A-Fa-f]{0,6}\]", "", protected)
+    return stripped.replace(sentinel, "[")
 
 
-def test_no_reported_window_no_bar_same_rule_as_the_numbers():
-    """Item K's central rule, restated for the bar: a limit the CLI never
+def test_no_reported_window_no_grid_same_rule_as_the_numbers():
+    """Item K's central rule, restated for the grid: a limit the CLI never
     sent reads ``?`` and stays ``?`` -- there is no denominator to be
-    proportional against, so there is no bar, not one drawn against a
+    proportional against, so there is no grid, not one drawn against a
     guessed 200000."""
     breakdown = context_breakdown({
         "totalTokens": 100,
         "categories": [{"name": "Messages", "tokens": 100}],
     })
     assert "max_tokens" not in breakdown
-    assert context_bar_segments(breakdown, 80) is None
-    assert context_bar_text(breakdown, 80) == ""
+    assert context_grid_cells(breakdown) is None
+    assert context_grid_text(breakdown, 120) == ""
 
 
-def test_no_measured_categories_no_bar():
+def test_no_measured_categories_no_grid():
     """A window size with nothing to divide it into is the other half of
     the same rule: percentage and totals alone are not a shape."""
     breakdown = context_breakdown({"totalTokens": 100, "maxTokens": 1000})
     assert breakdown.get("categories") == []
-    assert context_bar_segments(breakdown, 80) is None
+    assert context_grid_cells(breakdown) is None
 
 
-def test_a_box_too_narrow_drops_the_bar_not_the_numbers():
-    """Below CONTEXT_BAR_MIN_COLUMNS the bar is 2-3 blocks of noise, not a
-    shape -- context_bar_text degrades to "" rather than ship it, and
-    context_breakdown_text (unexercised by width at all) keeps printing
-    the exact numbers regardless."""
+def test_a_box_too_narrow_drops_the_grid_not_the_numbers():
+    """Below the grid's own fixed width (GRID_COLUMNS * GRID_CELL_WIDTH)
+    there is no smaller grid to fall back to -- unlike the old proportional
+    bar, this grid never shrinks, so context_grid_text degrades straight
+    to "" rather than ship a truncated shape, and context_breakdown_text
+    (unexercised by width at all) keeps printing the exact numbers
+    regardless."""
     breakdown = _breakdown()
-    assert context_bar_segments(breakdown, CONTEXT_BAR_MIN_COLUMNS - 1) is None
-    assert context_bar_text(breakdown, CONTEXT_BAR_MIN_COLUMNS - 1) == ""
-    assert context_bar_segments(breakdown, CONTEXT_BAR_MIN_COLUMNS) is not None
+    assert context_grid_text(breakdown, GRID_WIDTH - 1) == ""
+    assert context_grid_text(breakdown, GRID_WIDTH) != ""
     assert "60,650 / 180,000" in context_breakdown_text(breakdown)
 
 
-def test_a_sub_half_block_component_draws_no_visible_sliver():
-    """Rounding a 0.2% component up to one block is a lie at the small
-    end. A category worth 0.2% of a 60-wide bar (0.12 of a block) must
-    draw ZERO blocks, and every category ahead of it in the list must not
-    be inflated to cover for it -- the bar's own width still has to sum
-    correctly with the sliver gone."""
+def test_a_sub_full_cell_component_draws_no_visible_cell():
+    """FLOOR, not round, is item K's own small-lie rule pinned in the
+    picture as well as the numbers: a category whose cumulative share
+    reaches 0.9 of ONE cell's width (not yet a whole cell) must draw ZERO
+    cells -- rounding it to the nearest cell (0.9 rounds to 1) would paint
+    a filled cell for a component that has not actually earned one.
+    200,000-token window, 900-token category: 900/200,000 * 200 cells =
+    0.9 -- floor(0.9) == 0, the exact boundary a round-based
+    implementation would get wrong."""
     breakdown = context_breakdown({
-        "totalTokens": 100_000,
-        "maxTokens": 100_000,
+        "totalTokens": 200_000,
+        "maxTokens": 200_000,
         "categories": [
-            {"name": "Sliver", "tokens": 200},        # 0.2% of the window
-            {"name": "Messages", "tokens": 49_800},   # 49.8%
-            {"name": "Free space", "tokens": 50_000},  # 50%
+            {"name": "Sliver", "tokens": 900},          # 0.9 of one cell
+            {"name": "Messages", "tokens": 99_100},
+            {"name": "Free space", "tokens": 100_000},
         ],
     })
-    segments = context_bar_segments(breakdown, 60)
-    assert segments is not None
-    colors = [color for color, _count in segments]
-    # The sliver's own palette slot (index 0) never appears -- it drew
-    # zero blocks and was skipped outright, not folded into a neighbor.
-    from doxa.ui.labels import CONTEXT_BAR_PALETTE
-
-    assert CONTEXT_BAR_PALETTE[0] not in colors
-    assert sum(count for _color, count in segments) == 60
+    cells = context_grid_cells(breakdown)
+    assert cells is not None
+    assert len(cells) == GRID_CELLS
+    assert all(name != "Sliver" for name, _color in cells), (
+        "a 0.9-of-a-cell component painted a full cell"
+    )
 
 
-def test_segments_never_exceed_the_width_they_were_given():
-    """The v0.70.0 lesson, restated for the bar: independent per-category
-    rounding can overshoot (several categories each just over a half-block
-    boundary, each rounding up) -- the exact failure shape that let the
-    boot mark's own fit overflow its column once already. Pinned here
-    against a set of shares chosen to trip that: six categories at 15%
-    apiece (a share whose ``* width`` lands past the halfway mark at every
-    width tried) plus one at 10%, for widths spanning
-    CONTEXT_BAR_MIN_COLUMNS to CONTEXT_BAR_MAX_COLUMNS and a few points
-    past it."""
+def test_cells_always_sum_to_exactly_two_hundred():
+    """The grid never stretches (unlike the old bar, whose width tracked
+    the pane), so its cell total is a CONSTANT -- pinned here against the
+    same trip-prone share set the old bar's overflow test used (independent
+    per-category rounding overshooting), which the floor-and-clamp
+    construction in context_grid_cells cannot reproduce regardless of how
+    many categories are in play."""
     shares = [0.15] * 6 + [0.10]
     window = 1_000_000
     breakdown = context_breakdown({
@@ -608,73 +623,195 @@ def test_segments_never_exceed_the_width_they_were_given():
             for i, share in enumerate(shares)
         ],
     })
-    for width in (
-        CONTEXT_BAR_MIN_COLUMNS,
-        30,
-        40,
-        CONTEXT_BAR_MAX_COLUMNS,
-        CONTEXT_BAR_MAX_COLUMNS + 40,
-    ):
-        segments = context_bar_segments(breakdown, width)
-        assert segments is not None
-        total = sum(count for _color, count in segments)
-        expected = min(width, CONTEXT_BAR_MAX_COLUMNS)
-        assert total == expected, f"width {width}: bar drew {total}, box is {expected}"
+    cells = context_grid_cells(breakdown)
+    assert cells is not None
+    assert len(cells) == GRID_CELLS
 
 
 def test_free_space_draws_in_the_track_color_not_a_content_color():
     """"Free space" is the CLI's own name for the window's unspent
     remainder (it is what makes ``categories`` sum to ``max_tokens`` in
-    the fixture at the top of this file) -- the bar reads it as the empty
+    the fixture at the top of this file) -- the grid reads it as the empty
     part of the picture, in the same border-grey theme.tcss already uses
     to mean "boundary, not content", never as one more colored component
-    competing for attention with what was actually spent."""
-    segments = context_bar_segments(_breakdown(), 60)
-    assert segments is not None
-    assert segments[-1] == (CONTEXT_BAR_TRACK, 40)  # Free space is 119_350/180_000
+    competing for attention with what was actually spent. Free space is
+    119,350/180,000 of the fixture's window: floor(119350/180000 * 200) =
+    133 cells, and since it is also the LAST category in the fixture's own
+    list with nothing behind it, those are exactly the grid's trailing 133
+    cells."""
+    cells = context_grid_cells(_breakdown())
+    assert cells is not None
+    free = [cell for cell in cells if cell[1] == CONTEXT_GRID_TRACK]
+    assert len(free) == 133
+    assert all(name == "" for name, _color in free)
+    assert cells[-133:] == free
 
 
-def test_component_colors_are_stable_across_widths():
-    """A category's color comes from its OWN position in the CLI's list,
-    not from how many segments happened to draw a block at this
-    particular width -- otherwise a category that rounds to zero at 24
-    columns would silently push every later category into a different
-    hue than it wore at 60, which is exactly the kind of thing "the same
-    component, the same color" is supposed to rule out."""
-    from doxa.ui.labels import CONTEXT_BAR_PALETTE
+def test_component_colors_are_stable_regardless_of_list_order():
+    """A category's color comes from its OWN NAME now, not its position in
+    the CLI's list -- unlike the old position-keyed bar palette, the
+    grid's legend has to label a color consistently, so the same category
+    reported in a different position (an SDK that reorders its own reply)
+    must still wear the same color."""
+    from doxa.ui.labels import CONTEXT_GRID_CATEGORY_COLORS
 
-    breakdown = _breakdown()
-    wide = dict(context_bar_segments(breakdown, 60))
-    narrow = context_bar_segments(breakdown, CONTEXT_BAR_MIN_COLUMNS)
-    assert narrow is not None
-    # System tools (idx 1, the second-largest real category) survives at
-    # both widths and must keep the same color at both.
-    assert CONTEXT_BAR_PALETTE[1] in wide
-    assert CONTEXT_BAR_PALETTE[1] in dict(narrow)
+    forward = context_breakdown({
+        "totalTokens": 100, "maxTokens": 100,
+        "categories": [
+            {"name": "System prompt", "tokens": 40},
+            {"name": "Messages", "tokens": 60},
+        ],
+    })
+    reversed_order = context_breakdown({
+        "totalTokens": 100, "maxTokens": 100,
+        "categories": [
+            {"name": "Messages", "tokens": 60},
+            {"name": "System prompt", "tokens": 40},
+        ],
+    })
+    forward_colors = {name: color for name, color in context_grid_cells(forward) if name}
+    reversed_colors = {
+        name: color for name, color in context_grid_cells(reversed_order) if name
+    }
+    assert forward_colors["System prompt"] == CONTEXT_GRID_CATEGORY_COLORS["system prompt"]
+    assert forward_colors["Messages"] == CONTEXT_GRID_CATEGORY_COLORS["messages"]
+    assert forward_colors == reversed_colors
 
 
-def test_context_bar_text_repeats_the_percentage_next_to_the_picture():
-    """A bar with no number beside it invites reading 4% as 6% -- the one
-    figure that belongs on the SAME line as a picture is the figure the
-    picture is a picture of, at the numbers view's own one-decimal
-    precision so the two never read as disagreeing over rounding."""
-    text = context_bar_text(_breakdown(), 60)
-    assert text.endswith("33.7%")
-    assert "█" in _plain(text)
+def test_context_grid_mode_reads_the_config_setting(monkeypatch):
+    """DOXA cannot probe a terminal's own font coverage -- this is the
+    one manual switch, defaulting to glyphs (Claude Code's own look)."""
+    monkeypatch.delenv("DOXA_CONTEXT_GRID", raising=False)
+    assert context_grid_mode() == "glyphs"
+    monkeypatch.setenv("DOXA_CONTEXT_GRID", "ascii")
+    assert context_grid_mode() == "ascii"
+    monkeypatch.setenv("DOXA_CONTEXT_GRID", "glyphs")
+    assert context_grid_mode() == "glyphs"
+    monkeypatch.setenv("DOXA_CONTEXT_GRID", "nonsense")
+    assert context_grid_mode() == "glyphs"
+
+
+def test_glyph_style_uses_only_the_three_draughts_glyphs():
+    """The exact three code points the owner asked for (U+26C0, U+26C1,
+    U+26F6) -- never a full block (the v0.75.0 bar's own glyph) and never
+    a Geometric Shapes triangle (the tofu risk v0.58.0's banner work
+    rejected)."""
+    text = context_grid_text(_breakdown(), 120, mode="glyphs")
+    plain = _plain(text)
+    assert "⛀" in plain or "⛁" in plain
+    assert "⛶" in plain
+    assert "█" not in plain
+    assert not any(ch in plain for ch in "◢◣◤◥▲▼△▽")
+
+
+def test_ascii_style_uses_bracket_cells_only():
+    """The tofu-proof fallback: universal ASCII, no Miscellaneous Symbols
+    at all."""
+    text = context_grid_text(_breakdown(), 120, mode="ascii")
+    plain = _plain(text)
+    assert "⛀" not in plain and "⛁" not in plain and "⛶" not in plain
+    grid_rows = [line for line in plain.splitlines() if line.startswith("[")]
+    assert grid_rows, "no ascii grid row found"
+    assert all(set(row[:GRID_WIDTH]) <= set("[]# ") for row in grid_rows)
+
+
+def test_ascii_and_glyph_styles_share_the_identical_width_and_geometry():
+    """'Width math: solve it once for the wider of the two forms' -- both
+    styles occupy exactly GRID_WIDTH columns per row and GRID_ROWS rows,
+    so flipping the setting changes only the characters, never the
+    layout."""
+    glyph_lines = context_grid_text(_breakdown(), GRID_WIDTH, mode="glyphs").splitlines()
+    ascii_lines = context_grid_text(_breakdown(), GRID_WIDTH, mode="ascii").splitlines()
+    assert len(glyph_lines) == len(ascii_lines) == GRID_ROWS
+    for g_line, a_line in zip(glyph_lines, ascii_lines):
+        assert len(_plain(g_line)) == len(_plain(a_line)) == GRID_WIDTH
+
+
+def test_the_side_panel_names_the_model_beside_the_top_rows():
+    """Claude Code's own layout: the model's tier word (the same word tab
+    labels already use) beside the very first grid row, the raw model id
+    beside the second."""
+    text = context_grid_text(_breakdown(), 100)
+    lines = text.splitlines()
+    assert len(lines) == GRID_ROWS
+    assert "Opus" in _plain(lines[0])
+    assert "claude-opus-4-6" in _plain(lines[1])
+
+
+def test_the_legend_sits_beside_the_lower_rows_and_never_says_estimated():
+    """The category legend, with every category's own tokens and share of
+    window -- and NOT Claude Code's own "Estimated usage by category"
+    heading, because DOXA does not estimate anything on this screen
+    (item K's third honesty rule)."""
+    text = context_grid_text(_breakdown(), 100)
+    plain = _plain(text)
+    assert "Usage by category" in plain
+    assert "Estimated" not in plain
+    assert "System prompt: 3k tokens" in plain
+    assert "(1.8%)" in plain  # 3,200 / 180,000
+    assert "Free space" in plain
+
+
+def test_the_panel_is_omitted_below_its_own_minimum_but_the_grid_still_draws():
+    """Too narrow for the side panel to be legible: the grid still draws
+    at its one true size, the panel drops out whole rather than truncate
+    into noise -- every figure it would have shown is still one screen
+    below, in context_breakdown_text, unchanged."""
+    from doxa.ui.labels import GRID_GUTTER, GRID_PANEL_MIN_COLUMNS
+
+    too_narrow = GRID_WIDTH + GRID_GUTTER + GRID_PANEL_MIN_COLUMNS - 1
+    text = context_grid_text(_breakdown(), too_narrow)
+    plain = _plain(text)
+    assert len(text.splitlines()) == GRID_ROWS
+    assert "Opus" not in plain
+    assert "Usage by category" not in plain
+    wide_enough = GRID_WIDTH + GRID_GUTTER + GRID_PANEL_MIN_COLUMNS
+    assert "Usage by category" in _plain(context_grid_text(_breakdown(), wide_enough))
+
+
+# -- the per-source sections: MCP tools, agents, adopted-plugin skills ----
+
+
+def test_context_sources_text_reports_mcp_tools_and_agents():
+    """Both are real ``get_context_usage`` fields -- ``mcp_tools`` already
+    normalized before this redesign, ``agents`` new to it (see
+    doxa.engine.context_breakdown)."""
+    text = context_sources_text(_breakdown())
+    assert "MCP tools" in text
+    assert "doxa_lore: 1 tools · 380 tokens" in text
+    assert "Agents" in text
+    assert "1 agents · 900 tokens" in text
+    assert "Skills" not in text  # hide-at-zero: no adopted_skills in _breakdown()
+
+
+def test_context_sources_text_reports_adopted_skills_when_present():
+    """The one figure in this section DOXA measures itself, because
+    get_context_usage has no ``skills`` field at all -- gated on the
+    adopt_plugins setting via doxa.claude_plugins.adopted_skill_summary."""
+    text = context_sources_text(_breakdown(adopted_skills=5, adopted_skill_plugins=2))
+    assert "Skills · adopted plugins" in text
+    assert "5 skills from 2 plugins" in text
+
+
+def test_context_sources_text_empty_when_nothing_to_report():
+    breakdown = context_breakdown({"totalTokens": 1, "maxTokens": 2})
+    assert context_sources_text(breakdown) == ""
+    assert context_sources_text(None) == ""
 
 
 @pytest.mark.asyncio
-async def test_context_leads_with_a_bar_of_full_blocks_and_keeps_the_numbers(
+async def test_context_leads_with_a_grid_of_draughts_glyphs_and_keeps_the_numbers(
     monkeypatch, tmp_path
 ):
     """The rendered outcome, measured rather than assumed (the v0.28.0
     rule: assert what actually painted, not that a matching widget
-    exists). At 80 columns the bar is real block art AND every number
-    /context has always printed is still on screen beneath it."""
+    exists). At 100 columns the grid is real draughts-glyph art, the side
+    panel names the model, AND every number /context has always printed
+    is still on screen beneath it."""
     fake = FakeEngine([])
     fake.context_usage_result = _breakdown()
     app, _fake = await _app(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(80, 24)) as pilot:
+    async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         app.query_one("#prompt-input").value = "/context"
         await pilot.press("enter")
@@ -683,26 +820,24 @@ async def test_context_leads_with_a_bar_of_full_blocks_and_keeps_the_numbers(
             found = list(app.query(ContextBlock))
             if found:
                 block = found[0]
-                # The bar is fitted to MEASURED width, which lands a frame
-                # after mount -- later still on a loaded machine. Polling
-                # only for the mount made this fail under the full suite
-                # while passing alone: the first frame is honestly the
-                # numbers view, and the bar is the next one. Poll for the
-                # bar itself.
-                if "█" in _plain(str(block.renderable)):
+                # The grid is fitted to MEASURED width, which lands a
+                # frame after mount -- later still on a loaded machine.
+                # Polling only for the mount made the old bar's version of
+                # this test fail under the full suite while passing alone:
+                # the first frame is honestly the numbers view, and the
+                # grid is the next one. Poll for the grid itself.
+                plain = _plain(str(block.renderable))
+                if "⛀" in plain or "⛁" in plain:
                     break
             await pilot.pause(0.02)
         assert block is not None, "/context did not mount a ContextBlock"
         assert block.region.height > 0
         rendered = str(block.renderable)
         plain = _plain(rendered)
-        assert "█" in plain, f"bar never painted; last frame: {plain[:120]!r}"
-        # The bar is only ONE glyph -- nothing but block art and spaces on
-        # its own line, never a half-block or a Geometric Shapes triangle.
-        bar_lines = [line for line in plain.splitlines() if "█" in line]
-        assert bar_lines, "no rendered line carries the bar"
-        stripped_glyphs = set(bar_lines[0].replace(" ", "").replace("%", ""))
-        assert stripped_glyphs <= set("█0123456789.")
+        assert "⛀" in plain or "⛁" in plain, f"grid never painted; last frame: {plain[:200]!r}"
+        assert "⛶" in plain
+        assert "Opus" in plain
+        assert "Usage by category" in plain
         # The numbers underneath are exactly what they always were.
         assert "60,650 / 180,000" in rendered
         assert "33.7%" in rendered
@@ -711,7 +846,7 @@ async def test_context_leads_with_a_bar_of_full_blocks_and_keeps_the_numbers(
 
 
 @pytest.mark.asyncio
-async def test_the_bar_never_overflows_the_content_box_it_was_measured_against(
+async def test_the_grid_never_overflows_the_content_box_it_was_measured_against(
     monkeypatch, tmp_path
 ):
     """v0.70.0's own precedent (the boot mark overflowing a column a
@@ -723,7 +858,7 @@ async def test_the_bar_never_overflows_the_content_box_it_was_measured_against(
         fake = FakeEngine([])
         fake.context_usage_result = _breakdown()
         app, _fake = await _app(monkeypatch, tmp_path / f"w{width}", fake)
-        async with app.run_test(size=(width, 24)) as pilot:
+        async with app.run_test(size=(width, 30)) as pilot:
             await pilot.pause()
             app.query_one("#prompt-input").value = "/context"
             await pilot.press("enter")
@@ -738,30 +873,30 @@ async def test_the_bar_never_overflows_the_content_box_it_was_measured_against(
             available = block.content_size.width
             rendered = _plain(str(block.renderable))
             for line in rendered.splitlines():
-                if "█" not in line:
+                if "⛀" not in line and "⛁" not in line and "⛶" not in line:
                     continue
                 assert len(line) <= available, (
-                    f"at width {width} (content {available}) the bar row "
+                    f"at width {width} (content {available}) the grid row "
                     f"{line!r} ({len(line)} cells) overflows"
                 )
-            if available < CONTEXT_BAR_MIN_COLUMNS:
-                assert "█" not in rendered, (
-                    f"width {width} (content {available}) drew a bar below "
-                    "CONTEXT_BAR_MIN_COLUMNS"
+            if available < GRID_WIDTH:
+                assert "⛀" not in rendered and "⛁" not in rendered, (
+                    f"width {width} (content {available}) drew a grid below "
+                    "its own fixed width"
                 )
 
 
 @pytest.mark.asyncio
-async def test_a_narrow_pane_drops_the_bar_and_keeps_the_numbers(
+async def test_a_narrow_pane_drops_the_grid_and_keeps_the_numbers(
     monkeypatch, tmp_path
 ):
-    """The degrade path named in the brief: too narrow for a shape, the
-    numbers stay -- /context never goes silent just because the bar
-    could not."""
+    """The degrade path named in the brief: too narrow for the grid's own
+    fixed shape, the numbers stay -- /context never goes silent just
+    because the grid could not."""
     fake = FakeEngine([])
     fake.context_usage_result = _breakdown()
     app, _fake = await _app(monkeypatch, tmp_path, fake)
-    async with app.run_test(size=(30, 24)) as pilot:
+    async with app.run_test(size=(24, 24)) as pilot:
         await pilot.pause()
         app.query_one("#prompt-input").value = "/context"
         await pilot.press("enter")
@@ -773,7 +908,36 @@ async def test_a_narrow_pane_drops_the_bar_and_keeps_the_numbers(
                 break
             await pilot.pause(0.02)
         assert block is not None
-        assert block.content_size.width < CONTEXT_BAR_MIN_COLUMNS
+        assert block.content_size.width < GRID_WIDTH
         rendered = str(block.renderable)
-        assert "█" not in rendered
+        assert "⛀" not in rendered and "⛁" not in rendered and "⛶" not in rendered
         assert "60,650" in rendered
+
+
+@pytest.mark.asyncio
+async def test_the_ascii_setting_swaps_glyphs_for_brackets_in_the_live_widget(
+    monkeypatch, tmp_path
+):
+    """The setting end to end: DOXA_CONTEXT_GRID=ascii reaches the actual
+    mounted widget, not just the pure formatter."""
+    monkeypatch.setenv("DOXA_CONTEXT_GRID", "ascii")
+    fake = FakeEngine([])
+    fake.context_usage_result = _breakdown()
+    app, _fake = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one("#prompt-input").value = "/context"
+        await pilot.press("enter")
+        block = None
+        for _ in range(300):
+            found = list(app.query(ContextBlock))
+            if found:
+                block = found[0]
+                plain = _plain(str(block.renderable))
+                if "[#]" in plain or "[ ]" in plain:
+                    break
+            await pilot.pause(0.02)
+        assert block is not None
+        plain = _plain(str(block.renderable))
+        assert "[#]" in plain or "[ ]" in plain
+        assert "⛀" not in plain and "⛁" not in plain and "⛶" not in plain

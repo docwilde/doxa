@@ -663,6 +663,8 @@ def context_breakdown(
     usage: dict, *,
     lore_snapshot_chars: "int | None" = None,
     worktree_notice_chars: "int | None" = None,
+    adopted_skills: "int | None" = None,
+    adopted_skill_plugins: "int | None" = None,
 ) -> dict:
     """One ``get_context_usage`` reply, narrowed to what ``/context`` shows.
 
@@ -688,7 +690,18 @@ def context_breakdown(
     "system prompt" row, and conflating their sizes would make either
     figure wrong the day only one of them changes shape. ``None`` for
     every session that never got a worktree block -- hide-at-zero, same
-    as the block itself."""
+    as the block itself.
+
+    ``adopted_skills``/``adopted_skill_plugins`` are the same kind of
+    DOXA-measured figure for a THIRD thing the CLI cannot separate out:
+    unlike ``mcpTools`` and ``agents`` below (both reported directly by
+    ``get_context_usage``), the CLI has no ``skills`` field at all, so a
+    skill count from an adopted Claude Code plugin
+    (:func:`doxa.claude_plugins.adopted_skill_summary`) is not hiding
+    inside any category here -- it is simply not measured by the CLI in
+    any form. Reported as a bare count, never a token figure, for exactly
+    that reason. ``None`` -- hide-at-zero -- when adoption is off or
+    nothing qualifies."""
     out: dict[str, Any] = {}
     for out_key, in_key in (
         ("model", "model"),
@@ -728,10 +741,23 @@ def context_breakdown(
             ("tokens", "tokens", None),
         ),
     )
+    # "agents" -- subagent definitions loaded into the window -- is a real
+    # field of ContextUsageResponse (claude_agent_sdk/types.py) that every
+    # /context surface through v0.80.0 silently dropped. Same cap/omit
+    # discipline as memory_files/mcp_tools above: nothing invented, nothing
+    # estimated, just a row this codebase was throwing away.
+    out["agents"], out["agents_dropped"] = _context_rows(
+        usage.get("agents"),
+        (("agent_type", "agentType", ""), ("source", "source", ""),
+         ("tokens", "tokens", None)),
+    )
     if lore_snapshot_chars is not None:
         out["lore_snapshot_chars"] = int(lore_snapshot_chars)
     if worktree_notice_chars is not None:
         out["worktree_notice_chars"] = int(worktree_notice_chars)
+    if adopted_skills:
+        out["adopted_skills"] = int(adopted_skills)
+        out["adopted_skill_plugins"] = int(adopted_skill_plugins or 0)
     return out
 
 
@@ -1186,6 +1212,13 @@ class SessionEngine:
         # set once the block itself is built, same "connect-time only"
         # shape as lore_snapshot_chars beside it.
         self.worktree_notice_chars: int | None = None
+        # (skills, plugins-carrying-a-skill) among whatever plugins THIS
+        # session actually adopted -- computed once, at the same connect
+        # moment _build_options calls claude_plugins_mod.adopt() itself,
+        # never re-walked mid-session. 0 unless adoption is on and at
+        # least one adopted plugin carries a skill (hide-at-zero).
+        self.adopted_skills: int = 0
+        self.adopted_skill_plugins: int = 0
         # Session token accounting for /usage: summed from every
         # ResultMessage's own usage block -- the CLI's numbers, not an
         # estimate of our own. Cache reads/creates are kept separate
@@ -1818,6 +1851,23 @@ class SessionEngine:
         # session in the same worktree.
         worktree_block = _session_worktree_block(self.cwd)
         self.worktree_notice_chars = len(worktree_block) if worktree_block else None
+        # One discovery walk feeds BOTH the skill count /context reports
+        # and the plugins= kwarg below, and ONLY happens at all when
+        # adoption is on -- claude_plugins_mod.discover() is a filesystem
+        # walk (installed_plugins.json plus a directory scan per plugin),
+        # and a session with adoption off must not pay that cost just to
+        # populate a count nobody asked for. Both adopt() and
+        # adopted_skill_summary() already treat a None `discovered` the
+        # same way discover() itself would answer when adoption is off
+        # (empty), so passing None here rather than skipping the calls
+        # keeps one code path instead of two.
+        discovered_plugins = (
+            claude_plugins_mod.discover()
+            if claude_plugins_mod.adoption_enabled() else None
+        )
+        self.adopted_skills, self.adopted_skill_plugins = (
+            claude_plugins_mod.adopted_skill_summary(discovered_plugins)
+        )
         # Native LORE tools: the registry projected through the gate's
         # executor onto an in-process SDK MCP server. include_write=True is
         # deliberate -- lore_remember only STAGES a pending proposal, so the
@@ -1957,7 +2007,7 @@ class SessionEngine:
             # plugins' is on. Hooks and MCP servers never reach this list
             # regardless of the setting; that is item AA's actual fix and
             # this list does not get to relitigate it.
-            plugins=claude_plugins_mod.adopt(),
+            plugins=claude_plugins_mod.adopt(discovered_plugins),
         )
 
     async def start(self) -> EngineEvent:
@@ -2529,6 +2579,8 @@ class SessionEngine:
             usage,
             lore_snapshot_chars=self.lore_snapshot_chars,
             worktree_notice_chars=self.worktree_notice_chars,
+            adopted_skills=self.adopted_skills,
+            adopted_skill_plugins=self.adopted_skill_plugins,
         )
 
     def belief_count(self) -> int:

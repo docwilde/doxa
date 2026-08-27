@@ -263,6 +263,21 @@ SETTINGS: tuple[Setting, ...] = (
              "request, in every tier this terminal answers for.",
     ),
     Setting(
+        key="context_grid", env="DOXA_CONTEXT_GRID", label="context grid style",
+        category="Appearance", kind="choice", choices=("", "glyphs", "ascii"),
+        help="Cell style for /context's 10x20 usage grid "
+             "(doxa.ui.labels.context_grid_mode): 'glyphs' draws the "
+             "draughts glyphs (⛀⛁⛶, Claude Code's own look); 'ascii' draws "
+             "bracket cells ([#]/[ ]) for a terminal font that tofu's the "
+             "Miscellaneous Symbols block. Empty = glyphs.",
+        note="DOXA cannot probe a terminal's own font coverage -- nothing "
+             "in a terminal reports that -- so this is a manual switch, "
+             "not detection: see tofu on the grid once, flip it here. "
+             "Both styles read the identical measured cells and the "
+             "identical per-category colors; only the two characters "
+             "change.",
+    ),
+    Setting(
         key="show_reasoning", env="DOXA_SHOW_REASONING", label="show reasoning",
         category="Appearance", kind="bool_on", default="1",
         help="Stream the model's summarized reasoning into a collapsed "

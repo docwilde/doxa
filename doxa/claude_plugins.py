@@ -326,6 +326,38 @@ def adopted_commands(
     return out
 
 
+def adopted_skill_summary(
+    discovered: "list[DiscoveredPlugin] | None" = None,
+) -> "tuple[int, int]":
+    """``(total skills, plugins contributing at least one)`` across every
+    plugin that WOULD be adopted right now -- the same eligibility
+    :func:`adopt` applies, computed read-only with no staging copy, the
+    same relationship :func:`adopted_commands` already has to :func:`adopt`.
+
+    This is what ``/context`` (item K's grid redesign) reports as the
+    "skills" per-source section: the CLI's own ``get_context_usage`` has no
+    ``skills`` field to read (unlike ``mcpTools`` and ``agents``, which it
+    does report), so a skill count is the one piece of that section DOXA
+    measures itself -- directly off the manifest counts :func:`discover`
+    already read from disk, never a guess.
+
+    ``(0, 0)`` -- hide-at-zero -- whenever :func:`adoption_enabled` is
+    False or no adopted plugin carries a skill, matching every other
+    plugin-adoption reader's empty state in this module."""
+    if not adoption_enabled():
+        return (0, 0)
+    discovered = discover() if discovered is None else discovered
+    total = 0
+    contributing = 0
+    for plugin in discovered:
+        if plugin.refused:
+            continue
+        if plugin.n_skills:
+            total += plugin.n_skills
+            contributing += 1
+    return (total, contributing)
+
+
 def _has_hooks(install_path: Path, manifest: dict) -> bool:
     if manifest.get("hooks"):
         return True

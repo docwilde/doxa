@@ -251,15 +251,19 @@ read-only transcript tab mirroring that subagent's own narration and tool
 calls. Once the parent `Task` call finishes, the same activity becomes a
 foldable tree under the parent tool-calls chip.
 
-`/context` leads with a proportional bar of the window (block art, one
-colored run per component) and keeps the exact breakdown below it —
-system prompt, tools, messages, free space, loaded `CLAUDE.md` files,
-per-MCP-tool cost — using the `claude` CLI's own accounting, the same
-measurement the `ctx` chip reads. No reported window size means no bar,
-the same way it means no percentage; a pane too narrow to draw a shape
-(under 24 columns of content) drops the bar and keeps the numbers alone.
-`/usage` prints the same cost and utilization figures the status bar
-chips show, with separators.
+`/context` leads with a 10x20 grid of the window (Claude Code's own look:
+draughts glyphs by default, `[#]`/`[ ]` ascii behind the `context_grid`
+setting for a terminal font that tofu's them — `context grid` in
+`/settings`), model and headline beside the top rows, a category legend
+beside the lower rows, per-source summaries (MCP tools, agents,
+adopted-plugin skills) below the grid, and the exact breakdown below all
+of that — system prompt, tools, messages, free space, loaded `CLAUDE.md`
+files, per-MCP-tool cost — using the `claude` CLI's own accounting, the
+same measurement the `ctx` chip reads. No reported window size means no
+grid, the same way it means no percentage; unlike a stretching bar the
+grid never draws smaller, so a pane too narrow for its own fixed width
+drops it and keeps the numbers alone. `/usage` prints the same cost and
+utilization figures the status bar chips show, with separators.
 
 ## LORE integration
 
@@ -540,6 +544,7 @@ environment is winning is read-only in the modal.
 | `ctx_absolute` | `DOXA_CTX_ABSOLUTE` | off | print `24k/200k` beside the `ctx%` chip (below 100 columns it drops again) |
 | `image_mode` | `DOXA_IMAGE_MODE` | probe | force a rung of the image ladder (`kgp`/`sixel`/`halfblock`/`text`) |
 | `boot_banner` | `DOXA_BOOT_BANNER` | on | draw the DOXA mark above the opening identity block |
+| `context_grid` | `DOXA_CONTEXT_GRID` | `glyphs` | cell style for `/context`'s grid: `glyphs` (⛀⛁⛶) or `ascii` (`[#]`/`[ ]`) for a font that tofu's them |
 | *keyboard override* | `DOXA_KEYBOARD_PROTOCOL` | probe | `kitty`/`legacy`/`unknown`, for a terminal that lies about it; env-only |
 | `show_reasoning` | `DOXA_SHOW_REASONING` | on | stream the model's summarized reasoning into a collapsed fold |
 | `background` | `DOXA_BACKGROUND` | `opaque` | `opaque` paints DOXA's own base; `transparent` stops painting it |

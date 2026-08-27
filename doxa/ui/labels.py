@@ -1759,105 +1759,180 @@ def _context_section(
     return out
 
 
-# -- /context (item K, continued): the bar -----------------------------
+# -- /context (item K, continued): the grid -----------------------------
 #
-# The owner's ask was "a visual representation of context occupancy in
-# block art" instead of the numbers. Read as a straight swap that would
-# mean deleting them -- but item K's whole premise is that every figure on
-# this screen is a measurement, and a measurement stays reachable. A bar of
-# ``█`` shows the SHAPE of the window (a handful of colored runs and a grey
-# remainder) at a glance; it cannot tell 4% from 6%, which is exactly the
-# distinction a screen like this exists to preserve. So the bar LEADS --
-# it is the first thing under the "context" heading, which is where the
-# owner's ask puts it -- and context_breakdown_text's exact numbers still
-# follow it, unchanged, one screen down. Nothing here reads or edits that
-# function; :class:`doxa.ui.transcript.ContextBlock` stacks the two.
+# v0.75.0's ask was "block art instead of the numbers", answered with a
+# single proportional bar of ``█``. This redesign's ask is more specific:
+# make it look like Claude Code's OWN ``/context`` -- a fixed 10x20 grid of
+# 200 cells (0.5% each), model and headline beside the top rows, a
+# per-category legend beside the lower rows. Read the same way v0.75.0's
+# ask was read: "instead of the numbers" means LEADS the numbers, not
+# replaces them. context_breakdown_text (the numbers) is UNTOUCHED by
+# everything below -- :class:`doxa.ui.transcript.ContextBlock` stacks the
+# grid above it, exactly where the bar used to sit.
 #
-# **Full blocks only.** The house rule the boot mark settled this session:
-# half-blocks read as mush at the sizes a widget actually gets, and the
-# Geometric Shapes triangles carry a tofu risk on fonts that do not cover
-# that block -- ``█`` is the one glyph doxa/banner.py leans on for the same
-# reason (see that module's GREEK_ROWS).
+# **The grid does not stretch.** The old bar was proportional to whatever
+# width the pane happened to have (24 to 60 columns); Claude Code's grid is
+# always the same 200 cells regardless of terminal width, because the
+# CELLS are the unit of resolution, not the pane. So there is no
+# "narrower bar" degrade step here the way there was for ``█`` -- either
+# the pane has room for GRID_COLUMNS * GRID_CELL_WIDTH columns and the
+# grid draws at its one true size, or it does not and /context shows the
+# numbers alone, the same final degrade state the old bar had.
+#
+# **Two cell styles, one geometry, one honesty rule.** The owner asked for
+# Claude Code's own draughts glyphs (⛀ U+26C0, ⛁ U+26C1, ⛶ U+26F6) --
+# Miscellaneous Symbols, the same font-coverage class as the Geometric
+# Shapes triangles v0.58.0's banner work rejected for tofu risk. Claude
+# Code ships them regardless, so they are the PRIMARY style; DOXA_CONTEXT_
+# GRID/config.py's ``context_grid`` setting adds ``ascii`` ([#]/[ ]) as a
+# manual fallback for a font that tofu's them, because nothing in a
+# terminal reports its own glyph coverage -- DOXA cannot detect this, only
+# offer the switch and let a user who SEES tofu flip it once. Both styles
+# read the identical 200 measured cells (:func:`context_grid_cells`); only
+# the two characters differ, and GRID_CELL_WIDTH is sized to the WIDER of
+# the two forms (both are exactly 3 columns: `` c `` or ``[c]``) so
+# switching the setting changes nothing about the grid's width or the
+# side panel's start column.
+#
+# **The two "used" glyphs are texture, not two categories.** Claude Code's
+# own grid alternates ⛀/⛁ within a single color's run -- read here as a
+# checkerboard dither on the FILLED cells for visual texture, exactly
+# mirrored by the ascii style having only one used-glyph (``#``): a used
+# cell says "this category" through its COLOR and its POSITION in the
+# grid, never through which of the two used-glyphs it drew. Confirmed by
+# the owner's own ascii sketch, which has no second used-symbol to
+# alternate with.
+#
+# **Colour is load-bearing, not decorative, once ASCII is in play.** On a
+# style/terminal combination with no color (or a user who cannot
+# distinguish it), the grid's category boundaries collapse to a wall of
+# identical ``[#]`` -- the SAME trade the ctx% chip already makes for its
+# escalation color, and why the legend beside the grid, and the full
+# numbers beneath it, carry every figure the grid shows in text too:
+# nothing on this screen is available ONLY as color.
 #
 # **The colors are reused, not invented.** Every hex literal below already
-# paints something else in theme.tcss: PROVIDER_GLYPH_COLOR is the accent
-# every clickable chip already wears, the other four are the
-# ``#session-tabs`` status ladder (``-done-unseen``, ``-staged``,
-# ``-working``) plus SystemBlock's own left rule. A segment's color was
-# never picked for this bar specifically -- it is the same vocabulary the
-# rest of the app already reads.
-CONTEXT_BAR_PALETTE: "tuple[str, ...]" = (
-    PROVIDER_GLYPH_COLOR,  # "#D97757" -- the app's own accent
-    "#6FCF97",             # #session-tabs Tab.-done-unseen
-    "#A98FD1",             # #session-tabs Tab.-staged
-    "#E0A83C",             # #session-tabs Tab.-working
-    "#7A9B6E",             # SystemBlock's own left rule (theme.tcss)
-)
+# paints something else in theme.tcss, unchanged from the bar this grid
+# replaces: PROVIDER_GLYPH_COLOR is the accent every clickable chip already
+# wears, the other four are the ``#session-tabs`` status ladder
+# (``-done-unseen``, ``-staged``, ``-working``) plus SystemBlock's own left
+# rule. Keyed by CATEGORY NAME now rather than list position (the grid's
+# legend has to label a color, so the mapping has to survive the CLI
+# reordering its own list); an unrecognized category name still gets a
+# color, cycling the same five hex values by its position in the list, the
+# bar's old fallback behavior kept for exactly the categories that were
+# never named here.
+GRID_COLUMNS = 10
+GRID_ROWS = 20
+GRID_CELLS = GRID_COLUMNS * GRID_ROWS  # 200 -- 0.5% of the window each
+GRID_CELL_WIDTH = 3  # " c " (glyphs) and "[c]" (ascii) are both 3 columns
+GRID_GUTTER = 2  # columns between the grid and the side panel
+GRID_PANEL_MIN_COLUMNS = 20
+"""Below this the side panel would be truncated past legibility -- the
+grid still draws at its one true size, but model/headline/legend drop
+out entirely rather than ship a panel too narrow to read. Nothing is
+LOST: every figure the panel would have shown is still in
+context_breakdown_text, one screen below, unchanged."""
 
-CONTEXT_BAR_TRACK = "#3A3429"
+GRID_GLYPH_USED: "tuple[str, str]" = ("⛀", "⛁")
+GRID_GLYPH_FREE = "⛶"
+GRID_ASCII_USED = "#"
+GRID_ASCII_FREE = " "
+
+CONTEXT_GRID_TRACK = "#3A3429"
 """theme.tcss's own border grey -- the top rung of the surface ramp, used
-everywhere else in this app to mean "a boundary, not content." The bar
-reuses it for the window's unspent remainder for the same reason: that
-remainder is not a component competing for a color, it is the absence of
+everywhere else in this app to mean "a boundary, not content." The grid
+reuses it (the old bar's CONTEXT_BAR_TRACK, renamed) for every free cell:
+free space is not a component competing for a color, it is the absence of
 one, and drawing it in a content color would read as tokens nobody spent."""
 
-CONTEXT_BAR_FREE_NAMES = frozenset({"free space"})
+CONTEXT_GRID_FREE_NAMES = frozenset({"free space"})
 """The one category name (matched case-insensitively, exactly -- no
 substring, no near-miss) this module treats as the window's own unspent
 remainder rather than a component. Narrow on purpose: an SDK that ever
-renames or drops this category degrades to "one more colored segment",
-never to a silently mislabeled one."""
+renames or drops this category degrades to "one more colored cell", never
+to a silently mislabeled one."""
 
-CONTEXT_BAR_MIN_COLUMNS = 24
-"""Below this the bar is not drawing a shape, it is drawing two or three
-blocks of noise -- /context drops to the numbers alone (context_bar_text
-returns "") rather than ship a bar too coarse to answer the question it
-exists for."""
+CONTEXT_GRID_CATEGORY_COLORS: "dict[str, str]" = {
+    "system prompt": PROVIDER_GLYPH_COLOR,  # "#D97757" -- the app's own accent
+    "system tools": "#6FCF97",              # #session-tabs Tab.-done-unseen
+    "mcp tools": "#A98FD1",                 # #session-tabs Tab.-staged
+    "memory files": "#E0A83C",              # #session-tabs Tab.-working
+    "messages": "#7A9B6E",                  # SystemBlock's own left rule
+}
+"""Lowercased category name -> color, for the five names ``get_context_
+usage`` actually sends (:data:`tests.test_context.CTX_USAGE`, a realistic
+reply shaped exactly like the SDK's own). Stable across a CLI that
+reorders its own ``categories`` list -- unlike the old bar's
+position-keyed palette, the grid's legend has a name to label, and a name
+that always wears the same color is the whole point of a legend."""
 
-CONTEXT_BAR_MAX_COLUMNS = 60
-"""A voluntary ceiling, not a defect: past roughly 60 blocks each extra
-column buys less resolution than the exact percentage already sitting one
-line below it."""
+CONTEXT_GRID_PALETTE: "tuple[str, ...]" = tuple(CONTEXT_GRID_CATEGORY_COLORS.values())
+"""Fallback cycle, by the category's own position in the CLI's list, for
+any name not in :data:`CONTEXT_GRID_CATEGORY_COLORS` -- the exact values
+the old bar used unconditionally, kept here for the one case (an SDK
+category this module has never seen) where there is no name to key on."""
 
 
-def context_bar_segments(
-    breakdown: "dict | None", width: int
-) -> "list[tuple[str, int]] | None":
-    """``[(color, block_count), ...]`` for one row of ``█`` -- pure and
-    total, the bar's half of :func:`context_breakdown`'s own discipline:
-    every block traces to a measured category, nothing is estimated, and
-    this returns ``None`` rather than a bar drawn against a guessed
-    denominator.
+def context_grid_mode() -> str:
+    """``"ascii"`` or ``"glyphs"`` -- config.py's ``context_grid`` setting
+    (``DOXA_CONTEXT_GRID``), read the same way :func:`git_branch_symbol`
+    reads its own font-coverage switch: DOXA cannot probe what a terminal's
+    font covers, so this is the user's manual answer, not a detection this
+    function performs. Anything other than the literal ``"ascii"`` --
+    unset, ``"glyphs"``, or a stray value -- reads as glyphs, Claude Code's
+    own look and this module's default."""
+    return "ascii" if config_mod.raw("DOXA_CONTEXT_GRID").strip().lower() == "ascii" else "glyphs"
+
+
+def _context_grid_color(name: str, index: int) -> str:
+    key = name.strip().lower()
+    if key in CONTEXT_GRID_FREE_NAMES:
+        return CONTEXT_GRID_TRACK
+    known = CONTEXT_GRID_CATEGORY_COLORS.get(key)
+    if known is not None:
+        return known
+    return CONTEXT_GRID_PALETTE[index % len(CONTEXT_GRID_PALETTE)]
+
+
+def context_grid_cells(breakdown: "dict | None") -> "list[tuple[str, str]] | None":
+    """``[(category_name, color), ...]``, exactly :data:`GRID_CELLS` (200)
+    entries, row-major (index 0 is the grid's top-left cell, index
+    ``GRID_COLUMNS - 1`` ends row 0) -- the grid's own half of
+    :func:`context_breakdown`'s discipline: every cell traces to a
+    measured category, nothing is estimated, and this returns ``None``
+    rather than a grid drawn against a guessed denominator.
 
     ``None`` when there is nothing honest to draw: no breakdown, no
     reported window (``max_tokens`` -- a limit the CLI never sent reads
     ``?`` and stays ``?``; there is no denominator to be proportional
-    against), no measured categories, or a box too narrow
-    (:data:`CONTEXT_BAR_MIN_COLUMNS`) to hold a shape rather than noise.
+    against, so there is no grid, full stop -- unlike the old bar this
+    never degrades to a narrower shape, because the grid has no narrower
+    shape), or no measured categories.
 
-    Block counts are assigned by rounding each category's CUMULATIVE share
-    of the window to the nearest block and taking the difference from the
-    previous category's rounded position -- not by rounding each category
-    independently. Independent rounding can overshoot the bar's own width
-    (several categories each just over a half-block, each rounding up,
-    summing past ``width``) -- precisely the kind of fit-computed-wrong
-    overflow v0.70.0 already found once, in the boot mark. Cumulative
-    rounding cannot: the running position is clamped to ``[0, width]`` by
-    construction, so the sum of every block count this returns, plus its
-    own trailing remainder, is always exactly ``width``, never more.
+    Cell counts are assigned by FLOORING each category's CUMULATIVE share
+    of the 200 cells and taking the difference from the previous
+    category's floored position -- not rounding, and not independently per
+    category. Floor over round: a category that has not YET earned a
+    whole cell must not show one -- rounding a component sitting at 0.9 of
+    a cell's width up to a full filled cell would be exactly the kind of
+    small lie item K's own docstring rules out for the numbers, just
+    committed one layer up in the picture instead of in an integer. Floor
+    also cannot overshoot the grid's own 200-cell width the way
+    independent per-category rounding could (v0.70.0's boot-mark lesson,
+    already paid for once by the old bar's cumulative-ROUND scheme): the
+    running position is monotonic and clamped to ``[0, GRID_CELLS]`` by
+    construction, so the sum of every count this returns, plus its own
+    trailing remainder, is always exactly 200, never more. The remainder
+    -- whatever cumulative rounding dust is left once every category has
+    drawn its share -- is appended as more free cells, so the grid always
+    reads as content followed by however much window is genuinely unspent,
+    the same rule the old bar's own trailing track kept.
 
-    The same rounding is what keeps a sliver honest: a category under half
-    a block's width moves the cumulative position by less than one whole
-    block, so the difference against the previous position is zero --
-    rounding a 0.2% component up to one visible block would be exactly the
-    kind of small lie item K's own docstring already rules out for the
-    numbers, and cumulative rounding never produces it. The category named
-    "free space" (:data:`CONTEXT_BAR_FREE_NAMES`) draws in
-    :data:`CONTEXT_BAR_TRACK` rather than a content color; whatever width
-    is left over once every category has drawn its share is appended as
-    more track, so the bar always reads as content blocks followed by
-    however much window is genuinely unspent -- never as a component that
-    was never told about."""
+    The category named "free space" (:data:`CONTEXT_GRID_FREE_NAMES`)
+    draws as free cells (empty name, :data:`CONTEXT_GRID_TRACK`) rather
+    than a content color, wherever it falls in the CLI's own list."""
     if not breakdown:
         return None
     window = breakdown.get("max_tokens")
@@ -1866,67 +1941,211 @@ def context_bar_segments(
     categories = breakdown.get("categories")
     if not isinstance(categories, list) or not categories:
         return None
-    bar_width = min(int(width), CONTEXT_BAR_MAX_COLUMNS)
-    if bar_width < CONTEXT_BAR_MIN_COLUMNS:
-        return None
 
-    segments: list[tuple[str, int]] = []
+    cells: list[tuple[str, str]] = []
     cumulative_share = 0.0
     prev_pos = 0
     for idx, row in enumerate(categories):
-        # Color keyed to the category's OWN position in the CLI's list, not
-        # to how many segments have actually drawn a block so far -- a
-        # category that rounds to zero blocks at a narrow width must not
-        # bump every later category into a different color than it wore at
-        # a wider one. The same component reads as the same color on every
-        # paint, whether or not this particular paint has room to show it.
-        color = CONTEXT_BAR_PALETTE[idx % len(CONTEXT_BAR_PALETTE)]
         tokens = row.get("tokens")
         if not isinstance(tokens, (int, float)):
-            continue  # no number, no block -- same omission rule as the text
+            continue  # no number, no cell -- same omission rule as the text
+        name = str(row.get("name") or "").strip()
         cumulative_share = min(1.0, cumulative_share + float(tokens) / float(window))
-        pos = round(cumulative_share * bar_width)
-        blocks = pos - prev_pos
+        pos = int(cumulative_share * GRID_CELLS)  # floor -- see docstring above
+        count = pos - prev_pos
         prev_pos = pos
-        if blocks <= 0:
+        if count <= 0:
             continue
-        name = str(row.get("name") or "").strip().lower()
-        if name in CONTEXT_BAR_FREE_NAMES:
-            color = CONTEXT_BAR_TRACK
-        segments.append((color, blocks))
+        is_free = name.lower() in CONTEXT_GRID_FREE_NAMES
+        label = "" if is_free else name
+        color = CONTEXT_GRID_TRACK if is_free else _context_grid_color(name, idx)
+        cells.extend([(label, color)] * count)
 
-    remainder = bar_width - prev_pos
+    remainder = GRID_CELLS - prev_pos
     if remainder > 0:
-        segments.append((CONTEXT_BAR_TRACK, remainder))
-    return segments or None
+        cells.extend([("", CONTEXT_GRID_TRACK)] * remainder)
+    return cells or None
 
 
-def context_bar_text(breakdown: "dict | None", width: int) -> str:
-    """One markup line -- the bar, two spaces, the exact percentage it
-    depicts -- or ``""`` when there is nothing honest to draw at this
-    width. The percentage is repeated here even though
-    :func:`context_breakdown_text` prints it again below: a bar with no
-    number beside it invites reading 4% as 6%, and the one figure that
-    belongs on the SAME line as a picture is the figure the picture is a
-    picture of. Formatted to the same one decimal place as the numbers
-    view, so the two never appear to disagree over a rounding choice.
+def _grid_cell_glyph(style: str, *, free: bool, parity: int) -> str:
+    if style == "ascii":
+        return GRID_ASCII_FREE if free else GRID_ASCII_USED
+    if free:
+        return GRID_GLYPH_FREE
+    return GRID_GLYPH_USED[parity % len(GRID_GLYPH_USED)]
 
-    The percentage's OWN rendered width is measured first and subtracted
-    from ``width`` before :func:`context_bar_segments` ever sees a block
-    budget -- not a padded worst-case reservation, the exact length of the
-    suffix this call is about to append. Skipping that step was a bug
-    caught by measuring, not by reasoning about it: a bar sized to the
-    full width with the percentage appended afterward overflows the same
-    box it was just fitted to (v0.70.0's own overflow, reproduced one
-    layer up, from string concatenation instead of a stale resize)."""
-    percent = (breakdown or {}).get("percentage")
-    pct = f"{float(percent):.1f}%" if isinstance(percent, (int, float)) else "?%"
-    suffix = f"  {pct}"
-    segments = context_bar_segments(breakdown, width - len(suffix))
-    if not segments:
+
+def _grid_cell_markup(style: str, color: str, *, free: bool, parity: int) -> str:
+    glyph = _grid_cell_glyph(style, free=free, parity=parity)
+    # The ascii style's own cell shape, "[#]"/"[ ]", is a literal pair of
+    # square brackets -- exactly what Rich/Textual markup syntax also uses
+    # for a tag, and "[#]" in particular (a bracket, a bare "#", zero
+    # trailing hex digits) parses as a validly-shaped, if empty, color
+    # tag. Left unescaped, DOXA's own markup parser would eat the cell's
+    # visible brackets the same way an unescaped "[" in a model-chosen
+    # description could swallow a click target (_escape_markup's own
+    # docstring) -- so the body is escaped the identical way before it is
+    # ever wrapped in the real color span around it.
+    body = _escape_markup(f"[{glyph}]") if style == "ascii" else f" {glyph} "
+    paint = CONTEXT_GRID_TRACK if free else color
+    return f"[{paint}]{body}[/]"
+
+
+def _context_grid_panel(breakdown: dict, style: str) -> "list[str]":
+    """Plain-text lines for beside the grid: the model beside the TOP
+    rows, then a blank, then the headline, then the category legend beside
+    the LOWER rows -- Claude Code's own layout. Every figure here is a
+    SECOND view of a number :func:`context_breakdown_text` already prints
+    below; nothing is computed that function does not already carry."""
+    lines: list[str] = []
+    model = breakdown.get("model")
+    if model:
+        lines.append(short_model(str(model)))  # the same tier word tab labels use
+        lines.append(str(model))
+    total = breakdown.get("total_tokens")
+    window = breakdown.get("max_tokens")
+    percent = breakdown.get("percentage")
+    lines.append("")
+    if isinstance(total, (int, float)) and isinstance(window, (int, float)):
+        pct = f"  ({float(percent):.1f}%)" if isinstance(percent, (int, float)) else ""
+        lines.append(f"{fmt_tokens(int(total))}/{fmt_tokens(int(window))} tokens{pct}")
+    categories = breakdown.get("categories")
+    rows = [row for row in (categories or []) if isinstance(row.get("tokens"), (int, float))]
+    if rows:
+        lines.append("")
+        # Not "Estimated usage by category" -- Claude Code's own heading --
+        # because DOXA does not estimate: every figure below is the CLI's
+        # own measurement, restated, and the word "estimated" would be a
+        # claim about this screen that is simply false (item K's third
+        # honesty rule, in :func:`context_breakdown_text`'s own docstring).
+        lines.append("Usage by category")
+        for idx, row in enumerate(categories):
+            tokens = row.get("tokens")
+            if not isinstance(tokens, (int, float)):
+                continue
+            name = str(row.get("name") or "?")
+            is_free = name.strip().lower() in CONTEXT_GRID_FREE_NAMES
+            color = CONTEXT_GRID_TRACK if is_free else _context_grid_color(name, idx)
+            swatch = _grid_cell_markup(style, color, free=is_free, parity=0)
+            share = (
+                f"  ({float(tokens) / float(window) * 100:.1f}%)"
+                if isinstance(window, (int, float)) and window else ""
+            )
+            lines.append(f"{swatch} {name}: {fmt_tokens(int(tokens))} tokens{share}")
+    return lines
+
+
+def context_grid_lines(
+    breakdown: "dict | None", width: int, *, mode: "str | None" = None
+) -> "list[str]":
+    """The rendered grid, one markup row per string -- the side panel
+    (model/headline/legend) appended after :data:`GRID_GUTTER` spaces on
+    each row when ``width`` has room for it, omitted (grid alone) when it
+    does not. ``[]`` -- the numbers-only degrade -- when
+    :func:`context_grid_cells` has nothing to draw, or when ``width`` is
+    narrower than the grid's own fixed geometry
+    (``GRID_COLUMNS * GRID_CELL_WIDTH`` columns): unlike the old
+    proportional bar this grid never draws smaller, only at its one true
+    size or not at all.
+
+    ``mode`` overrides :func:`context_grid_mode` for a caller that already
+    knows the style (tests); a live caller leaves it ``None`` and gets the
+    user's own setting."""
+    cells = context_grid_cells(breakdown)
+    if cells is None:
+        return []
+    grid_width = GRID_COLUMNS * GRID_CELL_WIDTH
+    if width < grid_width:
+        return []
+    style = mode if mode in ("glyphs", "ascii") else context_grid_mode()
+
+    grid_rows: list[str] = []
+    for r in range(GRID_ROWS):
+        parts = []
+        for c in range(GRID_COLUMNS):
+            name, color = cells[r * GRID_COLUMNS + c]
+            parts.append(
+                _grid_cell_markup(style, color, free=not name, parity=(r + c))
+            )
+        grid_rows.append("".join(parts))
+
+    available_for_panel = width - grid_width - GRID_GUTTER
+    if available_for_panel < GRID_PANEL_MIN_COLUMNS:
+        return grid_rows
+    panel_lines = _context_grid_panel(breakdown, style)
+    out: list[str] = []
+    for i, grid_row in enumerate(grid_rows):
+        side = panel_lines[i] if i < len(panel_lines) else ""
+        if side:
+            out.append(f"{grid_row}{' ' * GRID_GUTTER}{ellipsize(side, available_for_panel)}")
+        else:
+            out.append(grid_row)
+    return out
+
+
+def context_grid_text(
+    breakdown: "dict | None", width: int, *, mode: "str | None" = None
+) -> str:
+    """:func:`context_grid_lines`, joined -- or ``""`` when there is
+    nothing to draw. The single call :class:`doxa.ui.transcript.ContextBlock`
+    splices in where the old bar used to sit."""
+    lines = context_grid_lines(breakdown, width, mode=mode)
+    return "\n".join(lines)
+
+
+def context_sources_text(breakdown: "dict | None") -> str:
+    """The per-source summary Claude Code prints below its own grid --
+    ``MCP tools · /mcp (loaded on-demand)`` / ``└ 202 tools · 0 tokens``,
+    and the like -- as three sections, each hide-at-zero, each a SUMMARY
+    of a figure this codebase already has, never a new measurement:
+
+    * MCP tools, grouped by server, off the same ``mcp_tools`` rows
+      :func:`context_breakdown` already normalizes (which includes DOXA's
+      own in-process SDK MCP server -- whatever ``get_context_usage``
+      names it comes through here like any other server).
+    * Agents, off ``agents`` -- a real ``get_context_usage`` field
+      (subagent definitions loaded into the window) that no ``/context``
+      surface before this normalized at all; see
+      :func:`doxa.engine.context_breakdown`'s own docstring.
+    * Skills, off ``adopted_skills``/``adopted_skill_plugins`` -- the ONE
+      figure here DOXA measures itself rather than reading off the CLI,
+      because ``get_context_usage`` has no ``skills`` field to read at
+      all (:func:`doxa.claude_plugins.adopted_skill_summary`). Absent
+      entirely -- not a zero-count section -- when plugin adoption is off,
+      the same hide-at-zero rule the LORE snapshot line and the worktree
+      notice line already apply to a DOXA-contributed figure with nothing
+      to report.
+
+    ``""`` when none of the three has anything to say."""
+    if not breakdown:
         return ""
-    bar = "".join(f"[{color}]{'█' * count}[/]" for color, count in segments)
-    return f"{bar}{suffix}"
+    sections: list[str] = []
+    mcp_tools = breakdown.get("mcp_tools")
+    if isinstance(mcp_tools, list) and mcp_tools:
+        by_server: "dict[str, list[int]]" = {}
+        for row in mcp_tools:
+            tokens = row.get("tokens")
+            by_server.setdefault(str(row.get("server") or "?"), []).append(
+                int(tokens) if isinstance(tokens, (int, float)) else 0
+            )
+        sections.append("MCP tools")
+        for server, tok_list in by_server.items():
+            sections.append(f"  └ {server}: {len(tok_list)} tools · {sum(tok_list):,} tokens")
+    agents = breakdown.get("agents")
+    if isinstance(agents, list) and agents:
+        total = sum(
+            int(row["tokens"]) for row in agents if isinstance(row.get("tokens"), (int, float))
+        )
+        sections.append("Agents")
+        sections.append(f"  └ {len(agents)} agents · {total:,} tokens")
+    skills = breakdown.get("adopted_skills")
+    if isinstance(skills, int) and skills > 0:
+        plugins = breakdown.get("adopted_skill_plugins") or 0
+        sections.append("Skills · adopted plugins")
+        sections.append(
+            f"  └ {skills} skills from {plugins} plugin{'' if plugins == 1 else 's'}"
+        )
+    return "\n".join(sections)
 
 
 def git_branch_symbol() -> str:

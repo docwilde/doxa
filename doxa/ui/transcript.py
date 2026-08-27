@@ -40,8 +40,9 @@ from .labels import (
     _one_line,
     _write_tab_class,
     _write_tab_label,
-    context_bar_text,
     context_breakdown_text,
+    context_grid_text,
+    context_sources_text,
 )
 
 
@@ -244,31 +245,36 @@ class SystemBlock(Static):
 
 class ContextBlock(SystemBlock):
     """``/context`` (item K's newest form): the same measured breakdown
-    SystemBlock has always shown, now LED by a proportional bar of the
-    window -- :func:`doxa.ui.labels.context_bar_text`, built from the same
-    ``categories`` the numbers below it already come from. See that
-    function's own docstring for the honesty rules the bar keeps (no
-    reported window, no bar; a component under half a block draws zero,
-    never one; the bar's own width can never exceed what it was given).
+    SystemBlock has always shown, now LED by a 10x20 grid of the window --
+    :func:`doxa.ui.labels.context_grid_text`, Claude Code's own look, built
+    from the same ``categories`` the numbers below it already come from.
+    See that function's own docstring for the honesty rules the grid keeps
+    (no reported window, no grid -- the grid never draws smaller, only at
+    its one true 200-cell size or not at all; a component that has not
+    earned a whole cell draws zero, never one). Below the grid,
+    :func:`doxa.ui.labels.context_sources_text` adds the per-source
+    summary (MCP tools, agents, adopted-plugin skills) Claude Code prints
+    in the same spot -- hide-at-zero, omitted entirely when there is
+    nothing to summarize.
 
     A widget of its own, not a wider SystemBlock, for exactly
-    :class:`_DrawnMark`'s reason: the bar's WIDTH depends on the box this
-    widget is actually given, and that can change out from under it after
-    it mounts -- the transcript growing a scrollbar with no Resize message
-    following is v0.70.0's own precedent, found once already in the boot
-    mark. So :meth:`render` recomputes the bar from
+    :class:`_DrawnMark`'s reason: the grid's side-panel WIDTH depends on
+    the box this widget is actually given, and that can change out from
+    under it after it mounts -- the transcript growing a scrollbar with no
+    Resize message following is v0.70.0's own precedent, found once
+    already in the boot mark. So :meth:`render` recomputes the grid from
     ``self.content_size.width`` on every paint, the same discipline
     :class:`_DrawnMark` keeps, rather than fitting once at construction
-    and trusting a resize to arrive. A box narrower than
-    ``CONTEXT_BAR_MIN_COLUMNS`` degrades to the numbers alone -- the same
-    thing a session with no reported window already does.
+    and trusting a resize to arrive. A box narrower than the grid's own
+    fixed width degrades to the numbers alone -- the same thing a session
+    with no reported window already does.
 
     ``self.text`` is still SystemBlock's own plain-numbers rendering
     (:func:`context_breakdown_text`), untouched -- every existing
     ``/context`` assertion keeps reading exactly what it always did off
     that attribute. Only :meth:`render` (what the screen actually paints)
-    gains the bar, spliced in right after the "context" heading line and
-    ahead of everything measured."""
+    gains the grid and the sources summary, spliced in right after the
+    "context" heading line and ahead of everything measured."""
 
     def __init__(self, breakdown: dict) -> None:
         self.breakdown = breakdown
@@ -277,9 +283,12 @@ class ContextBlock(SystemBlock):
     def render(self):
         heading, _, rest = self.text.partition("\n")
         body = f"▎ doxa\n{heading}"
-        bar = context_bar_text(self.breakdown, self.content_size.width)
-        if bar:
-            body += f"\n{bar}"
+        grid = context_grid_text(self.breakdown, self.content_size.width)
+        if grid:
+            body += f"\n{grid}"
+        sources = context_sources_text(self.breakdown)
+        if sources:
+            body += f"\n\n{sources}"
         if rest:
             body += f"\n{rest}"
         if body != self._content:
