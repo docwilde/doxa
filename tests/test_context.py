@@ -258,6 +258,28 @@ def test_a_component_the_cli_cannot_separate_is_reported_in_characters():
     assert "INSIDE the system-" in text
 
 
+def test_the_session_worktree_block_is_reported_as_its_own_characters():
+    """The SECOND thing DOXA may append after the LORE snapshot -- the
+    [SESSION WORKTREE] block -- gets its OWN characters line, not folded
+    into lore_snapshot_chars: they are separate DOXA-contributed
+    components of the one CLI 'system prompt' row, and conflating them
+    would make either figure wrong the day only one changes shape."""
+    text = context_breakdown_text(
+        _breakdown(lore_snapshot_chars=4_812, worktree_notice_chars=210)
+    )
+    assert "4,812 characters" in text
+    assert "210 characters" in text
+    assert text.count("INSIDE the system-prompt row") == 2
+    assert "worktree notice" in text
+
+
+def test_a_session_with_no_worktree_gets_no_worktree_notice_line():
+    """Hide-at-zero: a breakdown with no worktree_notice_chars at all
+    (the overwhelming majority of sessions) prints no such line."""
+    text = context_breakdown_text(_breakdown(lore_snapshot_chars=4_812))
+    assert "worktree notice" not in text
+
+
 def test_the_no_estimate_promise_is_made_where_the_user_reads_it():
     text = context_breakdown_text(_breakdown())
     assert "the claude CLI's own measurement" in text

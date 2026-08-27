@@ -4,6 +4,13 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.80.0 — 2026-08-27
+
+- A session running in its own git worktree (`doxa/<id>`, v0.17.0+) is now told so: `SessionEngine._build_options` appends a `[SESSION WORKTREE]` block after the LORE snapshot, naming the session's actual branch, base ref and main repo root, and stating the real removal rule (`doxa.worktrees.FINALIZE_RULE`) so the agent knows what finalize keeps versus discards. Fixes agents pushing their private branch upstream, trying to switch to `main`, or burning a turn on git archaeology to find their own base.
+- Every fact in the block comes from `doxa.worktrees.read_meta`'s sidecar, never a guess: a missing or unreadable sidecar (no worktree, worktrees disabled, `--in-process`, a repo-less cwd) appends nothing, and the prompt is byte-identical to a pre-0.80.0 session.
+- `/context` reports the block's size separately (`worktree_notice_chars`), the same "characters, not tokens" honesty `lore_snapshot_chars` already applies, since the CLI counts both inside one undifferentiated "system prompt" row.
+- `doxa.worktrees.FINALIZE_RULE` is a new constant carrying the exact clean/ahead rule `finalize()` applies -- the single source both the prompt block and its own test suite read, so the two cannot drift apart.
+
 ## 0.79.0 — 2026-08-27
 
 - The peers chip is a real roster now instead of a `/sessions` shortcut: click it and the shared `ChipPicker` lists every live peer sharing this repo, each row showing what it's working on and tokens consumed so far. Selecting a row reuses the same attach path the sessions picker already established (`DoxaApp._cmd_attach`); the current session is a no-op and a peer open in another tab switches to it instead of attaching a second client.

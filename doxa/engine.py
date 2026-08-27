@@ -660,7 +660,9 @@ def _context_rows(
 
 
 def context_breakdown(
-    usage: dict, *, lore_snapshot_chars: "int | None" = None
+    usage: dict, *,
+    lore_snapshot_chars: "int | None" = None,
+    worktree_notice_chars: "int | None" = None,
 ) -> dict:
     """One ``get_context_usage`` reply, narrowed to what ``/context`` shows.
 
@@ -676,7 +678,17 @@ def context_breakdown(
     those tokens inside its own "system prompt" category without being able
     to tell the appendix from the preset. Reporting the exact character
     count and saying where the tokens landed is the honest version of that;
-    dividing by four would not be."""
+    dividing by four would not be.
+
+    ``worktree_notice_chars`` is the same idea for the SECOND thing
+    ``_build_options`` may append after the snapshot -- the
+    ``[SESSION WORKTREE]`` block (see :func:`_session_worktree_block`).
+    It gets its OWN field rather than folding into ``lore_snapshot_chars``:
+    the two are separate DOXA-contributed components of the one CLI
+    "system prompt" row, and conflating their sizes would make either
+    figure wrong the day only one of them changes shape. ``None`` for
+    every session that never got a worktree block -- hide-at-zero, same
+    as the block itself."""
     out: dict[str, Any] = {}
     for out_key, in_key in (
         ("model", "model"),
@@ -718,7 +730,52 @@ def context_breakdown(
     )
     if lore_snapshot_chars is not None:
         out["lore_snapshot_chars"] = int(lore_snapshot_chars)
+    if worktree_notice_chars is not None:
+        out["worktree_notice_chars"] = int(worktree_notice_chars)
     return out
+
+
+def _session_worktree_block(cwd: str) -> "str | None":
+    """The ``[SESSION WORKTREE]`` block ``_build_options`` appends after
+    the LORE snapshot -- three sentences of mechanics an agent otherwise
+    has no way to learn: through v0.79.0 a session running in its own
+    ``doxa/<id>`` worktree (v0.17.0+) was never told, and would push its
+    private branch upstream, try to switch to ``main`` and fail or escape
+    its isolation, or burn a turn on git archaeology working out its own
+    base -- all while unaware that a worktree finalize decides to REMOVE
+    is gone with no trace (:data:`doxa.worktrees.FINALIZE_RULE`).
+
+    Every fact below is read straight off :func:`doxa.worktrees.read_meta`
+    -- the sidecar :func:`doxa.worktrees.create` itself wrote -- never
+    guessed: a wrong claim about the session's own base would be worse
+    than saying nothing, the same rule ``/context`` follows for a figure
+    it cannot measure. ``None`` (no block at all, hide-at-zero) whenever
+    that sidecar is missing, unreadable, or incomplete -- ``--in-process``
+    outside a repo, worktrees disabled by setting, a repo-less cwd, or
+    simply a cwd that was never a doxa worktree in the first place all
+    land here, and all get NOTHING appended: the prompt they produce is
+    byte-identical to a session that predates this feature.
+
+    Called fresh from ``_build_options`` on every connect, including a
+    resume's reconnect (v0.56.0) -- so the block always reflects the
+    worktree's CURRENT branch/base, never a value cached from an earlier
+    turn in this same session."""
+    from . import worktrees as worktrees_mod
+
+    meta = worktrees_mod.read_meta(cwd)
+    if not meta:
+        return None
+    branch = str(meta.get("branch") or "")
+    base_ref = str(meta.get("base_ref") or "")
+    main_root = str(meta.get("main_root") or "")
+    if not (branch and base_ref and main_root):
+        return None
+    return (
+        f"[SESSION WORKTREE] You are working in a git worktree on branch "
+        f"{branch}, forked from {base_ref} of {main_root}. Commit your "
+        f"work: {worktrees_mod.FINALIZE_RULE}. Do not push this branch "
+        f"and do not switch off it."
+    )
 
 
 # -- what rides on ONE derive_done event ------------------------------
@@ -1122,6 +1179,13 @@ class SessionEngine:
         # preset -- so /context reports the one thing about it that IS
         # measured rather than estimating a token count for it.
         self.lore_snapshot_chars: int | None = None
+        # Same measured-not-estimated accounting, for the SECOND thing
+        # _build_options may append after the LORE snapshot: the
+        # [SESSION WORKTREE] block (see _session_worktree_block). None
+        # for every session that never gets one (hide-at-zero) -- only
+        # set once the block itself is built, same "connect-time only"
+        # shape as lore_snapshot_chars beside it.
+        self.worktree_notice_chars: int | None = None
         # Session token accounting for /usage: summed from every
         # ResultMessage's own usage block -- the CLI's numbers, not an
         # estimate of our own. Cache reads/creates are kept separate
@@ -1747,6 +1811,13 @@ class SessionEngine:
         snapshot = lore_context.build_context(self.cwd)
         # /context reports this length verbatim -- see lore_snapshot_chars.
         self.lore_snapshot_chars = len(snapshot)
+        # Second (optional) system-prompt appendix -- see
+        # _session_worktree_block's own docstring for the full "why".
+        # Re-derived on every call, including a resume's reconnect, so it
+        # is never a value cached from an earlier turn or an earlier
+        # session in the same worktree.
+        worktree_block = _session_worktree_block(self.cwd)
+        self.worktree_notice_chars = len(worktree_block) if worktree_block else None
         # Native LORE tools: the registry projected through the gate's
         # executor onto an in-process SDK MCP server. include_write=True is
         # deliberate -- lore_remember only STAGES a pending proposal, so the
@@ -1848,7 +1919,10 @@ class SessionEngine:
             system_prompt={
                 "type": "preset",
                 "preset": "claude_code",
-                "append": "[LORE SNAPSHOT]\n" + snapshot,
+                "append": (
+                    "[LORE SNAPSHOT]\n" + snapshot
+                    + (f"\n\n{worktree_block}" if worktree_block else "")
+                ),
             },
             hooks={
                 "UserPromptSubmit": [HookMatcher(hooks=[self._on_user_prompt_submit])],
@@ -2451,7 +2525,11 @@ class SessionEngine:
         usage = await self._safe_context_usage() or self.last_context_usage
         if usage is None:
             return None
-        return context_breakdown(usage, lore_snapshot_chars=self.lore_snapshot_chars)
+        return context_breakdown(
+            usage,
+            lore_snapshot_chars=self.lore_snapshot_chars,
+            worktree_notice_chars=self.worktree_notice_chars,
+        )
 
     def belief_count(self) -> int:
         """Active belief count for the status bar -- same query

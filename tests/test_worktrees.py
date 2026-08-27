@@ -173,6 +173,44 @@ def test_finalize_keeps_a_worktree_with_unmerged_commits(tmp_path):
     assert Path(path).exists()
 
 
+def test_finalize_rule_text_matches_finalize_behavior(tmp_path):
+    """``FINALIZE_RULE`` is the single string doxa.engine's
+    ``[SESSION WORKTREE]`` prompt block quotes for its removal warning
+    (see test_engine.py's own worktree-notice tests) -- so it is the
+    ONLY place that sentence is allowed to be written down. This test is
+    the coupling: it exercises :func:`finalize` under all three outcomes
+    the sentence claims and checks the outcome against the sentence's own
+    wording, so a change to finalize's clean/ahead logic that is not
+    matched by an edit to FINALIZE_RULE fails HERE, in the same module as
+    the logic that changed -- not silently in a prompt nobody reread."""
+    repo = _repo(tmp_path)
+
+    # clean + zero commits ahead -> removed with no trace.
+    clean_path = worktrees_mod.create(str(repo), "ruleclea")
+    assert clean_path is not None
+    assert worktrees_mod.finalize(clean_path) is None
+    assert "removed with no trace" in worktrees_mod.FINALIZE_RULE
+    assert "clean" in worktrees_mod.FINALIZE_RULE
+    assert "zero commits ahead" in worktrees_mod.FINALIZE_RULE
+
+    # dirty (uncommitted change) -> kept.
+    dirty_path = worktrees_mod.create(str(repo), "ruledirt")
+    assert dirty_path is not None
+    (Path(dirty_path) / "f.txt").write_text("edited", encoding="utf-8")
+    assert worktrees_mod.finalize(dirty_path) is not None
+    assert "uncommitted change" in worktrees_mod.FINALIZE_RULE
+    assert "kept for manual merge" in worktrees_mod.FINALIZE_RULE
+
+    # clean, but committed-and-unmerged -> kept.
+    ahead_path = worktrees_mod.create(str(repo), "ruleahea")
+    assert ahead_path is not None
+    (Path(ahead_path) / "new.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "-C", ahead_path, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", ahead_path, "commit", "-qm", "work"], check=True)
+    assert worktrees_mod.finalize(ahead_path) is not None
+    assert "committed-but-unmerged work" in worktrees_mod.FINALIZE_RULE
+
+
 def test_finalize_is_a_noop_for_a_non_doxa_worktree(tmp_path):
     """No sidecar metadata (the setting was off, or this is just some
     other directory) -- finalize leaves it completely alone."""

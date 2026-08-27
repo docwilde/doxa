@@ -7,7 +7,9 @@ applied before anything touches disk, and finalize() running exactly once.
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 from typing import Any
 
 import pytest
@@ -24,8 +26,26 @@ from claude_agent_sdk import (
 
 from doxa import claude_plugins as claude_plugins_mod
 from doxa import cli_isolation as cli_isolation_mod
+from doxa import worktrees as worktrees_mod
 from doxa.engine import SessionEngine
 from tests.fakes import factory_with_script
+
+
+def _repo(tmp_path, name="repo", branch="trunk"):
+    """Same minimal real-git fixture tests/test_worktrees.py and tests/
+    test_branch_command.py each keep their own copy of -- the [SESSION
+    WORKTREE] block tests below need a REAL sidecar (doxa.worktrees.
+    read_meta reads an actual file worktrees.create wrote), so a fake
+    engine/fake git would test nothing."""
+    repo = tmp_path / name
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", branch, str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+    (repo / "f.txt").write_text("one", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "one"], check=True)
+    return repo
 
 
 def _script_one_turn_with_tool_call() -> list:
@@ -159,6 +179,179 @@ async def test_start_injects_lore_snapshot_into_system_prompt(tmp_path):
     assert "LORE SNAPSHOT" in system_prompt["append"]
     assert "hooks" in vars(created[0].options) or created[0].options.hooks
     assert set(created[0].options.hooks) == {"UserPromptSubmit", "PreCompact", "PreToolUse"}
+
+
+# -- [SESSION WORKTREE]: worktree-awareness in the system prompt ----------
+#
+# The gap this closes: a session running in its own doxa/<id> worktree
+# (v0.17.0+) was never told, and would push its private branch, try to
+# switch to main, or burn a turn on git archaeology working out its own
+# base. Every test below asserts on the COMPOSED options a real client
+# factory receives -- system_prompt["append"] and engine.
+# worktree_notice_chars -- never on _session_worktree_block's internals.
+
+
+@pytest.mark.asyncio
+async def test_session_worktree_block_carries_the_real_branch_base_and_root(
+    tmp_path,
+):
+    """Inside a real doxa worktree, the appended block names the ACTUAL
+    branch/base/root the sidecar recorded -- not a guess, not a template
+    with placeholders."""
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "e2eid01")
+    assert path is not None
+    meta = worktrees_mod.read_meta(path)
+
+    factory, created = factory_with_script([])
+    engine = SessionEngine(cwd=path, client_factory=factory)
+    await engine.start()
+
+    append = created[0].options.system_prompt["append"]
+    assert "[SESSION WORKTREE]" in append
+    assert meta["branch"] in append
+    assert meta["base_ref"] in append
+    assert meta["main_root"] in append
+    assert "removed with no trace" in append  # the finalize rule, verbatim
+    assert "do not push this branch" in append.lower()
+    assert "do not switch off it" in append.lower()
+    # LORE snapshot is still there too -- this is a SECOND appendix, not a
+    # replacement.
+    assert "[LORE SNAPSHOT]" in append
+    assert append.index("[LORE SNAPSHOT]") < append.index("[SESSION WORKTREE]")
+
+    assert engine.worktree_notice_chars is not None
+    assert engine.worktree_notice_chars > 0
+    await engine.finalize()
+
+
+@pytest.mark.asyncio
+async def test_non_worktree_session_gets_a_byte_identical_prompt(tmp_path):
+    """The hide-at-zero pin (item 2 of the ask): a session with no doxa
+    worktree sidecar at all -- no git repo here, worktrees never touched
+    this cwd -- must produce EXACTLY the append string a pre-feature
+    session produced: "[LORE SNAPSHOT]\\n" + the snapshot, nothing more."""
+    from lore_core import context as lore_context_mod
+
+    plain = tmp_path / "not-a-worktree"
+    plain.mkdir()
+
+    factory, created = factory_with_script([])
+    engine = SessionEngine(cwd=str(plain), client_factory=factory)
+    await engine.start()
+
+    expected = "[LORE SNAPSHOT]\n" + lore_context_mod.build_context(str(plain))
+    assert created[0].options.system_prompt["append"] == expected
+    assert "[SESSION WORKTREE]" not in created[0].options.system_prompt["append"]
+    assert engine.worktree_notice_chars is None
+    await engine.finalize()
+
+
+@pytest.mark.asyncio
+async def test_worktree_disabled_by_setting_gets_no_block(tmp_path, monkeypatch):
+    """Same hide-at-zero, the 'disabled by setting' path named explicitly:
+    DOXA_WORKTREE=0 means worktrees.create never wrote a sidecar for this
+    cwd in the first place, so read_meta finds nothing and the prompt is
+    unaffected -- even though this cwd IS a real repo."""
+    monkeypatch.setenv("DOXA_WORKTREE", "0")
+    repo = _repo(tmp_path)
+    assert worktrees_mod.create(str(repo), "offid001") is None  # setting off
+
+    factory, created = factory_with_script([])
+    engine = SessionEngine(cwd=str(repo), client_factory=factory)
+    await engine.start()
+
+    assert "[SESSION WORKTREE]" not in created[0].options.system_prompt["append"]
+    assert engine.worktree_notice_chars is None
+    await engine.finalize()
+
+
+@pytest.mark.asyncio
+async def test_missing_sidecar_gets_no_block(tmp_path):
+    """A cwd that LOOKS like a doxa worktree dir name but has no sidecar
+    at all (crashed create, or the .meta file was lost) -- read_meta
+    returns None, and a wrong claim about the base is worse than silence,
+    so nothing is appended."""
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "nosidecr")
+    assert path is not None
+    worktrees_mod.meta_file_path(path).unlink()  # sidecar gone, worktree stays
+
+    factory, created = factory_with_script([])
+    engine = SessionEngine(cwd=path, client_factory=factory)
+    await engine.start()
+
+    assert "[SESSION WORKTREE]" not in created[0].options.system_prompt["append"]
+    assert engine.worktree_notice_chars is None
+    await engine.finalize()
+
+
+@pytest.mark.asyncio
+async def test_corrupt_sidecar_gets_no_block(tmp_path):
+    """Same refusal for a sidecar that exists but is not valid JSON --
+    read_meta's own contract (OSError/ValueError -> None), exercised
+    through the engine rather than assumed."""
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "corrupti")
+    assert path is not None
+    worktrees_mod.meta_file_path(path).write_text("{not json", encoding="utf-8")
+
+    factory, created = factory_with_script([])
+    engine = SessionEngine(cwd=path, client_factory=factory)
+    await engine.start()
+
+    assert "[SESSION WORKTREE]" not in created[0].options.system_prompt["append"]
+    assert engine.worktree_notice_chars is None
+    await engine.finalize()
+
+
+@pytest.mark.asyncio
+async def test_incomplete_sidecar_gets_no_block(tmp_path):
+    """A sidecar that parses as JSON but is missing a field the block
+    needs (branch/base_ref/main_root) -- still refused rather than
+    printing a half-true sentence with a blank where the base should be."""
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "incomplt")
+    assert path is not None
+    meta = worktrees_mod.read_meta(path)
+    del meta["base_ref"]
+    worktrees_mod.meta_file_path(path).write_text(
+        json.dumps(meta), encoding="utf-8",
+    )
+
+    factory, created = factory_with_script([])
+    engine = SessionEngine(cwd=path, client_factory=factory)
+    await engine.start()
+
+    assert "[SESSION WORKTREE]" not in created[0].options.system_prompt["append"]
+    await engine.finalize()
+
+
+def test_session_worktree_block_reflects_the_current_base_at_reconnect(tmp_path):
+    """v0.56.0's resume re-runs _build_options on reconnect (SessionEngine.
+    start() is exactly the same call for a fresh connect and a resume) --
+    this pins that the block is rebuilt from the sidecar's CURRENT state
+    each time, not cached from the first call. Exercised directly against
+    _build_options (sync, no client needed) so the test can rewrite the
+    sidecar BETWEEN two calls and assert the second one sees the change,
+    the way a real switch_base rewrite (doxa.worktrees.update_base) would
+    land before a later reconnect."""
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "reconnid")
+    assert path is not None
+
+    engine = SessionEngine(cwd=path)
+    first = engine._build_options()
+    first_append = first.system_prompt["append"]
+    assert "trunk" in first_append
+
+    subprocess.run(["git", "-C", str(repo), "checkout", "-qb", "other"], check=True)
+    assert worktrees_mod.update_base(path, "other") is True
+
+    second = engine._build_options()
+    second_append = second.system_prompt["append"]
+    assert "other" in second_append
+    assert second_append != first_append
 
 
 @pytest.mark.asyncio

@@ -509,6 +509,24 @@ def _remove(main_root: str, worktree_path: str, branch: str) -> None:
         )
 
 
+FINALIZE_RULE = (
+    "a worktree that is completely clean with zero commits ahead of its "
+    "base is removed with no trace when the session ends; any "
+    "uncommitted change, or any committed-but-unmerged work, is kept for "
+    "manual merge"
+)
+"""One sentence, the whole clean/ahead rule :func:`finalize` applies below
+-- the SINGLE source ``doxa.engine``'s ``[SESSION WORKTREE]`` prompt block
+quotes for its removal warning, so the two can never drift apart the way a
+second hand-written copy of this rule would let them. ``tests/
+test_worktrees.py::test_finalize_rule_text_matches_finalize_behavior``
+exercises :func:`finalize` under all three outcomes this sentence claims
+(clean+zero-ahead removed, dirty kept, clean-but-ahead kept) and fails if
+the code and the sentence disagree -- so a change to the logic below that
+is not matched by an edit HERE breaks a test before it ever reaches the
+model's context, in engine.py or anywhere else that imports this name."""
+
+
 def finalize(worktree_path: str) -> "str | None":
     """A session's REAL end (never a mere detach): clean up its worktree,
     or say why it was kept. See the module docstring for the clean/dirty

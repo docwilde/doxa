@@ -1723,6 +1723,14 @@ def context_breakdown_text(breakdown: "dict | None") -> str:
             "prompt row above — the CLI cannot tell DOXA's appendix from the "
             "preset, so no separate token figure is claimed for it."
         )
+    wt_chars = breakdown.get("worktree_notice_chars")
+    if isinstance(wt_chars, int):
+        lines.append(
+            f"worktree notice: {wt_chars:,} characters appended to the "
+            "system prompt at connect (this session runs in its own git "
+            "worktree). Also counted INSIDE the system-prompt row above, "
+            "for the same reason as the lore snapshot."
+        )
     return "\n".join(lines)
 
 
