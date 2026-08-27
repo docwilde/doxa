@@ -661,13 +661,20 @@ async def test_context_leads_with_a_bar_of_full_blocks_and_keeps_the_numbers(
             found = list(app.query(ContextBlock))
             if found:
                 block = found[0]
-                break
+                # The bar is fitted to MEASURED width, which lands a frame
+                # after mount -- later still on a loaded machine. Polling
+                # only for the mount made this fail under the full suite
+                # while passing alone: the first frame is honestly the
+                # numbers view, and the bar is the next one. Poll for the
+                # bar itself.
+                if "█" in _plain(str(block.renderable)):
+                    break
             await pilot.pause(0.02)
         assert block is not None, "/context did not mount a ContextBlock"
         assert block.region.height > 0
         rendered = str(block.renderable)
         plain = _plain(rendered)
-        assert "█" in plain
+        assert "█" in plain, f"bar never painted; last frame: {plain[:120]!r}"
         # The bar is only ONE glyph -- nothing but block art and spaces on
         # its own line, never a half-block or a Geometric Shapes triangle.
         bar_lines = [line for line in plain.splitlines() if "█" in line]
