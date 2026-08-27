@@ -964,8 +964,26 @@ class ThinkingMarker(Static):
         arming a timer there just to cancel it a message-pump cycle later
         would be the leak this method exists to prevent, not cause."""
         self._started_at = monotonic()
-        self._tick_timer = self.set_interval(TICK_INTERVAL, self._tick)
-        self._render()
+        # Arm only on a MOUNTED widget. Measured, deterministic: set_interval
+        # plus update() on a marker whose message pump has not started yet
+        # poisons the compositor -- every later reflow dies with 'NoneType'
+        # has no attribute 'get_height', for the life of the screen. And
+        # this is the normal case, not an edge: _composed's own docstring
+        # (top of this file) records that a TurnBlock's children land a
+        # message-pump cycle after mount(), so _run_turn's start() can
+        # arrive first. on_mount below picks the timer up.
+        if self.is_mounted:
+            self._arm()
+
+    def _arm(self) -> None:
+        if self._tick_timer is None:
+            self._tick_timer = self.set_interval(TICK_INTERVAL, self._tick)
+        self._repaint()
+
+    def on_mount(self) -> None:
+        # start() before mount: the timestamp is set, the timer is not.
+        if self._started_at is not None and self._tick_timer is None:
+            self._arm()
 
     def stop(self) -> None:
         """Cancel the ticker. Idempotent: safe on a marker :meth:`start`
@@ -981,7 +999,23 @@ class ThinkingMarker(Static):
             return 0
         return int(monotonic() - self._started_at)
 
-    def _render(self) -> None:
+    def _repaint(self) -> None:
+        # NOT named _render: Widget._render is a FRAMEWORK method that must
+        # return a Visual (widget.py:4270 in this Textual version), and an
+        # override returning None makes every paint of this widget die with
+        # 'NoneType' has no attribute 'get_height' -- measured, and the
+        # whole cause of the 9-failure/35-error suite this branch first
+        # produced.
+        # Guarded on is_mounted AND display -- both measured, not assumed.
+        # A queued tick can land after hide_thinking: Textual stops a
+        # widget's timers at pump close, but a tick already queued still
+        # fires. And in this Textual version, Static.update() on a
+        # display=False widget leaves a None visual the compositor then
+        # queries ('NoneType' has no attribute 'get_height', from inside a
+        # paint with no caller of ours on the stack) -- reproduced in
+        # isolation with three lines: start(), display=False, update().
+        if not (self.is_mounted and self.display):
+            return
         self.update(
             f"{SPINNER_FRAMES[self.frame]} {self.phase or 'thinking'} "
             f"({self._elapsed()}s)"
@@ -997,7 +1031,7 @@ class ThinkingMarker(Static):
             return
         self.frame = (self.frame + 1) % len(SPINNER_FRAMES)
         self._last_tick = monotonic()
-        self._render()
+        self._repaint()
 
     def advance(self, phase: str) -> None:
         """One delta (or one tool call) arrived: move the glyph on, and
@@ -1021,7 +1055,7 @@ class ThinkingMarker(Static):
         self._last_tick = now
         self.frame = (self.frame + 1) % len(SPINNER_FRAMES)
         self.phase = phase
-        self._render()
+        self._repaint()
 
 
 # A Collapsible title is ONE ROW that cannot wrap (theme.tcss pins

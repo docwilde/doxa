@@ -491,12 +491,21 @@ async def test_the_tick_timer_lives_no_longer_than_the_turn_it_belongs_to(
 
     from doxa.ui.statusline import ClockChip
 
+    release = _asyncio.Event()
+
     class ChattyEngine(FakeEngine):
         async def send(self, prompt):
             yield EngineEvent("turn_started", {})
-            for _ in range(20):
+            for _ in range(3):
                 yield EngineEvent("text_delta", {"text": "word "})
                 await _asyncio.sleep(0.01)
+            # Held OPEN until the test has sampled the in-flight state.
+            # pilot.press awaits app-idle, so a turn that free-runs to
+            # completion finishes INSIDE the press await and the sampling
+            # loop below starts after the very window it exists to observe
+            # -- measured: armed t+0.000, stopped t+0.369, loop first
+            # sample later still. The event pins the window open.
+            await release.wait()
             yield EngineEvent("turn_done", {"cost_usd": 0.0, "duration_ms": 5})
 
     monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
@@ -516,11 +525,13 @@ async def test_the_tick_timer_lives_no_longer_than_the_turn_it_belongs_to(
         assert all(m._tick_timer is None for m in app.query(ThinkingMarker))
 
         app.query_one("#prompt-input").value = "go"
-        await pilot.press("enter")
+        press = _asyncio.ensure_future(pilot.press("enter"))
 
         spun = False
         tick_timer_seen_armed = False
         for _ in range(300):
+            if tick_timer_seen_armed and spun and not release.is_set():
+                release.set()
             blocks = list(app.query(TurnBlock))
             if blocks:
                 assert armed() == []
@@ -532,6 +543,9 @@ async def test_the_tick_timer_lives_no_longer_than_the_turn_it_belongs_to(
                 if not blocks[0].thinking.display and spun:
                     break
             await pilot.pause(0.02)
+        if not release.is_set():
+            release.set()
+        await press
         assert spun, "the marker never advanced -- nothing was sampled"
         assert tick_timer_seen_armed, "the tick timer never armed during the turn"
         assert armed() == []
