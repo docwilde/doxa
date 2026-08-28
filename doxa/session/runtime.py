@@ -590,10 +590,12 @@ class PaneRuntimeMixin:
         """A fresh needs_input event: open the dialog, blink the tab
         (cleared on answer or on activating this tab -- set_needs_input's
         own, already-tested convention, unchanged here), and notify --
-        gated exactly like notify_turn_done, by THIS pane's real
-        app_has_focus (the detached-daemon case, no client at all
-        attached, is handled separately, daemon-side -- see
-        doxa/daemon.py's _peer_pump).
+        gated by THIS pane's real app_has_focus (the detached-daemon
+        case, no client at all attached, is handled separately,
+        daemon-side -- see doxa/daemon.py's _peer_pump). This is the ONE
+        notification-worthy turn outcome (v0.85.0): a turn merely
+        FINISHING is not, and nothing fires for that -- see
+        doxa.notify's module docstring.
 
         Claims the keyboard, if this pane is the tab the user is actually
         looking at (v0.43.0). The dialog is driven entirely through
@@ -752,20 +754,28 @@ class PaneRuntimeMixin:
                     )
 
     def _on_turn_done_status(self, duration_ms: "float | None") -> None:
-        """Tab-status + desktop-notification side effects of ONE finished
-        turn. Reached for a turn THIS client drove (_run_turn) and for one
-        replayed in from another attached client of the same daemon
-        (_peer_pump's turn_started/turn_done forwarding) -- both funnel
-        through _handle_event's turn_done branch, and both are equally "a
-        turn just finished on a session you might not be looking at"."""
+        """Tab-status side effect of ONE finished turn. Reached for a turn
+        THIS client drove (_run_turn) and for one replayed in from another
+        attached client of the same daemon (_peer_pump's turn_started/
+        turn_done forwarding) -- both funnel through _handle_event's
+        turn_done branch, and both are equally "a turn just finished on a
+        session you might not be looking at".
+
+        No desktop notification here, on purpose, since v0.85.0: a turn
+        finishing is not a notification-worthy event -- reported verbatim,
+        "response finished should not trigger a desktop notification.
+        Only when user input is required." The done-unseen tab tint below
+        is still exactly right for this (a quiet, in-window "you missed
+        something" marker); the desktop banner only fires from
+        :meth:`_open_needs_input`, the one place a turn is actually
+        BLOCKED on the user rather than merely over. ``duration_ms`` is
+        kept in the signature even though nothing here reads it anymore --
+        every caller already has it in hand off the same event, and a
+        churned signature would be a second, purely mechanical diff for no
+        behavioral reason."""
         active = self.app.active_pane is self
         if not active:
             self._set_tab_class("-done-unseen", True)
-        notify_mod.notify_turn_done(
-            getattr(self.app, "app_has_focus", True),
-            self.display_name(),
-            duration_ms,
-        )
 
     async def switch_engine(self, make_engine: "Callable[[], Any]") -> None:
         """Swap this pane's live engine handle: detach/finalize the old one,

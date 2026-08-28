@@ -555,9 +555,8 @@ environment is winning is read-only in the modal.
 | `clock_tz` | `DOXA_CLOCK_TZ` | system | IANA zone name, e.g. `Europe/Berlin`; unresolvable falls back to system local, visibly |
 | `clock_format` | `DOXA_CLOCK_FORMAT` | (none) | custom `strftime`, overrides the toggles above; validated on save |
 | `notify` | `DOXA_NOTIFY` | `auto` | when desktop notifications fire: `auto` (only while unfocused), `always`, `off` |
-| `notify_turn_done` | `DOXA_NOTIFY_TURN_DONE` | on | notify when a turn finishes |
 | `notify_staged` | `DOXA_NOTIFY_STAGED` | on | notify when the background reviewer stages proposals |
-| `notify_needs_input` | `DOXA_NOTIFY_NEEDS_INPUT` | on | notify when a session is waiting on you; a fully detached session always notifies |
+| `notify_needs_input` | `DOXA_NOTIFY_NEEDS_INPUT` | **off** | notify when a session is waiting on you (a turn merely finishing never notifies); a fully detached session always notifies once this is on |
 | `notify_update` | `DOXA_NOTIFY_UPDATE` | on | notify when `/update` has something to pull |
 | `notify_lore` | `DOXA_NOTIFY_LORE` | on | `lore_core`'s own review banner; held silent while `notify_staged` is on |
 | *doxa home* | `DOXA_HOME` | `~/.doxa` | durable state: this config, tab sets, names |

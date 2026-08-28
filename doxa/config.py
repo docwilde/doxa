@@ -378,12 +378,6 @@ SETTINGS: tuple[Setting, ...] = (
              "terminal window is unfocused), always, or off (doxa.notify)",
     ),
     Setting(
-        key="notify_turn_done", env="DOXA_NOTIFY_TURN_DONE",
-        label="notify: turn done", category="Notifications",
-        kind="bool_on", default="1",
-        help="Notify when a turn finishes (doxa.notify.notify_turn_done)",
-    ),
-    Setting(
         key="notify_update", env="DOXA_NOTIFY_UPDATE",
         label="notify: update available", category="Notifications",
         kind="bool_on", default="1",
@@ -418,14 +412,17 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="notify_needs_input", env="DOXA_NOTIFY_NEEDS_INPUT",
         label="notify: needs input", category="Notifications",
-        kind="bool_on", default="1",
+        kind="bool", default="",
         help="Notify when a session is waiting on you",
-        note="Fires on an AskUserQuestion or a permission request the CLI "
-             "would have prompted on (doxa.engine's can_use_tool "
-             "callback) -- while it's attached, gated like every other "
-             "trigger above; a fully detached session (nobody attached at "
-             "all) always notifies, since there is no window to blink "
-             "instead.",
+        note="OFF by default -- the ONLY notification-worthy turn outcome "
+             "(a plain finished response is not one; see the module "
+             "docstring of doxa.notify) is still opt-in, on the owner's "
+             "own call. Fires on an AskUserQuestion or a permission "
+             "request the CLI would have prompted on (doxa.engine's "
+             "can_use_tool callback) -- while it's attached, gated like "
+             "every other trigger above; a fully detached session (nobody "
+             "attached at all) always notifies once this is on, since "
+             "there is no window to blink instead.",
     ),
     Setting(
         key="", env="DOXA_HOME", label="doxa home", category="Paths",

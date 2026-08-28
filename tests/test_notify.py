@@ -51,25 +51,52 @@ def _reset_lore_notify_latch(monkeypatch):
     ],
 )
 def test_gating_matrix(monkeypatch, mode, focused, expected):
+    # notify_update is a bool_on trigger (defaults ON) -- the master-mode
+    # matrix above is about `notify`, not about any one trigger's own
+    # default, so any always-on trigger stands in for "the gate itself".
     config.save({"notify": mode})
-    assert notify_mod.should_fire("DOXA_NOTIFY_TURN_DONE", focused) is expected
+    assert notify_mod.should_fire("DOXA_NOTIFY_UPDATE", focused) is expected
 
 
 def test_a_disabled_trigger_never_fires_regardless_of_mode_or_focus():
-    config.save({"notify": "always", "notify_turn_done": "0"})
-    assert notify_mod.should_fire("DOXA_NOTIFY_TURN_DONE", False) is False
+    config.save({"notify": "always", "notify_update": "0"})
+    assert notify_mod.should_fire("DOXA_NOTIFY_UPDATE", False) is False
 
 
 def test_an_unrecognised_mode_degrades_to_auto(monkeypatch):
     monkeypatch.setenv("DOXA_NOTIFY", "sometimes")
-    assert notify_mod.should_fire("DOXA_NOTIFY_TURN_DONE", True) is False
-    assert notify_mod.should_fire("DOXA_NOTIFY_TURN_DONE", False) is True
+    assert notify_mod.should_fire("DOXA_NOTIFY_UPDATE", True) is False
+    assert notify_mod.should_fire("DOXA_NOTIFY_UPDATE", False) is True
 
 
 def test_env_beats_config_for_the_master_mode(monkeypatch):
     config.save({"notify": "off"})
     monkeypatch.setenv("DOXA_NOTIFY", "always")
-    assert notify_mod.should_fire("DOXA_NOTIFY_TURN_DONE", True) is True
+    assert notify_mod.should_fire("DOXA_NOTIFY_UPDATE", True) is True
+
+
+# -- per-trigger defaults, straight off the settings registry ---------------
+
+
+def test_a_bool_on_trigger_defaults_on(monkeypatch):
+    """notify_update (kind="bool_on" in config.SETTINGS) fires with
+    nothing ever configured -- the house default for that kind."""
+    config.save({"notify": "always"})
+    assert notify_mod.should_fire("DOXA_NOTIFY_UPDATE", True) is True
+
+
+def test_needs_input_defaults_off(monkeypatch):
+    """The owner's ask, the other half of it: notify_needs_input is
+    kind="bool" (config.py's off-by-default declaration) since v0.85.0,
+    so with nothing ever configured it stays silent even when the master
+    mode would otherwise say to speak."""
+    config.save({"notify": "always"})
+    assert notify_mod.should_fire("DOXA_NOTIFY_NEEDS_INPUT", False) is False
+
+
+def test_needs_input_speaks_once_explicitly_turned_on(monkeypatch):
+    config.save({"notify": "always", "notify_needs_input": "1"})
+    assert notify_mod.should_fire("DOXA_NOTIFY_NEEDS_INPUT", False) is True
 
 
 # -- notify() itself ---------------------------------------------------------
@@ -140,34 +167,21 @@ def test_notify_carries_the_icon_flag_when_one_resolves(monkeypatch):
 # -- the wired triggers -------------------------------------------------
 
 
-def test_notify_turn_done_includes_duration_when_given(monkeypatch):
+def test_notify_needs_input_is_silent_by_default_even_when_always_and_unfocused(
+    monkeypatch,
+):
+    """The core of the defect fix: notify_needs_input defaults OFF, so
+    with nothing ever configured -- not even the master mode standing in
+    the way -- a needs-input event stays quiet until the owner opts in."""
     config.save({"notify": "always"})
     calls = []
     monkeypatch.setattr(notify_mod, "notify", lambda title, body: calls.append((title, body)))
-    notify_mod.notify_turn_done(True, "Sonnet@doxa:main", 1500)
-    assert calls == [("Sonnet@doxa:main", "response finished (1.5s)")]
-
-
-def test_notify_turn_done_omits_duration_when_absent(monkeypatch):
-    config.save({"notify": "always"})
-    calls = []
-    monkeypatch.setattr(notify_mod, "notify", lambda title, body: calls.append((title, body)))
-    notify_mod.notify_turn_done(True, "Sonnet@doxa:main", None)
-    assert calls == [("Sonnet@doxa:main", "response finished")]
-
-
-def test_notify_turn_done_is_gated_like_any_other_trigger(monkeypatch):
-    config.save({"notify": "auto"})
-    calls = []
-    monkeypatch.setattr(notify_mod, "notify", lambda title, body: calls.append((title, body)))
-    notify_mod.notify_turn_done(True, "tab", 100)  # focused, auto: silent
+    notify_mod.notify_needs_input(False, "tab", "q")
     assert calls == []
-    notify_mod.notify_turn_done(False, "tab", 100)  # unfocused: speaks
-    assert len(calls) == 1
 
 
 def test_notify_needs_input_includes_the_summary(monkeypatch):
-    config.save({"notify": "always"})
+    config.save({"notify": "always", "notify_needs_input": "1"})
     calls = []
     monkeypatch.setattr(notify_mod, "notify", lambda title, body: calls.append((title, body)))
     notify_mod.notify_needs_input(True, "Sonnet@doxa:main", "which environment?")
@@ -175,7 +189,7 @@ def test_notify_needs_input_includes_the_summary(monkeypatch):
 
 
 def test_notify_needs_input_falls_back_when_summary_is_empty(monkeypatch):
-    config.save({"notify": "always"})
+    config.save({"notify": "always", "notify_needs_input": "1"})
     calls = []
     monkeypatch.setattr(notify_mod, "notify", lambda title, body: calls.append((title, body)))
     notify_mod.notify_needs_input(True, "Sonnet@doxa:main", "")
@@ -183,7 +197,7 @@ def test_notify_needs_input_falls_back_when_summary_is_empty(monkeypatch):
 
 
 def test_notify_needs_input_truncates_a_long_summary(monkeypatch):
-    config.save({"notify": "always"})
+    config.save({"notify": "always", "notify_needs_input": "1"})
     calls = []
     monkeypatch.setattr(notify_mod, "notify", lambda title, body: calls.append((title, body)))
     notify_mod.notify_needs_input(True, "tab", "x" * 200)
@@ -192,8 +206,10 @@ def test_notify_needs_input_truncates_a_long_summary(monkeypatch):
     assert body.endswith("…")
 
 
-def test_notify_needs_input_is_gated_like_any_other_trigger(monkeypatch):
-    config.save({"notify": "auto"})
+def test_notify_needs_input_is_gated_like_any_other_trigger_once_turned_on(
+    monkeypatch,
+):
+    config.save({"notify": "auto", "notify_needs_input": "1"})
     calls = []
     monkeypatch.setattr(notify_mod, "notify", lambda title, body: calls.append((title, body)))
     notify_mod.notify_needs_input(True, "tab", "q")  # focused, auto: silent
@@ -219,12 +235,12 @@ def test_notify_update_available_message(monkeypatch):
 
 
 def test_per_trigger_bools_are_independent(monkeypatch):
-    config.save({"notify": "always", "notify_update": "0"})
+    config.save({"notify": "always", "notify_update": "0", "notify_needs_input": "1"})
     calls = []
     monkeypatch.setattr(notify_mod, "notify", lambda title, body: calls.append((title, body)))
     notify_mod.notify_update_available(False)
     assert calls == []  # this trigger is off
-    notify_mod.notify_turn_done(False, "tab", None)
+    notify_mod.notify_needs_input(False, "tab", "q")
     assert len(calls) == 1  # unrelated trigger, untouched
 
 

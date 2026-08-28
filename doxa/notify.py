@@ -15,9 +15,25 @@ such concept):
   the terminal window does NOT have focus -- a notification that says
   "look at the terminal" is noise if you are already looking at it),
   ``always`` (ignore focus), or ``off`` (never).
-* one bool per trigger (``notify_turn_done`` / ``notify_update`` /
-  ``notify_lore`` / ``notify_needs_input``, all default ON), so a specific
-  kind of notification can be silenced without killing the others.
+* one bool per trigger (``notify_update`` / ``notify_lore`` /
+  ``notify_staged``, default ON; ``notify_needs_input``, default OFF --
+  see below), so a specific kind of notification can be silenced (or, for
+  ``notify_needs_input``, turned on) without touching the others.
+
+A finished turn is deliberately NOT a trigger here. Through v0.84.0 it
+was (``notify_turn_done``, fired from every ``turn_done`` regardless of
+whether anything was actually waiting on the user), which meant a
+perfectly ordinary reply popped a desktop banner -- reported as "response
+finished should not trigger a desktop notification. Only when user input
+is required." Only a turn genuinely BLOCKED ON THE USER
+(:func:`notify_needs_input` -- an ``AskUserQuestion``, a permission
+prompt, or a fully detached session with nobody attached at all) is
+notification-worthy; a plain completed response is not, and nothing
+fires for one. ``notify_needs_input`` itself now defaults OFF (the other
+owner request: a way to turn desktop notifications on, which implies
+they start off) -- ``_trigger_default`` below reads that straight off
+``config.SETTINGS`` (``kind="bool_on"`` -> default on, anything else ->
+default off) rather than this module hardcoding a second copy of it.
 
 Focus is tracked by DoxaApp (``events.AppFocus``/``events.AppBlur`` ->
 ``self.app_has_focus``, init True) and passed in by every call site here --
@@ -97,10 +113,25 @@ def _mode() -> str:
     return value if value in ("auto", "always", "off") else "auto"
 
 
+def _trigger_default(trigger_env: str) -> bool:
+    """Whether a trigger notifies out of the box, when nothing has ever
+    set its env var or its config-file key -- read straight off the
+    settings registry rather than redeclared here, so there is exactly
+    ONE place a trigger's default lives. ``kind="bool_on"`` (config.py's
+    own declaration for a bool that defaults ON, e.g. ``notify_staged``)
+    means yes; anything else -- in practice ``kind="bool"``, the
+    registry's declaration for a bool that defaults OFF, which is what
+    ``notify_needs_input`` uses since v0.85.0 -- means no. A trigger with
+    no matching Setting at all (should not happen; every trigger here has
+    one) also defaults off, the safer failure."""
+    setting = config_mod.SETTINGS_BY_ENV.get(trigger_env)
+    return bool(setting is not None and setting.kind == "bool_on")
+
+
 def should_fire(trigger_env: str, app_has_focus: bool) -> bool:
     """Whether ONE trigger should actually notify right now: its own
     per-trigger bool AND the master mode AND (for ``auto``) focus."""
-    if not _bool(trigger_env, True):
+    if not _bool(trigger_env, _trigger_default(trigger_env)):
         return False
     mode = _mode()
     if mode == "off":
@@ -118,18 +149,6 @@ def notify_if(trigger_env: str, app_has_focus: bool, title: str, body: str) -> N
 
 
 # -- the triggers wired now -------------------------------------------------
-
-
-def notify_turn_done(
-    app_has_focus: bool, tab_label: str, duration_ms: "float | None"
-) -> None:
-    """A turn finished. Title is the tab's own label (which pane, in a
-    multi-tab window), body is short -- a duration when the caller has one,
-    since "how long did that take" is the one thing worth a glance."""
-    body = "response finished"
-    if duration_ms:
-        body += f" ({duration_ms / 1000:.1f}s)"
-    notify_if("DOXA_NOTIFY_TURN_DONE", app_has_focus, tab_label, body)
 
 
 def notify_needs_input(app_has_focus: bool, tab_label: str, summary: str) -> None:
@@ -158,7 +177,7 @@ def notify_staged(
     did NOT reject it, so it is now sitting behind LORE's approval gate
     waiting on a human.
 
-    Title is the tab's own label, same as :func:`notify_turn_done`: in a
+    Title is the tab's own label, same as :func:`notify_needs_input`: in a
     multi-tab window "which session derived this" is the first question.
     The body leads with the count and then QUOTES the first proposal,
     because a bare count cannot tell you whether a batch is worth opening.

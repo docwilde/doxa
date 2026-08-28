@@ -132,6 +132,44 @@ async def test_done_unseen_marks_a_background_tab_and_clears_on_activation(
 
 
 @pytest.mark.asyncio
+async def test_a_finished_turn_never_pops_a_desktop_notification(
+    tmp_path, monkeypatch,
+):
+    """v0.85.0, the core of the reported defect: "response finished
+    should not trigger a desktop notification. Only when user input is
+    required." A turn finishing on a BACKGROUND tab while the window is
+    UNFOCUSED -- exactly the shape that used to fire notify_turn_done,
+    the most permissive case for it to fire in -- must still mark
+    -done-unseen (the in-window, non-desktop signal) but never reach
+    doxa.notify.notify at all."""
+    sent: list = []
+    monkeypatch.setattr(
+        "doxa.app.notify_mod.notify", lambda title, body: sent.append((title, body))
+    )
+    engines: list[FakeEngine] = []
+
+    def make():
+        engines.append(FakeEngine(list(SCRIPT)))
+        return engines[-1]
+
+    app = DoxaApp(cwd=str(tmp_path), engine_factory=make, new_session_factory=make)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.app_has_focus = False  # notify's own "auto" mode would fire here
+        assert await _wait(pilot, lambda: engines and engines[0].started)
+        await pilot.press("ctrl+t")
+        assert await _wait(pilot, lambda: len(app.panes()) == 2)
+        assert await _wait(pilot, lambda: len(engines) == 2 and engines[1].started)
+        second = app.panes()[1]
+        await pilot.press("ctrl+left")
+        await pilot.pause()
+
+        await second._run_turn("hi from the background")
+        assert _tab(app, second).has_class("-done-unseen")
+    assert sent == []
+
+
+@pytest.mark.asyncio
 async def test_done_unseen_is_never_set_on_the_active_tab(tmp_path):
     engine = FakeEngine(list(SCRIPT))
     app = DoxaApp(
