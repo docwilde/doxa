@@ -284,6 +284,27 @@ def test_a_session_with_no_worktree_gets_no_worktree_notice_line():
     assert "worktree notice" not in text
 
 
+def test_the_graph_context_block_is_reported_in_its_own_characters():
+    """The graph-backed context block (v0.84.0, DOXA_GRAPH_CONTEXT) gets its
+    own characters line too -- but with DIFFERENT wording from the two
+    connect-time rows above it: it rides the per-turn additionalContext
+    path, not the connect-time system prompt, so the CLI's own usage
+    figures already count its tokens correctly once that turn's numbers
+    come back. Claiming "INSIDE the system-prompt row" for it, like the
+    two rows above, would be false."""
+    text = context_breakdown_text(_breakdown(graph_context_chars=640))
+    assert "640 characters" in text
+    assert "graph context" in text
+    assert "additionalContext path" in text
+    assert "INSIDE the system-prompt row" not in text
+
+
+def test_a_turn_with_no_graph_context_block_gets_no_graph_context_line():
+    """Hide-at-zero, same rule as the worktree notice above."""
+    text = context_breakdown_text(_breakdown(lore_snapshot_chars=4_812))
+    assert "graph context" not in text
+
+
 def test_the_no_estimate_promise_is_made_where_the_user_reads_it():
     text = context_breakdown_text(_breakdown())
     assert "the claude CLI's own measurement" in text

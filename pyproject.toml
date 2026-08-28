@@ -45,7 +45,7 @@ dependencies = [
     # runs the suite and opens a PR. It only ever proposes -- this line is
     # still only changed by a human merging one. Editing it by hand stays
     # perfectly fine; the workflow reads whatever is here.
-    "lore-core @ git+https://github.com/docwilde/LORE@v0.42.1",
+    "lore-core @ git+https://github.com/docwilde/LORE@v0.45.0",
 ]
 
 [project.scripts]

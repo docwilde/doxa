@@ -211,6 +211,24 @@ SETTINGS: tuple[Setting, ...] = (
              "disables it (doxa.engine.consult_floor)",
     ),
     Setting(
+        key="graph_context", env="DOXA_GRAPH_CONTEXT",
+        label="graph context", category="Memory",
+        kind="bool", default="",
+        help="Add LORE's graph-backed context block (beliefs reached by a "
+             "relation, ranked confidence-first) to the act-time consult "
+             "(doxa.engine.graph_context_enabled)",
+        note="OFF by default. Calls LORE's OWN builder "
+             "(lore_core.graph.context_candidates/render_context_block, "
+             "LORE 0.44.0+) rather than a second ranking implementation, "
+             "as a SEPARATE stage from the consult floor above -- the two "
+             "toggle independently. Unlike the consult note (silent unless "
+             "something clears the relevance floor), this block falls back "
+             "to the best-supported beliefs in scope when nothing matches "
+             "the prompt, so once on it rides EVERY turn, budgeted under "
+             "its own char cap but real, recurring cost -- see the "
+             "graph_context_chars row in /context.",
+    ),
+    Setting(
         key="lore_root", env="LORE_ROOT", label="lore store", category="Memory",
         help="Where the belief store and session index live (lore_core.ROOT)",
         note="Shared with the Claude Code LORE plugin -- one store, two "

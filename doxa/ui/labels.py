@@ -1731,6 +1731,18 @@ def context_breakdown_text(breakdown: "dict | None") -> str:
             "worktree). Also counted INSIDE the system-prompt row above, "
             "for the same reason as the lore snapshot."
         )
+    gc_chars = breakdown.get("graph_context_chars")
+    if isinstance(gc_chars, int):
+        lines.append(
+            f"graph context: {gc_chars:,} characters added to the LAST "
+            "turn's prompt (LORE's graph-backed belief context, "
+            "DOXA_GRAPH_CONTEXT). Unlike the two rows above, this rides "
+            "the per-turn additionalContext path, not the connect-time "
+            "system prompt -- the CLI counts its tokens correctly on its "
+            "own, inside the categories above, once that turn's usage "
+            "comes back. Shown here as the last known size, since it "
+            "varies by prompt rather than being fixed for the session."
+        )
     return "\n".join(lines)
 
 

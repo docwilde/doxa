@@ -51,11 +51,14 @@ from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see that module
 from claude_agent_sdk import SdkMcpTool
 
 from lore_core import beliefs as lore_beliefs
+from lore_core import graph as lore_graph
 from lore_core import store as lore_store
 from lore_core.config import ROOT, one_line, project_slug, utcnow
 from lore_core.deriver import pending_texts
 from lore_core.memory import memory_cap, memory_path, read_entries, usage_line
 from lore_core.scrub import scrub_secrets
+
+from .events import BELIEF_NEIGHBOUR_LIMIT
 
 if TYPE_CHECKING:
     from .gate import OperatorContext
@@ -208,6 +211,26 @@ def _belief_show(belief_id: int) -> dict:
         )
     ]
     confirms, contradicts, stales = lore_beliefs.outcome_counts(conn, bid)
+    # EDGES (v0.84.0): the belief's typed relations, both directions --
+    # lore_core.beliefs.belief_edges already returns exactly this shape
+    # (direction, other_id, rel, source, support, other_claim, other_status),
+    # the same query `lore belief show`/`lore belief edges` render. Structure
+    # earns no authority here: `source` says who asserted it ("derived" is
+    # a model claim, as uncalibrated as a deriver-claimed confidence, and
+    # "structural" is a fact the store recorded itself), and `support` is
+    # the distinct-session corroboration count -- the caller reads both
+    # rather than the relation being handed extra weight for existing at
+    # all. An absent block (no edges) is an empty list, not a missing key,
+    # so a caller can always index it.
+    edges = [
+        {
+            "direction": direction, "verb": rel, "belief_id": other,
+            "claim": other_claim, "status": other_status,
+            "source": source, "support": support,
+        }
+        for direction, other, rel, source, support, other_claim, other_status
+        in lore_beliefs.belief_edges(conn, bid)
+    ]
     return {
         "belief": {
             "id": bid, "subject": subject, "claim": claim,
@@ -218,6 +241,7 @@ def _belief_show(belief_id: int) -> dict:
         },
         "evidence": evidence,
         "outcomes": {"confirmed": confirms, "contradicted": contradicts, "stale": stales},
+        "edges": edges,
     }
 
 
@@ -225,7 +249,9 @@ _LORE_BELIEF_SHOW = Operator(
     name="lore_belief_show",
     description=(
         "One LORE belief by id: claim, self-reported and outcome-calibrated "
-        "confidence, status, the full evidence trail, and its outcomes ledger."
+        "confidence, status, the full evidence trail, its outcomes ledger, "
+        "and its typed relations to other beliefs (verb, direction, the "
+        "other belief, and how well-corroborated the relation itself is)."
     ),
     parameters={
         "type": "object",
@@ -236,6 +262,196 @@ _LORE_BELIEF_SHOW = Operator(
         "additionalProperties": False,
     },
     fn=_belief_show,
+    cost="low",
+    read_only=True,
+)
+
+
+# --------------------------------------------------------------------------
+# lore_belief_neighbours -- graph traversal (read-only)
+# --------------------------------------------------------------------------
+#
+# ONE tool, not five, covering the two shapes lore_core.graph actually earns
+# their context cost: browse ("what does this belief sit near") and probe
+# ("does X reach Y, and how"). Both share one adjacency build and one rule
+# set, so a single parameter (`to_id`) switches mode rather than the model
+# choosing between two similarly-named tools. `khop`/`best_path`/
+# `simple_paths` are lore_core.graph's own functions -- nothing here
+# reimplements traversal, it only shapes the result and enforces the two
+# honesty rules `lore consult`/`lore ask` already apply to structure:
+#
+# 1. STRUCTURE EARNS NO AUTHORITY. Every belief this tool returns -- the
+#    seed, each neighbour, each node on a path -- carries its OWN
+#    citation_status, computed the same way cmd_consult computes STEER vs
+#    CITE ONLY (>=3 outcome-ledger rows -> STEER with a calibrated
+#    confidence; otherwise CITE ONLY with the deriver-claimed one). A
+#    STEER belief one hop from a CITE-only one does not lend it authority,
+#    and the reverse does not cost the STEER belief its own status --
+#    each id is looked up independently, never inherited from a neighbour
+#    or a path.
+# 2. PATH CONFIDENCE IS THE PRODUCT OVER HOPS (best_path's own contract:
+#    Dijkstra on -log(weight), so the number returned already IS the
+#    product, not an average or a per-hop score). It is surfaced next to
+#    hop_count on every result so a 4-hop chain at 0.8/hop reads as the
+#    0.41 it is, not as "0.8-ish".
+# 3. co_derived IS A PROJECTION. lore_core.graph.adjacency folds it in by
+#    default (a real signal: two beliefs derived in the same small
+#    session), but it is computed at read time from belief_evidence, never
+#    stored as a row -- every hop/neighbour that used it carries
+#    "projected": true so nothing reads it as an asserted relation.
+
+
+def _citation_tag(conn, bid: int, claim: str) -> dict:
+    """One belief's own citation status -- independent of how it was
+    reached. The exact STEER/CITE-ONLY split lore_core.dialectic.cmd_consult
+    applies to FTS hits, applied here to graph-reached beliefs: >=3
+    outcome-ledger rows earns STEER with a calibrated confidence, anything
+    else is CITE ONLY with the uncalibrated, deriver-claimed one. Never a
+    property of the edge or path that reached this id."""
+    row = conn.execute("SELECT confidence FROM beliefs WHERE id = ?", (bid,)).fetchone()
+    conf = row[0] if row else 0.0
+    confirms, contradicts, stales = lore_beliefs.outcome_counts(conn, bid)
+    n_out = confirms + contradicts + stales
+    if n_out >= 3:
+        return {
+            "id": bid, "claim": claim, "citation_status": "steer",
+            "calibrated_confidence": round(
+                lore_beliefs.calibrated_confidence(conf, confirms, contradicts), 2),
+            "outcome_count": n_out,
+        }
+    return {
+        "id": bid, "claim": claim, "citation_status": "cite_only",
+        "confidence": round(conf, 2), "outcome_count": n_out,
+    }
+
+
+def _belief_neighbours(belief_id: int, hops: int = 1, to_id: "int | None" = None,
+                       limit: int = 12) -> dict:
+    conn = lore_store.db_connect()
+    hops = max(1, min(int(hops), 2))
+    limit = max(1, min(int(limit), BELIEF_NEIGHBOUR_LIMIT))
+    row = conn.execute(
+        f"SELECT {lore_beliefs.BELIEF_COLS} FROM beliefs WHERE id = ?", (belief_id,)
+    ).fetchone()
+    if not row:
+        return {"error": f"lore_belief_neighbours: no belief with id {belief_id}"}
+    seed_id, _subject, seed_claim, _conf, seed_status = row
+
+    # active-only, same view `lore consult`/`lore ask` traverse -- a
+    # superseded/retracted/dormant belief is not somewhere structure should
+    # lead the agent.
+    adj, claims = lore_graph.adjacency(conn)
+    if seed_id not in claims:
+        return {
+            "error": f"lore_belief_neighbours: belief {belief_id} is not active"
+                     f" (status {seed_status}) -- the graph view is active beliefs only",
+        }
+    seed_tag = _citation_tag(conn, seed_id, seed_claim)
+
+    if to_id is not None:
+        if to_id not in claims:
+            return {"error": f"lore_belief_neighbours: no active belief with id {to_id}"}
+        path_hops, confidence = lore_graph.best_path(adj, belief_id, to_id)
+        if not path_hops:
+            return {
+                "mode": "path", "seed": seed_tag,
+                "target": _citation_tag(conn, to_id, claims[to_id]),
+                "path": [], "confidence": 0.0, "hop_count": 0,
+                "note": "no path between these beliefs in the active graph",
+            }
+        node_ids = [path_hops[0][0]] + [dst for _s, _r, dst in path_hops]
+        path_out = []
+        for src, rel, dst in path_hops:
+            projected = rel in lore_beliefs.PROJECTED_RELATIONS
+            hop: dict = {"src": src, "verb": rel, "dst": dst, "projected": projected}
+            if not projected:
+                hop["support"] = lore_beliefs.edge_support(conn, src, dst, rel)
+            path_out.append(hop)
+        others = lore_graph.simple_paths(adj, belief_id, to_id, cutoff=len(path_hops) + 1)
+        return {
+            "mode": "path",
+            "path": path_out,
+            "confidence": round(confidence, 4),
+            "hop_count": len(path_hops),
+            "beliefs": [_citation_tag(conn, n, claims.get(n, "?")) for n in node_ids],
+            "other_paths_exist": len(others) > 1,
+            "note": "path confidence is the PRODUCT over hops, not a per-hop average or "
+                    "the weakest single hop's weight -- a long chain of plausible steps is "
+                    "not a strong conclusion. Structure earns no citation authority: read "
+                    "each belief's own citation_status, never the path's existence.",
+        }
+
+    # neighbourhood mode
+    reached = lore_graph.khop(adj, belief_id, hops)
+    others = sorted((n for n in reached if n != belief_id), key=lambda n: (reached[n], n))
+    truncated = len(others) > limit
+    kept = others[:limit]
+    neighbours_out = []
+    for node in kept:
+        path_hops, confidence = lore_graph.best_path(adj, belief_id, node)
+        rel = path_hops[-1][1] if path_hops else "?"
+        tag = _citation_tag(conn, node, claims.get(node, "?"))
+        tag.update({
+            "hop_distance": reached[node],
+            "path_confidence": round(confidence, 4),
+            "via_relation": rel,
+            "relation_projected": rel in lore_beliefs.PROJECTED_RELATIONS,
+        })
+        neighbours_out.append(tag)
+    out: dict = {
+        "mode": "neighbourhood",
+        "seed": seed_tag,
+        "hops": hops,
+        "neighbours": neighbours_out,
+        "count": len(neighbours_out),
+        "reachable_total": len(others),
+        "limit": limit,
+        "truncated": truncated,
+        "note": "structure earns no citation authority -- each neighbour's "
+                "citation_status is its own, independent of the seed's; "
+                "path_confidence is the product over hops, not a per-hop average.",
+    }
+    if truncated:
+        out["note"] += (
+            f" TRUNCATED to the nearest {limit} of {len(others)} reachable belief(s)"
+            " -- narrow with a smaller hops or ask about a more specific belief_id."
+        )
+    elif not others:
+        out["note"] = "no relation recorded for this belief in the active graph."
+    return out
+
+
+_LORE_BELIEF_NEIGHBOURS = Operator(
+    name="lore_belief_neighbours",
+    description=(
+        "Traverse LORE's belief graph from one belief: its k-hop "
+        "neighbourhood (hops<=2, capped), or -- when to_id is given -- the "
+        "single most-confident path to another belief. Path confidence is "
+        "the PRODUCT over hops (a long chain reads as weak, not strong). "
+        "Every belief returned carries its OWN citation status "
+        "(steer/cite_only) independent of how it was reached -- being "
+        "related to a well-corroborated belief earns nothing on its own. "
+        "co_derived relations are a projection from shared sessions, never "
+        "stored, and are labeled as such."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "belief_id": {"type": "integer", "minimum": 1,
+                          "description": "The belief to traverse from."},
+            "hops": {"type": "integer", "minimum": 1, "maximum": 2, "default": 1,
+                     "description": "Neighbourhood radius; ignored when to_id is set."},
+            "to_id": {"type": "integer", "minimum": 1,
+                      "description": "Optional: switch to path mode -- the most "
+                                     "confident path belief_id -> to_id."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": BELIEF_NEIGHBOUR_LIMIT,
+                      "default": 12,
+                      "description": "Neighbourhood mode only: max beliefs returned."},
+        },
+        "required": ["belief_id"],
+        "additionalProperties": False,
+    },
+    fn=_belief_neighbours,
     cost="low",
     read_only=True,
 )
@@ -421,6 +637,7 @@ OPERATORS: dict[str, Operator] = {
     for op in (
         _LORE_BELIEF_SEARCH,
         _LORE_BELIEF_SHOW,
+        _LORE_BELIEF_NEIGHBOURS,
         _LORE_MEMORY_LIST,
         _LORE_SESSION_SEARCH,
     )

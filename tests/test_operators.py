@@ -7,6 +7,7 @@ lore_core state lives in the throwaway LORE_ROOT conftest.py points at."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 
 import jsonschema
@@ -15,7 +16,12 @@ import pytest
 import doxa._lore_bootstrap  # noqa: F401 -- sys.path shim: makes lore_core importable
 import lore_core
 from lore_core import store as lore_store
-from lore_core.beliefs import belief_insert
+from lore_core.beliefs import (
+    belief_insert,
+    edge_insert,
+    record_outcome,
+    support_factor,
+)
 from lore_core.config import project_slug
 from lore_core.memory import memory_add, memory_path, read_entries
 from lore_core.pending import load_pending
@@ -66,7 +72,7 @@ def test_registry_has_exactly_the_read_operators():
     # is a deliberate act that must touch this test, never an import side
     # effect that slips a tool into the model's hands unreviewed.
     assert set(ops.OPERATORS) == {
-        "lore_belief_search", "lore_belief_show",
+        "lore_belief_search", "lore_belief_show", "lore_belief_neighbours",
         "lore_memory_list", "lore_session_search",
     }
     assert all(op.read_only for op in ops.OPERATORS.values())
@@ -113,7 +119,9 @@ def test_unconfigured_operators_never_appear():
     # a tool the model can see but never successfully call just burns a step.
     names = {t.name for t in ops.to_sdk_tools(
         executor, include_write=True, ctx={"lore_root": "/x"})}
-    assert names == {"lore_belief_show", "lore_memory_list", "lore_remember"}
+    assert names == {
+        "lore_belief_show", "lore_belief_neighbours", "lore_memory_list", "lore_remember",
+    }
     # ctx=None means "don't gate on configuredness", never "nothing is
     # configured" -- every registered name appears.
     names_none = {t.name for t in ops.to_sdk_tools(executor, include_write=True, ctx=None)}
@@ -188,6 +196,9 @@ def test_read_operators_never_write(tmp_path, monkeypatch):
     bid = out_search["beliefs"][0]["id"]
     out_show = ops.OPERATORS["lore_belief_show"].fn(belief_id=bid)
     assert out_show["belief"]["id"] == bid
+    assert out_show["edges"] == []
+    out_nb = ops.OPERATORS["lore_belief_neighbours"].fn(belief_id=bid)
+    assert out_nb["mode"] == "neighbourhood"
     out_mem = ops.OPERATORS["lore_memory_list"].fn(op_ctx=ctx)
     assert "doxa quokka readonly memory entry" in out_mem["project"]["entries"]
     out_sess = ops.OPERATORS["lore_session_search"].fn(query="quokka telemetry", op_ctx=ctx)
@@ -282,3 +293,227 @@ def test_registry_name_strips_only_the_doxa_prefix():
     assert ops.registry_name("mcp__doxa__lore_belief_search") == "lore_belief_search"
     assert ops.registry_name("Bash") == "Bash"
     assert ops.registry_name("mcp__github__search_code") == "mcp__github__search_code"
+
+
+# --------------------------------------------------------------------------
+# lore_belief_show edges + lore_belief_neighbours (v0.84.0, the belief graph)
+#
+# Fixtures go through lore_core's own write path -- belief_insert /
+# edge_insert / record_outcome -- never a hand-rolled INSERT into
+# belief_edges or belief_outcomes, so a schema change under either table
+# breaks these tests honestly instead of silently drifting from the real
+# shape.
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def _belief_graph_cleanup():
+    """Put the shared belief store back exactly as it was found -- same
+    snapshot-and-restore discipline as tests/test_beliefs_picker.py's
+    lore_store_cleanup (conftest.py points LORE_ROOT at ONE throwaway
+    directory for the whole session, so a stray belief here is a stray
+    belief `tests/test_consult.py`'s bm25-floor assertions see too),
+    extended to belief_edges/belief_edge_assertions: their PRIMARY KEY is
+    (src, dst, rel), not an autoincrement id, so they are cleaned by
+    endpoint membership rather than by row id."""
+    conn = lore_store.db_connect()
+    before = {row[0] for row in conn.execute("SELECT id FROM beliefs")}
+    try:
+        yield
+    finally:
+        conn = lore_store.db_connect()
+        added = [row[0] for row in conn.execute("SELECT id FROM beliefs")
+                 if row[0] not in before]
+        for bid in added:
+            conn.execute("DELETE FROM beliefs WHERE id = ?", (bid,))
+            conn.execute("DELETE FROM belief_evidence WHERE belief_id = ?", (bid,))
+            conn.execute("DELETE FROM belief_outcomes WHERE belief_id = ?", (bid,))
+            conn.execute("DELETE FROM belief_edges WHERE src = ? OR dst = ?", (bid, bid))
+            conn.execute(
+                "DELETE FROM belief_edge_assertions WHERE src = ? OR dst = ?", (bid, bid))
+            with contextlib.suppress(Exception):
+                conn.execute("DELETE FROM belief_fts WHERE belief_id = ?", (bid,))
+        conn.commit()
+
+
+def _belief(slug, claim, session_id, confidence=0.6):
+    conn = lore_store.db_connect()
+    bid, _created = belief_insert(conn, "project:" + slug, claim, confidence,
+                                  session_id, slug, "seeded")
+    conn.commit()
+    return bid
+
+
+def _make_steer(bid):
+    """Push a belief past the >=3 outcome-ledger rows cmd_consult's STEER
+    bar requires, via the real ledger write path."""
+    conn = lore_store.db_connect()
+    for _ in range(3):
+        record_outcome(conn, bid, "confirmed", "test")
+    conn.commit()
+
+
+def test_belief_show_carries_its_edges_present_and_absent(tmp_path, _belief_graph_cleanup):
+    slug = project_slug(str(tmp_path))
+    a = _belief(slug, "edge-fixture belief A depends on belief B", "sess-edge-1")
+    b = _belief(slug, "edge-fixture belief B is the dependency", "sess-edge-2")
+    conn = lore_store.db_connect()
+    assert edge_insert(conn, a, b, "depends_on", "derived", session_id="sess-edge-1") is True
+    conn.commit()
+
+    out_a = ops.OPERATORS["lore_belief_show"].fn(belief_id=a)
+    assert len(out_a["edges"]) == 1
+    edge = out_a["edges"][0]
+    assert edge == {
+        "direction": "out", "verb": "depends_on", "belief_id": b,
+        "claim": "edge-fixture belief B is the dependency", "status": "active",
+        "source": "derived", "support": 1,
+    }
+
+    # The other endpoint sees the same edge from the "in" side.
+    out_b = ops.OPERATORS["lore_belief_show"].fn(belief_id=b)
+    assert len(out_b["edges"]) == 1
+    assert out_b["edges"][0]["direction"] == "in"
+    assert out_b["edges"][0]["belief_id"] == a
+
+    # A belief nobody has related to anything gets an empty block, not a
+    # missing key.
+    lonely = _belief(slug, "edge-fixture belief C has no relations at all", "sess-edge-3")
+    out_c = ops.OPERATORS["lore_belief_show"].fn(belief_id=lonely)
+    assert out_c["edges"] == []
+
+
+def test_belief_neighbours_one_and_two_hops_with_product_confidence(tmp_path, _belief_graph_cleanup):
+    slug = project_slug(str(tmp_path))
+    s = _belief(slug, "chain-fixture seed belief S", "sess-chain-s")
+    a = _belief(slug, "chain-fixture belief A one hop from S", "sess-chain-a")
+    b = _belief(slug, "chain-fixture belief B two hops from S", "sess-chain-b")
+    conn = lore_store.db_connect()
+    assert edge_insert(conn, s, a, "depends_on", "derived", session_id="sess-chain-e1")
+    assert edge_insert(conn, a, b, "depends_on", "derived", session_id="sess-chain-e2")
+    conn.commit()
+
+    one_hop = ops.OPERATORS["lore_belief_neighbours"].fn(belief_id=s, hops=1)
+    assert one_hop["mode"] == "neighbourhood"
+    ids_1 = {n["id"] for n in one_hop["neighbours"]}
+    assert ids_1 == {a}
+    a_row = one_hop["neighbours"][0]
+    assert a_row["hop_distance"] == 1
+    assert a_row["via_relation"] == "depends_on"
+    assert a_row["relation_projected"] is False
+    w1 = support_factor(1)  # single-session support on the S->A edge
+    assert a_row["path_confidence"] == pytest.approx(round(w1, 4))
+
+    two_hop = ops.OPERATORS["lore_belief_neighbours"].fn(belief_id=s, hops=2)
+    ids_2 = {n["id"] for n in two_hop["neighbours"]}
+    assert ids_2 == {a, b}
+    b_row = next(n for n in two_hop["neighbours"] if n["id"] == b)
+    assert b_row["hop_distance"] == 2
+    # PATH CONFIDENCE IS THE PRODUCT OVER HOPS -- two single-session hops
+    # multiply, they do not average and they are not just the weaker one.
+    expected_product = support_factor(1) * support_factor(1)
+    assert b_row["path_confidence"] == pytest.approx(round(expected_product, 4))
+    assert b_row["path_confidence"] < a_row["path_confidence"]
+
+    # The same product, reached through the explicit path mode (to_id).
+    path_out = ops.OPERATORS["lore_belief_neighbours"].fn(belief_id=s, to_id=b)
+    assert path_out["mode"] == "path"
+    assert path_out["hop_count"] == 2
+    assert path_out["confidence"] == pytest.approx(round(expected_product, 4))
+    assert [h["verb"] for h in path_out["path"]] == ["depends_on", "depends_on"]
+    assert [belief["id"] for belief in path_out["beliefs"]] == [s, a, b]
+
+
+def test_belief_neighbours_cap_truncates_visibly(tmp_path, _belief_graph_cleanup):
+    slug = project_slug(str(tmp_path))
+    s = _belief(slug, "cap-fixture seed belief", "sess-cap-s")
+    targets = [
+        _belief(slug, f"cap-fixture direct neighbour {i}", f"sess-cap-{i}")
+        for i in range(3)
+    ]
+    conn = lore_store.db_connect()
+    for i, t in enumerate(targets):
+        assert edge_insert(conn, s, t, "depends_on", "derived", session_id=f"sess-cap-e{i}")
+    conn.commit()
+
+    out = ops.OPERATORS["lore_belief_neighbours"].fn(belief_id=s, hops=1, limit=2)
+    assert out["count"] == 2
+    assert out["reachable_total"] == 3
+    assert out["truncated"] is True
+    assert "TRUNCATED" in out["note"]
+
+    # A limit above the tool's hard cap is clamped, not honored verbatim.
+    from doxa.events import BELIEF_NEIGHBOUR_LIMIT
+
+    clamped = ops.OPERATORS["lore_belief_neighbours"].fn(belief_id=s, hops=1, limit=999)
+    assert clamped["limit"] == BELIEF_NEIGHBOUR_LIMIT
+
+
+def test_belief_neighbours_cite_only_survives_a_steer_seed(tmp_path, _belief_graph_cleanup):
+    """A belief reached by traversal is CITE ONLY unless it earned STEER on
+    its own -- neither direction launders authority across the edge."""
+    slug = project_slug(str(tmp_path))
+    steer_belief = _belief(slug, "steer-fixture outcome-calibrated belief", "sess-steer")
+    cite_belief = _belief(slug, "steer-fixture uncalibrated neighbour belief", "sess-cite")
+    _make_steer(steer_belief)
+    conn = lore_store.db_connect()
+    # adjacency() is a DIRECTED graph for non-symmetric relations (adj maps
+    # src -> dst, matching `lore graph`'s own model) -- an edge asserted one
+    # way is not traversable the other way without a second, explicit edge.
+    # Two distinct verbs both ways is what makes each direction below an
+    # honest, independent traversal rather than an artifact of reversal.
+    assert edge_insert(conn, steer_belief, cite_belief, "explains", "derived",
+                       session_id="sess-steer-edge")
+    assert edge_insert(conn, cite_belief, steer_belief, "specializes", "derived",
+                       session_id="sess-cite-edge")
+    conn.commit()
+
+    from_steer = ops.OPERATORS["lore_belief_neighbours"].fn(belief_id=steer_belief, hops=1)
+    assert from_steer["seed"]["citation_status"] == "steer"
+    neighbour = from_steer["neighbours"][0]
+    assert neighbour["id"] == cite_belief
+    assert neighbour["citation_status"] == "cite_only"
+
+    # And the reverse: reached FROM the cite-only belief, the steer belief
+    # keeps its own earned status -- it is not downgraded by the direction
+    # of the query either.
+    from_cite = ops.OPERATORS["lore_belief_neighbours"].fn(belief_id=cite_belief, hops=1)
+    assert from_cite["seed"]["citation_status"] == "cite_only"
+    reached = from_cite["neighbours"][0]
+    assert reached["id"] == steer_belief
+    assert reached["citation_status"] == "steer"
+
+
+def test_belief_neighbours_labels_co_derived_as_projected(tmp_path, _belief_graph_cleanup):
+    slug = project_slug(str(tmp_path))
+    conn = lore_store.db_connect()
+    # Two beliefs derived in the SAME small session -- co_derived is
+    # PROJECTED from belief_evidence at read time, never a belief_edges row.
+    a, _ = belief_insert(conn, "project:" + slug, "co-derived-fixture belief A",
+                         0.6, "sess-coderived", slug, "seeded")
+    b, _ = belief_insert(conn, "project:" + slug, "co-derived-fixture belief B",
+                         0.6, "sess-coderived", slug, "seeded")
+    conn.commit()
+
+    out = ops.OPERATORS["lore_belief_neighbours"].fn(belief_id=a, hops=1)
+    row = next((n for n in out["neighbours"] if n["id"] == b), None)
+    assert row is not None, "co_derived projection did not surface the sibling belief"
+    assert row["via_relation"] == "co_derived"
+    assert row["relation_projected"] is True
+
+
+def test_belief_neighbours_errors_on_bad_or_inactive_ids(tmp_path, _belief_graph_cleanup):
+    slug = project_slug(str(tmp_path))
+    active = _belief(slug, "error-fixture active belief", "sess-err-1")
+    dormant = _belief(slug, "error-fixture dormant belief", "sess-err-2")
+    conn = lore_store.db_connect()
+    conn.execute("UPDATE beliefs SET status = 'dormant' WHERE id = ?", (dormant,))
+    conn.commit()
+
+    missing = ops.OPERATORS["lore_belief_neighbours"].fn(belief_id=999_999_999)
+    assert "error" in missing
+
+    not_active = ops.OPERATORS["lore_belief_neighbours"].fn(belief_id=dormant)
+    assert "error" in not_active
+
+    bad_target = ops.OPERATORS["lore_belief_neighbours"].fn(belief_id=active, to_id=999_999_999)
+    assert "error" in bad_target

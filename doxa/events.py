@@ -54,6 +54,17 @@ PENDING_LIST_LIMIT = 500
 # says so rather than showing a short trail as a complete one.
 BELIEF_EVIDENCE_LIMIT = 40
 
+# How many beliefs the graph traversal tool (lore_belief_neighbours,
+# doxa.operators) will ever return in one call. Same reasoning as
+# BELIEF_EVIDENCE_LIMIT, applied to a k-hop neighbourhood instead of an
+# evidence trail: an unbounded khop on a several-hundred-belief store can
+# reach most of it (a hub belief's 2-hop neighbourhood is not "a few
+# related claims", it is half the graph), and a tool call that floods the
+# model's context is worse than no tool at all. The cap is per CALL, not
+# per store, and the tool says so when it bites rather than quietly
+# returning a partial list as if it were complete.
+BELIEF_NEIGHBOUR_LIMIT = 20
+
 
 @dataclass
 class EngineEvent:

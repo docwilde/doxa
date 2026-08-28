@@ -144,6 +144,27 @@ def consult_floor() -> float | None:
     return value if value > 0 else None
 
 
+def graph_context_enabled() -> bool:
+    """``DOXA_GRAPH_CONTEXT`` / the config file's ``graph_context`` row --
+    same off-by-default, explicit-truthy-string reading
+    ``doxa.claude_plugins.adoption_enabled`` uses for the other opt-in
+    capability expansion in this codebase.
+
+    Wires DOXA's act-time consult to LORE's OWN graph-backed context
+    builder (``lore_core.graph.context_candidates``/``render_context_block``,
+    LORE 0.44.0/0.45.0) as a SEPARATE, additionally-gated stage alongside
+    :meth:`SessionEngine._consult_note`'s plain FTS pass -- not a
+    replacement for it, and not DOXA re-deriving the same ranking: LORE's
+    own ``LORE_GRAPH_CONTEXT`` hook computes this exact block for the
+    plugin carrier reading the SAME belief store, and a second
+    implementation that could drift from it is worse than none. OFF by
+    default -- it rides the one per-turn injection point that already
+    exists (UserPromptSubmit additionalContext), and the default keeps
+    that path's cost at exactly what it is today until this is opted in."""
+    raw_value = config_mod.raw("DOXA_GRAPH_CONTEXT").strip()
+    return bool(raw_value) and raw_value.lower() not in ("0", "false", "no", "off")
+
+
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
@@ -663,6 +684,7 @@ def context_breakdown(
     usage: dict, *,
     lore_snapshot_chars: "int | None" = None,
     worktree_notice_chars: "int | None" = None,
+    graph_context_chars: "int | None" = None,
     adopted_skills: "int | None" = None,
     adopted_skill_plugins: "int | None" = None,
 ) -> dict:
@@ -691,6 +713,18 @@ def context_breakdown(
     figure wrong the day only one of them changes shape. ``None`` for
     every session that never got a worktree block -- hide-at-zero, same
     as the block itself.
+
+    ``graph_context_chars`` differs from both: the graph-backed context
+    block (:meth:`SessionEngine._graph_context_block`, DOXA_GRAPH_CONTEXT)
+    rides the per-turn ``additionalContext`` path the consult note and the
+    throttled snapshot refresh already use, where the CLI's own usage
+    figures DO correctly count the tokens on the next turn -- no
+    attribution blind spot to fix. It is reported anyway, for the same
+    reason ``worktree_notice_chars`` is: this is new, opt-in, potentially
+    RECURRING per-turn cost, and a user who turned it on should be able to
+    see what it is spending without waiting a turn for the CLI's own
+    numbers to catch up. Unlike the two connect-time fields above, this is
+    the LAST turn's figure, not a session constant.
 
     ``adopted_skills``/``adopted_skill_plugins`` are the same kind of
     DOXA-measured figure for a THIRD thing the CLI cannot separate out:
@@ -755,6 +789,8 @@ def context_breakdown(
         out["lore_snapshot_chars"] = int(lore_snapshot_chars)
     if worktree_notice_chars is not None:
         out["worktree_notice_chars"] = int(worktree_notice_chars)
+    if graph_context_chars is not None:
+        out["graph_context_chars"] = int(graph_context_chars)
     if adopted_skills:
         out["adopted_skills"] = int(adopted_skills)
         out["adopted_skill_plugins"] = int(adopted_skill_plugins or 0)
@@ -1212,6 +1248,15 @@ class SessionEngine:
         # set once the block itself is built, same "connect-time only"
         # shape as lore_snapshot_chars beside it.
         self.worktree_notice_chars: int | None = None
+        # Same measured-not-estimated idea, for the graph-backed context
+        # block (_graph_context_block, DOXA_GRAPH_CONTEXT -- v0.84.0). Unlike
+        # the two above it is NOT connect-time-only: it rides the per-turn
+        # UserPromptSubmit additionalContext path (like the consult note and
+        # the throttled snapshot refresh), so its size varies with the
+        # prompt and this is the LAST turn's figure, updated on every
+        # _on_user_prompt_submit call rather than set once. None whenever
+        # the stage is off or nothing qualified that turn (hide-at-zero).
+        self.graph_context_chars: int | None = None
         # (skills, plugins-carrying-a-skill) among whatever plugins THIS
         # session actually adopted -- computed once, at the same connect
         # moment _build_options calls claude_plugins_mod.adopt() itself,
@@ -1332,8 +1377,11 @@ class SessionEngine:
         lore_core.context.cmd_refresh's LORE_REFRESH_SECS logic, in-memory
         -- one long-lived process owns the whole session, so a monotonic
         timestamp on self replaces cmd_refresh's per-session stamp file)
-        PLUS the act-time consult -- both ride the same additionalContext
-        path, the one injection point that exists per turn."""
+        PLUS the act-time consult PLUS the graph-backed context block --
+        all three ride the same additionalContext path, the one injection
+        point that exists per turn. The last two are separately gated
+        (consult_floor / graph_context_enabled) and can be on independently
+        of each other -- see _graph_context_block's docstring."""
         parts: list[str] = []
         interval = lore_context.refresh_interval()
         if interval is not None:
@@ -1345,9 +1393,14 @@ class SessionEngine:
                     "LORE MEMORY REFRESH -- current as of now; supersedes any "
                     "earlier lore snapshot in this conversation.\n\n" + snapshot
                 )
-        note = self._consult_note(str(input_data.get("prompt") or ""))
+        prompt = str(input_data.get("prompt") or "")
+        note = self._consult_note(prompt)
         if note is not None:
             parts.append(note)
+        graph_block = self._graph_context_block(prompt)
+        self.graph_context_chars = len(graph_block) if graph_block else None
+        if graph_block:
+            parts.append(graph_block)
         if not parts:
             return {}
         return {
@@ -1396,6 +1449,44 @@ class SessionEngine:
             )
         except Exception:
             return None
+
+    def _graph_context_block(self, prompt: str) -> str:
+        """The graph-backed context block -- FTS-seeded, expanded one
+        relation out, ranked confidence-first, budgeted under its own char
+        cap including the header (``lore_core.graph.context_candidates`` /
+        ``render_context_block``, LORE 0.44.0/0.45.0). "" when the stage is
+        off or nothing qualifies.
+
+        DOXA calls LORE's OWN builder rather than writing a second ranking
+        implementation: this is the EXACT function LORE's own
+        ``LORE_GRAPH_CONTEXT`` UserPromptSubmit hook calls for the plugin
+        carrier (``lore_core.context._graph_context_block``), reading the
+        same belief store -- a parallel implementation that could drift
+        from LORE's own ranking (calibrated-first, asserted relations only,
+        never ``co_derived``) would be worse than none. Gated the SAME two
+        ways LORE's own hook gates it -- ``graph_context_enabled`` (DOXA's
+        own opt-in, default OFF) AND ``stage_disabled("beliefs")`` (LORE's
+        belief stage kill switch, which must turn this off too even when
+        DOXA's own setting is on) -- and it is a SEPARATE stage from
+        :meth:`_consult_note`'s plain FTS pass, not a replacement: the two
+        can be on independently, same as LORE's own ``consult`` and
+        ``graph-context`` opt-in stages. Never raises: a broken graph query
+        costs this block, never the turn."""
+        if not graph_context_enabled() or stage_disabled("beliefs"):
+            return ""
+        try:
+            from lore_core import graph as lore_graph
+            from lore_core.beliefs import belief_subject
+
+            conn = lore_store.db_connect()
+            slug = project_slug(self.cwd)
+            subjects = [belief_subject("user", slug), "user-model",
+                       belief_subject("project", slug)]
+            rows = lore_graph.context_candidates(conn, prompt, subjects)
+            block, _chosen = lore_graph.render_context_block(rows)
+            return block
+        except Exception:
+            return ""
 
     async def _on_pre_compact(self, input_data: dict, tool_use_id, context) -> dict:
         """PreCompact -- review the transcript-so-far before the harness
@@ -2579,6 +2670,7 @@ class SessionEngine:
             usage,
             lore_snapshot_chars=self.lore_snapshot_chars,
             worktree_notice_chars=self.worktree_notice_chars,
+            graph_context_chars=self.graph_context_chars,
             adopted_skills=self.adopted_skills,
             adopted_skill_plugins=self.adopted_skill_plugins,
         )
