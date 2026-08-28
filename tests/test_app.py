@@ -323,49 +323,31 @@ async def test_status_line_has_no_git_chip_outside_a_repo(monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_ctrl_c_quits_via_detach_path(monkeypatch, tmp_path):
-    """One Ctrl+C = quit-detach: after the double-press window expires the
-    app finalizes the engine handle (detach over a daemon client, full
-    finalize in-process) and exits -- Textual's default 'ctrl+c does not
-    quit' behavior must never win over the priority binding."""
-    from doxa.app import CTRL_C_DOUBLE_SECS
-
+async def test_ctrl_c_does_nothing_doxa_shaped_and_is_absent_from_the_bindings(
+    monkeypatch, tmp_path,
+):
+    """The v0.85.0 fix, reported verbatim: "we need to remove the binding
+    CTRL+C to close the TUI ... i want to be able to copy and paste".
+    Ctrl+C must be completely free for the terminal's own copy gesture --
+    not bound to a DOXA action (checked live, by pressing it and seeing
+    nothing happen: no quit, no detach, no notification) AND absent from
+    the resolved binding set (checked statically -- Textual's own
+    App.BINDINGS carries a ctrl+c->help_quit system binding that a
+    same-key override would only SHADOW, not remove; DoxaApp pops it
+    explicitly, and this is what pins that)."""
     fake = FakeEngine([])
     monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: fake)
     app = DoxaApp(cwd=str(tmp_path))
+    assert "ctrl+c" not in app._bindings.key_to_bindings
+    notified: list = []
     async with app.run_test() as pilot:
         await pilot.pause()
+        app.notify = lambda msg, **kw: notified.append(msg)
         await pilot.press("ctrl+c")
-        # Window armed, not yet detached -- the second-press upgrade to
-        # quit-stop must still be possible here.
+        await pilot.pause(0.2)
         assert fake.finalized is False
-        assert app._ctrl_c_timer is not None
-        await pilot.pause(CTRL_C_DOUBLE_SECS + 0.5)
-    assert fake.finalized is True
-
-
-@pytest.mark.asyncio
-async def test_double_ctrl_c_stops_the_session(monkeypatch, tmp_path):
-    """Ctrl+C twice inside the window = quit-stop: the engine's stop()
-    (finalize the daemon NOW) runs instead of the detach-only finalize()."""
-    class StoppableEngine(FakeEngine):
-        def __init__(self):
-            super().__init__([])
-            self.stopped = False
-
-        async def stop(self):
-            self.stopped = True
-
-    engine = StoppableEngine()
-    monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: engine)
-    app = DoxaApp(cwd=str(tmp_path))
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.press("ctrl+c")
-        await pilot.press("ctrl+c")
-        await pilot.pause()
-    assert engine.stopped is True
-    assert engine.finalized is False  # stop path, never detach-finalize
+        assert notified == []
+        assert app._exit is False  # no quit was ever triggered
 
 
 @pytest.mark.asyncio

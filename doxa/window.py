@@ -33,11 +33,15 @@ foot, wezterm, gnome-terminal/vte, konsole, tmux, screen):
 is in a ``finally``, which is what makes it hold on the paths that matter:
 
 * **Normal exit** -- ``App.run()`` returns, the ``with`` block ends.
-* **Ctrl+C** -- two cases, both covered. DOXA binds ``ctrl+c`` itself
-  (``DoxaApp.action_ctrl_c_quit``, ``priority=True``) so the ordinary
-  press is a quit action and returns normally; and if the key arrives
-  before the app is live, ``KeyboardInterrupt`` propagates out of
-  ``run()`` and through the ``finally``.
+* **Ctrl+C** -- DOXA does not bind it at all (v0.85.0 freed it for the
+  terminal's own copy gesture; see ``doxa.app.DoxaApp``'s BINDINGS
+  comment), so an ordinary press while the app is live is simply an
+  unhandled key -- the app keeps running, the title stays pushed, and the
+  pop only happens on an actual quit (Ctrl+Q down to the last tab, or the
+  palette's "Quit: detach"/"Quit: stop session"), same as any other exit
+  path below. If the key arrives before the app is live -- no driver yet
+  to swallow it -- ``KeyboardInterrupt`` propagates out of ``run()`` and
+  through the ``finally`` regardless.
 * **A crash** -- any exception out of ``run()`` unwinds through the
   ``finally`` before the traceback prints.
 

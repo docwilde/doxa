@@ -3,11 +3,14 @@
 under a TabbedContent -- one engine handle per tab. Covers the lifecycle
 headlines: Ctrl+T spawns a fresh session (new_session_factory) in a new
 tab without touching the first tab's engine; Ctrl+W close-DETACHES only
-the active tab; closing the last tab closes the app on detach semantics;
-per-tab status lines and identity blocks stay independent; app-level
-Ctrl+C detaches ALL tabs (stop-all on double press); and the palette
-carries the tab surface (new/close/picker). Headless Pilot + FakeEngine,
-same pattern as tests/test_app.py.
+the active tab (and says so, since v0.85.0); Ctrl+Q ends only the active
+tab; closing the last tab closes the app and starts the NEXT launch
+fresh regardless of which key closed it (v0.85.0); Ctrl+C touches
+NOTHING here (freed for terminal copy, v0.85.0 -- app-wide quit lives on
+the command palette instead, covered in tests/test_palette.py and
+tests/test_tabsets.py); per-tab status lines and identity blocks stay
+independent; and the palette carries the tab surface (new/close/picker).
+Headless Pilot + FakeEngine, same pattern as tests/test_app.py.
 """
 
 from __future__ import annotations
@@ -179,46 +182,22 @@ async def test_closing_the_last_tab_closes_the_app_detached(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_ctrl_c_detaches_all_tabs(tmp_path):
-    from doxa.app import CTRL_C_DOUBLE_SECS
-
+async def test_ctrl_c_touches_no_tab_at_all(tmp_path):
+    """v0.85.0: Ctrl+C used to be the app-wide quit gesture (one press
+    detached every tab, two stopped them); reported from live use as
+    stealing the terminal's own copy keystroke. It is unbound now --
+    pressed once or twice, on one tab or several, nothing in this window
+    reacts at all."""
     app, engines = _app(tmp_path)
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.press("ctrl+t")
         assert await _wait(pilot, lambda: len(engines) == 2 and engines[1].started)
         await pilot.press("ctrl+c")
-        assert engines[0].finalized is False  # window armed, nothing detached yet
-        await pilot.pause(CTRL_C_DOUBLE_SECS + 0.5)
-    assert engines[0].finalized is True
-    assert engines[1].finalized is True
-
-
-@pytest.mark.asyncio
-async def test_double_ctrl_c_stops_all_tabs(tmp_path):
-    stopped: list[str] = []
-
-    class StoppableEngine(FakeEngine):
-        def __init__(self, name: str):
-            super().__init__([])
-            self.name = name
-
-        async def stop(self):
-            stopped.append(self.name)
-
-    serial = iter(("one", "two"))
-    app = DoxaApp(
-        cwd=str(tmp_path),
-        engine_factory=lambda: StoppableEngine(next(serial)),
-    )
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.press("ctrl+t")
-        await _wait(pilot, lambda: len(app.panes()) == 2)
         await pilot.press("ctrl+c")
-        await pilot.press("ctrl+c")
-        await pilot.pause()
-    assert sorted(stopped) == ["one", "two"]
+        await pilot.pause(0.2)
+    assert engines[0].finalized is False
+    assert engines[1].finalized is False
 
 
 @pytest.mark.asyncio

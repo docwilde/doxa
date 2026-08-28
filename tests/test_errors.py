@@ -646,22 +646,11 @@ async def test_a_failed_answer_delivery_is_reported_and_says_what_to_do(
 def test_the_boundary_cannot_receive_ctrl_c_or_a_deliberate_exit():
     """KeyboardInterrupt and SystemExit derive from BaseException, so
     Textual's own `except Exception` clauses cannot catch them and this
-    signature cannot receive them. Ctrl+C behaviour is bound in app.py and
-    must keep working."""
+    signature cannot receive them -- true regardless of what, if
+    anything, is bound to Ctrl+C (nothing, as of v0.85.0; see
+    doxa.app.DoxaApp's BINDINGS comment)."""
     assert not issubclass(KeyboardInterrupt, Exception)
     assert not issubclass(SystemExit, Exception)
-
-
-@pytest.mark.asyncio
-async def test_ctrl_c_still_arms_the_double_press_window(tmp_path):
-    app = DoxaApp(cwd=str(tmp_path))
-    async with app.run_test(size=(100, 30)) as pilot:
-        await _booted(app, pilot)
-        await app.action_ctrl_c_quit()
-        assert app._ctrl_c_timer is not None
-        assert not _blocks(app), "a quit keystroke was reported as a failure"
-        app._ctrl_c_timer.stop()
-        app._ctrl_c_timer = None
 
 
 # -- no per-frame cost -------------------------------------------------

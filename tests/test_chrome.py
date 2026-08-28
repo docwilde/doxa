@@ -218,9 +218,16 @@ def test_help_shows_a_commands_binding_beside_its_command():
 
 def test_help_documents_the_tab_and_quit_keys():
     text = help_text()
-    for key in ("Ctrl+←", "Ctrl+→", "Ctrl+T", "Ctrl+W", "Ctrl+R", "Ctrl+P"):
+    for key in ("Ctrl+←", "Ctrl+→", "Ctrl+T", "Ctrl+W", "Ctrl+Q", "Ctrl+R", "Ctrl+P"):
         assert key in text, key
-    assert "twice = stop" in text  # the Ctrl+C double-press semantics
+    # v0.85.0: Ctrl+C is no longer a DOXA binding at all (freed for the
+    # terminal's own copy gesture -- see doxa.app.DoxaApp's BINDINGS
+    # comment), so /help -- generated straight off BINDINGS -- must not
+    # claim it does anything. This is the specific case
+    # test_help_lists_every_app_binding_exactly_once's generic sweep
+    # cannot catch: an absent binding has no row to check FOR, only one
+    # to check is not there.
+    assert "Ctrl+C" not in text
 
 
 # -- (d) nothing animates -------------------------------------------------

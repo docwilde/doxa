@@ -17,12 +17,14 @@ pump dies with its tab, not with its neighbor. The peer layer needed zero
 changes -- each daemon registers its own presence, so two tabs of the same
 repo correctly see each other as peers.
 
-Ctrl+C stays APP-level, deliberately: one press arms the double-press
-window and then detaches ALL tabs (every daemon keeps running -- the
-cheapest outcome to recover from is always chosen on a reflex
-keystroke); a second press inside the window stops EVERY tab's session
-(finalize NOW). Per-tab stopping remains available where deliberation
-lives: the palette's quit-stop and Ctrl+W.
+Ctrl+C is deliberately UNBOUND (v0.85.0 -- see the BINDINGS comment on
+DoxaApp), freed for the terminal emulator's own copy gesture over a
+selection rather than claimed as a quit reflex; DOXA even pops Textual's
+own default ``ctrl+c`` binding at init so nothing here answers it at
+all. Quitting the whole window (every tab detached, or every tab
+stopped) lives on the command palette (``action_quit`` /
+``action_quit_stop``) instead; ending just the active tab is Ctrl+Q,
+detaching just the active tab is Ctrl+W.
 
 Each turn is a foldable Collapsible; its response streams as markdown
 (Markdown.get_stream -- textual 5's append-only path for LLM deltas, no
@@ -281,10 +283,6 @@ from .ui.transcript import (  # noqa: F401
 )
 
 
-# Ctrl+C quit semantics: the first press arms this window and then detaches;
-# a second press inside it upgrades to quit-stop (finalize NOW).
-CTRL_C_DOUBLE_SECS = 2.0
-
 # -- v0.56.0: the error surface's app-level half -----------------------
 #
 # Textual 5.3.0 funnels EVERYTHING through ``App._handle_exception``:
@@ -378,12 +376,21 @@ class DoxaApp(App):
     # it, not a second door.
     # instant BM25 over every indexed session, not a scrollback scan.
     # Ctrl+T/Ctrl+W: tab lifecycle (new same-repo session / close-detach).
-    # Ctrl+C: quit. Textual 5 binds ctrl+c to a "press ctrl+q to quit"
-    # notification app-side and to "copy" on a focused Input -- with the
-    # prompt input permanently focused, Ctrl+C therefore did NOTHING
-    # quit-shaped (the dogfooding bug). priority=True beats both: one press
-    # = quit-detach ALL tabs (daemons keep running), double press within
-    # CTRL_C_DOUBLE_SECS = quit-stop ALL -- see action_ctrl_c_quit.
+    # Ctrl+C: deliberately NOT bound here, and explicitly UNBOUND from
+    # Textual's own default (App.BINDINGS carries `Binding("ctrl+c",
+    # "help_quit", system=True)`) in __init__ below, right after
+    # super().__init__() populates self._bindings. Through v0.84.0 DOXA
+    # bound it itself (one press = quit-detach ALL tabs, two = quit-stop),
+    # on the theory that Textual's own binding did "nothing quit-shaped"
+    # with the prompt permanently focused. Reported the other way round
+    # from live use: "remove the binding CTRL+C to close the TUI ... i
+    # want to be able to copy and paste" -- a raw Ctrl+C is exactly what a
+    # terminal emulator needs to see, unclaimed, to treat it as its own
+    # copy gesture over a selection rather than a byte for the foreground
+    # app to consume. Quitting the whole window now lives on the command
+    # palette ("Quit: detach"/"Quit: stop session", action_quit /
+    # action_quit_stop below) and on Ctrl+Q run down to the last tab
+    # (action_end_session); neither needs Ctrl+C at all.
     BINDINGS = [
         Binding("ctrl+p", "command_palette", "Command palette", show=False),
         Binding("ctrl+r", "history_search", "Search past sessions (/search)"),
@@ -395,12 +402,13 @@ class DoxaApp(App):
             show=False, priority=True,
         ),
         # Ctrl+Q is Textual's own quit-the-app binding; this overrides it
-        # deliberately and scopes it to the TAB. Quitting the window is
-        # Ctrl+C (twice) here, and a key that ends one session must not be
-        # the same key that ends all of them. priority=True for the same
-        # reason Ctrl+C needs it: the focused Input would otherwise eat it.
-        # (Terminal flow control does not: Textual's Linux driver clears
-        # IXON/IXOFF, i.e. `stty -ixon`, so Ctrl+Q reaches the app.)
+        # deliberately and scopes it to the TAB. Quitting the whole window
+        # is the command palette's job now (Ctrl+C no longer is one --
+        # v0.85.0), and a key that ends one session must not be the same
+        # key that ends all of them. priority=True: the focused Input
+        # would otherwise eat it. (Terminal flow control does not:
+        # Textual's Linux driver clears IXON/IXOFF, i.e. `stty -ixon`, so
+        # Ctrl+Q reaches the app.)
         Binding(
             "ctrl+q", "end_session",
             "End this session (finalize now) and close its tab — on a "
@@ -443,11 +451,6 @@ class DoxaApp(App):
             "kitty-protocol terminal)",
             show=False, priority=True,
         ),
-        Binding(
-            "ctrl+c", "ctrl_c_quit",
-            "Quit: detach all tabs (twice = stop the sessions)",
-            show=False, priority=True,
-        ),
     ]
 
     def __init__(
@@ -463,6 +466,19 @@ class DoxaApp(App):
         restore_report: "str | None" = None,
     ) -> None:
         super().__init__()
+        # Explicitly UNBIND Ctrl+C -- see the BINDINGS comment above for
+        # why. `self._bindings` (textual.dom.DOMNode.__init__) starts as a
+        # COPY of the class-level merge of every base's BINDINGS, App's own
+        # `Binding("ctrl+c", "help_quit", system=True)` included; simply
+        # not re-declaring "ctrl+c" in DoxaApp.BINDINGS is not enough to
+        # remove it; because Textual's merge overwrites per-key rather
+        # than unions (DOMNode._merge_bindings), the App-level entry would
+        # still be there, resolved and system-shown, unless something
+        # actively drops it. This instance-level pop is that something --
+        # done once, here, rather than per key-press, and pinned by
+        # tests/test_app.py's own assertion that "ctrl+c" is absent from
+        # the resolved set, not merely rebound to a no-op.
+        self._bindings.key_to_bindings.pop("ctrl+c", None)
         self.cwd = cwd or os.getcwd()
         self.model = model
         # The daemon-split seam: engine_factory builds whatever the first
@@ -605,10 +621,6 @@ class DoxaApp(App):
         self.failures = errors_mod.FailureLog()
         self._error_blocks: "dict[str, ErrorBlock]" = {}
         self._reporting = False
-        # Ctrl+C double-press window (see action_ctrl_c_quit): the armed
-        # timer that will quit-detach when it fires; a second Ctrl+C while
-        # it is armed cancels it and quit-stops instead.
-        self._ctrl_c_timer: Any = None
         # Set by `/update --restart`: doxa.cli re-execs after the app exits,
         # which is the only place that can -- exec'ing out from under a
         # running Textual app would leave the terminal in raw mode.
@@ -1401,14 +1413,16 @@ class DoxaApp(App):
         event. Now a failed worker is a visible block and the session it
         belonged to stays usable.
 
-        Ctrl+C and a deliberate exit are not defects and never arrive
-        here: ``KeyboardInterrupt`` and ``SystemExit`` derive from
+        A deliberate exit is not a defect and never arrives here:
+        ``KeyboardInterrupt`` and ``SystemExit`` derive from
         BaseException, not Exception, so Textual's own ``except Exception``
         clauses do not catch them and this signature cannot receive them.
-        The guard below is belt-and-braces for a caller that ignores the
-        annotation, and it hands them straight back to Textual so the
-        Ctrl+C semantics bound in this file keep working exactly as they
-        did.
+        (Ctrl+C itself is not bound to anything in this file as of
+        v0.85.0 -- see the BINDINGS comment on DoxaApp -- so it no longer
+        even reaches this question in the ordinary case; the guard below
+        is belt-and-braces for whatever path DOES still raise one, a
+        pre-app-start KeyboardInterrupt included, and hands it straight
+        back to Textual/Python rather than swallowing it.)
 
         Fatal is still possible and still SEEN: a failure with nowhere to
         draw itself, or one that will not stop repeating, exits through
@@ -1815,10 +1829,12 @@ class DoxaApp(App):
         daemon child reaped -- and close the tab. Nothing survives but the
         transcript.
 
-        Tab-scoped, never app-scoped: quitting the whole window is Ctrl+C
-        (twice). A turn IN FLIGHT is the one case this refuses to decide by
-        itself -- killing work silently is not a thing a keystroke should
-        do -- so it asks; an idle session ends without a prompt.
+        Tab-scoped, never app-scoped: quitting the whole window lives on
+        the command palette ("Quit: detach" / "Quit: stop session"), not
+        on this key. A turn IN FLIGHT is the one case this refuses to
+        decide by itself -- killing work silently is not a thing a
+        keystroke should do -- so it asks; an idle session ends without a
+        prompt.
 
         On a tab with NO session to end -- a subagent transcript, a
         restored archive -- it closes the tab, and that is the whole of
@@ -2476,28 +2492,11 @@ class DoxaApp(App):
             event.collapsible.format_body()
 
     # -- quit semantics (app-level, all tabs) ------------------------
-
-    async def action_ctrl_c_quit(self) -> None:
-        """Ctrl+C (priority binding), APP-level by design -- a reflex
-        keystroke gets the cheapest-to-recover outcome across every tab.
-        First press: arm the double-press window, then quit-DETACH when it
-        expires -- every daemon-hosted session keeps running; in-process
-        engines finalize right there, so Ctrl+C always exits cleanly.
-        Second press inside the window: quit-STOP every tab's session
-        (finalize NOW, daemons included). Per-tab ending lives on Ctrl+Q
-        and the palette's 'Quit: stop session', where the choice is
-        deliberate rather than reflexive."""
-        if self._ctrl_c_timer is not None:
-            self._ctrl_c_timer.stop()
-            self._ctrl_c_timer = None
-            await self.action_quit_stop()
-            return
-        self.notify(
-            "detaching all tabs — Ctrl+C again to STOP the sessions (finalize now)",
-            severity="warning",
-            timeout=CTRL_C_DOUBLE_SECS,
-        )
-        self._ctrl_c_timer = self.set_timer(CTRL_C_DOUBLE_SECS, self.action_quit)
+    #
+    # Neither of these lives on a key anymore (v0.85.0 dropped Ctrl+C --
+    # see the BINDINGS comment). Both stay reachable from the command
+    # palette ("Quit: detach" / "Quit: stop session") and action_quit_stop
+    # doubles as `/update --restart`'s own shutdown path.
 
     async def action_quit_stop(self) -> None:
         """Quit-stop, ALL tabs -- finalize every session NOW. Over a daemon
@@ -2526,21 +2525,23 @@ class DoxaApp(App):
         # the app quits right below), so _persist_tabset's own per-pane
         # scan picks all of them up without help from either side dict.
         # v0.60.0: a stopped pane is no longer excluded there either -- see
-        # _ended_this_run's docstring -- so double-Ctrl+C (this method) now
-        # leaves every tab resumable, the same as ending them one at a
-        # time with Ctrl+Q does; there is no reason the all-at-once quit
-        # gesture should be the ONE way left to lose the set for good.
+        # _ended_this_run's docstring -- so this method (palette 'Quit:
+        # stop session', all tabs -- Ctrl+C used to reach it too, through
+        # v0.84.0) now leaves every tab resumable, the same as ending them
+        # one at a time with Ctrl+Q does; there is no reason the
+        # all-at-once quit gesture should be the ONE way left to lose the
+        # set for good.
         self._persist_tabset()
         await App.action_quit(self)
 
     async def action_quit(self) -> None:
-        """palette 'Quit: detach' (and the Ctrl+C window's expiry) -- ALL
-        tabs. Over a daemon client, finalize() only DETACHES: the daemon
-        lingers and runs the session-end review + index itself once the
-        last client has been gone for the linger window (or on `doxa
-        stop`). In-process (Phase 1 shape), finalize() still runs the
-        review + index right here, host-driven (PHASE0 redesign item 1: no
-        SessionEnd hook exists)."""
+        """palette 'Quit: detach' -- ALL tabs. Over a daemon client,
+        finalize() only DETACHES: the daemon lingers and runs the
+        session-end review + index itself once the last client has been
+        gone for the linger window (or on `doxa stop`). In-process (Phase
+        1 shape), finalize() still runs the review + index right here,
+        host-driven (PHASE0 redesign item 1: no SessionEnd hook
+        exists)."""
         for pane in self.panes():
             await pane.detach()
         # Item D: every pane stays mounted here (detach() only clears the
