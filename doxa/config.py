@@ -229,6 +229,26 @@ SETTINGS: tuple[Setting, ...] = (
              "graph_context_chars row in /context.",
     ),
     Setting(
+        key="graph_view", env="DOXA_GRAPH_VIEW",
+        label="belief graph view", category="Memory",
+        kind="choice", choices=("", "browser", "ascii"), default="browser",
+        help="How the beliefs picker's 'g graph' row action shows a "
+             "belief's neighbourhood (doxa.beliefgraph.graph_view_mode): "
+             "'browser' writes LORE's pan/zoom mermaid page under "
+             "$DOXA_HOME/graphs and opens it; 'ascii' inserts LORE's own "
+             "edge block as rows beneath the belief, in the TUI. Empty = "
+             "browser.",
+        note="Per BELIEF, never whole-graph, and that is measured rather "
+             "than chosen: a whole-graph view filtered to asserted "
+             "relations fragmented 104 beliefs into 44 clusters, which "
+             "mermaid stacks vertically -- 1188x13814 pixels, fitting on "
+             "screen at 5%. A k-hop neighbourhood is connected by "
+             "construction. 'ascii' is the answer for a headless or "
+             "SSH session; 'browser' prints the file's path into the "
+             "transcript either way, so one still ends up with something "
+             "to scp when no browser opens.",
+    ),
+    Setting(
         key="lore_root", env="LORE_ROOT", label="lore store", category="Memory",
         help="Where the belief store and session index live (lore_core.ROOT)",
         note="Shared with the Claude Code LORE plugin -- one store, two "

@@ -1011,6 +1011,41 @@ class ChipPicker(OptionList):
             self.highlighted = highlighted
         self.run_worker(self._fetch_expansion(rid), group="chip-picker-evidence")
 
+    def expand_rows(self, rid: str, rows: "list[str]") -> None:
+        """Insert ALREADY-COMPUTED rows beneath ``rid`` -- the same fold
+        :meth:`expand_current` produces, for a caller that holds the rows
+        rather than an async fetcher to run.
+
+        The beliefs menu's ``g`` graph action (v0.86.0) is the one caller:
+        ``lore_core.beliefs.format_edges`` hands back a formatted edge
+        block, so there is nothing to fetch lazily and no availability
+        pre-check to consult -- the belief either has relations or the
+        caller has already turned that into its own "no relations
+        recorded" row.
+
+        ONE EXPANSION SLOT PER ROW, shared with the evidence trail. Two
+        stacked expansions under one belief would be a wall with no header
+        telling a reader which half is which, so the newest one wins:
+        ``g`` on a row already showing its evidence replaces it. The
+        precedence is not symmetric, and deliberately so -- ``g`` always
+        applies, while Right no-ops on a row that is ALREADY expanded (see
+        :meth:`expand_current`'s own guard, unchanged), so getting the
+        evidence back after a graph takes Left first. That asymmetry
+        follows the existing rule rather than carving an exception into
+        it: Right has never re-fetched over an open expansion.
+
+        A no-op on a row this menu does not have -- a picker reconfigured
+        onto a different row set while the caller was computing must not
+        grow an orphan expansion."""
+        if not rid or rid not in {r for r, _l in self._all_rows}:
+            return
+        self._expanding.discard(rid)
+        self._expanded[rid] = [str(row) for row in rows] or ["    (nothing to show)"]
+        highlighted = self.highlighted
+        self._render_rows()
+        if highlighted is not None and highlighted < len(self._rows):
+            self.highlighted = highlighted
+
     def collapse_current(self) -> None:
         """Left: fold an expanded row's evidence away again -- a no-op on
         a row that was never expanded, matching ``SessionSearch.

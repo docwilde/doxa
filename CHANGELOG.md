@@ -4,6 +4,104 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.86.0 — 2026-08-28
+
+**The beliefs picker gains a graph view.** 0.84.0 gave the MODEL the belief
+graph (`lore_belief_neighbours`, the `[BELIEF GRAPH]` block) and left the
+operator with nothing to look at.
+
+- New row action **`g`** on every beliefs-picker row, beside `y`/`c`/`s`/`r`
+  (**`BELIEF_GRAPH_ROW_ACTION`**, `doxa/session/chips.py`): that belief's
+  graph neighbourhood, reached by the bare letter or a click on the row's
+  own action span, like every other inline action since v0.67.0.
+- New setting **`graph_view`** (`DOXA_GRAPH_VIEW`, default `browser`) picks
+  the rendering. `ascii` folds `lore_core.beliefs.format_edges`' own block
+  in under the row; `browser` writes `lore_core.graph`'s pan/zoom mermaid
+  page and opens it.
+- New **`ChipPicker.expand_rows`** (`doxa/ui/dialogs.py`) inserts the ascii
+  block as real rows beneath the belief — the SAME fold `Right` already
+  gives the evidence trail, not a second one. One expansion slot per row:
+  `g` replaces an open evidence trail, `Left` folds away whichever shows.
+  `Right` still no-ops over an open expansion, unchanged.
+- **`g` writes nothing**, so it is composed onto the action list separately
+  from the four write verbs and survives a session whose `lore_core` cannot
+  record an outcome — which loses `y`/`c`/`s`/`r` entirely (v0.69.0's "the
+  control is gone, not merely inert"). Its label is `g graph`, 7 columns,
+  shorter than two of the four verbs beside it: every label is a fixed
+  column out of the same width budget `ChipPicker._action_reserve` trims
+  the claim text against.
+- New module **`doxa/beliefgraph.py`**; every store read and the browser
+  launch go through `asyncio.to_thread`. `lore_core.graph.adjacency` builds
+  the WHOLE store's adjacency before `khop` walks two steps of it, and
+  `webbrowser.open` can fork — either on the event loop is a frozen
+  terminal.
+
+**Per belief, and there is deliberately no whole-graph view.** Measured,
+not preferred.
+
+- A whole-graph view filtered to asserted relations was built first and
+  fragments: **63 edges over 104 beliefs resolved to 44 disconnected
+  clusters**, which mermaid stacks vertically — **1188×13814 pixels**,
+  aspect 0.09, fitting on screen at 5% and unreadable at every zoom above
+  it. `khop` from one belief is connected by construction.
+- **Hidden at zero**, and this is very nearly the only case: on the live
+  store this was built against, **745 of 799 active beliefs (93%)** have no
+  row in `belief_edges` at all, and **776 of 799 (97%)** have no *asserted*
+  one — the store holds **121 structural edges against 13 derived**. Those
+  say `no relations recorded` rather than opening an empty page.
+- **One gate for both renderings**: `format_edges`' emptiness, read once
+  and branched on (**`beliefgraph.edge_block`**), so `ascii` and `browser`
+  can never disagree about whether a belief has anything to show.
+  `co_derived` is a read-time projection and never counts as recorded.
+
+**Where the page lands, and how a browser reaches it.**
+
+- **`$DOXA_HOME/graphs`** (`~/.doxa/graphs`, 0700), deliberately not
+  `LORE_ROOT`: the belief store is shared with the Claude Code LORE plugin,
+  and a rendered artifact of DOXA's UI is not memory. The path is printed
+  into the transcript on every open, whether or not a browser launched, so
+  a headless box or an SSH session still ends up with a file to `scp`.
+- **Served over loopback HTTP, not handed over as `file://`.** LORE's page
+  imports mermaid from `cdn.jsdelivr.net` as an ES module, and a `file://`
+  document is a null origin some browsers refuse that fetch from — a page
+  that loads, throws nothing and draws nothing. **`beliefgraph.page_url`**
+  starts a 127.0.0.1-only server on an ephemeral port over that one
+  directory, lazily, and falls back to `file://` when it cannot; LORE's
+  template explains the null-origin case in the page itself either way.
+- **That server is token-gated.** `~/.doxa/graphs` is 0700, so a co-tenant
+  cannot read a page off disk — but an HTTP server on 127.0.0.1 answers any
+  *local* process regardless of whose it is, and a port is not a secret.
+  The page carries belief claims in full, so every request needs a
+  per-process token (`?k=`, in memory, never written to disk); anything
+  else gets 404. The server's root is part of its cache key, so a moved
+  `DOXA_HOME` restarts it rather than 404ing a page that is on disk.
+
+**DOXA draws none of it.** No mermaid source, no edge formatting, no
+traversal: `doxa/beliefgraph.py` selects a belief, reads the setting, and
+puts LORE's output where a reader can see it.
+
+- **`beliefgraph.graph_state(mode)`** measures capability off the API, PER
+  RENDERING, never off a version — `ascii` needs only `format_edges`, so a
+  checkout missing `mermaid_source` loses the browser half and keeps the
+  TUI one.
+- A version comparison would be wrong here specifically: `doxa/
+  _lore_bootstrap.py` prefers a plugin **checkout** over the pinned wheel,
+  so the loaded `lore_core` can be OLDER than `pyproject.toml`'s pin. A
+  stale checkout is reported in the transcript by the missing function's
+  name rather than raised, and `/about`'s `lore from` row says which copy
+  that is.
+
+**Dependency.**
+
+- `lore-core` moves 0.45.0 → **0.48.2**, required rather than cosmetic:
+  0.47.0's page loaded mermaid cleanly and drew nothing
+  (`initialize({startOnLoad: true})` hooks `DOMContentLoaded`, which a
+  dynamic `import()` always resolves after — fixed in 0.47.1 with an
+  explicit `run()`), and nothing before 0.48.1 carries the cluster cap.
+- Full suite: **1491 passed** (1469 on 0.85.0, plus the 22 new tests in
+  `tests/test_belief_graph_view.py` — every one verified failing against
+  pre-change code).
+
 ## 0.85.0 — 2026-08-28
 
 **Session lifecycle and keybindings, four independent defects from live use.**

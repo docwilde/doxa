@@ -322,6 +322,29 @@ surface, not two.
   trailing row, rather than reading as complete. The evidence rows are
   disabled — the highlight cannot land on one, so an action key always
   acts on the belief above them, never on its own trail.
+- **The graph**, per belief: `g` on a highlighted belief row shows that
+  belief's own graph neighbourhood — the relations LORE has recorded
+  about it, and theirs. `graph_view` picks the rendering: `ascii` folds
+  LORE's own edge block (arrow for direction, the other belief's id, who
+  asserted it, and the distinct-session support count) in under the row,
+  the same way `Right` folds evidence; `browser` (the default) writes
+  LORE's pan/zoom mermaid page under `~/.doxa/graphs` and opens it,
+  printing the path into the transcript either way so a headless or SSH
+  session still gets the file. That page needs network the first time it
+  is opened (mermaid loads from a CDN), and because a `file://` page is a
+  null origin some browsers refuse that fetch from, DOXA serves it over a
+  loopback-only HTTP server instead — token-gated, so a co-tenant on a
+  shared machine cannot read your beliefs off the port. Nine beliefs in
+  ten have no recorded relation at all (745 of 799 on the store this was
+  measured against), and those say `no relations recorded` rather than
+  opening an empty page. Deliberately **per belief and never
+  whole-graph**: the whole graph, filtered to asserted relations,
+  fragments into dozens of disconnected clusters that mermaid stacks into
+  a strip fitting on screen at 5%; a k-hop neighbourhood is connected by
+  construction. `g` is the one belief control that writes nothing, so a
+  session whose `lore_core` is too old to record an outcome keeps it, and
+  a `lore_core` too old to draw at all says which function is missing
+  instead of failing.
 - A proposal row's controls are **approve** and **reject**. Reject applies
   immediately. Approve **arms** on the first selection and applies on a
   second, differently-worded selection — the write is the irreversible
@@ -341,10 +364,10 @@ surface, not two.
 
 **Inline row actions.** The `N beliefs` and `N proposals` chips open
 dropdowns, not just glances: every row carries confirmed/contradicted/
-stale/retract (beliefs) or approve/reject (proposals) reachable without
-leaving the list. Click the action span on a row, or press its letter
-(`a`/`r` for proposals, `y`/`c`/`s`/`r` for beliefs) while that row is
-highlighted; approve and retract still arm on the first press and apply
+stale/retract/graph (beliefs) or approve/reject (proposals) reachable
+without leaving the list. Click the action span on a row, or press its
+letter (`a`/`r` for proposals, `y`/`c`/`s`/`r`/`g` for beliefs) while that
+row is highlighted; approve and retract still arm on the first press and apply
 on the second, on the same row. Selecting a row outright (Enter, or a
 click that misses every action) opens a per-row action menu carrying the
 same verbs one selection deep — the inline controls are a faster path
@@ -354,7 +377,7 @@ list a beat later (the rebuild debounces, so a fast typist gets one
 settled query per word rather than one per letter — a live `/query …`
 marker in the picker's own border shows a filter is pending until it
 does), `Right`/`Left` expand and fold a belief's evidence, Enter acts on
-the highlighted row, Esc closes and clears it. The five action letters
+the highlighted row, Esc closes and clears it. The six action letters
 only fire while that filter is empty — once it holds text they are
 ordinary characters, so searching for a claim that happens to start with
 one of them costs one throwaway keystroke first rather than ever firing
@@ -539,6 +562,7 @@ environment is winning is read-only in the modal.
 | `resume_restored` | `DOXA_RESUME_RESTORED` | on | a restored tab whose session ended comes back live, continuing the conversation |
 | `derive_secs` | `DOXA_DERIVE_SECS` | off | streaming-deriver interval; unset runs review only at session end |
 | `consult_floor` | `DOXA_CONSULT_FLOOR` | 1.0 | act-time belief-consult relevance floor; 0 disables it |
+| `graph_view` | `DOXA_GRAPH_VIEW` | `browser` | how the beliefs picker's `g` shows one belief's neighbourhood: `browser` (mermaid page under `~/.doxa/graphs`) or `ascii` (LORE's edge block, in the TUI) |
 | `lore_root` | `LORE_ROOT` | `~/.claude/lore` | where the belief store and session index live; sticky, set by `/setup` |
 | `nerd_font` | `DOXA_NERD_FONT` | off | use a Nerd Font glyph for the branch chip |
 | `ctx_absolute` | `DOXA_CTX_ABSOLUTE` | off | print `24k/200k` beside the `ctx%` chip (below 100 columns it drops again) |

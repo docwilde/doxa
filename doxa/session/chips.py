@@ -27,6 +27,7 @@ order; that folding step is deliberately NOT built here.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import os
 from dataclasses import dataclass, field
@@ -149,6 +150,26 @@ BELIEF_ROW_ACTIONS = [
               armed_label="⌫ RETRACT", color=REJECT_COLOR,
               armed_color=ARMED_COLOR, arms=True),
 ]
+# v0.86.0: the beliefs row's one READ-ONLY action -- this belief's graph
+# neighbourhood, rendered by whichever of `doxa.beliefgraph`'s two paths
+# the `graph_view` setting names. Kept OUT of BELIEF_ROW_ACTIONS above
+# rather than appended to it, because that list is gated as a whole on
+# `belief_action_state().capable` (v0.69.0: a session whose lore_core
+# cannot record an outcome must not paint controls that look writable) and
+# this one writes nothing to the store. A read-only session keeps it; see
+# open_beliefs_picker, which composes the two lists.
+#
+# "g graph" AND NOT ONE CHARACTER MORE. Every action label is a fixed
+# column out of the SAME width budget the claim text is trimmed against
+# (ChipPicker._action_reserve), so a fifth control costs its own label
+# plus a separator off every belief row's readable text -- and an
+# over-long label on this row was already a reported defect once (v0.81.0,
+# an underscore-extended label). Seven columns is the shortest honest
+# wording: shorter than two of the four verbs beside it, and it names the
+# thing it opens rather than the gesture that opens it.
+BELIEF_GRAPH_ROW_ACTION = RowAction(
+    "g", "graph", "g graph", color=CLICKABLE_CHIP_ACCENT)
+
 PENDING_ROW_ACTIONS = [
     RowAction("a", "approve", "a approve",
               armed_label="✓ APPROVE", color=CLICKABLE_CHIP_ACCENT,
@@ -1111,6 +1132,15 @@ class PaneChipsMixin:
         this picker's ``expand_dispatch`` -- the same fold gesture
         ``/search``'s own result list already uses).
 
+        v0.86.0 adds a FIFTH row control, ``g``, and it is the only one
+        here that writes nothing: this belief's graph neighbourhood, as
+        LORE's edge block folded under the row or as its pan/zoom mermaid
+        page in a browser, per the ``graph_view`` setting (see
+        :meth:`_show_belief_graph` and ``doxa.beliefgraph``). Because it
+        is read-only it is composed onto the action list SEPARATELY from
+        the four write verbs, which stay gated on the store being
+        writable at all.
+
         Cost discipline: ``belief_count()`` (the chip's own number) runs on
         EVERY status refresh and must stay free of the belief BODIES --
         this calls ``list_beliefs()`` instead, the heavier claim-text
@@ -1200,6 +1230,17 @@ class PaneChipsMixin:
         # same rule ``doxa.engine.available_modes`` states for permission
         # modes.
         belief_writable = bool((self._belief_action_state_cached() or {}).get("capable"))
+        # v0.86.0: the read-only graph action rides ALONGSIDE that gate,
+        # not under it. `g` opens a view; it records nothing, retracts
+        # nothing and cannot write to the store at all, so a session whose
+        # lore_core is too old to record an outcome -- or one attached
+        # read-only -- keeps it while losing y/c/s/r. The capability THIS
+        # action needs is a different one (doxa.beliefgraph.graph_state),
+        # asked at press time rather than here so an unrenderable graph is
+        # reported in the transcript in the operator's own words instead of
+        # silently costing the row a control.
+        row_actions = (list(BELIEF_ROW_ACTIONS) if belief_writable else []) + [
+            BELIEF_GRAPH_ROW_ACTION]
         self._open_chip_picker(
             rows, None,
             lambda rid: self._pick_belief_row(rid, by_id),
@@ -1207,10 +1248,9 @@ class PaneChipsMixin:
             note=self._belief_cap_note(engine, len(rows)),
             collapsible=True, group_notes=group_notes, counted_noun="belief",
             row_prefix_width=PICKER_PREFIX_WIDTH,
-            row_actions=BELIEF_ROW_ACTIONS if belief_writable else None,
+            row_actions=row_actions,
             row_action_dispatch=(
-                (lambda rid, key: self._dispatch_belief_row_action(rid, key, by_id))
-                if belief_writable else None
+                lambda rid, key: self._dispatch_belief_row_action(rid, key, by_id)
             ),
             prompt_filter=True,
             expand_dispatch=lambda rid: self._fetch_belief_evidence(rid, by_id),
@@ -1270,6 +1310,11 @@ class PaneChipsMixin:
         belief = by_id.get(rid)
         if belief is None:
             return
+        if key == "g":
+            # v0.86.0: read-only, and the one action here that does not
+            # touch the store -- see BELIEF_GRAPH_ROW_ACTION.
+            self.run_worker(self._show_belief_graph(rid, belief), group="command")
+            return
         if key == "r":
             self.run_worker(self._retract_belief(belief), group="command")
             return
@@ -1277,6 +1322,111 @@ class PaneChipsMixin:
         if event:
             self.run_worker(
                 self._record_belief_outcome(belief, event), group="command")
+
+    async def _show_belief_graph(self, rid: str, belief: dict) -> None:
+        """The ``g`` row action: THIS belief's graph neighbourhood, drawn
+        the way ``graph_view`` says (:func:`doxa.beliefgraph.
+        graph_view_mode`).
+
+        Per belief, never whole-graph -- see ``doxa.beliefgraph``'s module
+        docstring for the measurement that settled that, and why the
+        picker row (which already names one belief) is the only place this
+        belongs.
+
+        Three answers before either rendering runs, in this order, because
+        each one makes the next meaningless:
+
+        1. **Can this lore_core draw it at all.** Asked per mode, measured
+           off the API, and REPORTED rather than raised -- ``doxa.
+           _lore_bootstrap`` prefers a plugin checkout over the pinned
+           wheel, so a stale checkout with no ``format_edges`` is a real
+           configuration on a real machine and not a bug to crash on.
+        2. **Does the belief have relations at all.** Nine in ten do not
+           -- 745 of 799 active beliefs on the live store this was
+           measured against -- so this says "no relations recorded", one
+           line, in place, rather than opening an empty page for the
+           overwhelmingly common case. Answered off the ONE edge block
+           both renderings gate on, fetched once.
+        3. **Then, and only then**, draw.
+
+        EVERY STORE READ AND EVERY BROWSER LAUNCH GOES THROUGH
+        ``asyncio.to_thread``, on the rule ``SessionEngine.retract_belief``
+        already follows. This is a worker, but a worker still runs ON the
+        event loop: ``write_page`` has ``lore_core.graph.adjacency`` build
+        the WHOLE store's adjacency before ``khop`` walks two steps of it,
+        and ``webbrowser.open`` can fork a process. Either one on the loop
+        is a visibly frozen terminal. (A ``lore_core`` connection is
+        created and used inside the same call, so it never crosses the
+        thread it was opened on -- ``db_connect`` hands back a fresh,
+        same-thread-only connection every time.)
+
+        Never raises: every arm below ends in a line a reader can see,
+        because this runs in a worker with no caller of ours to catch it
+        (the same posture :meth:`_fetch_belief_evidence` already takes)."""
+        from .. import beliefgraph
+
+        bid = belief.get("id")
+        mode = beliefgraph.graph_view_mode()
+        state = beliefgraph.graph_state(mode)
+        if not state.get("capable"):
+            await self._system(
+                f"belief graph: {state.get('reason') or 'unavailable'}")
+            return
+        try:
+            block = await asyncio.to_thread(beliefgraph.edge_block, bid)
+        except Exception as exc:  # noqa: BLE001 -- a refusal is information
+            await self._system(
+                f"belief graph: {bid}: {type(exc).__name__}: {exc}")
+            return
+        if not block.strip():
+            if mode == "ascii":
+                self._expand_belief_rows(rid, [beliefgraph.NO_RELATIONS])
+            else:
+                await self._system(
+                    f"belief graph: belief {bid} has no relations recorded — "
+                    "nothing to draw")
+            return
+        if mode == "ascii":
+            self._expand_belief_rows(rid, beliefgraph.edge_lines(block))
+            return
+        try:
+            path, note = await asyncio.to_thread(beliefgraph.write_page, bid)
+        except KeyError:
+            await self._system(
+                f"belief graph: belief {bid} is not in the active graph — "
+                "the graph view is active beliefs only")
+            return
+        except Exception as exc:  # noqa: BLE001
+            await self._system(
+                f"belief graph: {bid}: {type(exc).__name__}: {exc}")
+            return
+        url = await asyncio.to_thread(beliefgraph.page_url, path)
+        opened = await asyncio.to_thread(beliefgraph.open_url, url)
+        # The PATH is printed whether or not a browser opened, and that is
+        # the point of printing it: a headless box, an SSH session or a
+        # machine with no BROWSER still ends up with a file it can scp.
+        # The url is named separately when it is a served one, because
+        # "open this over http" is the answer to the null-origin refusal
+        # LORE's own template describes.
+        tail = "" if opened else " (no browser opened — open it yourself)"
+        served = f"\n  {url}" if url.startswith("http") else ""
+        await self._system(f"belief graph: {note}\n  {path}{served}{tail}")
+
+    def _expand_belief_rows(self, rid: str, lines: "list[str]") -> None:
+        """Put ``lines`` under the belief row, using the picker's OWN fold
+        -- the same rows-beneath-the-row shape Right already gives the
+        evidence trail (:meth:`ChipPicker.expand_rows`).
+
+        Silent when the picker has closed or been reconfigured onto a
+        different row set since the ``g`` press: there is nothing left on
+        screen to attach this to, and ``expand_rows`` guards the row set
+        itself for the same reason."""
+        try:
+            picker = self.query_one("#chip-picker", ChipPicker)
+        except NoMatches:
+            return
+        if picker.is_open:
+            picker.expand_rows(rid, lines)
 
     def _pick_belief_row(self, rid: str, by_id: "dict[str, dict]") -> None:
         """A picker row's destination: THIS belief's own actions.
