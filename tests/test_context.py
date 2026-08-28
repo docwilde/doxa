@@ -284,6 +284,28 @@ def test_a_session_with_no_worktree_gets_no_worktree_notice_line():
     assert "worktree notice" not in text
 
 
+def test_the_belief_graph_notice_is_reported_as_its_own_characters():
+    """The THIRD (and last) thing DOXA may append after the LORE snapshot
+    -- the [BELIEF GRAPH] awareness block -- gets its own characters line
+    too, same connect-time shape as the worktree notice (also counted
+    INSIDE the system-prompt row, same reason)."""
+    text = context_breakdown_text(
+        _breakdown(lore_snapshot_chars=4_812, graph_awareness_chars=180)
+    )
+    assert "4,812 characters" in text
+    assert "180 characters" in text
+    assert text.count("INSIDE the system-prompt row") == 2
+    assert "belief graph notice" in text
+
+
+def test_a_session_with_no_belief_graph_notice_gets_no_such_line():
+    """Hide-at-zero: no asserted relation between two active beliefs yet
+    (the overwhelming majority of stores, per the live measurement in
+    _graph_awareness_block's own docstring) prints no such line."""
+    text = context_breakdown_text(_breakdown(lore_snapshot_chars=4_812))
+    assert "belief graph notice" not in text
+
+
 def test_the_graph_context_block_is_reported_in_its_own_characters():
     """The graph-backed context block (v0.84.0, DOXA_GRAPH_CONTEXT) gets its
     own characters line too -- but with DIFFERENT wording from the two

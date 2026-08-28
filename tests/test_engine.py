@@ -354,6 +354,165 @@ def test_session_worktree_block_reflects_the_current_base_at_reconnect(tmp_path)
     assert second_append != first_append
 
 
+# -- [BELIEF GRAPH]: telling a session lore_belief_neighbours exists ------
+#
+# The gap this closes: the LORE snapshot's own retrieval ladder (verbatim
+# inside [LORE SNAPSHOT]) lists five steps and none of them is "the store
+# also carries typed relations between beliefs; traverse them" -- a session
+# has the tool (advertised by its schema, like any operator) with no
+# instruction that reaching for it is ever the right move. HIDE AT ZERO:
+# the block only appears once the store has an ASSERTED relation (one of
+# the deriver's five verbs) between two ACTIVE beliefs -- the exact view
+# lore_belief_neighbours itself traverses. A store with only structural
+# `supersedes` edges or projected `co_derived` pairs (no deriver has ever
+# asserted a real relation) gets nothing: pointing an agent at pure
+# coincidence would teach it to read co-occurrence as structure.
+
+def _assert_active(slug, claim, session_id):
+    from lore_core import store as lore_store
+    from lore_core.beliefs import belief_insert
+
+    conn = lore_store.db_connect()
+    bid, _created = belief_insert(
+        conn, f"project:{slug}", claim, 0.6, session_id, slug, "seeded")
+    conn.commit()
+    return bid
+
+
+@pytest.fixture
+def _belief_graph_engine_cleanup():
+    """Same snapshot-and-restore discipline as tests/test_operators.py's
+    _belief_graph_cleanup -- conftest.py's LORE_ROOT is one throwaway
+    store for the whole session, and these tests write real beliefs and
+    real belief_edges rows into it."""
+    from lore_core import store as lore_store
+
+    conn = lore_store.db_connect()
+    before = {row[0] for row in conn.execute("SELECT id FROM beliefs")}
+    try:
+        yield
+    finally:
+        conn = lore_store.db_connect()
+        added = [row[0] for row in conn.execute("SELECT id FROM beliefs")
+                 if row[0] not in before]
+        for bid in added:
+            conn.execute("DELETE FROM beliefs WHERE id = ?", (bid,))
+            conn.execute("DELETE FROM belief_evidence WHERE belief_id = ?", (bid,))
+            conn.execute("DELETE FROM belief_edges WHERE src = ? OR dst = ?", (bid, bid))
+            conn.execute(
+                "DELETE FROM belief_edge_assertions WHERE src = ? OR dst = ?", (bid, bid))
+            import contextlib
+            with contextlib.suppress(Exception):
+                conn.execute("DELETE FROM belief_fts WHERE belief_id = ?", (bid,))
+        conn.commit()
+
+
+@pytest.mark.asyncio
+async def test_belief_graph_block_appears_once_an_asserted_relation_exists(
+    tmp_path, _belief_graph_engine_cleanup,
+):
+    """The presence case: one asserted relation (depends_on) between two
+    active beliefs is enough to earn the block, and it names the real
+    tool by name."""
+    from lore_core import store as lore_store
+    from lore_core.beliefs import edge_insert
+    from lore_core.config import project_slug
+
+    slug = project_slug(str(tmp_path))
+    a = _assert_active(slug, "belief-graph-fixture A depends on B", "sess-bg-a")
+    b = _assert_active(slug, "belief-graph-fixture B is the dependency", "sess-bg-b")
+    conn = lore_store.db_connect()
+    assert edge_insert(conn, a, b, "depends_on", "derived", session_id="sess-bg-edge") is True
+    conn.commit()
+
+    factory, created = factory_with_script([])
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+    await engine.start()
+
+    append = created[0].options.system_prompt["append"]
+    assert "[BELIEF GRAPH]" in append
+    assert "lore_belief_neighbours" in append
+    assert "CITE-only" in append
+    assert "[LORE SNAPSHOT]" in append
+    assert append.index("[LORE SNAPSHOT]") < append.index("[BELIEF GRAPH]")
+
+    assert engine.graph_awareness_chars is not None
+    assert engine.graph_awareness_chars > 0
+    await engine.finalize()
+
+
+@pytest.mark.asyncio
+async def test_belief_graph_block_absent_with_no_asserted_relation_at_all(
+    tmp_path, _belief_graph_engine_cleanup,
+):
+    """Hide-at-zero: a belief with no relation of any kind gets nothing --
+    the prompt is unaffected."""
+    from lore_core.config import project_slug
+
+    slug = project_slug(str(tmp_path))
+    bid = _assert_active(
+        slug, "belief-graph-fixture lonely belief, no relation at all", "sess-bg-lonely")
+    assert bid  # seeded, just needs to exist
+
+    factory, created = factory_with_script([])
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+    await engine.start()
+
+    assert "[BELIEF GRAPH]" not in created[0].options.system_prompt["append"]
+    assert engine.graph_awareness_chars is None
+    await engine.finalize()
+
+
+@pytest.mark.asyncio
+async def test_belief_graph_block_absent_with_only_structural_and_projected_edges(
+    tmp_path, _belief_graph_engine_cleanup,
+):
+    """The deliberate exclusions, both at once: a `supersedes` edge
+    (structural) and a `co_derived` pair (projected, same small session)
+    exist, but NEITHER is an asserted relation between two ACTIVE beliefs
+    -- supersedes touches a now-superseded (non-active) belief by
+    definition, and co_derived is coincidence, not an assertion. No block."""
+    from lore_core import store as lore_store
+    from lore_core.beliefs import belief_insert, belief_supersede
+    from lore_core.config import project_slug
+
+    slug = project_slug(str(tmp_path))
+    conn = lore_store.db_connect()
+
+    # supersedes: old -> new, backfilled the way belief_supersede does it.
+    old, _created = belief_insert(
+        conn, f"project:{slug}", "belief-graph-fixture superseded claim",
+        0.6, "sess-bg-old", slug, "seeded")
+    new, _created = belief_insert(
+        conn, f"project:{slug}", "belief-graph-fixture superseding claim",
+        0.6, "sess-bg-new", slug, "seeded")
+    conn.commit()
+    belief_supersede(conn, old, new, "superseded by a newer claim")
+    conn.commit()
+
+    # co_derived: two beliefs from the SAME small session, projected at
+    # read time, never a belief_edges row.
+    c1, _created = belief_insert(
+        conn, f"project:{slug}", "belief-graph-fixture co-derived claim one",
+        0.6, "sess-bg-coderived", slug, "seeded")
+    c2, _created = belief_insert(
+        conn, f"project:{slug}", "belief-graph-fixture co-derived claim two",
+        0.6, "sess-bg-coderived", slug, "seeded")
+    conn.commit()
+
+    factory, created = factory_with_script([])
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+    await engine.start()
+
+    assert "[BELIEF GRAPH]" not in created[0].options.system_prompt["append"]
+    assert engine.graph_awareness_chars is None
+    await engine.finalize()
+    # old/new/c1/c2 cleanup: handled by _belief_graph_engine_cleanup's own
+    # before/after id diff -- belief_supersede changes old's status but
+    # leaves its row in `beliefs`, so it (and new, c1, c2) are all caught
+    # by the generic sweep same as a plain insert would be.
+
+
 @pytest.mark.asyncio
 async def test_start_isolates_the_spawned_cli_from_the_real_claude_config(tmp_path):
     """Item AA: every spawned CLI gets its OWN CLAUDE_CONFIG_DIR (never

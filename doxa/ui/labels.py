@@ -1731,12 +1731,22 @@ def context_breakdown_text(breakdown: "dict | None") -> str:
             "worktree). Also counted INSIDE the system-prompt row above, "
             "for the same reason as the lore snapshot."
         )
+    ga_chars = breakdown.get("graph_awareness_chars")
+    if isinstance(ga_chars, int):
+        lines.append(
+            f"belief graph notice: {ga_chars:,} characters appended to the "
+            "system prompt at connect (this store carries at least one "
+            "typed relation between two active beliefs, so the session is "
+            "told lore_belief_neighbours exists). Also counted INSIDE the "
+            "system-prompt row above, for the same reason as the lore "
+            "snapshot."
+        )
     gc_chars = breakdown.get("graph_context_chars")
     if isinstance(gc_chars, int):
         lines.append(
             f"graph context: {gc_chars:,} characters added to the LAST "
             "turn's prompt (LORE's graph-backed belief context, "
-            "DOXA_GRAPH_CONTEXT). Unlike the two rows above, this rides "
+            "DOXA_GRAPH_CONTEXT). Unlike the three rows above, this rides "
             "the per-turn additionalContext path, not the connect-time "
             "system prompt -- the CLI counts its tokens correctly on its "
             "own, inside the categories above, once that turn's usage "

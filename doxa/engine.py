@@ -118,6 +118,7 @@ from lore_core import context as lore_context
 from lore_core import deriver as lore_deriver
 from lore_core import pending as lore_pending
 from lore_core import store as lore_store
+from lore_core.beliefs import BELIEF_RELATIONS
 from lore_core.config import PROJECTS_DIR, project_slug, stage_disabled
 from lore_core.scrub import scrub_secrets
 
@@ -684,6 +685,7 @@ def context_breakdown(
     usage: dict, *,
     lore_snapshot_chars: "int | None" = None,
     worktree_notice_chars: "int | None" = None,
+    graph_awareness_chars: "int | None" = None,
     graph_context_chars: "int | None" = None,
     adopted_skills: "int | None" = None,
     adopted_skill_plugins: "int | None" = None,
@@ -714,7 +716,17 @@ def context_breakdown(
     every session that never got a worktree block -- hide-at-zero, same
     as the block itself.
 
-    ``graph_context_chars`` differs from both: the graph-backed context
+    ``graph_awareness_chars`` is the SAME connect-time shape again, for the
+    THIRD and last thing ``_build_options`` may append: the
+    ``[BELIEF GRAPH]`` block (see :func:`_graph_awareness_block`) that
+    tells a session ``lore_belief_neighbours`` exists and that reachability
+    is not authority. Its own field for the same reason
+    ``worktree_notice_chars`` has one -- and hide-at-zero the same way: no
+    block, no line, for every session whose store carries no asserted
+    relation between two active beliefs yet.
+
+    ``graph_context_chars`` differs from all three above: the graph-backed
+    context
     block (:meth:`SessionEngine._graph_context_block`, DOXA_GRAPH_CONTEXT)
     rides the per-turn ``additionalContext`` path the consult note and the
     throttled snapshot refresh already use, where the CLI's own usage
@@ -789,6 +801,8 @@ def context_breakdown(
         out["lore_snapshot_chars"] = int(lore_snapshot_chars)
     if worktree_notice_chars is not None:
         out["worktree_notice_chars"] = int(worktree_notice_chars)
+    if graph_awareness_chars is not None:
+        out["graph_awareness_chars"] = int(graph_awareness_chars)
     if graph_context_chars is not None:
         out["graph_context_chars"] = int(graph_context_chars)
     if adopted_skills:
@@ -837,6 +851,81 @@ def _session_worktree_block(cwd: str) -> "str | None":
         f"{branch}, forked from {base_ref} of {main_root}. Commit your "
         f"work: {worktrees_mod.FINALIZE_RULE}. Do not push this branch "
         f"and do not switch off it."
+    )
+
+
+def _graph_awareness_block() -> "str | None":
+    """The ``[BELIEF GRAPH]`` block ``_build_options`` appends after the
+    LORE snapshot (and the worktree notice, if any) -- one to three
+    sentences telling a session that ``lore_belief_neighbours`` exists and
+    what it is for, a gap the snapshot itself does not close: LORE's own
+    retrieval ladder (``lore_core/context.py``, verbatim inside
+    ``[LORE SNAPSHOT]``) lists five steps -- this snapshot, the file map,
+    the belief store (search/show), the session index, re-derive/measure
+    fresh -- and none of them is "the store also carries typed relations
+    BETWEEN beliefs; traverse them." A session has the tool (it is
+    advertised by its schema like every operator) with no instruction
+    that reaching for it is ever the right move -- this block is that
+    instruction, mechanics rather than documentation, so it stays short.
+
+    HIDE AT ZERO, and checked precisely, not approximately: the live
+    store (2026-08-28 measurement) carries 796 active beliefs, 121
+    structural ``supersedes`` edges and 1038 PROJECTED ``co_derived``
+    pairs, and ZERO of the deriver's five ASSERTED verbs (``depends_on``/
+    ``specializes``/``explains``/``contradicts``/``applies_when``) --
+    those only start landing once a session's deriver runs against LORE
+    0.41.0+. Telling every session about a traversal tool that would find
+    nothing spends the one line this costs on every turn from day one for
+    nothing. So the gate below is the EXACT active-only view
+    ``lore_belief_neighbours`` itself traverses
+    (``lore_core.graph.adjacency``'s default: both endpoints ``status =
+    'active'``) restricted to the five asserted verbs -- "the block is
+    present" and "the tool would find something" can never disagree.
+
+    TWO relations are DELIBERATELY excluded from the check, not omitted
+    by accident:
+
+    * ``co_derived`` is a PROJECTION over one session's beliefs joined
+      pairwise (see ``lore_core.graph``'s own module docstring) -- its
+      presence says a session concluded several things at one sitting,
+      and nothing about whether any two of them are actually related.
+      Pointing a session at a graph whose only edges are coincidence
+      would teach it to read co-occurrence as structure, exactly the
+      confusion the CITE-only/STEER split one level up exists to
+      prevent -- surfacing this tool on the strength of `co_derived`
+      alone would undercut the very honesty rule the tool itself
+      enforces per-belief.
+    * ``supersedes`` is excluded for a narrower, structural reason: a
+      superseded belief is never ``active``, so a `supersedes` edge can
+      never appear in the active-only view either this gate or the tool
+      itself reads -- it could not make the tool find anything even if
+      counted.
+
+    Never raises: a broken store or query is a session with no block,
+    not a failed connect -- the same posture every other read here."""
+    try:
+        conn = lore_store.db_connect()
+        placeholders = ",".join("?" * len(BELIEF_RELATIONS))
+        row = conn.execute(
+            "SELECT 1 FROM belief_edges e"
+            " JOIN beliefs s ON s.id = e.src AND s.status = 'active'"
+            " JOIN beliefs d ON d.id = e.dst AND d.status = 'active'"
+            f" WHERE e.rel IN ({placeholders}) LIMIT 1",
+            tuple(BELIEF_RELATIONS),
+        ).fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    return (
+        "[BELIEF GRAPH] Beyond the five-step ladder above: some beliefs "
+        "here carry typed relations to each other (depends_on, "
+        "specializes, explains, contradicts, applies_when). Once you "
+        "know a belief's id, call lore_belief_neighbours(belief_id) to "
+        "see what it depends on, contradicts or specializes, or the "
+        "confidence-scored path to another belief. Reachability is not "
+        "authority: a belief found by traversal is CITE-only unless it "
+        "earned STEER on its own."
     )
 
 
@@ -1248,6 +1337,13 @@ class SessionEngine:
         # set once the block itself is built, same "connect-time only"
         # shape as lore_snapshot_chars beside it.
         self.worktree_notice_chars: int | None = None
+        # Same measured-not-estimated accounting, for the THIRD (and last)
+        # thing _build_options may append: the [BELIEF GRAPH] awareness
+        # block (see _graph_awareness_block). Connect-time only, same shape
+        # as worktree_notice_chars beside it -- None (hide-at-zero) for
+        # every session whose store has no asserted relation between two
+        # active beliefs yet.
+        self.graph_awareness_chars: int | None = None
         # Same measured-not-estimated idea, for the graph-backed context
         # block (_graph_context_block, DOXA_GRAPH_CONTEXT -- v0.84.0). Unlike
         # the two above it is NOT connect-time-only: it rides the per-turn
@@ -1942,6 +2038,12 @@ class SessionEngine:
         # session in the same worktree.
         worktree_block = _session_worktree_block(self.cwd)
         self.worktree_notice_chars = len(worktree_block) if worktree_block else None
+        # Third (optional) system-prompt appendix -- see
+        # _graph_awareness_block's own docstring. Re-derived on every call
+        # for the same reason worktree_block is: never a value cached from
+        # an earlier turn or an earlier session in this same worktree.
+        awareness_block = _graph_awareness_block()
+        self.graph_awareness_chars = len(awareness_block) if awareness_block else None
         # One discovery walk feeds BOTH the skill count /context reports
         # and the plugins= kwarg below, and ONLY happens at all when
         # adoption is on -- claude_plugins_mod.discover() is a filesystem
@@ -2063,6 +2165,7 @@ class SessionEngine:
                 "append": (
                     "[LORE SNAPSHOT]\n" + snapshot
                     + (f"\n\n{worktree_block}" if worktree_block else "")
+                    + (f"\n\n{awareness_block}" if awareness_block else "")
                 ),
             },
             hooks={
@@ -2670,6 +2773,7 @@ class SessionEngine:
             usage,
             lore_snapshot_chars=self.lore_snapshot_chars,
             worktree_notice_chars=self.worktree_notice_chars,
+            graph_awareness_chars=self.graph_awareness_chars,
             graph_context_chars=self.graph_context_chars,
             adopted_skills=self.adopted_skills,
             adopted_skill_plugins=self.adopted_skill_plugins,
