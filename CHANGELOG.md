@@ -4,6 +4,55 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.84.0 — 2026-08-28
+- `lore-core` moves 0.42.1 → 0.45.0: 0.43.0 (mermaid/browser graph view),
+  0.44.0 (graph-backed context), 0.45.0 (learned-skills tier). DOXA does not
+  surface the mermaid view or the skills tier in this release.
+- **`lore_belief_show` gains its edges**: the belief's typed relations
+  (`lore_core.beliefs.belief_edges`), each carrying verb, direction, the
+  other belief's id/claim/status, who asserted it (`source`), and the
+  distinct-session `support` count. `"edges": []` for a belief with none —
+  an absent block would be indistinguishable from a query that failed.
+- New operator **`lore_belief_neighbours`**: one traversal tool, not five.
+  `belief_id` + `hops` (≤2) returns the k-hop neighbourhood; adding `to_id`
+  switches to the single most-confident path between two beliefs
+  (`lore_core.graph.khop`/`best_path`). Capped at `BELIEF_NEIGHBOUR_LIMIT`
+  (20, `doxa/events.py`), truncating visibly rather than silently.
+- **Structure earns no authority**: every belief either tool returns —
+  seed, neighbour, or a node on a path — carries its OWN `citation_status`
+  (`steer`/`cite_only`), computed independently the same way
+  `lore_core.dialectic.cmd_consult` splits STEER from CITE ONLY (≥3
+  outcome-ledger rows). A STEER belief never lends its status to a
+  CITE-only neighbour, or the reverse.
+- **Path confidence is the product over hops** (`best_path`'s own
+  contract — Dijkstra on `-log(weight)`), surfaced next to `hop_count` on
+  every result so a long chain reads as weak, never as strong as its best
+  single hop.
+- `co_derived` relations (projected from `belief_evidence` at read time,
+  never a stored row) are labeled `"projected": true` wherever they appear
+  — never presented as an asserted relation.
+- **Graph-backed act-time context** (new setting `graph_context`,
+  `DOXA_GRAPH_CONTEXT`, OFF by default): `SessionEngine._graph_context_block`
+  calls LORE's OWN builder (`lore_core.graph.context_candidates`/
+  `render_context_block`) rather than a second ranking implementation, as a
+  stage SEPARATE from and independent of the plain-FTS consult note
+  (`_consult_note`/`consult_floor`) — the two toggle independently. Gated
+  the same two ways LORE's own `LORE_GRAPH_CONTEXT` hook is:
+  `graph_context_enabled()` (DOXA's opt-in) AND LORE's own
+  `stage_disabled("beliefs")`.
+- `/context` reports the last-injected block's size as `graph_context_chars`
+  (`doxa.engine.context_breakdown`, `doxa/ui/labels.py`) — unlike
+  `lore_snapshot_chars`/`worktree_notice_chars`, which are connect-time,
+  system-prompt figures the CLI cannot separate out of its own accounting,
+  this rides the per-turn `additionalContext` path (already correctly
+  counted by the CLI on the next turn) and is reported as the last known
+  size rather than a session constant.
+- Decided against a bespoke one-hop follow on `_consult_note` itself: LORE
+  0.44.0/0.45.0 already ships the ranked, budgeted, calibrated-first
+  version of that idea, and a second implementation reading the same store
+  would only be able to drift from it.
+- Full suite: 1446 → (see this release's own count).
+
 ## 0.82.0 — 2026-08-28
 - `lore-core` moves 0.39.0 → 0.42.1 (`pyproject.toml`, `uv.lock`). No DOXA code changed: nothing DOXA imports (`engine.py`'s `beliefs`/`memory`/`deriver`/`pending`/`gate`/`context`/`store`, `peers.py`'s `scrub`, `operators.py`'s belief search/show) touches the new binding layer (`belief_edges`, `lore_core.graph`) or the deriver's `relates` schema field — those are internal to LORE's own worker process and CLI. Full suite: 1446 passed.
 - One of the three releases in the jump is not inert for DOXA even so: 0.41.0's `project_identity_root` now resolves a linked worktree through `--git-common-dir` instead of minting a project slug per checkout. DOXA runs every session in its own git worktree by default, so every session on a repo was previously deriving beliefs under a *different* project slug than the repo itself — this pin silently reunifies them onto the parent repo's store.
