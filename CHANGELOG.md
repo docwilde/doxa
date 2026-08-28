@@ -5,11 +5,8 @@ them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
 ## 0.82.0 — 2026-08-28
-- `lore-core` pinned to **v0.42.1**, up from v0.39.0: typed belief edges (0.41.0), belief-graph traversal (0.42.0), and `project_identity_root` resolving through `--git-common-dir` so a linked worktree no longer mints its own project slug.
-- README: the belief store carries typed relations — `depends_on`, `specializes`, `explains`, `contradicts`, `applies_when` — derived like beliefs themselves, support counted in distinct sessions, path confidence the product of its hops. Structure earns no authority: a belief reached by an edge is CITE-only unless it earned STEER on its own. Available to the engine; not yet surfaced in the interface.
-
-## 0.82.0 — 2026-08-28
 - `lore-core` moves 0.39.0 → 0.42.1 (`pyproject.toml`, `uv.lock`). No DOXA code changed: nothing DOXA imports (`engine.py`'s `beliefs`/`memory`/`deriver`/`pending`/`gate`/`context`/`store`, `peers.py`'s `scrub`, `operators.py`'s belief search/show) touches the new binding layer (`belief_edges`, `lore_core.graph`) or the deriver's `relates` schema field — those are internal to LORE's own worker process and CLI. Full suite: 1446 passed.
+- One of the three releases in the jump is not inert for DOXA even so: 0.41.0's `project_identity_root` now resolves a linked worktree through `--git-common-dir` instead of minting a project slug per checkout. DOXA runs every session in its own git worktree by default, so every session on a repo was previously deriving beliefs under a *different* project slug than the repo itself — this pin silently reunifies them onto the parent repo's store.
 - README: documents that the belief store now carries typed edges between beliefs (`depends_on`, `specializes`, `explains`, `contradicts`, `applies_when`), derived and support-counted the same way beliefs are, with a path's confidence the product of its hops — structure that earns no authority, so a belief reached through the graph is still CITE-only unless it earned STEER on its own. Stated plainly as not yet surfaced in DOXA's interface (no chip, picker or operator reads `belief_edges` today).
 
 ## 0.81.0 — 2026-08-27
