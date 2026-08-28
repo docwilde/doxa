@@ -223,7 +223,15 @@ async def test_a_worktree_session_still_finds_its_project_memory(
 
     main_slug = _slug_for(main)
     worktree_slug = _slug_for(worktree)
-    assert main_slug != worktree_slug, "the premise of the defect no longer holds"
+    # lore-core v0.41.0 resolves a linked worktree through
+    # `--git-common-dir`, so the two slugs are now the SAME and the defect
+    # is gone at the source. Kept as a regression pin rather than deleted:
+    # if a future lore-core reverts to `--show-toplevel`, the slugs diverge
+    # again and every worktree session silently loses its project memory.
+    assert main_slug == worktree_slug, (
+        "a linked worktree must resolve to its parent repo's slug "
+        "(lore_core.config.project_identity_root, --git-common-dir)"
+    )
 
     # The project memory exists ONLY under the main repo's slug, which is
     # exactly how it sits on a real machine.
