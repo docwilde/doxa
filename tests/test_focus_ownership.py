@@ -233,6 +233,39 @@ async def test_cycling_tabs_takes_the_focus_with_it(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cycling_reaches_a_read_only_archived_tab(tmp_path):
+    """Reported live: "CTRL+ArrowLeft ... only seems to work to switch
+    among active sessions ... not between read-only finished sessions".
+    _cycle_tab used to walk panes() -- SESSION tabs only -- so an
+    ArchivedSessionTab sitting right there in the strip was never
+    reachable by keyboard cycling. It must be, in strip order, same as
+    every other tab."""
+    where = tmp_path / "scratch"
+    where.mkdir()
+    specs = [
+        RestoreTabSpec("sid-live", _restore_factory("sid-live")),
+        RestoreTabSpec("sid-dead", None, cwd=str(where), archived=True),
+    ]
+    app = DoxaApp(cwd=str(where), restore_tabs=specs, restore_active_id="sid-live")
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: len(app.panes()) == 1)
+        await pilot.pause()
+        live = app.panes()[0]
+        assert app.active_pane is live
+
+        await pilot.press("ctrl+right")
+        await pilot.pause()
+        assert isinstance(_tabbed(app).active_pane, ArchivedSessionTab)
+        assert _tabbed(app).active_pane.session_id == "sid-dead"
+
+        # And back around: two tabs, so a second cycle in the same
+        # direction returns to the live one.
+        await pilot.press("ctrl+right")
+        await pilot.pause()
+        assert app.active_pane is live
+
+
+@pytest.mark.asyncio
 async def test_jumping_to_a_tab_by_id_focuses_it(tmp_path):
     """_switch_to_tab -- the palette's open-tab entries and the peer
     chip's "that session is already open here" jump."""

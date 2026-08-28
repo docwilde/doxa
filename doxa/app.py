@@ -973,15 +973,30 @@ class DoxaApp(App):
         handler of its own to hang this on, so the event is the only hook
         that path has.
 
-        Only a ``SessionPane`` has a prompt to focus. An
-        ``ArchivedSessionTab`` is read-only and was not focused by the old
-        mount-time path either (it is not a SessionPane, so it never had
-        one); a ``SubagentTranscriptTab`` focuses its own scroll container
-        at the point it is opened, which is that path's own explicit
-        intent (doxa.session.runtime.open_transcript_tab)."""
+        A ``SessionPane`` focuses its prompt; the two read-only kinds
+        (``ArchivedSessionTab``, ``SubagentTranscriptTab``) focus their own
+        ``.scroll`` container instead, so keyboard scrolling works the
+        moment you land on one -- v0.85.0, and load-bearing beyond that
+        single convenience: :meth:`_cycle_tab` landing on a tab with
+        NOTHING focusable left Textual's own ``AUTO_FOCUS`` (``App.
+        AUTO_FOCUS = "*"``, fired on the next screen-resume tick while
+        ``self.focused`` is ``None``) to pick the first focusable widget
+        it could find ANYWHERE in the DOM -- unscoped by which tab is
+        actually visible, so it landed back on the SessionPane's own
+        prompt in a different, now-hidden tab. Focusing that prompt posts
+        ``TabPane.Focused`` right back up to ``TabbedContent``, which
+        reactively reassigns ``active`` to ITS tab -- so the cycle
+        silently reverted itself one message-pump turn later, the exact
+        shape of the reported defect ("only seems to work ... not between
+        read-only finished sessions"). Giving every tab kind SOMETHING
+        focusable closes the gap AUTO_FOCUS was falling into, at the
+        source, for every caller in the list above, not just cycling."""
         if isinstance(tab, SessionPane):
             with contextlib.suppress(Exception):
                 tab.query_one("#prompt-input", PromptInput).focus()
+        elif isinstance(tab, (ArchivedSessionTab, SubagentTranscriptTab)):
+            with contextlib.suppress(Exception):
+                tab.scroll.focus()
 
     def _focus_active_tab(self) -> None:
         """:meth:`_focus_tab` for whichever tab is active RIGHT NOW --
@@ -2057,12 +2072,17 @@ class DoxaApp(App):
         left to _on_tab_activated, one message-pump turn later -- and a
         pane mounting in the meantime could focus itself and take the
         activation back, which is exactly what made tests/test_tab_status.
-        py's done-unseen test flaky after a Ctrl+T/Ctrl+← pair."""
-        panes = self.panes()
-        if len(panes) < 2:
+        py's done-unseen test flaky after a Ctrl+T/Ctrl+← pair.
+
+        :meth:`_cyclable_tabs`, not :meth:`panes` (v0.85.0 -- see that
+        method's own docstring for the defect this fixes): a read-only
+        tab has no prompt, so :meth:`_focus_tab` below is a no-op for one,
+        same as it already is for a mouse click landing on one."""
+        tabs = self._cyclable_tabs()
+        if len(tabs) < 2:
             return
         tabbed = self.query_one("#session-tabs", TabbedContent)
-        ids = [p.id for p in panes if p.id]
+        ids = [t.id for t in tabs if t.id]
         try:
             index = ids.index(tabbed.active)
         except ValueError:
