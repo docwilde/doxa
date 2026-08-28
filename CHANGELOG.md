@@ -5,53 +5,77 @@ them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
 ## 0.84.0 — 2026-08-28
-- `lore-core` moves 0.42.1 → 0.45.0: 0.43.0 (mermaid/browser graph view),
-  0.44.0 (graph-backed context), 0.45.0 (learned-skills tier). DOXA does not
-  surface the mermaid view or the skills tier in this release.
-- **`lore_belief_show` gains its edges**: the belief's typed relations
-  (`lore_core.beliefs.belief_edges`), each carrying verb, direction, the
-  other belief's id/claim/status, who asserted it (`source`), and the
-  distinct-session `support` count. `"edges": []` for a belief with none —
-  an absent block would be indistinguishable from a query that failed.
+
+**The belief graph reaches the model.** LORE has carried typed relations
+between beliefs since 0.41.0; nothing in DOXA could read them.
+
+- **`lore_belief_show` gains its edges** (`lore_core.beliefs.belief_edges`):
+  verb, direction, the other belief's id/claim/status, who asserted it
+  (`source`), and the distinct-session `support` count. `"edges": []` for a
+  belief with none — an absent block would be indistinguishable from a
+  query that failed.
 - New operator **`lore_belief_neighbours`**: one traversal tool, not five.
   `belief_id` + `hops` (≤2) returns the k-hop neighbourhood; adding `to_id`
-  switches to the single most-confident path between two beliefs
+  switches to the most-confident path between two beliefs
   (`lore_core.graph.khop`/`best_path`). Capped at `BELIEF_NEIGHBOUR_LIMIT`
   (20, `doxa/events.py`), truncating visibly rather than silently.
-- **Structure earns no authority**: every belief either tool returns —
+- **Structure earns no authority.** Every belief either tool returns —
   seed, neighbour, or a node on a path — carries its OWN `citation_status`
-  (`steer`/`cite_only`), computed independently the same way
+  (`steer`/`cite_only`), computed independently the way
   `lore_core.dialectic.cmd_consult` splits STEER from CITE ONLY (≥3
   outcome-ledger rows). A STEER belief never lends its status to a
   CITE-only neighbour, or the reverse.
-- **Path confidence is the product over hops** (`best_path`'s own
-  contract — Dijkstra on `-log(weight)`), surfaced next to `hop_count` on
-  every result so a long chain reads as weak, never as strong as its best
-  single hop.
-- `co_derived` relations (projected from `belief_evidence` at read time,
-  never a stored row) are labeled `"projected": true` wherever they appear
-  — never presented as an asserted relation.
-- **Graph-backed act-time context** (new setting `graph_context`,
-  `DOXA_GRAPH_CONTEXT`, OFF by default): `SessionEngine._graph_context_block`
-  calls LORE's OWN builder (`lore_core.graph.context_candidates`/
-  `render_context_block`) rather than a second ranking implementation, as a
-  stage SEPARATE from and independent of the plain-FTS consult note
-  (`_consult_note`/`consult_floor`) — the two toggle independently. Gated
-  the same two ways LORE's own `LORE_GRAPH_CONTEXT` hook is:
-  `graph_context_enabled()` (DOXA's opt-in) AND LORE's own
+- **Path confidence is the product over hops** (`best_path`'s contract —
+  Dijkstra on `-log(weight)`), surfaced beside `hop_count` on every result,
+  so a long chain reads as weak rather than as strong as its best hop.
+- `co_derived` relations — projected from `belief_evidence` at read time,
+  never a stored row — are labeled `"projected": true` wherever they
+  appear, never presented as asserted.
+
+**The session is told the graph exists.** A tool the model never thinks to
+call is close to no tool: the LORE snapshot's retrieval ladder names the
+snapshot, file map, belief store and session index, and stops there.
+
+- **`SessionEngine._graph_awareness_block`** appends a `[BELIEF GRAPH]`
+  block after the LORE snapshot and `[SESSION WORKTREE]`, naming the five
+  verbs, pointing at `lore_belief_neighbours`, and stating that
+  reachability is not authority.
+- **Hidden at zero**: emitted only when the store carries traversable
+  edges. A store whose only relations are projected `co_derived` gets
+  nothing — a co-derived cluster is one session's beliefs joined pairwise,
+  and pointing the agent at it teaches it to read coincidence as structure.
+- `/context` reports it as `graph_awareness_chars`.
+
+**Graph-backed act-time context, off by default.** New setting
+`graph_context` (`DOXA_GRAPH_CONTEXT`).
+
+- **`SessionEngine._graph_context_block`** calls LORE's OWN builder
+  (`lore_core.graph.context_candidates`/`render_context_block`) rather than
+  a second ranking implementation. A bespoke one-hop follow on
+  `_consult_note` was built and then removed: LORE 0.44.0/0.45.0 already
+  ships the ranked, budgeted, calibrated-first version, and a second
+  implementation over the same store could only drift from it.
+- A stage SEPARATE from the plain-FTS consult note (`_consult_note`/
+  `consult_floor`); the two toggle independently. Gated the two ways LORE's
+  own `LORE_GRAPH_CONTEXT` hook is: `graph_context_enabled()` AND
   `stage_disabled("beliefs")`.
-- `/context` reports the last-injected block's size as `graph_context_chars`
-  (`doxa.engine.context_breakdown`, `doxa/ui/labels.py`) — unlike
-  `lore_snapshot_chars`/`worktree_notice_chars`, which are connect-time,
-  system-prompt figures the CLI cannot separate out of its own accounting,
-  this rides the per-turn `additionalContext` path (already correctly
-  counted by the CLI on the next turn) and is reported as the last known
-  size rather than a session constant.
-- Decided against a bespoke one-hop follow on `_consult_note` itself: LORE
-  0.44.0/0.45.0 already ships the ranked, budgeted, calibrated-first
-  version of that idea, and a second implementation reading the same store
-  would only be able to drift from it.
-- Full suite: 1446 → (see this release's own count).
+- `/context` reports `graph_context_chars` as the LAST-INJECTED size, not a
+  session constant — unlike `lore_snapshot_chars`/`worktree_notice_chars`,
+  this rides the per-turn `additionalContext` path.
+
+**Dependency and a test whose premise expired.**
+
+- `lore-core` moves 0.42.1 → **0.45.0**: 0.43.0 mermaid/browser graph view,
+  0.44.0 graph-backed context, 0.45.0 learned-skills tier. DOXA surfaces
+  neither the mermaid view nor the skills tier in this release.
+- `test_a_worktree_session_still_finds_its_project_memory` asserted a
+  linked worktree gets a DIFFERENT project slug than its parent repo — the
+  defect DOXA worked around. lore-core 0.41.0 resolves through
+  `--git-common-dir` and the defect is gone at the source, so the
+  assertion is inverted and kept as a regression pin: a future revert to
+  `--show-toplevel` would silently cost every worktree session its project
+  memory.
+- Full suite: **1465 passed**.
 
 ## 0.82.0 — 2026-08-28
 - `lore-core` moves 0.39.0 → 0.42.1 (`pyproject.toml`, `uv.lock`). No DOXA code changed: nothing DOXA imports (`engine.py`'s `beliefs`/`memory`/`deriver`/`pending`/`gate`/`context`/`store`, `peers.py`'s `scrub`, `operators.py`'s belief search/show) touches the new binding layer (`belief_edges`, `lore_core.graph`) or the deriver's `relates` schema field — those are internal to LORE's own worker process and CLI. Full suite: 1446 passed.
