@@ -145,6 +145,29 @@ async def test_close_tab_detaches_only_that_session(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_ctrl_w_notifies_that_the_detached_session_can_be_reattached(tmp_path):
+    """Reported live, the second half of the tab-lifecycle defect: "when
+    the tab is detached with CTRL+W, there should be a notification or
+    message". Through v0.84.0 Ctrl+W closed the tab in total silence --
+    nothing said the session was still alive anywhere. Now it does, and
+    names the tab it was."""
+    app, engines = _app(tmp_path)
+    notified: list[str] = []
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+t")
+        assert await _wait(pilot, lambda: len(engines) == 2 and engines[1].started)
+        label = app.active_pane.display_name()
+        app.notify = lambda msg, **kw: notified.append(msg)
+        await pilot.press("ctrl+w")
+        await pilot.pause()
+    assert len(notified) == 1
+    assert label in notified[0]
+    assert "/attach" in notified[0]
+    assert engines[1].finalized is True  # the session itself kept running
+
+
+@pytest.mark.asyncio
 async def test_end_session_surfaces_a_worktree_kept_note_as_a_toast(tmp_path):
     """Worktree-per-session (#3): when the daemon kept a dirty/unmerged
     worktree instead of removing it, stop()'s EngineEvent carries a note

@@ -63,10 +63,10 @@ reports all three counts, so a startup that quietly differs from what the
 user left is never silent about it.
 
 **Stopped vs. detached vs. killed** (v0.17's ``detached_on_purpose`` /
-stop-path distinction, carried into the record; revised v0.60.0): a
-session DETACHED (Ctrl+W, Ctrl+C once, "Quit: detach") keeps running and
-STAYS in the set, tab closed or not. A session STOPPED from inside this
-window (Ctrl+Q, the palette's "Quit: stop session", Ctrl+C twice) also
+stop-path distinction, carried into the record; revised v0.60.0, then
+v0.85.0): a session DETACHED (Ctrl+W, the palette's "Quit: detach") keeps
+running and STAYS in the set, tab closed or not. A session STOPPED from
+inside this window (Ctrl+Q, the palette's "Quit: stop session") also
 STAYS -- through v0.55.0 it did not, because "the daemon is gone" and
 "the tab is gone" were the same fact. v0.56.0 broke that equivalence:
 DOXA now pins its own session id to the CLI's (``ClaudeAgentOptions.
@@ -74,13 +74,26 @@ session_id``), so ``--resume`` can replay a conversation DOXA itself
 ended, and a saved id with no live daemon behind it is resolved by THIS
 function exactly like any other -- archived if the transcript survived,
 dropped if it did not, with no memory of which of Ctrl+Q, a linger
-timeout or ``doxa stop`` from another terminal put it there. Only an
-EXPLICIT reap (``/sessions kill <prefix>``, ``kill-detached``, the
-palette's kill path) leaves the set for good: reaping is the one gesture
-in this app that means "forget this conversation", so doxa.app vetoes
-those ids at write time (``DoxaApp._killed_this_run``) rather than
-letting them round-trip through here and get treated as just another
-dead daemon. doxa.app is still the one place that knows which of the
+timeout or ``doxa stop`` from another terminal put it there.
+
+**One exception** (v0.85.0): closing the LAST open tab, by EITHER key,
+never writes that tab's session into the set at all --
+``DoxaApp._close_pane``'s own ``is_last`` branch, not this module.
+Reported live in two parts: Ctrl+Q on the last tab should start the next
+launch fresh (it used to come back archived, read-only); Ctrl+W on the
+last tab should ALSO start fresh, even though -- unlike Ctrl+Q -- the
+session is still running and reattachable by NAME (``/attach``, the
+peers chip). A window with zero tabs left has nothing left to restore
+automatically; that the Ctrl+W session is still there to attach TO is a
+fact about the live daemon registry (``doxa.peers``), never about this
+record.
+
+Only an EXPLICIT reap (``/sessions kill <prefix>``, ``kill-detached``,
+the palette's kill path) leaves the set for good otherwise: reaping is
+the one gesture in this app that means "forget this conversation", so
+doxa.app vetoes those ids at write time (``DoxaApp._killed_this_run``)
+rather than letting them round-trip through here and get treated as just
+another dead daemon. doxa.app is still the one place that knows which of the
 three just happened; this module stays a plain record store either way.
 """
 

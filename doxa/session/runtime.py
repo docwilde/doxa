@@ -222,9 +222,31 @@ class PaneRuntimeMixin:
         `⊘ toolname` note. Since the daemon split, TURN events can arrive
         here too -- replayed history right after a reattach, or a turn that
         another attached client of the same daemon is driving -- and render
-        into the same TurnBlock/ToolChip widgets a local turn uses."""
+        into the same TurnBlock/ToolChip widgets a local turn uses.
+
+        ``self.engine`` can legitimately be ``None`` the instant
+        ``_engine_ready`` releases this worker, not only after: this task
+        is CREATED in ``on_mount`` alongside ``_boot`` (``run_worker``,
+        both `group="engine"`/`"peers"`) but is not guaranteed its first
+        actual turn on the event loop before ``_boot`` finishes -- and
+        ``_boot`` sets ``_session_id`` (what every close-path test in this
+        suite waits on before pressing Ctrl+Q/Ctrl+W) BEFORE it sets
+        ``_engine_ready`` (a naming-cache lookup sits between the two,
+        ``asyncio.to_thread(naming_mod.cached_name, ...)``). A close
+        landing in that window calls ``detach()``/``stop()``, both of
+        which clear ``self.engine`` immediately and neither of which
+        cancels this worker outright -- so by the time ``_engine_ready``
+        (already set, from the in-flight ``_boot``) releases the `await`
+        below, the engine this worker was about to assert on is already
+        gone. Measured: an intermittent ``AssertionError`` out of exactly
+        this line, surfaced as a visible in-app error block on an
+        otherwise ordinary Ctrl+Q/Ctrl+W. A closed pane has nothing left
+        to pump -- returning quietly is the same outcome an ordinary
+        worker cancellation would have produced, just reached by a
+        different door."""
         await self._engine_ready.wait()
-        assert self.engine is not None
+        if self.engine is None:
+            return
         async for ev in self.engine.peer_events():
             if ev.type == "peer_message":
                 block_list = self.query_one("#block-list", VerticalScroll)

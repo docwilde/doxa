@@ -223,6 +223,28 @@ async def _wait(pilot, cond, tries=100):
     return cond()
 
 
+def _claim_failures(app_cls) -> list:
+    """Patch ``app_cls.report_failure`` to CAPTURE (not swallow) whatever
+    reaches it, and hand back the live list a test can assert against --
+    the same shape as tests/conftest.py's own autouse
+    ``_errors_must_be_claimed``, layered on top of it rather than
+    replacing it: that fixture resets the method back to its true
+    original in ITS OWN teardown regardless of what this leaves behind,
+    so a test using this helper does not need to restore anything
+    itself. A test that wants a CLEAR failure on a background error --
+    rather than the fixture's own opaque teardown error -- calls this
+    early and asserts the list is empty before its own assertions."""
+    original = app_cls.report_failure
+    seen: list = []
+
+    def _record(self, failure):
+        seen.append(failure)
+        return original(self, failure)
+
+    app_cls.report_failure = _record
+    return seen
+
+
 @pytest.mark.asyncio
 async def test_boot_persists_the_first_tab(tmp_path):
     where = tmp_path / "scratch"
@@ -364,6 +386,95 @@ async def test_ctrl_q_keeps_the_ended_session_in_the_record(tmp_path):
         await pilot.pause()
     record = tabsets.load(str(where))
     assert {t.session_id for t in record.tabs} == {"sid-a", "sid-b"}
+
+
+# -- v0.85.0: closing the LAST tab starts the next launch fresh -----------
+#
+# Reported live, in two parts: "if the last remaining open tab is closed
+# with CTRL+Q, the next time doxa is started should start with a fresh
+# session. If last open tab was closed with CTRL+W, we also start with a
+# fresh session, but the old session could be reattached." The four tests
+# above cover the OTHER case on purpose -- a second tab closed while a
+# first one is still open -- where the closed one SHOULD stay in the
+# record (there is still a window to restore). These cover the one they
+# do not: nothing left open at all.
+
+
+@pytest.mark.asyncio
+async def test_ending_the_only_tab_with_ctrl_q_leaves_no_restore_record(tmp_path):
+    """Also asserts NO background error surfaced during the quit -- an
+    earlier version of the is_last fix called remove_pane() before
+    persisting, which unmounted the pane while its _peer_pump worker was
+    still alive and occasionally raced App.action_quit into an
+    AssertionError (SessionPane._peer_pump's own `assert self.engine is
+    not None`), visible in-app as an error block. tests/conftest.py's
+    autouse _errors_must_be_claimed would already fail this test on that
+    (as a teardown error, not a clean assertion) -- claiming it here
+    explicitly is what turns a regression back into a readable failure."""
+    seen = _claim_failures(DoxaApp)
+    where = tmp_path / "scratch"
+    where.mkdir()
+    factory = _fake_factory("sid-solo")
+    app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        await pilot.press("ctrl+q")
+        await pilot.pause()
+    assert seen == [], [f.headline() for f in seen]
+    record = tabsets.load(str(where))
+    assert record is None or record.tabs == ()
+
+
+@pytest.mark.asyncio
+async def test_detaching_the_only_tab_with_ctrl_w_also_leaves_no_restore_record(
+    tmp_path,
+):
+    """The other half: Ctrl+W's session is still running (unlike Ctrl+Q's
+    -- see the notify test in tests/test_tabs.py for that half), but the
+    next launch does not auto-restore it either. Reattaching it is a
+    deliberate act (/attach, the peers chip) against the live daemon
+    registry, never an automatic tab -- that registry, not this record,
+    is what keeps it findable. Also asserts no background error, same
+    reasoning as the Ctrl+Q test above."""
+    seen = _claim_failures(DoxaApp)
+    where = tmp_path / "scratch"
+    where.mkdir()
+    factory = _fake_factory("sid-solo")
+    app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        await pilot.press("ctrl+w")
+        await pilot.pause()
+    assert seen == [], [f.headline() for f in seen]
+    record = tabsets.load(str(where))
+    assert record is None or record.tabs == ()
+
+
+@pytest.mark.asyncio
+async def test_peer_pump_tolerates_the_engine_already_being_gone(tmp_path):
+    """Direct, deterministic regression test for the race the two tests
+    above catch only intermittently: SessionPane._peer_pump is created
+    (run_worker, in on_mount) alongside _boot but is not guaranteed its
+    first actual turn on the event loop before _boot finishes -- and
+    _boot sets _session_id (what every close-path test here waits on)
+    BEFORE it sets _engine_ready (a naming-cache lookup sits between the
+    two). A close landing in that window clears self.engine
+    (detach()/stop() both do, immediately) without cancelling this
+    worker, so by the time _engine_ready releases it, the engine it was
+    about to assert on is already gone. Called directly here (bypassing
+    the timing entirely) so the regression is a fast, deterministic
+    failure rather than a stress test that only sometimes reproduces."""
+    where = tmp_path / "scratch"
+    where.mkdir()
+    factory = _fake_factory("sid-solo")
+    app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        pane = app.panes()[0]
+        # _engine_ready is already set (boot completed); this simulates
+        # detach()/stop() clearing the handle in the race window above.
+        pane.engine = None
+        await pane._peer_pump()  # must return quietly, not raise
 
 
 @pytest.mark.asyncio
