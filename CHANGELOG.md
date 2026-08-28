@@ -5,423 +5,95 @@ them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
 ## 0.81.0 — 2026-08-27
-
-`/context` redrawn to look like Claude Code's own: a fixed 10x20 grid of
-200 cells (0.5% each) leads the numbers, model and headline beside the top
-rows, a per-category legend beside the lower rows -- replacing v0.75.0's
-single proportional bar of `█`.
-
-- `doxa.ui.labels.context_grid_cells`/`context_grid_text` -- the grid.
-  Fixed geometry (unlike the old bar, it never stretches to the pane; it
-  draws at its one true 200-cell size or, below `GRID_COLUMNS *
-  GRID_CELL_WIDTH` columns, not at all -- numbers-only, same final degrade
-  the old bar had). Cell counts are assigned by FLOORING each category's
-  cumulative share of 200, not rounding: a category that has not yet
-  earned a whole cell draws zero, never one -- item K's small-lie rule,
-  now pinned in the picture as well as the numbers. No reported window,
-  no grid, same as always.
-- Two cell styles, one geometry: Claude Code's own draughts glyphs (⛀ ⛁
-  ⛶) by default, `[#]`/`[ ]` ascii behind the new `context_grid` setting
-  (`DOXA_CONTEXT_GRID=ascii`) for a terminal font that tofu's Miscellaneous
-  Symbols -- DOXA cannot probe a terminal's own glyph coverage, so this is
-  a manual switch, not detection. Both read the identical measured cells;
-  only the two characters change, and the cell width (3 columns either
-  way) is fixed so flipping the setting never moves the layout.
-- Category color is now keyed by NAME (`CONTEXT_GRID_CATEGORY_COLORS`),
-  not list position, reusing the same five theme.tcss hex values the old
-  bar already wore (PROVIDER_GLYPH_COLOR plus the `#session-tabs` status
-  ladder) -- nothing invented, and a legend needs a name to label
-  consistently across a CLI that reorders its own list.
-- `doxa.ui.labels.context_sources_text` -- the per-source summary Claude
-  Code prints below its own grid (MCP tools by server, agents, adopted-
-  plugin skills), hide-at-zero throughout. `agents` is a real
-  `get_context_usage` field (`claude_agent_sdk/types.py`) no `/context`
-  surface before this normalized at all; `doxa.engine.context_breakdown`
-  now carries it the same capped/omitted way as `memory_files`/
-  `mcp_tools`. Skills has no CLI field to read (`get_context_usage` does
-  not report them), so it is the one figure here DOXA measures itself --
-  `doxa.claude_plugins.adopted_skill_summary`, a bare count, never a token
-  total, gated on the existing `adopt_plugins` setting.
-- "Usage by category", not "Estimated usage by category" -- Claude Code's
-  own heading. DOXA does not estimate anything on this screen; keeping the
-  word would have been a claim item K's own docstring already rules out.
-- `tests/test_context.py`'s bar tests (`CONTEXT_BAR_*`, `context_bar_
-  segments`/`_text`) are rewritten for the grid's shape, keeping both
-  lessons the bar tests paid for: poll for the PAINTED state, not the
-  mount, and assert rendered text rather than a matching widget existing.
+- `/context` redrawn as a fixed 10×20 grid of 200 cells (0.5% each), replacing 0.75.0's proportional bar. Model and headline beside the top rows, per-category legend beside the lower rows.
+- New **`context_grid_cells`**/**`context_grid_text`** (`doxa/ui/labels.py`): fixed geometry, drawn at 200 cells or not at all. Cell counts floor each category's cumulative share, so a category below one whole cell draws zero.
+- Two cell styles, one geometry: draughts glyphs (⛀ ⛁ ⛶) by default, `[#]`/`[ ]` behind new setting `context_grid` (`DOXA_CONTEXT_GRID=ascii`). 3 columns wide either way, so switching never moves the layout.
+- Category colour keyed by name (**`CONTEXT_GRID_CATEGORY_COLORS`**), not list position.
+- New **`context_sources_text`**: MCP tools by server, agents, adopted-plugin skills; hidden at zero. `agents` added to `doxa.engine.context_breakdown`; skills is a bare count from `adopted_skill_summary`, gated on `adopt_plugins`.
+- Heading is "Usage by category", not "Estimated usage by category".
+- Tests: `tests/test_context.py` bar tests rewritten for the grid.
 
 ## 0.80.0 — 2026-08-27
-
-- A session running in its own git worktree (`doxa/<id>`, v0.17.0+) is now told so: `SessionEngine._build_options` appends a `[SESSION WORKTREE]` block after the LORE snapshot, naming the session's actual branch, base ref and main repo root, and stating the real removal rule (`doxa.worktrees.FINALIZE_RULE`) so the agent knows what finalize keeps versus discards. Fixes agents pushing their private branch upstream, trying to switch to `main`, or burning a turn on git archaeology to find their own base.
-- Every fact in the block comes from `doxa.worktrees.read_meta`'s sidecar, never a guess: a missing or unreadable sidecar (no worktree, worktrees disabled, `--in-process`, a repo-less cwd) appends nothing, and the prompt is byte-identical to a pre-0.80.0 session.
-- `/context` reports the block's size separately (`worktree_notice_chars`), the same "characters, not tokens" honesty `lore_snapshot_chars` already applies, since the CLI counts both inside one undifferentiated "system prompt" row.
-- `doxa.worktrees.FINALIZE_RULE` is a new constant carrying the exact clean/ahead rule `finalize()` applies -- the single source both the prompt block and its own test suite read, so the two cannot drift apart.
+- A session running in its own git worktree is now told so: **`SessionEngine._build_options`** appends a `[SESSION WORKTREE]` block after the LORE snapshot, naming the session's branch, base ref, main repo root and `FINALIZE_RULE`. Fixes agents pushing their private branch upstream, switching to `main`, or hunting for their own base.
+- Facts come from **`doxa.worktrees.read_meta`**'s sidecar; a missing or unreadable sidecar appends nothing and the prompt is byte-identical to pre-0.80.0.
+- `/context` reports the block separately as `worktree_notice_chars`.
+- New constant **`doxa.worktrees.FINALIZE_RULE`**: the clean/ahead rule `finalize()` applies, read by both the prompt block and its tests.
 
 ## 0.79.0 — 2026-08-27
-
-- The peers chip is a real roster now instead of a `/sessions` shortcut: click it and the shared `ChipPicker` lists every live peer sharing this repo, each row showing what it's working on and tokens consumed so far. Selecting a row reuses the same attach path the sessions picker already established (`DoxaApp._cmd_attach`); the current session is a no-op and a peer open in another tab switches to it instead of attaching a second client.
-- `PeerInfo.usage_tokens` (`doxa/peers.py`) -- the session's own running token total (input + output + cache read + cache create, the same sum `/usage` prints), piggybacked on the existing 15-second heartbeat rather than written on every turn: `PeerHost.update_usage()` only updates the in-memory value, and the next scheduled heartbeat flushes it. A peers-picker token count can therefore be up to `HEARTBEAT_SECS` (15s) stale, stated in the picker's own note row -- never presented as instantaneous. `None` means unknown (an older build's entry, or a peer that hasn't completed a turn yet), never `0 tok`, the same rule `PeerInfo.clients` already states.
-- `PeerInfo.title` is now actually what its own docstring and a v0.75.0 changelog entry already claimed: derived from the session's first prompt (`doxa.engine._peer_title_from_prompt`, capped at 72 chars), not the cwd basename it silently fell back to at every call site through v0.78.0 -- `PeerHost` was never wired to update it after connect. `PeerHost.set_title()` writes immediately on the first turn (same "presence has to move when the answer changes" discipline `set_client_count` already applies), so every consumer of `title` (`/peers`, the sessions picker, and the new peers picker) gets the real excerpt, not a repeated directory name.
-- `docs/plans/peer-publishing.md`'s rejection of live telemetry ("tokens burned... would turn a 15-second heartbeat write into... a much heavier write path") assumed the only mechanism was a write per delta. Piggybacking on the already-scheduled heartbeat removes that cost for a monotonic total; the doc is corrected to ship `usage_tokens` while keeping cost-so-far and context% out (both remain local-only, `/usage`/`/context`, for reasons unrelated to write frequency).
+- The peers chip opens a roster instead of shortcutting to `/sessions`: **`ChipPicker`** lists every live peer on this repo with what it's working on and tokens consumed. Selecting a row reuses `DoxaApp._cmd_attach`; the current session is a no-op and a peer already open switches to its tab.
+- New **`PeerInfo.usage_tokens`** (`doxa/peers.py`): input + output + cache read + cache create, the sum `/usage` prints. Flushed on the existing 15s heartbeat, so a count can be up to `HEARTBEAT_SECS` stale — stated in the picker's note row. `None` means unknown, never `0 tok`.
+- Fix **`PeerInfo.title`**: fell back to the cwd basename at every call site through 0.78.0 because `PeerHost` was never wired to update it. **`PeerHost.set_title()`** now writes on the first turn, so `/peers`, the sessions picker and the peers picker all show the real first-prompt excerpt (capped 72 chars).
+- `docs/plans/peer-publishing.md` corrected to ship `usage_tokens`; cost-so-far and context% stay local-only.
 
 ## 0.78.0 — 2026-08-27
-
-**Spinner freeze during dead air.** The in-flight marker only advanced on
-an SSE delta, so a 30s `Bash`, a slow `WebFetch`, or a silent subagent
-froze it on whatever frame the last event left it at — reading as hung
-exactly when reassurance mattered most.
-
-- `ThinkingMarker` now arms a per-second `Timer` (`start()`/`stop()`) for
-  the life of a turn, in addition to its existing delta-driven `advance()`.
-  It shows elapsed seconds — `⠋ working (14s)` — since turn start, not
-  since the last event: since-last-event resets to 0 on every delta, and a
-  chatty turn would never show more than a second or two no matter how
-  long it actually ran.
-- Armed at the three places a turn genuinely begins (`_run_turn`, and the
-  `turn_started`/orphaned-turn branches of a peer-driven turn); cancelled
-  from `hide_thinking()` on every completion path (turn_done, the error
-  path, restore) and — belt and braces — by Textual's own message-pump
-  teardown on any abrupt one (pane close, app quit), verified against
-  `textual.message_pump` rather than assumed.
-- Amends the no-third-timer rule from v0.56.0/v0.28.0, on purpose: that
-  rule's real target was idle CPU, not timer count — `GitLine`'s own
-  wording is "no CPU spent when nothing is happening". A timer that exists
-  only while a turn is in flight and is gone the instant it ends spends
-  none. `tests/test_transcript_density.py`'s
-  `test_the_tick_timer_lives_no_longer_than_the_turn_it_belongs_to`
-  (renamed from `test_the_spinner_arms_nothing_during_or_after_a_turn`)
-  and `tests/test_chrome.py`'s `test_no_armed_timers_while_a_turn_is_in_flight`
-  now assert that directly — armed during the turn, gone after, none while
-  idle — instead of a global absence.
-- Glyph cycle unchanged (doxa's own Braille frames, already chosen for
-  font coverage); the shape (glyph, phase, elapsed) follows Claude Code's
-  own "esc to interrupt" line, reverse-engineered from the installed CLI
-  binary (`strings -n6 --unicode=escape` + a raw UTF-8 byte scan) rather
-  than guessed — its own rotating asterisk glyph could not be sourced the
-  same way and is not reproduced.
-- `assets/shots/markdown-stream.gif` and `assets/shots/tool-calls.gif`
-  (README) show the old frozen-glyph, no-elapsed-time marker and are
-  stale as of this release; not regenerated.
+- Fix **spinner freeze during dead air**: the in-flight marker only advanced on an SSE delta, so a 30s `Bash`, a slow `WebFetch` or a silent subagent froze it on the last frame.
+- **`ThinkingMarker`** arms a per-second `Timer` (`start()`/`stop()`) for the life of a turn alongside its delta-driven `advance()`, showing elapsed since turn start — `⠋ working (14s)`.
+- Armed at the three turn-start paths (`_run_turn`, the `turn_started` and orphaned-turn branches); cancelled from `hide_thinking()` on every completion path and by Textual's message-pump teardown.
+- Amends the no-third-timer rule (0.56.0/0.28.0): the rule's target was idle CPU, and a timer that exists only during a turn spends none.
+- `assets/shots/markdown-stream.gif` and `tool-calls.gif` show the old marker and are stale; not regenerated.
+- Tests: `test_transcript_density.py`, `test_chrome.py` assert armed-during, gone-after, none-while-idle.
 
 ## 0.77.0 — 2026-08-27
-
-Fixed a staged proposal losing its own timestamp on the pending picker.
-
-- `_fmt_pending_row` read only the record's `created` field for the stamp
-  and age columns. A proposal staged before `created` was added to the
-  payload (`lore_core.gate.stage_write` / `lore_core.deriver`'s staging
-  `put`) rendered both blank, even though its own pending id — `<14-digit
-  UTC timestamp>-<counter>`, minted by both writers — carries the same
-  moment. `doxa.ui.labels._pending_id_stamp` recovers it from the id when
-  `created` is absent or unparseable; stamp and age both derive from the
-  same resolved value, so a recovered stamp also recovers the wait beside
-  it. A foreign or hand-authored id (not 14 digits) still renders blank
-  rather than a guessed date.
-- Measured, not assumed: `PICKER_STAMP_COL` (15), `PICKER_STATUS_COL`
-  (28) and `PICKER_AGE_COL` (7) were re-checked against both row types
-  sharing the grid and against `_fmt_age`'s own real ceiling
-  (`"23h59m"`, 6 columns) rather than its comment — all three already sat
-  at their measured maxima and are unchanged.
-- Added the assertion the shared formatter never had: one belief row and
-  one pending row, rendered together, now have a test asserting their
-  claim/text columns start at the identical offset — not just each row
-  type's own `PICKER_PREFIX_WIDTH` checked in isolation.
+- Fix **staged proposal lost its timestamp** on the pending picker: `_fmt_pending_row` read only the record's `created` field, so a proposal staged before that field existed rendered stamp and age blank.
+- `PICKER_STAMP_COL` (15), `PICKER_STATUS_COL` (28), `PICKER_AGE_COL` (7) re-checked against both row types and `_fmt_age`'s real ceiling (`23h59m`, 6 columns); all already at their maxima, unchanged.
+- New test: a belief row and a pending row rendered together start their text columns at the same offset.
 
 ## 0.76.0 — 2026-08-26
-
-- Adopted Claude Code plugin commands now reach DOXA's own "/" autocomplete,
-  the Ctrl+P palette and `/help` — measured against a real adopted plugin
-  first: `--plugin-dir` already worked and `/plugins` already named the
-  setting when off, but `doxa.commands` (the one registry every "/" surface
-  reads) never learned a plugin existed, and the underlying CLI registers a
-  plugin's commands NAMESPACED (`caveman:caveman`, not the bare `caveman` a
-  plugin's own docs advertise) — typing the bare form got `Unknown command`
-  back even when unique. `doxa.claude_plugins.command_names()` now reads
-  the correct invocable spelling and front-matter description; `doxa.commands._plugin_rows`
-  folds them in as passthrough rows under a new "Plugins" group, so they
-  ride the same wiring `/compact` already does rather than needing a DOXA
-  handler. `/plugins`' report states the exact spelling per command and
-  tallies "would adopt if the setting were on" separately from "refused".
-- A user's own prompt, shown in the turn fold's title, was sliced with a
-  bare `[:70]` character cut — no word boundary, no ellipsis, and 70 had
-  nothing to do with the terminal actually open, so a narrow terminal still
-  hit the fold's own silent column clip underneath that guess, and the full
-  prompt was reachable nowhere else once cut. `TurnBlock` now fits the title
-  to its own measured width, cuts at a word boundary with a trailing
-  ellipsis, redoes the cut on every resize, and — when it has to cut — shows
-  the full prompt in the fold body, the same "never silently drop content"
-  rule a restored transcript's own truncation markers already keep.
+- Adopted Claude Code plugin commands now reach DOXA's `/` autocomplete, the Ctrl+P palette and `/help`.
+- Fix: a user's own prompt in the turn fold's title was cut with a bare `[:70]` — no word boundary, no ellipsis, and unrelated to the terminal's actual width.
 
 ## 0.75.0 — 2026-08-26
-
-- `_boot` queried `#block-list` on a pane Textual had not composed yet, raising `NoMatches` from a background task; the error surface turned it into a visible block during a multi-pane restore. Same guard as the `#status-bar` one in v0.70.0 — a boot with nowhere to draw returns rather than reporting a failure nobody could have seen.
-
-`/context` leads with a bar now: block art (full blocks only, the house
-rule the boot mark settled) showing the window's occupancy, colored per
-component, right above the exact numbers the command has always printed
--- "instead of the numbers" read as LEADS them, not replaces them, since a
-bar cannot tell 4% from 6% and item K's whole premise is that every figure
-here stays a reachable measurement.
-
-- `doxa.ui.labels.context_bar_segments`/`context_bar_text` build the bar
-  from the same `categories` `context_breakdown_text` already reads --
-  nothing new is measured. No reported window (`max_tokens`), no
-  denominator, no bar: the same rule that leaves an unknown context limit
-  reading `?` in the numbers leaves it undrawn here. A category under half
-  a block's own share of the width draws ZERO blocks -- rounding a 0.2%
-  sliver up to a visible one would be exactly the small lie item K's own
-  docstring already rules out for the numbers -- and every category's
-  block count is apportioned by rounding its CUMULATIVE share rather than
-  each category independently, so the bar's own width can never exceed
-  what it was asked to fit into (independent rounding can overshoot; this
-  cannot). The CLI's own "Free space" category draws in the app's border
-  grey (theme.tcss's own boundary color) rather than a content color, so
-  the bar reads as spent-then-headroom rather than one more component
-  competing for attention. Every other segment's color comes from its
-  OWN position in the CLI's category list, reusing four hex literals that
-  already paint something else in this app (the accent every clickable
-  chip wears, the `#session-tabs` status ladder) -- not invented, and
-  stable across widths: a category that rounds to zero blocks at a narrow
-  terminal does not push every later one into a different hue than it
-  wore at a wide one.
-- `doxa.ui.transcript.ContextBlock` (a `SystemBlock` subclass) is what
-  `/context` mounts now, in place of a plain text block -- the same door
-  `ShellBlock` already uses for output that isn't just a string. Its
-  `render()` recomputes the bar from `self.content_size.width` on every
-  paint, the same discipline `_DrawnMark` keeps for the boot mark and for
-  the same reason: the box this widget is given can narrow out from under
-  it after it mounts (a scrollbar appearing with no `Resize` message
-  following is v0.70.0's own precedent), so a bar fitted once at
-  construction and trusted to stay correct is the same defect found
-  there. Below `CONTEXT_BAR_MIN_COLUMNS` (24) the bar drops out entirely
-  and `/context` shows the numbers alone -- the same degrade a session
-  with no reported window already gets.
-- `context_breakdown_text` itself is untouched; every existing `/context`
-  assertion in `tests/test_context.py` keeps passing unmodified, because
-  `ContextBlock.text` is still exactly what it always was.
+- Fix `_boot` queried `#block-list` on a pane Textual had not composed, raising `NoMatches` from a background task and surfacing as a visible block during multi-pane restore.
+- New **`context_bar_segments`**/**`context_bar_text`** (`doxa/ui/labels.py`): a proportional bar built from the same `categories` `context_breakdown_text` already reads.
+- New **`doxa.ui.transcript.ContextBlock`** (a `SystemBlock` subclass) is what `/context` mounts, replacing a plain text block.
+- `context_breakdown_text` untouched; every existing `/context` assertion passes unmodified.
 
 ## 0.74.0 — 2026-08-26
-
-Claude Code plugins and skills, adopted without reopening item AA's
-duplicate-snapshot defect. See
-[`docs/plans/plugins.md`](docs/plans/plugins.md).
-
-- `doxa/claude_plugins.py` discovers the operator's OWN installed Claude
-  Code plugins (`~/.claude/plugins/installed_plugins.json`, resolving each
-  entry's `installPath` directly rather than guessing at the versioned
-  cache) and adopts them per CAPABILITY, not per plugin: commands, skills
-  and agents are additive and inert until invoked, so they are adopted;
-  hooks and MCP servers execute unasked at session start — the exact shape
-  of item AA's original defect — so they are refused unconditionally,
-  regardless of the setting below. A sanitized, copy-then-exclude staged
-  copy per plugin (never the CLI's own plugin-management files) is handed
-  to the SDK as one `--plugin-dir` flag per adopted plugin.
-  `ClaudeAgentOptions.env`/isolation is untouched either way.
-- The LORE plugin is blocked outright, always: `lore_core` already runs
-  in-process inside DOXA, and every one of LORE's own commands shells out
-  to a `bin/` path this module deliberately never stages, so adopting it
-  would ship broken commands on top of a redundant, out-of-band carrier
-  into the same belief store.
-- New setting `adopt_plugins` / `DOXA_ADOPT_PLUGINS`, default OFF —
-  isolation stays the resting posture; adopting the operator's own plugins
-  is opt-in.
-- `/plugins`: what was discovered, what is enabled in your own
-  `~/.claude/settings.json`, what is (or would be) adopted, and what is
-  refused and why — every refusal states its reason.
-- `/reload-plugins`: re-scans and re-stages without restarting DOXA, and
-  says plainly that it only affects new sessions/tabs — a running
-  session's CLI already connected with whatever `--plugin-dir` flags its
-  own start resolved.
+- New **`doxa/claude_plugins.py`**: discovers the operator's installed Claude Code plugins from `~/.claude/plugins/installed_plugins.json`, resolving each entry's `installPath`. Adopted per capability — commands, skills and agents are additive and inert until invoked; hooks and MCP servers execute unasked at session start and are refused unconditionally. A sanitized staged copy per plugin is passed as one `--plugin-dir` flag.
+- The LORE plugin is blocked outright: `lore_core` already runs in-process, and LORE's commands shell out to a `bin/` path this module never stages.
+- New setting `adopt_plugins` / `DOXA_ADOPT_PLUGINS`, default off.
+- New `/plugins`: what was discovered, what is enabled in `~/.claude/settings.json`, what is adopted, and what is refused with the reason.
+- New `/reload-plugins`: re-scans and re-stages without restarting; affects new sessions and tabs only.
+- Plan: `docs/plans/plugins.md`.
 
 ## 0.73.0 — 2026-08-26
-
-Removed item V's standalone beliefs browser tab; its evidence trail moved
-into the chip picker.
-
-- The picker already carried confirmed/contradicted/stale/retract and
-  approve/reject inline on every row (v0.67.0); the browser tab was a
-  second surface for the same review, minus the evidence trail. Removed
-  `doxa/ui/beliefs.py` (`BeliefsBrowserTab`, `BeliefRow`, `ProposalRow`,
-  `EvidenceTrail`) and every "open the browser" door row.
-- Evidence now expands in place on the beliefs picker: `Right` on a
-  highlighted row fetches its derivation trail and inserts it as real
-  rows directly beneath the belief, one row per evidence event; `Left`
-  folds them away again. Fetched lazily, one belief at a time, never on
-  load. A belief with no evidence gets one row saying so, distinct from
-  the transient "loading" row; a trail past the cap says so in its own
-  trailing row. The evidence rows are disabled, so the highlight cannot
-  land on one and an action key always resolves against the belief that
-  owns the trail, never its evidence. Typing a filter hides an expanded
-  trail without forgetting it (evidence text is not itself searchable).
-  A belief whose own row already says it carries no evidence
-  (`evidence_count == 0`) never round-trips for Right at all — the same
-  silent nothing a proposal row already gives it.
-- Fixed a gap the removal surfaced: the beliefs/proposals pickers' inline
-  row actions (`y`/`c`/`s`/`r`, `a`/`r`) painted regardless of whether the
-  loaded `lore_core` could record the write, unlike the row's own action
-  sub-menu, which already hid them. Both surfaces now agree — a read-only
-  session sees no approve/reject/confirm/retract control at all, inline
-  or in the sub-menu — and the pending picker's own note row says why, up
-  front, rather than only after a row is selected.
-- `/beliefs` opens the picker instead of the removed tab. `doxa/session/
-  pane.py`'s `_beliefs_tab` and the matching Ctrl+W/Ctrl+Q tab-close
-  cases in `doxa/app.py` are gone with it.
-- Fixed the reported "underline runs past the word" defect on `approve`/
-  `retract`, the two row actions that ARM: their padded column, sized to
-  fit a longer armed wording, was being closed by `.ljust`ing that
-  padding INSIDE the row's own `[@click=...]` span -- so the padding was
-  itself clickable, which meant a stray click just past `approve` could
-  arm it. Padding now lives outside the span; the armed labels also
-  shortened (`"⌫ CONFIRM RETRACT"` → `"⌫ RETRACT"`, `"✓ CONFIRM APPROVE"`
-  → `"✓ APPROVE"`, both now the same length as their own resting label,
-  so the column no longer pads at all) and `retract`'s trailing "…"
-  (a sub-menu holdover) is gone.
-- The beliefs/proposals pickers' rows carry a column-name header now
-  (`date · status · age · text`), shown once at the top and hidden under
-  a typed filter -- alignment does not depend on it, every row's columns
-  are already fixed-width. `PICKER_AGE_COL`'s own comment was wrong
-  (claimed a 5-column ceiling; `_fmt_age`'s real one is 6, `"23h59m"`) --
-  the number was already right, only the reasoning was not, now fixed.
-  `PICKER_STATUS_COL` (28) stays: proposal verdicts carry free text
-  (project slugs, skill names) with no true ceiling, so it was already a
-  pragmatic size rather than a computable one, unchanged by anything
-  here.
-- The prompt-as-filter now debounces on both pickers (reusing
-  `doxa.history.DEBOUNCE_SECS`, the same interval and the same
-  stop-and-replace-the-timer shape `/search` already uses -- one debounce
-  meaning, not a second knob at a different value), with a sequence
-  number guarding against a stale rebuild painting over a fresher one
-  (the same race `/search` itself guards against) and a live in-flight
-  marker (`/query …`) so a keystroke never reads as a hang while a
-  rebuild is pending.
+- Removed the standalone beliefs browser tab; `/beliefs` opens the chip picker instead. `_beliefs_tab` and its Ctrl+W/Ctrl+Q cases are gone.
+- Evidence expands in place on the beliefs picker: `Right` fetches a belief's derivation trail and inserts it as rows beneath it, one per evidence event; `Left` folds them.
+- Fix: the beliefs/proposals pickers' inline row actions (`y`/`c`/`s`/`r`, `a`/`r`) painted even when the loaded `lore_core` could not record the write, unlike the row's own sub-menu.
+- Fix "underline runs past the word" on `approve`/`retract`: padding was `.ljust`ed inside the row's `[@click=...]` span, so a click just past the label armed it. Padding moved outside; armed labels shortened to their resting length (`⌫ RETRACT`, `✓ APPROVE`).
+- Picker rows carry a column header (`date · status · age · text`), hidden under a typed filter.
+- The prompt-as-filter debounces on both pickers, reusing `doxa.history.DEBOUNCE_SECS`.
 
 ## 0.72.0 — 2026-08-26
-
-Two branches, one tree state, one tag.
-
-### The boot mark
-
-- Redraws the boot mark: drops the grey ring, widens the triangle so it reads as solid and confident instead of a narrow spike, and spells ΔΟΞΑ out in full-block letters beside it, same colour as the triangle. `belief earns knowledge` sits below as plain text, replacing the old `doxa · belief earning knowledge` strapline.
-- Draws the Greek letters from `█` rather than printing the Unicode characters, for the same reason the mark has never used half-blocks or Geometric Shapes triangles: a monospace font's Greek coverage is not guaranteed, and this sidesteps that tofu risk entirely instead of trading one glyph-coverage gamble for another.
-- Keeps the plain Latin `DOXA` wordmark as a fallback for terminals too narrow for the full Greek word, and drops to it alone when even the triangle does not fit — the same three-stage ladder as before, with the thresholds (`DRAWN_MARK_COLUMNS`, `DRAWN_FULL_COLUMNS`) recomputed from the new art's measured width.
-- Holds the total row budget at 9, same as the ring-era mark, despite giving Ξ and Α enough rows to read clearly: dropping the ring's moat frees the rows the tagline now spends on its own row below the word. The mid-width fallback (triangle + plain wordmark, no tagline) is shorter than before, at 7 rows rather than 9.
-- Ο's sides were drawn two columns wide to make the curve read as a curve; fixed to match Δ and Α's single-cell stroke, with the roundness coming from narrower cap and base rows instead. Word width is unchanged (`GREEK_COLUMNS` 40, `DRAWN_FULL_COLUMNS` 58).
-
-### The curated-memory chip
-
-- Curated-memory chip (`mem u63% p39%`): the project half stayed absent past startup and never moved on a repo switch or a resume. `PaneChipsMixin._lore_slug` resolved the project slug from the pane's own construction-time `cwd`, never the connected engine's — the one reader in the pane still doing that (every other one already prefers `engine.cwd`). Now resolves through the engine's cwd first, falling back to the pane's only when there is no engine yet.
-- Approving or rejecting a staged proposal, recording a belief outcome, and retracting a belief never refreshed the status bar afterward — the memory-fill, belief-count and staged-proposals chips stayed exactly as stale as their last unrelated refresh. The three write paths in `doxa/session/chips.py` (the status bar's own quick pending/beliefs pickers) now trigger a refresh once the write actually lands — never on the arming selection, which writes nothing.
+- Boot mark redrawn: grey ring dropped, triangle widened, ΔΟΞΑ spelled in full-block letters beside it in the same colour.
+- Greek letters drawn from `█` rather than printed as Unicode — a monospace font's Greek coverage is not guaranteed.
+- The Latin `DOXA` wordmark remains the fallback for terminals too narrow for the Greek word, and stands alone when the triangle does not fit.
+- Row budget held at 9; Ο's sides narrowed to a single-cell stroke to match Δ and Α.
+- Fix curated-memory chip (`mem u63% p39%`): the project half stayed absent after startup and never moved on a repo switch or resume — `PaneChipsMixin._lore_slug` resolved the slug from the pane's construction-time `cwd`.
+- Fix: approving or rejecting a proposal, recording a belief outcome, or retracting a belief never refreshed the status bar, leaving the memory-fill, belief-count and proposal chips stale.
 
 ## 0.70.0 — 2026-08-26
-
-- A status refresh on a pane whose status bar had not mounted yet raised `NoMatches` from a background task, which the error surface turned into a visible block. Refreshes are event-driven — a peer joining, a turn finishing, a restore reporting its session id — and those arrive before compose finishes. A refresh with nowhere to draw is now a no-op; the next event repaints. Surfaced by this release's mount-ordering change, but the race predates it: it was reported during the v0.60.0 work as reproducible only against a real daemon and left unfixed.
-
-- The drawn boot mark could overflow its column in CI (`test_narrow_terminal_never_overflows_the_glyph_art`): the transcript's scrollbar can appear after the banner's last resize and narrow its box without a Resize message following, leaving a fit computed for a wider box painted into a narrower one. The art now fits itself inside `render()`, against its own live `content_size`, on every paint — not a string cached by `_lay_out` on mount/resize — so a stale fit cannot survive a frame regardless of whether a resize arrives.
-- The mark itself: nine rows instead of seven, with a real gap between the ring and the triangle (they read as one blob at the old size), and the ring now renders in a muted grey while the triangle keeps the orange accent — two shapes, not one two-tone blob.
-- The raster boot banner is gone. `logo.png` used to draw on `kgp`/`sixel` terminals (`boot_banner=auto`/`image`); the drawn block mark reads better than a downscaled photograph even there, so there is no longer a case where the raster is the right answer. `boot_banner` collapses from a four-way choice to plain on/off — a `config.toml` still holding `auto`, `blocks` or `image` from before this change keeps meaning on. `/img`'s showcase is unaffected and still renders the raster logo in every tier a terminal answers for.
-- `test_restore_tabs_open_in_saved_order_with_names_and_active_tab` failed in CI with a wrong active tab id, not the null one v0.38.0 already guards against. Textual's `Tabs` widget defaults itself to its first child tab on its own mount, and that default reaches `TabbedContent.active` as a queued message rather than a synchronous write — a later explicit write can still be overwritten once the stale default message is finally processed. Fixed by computing the correct starting tab before anything mounts and handing it to `TabbedContent` as `initial=`, so the wrong default is never posted in the first place.
+- Fix a status refresh on a pane whose status bar had not mounted raising `NoMatches` from a background task, surfacing as a visible block.
+- Fix the boot mark overflowing its column in CI: the transcript's scrollbar can appear after the banner's last resize without a `Resize` message following.
+- Mark redrawn at nine rows with a real gap between ring and triangle; ring muted grey, triangle keeps the orange accent.
+- The raster boot banner is gone — `logo.png` no longer draws on `kgp`/`sixel`; the drawn mark reads better even there.
+- Fix `test_restore_tabs_open_in_saved_order_with_names_and_active_tab` failing in CI on a wrong active tab id.
 
 ## 0.67.0 — 2026-08-26
-
-Gallery uniformity, one row shape for both LORE pickers, and inline
-actions on their rows.
-
-- Every asset in `assets/shots/` — 13 PNG/SVG pairs and 11 GIFs — now
-  renders at the identical 3068x1734 (250x69 columns/rows, 16:9 within
-  0.5%). Previously five different pixel sizes shipped side by side (a
-  sixth, bespoke one for `beliefs-browser`), so the README visibly
-  changed image size scene to scene. 250 columns is a measured floor:
-  the seven scenes carrying a live status bar (`hero`, `trace`,
-  `transparent`, `subagent-tracker`, `memory`, `sessions`,
-  `image-support`) already needed it, and every other scene now matches
-  for uniformity rather than its own smaller content-fit size.
-- Scenes that had less content than the new frame got more, not blank
-  canvas: `settings`/`clock`/`error-block` and every GIF scene now run
-  behind or alongside a real three-tab session already mid-conversation;
-  `beliefs-browser` gained a much larger scripted store (14 beliefs, 6
-  proposals) in place of three and two. `banner`/`banner-blocks` gained
-  two more tabs in the strip but not a running conversation — one would
-  scroll the boot banner these two scenes exist to show out of frame —
-  and their own blank space below the identity block is real, not
-  padded over.
-- `scripts/screenshot.py`/`scripts/record_gif.py` leaked real machine
-  state into the gallery: `N proposals` and `mem u%p%` read straight off
-  this machine's actual `lore_core` store (neither is scripted anywhere
-  in either file), and `/settings` showed this machine's real config
-  defaults. Measured, not assumed — `N proposals` read 205 one run and
-  78 the next on the same unedited scene. Both scripts now isolate
-  `LORE_ROOT`/`DOXA_HOME` the same way the test suite already does,
-  before any `doxa` import.
-- The beliefs and proposals chip pickers used to format their rows two
-  different ways (a `belief_stamp` join with no fixed columns, a `` · ``
-  string for proposals that drifted with every field's own length). One
-  formatter now — `doxa.ui.labels.format_picker_row` — used by both:
-  `YY-MM-DD HH:MM  status  age  text`, fixed-width prefix columns, text
-  capped to `min(100, measured terminal width)` by the widget at render
-  time. The matcher still scores the full untrimmed row, so a word past
-  the visible cut stays findable.
-- Both pickers gained inline row actions — approve/reject on a proposal,
-  confirmed/contradicted/stale/retract on a belief — reachable without
-  leaving the list: a click on the row's own action span, or the
-  reserved letter while that row is highlighted. Retract and approve
-  still arm on the first press and apply on the second, on the same row.
-  Additive: selecting a row outright still opens the existing per-row
-  action sub-menu unchanged, and its own tests keep passing as written.
-- While either picker is open, the prompt input filters its rows instead
-  of sending to the agent — typed text syncs live, Enter acts on the
-  highlighted row rather than submitting a turn, Escape closes and clears
-  it. The five reserved action letters only fire while the filter is
-  empty; the moment it holds text they are ordinary characters, so typing
-  a word that starts with one of them never fires an action on the way
-  through.
-- The `user`/`user-model` group headers (picker and full browser) now
-  carry LORE's own channel tag — `user · stated` (the user said it
-  themselves; a later session may act on it) vs `user-model · inferred`
-  (read off behaviour, never spelled out; shapes tone and authorizes
-  nothing) — and the full rule is in the belief tooltip. `project` is
-  unaffected — it has no channel to distinguish.
+- Every asset in `assets/shots/` — 13 PNG/SVG pairs and 11 GIFs — renders at 3068×1734 (250×69 cells, 16:9 within 0.5%). Five different pixel sizes previously shipped side by side.
+- Scenes with less content than the new frame now run alongside a real three-tab session mid-conversation rather than blank canvas.
+- Fix `scripts/screenshot.py`/`scripts/record_gif.py` leaking real machine state into the gallery: `N proposals` and `mem u%p%` read off this machine's actual `lore_core` store.
+- The beliefs and proposals pickers share one row shape; previously a `belief_stamp` join with no fixed columns and a `·`-joined proposal string that drifted with each field's length.
+- Both pickers gained inline row actions — approve/reject on a proposal, confirmed/contradicted/stale/retract on a belief — via a click on the row's action span or the reserved letter.
+- While a picker is open the prompt input filters its rows: typed text syncs live, Enter acts on the highlighted row, Escape closes and clears.
+- `user`/`user-model` group headers carry LORE's channel tag: `user · stated` against `user-model · inferred`.
 
 ## 0.65.0 — 2026-08-26
-
-- `/peers` printed a peer's `title` and `cwd` raw. Another process writes both — a title derives from that session's first prompt, a cwd from a path — and the message receive path has scrubbed since it existed while the registry-read path never did. Scrubbed at the single point an entry becomes a `PeerInfo`, so a consumer added later cannot forget.
-
-Gallery regenerated end to end: every asset in `assets/shots/` predated the
-full-block banner, the permission-mode chip, curated-memory fill and the
-staged-proposals chip, so the README was showing a mixture of eras.
-
-- All 11 PNG/SVG pairs and 10 GIFs re-captured at this version.
-  `banner-blocks` was also fixed in the process: its 80-column frame
-  measured 1.51 against a 16:9 target (15% off, outside the ~2% the rest of
-  the gallery holds to) — widened to 95 columns, rows unchanged, now 1.78.
-- Six status-bar-carrying scenes (`hero`, `trace`, `transparent`,
-  `subagent-tracker`, `memory`, `sessions`, `image-support`) widened from
-  172 to 250 columns. Measured, not assumed: the live status bar's own
-  plain text now runs past 200 characters with the mode chip, memory fill
-  and proposals chip added since 172 was chosen, and `hero` was losing
-  everything from the memory chip on.
-- Three new pairs: `beliefs-browser` (the full `/beliefs` tab —
-  scope-grouped beliefs carrying LORE's own outcome verbs, one staged
-  proposal armed mid-approve), `error-block` (a caught exception rendered
-  inline instead of killing the app), and `permission-mode` (the chip
-  cycling default → plan → auto → bypassPermissions, teal/amber/red).
-  Captioned in the README's gallery.
-- `beliefs-browser`'s header rendered `lore_write_state_result`'s test
-  fixture default straight into the image (`lore_core 0.36.0 (package)`)
-  instead of asking `doxa.version.lore_core_version()` and
-  `doxa._lore_bootstrap.resolved_source()` the way the real engine does —
-  a hard-coded fact in a scene fixture, exactly the class of bug this
-  release exists to catch, just not limited to the boot banner's version
-  line this time. `scripts/screenshot.py`'s `_beliefs_engine()` now reads
-  both live. The number on screen is unchanged on this machine (still
-  0.36.0) but the source label corrects from `(package)` to `(plugin)` —
-  this checkout's LORE plugin checkout wins over the pip-pinned v0.38.0
-  per `doxa/_lore_bootstrap.py`'s own documented precedence, which the
-  fixture default could not have known to say.
-- `beliefs-browser` also stopped sharing the other new `WIDE` (250×69)
-  geometry: its tab has no status bar or prompt box beneath it, so none
-  of the reasoning that widened those scenes applied, and the content
-  (two staged proposals, three belief rows) filled barely a third of the
-  frame. Resized to its own content-fit 134×36.
+- Fix `/peers` printing a peer's `title` and `cwd` raw — another process writes both, and the registry-read path was never scrubbed.
+- All 11 PNG/SVG pairs and 10 GIFs re-captured. `banner-blocks` measured 1.51 against a 16:9 target and was fixed.
+- Six status-bar scenes (`hero`, `trace`, `transparent`, `subagent-tracker`, `memory`, `sessions`, `image-support`) widened 172 → 250 columns.
+- Three new pairs: `beliefs-browser`, `error-block`, and one more.
+- Fix `beliefs-browser` rendering `lore_write_state_result`'s test fixture default (`lore_core 0.36.0 (package)`) into the image instead of calling `doxa.version.lore_core_version()`.
 
 ## 0.64.0 — 2026-08-26
 
@@ -430,379 +102,93 @@ staged-proposals chip, so the README was showing a mixture of eras.
 - README's "What you get" is short bullets linking into the manual; "How it works" follows it directly. The session walkthrough, permission-mode table and configuration reference move to the manual. 1076 lines to 310.
 
 ## 0.63.0 — 2026-08-26
-
-- Relicensed from the DOXA Noncommercial License 1.0 to **AGPL-3.0-only**, dual with a commercial option. The noncommercial terms were not open source by the OSI definition, which blocked distro packaging and deterred contributors; AGPL keeps a fork's source open, including when it is only offered over a network. `LICENSE-COMMERCIAL.md` is the commercial offer, `TRADEMARK.md` reserves the name and mark.
-- `Ctrl+T` raised `NameError: name 'spawn_daemon' is not defined` and the tab hung at "connecting…". v0.61.0 deferred that import and three call sites kept the bare name, two of them the closures `Ctrl+T` and the palette use. The suite passed on the broken code because every test reaching those closures patches `cli_mod.spawn_daemon`, which creates the module global a bare name resolves against — the tests were what made the code work. `test_no_call_site_uses_the_bare_lazy_name` checks the source instead.
-
-Docs restructuring: nothing in `doxa/` changed.
-
-- CHANGELOG.md rewritten throughout to state what changed and why, dropping
-  narrative, dead ends and direct user quotes — 5139 to 947 lines.
-- Added `docs/manual.md`: the tab model and keys, permission modes,
-  worktrees and finalize, the daemon, status-bar chips, LORE integration
-  and the review gate, commands, and settings — written against current
-  source, not transcribed from release notes.
-- README's "What you get" section condensed to short bullets linking into
-  the manual; the session walkthrough, permission-mode table, configuration
-  table and reasoning section moved there too. "How it works" trimmed to
-  the shape of the system and moved up beside "What you get".
+- Relicensed from the DOXA Noncommercial License 1.0 to **AGPL-3.0-only**, dual with a commercial option.
+- Fix `Ctrl+T` raising `NameError: name 'spawn_daemon' is not defined`, hanging the tab at "connecting…": 0.61.0 deferred that import and three call sites kept the bare name.
+- CHANGELOG rewritten to state what changed and why: 5139 → 947 lines.
+- New `docs/manual.md`: tab model and keys, permission modes, worktrees and finalize, the daemon, status chips, LORE integration and the review gate, commands, settings.
+- README's "What you get" condensed to bullets linking into the manual.
 
 ## 0.62.0 — 2026-08-25
-
-**lore-core moves from v0.36.0 to v0.38.0.** DOXA runs `lore_core`
-in-process, so a LORE release changes what this terminal does, not just
-what it depends on. Two releases land at once:
-
-- **0.37.0 cuts the deriver's proposal ceiling from 5 to 3** and tells it
-  the number is a ceiling rather than a quota. LORE measured 79% of runs
-  emitting exactly 5, and those runs were approved at 0.83% against 2.47%
-  for runs emitting 4 or fewer. It also adds the act-not-know test and
-  suppresses a proposal an existing entry already covers.
-- **0.38.0 separates the two user channels by a stated rule.** The user
-  said it → `user`, and a later session may act on it. You concluded it →
-  `user-model`, and it authorizes nothing. The check is asymmetric on
-  purpose: an inference already carried by a stated fact gets dropped, the
-  reverse gets kept and reported.
-
-Expect fewer proposals on the `proposals` chip, and expect them to be
-better. Nothing in DOXA changed.
+- `lore_core` moves 0.36.0 → 0.38.0. DOXA runs it in-process, so this changes what the terminal does.
+- LORE 0.37.0 cuts the deriver's proposal ceiling 5 → 3 and states it is a ceiling, not a quota. Runs emitting exactly 5 were approved at 0.83% against 2.47%.
+- LORE 0.38.0 separates the two user channels by a stated rule: the user said it → `user`, and a later session may act on it; you concluded it → `user-model`, which authorizes nothing.
 
 ## 0.61.0 — 2026-08-25
-
-`import doxa.app` no longer imports the Claude Agent SDK, which was 404 ms
-of its 546 ms cost (`mcp.types`'s pydantic models alone were 330 ms).
-Import time drops to 168 ms; `doxa.client` drops from 465 ms to 59 ms.
-Every launch paid this before the first frame, including `doxa doctor` and
-`doxa launcher install`, which never build a `SessionEngine`.
-
-- `doxa/events.py` now holds the event vocabulary (`EngineEvent`, list
-  caps, `PROTOCOL_VERSION`) with no SDK dependency; `doxa.engine` and
-  `doxa.daemon` re-export it so existing imports still work.
-- `doxa.client`, `doxa.session.runtime` and `doxa.session.chips` import
-  from `doxa.events` instead of the SDK.
-- `doxa.app` imports `SessionEngine` only inside its session factories,
-  and `doxa.cli` imports `spawn_daemon` at point of use, both reachable via
-  PEP 562 `__getattr__` so existing `monkeypatch.setattr` test patches
-  still work.
-- `tests/test_import_cost.py` pins both directions in a subprocess: the
-  launch modules must not import the SDK, `doxa.daemon` must.
+- `import doxa.app` no longer imports the Claude Agent SDK — 404 ms of its 546 ms (`mcp.types`'s pydantic models alone were 330 ms). Import drops to 168 ms; `doxa.client` 465 ms → 59 ms.
+- New **`doxa/events.py`** holds the event vocabulary (`EngineEvent`, list caps, `PROTOCOL_VERSION`) with no SDK dependency; `doxa.engine` and `doxa.daemon` re-export it.
+- `doxa.client`, `doxa.session.runtime` and `doxa.session.chips` import from `doxa.events`.
+- `doxa.app` imports `SessionEngine` only inside its session factories and `doxa.cli` imports `spawn_daemon` at point of use, both via PEP 562 `__getattr__` so existing `monkeypatch.setattr` patches still work.
+- Tests: `tests/test_import_cost.py` pins both directions in a subprocess.
 
 ## 0.60.0 — 2026-08-25
-
-Three fixes in the same tab-attach/tab-persistence area, all reported the
-same day.
-
-- Ctrl+Q on the last tab of a window wiped the saved tab set to `"tabs":
-  []`. `_persist_tabset` excluded every stopped pane, which was correct
-  before v0.56.0 pinned `ClaudeAgentOptions.session_id` to DOXA's own id —
-  after that, a stopped session's id is resolvable by `--resume` like any
-  other. `_persist_tabset` no longer excludes a stopped pane; an explicit
-  `/sessions kill <prefix>` is still the one action that permanently drops
-  a session from the set.
-- `/attach [prefix]` added as the in-app door to a live detached session
-  (mirroring the CLI's `doxa attach`), always opening a new tab and
-  reusing the sessions-chip's existing picker.
-- The sessions-chip's own attach was broken: `_cmd_attach` swapped the
-  active pane's engine in place instead of opening a tab, and never set
-  `_restore_transcript_wanted`, so a reattached pane's content came from
-  the daemon's in-memory ring (capped at 512 frames) instead of disk — a
-  session detached long enough came back blank in the tab you were already
-  looking at. Fixed by routing `_cmd_attach` through the same
-  `_attach_in_new_tab` door `/resume` already uses.
-- Ctrl+Q doing nothing on a read-only tab was already fixed by v0.58.0;
-  verified still correct, no change needed here.
+- Fix Ctrl+Q on a window's last tab wiping the saved tab set to `"tabs": []` — `_persist_tabset` excluded every stopped pane, correct before 0.56.0 pinned `ClaudeAgentOptions.session_id`.
+- New `/attach [prefix]`: the in-app door to a live detached session, always opening a new tab, reusing the sessions-chip picker.
+- Fix the sessions-chip attach: `_cmd_attach` swapped the active pane's engine in place instead of opening a tab and never set `_restore_transcript_wanted`.
 
 ## 0.59.0 — 2026-08-25
-
-CI was red on two shipped tags while the local suite (1307 tests) was
-green on both — both defects were cases where the machine running the
-test decided the answer.
-
-- The startup banner could draw wider than its column with no resize ever
-  correcting it: it fit itself to the terminal's raw width rather than
-  the widget's own content box, and real chrome (e.g. the scrollbar) isn't
-  a constant. It now draws its 4-cell name when width is unmeasured and
-  retries up to 3 times once Textual has laid it out.
-- `doxa launcher install` could crash on a machine without
-  `desktop-file-utils`: the cache-refresh guard checked `shutil.which`,
-  but the test stubbed `which` to answer for every name rather than just
-  `doxa`, hiding that the real exec could still fail. Now suppresses
-  `OSError` and a non-zero exit around that refresh.
+- Fix the startup banner drawing wider than its column with no resize correcting it: it fit to the terminal's raw width rather than the widget's content box.
+- Fix `doxa launcher install` crashing on a machine without `desktop-file-utils`: the cache-refresh guard checked `shutil.which`, and the test stubbed `which` to answer for every name.
+- Both defects were cases where the machine running the test decided the answer; CI was red on two shipped tags while the local suite (1307 tests) was green.
 
 ## 0.58.0 — 2026-08-25
-
-Three branches landed together.
-
-- **Launcher shortcuts pointed at the wrong DOXA.** `Exec=doxa` resolved
-  against the desktop session's PATH at click time, unrelated to the shell
-  the install command ran from — a shortcut could silently launch a stale,
-  separately-installed copy. `Exec` is now an absolute path to the DOXA
-  that wrote the entry (`launcher.exec_target()`, anchored on `sys.prefix`
-  rather than `sys.executable`, since `uv run` resolves the latter to a
-  base interpreter with no `doxa` installed). The install report and
-  `doxa doctor`'s new `launcher` check now surface the pinned path and
-  version so a moved or removed checkout is diagnosable; a different
-  `doxa` found on PATH is named but never touched (its version is read
-  from its `.dist-info`, never executed). A missing scalable icon was
-  added so small panel slots get a real rendering instead of a downsampled
-  smudge.
-- **No terminal window title.** Textual offers no API for one. New
-  `doxa/window.py` writes an OSC title-stack push/pop (`CSI 22;0t` /
-  `23;0t`) around `DoxaApp.run()`, restoring the terminal's own title on
-  quit, Ctrl+C, or a crash (not on `SIGKILL`, which no terminal-title
-  convention survives anyway). Title is `DOXA — <project>` (never bare
-  `DOXA`, so two windows are distinguishable; never the active session,
-  since that would move on every tab switch). Guarded off for
-  non-terminals, `TERM=dumb`/unset, and `DOXA_NO_TERMINAL_TITLE`.
-- **Ctrl+Q did nothing on a read-only tab** (`SubagentTranscriptTab`,
-  `ArchivedSessionTab`, the beliefs browser) because `_end_session`
-  required `active_pane` to be a `SessionPane`. Extracted
-  `_close_read_only_tab()`, reached by both Ctrl+W and Ctrl+Q, since
-  neither key draws a real distinction on a tab with no session to
-  end or detach.
-- **`bypassPermissions` was on the mode cycle but the CLI refuses it**
-  unless the session launched with `--allow-dangerously-skip-permissions`
-  — the only one of five modes with a launch-time prerequisite, confirmed
-  by driving the real CLI through every mode on both an armed and unarmed
-  session. Rather than arming every session by default, new setting
-  `allow_bypass` / `DOXA_ALLOW_BYPASS` (default off) controls it; an
-  unarmed session now omits `bypassPermissions` from the cycle, the
-  chip's picker, and `/mode`'s list entirely, since an option a user can
-  see must be one that works. Arming cannot be retrofitted onto a running
-  session (it is argv); a restored or resumed session clamps to its own
-  arming.
-- The startup mark is now a ring around a triangle drawn only in `█` and
-  spaces (7×13 cells), superseding v0.55.0's quadrant-triangle glyph:
-  half-blocks seam at the font baseline, and the quadrant triangles
-  (`◢`/`◣`) live in Unicode's Geometric Shapes block, which a font can
-  lack even when it covers Block Elements, producing tofu. Some monospace
-  fonts show faint horizontal banding on stacked full blocks — a terminal
-  rendering artifact, not a bug.
+- Fix launcher shortcuts pointing at the wrong DOXA: `Exec=doxa` resolved against the desktop session's PATH at click time, unrelated to the installing shell.
+- New **`doxa/window.py`**: writes an OSC title-stack push/pop (`CSI 22;0t` / `23;0t`) around `DoxaApp.run()`, restoring the terminal's own title on quit, Ctrl+C or crash. Textual offers no API for a window title.
+- Fix Ctrl+Q doing nothing on a read-only tab (`SubagentTranscriptTab`, `ArchivedSessionTab`, the beliefs browser): `_end_session` required `active_pane` to be a `SessionPane`.
+- `bypassPermissions` removed from the mode cycle: the CLI refuses it unless the session launched with `--allow-dangerously-skip-permissions`, the only mode with a launch-time prerequisite.
+- The startup mark is a ring around a triangle drawn only in `█` and spaces (7×13), superseding 0.55.0's quadrant-triangle glyph.
 
 ## 0.57.0 — 2026-08-25
-
-Staged LORE proposals get their own status chip and picker: previously
-`/pending` was the only way in, and an operator could accumulate 175
-unreviewed proposals with no visible signal.
-
-- A `175 proposals` chip sits beside the belief count and memory fill,
-  hidden at zero. Its count and its list both derive from one predicate
-  (`engine.pending_visible`), after an earlier version undercounted by
-  reading a function that silently drops filemap proposals with no
-  text/name.
-- Cached on the pending directory's mtime: 4.2 ms cold vs. 0.0062 ms warm
-  (~670×).
-- Proposals group by kind (memory/user, memory/project, filemap, belief,
-  skill), since kind determines what a verdict acts on; selecting a row
-  opens that proposal's own approve/reject controls rather than acting
-  from the list directly.
-- Fixed: both the beliefs and proposals pickers' "browse" doors read
-  "open the beliefs browser" even though one led to a different tab half
-  than the other; each door now names its own destination and opens the
-  tab focused on that half (the tab itself renamed from `beliefs` to
-  `lore`).
-- Fixed: picker rows dropped the year from a timestamp to save a column,
-  making the claim column start at a different offset row to row; rows
-  now always show `YY-MM-DD HH:MM`, sized against the terminal's actual
-  width instead of a hardcoded 72-column floor.
+- Staged LORE proposals get a status chip and picker; `/pending` was previously the only way in, and an operator could accumulate 175 unreviewed proposals with no visible signal.
+- A `175 proposals` chip sits beside the belief count and memory fill, hidden at zero. Count and list both derive from one predicate, `engine.pending_visible`.
+- Cached on the pending directory's mtime: 4.2 ms cold against 0.0062 ms warm.
+- Proposals group by kind (memory/user, memory/project, filemap, belief, skill); selecting a row opens that proposal's approve/reject controls.
+- Fix both pickers' "browse" doors reading "open the beliefs browser" when they led to different halves.
+- Fix picker rows dropping the year from a timestamp, which moved the claim column row to row; rows now always show `YY-MM-DD HH:MM`, sized against the terminal's actual width.
 
 ## 0.56.0 — 2026-08-25
-
-Four features landed together.
-
-**Resume.** Sessions can now be resumed after ending, and a restored tab
-continues its prior conversation automatically instead of opening
-read-only. DOXA previously minted its own session id separate from the
-`claude` CLI's own id, so `--resume` against DOXA's id always failed;
-`_build_options` now passes `ClaudeAgentOptions.session_id` so the two
-agree. `/resume [session-id]` opens the shared picker or resolves a
-prefix; a resume always opens a new tab, never takes over the active one,
-and a still-running session is attached rather than forked. New setting
-`resume_restored` (separate from `restore_tabs`) controls whether restore
-resumes automatically; off is byte-identical to pre-0.56.0 read-only
-restore. A resume that cannot happen (still running, cwd gone, or
-recorded before this release) degrades to today's read-only tab with a
-line naming why, never to an error.
-
-**Transcript density.** Enter on a `/search` session header now opens or
-resumes that conversation instead of only toggling its fold (folding
-stays on `←`/`→`). A turn's tool-calls fold dropped from 15 rows to 4 for
-a three-call turn: the bordered-chip chrome and blank separator rows are
-gone, replaced by one line per call plus indentation and a brightness
-step to separate chips.
-
-**Spinner.** A spinner now runs during reasoning/generating, driven by
-the token-delta stream itself rather than a timer — measured no idle-CPU
-regression, and floored at 0.1 s between glyph advances so a 700-delta
-turn doesn't cause 700 repaints. It trails the turn's output rather than
-sitting above it, since the block list scrolls to the end on every event.
-
-**Lore status line.** The boot `lore` line now also shows pending count
-and user/project memory-fill percentages, reusing the same cached values
-the status chips already read rather than computing new ones; costs one
-extra socket round trip, at boot only.
-
-**Failure containment.** Four separate defects — a crash from an image
-library's timeout during paint, a needs-input dialog that stopped
-answering keys, a silently dropped server-tool result, a memory chip that
-drew half of itself — shared one root cause: nothing caught a failure and
-showed it. All are now caught at the one place Textual funnels every
-exception (`App._handle_exception`), rendered as a red-ruled transcript
-block with a collapsed traceback fold, scrubbed of secrets and frame
-locals, and logged to `~/.doxa/errors.log` (256 KiB × 2 generations). A
-widget that raises while painting is quarantined (`display = False`)
-rather than taking down the whole frame. Repeat failures collapse into
-one block with a `×N` tally; past 25 repeats the app exits with a report
-instead of spinning. An audit found roughly a dozen more places in
-`doxa/` that swallow real failures (a suppressed `finalize()` on
-stop/detach, a shell reader that presents lost output as no output,
-among others) — reported here rather than silently rerouted, since
-routing them without saying which would just be the same silence in a
-new coat.
+- **Resume**: sessions can be resumed after ending, and a restored tab continues its prior conversation. `_build_options` now passes `ClaudeAgentOptions.session_id` so DOXA's id and the CLI's agree — `--resume` against DOXA's own id always failed before.
+- New `/resume [session-id]` opens the shared picker or resolves a prefix; always a new tab, never taking over the active one, and a still-running session is attached rather than forked. New setting `resume_restored`; off is byte-identical to pre-0.56.0 read-only restore. A resume that cannot happen degrades to a read-only tab naming why.
+- **Transcript density**: Enter on a `/search` session header opens or resumes that conversation (folding moves to `←`/`→`). A three-call tool fold drops 15 rows → 4; chip borders and blank separators gone.
+- **Spinner** during reasoning/generating, driven by the token-delta stream rather than a timer, floored at 0.1 s between advances. It trails the turn's output.
+- The boot `lore` line adds pending count and user/project memory fill, reusing the cached values the chips read; one extra socket round trip at boot.
+- **Failure containment**: four defects (an image-library timeout during paint, an unresponsive needs-input dialog, a dropped server-tool result, a half-drawn memory chip) shared one cause — nothing caught a failure and showed it. All now caught at `App._handle_exception`, rendered as a red-ruled block with a collapsed traceback, scrubbed of secrets and frame locals, logged to `~/.doxa/errors.log` (256 KiB × 2). A widget that raises while painting is quarantined (`display = False`). Repeats collapse into one block with a `×N` tally; past 25 the app exits with a report.
 
 ## 0.55.0 — 2026-08-25
-
-Fixed a crash on Linux Mint's default terminal (GNOME Terminal/VTE):
-`textual-image`'s cell-size probe (`ESC[16t`) times out because VTE never
-answers, and the library logged that timeout with a full traceback to
-stderr — which in a full-screen TUI overwrites the screen and looks
-exactly like a crash. Fixed by silencing that logger, always seeding the
-cell-size cache (even on failure) so no later in-render probe can retry
-and burn its own timeout mid-paint, and wrapping the image widget's
-width/height/render methods so a failure degrades to a `[image: …]` line
-instead of raising.
-
-The startup banner switched from a raster PNG to a hand-drawn
-block-character mark as the default: half-block rendering (`▀`) averages
-a 238-row image down to 6, producing an illegible smear. The drawn
-triangle-in-ring mark plus a plain-text wordmark are now the default
-(`boot_banner=auto`); the PNG raster is kept only for kitty/sixel
-terminals with real pixel graphics. New setting `boot_banner`:
-`auto`/`blocks`/`image`/`off`. (This mark was itself superseded by
-v0.58.0's simpler ring-and-triangle glyph.)
-
-Two defects surfaced and fixed while chasing this: the banner could be
-silently clipped to a fixed 3-row CSS height regardless of content — now
-fits to the widget's actual `content_size`; and the banner's crop/flatten
-step could raise and take the whole pane's boot down with it — now
-inside the same try/except as the rest of `widget_for`.
+- Fix a crash on GNOME Terminal/VTE: `textual-image`'s cell-size probe (`ESC[16t`) times out because VTE never answers, and the library logged the timeout with a full traceback to stderr, overwriting a full-screen TUI. That logger is silenced, the cell-size cache is always seeded so no in-render probe retries, and the image widget's width/height/render are wrapped to degrade to `[image: …]`.
+- The startup banner defaults to a hand-drawn block-character mark: half-block rendering averages a 238-row image down to 6. New setting `boot_banner`: `auto`/`blocks`/`image`/`off`; the PNG raster is kept for kitty/sixel only.
+- Fix the banner being clipped to a fixed 3-row CSS height regardless of content, and its crop/flatten step taking down the whole pane's boot.
 
 ## 0.50.0 — 2026-08-25
-
-The permission-mode cycler now reaches `auto` and `bypassPermissions`
-(previously stopped at 3 of 6 modes), and the status chip matches Claude
-Code's own glyphs and colors, read directly out of the installed CLI
-binary rather than invented.
-
-- Cycle order: `default → acceptEdits → plan → auto → bypassPermissions →
-  default`. `dontAsk` stays off the cycle, reachable only via `/mode
-  dontAsk` with confirmation — it was never explicitly requested.
-- The chip moved to first position in the status bar, since it must never
-  fall off an overflowing row; it's bold and red for the two modes that
-  stop asking (`bypassPermissions`, `dontAsk`).
-- Entering a mode that stops asking now writes a transcript line, not
-  just a chip change — a corner-of-the-screen indicator is easy to miss.
-- `/mode auto` and `/mode bypassPermissions` no longer confirm, since a
-  dialog in front of a mode a keystroke already reaches can't prevent
-  anything; `/mode dontAsk` still confirms.
-- The persisted default setting still accepts only the three safest
-  modes — cycling into bypass is per-session and never saved, since a
-  stored bypass would silently apply to every future session in every
-  repository.
-- Four now-distinct constants replace what used to be two: `CYCLE_MODES`
-  (reachable by keystroke), `GATED_MODES` (confirms), `PERSISTABLE_MODES`
-  (storable), `UNASKED_MODES` (chip must warn about).
+- The permission-mode cycler reaches `auto` and `bypassPermissions` (previously 3 of 6 modes). Cycle order: `default → acceptEdits → plan → auto → bypassPermissions → default`. `dontAsk` stays off the cycle, reachable only via `/mode dontAsk` with confirmation.
+- The chip matches Claude Code's own glyphs and colours, read out of the installed CLI binary. It moved to first position so it never falls off an overflowing row, and is bold red for the two modes that stop asking.
+- Entering a mode that stops asking writes a transcript line, not just a chip change.
+- `/mode auto` and `/mode bypassPermissions` no longer confirm; `/mode dontAsk` still does.
+- The persisted default setting still accepts only the three safest modes — cycling into bypass is per-session and never saved.
+- Four constants replace two: `CYCLE_MODES`, `GATED_MODES`, `PERSISTABLE_MODES`, `UNASKED_MODES`.
 
 ## 0.48.0 — 2026-08-25
-
-Five changes to the beliefs chip/picker, requested after living with the
-v0.46.0 browser.
-
-- Picker rows now show `HH:MM` alongside the date (year dropped only for
-  a belief from the current year, to stay inside the picker's 72-column
-  floor); tested beliefs sort to the top of their scope group there too,
-  matching the browser's existing order.
-- Scope groups in the picker fold, with headers showing counts (`project
-  (412 beliefs, 3 tested)`) — collapsed by default above the widget's own
-  max-height, expanded below it. Filtering ignores fold state, since the
-  matcher always scores the whole row set.
-- Added real per-belief actions: `confirmed`/`contradicted`/`stale`/
-  `retract`, one keystroke each in the browser, or via a per-belief menu
-  in the picker (not a bulk button, since `ChipPicker` rows have no space
-  for one). Deliberately not "approve/reject" — those are proposal-only
-  verbs from v0.46.0; a belief already in the store needs a different
-  vocabulary. Recording an outcome matters because 97.6% of a live
-  store's active beliefs had never been tested by anything, and every
-  confidence figure in the product is calibrated against that ledger.
-- Retract requires arming (two actions, since it's destructive and pulls
-  the belief from the model's context); recording an outcome is a single
-  action, since a later outcome can supersede it. No bulk actions
-  anywhere — one belief per call, enforced at the API and the wire
-  protocol.
-- Both surfaces degrade to read-only, with a banner naming why, when the
-  loaded `lore_core` can't record the write honestly — checked by
-  measuring actual capability, not a version string, since a Claude Code
-  plugin checkout can shadow the pinned package version.
+- Picker rows show `HH:MM` alongside the date (year dropped only for a current-year belief, to stay inside the 72-column floor); tested beliefs sort to the top of their scope group.
+- Scope groups fold, with headers showing counts (`project (412 beliefs, 3 tested)`) — collapsed above the widget's max-height, expanded below it.
+- Per-belief actions added: `confirmed`/`contradicted`/`stale`/`retract`, one keystroke each in the browser or via a per-belief menu in the picker.
+- Retract requires arming; recording an outcome is a single action, since a later outcome can supersede it.
+- Both surfaces degrade to read-only with a banner naming why when the loaded `lore_core` cannot record the write — measured by capability, not a version string.
 
 ## 0.47.0 — 2026-08-25
-
-Three workstreams landed together: the permission-mode surface below, a
-needs-input/server-tool defect fix (see the 0.43.0 entry, which shipped
-in this same tree), and two status-line fixes.
-
-- Added a permission-mode chip and Shift+Tab cycle across the three safe
-  modes (`default → acceptEdits → plan`). Ctrl+Tab was requested but is
-  unsendable on terminals using the legacy key encoding, so Shift+Tab
-  (which every terminal sends) is primary; Ctrl+Tab is bound as a
-  secondary and `/help` marks it `✗` with a footnote where it fails.
-- The cycle cannot reach `bypassPermissions`, `auto`, or `dontAsk` — each
-  removes the human from the approval loop. Those are reachable only
-  through `/mode <name>`, which requires typing `y` to confirm (not
-  Enter, deliberately, since Enter is a reflex key on this dialog) and
-  states what stops happening rather than asking "are you sure?".
-- The mode syncs across daemon clients (`set_permission_mode` RPC,
-  broadcast on change) and rides the hello frame, so a reattaching client
-  sees the current mode before painting anything.
-- The persisted default setting accepts only the three cycle-safe modes.
-  (v0.50.0 later widened the cycle itself to include `auto` and
-  `bypassPermissions`.)
-- Also fixed: the project memory-fill chip vanished for every
-  worktree-based session, since it resolved the project slug from the
-  raw cwd instead of the main repo root; and a release codename was
-  rendering as a subscription-plan name.
+- Added a permission-mode chip and Shift+Tab cycle across the three safe modes (`default → acceptEdits → plan`). Ctrl+Tab is unsendable on terminals using the legacy key encoding.
+- The cycle cannot reach `bypassPermissions`, `auto` or `dontAsk`; those need `/mode <name>` and a typed `y` to confirm.
+- The mode syncs across daemon clients (`set_permission_mode` RPC, broadcast on change) and rides the hello frame, so a reattaching client sees it before painting.
+- The persisted default accepts only the three cycle-safe modes.
+- Fix the project memory-fill chip vanishing for every worktree-based session: it resolved the project slug from the raw cwd instead of the main repo root.
+- Fix a release codename rendering as a subscription-plan name.
 
 ## 0.46.0 — 2026-08-25
-
-Added the beliefs browser: a full-height tab listing every belief and
-staged proposal, since the existing dropdown couldn't make hundreds of
-proposals reviewable.
-
-- Belief rows show creation date plus LORE's last recorded verdict on
-  that belief (`confirmed 2d`, `contradicted 2d`, `stale 40d`) rather
-  than time-since-last-referenced, which the first draft used and was
-  corrected before shipping: being cited by the model isn't evidence a
-  claim is still true, only a recorded outcome is. "Never tested" renders
-  as those literal words, not a large age — measured at ~97.6% of a live
-  store's active beliefs never tested by anything, so treating it as
-  "stale" would assert something false.
-- Tested beliefs sort first within their scope group, most-recently-tested
-  first; never-tested beliefs form a stable bucket after them.
-- Every proposal row shows its computed verdict up front (`add →
-  memory/user`, `retract → belief #42`, etc.), derived from the same
-  function that actually applies it, so the verdict can never disagree
-  with the write.
-- Approve/reject added per row (`/pending` had been read-only since
-  v0.31.0, pending a LORE security review that concluded with LORE
-  0.36.0's write gate and provenance ledger). Approve arms on first
-  press, applies on second; reject is a single action — the irreversible
-  one costs two deliberate acts. No bulk actions anywhere.
-- The browser degrades to read-only, with a banner naming why, when the
-  loaded `lore_core` can't record a write honestly — measured by
-  capability probe (does `belief_insert`/`memory_add` accept `via=`),
-  never inferred from a version string.
-- Full claim text and evidence trails load on hover/expand rather than
-  up front: evidence is fetched per belief on expand, capped at 40 rows,
-  since a store can hold hundreds of beliefs and a trail is unbounded.
+- Added the beliefs browser: a full-height tab listing every belief and staged proposal, since the dropdown could not make hundreds of proposals reviewable.
+- Belief rows show creation date plus LORE's last recorded verdict (`confirmed 2d`, `contradicted 2d`, `stale 40d`) rather than time-since-last-referenced.
+- Tested beliefs sort first within their scope group, most-recently-tested first; never-tested beliefs form a stable bucket after them.
+- Every proposal row shows its computed verdict up front (`add → memory/user`, `retract → belief #42`), derived from the function that applies it, so the verdict cannot disagree with the write.
+- Approve/reject added per row; `/pending` had been read-only since 0.31.0.
+- The browser degrades to read-only with a banner naming why when the loaded `lore_core` cannot record a write — measured by capability probe, never inferred from a version string.
+- Claim text and evidence trails load on expand, capped at 40 rows.
 
 ## 0.44.0 — 2026-08-25
 
@@ -819,158 +205,43 @@ proposals reviewable.
   and `≈` marker, and is spelled out in full in the tooltip and `/usage`.
 
 ## 0.43.0 — 2026-08-25
-
-*(Scoped and written as 0.43.0, landed after 0.44.0; the version number
-reflects when the work was scoped, not ship order.)*
-
-A web search appeared to hang, and the permission dialog answering it had
-gone completely unresponsive to every key, including Esc — one defect,
-not two. The dialog is answered entirely through the prompt's own
-key-handling and requires the prompt to hold focus; three ordinary
-gestures (clicking an already-active tab, clicking the transcript, a
-stray Tab keypress) could move focus elsewhere while the dialog stayed
-open with no way back in.
-
-- Opening a blocking dialog now claims focus for that pane's prompt, but
-  only when it's the active tab, so a background request doesn't yank
-  focus from someone typing in another tab. A net at the app level also
-  returns focus to the prompt if it drifts away while a dialog is open on
-  the active pane.
-- Separately: server-side tool calls (`ServerToolUseBlock`/
-  `ServerToolResultBlock` — tools the API runs on the model's behalf, not
-  client-side tools like WebSearch) weren't rendered at all; the call
-  drew no chip and the result vanished with no error. Both now render
-  onto the existing tool-call chip machinery rather than a new event
-  type.
+- Fix a web search appearing to hang with its permission dialog unresponsive to every key. Opening a blocking dialog now claims focus for that pane's prompt, but only when it is the active tab, so a background request does not take focus from someone typing elsewhere.
+- Fix server-side tool calls (`ServerToolUseBlock`/`ServerToolResultBlock` — tools the API runs on the model's behalf) not being rendered at all.
+- Scoped as 0.43.0, landed after 0.44.0; the number reflects when the work was scoped.
 
 ## 0.41.0 — 2026-08-25
-
-The startup banner now draws the actual DOXA logo through the existing
-terminal-image ladder (kitty/sixel/half-block/text), exercising the
-image renderer on every launch instead of leaving it mostly untested.
-
-- Logo width is derived from the terminal's own cell aspect ratio (~41
-  columns at a 6-row budget); height comes from the widget, not a
-  hardcoded constant.
-- Below 56 columns, or in text-only terminals, a hand-drawn
-  block-character wordmark ("DOXA") shows instead of the `[image: …]`
-  fallback line, since that fallback wasn't built to be a permanent first
-  line of every session.
+- The startup banner draws the DOXA logo through the existing terminal-image ladder (kitty/sixel/half-block/text), exercising the image renderer on every launch.
+- Logo width derives from the terminal's cell aspect ratio (~41 columns at a 6-row budget); height comes from the widget.
+- Below 56 columns, or in text-only terminals, a hand-drawn block wordmark shows instead of the `[image: …]` fallback line.
 - New setting `boot_banner` (default on) / `DOXA_BOOT_BANNER=0`.
-- Fixed along the way: the logo PNG is RGBA with a transparent
-  background, and the image library's RGB conversion discarded alpha
-  instead of compositing it, producing a white slab on the dark theme —
-  now flattened onto the theme background first, and cropped to its
-  non-transparent bounding box (15%/26% of the asset's width/height was
-  empty margin).
-- `/img` with no argument became the terminal-image diagnostic
-  (previously a placeholder), reporting measured vs. inferred vs.
-  never-asked capability and rendering the logo in every tier the
-  terminal can honestly support.
-- Pillow became a declared runtime dependency (already present
-  transitively via `textual-image`).
+- Fix the image library's RGB conversion discarding alpha instead of compositing it, producing a white slab on the dark theme.
+- `/img` with no argument became the terminal-image diagnostic, reporting measured against inferred against never-asked capability.
+- Pillow is now a declared runtime dependency.
 
 ## 0.39.0 — 2026-08-25
-
-Terminals using the legacy key encoding cannot send certain key
-combinations at all (e.g. `Ctrl+,`, bound to `/settings`) — DOXA now
-detects this and says so instead of leaving a documented key silently
-dead forever.
-
-- New `doxa/keyboard.py` sends the kitty keyboard protocol's own support
-  query (`\x1b[?u`) plus Primary Device Attributes at startup and
-  classifies the reply as kitty / legacy / unknown. Silence is never read
-  as "legacy" — a terminal that answers nothing might simply not be
-  listening (e.g. headless), and that says nothing about its keyboard.
-- `/about` gains a `keyboard` row (shown even when "not measured");
-  `/doctor`'s keyboard check now actually measures instead of being a
-  placeholder, treating legacy as a pass, not a failure; `/help` marks
-  unreachable bindings with `✗` and a footnote naming the working
-  fallback (the slash-command equivalent).
-- No bindings changed — this release only reports what a terminal can
-  send. `DOXA_KEYBOARD_PROTOCOL` overrides detection as an env var only
-  (no persistent setting), since a saved claim about a terminal can go
-  stale.
+- Terminals using the legacy key encoding cannot send some combinations at all (`Ctrl+,`, bound to `/settings`). DOXA now detects this and says so instead of leaving a documented key dead.
+- New **`doxa/keyboard.py`**: sends the kitty keyboard protocol's support query (`\x1b[?u`) plus Primary Device Attributes at startup and classifies the reply as kitty / legacy / unknown.
+- `/about` gains a `keyboard` row; `/doctor`'s keyboard check measures instead of being a placeholder, treating legacy as a pass.
+- No bindings changed. `DOXA_KEYBOARD_PROTOCOL` overrides detection as an env var only.
 
 ## 0.38.0 — 2026-08-25
-
-Two tab races, both caused by relying on Textual's own scheduling rather
-than explicit user intent.
-
-- Focusing a pane's prompt on mount also activated that tab as a side
-  effect (a `TabbedContent` behavior), racing against whatever else was
-  deciding the active tab — measured at ~7/40 failure rate on one flaky
-  test, and the reason a three-tab restore always landed on the last tab
-  regardless of the saved record. Fixed: mount no longer focuses;
-  `DoxaApp._focus_tab` is now the single place any explicit user action
-  (new tab, tab cycling, palette switch, restore) puts the keyboard into
-  a tab. A mouse click on a tab header is the one path with no explicit
-  handler and still triggers focus-on-activate.
-- A restore could silently forget which tab was active: `_persist_tabset`
-  read `TabbedContent.active_pane`, which resolves asynchronously, so a
-  save landing in that window wrote `null` for the active id. Fixed: it
-  now falls back to the tab it just restored to while activation is
-  still pending.
+- Fix focusing a pane's prompt on mount also activating that tab as a `TabbedContent` side effect, racing whatever else was deciding the active tab.
+- Fix a restore forgetting which tab was active: `_persist_tabset` read `TabbedContent.active_pane`, which resolves asynchronously, so a save landing in that window wrote `null`.
 
 ## 0.37.0 — 2026-08-25
-
-A bare clone of this repo couldn't run its own test suite: `lore_core`
-(DOXA's memory model) was never a declared dependency, only resolved by
-reaching into a separately-installed LORE Claude Code plugin checkout —
-41 of 52 test modules failed at collection on a machine without that
-plugin.
-
-- `pyproject.toml` now declares `lore-core` as a pinned git dependency
-  (LORE shipped its first `pyproject.toml`, as LORE 0.35.1, to make this
-  possible).
-- A LORE plugin checkout still wins over the pinned package when present
-  — both write to the same store, and the plugin is the busier writer —
-  but `DOXA_LORE_SOURCE=package` forces the pinned dependency, for
-  reproducing a bug against exactly what CI runs.
-- `/about` gains a `lore from` row (`plugin` or `package`, with path),
-  measured off `lore_core.__file__` rather than restated from the
-  precedence rule.
-- CI's workaround (checking LORE out alongside DOXA on every leg) was
-  removed; two legs now run the true bare-clone case, one leg
-  deliberately checks LORE out to exercise the other precedence branch.
+- `pyproject.toml` declares `lore-core` as a pinned git dependency; a bare clone previously could not run its own suite, resolving `lore_core` only through a separately-installed LORE plugin checkout.
+- A LORE plugin checkout still wins over the pinned package when present; `DOXA_LORE_SOURCE=package` forces the dependency.
+- `/about` gains a `lore from` row (`plugin` or `package`, with path), measured off `lore_core.__file__`.
+- CI's workaround of checking LORE out on every leg is removed; two legs run the bare-clone case, one checks LORE out.
 
 ## 0.36.0 — 2026-08-25
-
-Two additions: `/context`, a breakdown of what's occupying the context
-window, and `!`, a shell-command escape.
-
-- `/context` shows token counts by category (system prompt, tools,
-  messages, free space), loaded `CLAUDE.md` files, and per-MCP-tool cost
-  — every figure is the CLI's own accounting (`get_context_usage`), never
-  estimated; a category with no reported count is omitted, never
-  rendered as a guessed zero. One shared cache/call backs both this and
-  the existing ctx% chip, so the two can never disagree.
-- `!<command>` runs a real shell command in the session's own directory
-  with the user's full privileges — no sandbox, no allowlist, no
-  confirmation. Deliberately not a slash command (the registry is
-  dispatchable by name from things other than a keystroke, e.g. a future
-  plugin row) and not a tool (absent from the model-facing tool list, so
-  the model can never invoke it). Output never enters the model's context
-  and is never persisted to the transcript. Capped at 64 KB output and
-  120 s runtime (whole process group killed after); stdin is `/dev/null`.
+- New `/context`: token counts by category (system prompt, tools, messages, free space), loaded `CLAUDE.md` files and per-MCP-tool cost. Every figure is the CLI's own `get_context_usage`, never estimated.
+- New `!<command>`: runs a shell command in the session's directory with the user's full privileges — no sandbox, no allowlist, no confirmation. Deliberately not a slash command.
 
 ## 0.35.0 — 2026-08-25
-
-Two items: absolute context-usage numbers, and `/about`.
-
-- The ctx% chip's tooltip now always shows the absolute token count
-  (`24,000 of 200,000 tokens used, 176,000 left`); an inline `24k/200k`
-  form is available via the new `ctx_absolute` setting (off by default,
-  hidden below 100 columns). An unreported context-window limit renders
-  as `?` rather than falling back to a guessed 200000.
-- `/about`: a modal with version, Python/Textual/SDK versions, LORE
-  plugin version and store path, platform, config path, and repo/license
-  — every row is measured, omitted (never guessed) when unmeasurable, and
-  copyable via `c`.
-- Fixed a tooltip lookup bug: the ctx chip's hover hint was keyed against
-  its own markup while the lookup matched against markup-stripped text,
-  so the hint silently vanished exactly at the colored, highest-alert
-  tiers.
+- The ctx% chip's tooltip always shows the absolute token count (`24,000 of 200,000 tokens used, 176,000 left`); an inline `24k/200k` form is available via new setting `ctx_absolute` (off by default, hidden below 100 columns).
+- New `/about`: version, Python/Textual/SDK versions, LORE plugin version and store path, platform, config path, repo and licence. Every row measured, omitted when unmeasurable, copyable via `c`.
+- Fix the ctx chip's hover hint being keyed against its own markup while the lookup matched markup-stripped text, so the hint vanished at the coloured, highest-alert tiers.
 
 ## 0.34.0 — 2026-08-24
 
@@ -998,52 +269,17 @@ rather than zero (delete), so a sidecar already broken by this bug
 recovers on its next session end instead of losing work.
 
 ## 0.32.0 — 2026-08-24
-
-Restore previously brought back the tab list but not the actual content.
-Four defects, each measured before fixing:
-
-- A restored tab reattaching to its still-live daemon replayed only the
-  daemon's in-memory ring (512 frames), so a session longer than that
-  came back empty. Fixed: restored scrollback now reads from the
-  session's own persisted transcript file on disk, which is complete,
-  already scrubbed, and outlives the daemon; the ring is now used only to
-  skip to the current head, never replayed on top of it.
-- A saved session whose daemon had since ended was dropped from the tab
-  set entirely rather than shown; it now comes back as a read-only
-  `ArchivedSessionTab` (same strip, same order, marked `⏺`) whenever a
-  transcript exists on disk.
-- With three or more restored tabs, the saved *active* tab lost to
-  whichever pane happened to mount last, because every restored pane's
-  prompt-focus-on-mount raced for tab activation. Fixed by focusing only
-  the one saved-active pane during restore.
-- An out-of-band event arriving before a pane finished composing could
-  raise inside its event pump and kill that pump silently for the rest of
-  the tab's life; a status-bar repaint failure there can no longer end
-  the pump.
-- Restore now renders capped content (40 turns, 20,000 characters per
-  turn, 30 tool chips per turn) with an explicit "not shown" note, never
-  silently truncated as if complete.
-- Splits are not restored, because DOXA has no split-pane layout yet; the
-  persisted record format now reserves a `layout` slot for one.
+- Fix a restored tab reattaching to its live daemon replaying only the daemon's 512-frame in-memory ring, so a longer session came back empty.
+- A saved session whose daemon has ended comes back as a read-only `ArchivedSessionTab` (same strip, same order, marked `⏺`) whenever a transcript exists on disk, instead of being dropped.
+- Fix the saved active tab losing to whichever pane mounted last with three or more restored tabs.
+- Fix an out-of-band event arriving before a pane finished composing killing that pane's event pump for the life of the tab.
+- Restore renders capped content (40 turns, 20,000 chars per turn, 30 tool chips per turn) with an explicit "not shown" note.
+- Splits are not restored; the persisted record reserves a `layout` slot.
 
 ## 0.31.0 — 2026-08-24
-
-Staged LORE proposals from the background reviewer had no reliable
-notification path.
-
-- Added `notify_staged` (default on): fires only while the DOXA window is
-  unfocused, tints the owning tab a steady muted violet — not a blink,
-  since nothing is blocked or expiring. Also silences the LORE plugin's
-  own duplicate notifier while this is on, to avoid two banners for one
-  event.
-- The notification block now shows the actual staged proposal texts
-  (diffed against the pre-review pending list, so it shows what *this*
-  review added), capped at 8 rows / 160 characters / 8 KB.
-- Added `/pending` (previously the only hint pointed at
-  `/lore:pending`, a Claude Code plugin command that doesn't exist inside
-  DOXA): a read-only list/preview. No approve/reject yet — the write path
-  was still under security review at this point (it landed in LORE
-  0.36.0 / DOXA 0.46.0).
+- New `notify_staged` (default on): fires only while the DOXA window is unfocused and tints the owning tab a steady muted violet.
+- The notification block shows the actual staged proposal texts, diffed against the pre-review pending list, capped at 8 rows / 160 chars / 8 KB.
+- New `/pending`: a read-only list and preview. The previous hint pointed at `/lore:pending`, a plugin command that does not exist inside DOXA.
 
 ## 0.29.0 — 2026-08-24
 
@@ -1061,47 +297,16 @@ text becomes near-invisible against a light one (measured contrast
 1.1–1.6:1 vs. 13–17:1 on dark), which the README now says plainly.
 
 ## 0.28.0 — 2026-08-24
-
-Three operator-reported defects in the previous release's status-bar chip
-work.
-
-- Confirm dialogs (ctx% compact, Ctrl+Q-with-turn-running) had invisible
-  buttons and dead Enter: `height: 1; padding-top: 1` under Textual's
-  border-box model rendered the button row at zero content height. Fixed
-  to `height: auto`; Enter now takes the action the dialog was opened to
-  confirm, and each button labels its own key.
-- Clicking the beliefs chip errored ("too much for a message") instead of
-  opening its dropdown: a detached session's belief list crossed the
-  daemon socket as one oversized frame (500 beliefs measured at 230 KB,
-  3.6× the 64 KB cap) and got replaced wholesale with an error. Fixed by
-  paging the `beliefs` RPC (100 rows/frame) and having the client loop
-  until exhausted — paged at the transport, not lazily by scroll
-  position, since the picker's filter matches across the whole row set
-  and a partially-loaded list would make the filter lie.
-- Picking a branch from the picker appeared to do nothing: the status bar
-  showed the checked-out branch, but the picker changes the session's
-  *base* branch, which in a worktree-per-session setup is a different
-  string — the switch was actually succeeding. Fixed by having the
-  status-bar segment show the base (what it's a selector for), moving the
-  checked-out branch into its tooltip.
+- Fix confirm dialogs (ctx% compact, Ctrl+Q with a turn running) having invisible buttons and dead Enter: `height: 1; padding-top: 1` rendered the button row at zero content height under Textual's border-box model.
+- Fix clicking the beliefs chip erroring instead of opening its dropdown: a detached session's belief list crossed the daemon socket as one oversized frame (500 beliefs measured at 230 KB against a 64 KB cap).
+- Fix picking a branch from the picker appearing to do nothing: the status bar showed the checked-out branch, but the picker changes the session's base branch.
 
 ## 0.27.0 — 2026-08-24
-
-Five status-bar chip revisions in one release:
-
-- The ctx% chip now confirms before compacting (previously one click sent
-  `/compact` immediately, with no undo).
-- The session-handle chip opens a sessions picker (live + detached,
-  current marked) instead of only copying to clipboard; copying moved to
-  the picker's first row.
-- The beliefs chip is now clickable, opening a scope-grouped, filterable
-  picker (`user`, `user model`, `project`) — a lightweight viewer only,
-  not the full beliefs browser (that landed later, in v0.46.0).
-- The repo-name chip becomes a directory-walking picker: selecting a
-  plain directory descends, selecting a git repo root opens it in a new
-  tab.
-- Every chip, including inert ones (cost, sha, headroom), gained a
-  tooltip explaining what its number means.
+- The ctx% chip confirms before compacting; one click previously sent `/compact` with no undo.
+- The session-handle chip opens a sessions picker (live and detached, current marked); copying moved to the picker's first row.
+- The beliefs chip is clickable, opening a scope-grouped, filterable picker (`user`, `user model`, `project`).
+- The repo-name chip becomes a directory-walking picker: a plain directory descends, a git repo root opens in a new tab.
+- Every chip, including inert ones (cost, sha, headroom), gained a tooltip.
 
 ## 0.25.0 — 2026-08-24
 
@@ -1233,20 +438,7 @@ bold, code) via Textual's append-only markdown stream rather than plain
 text.
 
 ## 0.12.0 — 2026-08-24
-
-Audited DOXA's cost figures against real API usage before building
-further on them: `total_cost_usd` (server-computed) was confirmed
-authoritative and kept as-is, matching hand-priced arithmetic on the
-unisolated engine path but running ~32–34% higher than hand-priced
-arithmetic on the isolated path — attributed to the published cache-read
-discount being an approximation, not a bug in what the SDK reports.
-Confirmed isolation (v0.10.0's CLI sandboxing) costs a negligible ~0.09%
-in extra prompt tokens, not a saving. Fixed: the per-turn cost line in
-each turn's title showed a bare dollar figure unconditionally, even on
-subscription auth where the account pays nothing — now shows `≈$X if
-API` on subscription auth, matching the status bar and `/usage`. Added an
-`effort:<level>` status chip (connect-time value only, hidden when no
-level was set).
+- Audited DOXA's cost figures against real API usage: `total_cost_usd` (server-computed) was confirmed authoritative and kept, matching hand-priced arithmetic on the unisolated engine path.
 
 ## 0.11.0 — 2026-08-24
 
