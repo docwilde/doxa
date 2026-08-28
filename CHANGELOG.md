@@ -4,6 +4,62 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.85.0 — 2026-08-28
+
+**Session lifecycle and keybindings, four independent defects from live use.**
+
+- Fix **desktop notification fires on turn-done, not on input-required**:
+  `doxa.notify.notify_turn_done` and its call site
+  (`SessionPane._on_turn_done_status`) removed outright — a finished
+  response is never notification-worthy, only a turn genuinely blocked on
+  the user is (`notify_needs_input`, unchanged wiring). `notify_needs_input`
+  now defaults **OFF** (`kind="bool"` in `config.SETTINGS`, was `bool_on`);
+  `doxa.notify.should_fire` reads each trigger's default straight off the
+  registry (`_trigger_default`) instead of hardcoding one, so the setting
+  and its runtime default can never drift apart.
+- Fix **Ctrl+C stole terminal copy**: the app-level quit-detach/quit-stop
+  double-press binding is gone (`action_ctrl_c_quit`, `CTRL_C_DOUBLE_SECS`,
+  `_ctrl_c_timer` removed). `DoxaApp.__init__` also explicitly pops
+  Textual's own default `ctrl+c` binding (`App.BINDINGS` carries one,
+  `system=True`) out of `self._bindings` — a same-key override alone only
+  shadows it, per `DOMNode._merge_bindings`. Ctrl+Q (per tab) and the
+  command palette ("Quit: detach" / "Quit: stop session") cover what
+  Ctrl+C used to; `/help` no longer mentions it.
+- Fix **closing the last tab didn't start the next launch fresh**:
+  `DoxaApp._close_pane` now excludes the closing session from the
+  persisted restore set (`_persist_tabset`'s new `exclude_session_id`)
+  when it is the LAST open tab, on either key — previously both Ctrl+Q
+  (ended) and Ctrl+W (detached) sessions stayed in the record even with
+  nothing else open, so the next launch came back to an archived
+  read-only tab (Ctrl+Q) or a silently auto-reattached live one (Ctrl+W)
+  instead of starting clean. Ctrl+W's session still runs and is
+  reattachable by name (`/attach`, the peers chip) against the live
+  daemon registry; a toast on close now names the tab and says so, where
+  before it detached in total silence.
+- Fix **a background `AssertionError` on that same last-tab close**,
+  found while hardening the fix above: `SessionPane._peer_pump` asserted
+  `self.engine is not None` right after awaiting `_engine_ready`, but the
+  worker is created (`run_worker`, in `on_mount`) alongside `_boot` with
+  no guaranteed ordering between them — `_boot` sets `_session_id` (what
+  every close-path test waits on) *before* `_engine_ready` (a
+  naming-cache lookup sits between the two). `detach()`/`stop()` clear
+  `self.engine` immediately without cancelling this worker, so a close
+  landing in that window let the assertion fire after `_engine_ready`
+  released it, surfacing as a visible in-app error block on an ordinary
+  Ctrl+Q/Ctrl+W. Pre-existing on both close paths, not introduced by the
+  fix above — now a plain early return: nothing left to pump.
+- Fix **Ctrl+Left/Right skipped read-only tabs**: `_cycle_tab` walked
+  `panes()` (session tabs only); a finished archived tab or an open
+  subagent transcript sitting right in the strip was never reachable by
+  keyboard. New `_cyclable_tabs()` (every `TabPane`, strip order) fixes
+  the walk; `_focus_tab` also now gives the two read-only tab kinds their
+  own `.scroll` focus target, closing a Textual `AUTO_FOCUS` gap
+  (`App.AUTO_FOCUS = "*"`, unscoped by which tab is visible) that
+  silently reverted the cycle back to a SessionPane's prompt in a
+  different, hidden tab.
+
+Full suite: **1469 passed**.
+
 ## 0.84.0 — 2026-08-28
 
 **The belief graph reaches the model.** LORE has carried typed relations
