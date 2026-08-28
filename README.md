@@ -55,6 +55,16 @@ standalone Claude Code plugin; DOXA compiles it in-process
 (`lore_core`, imported, not shelled out to) rather than requiring the
 plugin to be installed — one memory model, two front ends.
 
+Since LORE 0.41.0 the belief store also carries typed edges *between*
+beliefs — `depends_on`, `specializes`, `explains`, `contradicts`,
+`applies_when` — derived the same way beliefs themselves are, with
+support counted in distinct sessions and a path's confidence the product
+of its hops, so a long chain of plausible steps is weak by construction.
+Structure earns no authority: a belief reached by following an edge is
+still CITE-only unless it earned STEER on its own. DOXA gets this because
+it imports `lore_core` in-process — available to the engine, not yet
+surfaced in the interface.
+
 δόξα (*dóxa*): belief, opinion — as distinct from ἐπιστήμη (*epistēmē*),
 justified knowledge. The name is the thesis: belief is the raw material,
 never the finished thing.
@@ -88,9 +98,10 @@ the same way, by [`scripts/screenshot.py`](scripts/screenshot.py) and
   gets its own status row and a live, read-only transcript tab; once it
   finishes, the same activity folds into a tree under its parent chip.
 - **Memory that is inert until it earns influence.** LORE's `lore_core`
-  runs in-process: curated memory, an uncapped belief store, and one write
-  path — a human approving a staged proposal, one row at a time. Nothing
-  reaches the model's context unsupervised. See
+  runs in-process: curated memory, an uncapped belief store threaded with
+  typed relations between beliefs, and one write path — a human approving
+  a staged proposal, one row at a time. Nothing reaches the model's
+  context unsupervised. See
   [LORE integration](docs/manual.md#lore-integration).
 - **A shell the model cannot reach.** A prompt line starting with `!` runs
   in this session's own worktree with your full privileges and no

@@ -235,7 +235,7 @@ wheels = [
 
 [[package]]
 name = "doxa"
-version = "0.81.0"
+version = "0.82.0"
 source = { editable = "." }
 dependencies = [
     { name = "claude-agent-sdk" },
@@ -255,7 +255,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "claude-agent-sdk", specifier = ">=0.2.144" },
-    { name = "lore-core", git = "https://github.com/docwilde/LORE?rev=v0.39.0" },
+    { name = "lore-core", git = "https://github.com/docwilde/LORE?rev=v0.42.1" },
     { name = "pillow", specifier = ">=11" },
     { name = "textual", specifier = ">=5,<6" },
     { name = "textual-image", specifier = ">=0.12.0" },
@@ -374,8 +374,8 @@ wheels = [
 
 [[package]]
 name = "lore-core"
-version = "0.39.0"
-source = { git = "https://github.com/docwilde/LORE?rev=v0.39.0#38f993d18d5f7e9312cf840d6c385cd60861f18c" }
+version = "0.42.1"
+source = { git = "https://github.com/docwilde/LORE?rev=v0.42.1#80fbaabcc9afd1ab711b3869db9afc8bcef6db6c" }
 
 [[package]]
 name = "markdown-it-py"
