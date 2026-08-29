@@ -15,6 +15,7 @@ docs/plans/plugin-api.md's second extension point.
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 from textual import events
@@ -481,9 +482,53 @@ class StatusBar(Static):
         # SessionPane._refresh_status alongside the markup string itself,
         # so the two can never drift out of sync with each other.
         self._chip_hints: "list[tuple[str, str]]" = []
+        # v0.89.0: this row is also the pane's DIVIDER (see
+        # SessionPane.nudge_prompt). Screen y of the last drag position,
+        # None while nothing is being dragged.
+        self._drag_from: "int | None" = None
 
     def set_chip_hints(self, hints: "list[tuple[str, str]]") -> None:
         self._chip_hints = hints
+
+    # -- the divider, dragged (v0.89.0) -------------------------------
+    #
+    # Requested in exactly these words: "we should be able to drag the
+    # status line and resize the belief browser and input line". This row
+    # sits between the transcript and the prompt (SessionPane.compose
+    # yields #block-list, then this, then the popups, then #prompt-input),
+    # so it does not need a handle invented for it -- it IS the handle.
+    # The keyboard half is Ctrl+Up/Ctrl+Down on the app, because a
+    # mouse-only control is unreachable for a user driving DOXA by
+    # keyboard, which is most users most of the time.
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        # capture_mouse: a drag that leaves the one-row bar (which it does
+        # immediately -- the point is to move it) must keep delivering
+        # MouseMove here rather than to whatever is now under the cursor.
+        self._drag_from = event.screen_y
+        self.capture_mouse(True)
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        if self._drag_from is None:
+            return
+        delta = event.screen_y - self._drag_from
+        if not delta:
+            return
+        # Down is +y and grows the PROMPT; up grows the transcript. Same
+        # sign convention as Ctrl+Down / Ctrl+Up, deliberately: one
+        # divider, one direction rule, two ways to reach it.
+        if self.pane.nudge_prompt(delta):
+            self._drag_from = event.screen_y
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        if self._drag_from is None:
+            return
+        self._drag_from = None
+        self.capture_mouse(False)
+        # A drag is a state change with no keystroke behind it, so nothing
+        # else will persist it -- see DoxaApp._persist_tabset.
+        with contextlib.suppress(Exception):
+            self.app._persist_tabset()
 
     def _tooltip_for_x(self, x: int) -> "str | None":
         """Which chip's tooltip covers status-bar-relative `x` -- the SAME

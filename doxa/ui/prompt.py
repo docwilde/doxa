@@ -202,6 +202,10 @@ class PromptInput(TextArea):
         # time regardless of whether the operator ever expanded it to
         # look. See doxa/paste.py for the collapse threshold and format.
         self._pending_pastes: list[tuple[str, str]] = []
+        #: Content rows the in-pane divider has pinned this box to, or
+        #: ``None`` for the content-driven height DOXA has always had.
+        #: Written only by ``SessionPane._apply_prompt_ratio``.
+        self.pinned_rows: "int | None" = None
         self.styles.height = self.MIN_ROWS + 2  # +2: the round border
 
     def action_noop(self) -> None:
@@ -296,9 +300,25 @@ class PromptInput(TextArea):
         rows -- past the cap TextArea's own vertical scrolling takes over
         instead. Uses the WRAPPED row count (``wrapped_document.height``),
         not the raw newline count, so a long single line (soft-wrapped)
-        grows the box the same way embedded newlines would."""
-        rows = max(self.MIN_ROWS, min(self.MAX_ROWS, self.wrapped_document.height))
-        self.styles.height = rows + 2  # +2: the round border, top and bottom
+        grows the box the same way embedded newlines would.
+
+        :attr:`pinned_rows` overrides the whole calculation (v0.89.0): the
+        in-pane divider is the status bar right above this box, and once
+        the user has MOVED it the box's height is a layout decision they
+        made, not one the content gets to keep re-taking. The cap does not
+        apply to a pinned height either -- the point of dragging the
+        divider down is to get more than ten rows of prompt."""
+        rows = (
+            self.pinned_rows if self.pinned_rows
+            else max(self.MIN_ROWS, min(self.MAX_ROWS, self.wrapped_document.height))
+        )
+        self.styles.height = max(self.MIN_ROWS, rows) + 2  # +2: the round border
+
+    def sync_height(self) -> None:
+        """:meth:`_resize_to_content` under a name the pane may call --
+        :meth:`doxa.session.pane.SessionPane._apply_prompt_ratio` moves the
+        divider and then needs the box repainted at its new height."""
+        self._resize_to_content()
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         # Deliberately NOT stopped: SessionPane's own ``@on(TextArea.Changed,
