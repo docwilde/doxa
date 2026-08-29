@@ -390,7 +390,7 @@ async def test_the_tab_changes_and_does_not_blink(monkeypatch, tmp_path):
     async with app.run_test() as pilot:
         await pilot.pause()
         pane = app.active_pane
-        tab = app.query_one("#session-tabs", TabbedContent).get_tab(pane.id)
+        tab = app.query_one("#session-tabs", TabbedContent).get_tab(pane.tab_id)
         assert not tab.has_class("-staged")
         fake.push_peer_event(DERIVE_EVENT)
         assert await _wait(pilot, lambda: tab.has_class("-staged"))
@@ -415,13 +415,13 @@ async def test_looking_at_the_tab_clears_the_staged_tint(monkeypatch, tmp_path):
         await pilot.pause()
         first_pane = app.active_pane
         tabs = app.query_one("#session-tabs", TabbedContent)
-        first_tab = tabs.get_tab(first_pane.id)
+        first_tab = tabs.get_tab(first_pane.tab_id)
         await app.action_new_tab()
         await pilot.pause()
         assert app.active_pane is not first_pane
         first_engine.push_peer_event(DERIVE_EVENT)
         assert await _wait(pilot, lambda: first_tab.has_class("-staged"))
-        tabs.active = first_pane.id
+        tabs.active = first_pane.tab_id
         assert await _wait(pilot, lambda: not first_tab.has_class("-staged"))
 
 
@@ -590,7 +590,7 @@ async def test_opening_the_list_clears_the_staged_tint(monkeypatch, tmp_path):
     async with app.run_test() as pilot:
         await pilot.pause()
         pane = app.active_pane
-        tab = app.query_one("#session-tabs", TabbedContent).get_tab(pane.id)
+        tab = app.query_one("#session-tabs", TabbedContent).get_tab(pane.tab_id)
         fake.push_peer_event(DERIVE_EVENT)
         assert await _wait(pilot, lambda: pane.staged_pending)
         await pane.open_pending_picker()

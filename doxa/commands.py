@@ -103,6 +103,20 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette="Peers: list",
     ),
     SlashCommand(
+        name="/split",
+        group="Panes & tabs",
+        summary="Split this pane — a second session STACKED BELOW it "
+                "(Ctrl+Shift+H)",
+        palette="Split: stacked",
+    ),
+    SlashCommand(
+        name="/vsplit",
+        group="Panes & tabs",
+        summary="Split this pane — a second session SIDE BY SIDE with it "
+                "(Ctrl+Shift+V)",
+        palette="Split: side by side",
+    ),
+    SlashCommand(
         name="/msg",
         group="Panes & tabs",
         summary="Send a message to one same-project peer session",

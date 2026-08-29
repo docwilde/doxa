@@ -228,7 +228,7 @@ async def test_reclicking_a_running_subagent_focuses_the_open_tab(tmp_path):
         # label again -- it should refocus the SAME tab rather than
         # opening a second one.
         tabbed = app.query_one("#session-tabs", TabbedContent)
-        await pilot.click(tabbed.get_tab(pane.id))
+        await pilot.click(tabbed.get_tab(pane.tab_id))
         await pilot.pause()
         assert app.active_pane is pane
 
@@ -285,7 +285,7 @@ async def test_completion_marks_done_and_unseen_in_background(tmp_path):
         # Step away from the transcript tab BEFORE it finishes (a real
         # click on the session tab's own header).
         tabbed = app.query_one("#session-tabs", TabbedContent)
-        await pilot.click(tabbed.get_tab(pane.id))
+        await pilot.click(tabbed.get_tab(pane.tab_id))
         await pilot.pause()
         assert app.active_pane is pane
 
@@ -404,7 +404,7 @@ async def test_closing_the_session_takes_its_open_transcript_tabs_with_it(tmp_pa
         await app.action_new_tab()
         assert await _wait(pilot, lambda: len(app.panes()) == 2)
         pane, tab = await _start_and_open(app, pilot)
-        second_pane_id = pane.id
+        second_pane_id = pane.tab_id
         second_engine = engines[-1]
 
         # Switch focus back onto the SESSION tab itself (the transcript

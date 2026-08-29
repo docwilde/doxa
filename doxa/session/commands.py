@@ -32,6 +32,7 @@ from .. import auth as auth_mod
 from .. import config as config_mod
 from .. import history as history_mod
 from .. import identity as identity_mod
+from .. import layout as layout_mod
 from .. import peers as peers_mod
 from .. import version as version_mod
 from ..peers import PeerSendError, age_secs
@@ -98,6 +99,8 @@ PANE_COMMANDS: "tuple[CommandBinding, ...]" = (
     CommandBinding("/usage", "_cmd_usage"),
     CommandBinding("/context", "_cmd_context"),
     CommandBinding("/clear", "_cmd_clear"),
+    CommandBinding("/split", "_cmd_split"),
+    CommandBinding("/vsplit", "_cmd_vsplit"),
     CommandBinding("/detach", "_cmd_detach"),
     CommandBinding("/attach", "_cmd_attach"),
     CommandBinding("/sessions", "_cmd_sessions"),
@@ -728,6 +731,28 @@ class PaneCommandsMixin:
         self.run_worker(
             self.switch_engine(factory), exclusive=True, group="switch"
         )
+
+    async def _cmd_split(self, args: str) -> None:
+        """/split -- a second session STACKED below this pane, in the same
+        tab. The named form of Ctrl+Shift+H; the command is the door that
+        works on every terminal, since a ctrl+shift chord is not something
+        every emulator can send.
+
+        A refusal (the pane is already too small to halve, or it has spent
+        its depth allowance) comes back as a block in THIS pane's
+        transcript rather than a toast, because the pane it is about is
+        the one you are looking at."""
+        note = await self.app.split_active_pane(layout_mod.COLUMN)
+        if note:
+            await self._system(note)
+
+    async def _cmd_vsplit(self, args: str) -> None:
+        """/vsplit -- a second session SIDE BY SIDE with this pane, in the
+        same tab. The named form of Ctrl+Shift+V. Same refusals, same
+        place they are reported -- see :meth:`_cmd_split`."""
+        note = await self.app.split_active_pane(layout_mod.ROW)
+        if note:
+            await self._system(note)
 
     async def _cmd_detach(self, args: str) -> None:
         """/detach -- the deliberate opposite of Ctrl+W: this tab closes,

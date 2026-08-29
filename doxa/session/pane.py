@@ -25,10 +25,11 @@ from typing import Any, Callable  # noqa: F401 -- annotation-only
 
 from textual import events, on
 from textual.app import ComposeResult
-from textual.containers import VerticalScroll
-from textual.widgets import OptionList, TabbedContent, TabPane, TextArea
+from textual.containers import Vertical, VerticalScroll
+from textual.widgets import OptionList, TabbedContent, TextArea
 
 from .. import commands as commands_mod
+from .. import layout as layout_mod
 from .. import history as history_mod
 from .. import naming as naming_mod
 from .. import shell as shell_mod
@@ -64,8 +65,22 @@ from .chips import PaneChipsMixin
 from .commands import PaneCommandsMixin
 from .runtime import PaneRuntimeMixin
 
+#: Serial behind :func:`_auto_pane_id`. A leaf needs an id of its own now
+#: that it is no longer the tab (v0.89.0): the peers chip jumps to a pane
+#: BY id (``DoxaApp._switch_to_tab``), directional focus keys the painted
+#: rectangles by id (``DoxaApp._pane_regions``), and both used to get one
+#: for free from the ``TabPane`` this class no longer is. Process-wide and
+#: monotonic, so two panes are never confusable even across tabs.
+_PANE_SERIAL = 0
 
-class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
+
+def _auto_pane_id() -> str:
+    global _PANE_SERIAL
+    _PANE_SERIAL += 1
+    return f"pane-{_PANE_SERIAL}"
+
+
+class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical):
     """One session's whole surface: engine handle, block list, status bar,
     prompt input, and the boot/pump workers that drive them.
 
@@ -78,7 +93,21 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
 
     v0.34.0 split the BODY of this class across three mixins (see
     :mod:`doxa.session`); the class, its name, its bases as Textual's CSS
-    sees them, and every method's behaviour are unchanged."""
+    sees them, and every method's behaviour are unchanged.
+
+    **v0.89.0 changed the base class, and only the base class.** This was
+    a ``TabPane`` from Phase 3 until then -- one tab, one session, and
+    "which pane is active" derivable from "which tab is showing". Splits
+    break that equivalence: two of these can be visible in ONE tab, and a
+    ``TabPane`` inside a ``TabPane`` is a widget whose ``Focused`` message
+    reassigns ``TabbedContent.active`` to an id that is not a tab. So the
+    TAB became a container of its own (:class:`doxa.ui.split.PaneTab`) and
+    this became an ordinary ``Vertical``. Everything a caller touches is
+    unchanged, including ``self.query_one("#block-list", ...)`` and the
+    rest of the pane-scoped queries -- this widget's subtree is exactly
+    what it always was, it simply no longer IS the tab that holds it.
+    :attr:`tab` and :attr:`tab_id` are how the label/status-class writers
+    reach the tab that does."""
 
     def __init__(
         self,
@@ -89,7 +118,11 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         *,
         id: str | None = None,
     ) -> None:
-        super().__init__(title, id=id)
+        super().__init__(id=id or _auto_pane_id())
+        #: The label this pane is BORN with -- handed to the PaneTab that
+        #: holds it (a leaf has no tab header of its own), and kept here
+        #: so a pane built before its tab still knows what to call itself.
+        self.born_title = title
         self.cwd = cwd
         self.model = model
         self.engine: Any | None = None
@@ -233,6 +266,50 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         # cache actually persist across picker opens instead of being
         # rebuilt (and re-probing the network) every time.
         self._model_provider = providers_mod.ClaudeProvider()
+        # v0.89.0: this pane's OWN "you missed something" state, per class
+        # name. Through v0.88.0 the tab header WAS this state -- one tab,
+        # one pane, so writing the class was recording it. A tab can now
+        # hold several panes, and the header can only carry one answer for
+        # all of them, so the answer moved here and the header became the
+        # OR over a tab's leaves (see _set_tab_class). Read by the tests
+        # that pin "visible but unfocused is not seen".
+        self._marks: "dict[str, bool]" = {}
+        # The in-pane divider's position: the fraction of this pane's
+        # height the PROMPT AREA holds. 0.0 means "nobody has moved it",
+        # which is the content-driven auto height DOXA has always had --
+        # an explicit zero and an unset divider are the same statement, so
+        # a record that carries no ratio restores to today's behaviour
+        # exactly. Proportional, never rows: see doxa.layout.
+        self.prompt_ratio: float = 0.0
+
+    # -- the tab that holds this pane (v0.89.0) -----------------------
+
+    @property
+    def tab(self) -> "Any | None":
+        """The :class:`doxa.ui.split.PaneTab` this pane is a leaf of, or
+        ``None`` before it is mounted. Walked rather than stored: a pane
+        is mounted into its tab, never told about it, and a stored
+        reference would be one more thing to keep true."""
+        from ..ui.split import PaneTab
+
+        node: Any = self.parent
+        while node is not None and not isinstance(node, PaneTab):
+            node = node.parent
+        return node
+
+    @property
+    def tab_id(self) -> str:
+        """The id of the TAB this pane lives in -- what the tab strip, the
+        rename field and the status classes key off. ``""`` before mount,
+        which every caller already treats as "no tab to write to"."""
+        tab = self.tab
+        return (tab.id or "") if tab is not None else ""
+
+    @property
+    def is_split_leaf(self) -> bool:
+        """Is this pane sharing its tab with another pane?"""
+        tab = self.tab
+        return tab is not None and len(tab.leaves()) > 1
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="block-list")
@@ -464,21 +541,152 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         "✳ my old name" as the seed."""
         self._tab_label = text
         displayed = f"{provider_glyph()} {text}"
-        self._title = self.render_str(displayed)
+        # A SPLIT leaf does not own the tab header -- the tab's FIRST leaf
+        # names it, and a second session sharing the tab is found by
+        # looking at it, not by reading a label that could only ever say
+        # one of the two names. (The palette's tab section still lists
+        # every session by id, which is where two panes in one tab are
+        # actually told apart.) The pane's own ``_tab_label`` above is
+        # still written either way, so ``display_name`` -- which the
+        # rename field, the palette and the detach toast all read -- keeps
+        # naming THIS session rather than its tab's.
+        tab = self.tab
+        if tab is not None:
+            leaves = tab.leaves()
+            if leaves and leaves[0] is not self:
+                return
+            tab._title = self.render_str(displayed)
         with contextlib.suppress(Exception):
             tabbed = self.app.query_one("#session-tabs", TabbedContent)
-            tabbed.get_tab(self.id or "").label = displayed
+            tabbed.get_tab(self.tab_id).label = displayed
 
     def _set_tab_class(self, class_name: str, value: bool) -> None:
         """Toggle one status class (``-working`` / ``-done-unseen`` /
-        ``-attention``) on this pane's own Tab header -- same
-        contextlib.suppress discipline as :meth:`set_tab_label`, and for
-        the same reasons: the tab may not exist yet this early in boot, or
-        this pane may already be mid-teardown (a closed tab's last event
-        landing after the Tab widget is gone). Delegates to the module-level
-        ``_write_tab_class``, the same door ``SubagentTranscriptTab`` uses
-        for its own (``-done-unseen``-only) status class."""
-        _write_tab_class(self.app, self.id or "", class_name, value)
+        ``-attention`` / ``-staged``) for this pane.
+
+        v0.89.0 made this write TWO places, because a tab can now hold
+        more than one pane and the header can carry only one answer:
+
+        * on the PANE itself, as a CSS class, so a split leaf shows its
+          own state where the user can see which pane it is about --
+          ``SessionPane.-done-unseen`` and friends in ``doxa/theme.tcss``;
+        * on the tab header, as the OR over the tab's leaves, so a tab
+          whose corner pane finished still reads as "something happened in
+          here" from the strip.
+
+        Same contextlib.suppress discipline as :meth:`set_tab_label`, and
+        for the same reasons: the tab may not exist yet this early in
+        boot, or this pane may already be mid-teardown (a closed tab's
+        last event landing after the Tab widget is gone)."""
+        self._marks[class_name] = value
+        with contextlib.suppress(Exception):
+            self.set_class(value, class_name)
+        tab = self.tab
+        if tab is None:
+            _write_tab_class(self.app, "", class_name, value)
+            return
+        any_on = any(
+            leaf._marks.get(class_name, False) for leaf in tab.leaves()
+        )
+        _write_tab_class(self.app, tab.id or "", class_name, any_on)
+
+    def has_mark(self, class_name: str) -> bool:
+        """Does THIS pane still carry that "you missed something" mark?
+
+        The question the spec settles: a pane that is merely VISIBLE has
+        not been seen. Activation clears the marks of the pane that got
+        the keyboard, never of its siblings -- see
+        ``DoxaApp._clear_seen_marks``."""
+        return bool(self._marks.get(class_name, False))
+
+    # -- the in-pane divider: the status bar (v0.89.0) ----------------
+
+    def nudge_prompt(self, rows: int) -> bool:
+        """Move the status-bar divider by ``rows`` -- positive grows the
+        PROMPT area (Ctrl+Down), negative grows the transcript (Ctrl+Up).
+        Returns whether it moved.
+
+        The status bar IS the divider inside one pane: :meth:`compose`
+        yields the scrolling ``#block-list``, then the ``StatusBar``, then
+        the popups, then ``#prompt-input``, so the status line is
+        literally the boundary between the transcript above and the prompt
+        area below. This needs no notion of a "selected divider" and no
+        focus rule of its own -- the handle is a fixed, always-present
+        piece of furniture, present in a single-leaf tab with no splits at
+        all, which is the case that provoked the whole request (reviewing
+        166 staged proposals in a surface too short for them).
+
+        Stored as a RATIO of the pane's height, so the position survives a
+        terminal resize and a restore into a different window; converted
+        to rows only at the moment of painting (:meth:`_apply_prompt_ratio`)."""
+        height = max(1, self.content_size.height or self.size.height or 1)
+        current = self._effective_prompt_rows()
+        target = current + rows
+        floor, ceiling = self._prompt_bounds(height)
+        target = max(floor, min(ceiling, target))
+        if target == current:
+            return False
+        self.prompt_ratio = layout_mod.clamp_prompt_ratio(
+            (target + 2) / height  # +2: the prompt's round border
+        )
+        self._apply_prompt_ratio()
+        return True
+
+    def _prompt_bounds(self, height: int) -> "tuple[int, int]":
+        """The prompt's content-row floor and ceiling for a pane of
+        ``height`` rows. The floor is the point of the whole rule: a
+        resize must never leave the input line too small to type into,
+        which is the one region whose collapse makes DOXA unusable rather
+        than merely awkward. The ceiling keeps a readable transcript above
+        it, so the divider cannot swallow the conversation being typed
+        into."""
+        # -1 status bar, -2 the prompt's round border, -1 its bottom
+        # margin (theme.tcss: `#prompt-input { margin: 0 1 1 1 }`) -- all
+        # four are rows the pane spends before either region gets one, and
+        # leaving the margin out is exactly how a "3-row floor" renders as
+        # a 2-row transcript.
+        ceiling = height - layout_mod.MIN_TRANSCRIPT_ROWS - 1 - 2 - 1
+        return layout_mod.MIN_PROMPT_ROWS, max(layout_mod.MIN_PROMPT_ROWS, ceiling)
+
+    def _effective_prompt_rows(self) -> int:
+        """How many CONTENT rows the prompt is showing right now."""
+        try:
+            prompt = self.query_one("#prompt-input", PromptInput)
+        except Exception:  # noqa: BLE001 -- not composed yet
+            return PromptInput.MIN_ROWS
+        pinned = getattr(prompt, "pinned_rows", None)
+        if pinned:
+            return int(pinned)
+        return max(
+            PromptInput.MIN_ROWS,
+            min(PromptInput.MAX_ROWS, prompt.wrapped_document.height),
+        )
+
+    def _apply_prompt_ratio(self) -> None:
+        """Turn the stored ratio into the prompt's pinned row count.
+
+        Called on every resize as well as on every divider move, which is
+        what makes the position PROPORTIONAL rather than a column count
+        that happened to look right on one terminal."""
+        try:
+            prompt = self.query_one("#prompt-input", PromptInput)
+        except Exception:  # noqa: BLE001 -- not composed yet
+            return
+        if not self.prompt_ratio:
+            prompt.pinned_rows = None
+            prompt.sync_height()
+            return
+        height = max(1, self.content_size.height or self.size.height or 1)
+        floor, ceiling = self._prompt_bounds(height)
+        rows = int(round(self.prompt_ratio * height)) - 2  # -2: the border
+        prompt.pinned_rows = max(floor, min(ceiling, rows))
+        prompt.sync_height()
+
+    def on_resize(self, event: events.Resize) -> None:
+        """A proportional divider is only proportional if something
+        re-derives its rows when the pane changes size."""
+        if self.prompt_ratio:
+            self._apply_prompt_ratio()
 
     def set_needs_input(self, value: bool) -> None:
         """The attention-blink mechanism. Nothing calls this with True yet

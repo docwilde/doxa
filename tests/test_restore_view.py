@@ -290,7 +290,7 @@ async def test_the_saved_active_tab_wins_over_the_last_one_to_mount(tmp_path):
         assert await _wait(
             pilot, lambda: all(p._session_id for p in app.panes())
         )
-        assert app.active_pane.id == "restore-sid-b"
+        assert app.active_pane._session_id == "sid-b"
 
 
 @pytest.mark.asyncio

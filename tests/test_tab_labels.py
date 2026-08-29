@@ -120,7 +120,7 @@ def _raw_tab_label(app, pane) -> str:
     """The tab header exactly as painted -- provider glyph and all."""
     from textual.widgets import TabbedContent
 
-    return app.query_one("#session-tabs", TabbedContent).get_tab(pane.id).label.plain
+    return app.query_one("#session-tabs", TabbedContent).get_tab(pane.tab_id).label.plain
 
 
 def _tab_label(app, pane) -> str:
@@ -381,7 +381,7 @@ async def test_double_click_opens_an_inline_field(monkeypatch, tmp_path):
     async with app.run_test() as pilot:
         pane = app.active_pane
         assert await _settled(pilot, app, pane)
-        tab = app.query_one("#session-tabs").get_tab(pane.id)
+        tab = app.query_one("#session-tabs").get_tab(pane.tab_id)
 
         await pilot.click(Tab)  # one click is still just "switch to me"
         await pilot.pause()
@@ -414,7 +414,7 @@ async def test_enter_commits_and_pins_the_name(monkeypatch, tmp_path):
         assert pane.custom_name == "graph importer"
         assert _tab_label(app, pane) == "graph importer"
         assert not list(app.query("#tab-rename"))
-        assert app.query_one("#session-tabs").get_tab(pane.id).display is True
+        assert app.query_one("#session-tabs").get_tab(pane.tab_id).display is True
 
         # PINNED: neither a model switch nor a branch change rewrites it.
         await pane._cmd_model("haiku")

@@ -111,6 +111,7 @@ from . import errors as errors_mod
 from . import identity as identity_mod
 from . import images as images_mod
 from . import keyboard as keyboard_mod
+from . import layout as layout_mod
 from . import naming as naming_mod
 from . import notify as notify_mod
 from . import paste as paste_mod
@@ -254,6 +255,8 @@ from .ui.labels import (  # noqa: F401
     TAB_REPO_MIN,
 )
 from .ui.prompt import PromptInput  # noqa: F401
+from .ui.split import PaneTab, SplitBox  # noqa: F401
+from .ui import split as split_mod
 from .ui.statusline import ClockChip, GitLine, StatusBar  # noqa: F401
 from .ui.transcript import (  # noqa: F401
     _clone_chip,
@@ -451,6 +454,88 @@ class DoxaApp(App):
             "kitty-protocol terminal)",
             show=False, priority=True,
         ),
+        # -- split panes (v0.89.0) ------------------------------------
+        #
+        # Ctrl+Up / Ctrl+Down move the IN-PANE divider: the status bar,
+        # which SessionPane.compose puts literally between the transcript
+        # and the prompt area. Up grows the transcript, down grows the
+        # prompt. Re-verified free against THIS class's own binding set at
+        # the moment they were added (the set changed in v0.85.0, when
+        # Ctrl+C was freed for terminal copy): ctrl+p, ctrl+r, ctrl+comma,
+        # ctrl+t, ctrl+w, ctrl+q, ctrl+left, ctrl+right, shift+tab,
+        # ctrl+tab -- a VERTICAL pair reads as size against the horizontal
+        # pair that already means "move between tabs". Textual's own
+        # App/Screen defaults claim neither. tests/test_split_keys.py
+        # asserts that, so the next release that adds a binding trips over
+        # the collision instead of shipping it.
+        #
+        # priority=True for the reason every global here needs it: the
+        # prompt is a focused TextArea (and TextArea binds ctrl+up/down to
+        # cursor movement of its own), so without priority the widget eats
+        # the key before the app ever sees it.
+        Binding(
+            "ctrl+up", "divider_up",
+            "Grow the transcript (move the status-bar divider up)",
+            show=False, priority=True,
+        ),
+        Binding(
+            "ctrl+down", "divider_down",
+            "Grow the prompt (move the status-bar divider down)",
+            show=False, priority=True,
+        ),
+        # Directional focus between panes -- never "next pane": in a 2x2
+        # grid "next" has no meaning a user can predict.
+        Binding("ctrl+shift+left", "focus_pane_left", "Focus pane left",
+                show=False, priority=True),
+        Binding("ctrl+shift+right", "focus_pane_right", "Focus pane right",
+                show=False, priority=True),
+        Binding("ctrl+shift+up", "focus_pane_up", "Focus pane above",
+                show=False, priority=True),
+        Binding("ctrl+shift+down", "focus_pane_down", "Focus pane below",
+                show=False, priority=True),
+        # Creating a split, following VIM rather than tmux -- which is not
+        # a preference, it is the only reading that keeps one story. vim's
+        # `:split` is STACKED and `:vsplit` is SIDE BY SIDE; tmux's
+        # `split-window -h` means the opposite (it splits ALONG the
+        # horizontal axis, giving side-by-side panes). DOXA's commands are
+        # already named `/split` and `/vsplit` with vim's meanings, so the
+        # keys take vim's letters too: H beside `/split`, V beside
+        # `/vsplit`. The direction is spelled out in words in the
+        # description and in doxa/commands.py's summaries, because the
+        # letter alone cannot resolve the ambiguity for a reader who knows
+        # the other convention.
+        #
+        # Ctrl+Shift+V is also many terminal emulators' own PASTE gesture,
+        # and v0.85.0 spent a release learning what claiming a terminal's
+        # clipboard key costs (Ctrl+C, given back for copy). The difference
+        # is which way the claim runs: a terminal that special-cases
+        # Ctrl+Shift+V consumes it and DOXA never sees the key at all --
+        # the binding is inert, not destructive, and `/vsplit` is the door
+        # that always works. Ctrl+C was the opposite case: DOXA consumed a
+        # key the terminal needed.
+        Binding(
+            "ctrl+shift+h", "split_pane",
+            "Split this pane — a second session STACKED BELOW it (/split)",
+            show=False, priority=True,
+        ),
+        Binding(
+            "ctrl+shift+v", "vsplit_pane",
+            "Split this pane — a second session SIDE BY SIDE with it (/vsplit)",
+            show=False, priority=True,
+        ),
+        # The divider BETWEEN leaves. Its own gesture, deliberately: the
+        # spec's own instruction is that Ctrl+Up/Down cannot mean two
+        # things, and overloading them silently is the failure mode it
+        # names. Alt+arrow moves the boundary between the focused pane and
+        # its neighbour in that direction.
+        Binding("alt+up", "grow_pane_up", "Grow this pane upward",
+                show=False, priority=True),
+        Binding("alt+down", "grow_pane_down", "Grow this pane downward",
+                show=False, priority=True),
+        Binding("alt+left", "grow_pane_left", "Grow this pane leftward",
+                show=False, priority=True),
+        Binding("alt+right", "grow_pane_right", "Grow this pane rightward",
+                show=False, priority=True),
     ]
 
     def __init__(
@@ -464,6 +549,7 @@ class DoxaApp(App):
         restore_tabs: "list[RestoreTabSpec] | None" = None,
         restore_active_id: "str | None" = None,
         restore_report: "str | None" = None,
+        restore_layout: "list[Any] | None" = None,
     ) -> None:
         super().__init__()
         # Explicitly UNBIND Ctrl+C -- see the BINDINGS comment above for
@@ -547,6 +633,14 @@ class DoxaApp(App):
         self._restore_tabs = list(restore_tabs or [])
         self._restore_active_id = restore_active_id
         self._restore_report = restore_report
+        # v0.89.0: one :mod:`doxa.layout` tree per saved TAB, in saved tab
+        # order -- the split structure ``_restore_tabs``' flat list cannot
+        # express. ``None``/empty for every record written before this
+        # release AND for every ordinary launch, and the absence is the
+        # migration: :meth:`_restore_trees_in_order` turns each surviving
+        # spec into its own single-leaf tree, which is exactly the tab it
+        # was.
+        self._restore_layout = list(restore_layout or [])
         # Guards _persist_tabset while a multi-tab restore is still
         # connecting: each restored pane's boot() completion decrements
         # this (see _note_pane_booted), and only the LAST one to finish
@@ -755,6 +849,101 @@ class DoxaApp(App):
         label once it boots; this is only the correct BEFORE-boot guess)."""
         return SessionPane(self._tab_title(path), path, self.model, engine_factory)
 
+    # -- tabs are containers now (v0.89.0) ----------------------------
+
+    def _make_tab(self, pane: "SessionPane", *, id: "str | None" = None) -> PaneTab:
+        """Wrap one pane in the tab that holds it.
+
+        Every tab in this app is a :class:`~doxa.ui.split.PaneTab` whose
+        layout tree starts as a single leaf -- which is exactly what a tab
+        was through v0.88.0, and is what keeps the migration honest: a
+        window that never splits behaves identically to one that could
+        not. The empty :class:`~doxa.ui.split.SplitBox` chain around the
+        leaf is what a later split is built INTO; see that module's
+        docstring for why it cannot be created on demand.
+
+        The TAB takes the id its pane used to carry, so
+        :func:`_restore_pane_id`, :data:`_FALLBACK_PANE_ID`,
+        :meth:`_initial_active_tab_id` and every ``tabbed.active =``
+        assignment in this file keep naming the same strings."""
+        tab = PaneTab(
+            pane.born_title, split_mod.chain(pane),
+            # Distinct from the leaf's own id, deliberately. Textual only
+            # forbids duplicate ids among SIBLINGS, so a tab and the pane
+            # inside it could legally share one -- and every id-selector
+            # query in this app would then resolve to whichever the
+            # breadth-first walk reached first, which is the tab, silently,
+            # for the rest of the release. Derived from the pane's id so a
+            # DOM dump still reads as a pair.
+            id=id or f"tab-{pane.id}",
+        )
+        tab.focused_leaf = pane
+        return tab
+
+    def _activate_tab(self, tab: "Any", *, retry: bool = True) -> None:
+        """Make TAB the active tab, and survive the two moments Textual's
+        own reactive refuses the assignment.
+
+        ``TabbedContent.active`` validates through ``Tabs.validate_active``,
+        which raises ``ValueError: No Tab with id …`` whenever the strip
+        does not -- yet, or any longer -- hold a header for that pane. Two
+        real states reach it, both measured on this branch rather than
+        imagined:
+
+        * the tab was added from a WORKER (``/attach``'s own
+          ``_cmd_attach_worker``) and the header's mount into ``#tabs-list``
+          has not landed by the time the next line runs;
+        * the app is being torn down under a worker still finishing an
+          attach -- the v0.85.0 defect class, which ``tests/conftest.py``'s
+          ``_errors_must_be_claimed`` fixture correctly turns into a test
+          failure rather than a silent error block.
+
+        So the assignment is retried ONCE on the next refresh, then given
+        up on. Retried rather than suppressed outright, because a new tab
+        that silently fails to activate is the "it arrived by accident"
+        failure v0.38.0 removed; given up on rather than looped, because
+        the teardown case has no later moment in which it could succeed."""
+        tab_id = getattr(tab, "id", "") or ""
+        if not tab_id:
+            return
+        try:
+            self.query_one("#session-tabs", TabbedContent).active = tab_id
+        except Exception:  # noqa: BLE001 -- see the docstring
+            if retry and getattr(tab, "is_mounted", False):
+                self.call_after_refresh(self._activate_tab, tab, retry=False)
+
+    def leaf_tabs(self) -> "list[PaneTab]":
+        return list(self.query(PaneTab))
+
+    def _tab_of(self, pane: "Any") -> "PaneTab | None":
+        return getattr(pane, "tab", None) if isinstance(pane, SessionPane) else None
+
+    def focused_pane(self) -> "SessionPane | None":
+        """The ONE pane per window that holds the keyboard.
+
+        Derived from ``self.focused`` -- the widget Textual says has focus
+        -- rather than from a flag this app maintains, because a flag is a
+        second answer to a question the framework already answers, and the
+        two drifting apart is precisely how the v0.32.0 restored-active-tab
+        defect happened. Falls back to the active tab's last focused leaf
+        for the case where focus is legitimately somewhere that is not a
+        pane at all (a modal, the command palette, the rename field): the
+        status bar still has to reflect ONE pane, and jumping to the
+        tab's first leaf while a dialog is up would move it under the
+        user."""
+        node: Any = self.focused
+        while node is not None:
+            if isinstance(node, SessionPane):
+                return node
+            node = node.parent
+        tab = self._active_tab()
+        if isinstance(tab, PaneTab):
+            leaf = tab.focused_leaf
+            if isinstance(leaf, SessionPane) and leaf.is_mounted:
+                return leaf
+            return next(iter(tab.leaves()), None)
+        return None
+
     async def open_tab_at(self, path: str) -> "str | None":
         """The repo picker's own spawn call (item 4): a fresh session tab
         rooted at an EXPLICIT path, via ``_new_session_factory_at`` -- the
@@ -771,9 +960,11 @@ class DoxaApp(App):
             return f"not a directory: {path}"
         tabbed = self.query_one("#session-tabs", TabbedContent)
         pane = self._make_pane_at(path, lambda: self._new_session_factory_at(path))
-        await tabbed.add_pane(pane)
-        tabbed.active = pane.id or tabbed.active
-        self._focus_tab(pane)
+        tab = self._make_tab(pane)
+        await tabbed.add_pane(tab)
+        self._activate_tab(tab)
+        self._focus_tab(tab)
+        self._persist_tabset()
         return None
 
     async def resume_session(self, group: dict) -> "str | None":
@@ -822,7 +1013,7 @@ class DoxaApp(App):
             if pane._session_id == session_id:
                 self._focus_tab(pane)
                 self.query_one("#session-tabs", TabbedContent).active = (
-                    pane.id or ""
+                    pane.tab_id or ""
                 )
                 return f"{session_id[:8]} is already open in this window."
         tabbed = self.query_one("#session-tabs", TabbedContent)
@@ -838,9 +1029,11 @@ class DoxaApp(App):
         # Read once by _boot, which reuses v0.32.0's transcript restore to
         # draw the prior turns -- see SessionPane._restore_transcript.
         pane._resume_from = session_id
-        await tabbed.add_pane(pane)
-        tabbed.active = pane.id or tabbed.active
-        self._focus_tab(pane)
+        tab = self._make_tab(pane)
+        await tabbed.add_pane(tab)
+        self._activate_tab(tab)
+        self._focus_tab(tab)
+        self._persist_tabset()
         return None
 
     async def _attach_in_new_tab(
@@ -885,9 +1078,11 @@ class DoxaApp(App):
         # precondition intact: the daemon has a ring it may replay, and
         # the transcript is only drawn once it has agreed to skip it.
         pane._restore_transcript_wanted = True
-        await tabbed.add_pane(pane)
-        tabbed.active = pane.id or tabbed.active
-        self._focus_tab(pane)
+        tab = self._make_tab(pane)
+        await tabbed.add_pane(tab)
+        self._activate_tab(tab)
+        self._focus_tab(tab)
+        self._persist_tabset()
         return (
             f"{session_id[:8]} is still running — attached to it in a new "
             "tab rather than resuming it. a live conversation has one "
@@ -896,13 +1091,31 @@ class DoxaApp(App):
 
     @property
     def active_pane(self) -> SessionPane | None:
-        try:
-            pane = self.query_one("#session-tabs", TabbedContent).active_pane
-        except Exception:
+        """The session the user is driving: the FOCUSED leaf of the active
+        tab (v0.89.0), which through v0.88.0 was the same thing as the
+        active tab because a tab held exactly one pane.
+
+        Every engine-touching caller in this file reads this -- the
+        palette's actions, ``/mode``, the status refresh, the failure
+        surface. With two panes visible, "the tab that is showing" is no
+        longer an answer to "which session does this keystroke mean", and
+        the pane holding the keyboard is: a key aimed at a session is
+        aimed at the session you are typing into."""
+        tab = self._active_tab()
+        if not isinstance(tab, PaneTab):
             return None
-        return pane if isinstance(pane, SessionPane) else None
+        pane = self.focused_pane()
+        if pane is not None and pane.tab is tab:
+            return pane
+        leaf = tab.focused_leaf
+        if isinstance(leaf, SessionPane) and leaf.is_mounted:
+            return leaf
+        return next(iter(tab.leaves()), None)
 
     def panes(self) -> list[SessionPane]:
+        """Every session leaf in the window, in DOM order -- across tabs
+        AND across the splits inside one tab. Unchanged as a query; what
+        changed is that one tab can now contribute more than one."""
         return list(self.query(SessionPane))
 
     def archived_tabs(self) -> "list[ArchivedSessionTab]":
@@ -912,7 +1125,7 @@ class DoxaApp(App):
         them" and must keep reading that way."""
         return list(self.query(ArchivedSessionTab))
 
-    def _active_tab(self) -> "SessionPane | ArchivedSessionTab | None":
+    def _active_tab(self) -> "PaneTab | ArchivedSessionTab | None":
         """The active tab when it is one restore CARES about -- either
         kind. ``active_pane`` stays SessionPane-only on purpose (every
         engine-touching caller depends on that); this is the one question
@@ -921,7 +1134,7 @@ class DoxaApp(App):
             tab = self.query_one("#session-tabs", TabbedContent).active_pane
         except Exception:
             return None
-        return tab if isinstance(tab, (SessionPane, ArchivedSessionTab)) else None
+        return tab if isinstance(tab, (PaneTab, ArchivedSessionTab)) else None
 
     def _restorable_tabs(self) -> "list[Any]":
         """Every tab the persisted set is about, IN STRIP ORDER -- session
@@ -930,7 +1143,7 @@ class DoxaApp(App):
         to. Subagent transcript tabs are not sessions and never appear."""
         return [
             tab for tab in self.query(TabPane)
-            if isinstance(tab, (SessionPane, ArchivedSessionTab))
+            if isinstance(tab, (PaneTab, ArchivedSessionTab))
         ]
 
     def _activation_pending(self) -> bool:
@@ -952,7 +1165,7 @@ class DoxaApp(App):
 
     # -- focus ownership (v0.38.0) ------------------------------------
 
-    def _focus_tab(self, tab: "Any") -> None:
+    def _focus_tab(self, tab: "Any", *, retry: bool = True) -> None:
         """Put the keyboard into TAB. The ONE place that decides what
         "focused" means for a tab, and the one place that does it.
 
@@ -990,13 +1203,74 @@ class DoxaApp(App):
         shape of the reported defect ("only seems to work ... not between
         read-only finished sessions"). Giving every tab kind SOMETHING
         focusable closes the gap AUTO_FOCUS was falling into, at the
-        source, for every caller in the list above, not just cycling."""
+        source, for every caller in the list above, not just cycling.
+
+        **v0.89.0: a tab may hold several panes, so this needs to name
+        ONE.** It takes the tab's remembered focused leaf -- the pane the
+        keyboard was in the last time the user was in this tab -- rather
+        than its first, because coming back to a split tab and landing
+        somewhere other than where you left is the same class of surprise
+        as restoring onto the wrong tab. A brand-new tab's remembered leaf
+        is the one it was built with. Accepts a PANE as well as a tab, for
+        the callers that already have the leaf they mean (a split, a
+        directional move)."""
         if isinstance(tab, SessionPane):
-            with contextlib.suppress(Exception):
+            owner = tab.tab
+            if isinstance(owner, PaneTab):
+                owner.focused_leaf = tab
+            try:
                 tab.query_one("#prompt-input", PromptInput).focus()
-        elif isinstance(tab, (ArchivedSessionTab, SubagentTranscriptTab)):
+            except Exception:  # noqa: BLE001 -- see below
+                # A leaf mounted THIS turn has not composed its own
+                # subtree yet: ``mount`` resolves when the widget is in
+                # the DOM, and its children arrive on the next
+                # message-pump turn. Suppressing that used to be
+                # harmless, because the only caller was acting on a tab
+                # that had been on screen for a while; a SPLIT focuses a
+                # pane it created a moment ago, and swallowing the miss
+                # would leave the keyboard in the pane the user split
+                # AWAY from -- silently, and only sometimes. So the
+                # intent is re-stated on the next refresh instead of
+                # dropped.
+                #
+                # ONCE, and the bound is load-bearing rather than
+                # defensive: a pane being torn down never grows a prompt,
+                # so an unbounded re-state is a callback that schedules
+                # itself every refresh forever -- an app that never goes
+                # idle, which is the busy-idle bug GitLine's docstring
+                # warns about with a tighter loop.
+                if retry:
+                    self.call_after_refresh(self._focus_tab, tab, retry=False)
+                return
+            self._clear_seen_marks(tab)
+            return
+        if isinstance(tab, PaneTab):
+            leaf = tab.focused_leaf
+            if not (isinstance(leaf, SessionPane) and leaf.is_mounted):
+                leaf = next(iter(tab.leaves()), None)
+            if leaf is not None:
+                self._focus_tab(leaf)
+            return
+        if isinstance(tab, (ArchivedSessionTab, SubagentTranscriptTab)):
             with contextlib.suppress(Exception):
                 tab.scroll.focus()
+
+    def _clear_seen_marks(self, pane: "SessionPane") -> None:
+        """"You are looking at this now" -- for the ONE pane that just got
+        the keyboard, and never for its visible siblings (v0.89.0).
+
+        The three affordances (`-done-unseen`, the needs-input blink, the
+        `-staged` tint) all cleared on tab ACTIVATION through v0.88.0,
+        which was the same event as "this pane got the keyboard" while a
+        tab held one pane. It is not the same event any more, and the spec
+        settles which of the two it should follow: the marker means *you
+        have not looked at this*, and a pane in the corner of a 2x2 grid
+        may genuinely be unread. So visible-but-unfocused does NOT count
+        as seen; only focus clears. The panes beside it keep their marks
+        until the keyboard actually arrives there."""
+        pane._set_tab_class("-done-unseen", False)
+        pane.set_needs_input(False)
+        pane.set_staged(False)
 
     def _focus_active_tab(self) -> None:
         """:meth:`_focus_tab` for whichever tab is active RIGHT NOW --
@@ -1132,43 +1406,88 @@ class DoxaApp(App):
             return
         scope = peers_mod.main_repo_root_of(self.cwd) or self.cwd
         active_tab = self._active_tab()
+        # WHICH LEAF is the active one, asked in the order that is true
+        # synchronously. ``Widget.focus()`` is deferred in Textual 5.3 (it
+        # schedules ``screen.set_focus`` with ``call_later``), so right
+        # after Ctrl+T -- which activates the new tab and focuses its leaf
+        # in the same handler, then persists -- ``active_pane`` still reads
+        # the pane the user came FROM. ``PaneTab.focused_leaf`` is written
+        # by ``_focus_tab`` synchronously, so it is the answer that is
+        # already correct at this instant; ``active_pane`` is the fallback
+        # for a tab nobody has focused into yet. Getting this backwards
+        # saved the wrong active session -- the same class of defect as
+        # v0.38.0's null active id, with a wrong value instead of a
+        # missing one.
+        active_leaf = None
+        if isinstance(active_tab, PaneTab):
+            leaf = active_tab.focused_leaf
+            if isinstance(leaf, SessionPane) and leaf.tab is active_tab:
+                active_leaf = leaf
+            else:
+                active_leaf = self.active_pane
         tabs: "list[tabsets_mod.TabRecord]" = []
+        trees: "list[Any]" = []
         seen: set[str] = set()
         active_id: "str | None" = None
         # Tab-strip order, and BOTH kinds of restorable tab: a live
-        # SessionPane, and (v0.32.0) an ArchivedSessionTab, which is one of
-        # the user's open tabs too and must not evaporate on the next
-        # restart just because the session behind it already has.
+        # PaneTab (v0.89.0: one or MORE session panes, in layout order),
+        # and (v0.32.0) an ArchivedSessionTab, which is one of the user's
+        # open tabs too and must not evaporate on the next restart just
+        # because the session behind it already has.
         for tab in self._restorable_tabs():
             if isinstance(tab, ArchivedSessionTab):
                 if tab.session_id in seen or tab.session_id == exclude_session_id:
                     continue
                 seen.add(tab.session_id)
                 tabs.append(tab.as_record())
+                trees.append(
+                    layout_mod.Leaf(
+                        session_id=tab.session_id,
+                        pinned_name=tab.as_record().pinned_name,
+                        cwd=tab.as_record().cwd,
+                    )
+                )
                 if tab is active_tab:
                     active_id = tab.session_id
                 continue
-            pane = tab
-            sid = pane._session_id
-            if (
-                not sid or sid in seen or sid in self._killed_this_run
-                or sid == exclude_session_id
-            ):
-                continue
-            # A _stopped pane (Ctrl+Q, palette stop) falls straight through
-            # to the same record the live branch below builds -- see this
-            # method's own docstring for why that is now correct rather
-            # than an oversight. Its engine is gone (stop() cleared it), so
-            # the cwd read below already falls back to pane.cwd, same as
-            # it does for a Ctrl+W-detached pane at this exact call site.
-            pane_cwd = str(getattr(pane.engine, "cwd", None) or pane.cwd)
-            pane_scope = peers_mod.main_repo_root_of(pane_cwd) or pane_cwd
-            if pane_scope != scope:
-                continue
-            seen.add(sid)
-            tabs.append(tabsets_mod.TabRecord(sid, pane.custom_name, pane_cwd))
-            if pane is active_tab:
-                active_id = sid
+            kept: "list[str]" = []
+            for pane in tab.leaves():
+                sid = pane._session_id
+                if (
+                    not sid or sid in seen or sid in self._killed_this_run
+                    or sid == exclude_session_id
+                ):
+                    continue
+                # A _stopped pane (Ctrl+Q, palette stop) falls straight
+                # through to the same record the live branch below builds
+                # -- see this method's own docstring for why that is now
+                # correct rather than an oversight. Its engine is gone
+                # (stop() cleared it), so the cwd read below already falls
+                # back to pane.cwd, same as it does for a Ctrl+W-detached
+                # pane at this exact call site.
+                pane_cwd = str(getattr(pane.engine, "cwd", None) or pane.cwd)
+                pane_scope = peers_mod.main_repo_root_of(pane_cwd) or pane_cwd
+                if pane_scope != scope:
+                    continue
+                seen.add(sid)
+                kept.append(sid)
+                tabs.append(tabsets_mod.TabRecord(sid, pane.custom_name, pane_cwd))
+                if pane is active_leaf or (
+                    active_leaf is None and tab is active_tab and len(kept) == 1
+                ):
+                    active_id = sid  # noqa: E501 -- see active_leaf above
+            # The tab's own layout, read off the widgets and then PRUNED to
+            # the sessions that actually made it into the flat list above
+            # (a cross-repo leaf, a reaped one, the excluded last tab).
+            # A tree that still named them would restore a pane-shaped
+            # hole; the survivors take the space proportionally instead.
+            if kept:
+                tree = tab.tree()
+                tree = layout_mod.prune(tree, kept) if tree is not None else None
+                trees.append(
+                    tree if tree is not None
+                    else layout_mod.Leaf(session_id=kept[0])
+                )
         if (
             active_id is None
             and self._restore_active_id is not None
@@ -1205,8 +1524,17 @@ class DoxaApp(App):
                 continue
             seen.add(record.session_id)
             tabs.append(record)
+            # A session whose tab already left the strip restores as its
+            # own single-leaf tab -- there is no layout left to remember
+            # for it, and inventing one would put it back somewhere the
+            # user never had it.
+            trees.append(layout_mod.Leaf(
+                session_id=record.session_id,
+                pinned_name=record.pinned_name,
+                cwd=record.cwd,
+            ))
         with contextlib.suppress(Exception):
-            tabsets_mod.save(scope, tabs, active_id)
+            tabsets_mod.save(scope, tabs, active_id, trees=trees)
 
     @property
     def engine(self) -> Any | None:
@@ -1545,6 +1873,72 @@ class DoxaApp(App):
 
             self.panic(Text(report))
 
+    def _restored_pane(self, spec: "RestoreTabSpec", leaf: "Any" = None) -> SessionPane:
+        """One restored LIVE leaf, from the spec doxa.cli resolved and
+        (v0.89.0) the layout leaf that says where in its tab it sits.
+
+        Extracted from :meth:`compose` when a tab stopped being one pane:
+        a split tab builds several of these, and every one of them needs
+        the identical restore wiring -- the pinned name applied before
+        boot, the resume-vs-reattach choice about where the scrollback
+        comes from, the saved cwd, and (v0.89.0) the saved position of the
+        pane's own status-bar divider."""
+        pane = SessionPane(
+            self._tab_title(), self.cwd, self.model,
+            spec.engine_factory,
+            # The TAB keeps ``restore-<session id>`` -- that is the string
+            # _initial_active_tab_id, ``tabbed.active`` and the persisted
+            # record's own lookups all name. The LEAF inside it needs an id
+            # of its own now that the two are different widgets, and it is
+            # derived from the same one so a DOM dump still reads.
+            id=f"{_restore_pane_id(spec.session_id)}-leaf",
+        )
+        if spec.pinned_name:
+            pane._initial_pinned_name = spec.pinned_name
+        if spec.resume:
+            # v0.56.0: this tab's session had ENDED, and it is coming back
+            # LIVE, continuing that conversation (doxa.cli decided that;
+            # the engine_factory above spawns with --resume). Its
+            # scrollback comes from the same transcript file a reattach
+            # reads, minus the backlog-skip precondition -- a freshly
+            # spawned daemon has no ring to replay on top. See
+            # SessionPane._restore_transcript.
+            pane._resume_from = spec.session_id
+        else:
+            # v0.32.0: this pane's scrollback comes from the session's
+            # persisted transcript, not the daemon's 512-frame ring (see
+            # SessionPane._restore_transcript).
+            pane._restore_transcript_wanted = True
+        pane._restore_cwd = spec.cwd
+        if leaf is not None:
+            pane.prompt_ratio = layout_mod.clamp_prompt_ratio(leaf.prompt_ratio)
+        return pane
+
+    def _restore_trees_in_order(self) -> "list[tuple[layout_mod.Node, list[str]]]":
+        """The saved layout trees, pruned to the LIVE specs that actually
+        came back, each paired with its leaves' session ids.
+
+        Falls back to one single-leaf tree per live spec, which is what a
+        record written before v0.89.0 restores as -- the spec's own "a new
+        reader must restore old flat records as single-leaf trees",
+        implemented as the absence of trees rather than as a migration."""
+        live = [s.session_id for s in self._restore_tabs if not s.archived]
+        live_set = set(live)
+        trees: "list[tuple[layout_mod.Node, list[str]]]" = []
+        claimed: set[str] = set()
+        for tree in self._restore_layout or []:
+            pruned = layout_mod.prune(tree, live_set - claimed)
+            if pruned is None:
+                continue
+            ids = [leaf.session_id for leaf in layout_mod.leaves(pruned)]
+            claimed.update(ids)
+            trees.append((pruned, ids))
+        for session_id in live:
+            if session_id not in claimed:
+                claimed.add(session_id)
+                trees.append((layout_mod.Leaf(session_id=session_id), [session_id]))
+        return trees
+
     def compose(self) -> ComposeResult:
         yield BeliefInspector()  # hidden stub, palette-toggled
         yield ClockChip()  # upper-right, own layer -- see theme.tcss
@@ -1555,9 +1949,12 @@ class DoxaApp(App):
                 # kinds in that one order: a live spec reattaches its
                 # daemon (SessionPane), an archived one has no daemon left
                 # to reattach and renders its transcript read-only
-                # (ArchivedSessionTab). The report block (if any) rides on
-                # the first LIVE pane -- an archived tab already opens with
-                # a block of its own explaining what it is.
+                # (ArchivedSessionTab). v0.89.0 adds a third shape without
+                # adding a third kind: several live specs can share ONE
+                # tab, laid out by the saved tree. The report block (if
+                # any) rides on the first LIVE pane -- an archived tab
+                # already opens with a block of its own explaining what it
+                # is.
                 report_placed = False
                 # No pane arms a mount-time focus any more (v0.38.0): a
                 # restored pane mounts in the BACKGROUND, and which tab
@@ -1566,7 +1963,14 @@ class DoxaApp(App):
                 # always land on the last one" defect was this same
                 # entanglement -- one pane was allowed to focus on mount so
                 # that exactly one activation-by-side-effect happened. The
-                # side effect is gone, so the workaround is too.
+                # side effect is gone, so the workaround is too -- and a
+                # split leaf inherits the rule rather than the race: a new
+                # leaf mounts unfocused, and whatever creates it says where
+                # the keyboard goes.
+                specs = {s.session_id: s for s in self._restore_tabs}
+                trees = self._restore_trees_in_order()
+                tree_by_first = {ids[0]: (tree, ids) for tree, ids in trees if ids}
+                emitted: set[str] = set()
                 for spec in self._restore_tabs:
                     if spec.archived:
                         yield ArchivedSessionTab(
@@ -1580,33 +1984,35 @@ class DoxaApp(App):
                             resume_note=spec.resume_note,
                         )
                         continue
-                    pane = SessionPane(
-                        self._tab_title(), self.cwd, self.model,
-                        spec.engine_factory, id=_restore_pane_id(spec.session_id),
-                    )
-                    if spec.pinned_name:
-                        pane._initial_pinned_name = spec.pinned_name
-                    if spec.resume:
-                        # v0.56.0: this tab's session had ENDED, and it is
-                        # coming back LIVE, continuing that conversation
-                        # (doxa.cli decided that; the engine_factory above
-                        # spawns with --resume). Its scrollback comes from
-                        # the same transcript file a reattach reads, minus
-                        # the backlog-skip precondition -- a freshly
-                        # spawned daemon has no ring to replay on top. See
-                        # SessionPane._restore_transcript.
-                        pane._resume_from = spec.session_id
-                    else:
-                        # v0.32.0: this pane's scrollback comes from the
-                        # session's persisted transcript, not the daemon's
-                        # 512-frame ring (see
-                        # SessionPane._restore_transcript).
-                        pane._restore_transcript_wanted = True
-                    pane._restore_cwd = spec.cwd
-                    if not report_placed:
-                        pane._boot_report = self._restore_report
+                    if spec.session_id in emitted:
+                        continue
+                    entry = tree_by_first.get(spec.session_id)
+                    if entry is None:
+                        continue  # a later leaf of a tab already emitted
+                    tree, ids = entry
+                    emitted.update(ids)
+                    first_pane: "SessionPane | None" = None
+
+                    def _leaf(node: "layout_mod.Leaf") -> SessionPane:
+                        nonlocal first_pane
+                        pane = self._restored_pane(specs[node.session_id], node)
+                        if first_pane is None:
+                            first_pane = pane
+                        return pane
+
+                    # Always a SplitBox: build() wraps a bare leaf in this
+                    # tab's own SPLIT_SLOTS empty boxes, which is what a
+                    # later split is created INTO.
+                    root = split_mod.build(tree, _leaf)
+                    if first_pane is not None and not report_placed:
+                        first_pane._boot_report = self._restore_report
                         report_placed = True
-                    yield pane
+                    tab = PaneTab(
+                        self._tab_title(), root,
+                        id=_restore_pane_id(spec.session_id),
+                    )
+                    tab.focused_leaf = first_pane
+                    yield tab
                 if not report_placed:
                     # Every resolved tab was archived: the window would
                     # otherwise have no session in it at all -- no prompt,
@@ -1617,9 +2023,8 @@ class DoxaApp(App):
                     # PANE_ID -- so _initial_active_tab_id (which runs
                     # BEFORE this pane exists) can already name it.
                     pane = self._make_pane(self._engine_factory)
-                    pane.id = self._FALLBACK_PANE_ID
                     pane._boot_report = self._restore_report
-                    yield pane
+                    yield self._make_tab(pane, id=self._FALLBACK_PANE_ID)
             else:
                 pane = self._make_pane(self._engine_factory)
                 # Item D fallback: every saved tab was dead (nothing to
@@ -1628,22 +2033,13 @@ class DoxaApp(App):
                 # instead. self._restore_report is None on every ordinary
                 # launch, so this is a no-op there.
                 pane._boot_report = self._restore_report
-                yield pane
+                yield self._make_tab(pane)
 
     @on(TabbedContent.TabActivated)
     def _on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         self._jump_tab_marker()
-        pane = self.active_pane
-        if pane is not None:
-            # Looking at this tab now clears every "you missed something"
-            # signal: the done-unseen dot from a turn that finished while
-            # you were elsewhere, any attention blink (and its timer --
-            # set_needs_input(False) is what stops that), and the staged-
-            # proposal tint (the block announcing it is right there in the
-            # transcript you just opened).
-            pane._set_tab_class("-done-unseen", False)
-            pane.set_needs_input(False)
-            pane.set_staged(False)
+        tab = event.pane if isinstance(event.pane, PaneTab) else self._active_tab()
+        if isinstance(tab, PaneTab):
             # Focus here as well as at every keyboard site (v0.38.0), for
             # the ONE path that has no keyboard site to hang it on: a
             # MOUSE click on a tab header produces no key event and runs no
@@ -1651,7 +2047,13 @@ class DoxaApp(App):
             # only thing we hear about it. Every other caller of
             # _focus_tab has already focused by the time this arrives, so
             # this is a no-op refocus for them.
-            self._focus_tab(pane)
+            #
+            # The "you missed something" clears ride along INSIDE
+            # _focus_tab now (v0.89.0), scoped to the pane that actually
+            # gets the keyboard -- see _clear_seen_marks. Doing it here,
+            # per tab, would clear the marks of every visible pane in a
+            # split, which is the reading the spec rejects.
+            self._focus_tab(tab)
         elif isinstance(event.pane, SubagentTranscriptTab):
             # Same "you're looking at it now" clear, for a transcript tab
             # that finished (and picked up -done-unseen) while it sat in
@@ -1698,7 +2100,7 @@ class DoxaApp(App):
 
         pane_id = ContentTab.sans_prefix(tab.id or "")
         for pane in self.panes():
-            if pane.id == pane_id:
+            if pane.tab_id == pane_id:
                 return pane
         return None
 
@@ -1709,8 +2111,8 @@ class DoxaApp(App):
             return  # one rename at a time
         with contextlib.suppress(Exception):
             tabbed = self.query_one("#session-tabs", TabbedContent)
-            tab = tabbed.get_tab(pane.id or "")
-            editor = TabRename(pane.id or "", pane.display_name())
+            tab = tabbed.get_tab(pane.tab_id)
+            editor = TabRename(pane.tab_id, pane.display_name())
             editor.styles.width = max(len(editor.value) + 4, 14)
             await tab.parent.mount(editor, before=tab)
             tab.display = False
@@ -1720,7 +2122,7 @@ class DoxaApp(App):
     def _on_rename_submitted(self, event: Input.Submitted) -> None:
         event.stop()
         pane_id = getattr(event.input, "pane_id", "")
-        pane = next((p for p in self.panes() if p.id == pane_id), None)
+        pane = next((p for p in self.panes() if p.tab_id == pane_id), None)
         if pane is not None:
             # Empty means "no name", which is how a pinned tab is un-pinned.
             pane.set_custom_name(event.value)
@@ -1737,7 +2139,7 @@ class DoxaApp(App):
             tabbed.get_tab(pane_id).display = True
         for editor in list(self.query(TabRename)):
             editor.remove()
-        pane = next((p for p in self.panes() if p.id == pane_id), None)
+        pane = next((p for p in self.panes() if p.tab_id == pane_id), None)
         if pane is not None:
             with contextlib.suppress(Exception):
                 pane.query_one("#prompt-input", PromptInput).focus()
@@ -1781,16 +2183,216 @@ class DoxaApp(App):
         new_session_factory -- a new daemon under the CLI, a new in-process
         engine otherwise), attached in a new tab and focused.
 
-        All three steps are stated here, in order: mount, activate, focus.
-        Focus used to arrive on its own, from the pane's own mount, and
-        activation used to arrive as a side effect of THAT -- so the
-        keystroke's outcome was really a race with Textual's mount
-        scheduling (v0.38.0)."""
+        All three steps are stated here, in order: mount, activate, focus
+        -- and then PERSIST, which is the fourth (v0.89.0). Focus used to
+        arrive on its own, from the pane's own mount, and activation used
+        to arrive as a side effect of THAT -- so the keystroke's outcome
+        was really a race with Textual's mount scheduling (v0.38.0).
+
+        The explicit persist closes the last thread of that same race, at
+        the other end: a pane whose engine answers instantly (every
+        FakeEngine in the suite, and a warm daemon reattach) can finish
+        booting INSIDE the ``add_pane`` await, and ``_note_pane_booted``
+        then writes the tab set before the next two lines have said which
+        tab is active. Nothing wrote it again, so the record kept naming
+        the tab the user came from -- measured as a real failure of
+        tests/test_tabsets.py's own append test under a full-suite run,
+        and not reproducible on its own."""
         tabbed = self.query_one("#session-tabs", TabbedContent)
         pane = self._make_pane(self._new_session_factory)
-        await tabbed.add_pane(pane)
-        tabbed.active = pane.id or tabbed.active
-        self._focus_tab(pane)
+        tab = self._make_tab(pane)
+        await tabbed.add_pane(tab)
+        self._activate_tab(tab)
+        self._focus_tab(tab)
+        self._persist_tabset()
+
+    # -- splits (v0.89.0) ---------------------------------------------
+
+    async def action_split_pane(self) -> None:
+        """Ctrl+Shift+H / ``/split`` -- a fresh session STACKED BELOW this
+        one, in the same tab. vim's sense of the word, which is the sense
+        ``/split`` has always had here."""
+        note = await self.split_active_pane(layout_mod.COLUMN)
+        if note:
+            self.notify(note, severity="warning", timeout=8)
+
+    async def action_vsplit_pane(self) -> None:
+        """Ctrl+Shift+V / ``/vsplit`` -- a fresh session SIDE BY SIDE with
+        this one, in the same tab."""
+        note = await self.split_active_pane(layout_mod.ROW)
+        if note:
+            self.notify(note, severity="warning", timeout=8)
+
+    async def split_active_pane(self, orientation: str) -> "str | None":
+        """Divide the focused pane. Returns a refusal to show the user, or
+        ``None`` when it happened.
+
+        Two independent sessions side by side -- the spec's own reading of
+        its second open question -- so this spawns through the SAME
+        ``new_session_factory`` Ctrl+T uses. A split is a new session in
+        the tab you are already in, not a second view onto the one that is
+        there.
+
+        **Focus goes to the NEW pane, and it goes there explicitly.** A
+        leaf mounts unfocused (v0.38.0's rule, which splits inherit rather
+        than re-litigate) and whatever creates it says where the keyboard
+        goes; a user who just asked for a second pane is asking to work in
+        it, the same way Ctrl+T's new tab takes the keyboard. The pane it
+        was split off keeps rendering, keeps streaming, and keeps any
+        "you missed something" mark it had -- visible is not focused, and
+        neither is seen.
+
+        Refused, with a message and no change at all, when the resulting
+        panes would be below the floor (:func:`doxa.layout.split_refusal`)
+        or when this pane has already spent its depth allowance
+        (:data:`doxa.layout.SPLIT_SLOTS`). A refusal that performed a
+        sliver would be worse than the refusal."""
+        pane = self.active_pane
+        if pane is None:
+            return "there is no session pane here to split"
+        tab = pane.tab
+        if tab is None:
+            return "this pane is not in a tab yet"
+        box = split_mod.free_box(pane)
+        if box is None:
+            return (
+                f"this pane is already split as deep as DOXA goes "
+                f"({layout_mod.SPLIT_SLOTS} levels) — close a pane, or "
+                "split one of its neighbours instead"
+            )
+        region = pane.region
+        refusal = layout_mod.split_refusal(region.width, region.height, orientation)
+        if refusal is not None:
+            return refusal
+        new_pane = self._make_pane(self._new_session_factory)
+        await box.mount(split_mod.chain(new_pane))
+        box.divide(orientation)
+        self._focus_tab(new_pane)
+        self._persist_tabset()
+        return None
+
+    def _pane_regions(self) -> "dict[str, tuple[int, int, int, int]]":
+        """Every VISIBLE pane's painted rectangle, keyed by widget id.
+
+        Painted, not structural: the spec's testing bar says a split must
+        render two panes with non-zero width and height, because the
+        invisible-button defect passed every structural assertion for a
+        whole release. Directional focus reads the same rectangles the
+        user is looking at, so a pane that is not actually on screen is
+        not a destination."""
+        tab = self._active_tab()
+        if not isinstance(tab, PaneTab):
+            return {}
+        out: "dict[str, tuple[int, int, int, int]]" = {}
+        for leaf in tab.leaves():
+            region = leaf.region
+            if region.width > 0 and region.height > 0 and leaf.id:
+                out[leaf.id] = (region.x, region.y, region.width, region.height)
+        return out
+
+    def focus_pane_towards(self, direction: str) -> bool:
+        """Move the keyboard to the geometrically adjacent pane. Returns
+        whether it moved -- ``False`` at the edge of the layout, which is
+        deliberately silent: an arrow key that has nowhere to go should do
+        nothing, not complain."""
+        pane = self.active_pane
+        if pane is None or not pane.id:
+            return False
+        target_id = layout_mod.neighbour(self._pane_regions(), pane.id, direction)
+        if target_id is None or target_id == pane.id:
+            return False
+        target = next(
+            (p for p in self.panes() if p.id == target_id), None
+        )
+        if target is None:
+            return False
+        self._focus_tab(target)
+        return True
+
+    def action_focus_pane_left(self) -> None:
+        self.focus_pane_towards("left")
+
+    def action_focus_pane_right(self) -> None:
+        self.focus_pane_towards("right")
+
+    def action_focus_pane_up(self) -> None:
+        self.focus_pane_towards("up")
+
+    def action_focus_pane_down(self) -> None:
+        self.focus_pane_towards("down")
+
+    # -- dividers (v0.89.0) -------------------------------------------
+
+    def action_divider_up(self) -> None:
+        """Ctrl+Up: grow the transcript, shrink the prompt area.
+
+        Acts on the FOCUSED leaf's own status-bar divider -- each leaf has
+        one, and that is how the spec resolves "Ctrl+Up/Down cannot mean
+        two things" once splits exist. The divider BETWEEN leaves has its
+        own gesture (Alt+arrow, :meth:`grow_pane_towards`) rather than
+        being silently overloaded onto this pair."""
+        pane = self.active_pane
+        if pane is not None and pane.nudge_prompt(-1):
+            self._persist_tabset()
+
+    def action_divider_down(self) -> None:
+        """Ctrl+Down: grow the prompt area, shrink the transcript."""
+        pane = self.active_pane
+        if pane is not None and pane.nudge_prompt(1):
+            self._persist_tabset()
+
+    def grow_pane_towards(self, direction: str) -> bool:
+        """Alt+arrow: move the divider BETWEEN this pane and its
+        neighbour, growing this pane in ``direction``.
+
+        Finds the nearest ancestor split whose orientation matches the
+        axis being asked about, and nudges the boundary on this pane's
+        side of it. A drag changes weights and weights persist, so this
+        writes the tab set like any other layout change."""
+        pane = self.active_pane
+        if pane is None:
+            return False
+        want = (
+            layout_mod.ROW if direction in ("left", "right")
+            else layout_mod.COLUMN
+        )
+        node: Any = pane
+        parent = node.parent
+        while isinstance(parent, SplitBox):
+            if parent.is_used and parent.orientation == want:
+                kids = list(parent.children)
+                index = kids.index(node)
+                forward = direction in ("right", "down")
+                # Growing FORWARD means pushing the divider after this
+                # child; growing BACKWARD means pulling the divider before
+                # it, which is the same divider seen from the other side.
+                moved = (
+                    parent.nudge(index, self.DIVIDER_STEP) if forward
+                    else parent.nudge(index - 1, -self.DIVIDER_STEP)
+                )
+                if moved:
+                    self._persist_tabset()
+                return moved
+            node = parent
+            parent = node.parent
+        return False
+
+    #: How much of a split one Alt+arrow moves. A fifth of the smallest
+    #: legal share, so the boundary is nudgeable rather than jumpy and a
+    #: held key still crosses the range in a couple of seconds.
+    DIVIDER_STEP = 0.03
+
+    def action_grow_pane_up(self) -> None:
+        self.grow_pane_towards("up")
+
+    def action_grow_pane_down(self) -> None:
+        self.grow_pane_towards("down")
+
+    def action_grow_pane_left(self) -> None:
+        self.grow_pane_towards("left")
+
+    def action_grow_pane_right(self) -> None:
+        self.grow_pane_towards("right")
 
     async def action_close_tab(self) -> None:
         """Ctrl+W: close-DETACH the active tab -- its daemon keeps running,
@@ -2047,9 +2649,47 @@ class DoxaApp(App):
             await App.action_quit(self)
             return
         self._persist_tabset()
+        tab = pane.tab
+        siblings = [leaf for leaf in tab.leaves() if leaf is not pane] if tab else []
+        if siblings:
+            # v0.89.0: closing one leaf of a SPLIT collapses the split, it
+            # does not close the tab -- the spec's own "closing the last
+            # pane in a split collapses the split; closing the last pane in
+            # a tab closes the tab, matching today's _close_pane
+            # semantics". The keyboard goes to the sibling that takes the
+            # space, named explicitly here for the same reason every other
+            # focus move in this file is (v0.38.0): a leaf disappearing is
+            # not a user saying where to go next, so this has to say it.
+            box = split_mod.owning_box(pane)
+            heir = self._closest_sibling(pane, siblings)
+            with contextlib.suppress(Exception):
+                await pane.remove()
+            await split_mod.prune_boxes(box)
+            self._focus_tab(heir)
+            self._persist_tabset()
+            return
         await self.query_one("#session-tabs", TabbedContent).remove_pane(
-            pane.id or ""
+            pane.tab_id
         )
+
+    def _closest_sibling(
+        self, pane: "SessionPane", siblings: "list[SessionPane]"
+    ) -> "SessionPane":
+        """Which pane inherits the keyboard when ``pane`` closes: the one
+        nearest it on screen, measured from the rectangles the user was
+        actually looking at, falling back to the first remaining leaf when
+        nothing has been painted yet."""
+        here = pane.region
+        best = None
+        best_gap = None
+        for other in siblings:
+            region = other.region
+            if region.width <= 0 or region.height <= 0:
+                continue
+            gap = abs(region.x - here.x) + abs(region.y - here.y)
+            if best_gap is None or gap < best_gap:
+                best, best_gap = other, gap
+        return best or siblings[0]
 
     def _cyclable_tabs(self) -> "list[Any]":
         """Every tab in the strip, VISUAL (DOM/strip) order, for
@@ -2139,14 +2779,27 @@ class DoxaApp(App):
         pane.run_worker(pane._cmd_mode(target), group="command")
 
     def _switch_to_tab(self, pane_id: str) -> None:
-        """Take me to that tab, by id -- the palette's open-tab entries
+        """Take me to that pane, by id -- the palette's open-tab entries
         and a peer chip's jump to a session already open here. Same three
         beats as every other explicit switch: activate, move the marker,
-        focus (v0.38.0)."""
+        focus (v0.38.0).
+
+        Accepts a LEAF id as well as a tab id (v0.89.0). Every caller
+        passes a ``SessionPane``'s own id, and with splits that is no
+        longer the same string as its tab's -- so this resolves the leaf,
+        activates the tab that holds it, and lands the keyboard on THAT
+        pane rather than on whichever leaf the tab was last in. Jumping to
+        a peer and arriving at its neighbour would be the same defect as
+        restoring onto the wrong tab, one level down."""
+        leaf = next((p for p in self.panes() if p.id == pane_id), None)
+        target_id = leaf.tab_id if leaf is not None else pane_id
         with contextlib.suppress(Exception):
-            self.query_one("#session-tabs", TabbedContent).active = pane_id
+            self.query_one("#session-tabs", TabbedContent).active = target_id
         self._jump_tab_marker()
-        self._focus_active_tab()
+        if leaf is not None:
+            self._focus_tab(leaf)
+        else:
+            self._focus_active_tab()
 
     # -- palette (Ctrl+P) --------------------------------------------
 
@@ -2184,7 +2837,13 @@ class DoxaApp(App):
             is_active = pane is active
             entries.append(PaletteEntry(
                 palette_mod.SECTION_TABS,
-                f"{pane._title}" + (f"  ({sid})" if sid else "")
+                # ``display_name()``, not the TabPane ``_title`` this read
+                # through v0.88.0: a leaf is no longer the tab, and with
+                # two sessions in one tab the header's title names only
+                # the first of them. This names THIS pane -- which is
+                # also what makes the palette the place two panes sharing
+                # a tab are told apart, alongside the session id below.
+                f"{pane.display_name()}" + (f"  ({sid})" if sid else "")
                 + ("  · active" if is_active else ""),
                 "This tab (already active)" if is_active
                 else "Switch to this tab",
@@ -2339,7 +2998,7 @@ class DoxaApp(App):
             await App.action_quit(self)
             return
         await self.query_one("#session-tabs", TabbedContent).remove_pane(
-            pane.id or ""
+            pane.tab_id
         )
 
     def _cmd_run_slash(self, name: str) -> None:
@@ -2458,13 +3117,24 @@ class DoxaApp(App):
         id, purely so this method has something to call it."""
         if not self._restore_tabs:
             return ""  # one pane; Tabs' own first-tab default is already right
+        # v0.89.0: a tab is named after its FIRST leaf, so a saved session
+        # that sits in the middle of a split does not name its own tab.
+        # Without this indirection ``initial=`` would name a tab that does
+        # not exist, and Textual's ContentSwitcher hangs waiting for it --
+        # measured, as a Pilot timeout before a single assertion ran.
+        owner: "dict[str, str]" = {}
+        for _tree, ids in self._restore_trees_in_order():
+            for session_id in ids:
+                owner[session_id] = ids[0]
         if self._restore_active_id:
             for spec in self._restore_tabs:
                 if spec.session_id == self._restore_active_id:
-                    return _restore_pane_id(spec.session_id)
+                    return _restore_pane_id(
+                        owner.get(spec.session_id, spec.session_id)
+                    )
         for spec in self._restore_tabs:
             if not spec.archived:
-                return _restore_pane_id(spec.session_id)
+                return _restore_pane_id(owner.get(spec.session_id, spec.session_id))
         return self._FALLBACK_PANE_ID
 
     def _activate_initial_tab(self) -> None:
@@ -2498,8 +3168,19 @@ class DoxaApp(App):
             return
         target: "Any" = None
         if self._restore_active_id:
-            with contextlib.suppress(Exception):
-                target = tabbed.get_pane(_restore_pane_id(self._restore_active_id))
+            # The LEAF, not the tab (v0.89.0). A restored split puts three
+            # sessions in one tab, and "restore the saved active tab"
+            # under-specifies which of them the keyboard belongs to --
+            # which is the same defect the saved active TAB had from
+            # v0.23.0 to v0.32.0, one level down. The leaf carries a
+            # derived id for exactly this lookup.
+            leaf_id = f"{_restore_pane_id(self._restore_active_id)}-leaf"
+            target = next((p for p in self.panes() if p.id == leaf_id), None)
+            if target is None:
+                with contextlib.suppress(Exception):
+                    target = tabbed.get_pane(
+                        _restore_pane_id(self._restore_active_id)
+                    )
         if target is None:
             target = next(iter(self.panes()), None)
         if target is None or not target.id:

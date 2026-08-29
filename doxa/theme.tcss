@@ -73,9 +73,38 @@ Screen {
     height: 1fr;
 }
 
-SessionPane {
+/* v0.89.0: a tab is a CONTAINER of panes now (doxa/ui/split.py's PaneTab)
+   and SessionPane is an ordinary widget inside it, so BOTH need pinning to
+   the screen for the same reason the note above gives -- Textual's own
+   default is height:auto, which collapses a 1fr block list to nothing. */
+PaneTab {
     height: 1fr;
     padding: 0;
+}
+
+SessionPane {
+    height: 1fr;
+    width: 1fr;
+    padding: 0;
+}
+
+/* A pane that is VISIBLE but not FOCUSED keeps its "you missed something"
+   marks (v0.89.0 -- see DoxaApp._clear_seen_marks): the tab header can
+   only carry one answer for a whole tab, so a split leaf shows its own
+   state on itself. One left border cell, in the same vocabulary the tab
+   strip uses -- the done-unseen accent, the attention blink's own color,
+   the staged tint -- and nothing at all when the pane is clean, so an
+   unsplit window looks exactly as it did. */
+SessionPane.-done-unseen {
+    border-left: outer #D97757;
+}
+
+SessionPane.-attention {
+    border-left: outer #E5A54B;
+}
+
+SessionPane.-staged {
+    border-left: outer #6E8FA8;
 }
 
 #session-tabs ContentTabs {

@@ -99,7 +99,7 @@ async def test_startup_opens_with_the_first_prompt_focused(tmp_path):
         pane = app.active_pane
         assert pane is not None
         assert app.focused is _prompt_of(pane)
-        assert _tabbed(app).active == pane.id
+        assert _tabbed(app).active == pane.tab_id
 
 
 @pytest.mark.asyncio
@@ -168,7 +168,7 @@ async def test_a_pane_mounted_without_activating_stays_in_the_background(
         first = app.active_pane
 
         background = app._make_pane(app._new_session_factory)
-        await _tabbed(app).add_pane(background)
+        await _tabbed(app).add_pane(app._make_tab(background))
         await pilot.pause()
         await pilot.pause()
 
@@ -200,7 +200,7 @@ async def test_a_background_mount_cannot_steal_the_tab_you_just_switched_to(
         assert app.active_pane is first
 
         late = app._make_pane(app._new_session_factory)
-        await _tabbed(app).add_pane(late)
+        await _tabbed(app).add_pane(app._make_tab(late))
         for _ in range(5):
             await pilot.pause()
 

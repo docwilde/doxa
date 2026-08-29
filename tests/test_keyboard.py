@@ -418,8 +418,22 @@ def test_unreachable_bindings_names_the_real_ones(monkeypatch):
     # deliverable binding is only defensible because /help and /doctor say
     # out loud where it does not work, instead of leaving it documented
     # and silently dead -- which is the defect v0.39.0 exists to close.
+    #
+    # Ctrl+Shift+H / Ctrl+Shift+V joined it in v0.89.0 on the same terms:
+    # they are `/split` and `/vsplit`, and a legacy terminal sends
+    # Ctrl+Shift+<letter> as the same byte as Ctrl+<letter>, so the chord
+    # cannot be told apart. Both actions have a COMMAND (`/split`,
+    # `/vsplit`) that works on every terminal, which is what makes an
+    # only-partly-deliverable binding defensible at all -- and this list is
+    # where /help and /doctor learn to say so. The pane-movement keys
+    # (Ctrl+Shift+arrow) and the between-leaf divider (Alt+arrow) are
+    # deliberately NOT here: modified cursor keys go out as CSI 1;6D-style
+    # sequences every terminal since xterm has sent, and Alt is an ESC
+    # prefix.
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.LEGACY)
-    assert unreachable_bindings() == ["Ctrl+,", "Ctrl+Tab"]
+    assert unreachable_bindings() == [
+        "Ctrl+,", "Ctrl+Tab", "Ctrl+Shift+H", "Ctrl+Shift+V",
+    ]
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.KITTY)
     assert unreachable_bindings() == []
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.UNKNOWN)

@@ -277,7 +277,7 @@ async def test_project_memory_updates_on_resume(monkeypatch, tmp_path):
             await pilot.pause(0.02)
         assert pane.engine is resumed_engine
 
-        app.query_one("#session-tabs").active = pane.id
+        app.query_one("#session-tabs").active = pane.tab_id
         for _ in range(300):
             text = _status_plain(pane)
             if "mem u" in text and " p" in text.split("mem u", 1)[1].split("  ", 1)[0]:

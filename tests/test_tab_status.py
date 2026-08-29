@@ -56,7 +56,7 @@ async def _wait(pilot, cond, tries=100):
 
 
 def _tab(app, pane):
-    return app.query_one("#session-tabs", TabbedContent).get_tab(pane.id)
+    return app.query_one("#session-tabs", TabbedContent).get_tab(pane.tab_id)
 
 
 # -- working -----------------------------------------------------------

@@ -92,7 +92,7 @@ async def test_ctrl_arrows_cycle_tabs_both_ways_with_wraparound(
             await pilot.pause(0.02)
         panes = app.panes()
         assert len(panes) == 3
-        ids = [p.id for p in panes]
+        ids = [p.tab_id for p in panes]
         tabbed = app.query_one("#session-tabs")
         assert tabbed.active == ids[2]  # the newest tab is focused
 

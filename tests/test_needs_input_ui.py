@@ -41,7 +41,7 @@ async def _wait(pilot, cond, tries=100):
 
 
 def _tab(app, pane):
-    return app.query_one("#session-tabs", TabbedContent).get_tab(pane.id)
+    return app.query_one("#session-tabs", TabbedContent).get_tab(pane.tab_id)
 
 
 def _popup(pane) -> NeedsInputPopup:
@@ -238,7 +238,7 @@ async def test_dialog_answers_after_clicking_the_blinking_tab_it_is_already_on(
         assert await _wait(pilot, lambda: _popup(pane).is_open)
 
         tabbed = app.query_one("#session-tabs", TabbedContent)
-        await pilot.click(tabbed.get_tab(pane.id))
+        await pilot.click(tabbed.get_tab(pane.tab_id))
         await pilot.pause()
 
         await pilot.press("2")  # "Deny"
@@ -344,7 +344,7 @@ async def test_background_request_answers_to_arrows_digits_and_enter(tmp_path, m
         assert second.needs_input is True  # the blinking tab the user saw
 
         tabbed = app.query_one("#session-tabs", TabbedContent)
-        await pilot.click(tabbed.get_tab(second.id))  # go to the blinking tab
+        await pilot.click(tabbed.get_tab(second.tab_id))  # go to the blinking tab
         await pilot.pause()
         await pilot.click(second.query_one("#block-list", VerticalScroll))  # read it
         await pilot.pause()

@@ -817,7 +817,10 @@ async def test_a_resumed_restored_tab_shows_its_conversation_and_takes_a_prompt(
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         assert not list(app.query(ArchivedSessionTab)), "read-only was the FALLBACK"
-        pane = next(p for p in app.panes() if p.id == f"restore-{RESUMED_ID}")
+        pane = next(
+            p for p in app.panes()
+            if p.id == f"restore-{RESUMED_ID}-leaf"
+        )
         for _ in range(400):
             if any(
                 "keep going with the warpcore" in b.prompt_text
