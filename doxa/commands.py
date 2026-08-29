@@ -106,14 +106,14 @@ REGISTRY: tuple[SlashCommand, ...] = (
         name="/split",
         group="Panes & tabs",
         summary="Split this pane — a second session STACKED BELOW it "
-                "(Ctrl+Shift+H)",
+                "(Alt+S)",
         palette="Split: stacked",
     ),
     SlashCommand(
         name="/vsplit",
         group="Panes & tabs",
         summary="Split this pane — a second session SIDE BY SIDE with it "
-                "(Ctrl+Shift+V)",
+                "(Alt+D)",
         palette="Split: side by side",
     ),
     SlashCommand(

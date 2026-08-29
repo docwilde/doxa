@@ -68,14 +68,17 @@ migration honest.
   **Panes & tabs** group, so they reach `/help`, the palette and
   autocomplete like everything else, with handlers `_cmd_split` /
   `_cmd_vsplit` in `doxa/session/commands.py`. The bindings are
-  **Ctrl+Shift+H** and **Ctrl+Shift+V**, and the letters follow **vim,
-  not tmux** — which is not a preference, it is the only reading that
-  keeps one story: vim's `:split` is stacked and `:vsplit` is side by
-  side, tmux's `split-window -h` means the opposite (it splits *along*
-  the horizontal axis), and DOXA's command names already carried vim's
-  meanings. Both the binding description and the registry summary spell
-  the direction out in words, because the letter alone cannot resolve
-  that ambiguity for a reader who knows the other convention.
+  **Alt+S** and **Alt+D** — Alt rather than a `ctrl+shift` chord because
+  of what a terminal can actually deliver: under the legacy encoding
+  `ctrl+shift+<letter>` sends the same byte as `ctrl+<letter>`, so every
+  such binding is undeliverable there, while Alt goes out as an ESC prefix
+  every terminal has sent since long before the kitty protocol. They join
+  the family already present — `Alt+arrow` grows a pane. The COMMAND names
+  follow **vim, not tmux**: `:split` is stacked and `:vsplit` side by side,
+  where tmux's `split-window -h` means the opposite. Both the binding
+  description and the registry summary spell the direction out in words,
+  because no letter resolves that ambiguity for a reader who knows the
+  other convention.
 
 ### Focus: splits inherit 0.38.0's rule rather than re-litigating it
 

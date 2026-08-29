@@ -419,20 +419,19 @@ def test_unreachable_bindings_names_the_real_ones(monkeypatch):
     # out loud where it does not work, instead of leaving it documented
     # and silently dead -- which is the defect v0.39.0 exists to close.
     #
-    # Ctrl+Shift+H / Ctrl+Shift+V joined it in v0.91.0 on the same terms:
-    # they are `/split` and `/vsplit`, and a legacy terminal sends
-    # Ctrl+Shift+<letter> as the same byte as Ctrl+<letter>, so the chord
-    # cannot be told apart. Both actions have a COMMAND (`/split`,
-    # `/vsplit`) that works on every terminal, which is what makes an
-    # only-partly-deliverable binding defensible at all -- and this list is
-    # where /help and /doctor learn to say so. The pane-movement keys
-    # (Ctrl+Shift+arrow) and the between-leaf divider (Alt+arrow) are
-    # deliberately NOT here: modified cursor keys go out as CSI 1;6D-style
-    # sequences every terminal since xterm has sent, and Alt is an ESC
-    # prefix.
+    # v0.91.0's split keys are deliberately NOT here. They were
+    # ctrl+shift+s/d in draft, which WOULD have belonged in this list --
+    # a legacy terminal sends ctrl+shift+<letter> as the same byte as
+    # ctrl+<letter>, so the chord cannot be told apart -- and they were
+    # moved to Alt+S / Alt+D precisely so they would not. Alt is an ESC
+    # prefix every terminal has sent since long before the kitty
+    # protocol, so both are reachable under either encoding. The
+    # pane-movement keys (Ctrl+Shift+arrow) and the between-leaf divider
+    # (Alt+arrow) are absent for the same reason: modified cursor keys go
+    # out as CSI 1;6D-style sequences every terminal since xterm sends.
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.LEGACY)
     assert unreachable_bindings() == [
-        "Ctrl+,", "Ctrl+Tab", "Ctrl+Shift+H", "Ctrl+Shift+V",
+        "Ctrl+,", "Ctrl+Tab",
     ]
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.KITTY)
     assert unreachable_bindings() == []

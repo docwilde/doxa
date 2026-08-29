@@ -493,33 +493,33 @@ class DoxaApp(App):
                 show=False, priority=True),
         Binding("ctrl+shift+down", "focus_pane_down", "Focus pane below",
                 show=False, priority=True),
-        # Creating a split, following VIM rather than tmux -- which is not
-        # a preference, it is the only reading that keeps one story. vim's
-        # `:split` is STACKED and `:vsplit` is SIDE BY SIDE; tmux's
-        # `split-window -h` means the opposite (it splits ALONG the
-        # horizontal axis, giving side-by-side panes). DOXA's commands are
-        # already named `/split` and `/vsplit` with vim's meanings, so the
-        # keys take vim's letters too: H beside `/split`, V beside
-        # `/vsplit`. The direction is spelled out in words in the
-        # description and in doxa/commands.py's summaries, because the
-        # letter alone cannot resolve the ambiguity for a reader who knows
-        # the other convention.
+        # Creating a split. The COMMANDS follow vim -- `/split` is STACKED,
+        # `/vsplit` is SIDE BY SIDE, vim's sense and the opposite of tmux's
+        # `split-window -h`. The KEYS are positional (S and D adjacent under
+        # the left hand), not mnemonic, and every description and summary
+        # spells the direction out in words, because no letter resolves the
+        # vim/tmux ambiguity for a reader who knows the other convention.
         #
-        # Ctrl+Shift+V is also many terminal emulators' own PASTE gesture,
-        # and v0.85.0 spent a release learning what claiming a terminal's
-        # clipboard key costs (Ctrl+C, given back for copy). The difference
-        # is which way the claim runs: a terminal that special-cases
-        # Ctrl+Shift+V consumes it and DOXA never sees the key at all --
-        # the binding is inert, not destructive, and `/vsplit` is the door
-        # that always works. Ctrl+C was the opposite case: DOXA consumed a
-        # key the terminal needed.
+        # ALT, not Ctrl+Shift, decided 2026-08-29 after measuring what a
+        # terminal can actually deliver (doxa/keyboard.py): under the legacy
+        # encoding ctrl+shift+<letter> sends the SAME BYTE as ctrl+<letter>,
+        # so every ctrl+shift+letter binding is unreachable there -- H/V and
+        # S/D alike, which is why swapping between those pairs changed
+        # nothing. Alt goes out as an ESC prefix, which every terminal has
+        # sent since long before the kitty protocol, so alt+s / alt+d work
+        # under BOTH encodings. They also join the family already here:
+        # alt+arrow grows a pane. Ctrl+Shift+V was additionally most
+        # emulators' own paste gesture; v0.85.0 spent a release on the
+        # mirror-image mistake (DOXA consuming Ctrl+C, a key the terminal
+        # needed), and the lesson generalises -- do not contest a binding
+        # the terminal owns, and prefer an encoding every terminal speaks.
         Binding(
-            "ctrl+shift+h", "split_pane",
+            "alt+s", "split_pane",
             "Split this pane — a second session STACKED BELOW it (/split)",
             show=False, priority=True,
         ),
         Binding(
-            "ctrl+shift+v", "vsplit_pane",
+            "alt+d", "vsplit_pane",
             "Split this pane — a second session SIDE BY SIDE with it (/vsplit)",
             show=False, priority=True,
         ),
@@ -2209,7 +2209,7 @@ class DoxaApp(App):
     # -- splits (v0.91.0) ---------------------------------------------
 
     async def action_split_pane(self) -> None:
-        """Ctrl+Shift+H / ``/split`` -- a fresh session STACKED BELOW this
+        """Alt+S / ``/split`` -- a fresh session STACKED BELOW this
         one, in the same tab. vim's sense of the word, which is the sense
         ``/split`` has always had here."""
         note = await self.split_active_pane(layout_mod.COLUMN)
@@ -2217,7 +2217,7 @@ class DoxaApp(App):
             self.notify(note, severity="warning", timeout=8)
 
     async def action_vsplit_pane(self) -> None:
-        """Ctrl+Shift+V / ``/vsplit`` -- a fresh session SIDE BY SIDE with
+        """Alt+D / ``/vsplit`` -- a fresh session SIDE BY SIDE with
         this one, in the same tab."""
         note = await self.split_active_pane(layout_mod.ROW)
         if note:

@@ -734,7 +734,7 @@ class PaneCommandsMixin:
 
     async def _cmd_split(self, args: str) -> None:
         """/split -- a second session STACKED below this pane, in the same
-        tab. The named form of Ctrl+Shift+H; the command is the door that
+        tab. The named form of Alt+S; the command is the door that
         works on every terminal, since a ctrl+shift chord is not something
         every emulator can send.
 
@@ -748,7 +748,7 @@ class PaneCommandsMixin:
 
     async def _cmd_vsplit(self, args: str) -> None:
         """/vsplit -- a second session SIDE BY SIDE with this pane, in the
-        same tab. The named form of Ctrl+Shift+V. Same refusals, same
+        same tab. The named form of Alt+D. Same refusals, same
         place they are reported -- see :meth:`_cmd_split`."""
         note = await self.app.split_active_pane(layout_mod.ROW)
         if note:

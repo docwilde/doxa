@@ -58,7 +58,7 @@ def test_the_split_and_pane_keys_do_not_collide_with_the_existing_set():
         "ctrl+up", "ctrl+down",
         "ctrl+shift+left", "ctrl+shift+right",
         "ctrl+shift+up", "ctrl+shift+down",
-        "ctrl+shift+h", "ctrl+shift+v",
+        "alt+s", "alt+d",
         "alt+up", "alt+down", "alt+left", "alt+right",
     }
     assert established & claimed == set()
@@ -84,11 +84,11 @@ def test_the_split_keys_follow_vim_not_tmux():
     from doxa import commands as commands_mod
 
     app = DoxaApp(cwd=".")
-    assert _action_for(app, "ctrl+shift+h") == ["split_pane"]
-    assert _action_for(app, "ctrl+shift+v") == ["vsplit_pane"]
+    assert _action_for(app, "alt+s") == ["split_pane"]
+    assert _action_for(app, "alt+d") == ["vsplit_pane"]
 
-    stacked = _resolved(app)["ctrl+shift+h"][0].description
-    beside = _resolved(app)["ctrl+shift+v"][0].description
+    stacked = _resolved(app)["alt+s"][0].description
+    beside = _resolved(app)["alt+d"][0].description
     assert "STACKED BELOW" in stacked and "/split" in stacked
     assert "SIDE BY SIDE" in beside and "/vsplit" in beside
 
@@ -99,17 +99,17 @@ def test_the_split_keys_follow_vim_not_tmux():
 def test_ctrl_c_is_still_unbound():
     """v0.85.0 freed it for the terminal emulator's own copy gesture and
     popped Textual's own default. Nothing this release adds may take it
-    back -- and the two ctrl+shift chords added here are the opposite
-    case: a terminal that special-cases Ctrl+Shift+V consumes it and DOXA
-    never sees the key, so the binding is inert rather than destructive,
-    and `/vsplit` is the door that always works."""
+    back -- and the split keys added here deliberately avoid the whole
+    class of contested chords: Alt+S / Alt+D are an ESC prefix no
+    terminal claims, unlike the ctrl+shift+v this release first drafted,
+    which is most emulators' own paste gesture."""
     assert "ctrl+c" not in _resolved(DoxaApp(cwd="."))
 
 
 def test_split_and_vsplit_are_real_commands_with_help_and_palette_rows():
-    """Every action has a command and, where it earns one, a binding --
-    a ctrl+shift chord is not something every terminal can send, so the
-    command is the door that always works."""
+    """Every action has a command and, where it earns one, a binding.
+    Alt+S / Alt+D reach every terminal, but the command is still the
+    door that never depends on an encoding at all."""
     from doxa import commands as commands_mod
     from doxa.session.commands import PANE_COMMANDS
 

@@ -284,7 +284,7 @@ TUI instead, with no daemon and no detach: quitting finalizes on the spot.
 
 Once you're in: type a prompt, press enter. `ctrl+p` opens the command
 palette, `ctrl+t` opens a new tab, `/split` and `/vsplit` (or
-`ctrl+shift+h` stacked below, `ctrl+shift+v` side by side) put a second
+`alt+s` stacked below, `alt+d` side by side) put a second
 session in the tab you are
 already in — `ctrl+shift+←/→/↑/↓` moves between panes and `ctrl+↑`/`ctrl+↓`
 drags the status-bar divider between the transcript and the prompt —
