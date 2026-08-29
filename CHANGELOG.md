@@ -4,6 +4,93 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.87.0 — 2026-08-29
+
+**The gallery is regenerated against the running product.** Every asset in
+`assets/shots/` was last captured at **0.67.0** and had been rendering
+`DOXA 0.67.0` in its identity block ever since — twenty releases, so the
+version string alone made the whole set false independent of any feature
+drift. 24 stills (12 PNG/SVG pairs) and 11 GIFs, all at the unchanged
+shared geometry of **3068×1734** (250×69 cells), verified per file rather
+than assumed.
+
+**The in-flight marker, which 0.78.0 named as stale and left that way.**
+
+- `markdown-stream.gif`, `tool-calls.gif` and `reasoning.gif` were baking
+  **`⋯ thinking`** — not the old spinner, but `ThinkingMarker`'s un-armed
+  *construction* text, a state no real turn is ever in for a single frame.
+  Every GIF scene mounts its `TurnBlock` directly (`_mount_bare_turn`,
+  which is what buys a scene exact control over ordering) and so never
+  reached `ThinkingMarker.start()`, the method a real turn calls from
+  `_run_turn` and the two `_peer_pump` branches.
+- New **`record_gif._marker()`** paints the marker at a CHOSEN elapsed
+  second by assignment rather than by arming the real one-second `Timer` —
+  this file's own determinism rule, not a shortcut around it, since a live
+  timer would put a different count in the GIF on every run. The values
+  are the ones the widget computes for itself (`_elapsed()` floors
+  `monotonic() - _started_at`; `_tick` advances one frame per second from
+  zero), so second N renders the frame a real turn genuinely shows at
+  second N.
+- `tool-calls` now runs `⠹ generating (2s)` → `working` **5s → 9s → 14s →
+  17s → 19s`**, and the climb happens across the stretch between a
+  `tool_call` and its `tool_result` where no delta arrives at all — the
+  dead air that froze the pre-0.78.0 marker. `reasoning` shows both
+  reversals that release made: the opening `⠋ thinking (0s)` (0.56.0 kept
+  it frozen) and the `reasoning` → `generating` phase flip (0.25.0 hid the
+  marker there instead). Verified frame by frame off the rendered SVGs.
+- All three now END on a frame with no marker at all: `mark_done` calls
+  `hide_thinking`, so a reader is left looking at a finished turn rather
+  than a spinner stopped mid-flight.
+
+**Two surfaces the gallery never had.**
+
+- New scene **`context`**: `/context` as 0.81.0 redrew it — a fixed 10×20
+  grid of 200 draughts cells at 0.5% each, model and headline beside the
+  top rows, per-category legend beside the lower ones, source sections
+  below. No asset had ever shown this: 0.75.0's proportional bar shipped
+  and was retired inside four releases without a scene, so this is a first
+  capture rather than a refresh. Captured in the DEFAULT glyph tier —
+  `DOXA_CONTEXT_GRID` is left unset so the shot reads what a fresh install
+  renders.
+- New scene **`beliefs-picker`**: the beliefs surface that actually
+  exists. Shows 0.77.0's fixed 50-column row prefix (`PICKER_STAMP_COL`
+  15 / `PICKER_STATUS_COL` 28 / `PICKER_AGE_COL` 7) and 0.86.0's **`g
+  graph`** action beside `y`/`c`/`s`/`r`. `belief_count` is overridden on
+  the engine INSTANCE, not in `tests/fakes.py`: the fake hardcodes 3,
+  which would put a `3 beliefs` chip above a picker listing seven, and a
+  screenshot may not move a number the suite is written against.
+
+**`beliefs-browser.png`/`.svg` are deleted, not regenerated.** They were
+not stale — they were **wrong**: they showed the standalone beliefs
+BROWSER TAB, a whole surface 0.69.0 removed and 0.73.0 finished removing,
+down to the `lore_core 0.36.0 (plugin)` fixture string and an `a`/`r`
+action vocabulary that no longer exists. Their generating scene was
+deleted with the feature, which is why the two files sat in `assets/shots/`
+for eighteen releases with nothing in either script able to refresh them.
+Neither `README.md` nor `docs/` ever referenced either path.
+
+**README alt text, checked against the images rather than the captions.**
+
+- `hero`: the status-bar description listed model, repo/branch, headroom,
+  ctx%, belief count, session handle and peers — and omitted the
+  **permission-mode chip**, which 0.50.0 put first on the row and which is
+  never hidden. The one chip a reader sees before any other was the one
+  the description skipped.
+- `markdown-stream`/`tool-calls`: both now carry the ticker, and in
+  `tool-calls` it is half the point of the sequence.
+- Both new stills are placed in the gallery. Being unreferenced is exactly
+  the condition that let `beliefs-browser` rot unnoticed: an asset nothing
+  points at is an asset nothing re-checks.
+
+**Already correct, checked rather than assumed.** `/help` carries no
+Ctrl+C (0.85.0) and no asset ever showed one; the picker column constants
+were already fixed-width in code since 0.67.0/0.77.0, so the reported
+"proposals view should have fixed columns" needed a fresh capture, not a
+code change; and the shared 250×69 geometry 0.67.0 established was still
+uniform across every file on disk, so "the screenshots have different
+resolutions" was a defect the asset set had already outgrown — with
+`beliefs-browser` the sole remaining odd one out, now gone.
+
 ## 0.86.0 — 2026-08-28
 
 **The beliefs picker gains a graph view.** 0.84.0 gave the MODEL the belief
