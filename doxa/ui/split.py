@@ -7,7 +7,7 @@ them:
 * :class:`SplitBox` -- one node of the tree. Unused (one child) it is a
   transparent container; used (two or more) it lays its children out
   along its orientation with proportional ``fr`` weights.
-* :class:`PaneTab` -- the TAB. Since v0.89.0 a tab is a CONTAINER of
+* :class:`PaneTab` -- the TAB. Since v0.91.0 a tab is a CONTAINER of
   leaves, not a leaf itself; ``SessionPane`` stopped being a ``TabPane``
   and became an ordinary container so that two of them can be visible at
   once inside one tab.

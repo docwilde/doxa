@@ -482,7 +482,7 @@ class StatusBar(Static):
         # SessionPane._refresh_status alongside the markup string itself,
         # so the two can never drift out of sync with each other.
         self._chip_hints: "list[tuple[str, str]]" = []
-        # v0.89.0: this row is also the pane's DIVIDER (see
+        # v0.91.0: this row is also the pane's DIVIDER (see
         # SessionPane.nudge_prompt). Screen y of the last drag position,
         # None while nothing is being dragged.
         self._drag_from: "int | None" = None
@@ -490,7 +490,7 @@ class StatusBar(Static):
     def set_chip_hints(self, hints: "list[tuple[str, str]]") -> None:
         self._chip_hints = hints
 
-    # -- the divider, dragged (v0.89.0) -------------------------------
+    # -- the divider, dragged (v0.91.0) -------------------------------
     #
     # Requested in exactly these words: "we should be able to drag the
     # status line and resize the belief browser and input line". This row

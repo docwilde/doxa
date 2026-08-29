@@ -1,8 +1,18 @@
 # Recursive split panes — specification
 
-Status: **draft for review**. Nothing implemented. Written before the work so
-the layout format, the focus model and the restore path are agreed rather than
-discovered mid-build.
+Status: **implemented in v0.91.0** — see that release's CHANGELOG entry for
+what shipped, what it deliberately did not, and where each decision below
+landed in code. Written before the work so the layout format, the focus
+model and the restore path were agreed rather than discovered mid-build,
+which is why the entry can name the sections of this document rather than
+re-argue them.
+
+Three things below were settled by the build rather than by this text, and
+the text is left as written so the difference is visible: the divider
+BETWEEN leaves got its own gesture (Alt+arrow) and no mouse drag; the
+interactive depth cap is two splits per pane, and the shapes reachable
+through the UI are owner-first, because Textual cannot re-parent a mounted
+widget; and archived read-only tabs are not leaves.
 
 ## What exists today
 

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""The persisted layout (v0.89.0): what the record carries, and what BOTH
+"""The persisted layout (v0.91.0): what the record carries, and what BOTH
 readers make of it.
 
 The requirement the spec states twice, because it is the one that costs a
@@ -7,7 +7,7 @@ user their working set if it is got wrong: **round-trip both ways.**
 
 * a v0.32.0 reader must not choke on a record with splits in it, and must
   still read an unrecognised ``layout.kind`` as nothing-to-restore;
-* a v0.89.0 reader must restore old FLAT records as single-leaf trees.
+* a v0.91.0 reader must restore old FLAT records as single-leaf trees.
 
 The restore test uses THREE OR MORE leaves on purpose. The old two-tab
 test passed only because the saved tab happened to be the one that
@@ -291,7 +291,7 @@ async def test_a_saved_split_restores_as_a_split_with_the_right_leaf_focused(
 async def test_a_restore_with_no_saved_layout_gives_each_session_its_own_tab(
     tmp_path,
 ):
-    """The migration, end to end: a pre-v0.89.0 record has no trees, so
+    """The migration, end to end: a pre-v0.91.0 record has no trees, so
     three saved sessions come back as three ordinary tabs and behave
     exactly as they did."""
     where = tmp_path / "scope"

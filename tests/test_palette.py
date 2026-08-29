@@ -252,7 +252,7 @@ async def test_unfiltered_palette_order(monkeypatch, tmp_path):
         # Open tabs: left to right, exactly the tab bar's order.
         tabs = [e for e in entries if e.section == SECTION_TABS]
         assert [t.label.split("  ")[0] for t in tabs] == [
-            # v0.89.0: a leaf is not the tab, so the palette names the
+            # v0.91.0: a leaf is not the tab, so the palette names the
             # PANE (display_name) rather than the tab header's title --
             # which is also how two sessions sharing one tab are told
             # apart here.
@@ -352,7 +352,7 @@ async def test_filtering_keeps_tabs_above_commands_at_equal_score(
         await pilot.pause()
         await _open_tabs(app, pilot, 2)
         # == the /usage row's palette label. Named the way a user names a
-        # tab, which is what the palette reads since v0.89.0.
+        # tab, which is what the palette reads since v0.91.0.
         app.panes()[0].set_custom_name("Usage")
 
         provider = DoxaCommandProvider(app.screen)

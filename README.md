@@ -283,7 +283,12 @@ immediately on `doxa stop`. `doxa --in-process` runs the engine inside the
 TUI instead, with no daemon and no detach: quitting finalizes on the spot.
 
 Once you're in: type a prompt, press enter. `ctrl+p` opens the command
-palette, `ctrl+t` opens a new tab, `ctrl+r` searches past sessions,
+palette, `ctrl+t` opens a new tab, `/split` and `/vsplit` (or
+`ctrl+shift+h` stacked below, `ctrl+shift+v` side by side) put a second
+session in the tab you are
+already in — `ctrl+shift+←/→/↑/↓` moves between panes and `ctrl+↑`/`ctrl+↓`
+drags the status-bar divider between the transcript and the prompt —
+`ctrl+r` searches past sessions,
 `shift+tab` cycles the **permission mode** (what still stops and asks you
 before a tool runs — see the manual's
 [permission modes](docs/manual.md#permission-modes)), a line starting with
@@ -313,7 +318,6 @@ building it is cheaper than discovering the design in the diff. Each one is a
 design that has been thought through and not yet implemented:
 
 - [`docs/plans/plugin-api.md`](docs/plans/plugin-api.md) — **the plugin API.** There is no loader: no entry-point discovery, no `~/.doxa/plugins` scan, no allowlist, no `Plugin`/`PLUGIN` object, nothing in DOXA that loads third-party PYTHON code into its own process at all. What v0.34.0 actually shipped is the *shape* — the `app.py` split landed along four seams (the command registry `PANE_COMMANDS`, the status-chip records `_status_chips()`, the event dispatch map `EVENT_RENDERERS`, and the `ModelProvider` protocol), so each extension point in the spec names a real structure a loader could bind to. That is the whole claim. The spec also settles two decisions ahead of time: a plugin is never loaded from the working repository, and no plugin-facing write into the belief store will exist. Not to be confused with [`docs/plans/plugins.md`](docs/plans/plugins.md) (shipped, v0.74.0) — a different system entirely: adopting the OPERATOR'S OWN Claude Code plugins (commands/skills/agents only, never hooks or MCP servers) into the CLI process the engine spawns.
-- [`docs/plans/split-panes.md`](docs/plans/split-panes.md) — **split panes.** DOXA is a tab strip today; nothing here is built, and a saved tab set restores no layout because there is none to save.
 - [`docs/plans/remote.md`](docs/plans/remote.md) — **remote control and a web client.** Nothing here is built. The daemon's sequenced event stream is what a second renderer would consume, which is why the spec exists, but there is no network transport, no authorization model and no client. Note that this document reasons about a permission-mode feature that has also not landed on `main`.
 - [`docs/plans/mermaid.md`](docs/plans/mermaid.md) — **mermaid diagrams in the transcript.** Nothing implemented. A ```` ```mermaid ```` fence renders as a fenced code block today, which is what every other terminal client does; v0.41.0's image ladder is what a rendered diagram would arrive through, and the open question the spec is actually about is where the renderer's dependency lives.
 - [`docs/plans/code-graph.md`](docs/plans/code-graph.md) — **a queryable code graph.** Nothing implemented. One graph per worktree, built from the AST and swept in the background on commit, with `purpose` carried on a node as a *second provenance* beside the structure the parser can see — the spec is mostly about keeping those two provenances distinguishable rather than about the parsing.

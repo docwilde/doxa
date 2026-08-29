@@ -302,7 +302,7 @@ class PromptInput(TextArea):
         not the raw newline count, so a long single line (soft-wrapped)
         grows the box the same way embedded newlines would.
 
-        :attr:`pinned_rows` overrides the whole calculation (v0.89.0): the
+        :attr:`pinned_rows` overrides the whole calculation (v0.91.0): the
         in-pane divider is the status bar right above this box, and once
         the user has MOVED it the box's height is a layout decision they
         made, not one the content gets to keep re-taking. The cap does not

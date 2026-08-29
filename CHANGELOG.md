@@ -4,6 +4,285 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.91.0 — 2026-08-30
+
+**Recursive split panes, to `docs/plans/split-panes.md`.** A tab held one
+session from Phase 3 to 0.88.0, and everything that *sounded* like a split
+was a tab page. A tab now owns a **layout tree** and can show several
+sessions at once — `/split`, `/vsplit`, directional focus between panes,
+proportional dividers that persist — while a tab whose tree is a single
+leaf is byte-for-byte the tab it always was, which is what keeps the
+migration honest.
+
+### The layout tree, and why the tab stopped being the pane
+
+- New `doxa/layout.py` (396 lines): the MODEL half, pure data and pure
+  functions, no widget and no `self` — the rule `doxa/ui/labels.py`
+  already follows. `Leaf` (session id, pinned name, cwd, prompt ratio) and
+  `Split` (orientation `row`/`column`, ordered children, per-child
+  weights). Recursion is genuine: a split may contain a split.
+- **Weights are proportional, never absolute.** `Split.__post_init__`
+  runs every weight tuple through `normalise`, which returns `count`
+  positive weights summing to 1.0 and degrades EVERY malformed input —
+  wrong count, zero, negative, NaN, infinity, non-numbers — to the even
+  split rather than raising. A layout is chrome; a corrupt one costs the
+  user their proportions, never their session, the same posture
+  `doxa.config.load` takes on a broken settings file.
+- New `doxa/ui/split.py` (391 lines): the WIDGET half. `SplitBox` is one
+  tree node — transparent while it holds one child, laying children out
+  along its orientation with `fr` units once divided (never cells, which
+  is what makes a terminal resize preserve the ratio for free). `PaneTab`
+  is the tab.
+- **`SessionPane` stopped being a `TabPane`; that is the whole of the
+  structural change.** A `TabPane` inside a `TabPane` posts a `Focused`
+  message that reassigns `TabbedContent.active` to an id that is not a
+  tab, so the tab became `PaneTab` (a container of leaves) and the session
+  surface became an ordinary `Vertical`. Its subtree, its ids, its
+  `self.query_one("#block-list", …)` calls and every method's behaviour
+  are unchanged; `SessionPane.tab` / `.tab_id` are how the label and
+  status-class writers reach the tab that holds it. The tab keeps the id
+  the pane used to carry (`_restore_pane_id`'s `restore-<session id>`,
+  `DoxaApp._FALLBACK_PANE_ID`), so activation, the tab strip, the rename
+  field and the persisted-set lookups still name the same strings.
+- **Why every leaf is born inside two empty boxes.** Textual 5.3 cannot
+  re-parent a mounted widget — a `mount` of an already-mounted widget is a
+  silent no-op that orphans it, measured against 5.3.0 before this was
+  designed. A split therefore cannot WRAP a pane that already exists, so
+  the box it will need has to be on screen before the user asks.
+  `layout.SPLIT_SLOTS = 2` is how many, and it is therefore both the
+  interactive depth cap the spec asks for and the reason every split node
+  this app produces has the pane that was split as its FIRST child. Two
+  slots is exactly what a 2×2 grid costs: split one pane sideways, then
+  split each half the other way.
+- Splitting past the allowance is refused in words — *"this pane is
+  already split as deep as DOXA goes (2 levels) — close a pane, or split
+  one of its neighbours instead"* — and changes nothing. The cap is a
+  constant, not an architectural limit.
+- Minimum sizes: `MIN_LEAF_WIDTH = 34` columns, `MIN_LEAF_HEIGHT = 9` rows
+  (derived, not chosen: one status bar + a bordered prompt at its one-row
+  minimum + a transcript that can show a turn). `layout.split_refusal`
+  halves the pane's REAL painted rectangle and refuses with a message
+  naming the floor rather than performing an unusable sliver.
+- `/split` (a second session STACKED BELOW this one) and `/vsplit` (SIDE
+  BY SIDE) are registered in `doxa/commands.py` under the existing
+  **Panes & tabs** group, so they reach `/help`, the palette and
+  autocomplete like everything else, with handlers `_cmd_split` /
+  `_cmd_vsplit` in `doxa/session/commands.py`. The bindings are
+  **Ctrl+Shift+H** and **Ctrl+Shift+V**, and the letters follow **vim,
+  not tmux** — which is not a preference, it is the only reading that
+  keeps one story: vim's `:split` is stacked and `:vsplit` is side by
+  side, tmux's `split-window -h` means the opposite (it splits *along*
+  the horizontal axis), and DOXA's command names already carried vim's
+  meanings. Both the binding description and the registry summary spell
+  the direction out in words, because the letter alone cannot resolve
+  that ambiguity for a reader who knows the other convention.
+
+### Focus: splits inherit 0.38.0's rule rather than re-litigating it
+
+- **A new leaf mounts unfocused, and whatever creates it says where the
+  keyboard goes.** `DoxaApp.split_active_pane` focuses the NEW pane
+  explicitly, the way `action_new_tab` focuses a new tab — a user who just
+  asked for a second pane is asking to work in it.
+- `DoxaApp.active_pane` now means *the focused leaf of the active tab*.
+  With two panes visible, "the tab that is showing" stopped being an
+  answer to "which session does this keystroke mean", and the pane holding
+  the keyboard is one. `focused_pane()` derives it from `self.focused` —
+  the widget Textual says has focus — rather than from a flag this app
+  maintains, because a flag is a second answer to a question the framework
+  already answers, and the two drifting apart is how the 0.32.0
+  restored-active-tab defect happened. `PaneTab.focused_leaf` is the
+  fallback for when focus is legitimately not in a pane at all (a modal,
+  the palette, the rename field).
+- `_focus_tab` accepts a leaf as well as a tab, and re-states the intent
+  on the next refresh when the leaf's own subtree has not composed yet
+  (`mount` resolves when the widget is in the DOM; its children arrive a
+  message-pump turn later). Swallowing that miss — which the old
+  `contextlib.suppress` did — would have left the keyboard in the pane the
+  user split AWAY from, silently and only sometimes.
+- Directional focus is **geometric, never "next pane"**: `ctrl+shift+←/→/
+  ↑/↓` run `layout.neighbour` over the panes' real painted rectangles.
+  Only panes strictly beyond the current edge are candidates; only ones
+  whose perpendicular span overlaps (so moving right out of a 2×2's
+  top-left cell cannot land in the bottom-right one); nearest edge wins,
+  ties break deterministically. The overlap rule relaxes exactly once — if
+  nothing overlaps, the nearest pane in that direction is taken anyway, so
+  a narrow pane at the bottom of a column is never a dead end.
+- Closing one leaf of a split collapses the split and keeps the tab
+  (`DoxaApp._close_pane`'s new branch + `split.prune_boxes`); closing the
+  last leaf closes the tab, exactly as 0.88.0's `_close_pane` did. The
+  survivor nearest the closed pane on screen inherits the keyboard, named
+  explicitly (`_closest_sibling`) for the same reason every other focus
+  move here is: a leaf disappearing is not a user saying where to go next.
+- `_switch_to_tab` resolves a LEAF id as well as a tab id, so the peers
+  chip's "that session is already open here" jump lands on the pane it
+  named rather than on whichever leaf its tab was last in.
+- New `DoxaApp._activate_tab`, used by all four sites that add a tab.
+  `TabbedContent.active` validates through `Tabs.validate_active`, which
+  raises `ValueError: No Tab with id …` whenever the strip does not — yet,
+  or any longer — hold a header for that pane. Measured on this branch in
+  both states: `/attach` adds its tab from a worker and ran the next line
+  before the header's mount landed, and the same worker can still be
+  finishing while the app tears down under it (the 0.85.0 defect class,
+  which `tests/conftest.py`'s `_errors_must_be_claimed` fixture turned
+  into two real test failures rather than a silent error block). Retried
+  once on the next refresh, then given up on — retried rather than
+  suppressed, because a new tab that silently fails to activate is the
+  "it arrived by accident" failure 0.38.0 removed.
+- The `PaneTab` an ordinary tab is born with takes an id DERIVED from its
+  leaf's (`tab-<pane id>`) rather than the same string. Textual only
+  forbids duplicate ids among siblings, so a tab and the pane inside it
+  could legally share one — and every id-selector query in the app would
+  then resolve to whichever the breadth-first walk reached first, which is
+  the tab, silently, for the rest of the release.
+
+### Visible is not seen
+
+- **The affordances no longer clear for a pane that is merely visible.**
+  `-done-unseen`, the needs-input blink and the `-staged` tint cleared on
+  tab ACTIVATION through 0.88.0 — the same event as "this pane got the
+  keyboard", while a tab held one pane. It is not the same event any more,
+  and the spec settles it against the old behaviour: the marker means *you
+  have not looked at this*, and a pane in the corner of a 2×2 may
+  genuinely be unread. `DoxaApp._clear_seen_marks` runs from `_focus_tab`,
+  for the ONE pane that got the keyboard, and its siblings keep their
+  marks.
+- The state moved onto the pane (`SessionPane._marks`, `has_mark`),
+  because one tab header cannot carry an answer for several panes. Each
+  leaf now also wears its own CSS class, and `doxa/theme.tcss` gives it a
+  one-cell left border in the tab strip's own vocabulary
+  (`SessionPane.-done-unseen`, `.-attention`, `.-staged`). The header
+  shows the **OR** over its leaves, so a tab whose corner pane finished
+  still reads as "something happened in here" from the strip.
+- An unfocused visible pane keeps rendering: pinned by mounting a block
+  into a background leaf and asserting its PAINTED height and width, not
+  its presence in the DOM.
+
+### Dividers
+
+- **Inside one pane the status bar IS the divider.** `SessionPane.compose`
+  yields `VerticalScroll(#block-list)`, then `StatusBar`, then the popups,
+  then `PromptInput` — the status line is literally the boundary. **Ctrl+Up**
+  grows the transcript, **Ctrl+Down** grows the prompt area, and it works in
+  a single-leaf tab with no splits at all, which is the case that provoked
+  the request (reviewing 166 staged proposals in a surface too short for
+  them). No "selected divider", no focus rule: the handle is always-present
+  furniture.
+- **The keys were re-verified free against the binding table as it
+  resolves today**, not against the spec's 2026-08-25 check — the set
+  changed in 0.85.0, when Ctrl+C was freed for terminal copy and popped
+  out of Textual's own `system=True` binding. `tests/test_split_keys.py`
+  asserts `ctrl+up`/`ctrl+down` resolve to exactly one action each, that
+  both carry `priority=True` (the prompt is a `TextArea` and binds them to
+  cursor movement of its own), and that the twelve keys this release
+  claims do not intersect the ten it inherited.
+- Dragging works too: `StatusBar.on_mouse_down/move/up` captures the
+  mouse and moves the same divider, same sign convention as the keys.
+  Requested in exactly those words — *"we should be able to drag the status
+  line and resize the belief browser and input line"*.
+- The position is a RATIO of the pane's height (`SessionPane.prompt_ratio`,
+  `_apply_prompt_ratio`, re-applied on `on_resize`), never a row count, so
+  it survives a terminal resize and a restore into a different window.
+  `PromptInput.pinned_rows` is what it writes; `0.0` means "nobody has
+  moved it" and restores to the content-driven auto height DOXA has always
+  had.
+- Floors, enforced rather than documented: `MIN_PROMPT_ROWS = 1` (a resize
+  must never leave the input line too small to type into — the one region
+  whose collapse makes DOXA unusable rather than awkward) and
+  `MIN_TRANSCRIPT_ROWS = 3`. The ceiling arithmetic subtracts the status
+  bar, the prompt's round border AND its one-row bottom margin
+  (`#prompt-input { margin: 0 1 1 1 }`); leaving the margin out is exactly
+  how a "3-row floor" renders as a 2-row transcript, which it did once.
+- **The divider BETWEEN leaves got its own gesture, not an overload.** The
+  spec's instruction is that Ctrl+Up/Down cannot mean two things: they act
+  on the focused leaf's own status bar, and `alt+↑/↓/←/→`
+  (`DoxaApp.grow_pane_towards`) moves the boundary between the focused
+  pane and its neighbour, in steps of `DIVIDER_STEP = 0.03` down to
+  `SplitBox.MIN_WEIGHT = 0.15`. Both write the tab set: a drag is a state
+  change with no keystroke behind it and must survive restore like any
+  other layout state.
+
+### Persistence round-trips both ways
+
+- The tree serialises into the `layout` node 0.32.0 reserved and left
+  empty for fifty-seven releases — *"the day a split tree does exist the
+  record grows a `{"kind": "split", …}` node in the same slot instead of
+  needing a format version and a migration"*. This is that day, as
+  `layout.trees`: one tree per TAB, in tab order.
+- **`layout.kind` stays `"tabs"`, deliberately.** Writing `"split"` there
+  would be read by every DOXA from 0.32.0 to 0.88.0 as "nothing this
+  version can lay out" — correct, and it would cost the user every tab
+  they had. The flat top-level `tabs` list stays authoritative and now
+  carries every leaf of every tree in layout order, so a record written
+  here still restores under an older DOXA as N ordinary tabs. That
+  unknown-kind branch is unchanged and now pinned by a test of its own.
+- **The absence of the key is the migration.** A record written by any
+  DOXA from 0.23.0 to 0.88.0 has no `trees`, and `tabsets._layout_trees`
+  reads it as one single-leaf tree per saved tab — which was true, because
+  splits did not exist. No version field, no upgrade step. A malformed
+  tree falls back the same way, per tab, rather than discarding the record.
+- `doxa.cli` passes `resolved.trees` through as `DoxaApp(restore_layout=…)`;
+  `_restore_trees_in_order` prunes each tree to the sessions that actually
+  came back (`layout.prune` collapses splits that lose all but one child
+  and re-normalises the survivors' weights), and `split.build` +
+  `layout.rebuild_slots` put it back in the same widget shape the
+  interactive gesture would have produced — so a restored pane keeps the
+  slot allowance a never-saved one has and a restored layout is not a dead
+  end.
+- `_initial_active_tab_id` maps a saved session onto the tab that will
+  HOLD it (its tree's first leaf). Without that indirection `initial=`
+  named a tab that does not exist and Textual's `ContentSwitcher` hung
+  waiting for it — measured as a Pilot timeout before a single assertion
+  ran, not reasoned about. `_activate_initial_tab` then focuses the saved
+  LEAF by its derived id, because "restore the saved active tab"
+  under-specifies which of three panes in one tab gets the keyboard —
+  the same defect the saved active TAB had from 0.23.0 to 0.32.0, one
+  level down.
+- **The restore test uses three leaves in one tab, saved active in the
+  middle.** The old two-tab test passed only because the saved tab
+  happened to be last, and a two-leaf layout hides the identical error.
+
+### Tests
+
+- **58 new tests**, in four files: `tests/test_layout_tree.py` (20, the
+  model with no widget in sight), `tests/test_split_keys.py` (6, the
+  binding table as it actually resolves), `tests/test_split_panes.py` (21,
+  rendering/focus/marks/closing/refusals/dividers against a real Pilot),
+  `tests/test_split_persistence.py` (11, both directions of the record).
+- Every structural claim is paired with a rendered rectangle — the 0.28.0
+  lesson, which the spec restates: a split that "exists" in the widget
+  tree and paints nothing is the invisible-button defect again. The 2×2
+  test asserts the four panes' real x/y/width/height before it presses a
+  single direction key.
+- The suite polls for the SETTLED state after a focus move. `Widget.focus()`
+  is deferred in Textual 5.3 (it schedules `screen.set_focus` with
+  `call_later`), so every focus move lands one message-pump turn after the
+  handler returns.
+
+### What this release does NOT cover
+
+- **The divider between leaves is keyboard-only.** Alt+arrow moves it; there
+  is no mouse drag on a boundary between two panes, because there is no
+  widget on that boundary to hang a `MouseDown` on and inventing one is a
+  larger change than this release earns. The IN-PANE divider (the status
+  bar) drags with the mouse, which is the case that was actually reported.
+- **Interactive depth is capped at two splits per pane** (`SPLIT_SLOTS`),
+  and the shapes reachable through the UI are owner-first: every split node
+  has the pane that was split as its first child. The model reads any tree
+  `layout.from_json` accepts; a hand-written record nested deeper than the
+  allowance degrades into the innermost box rather than being rejected.
+- **A split leaf does not get its own tab-strip label.** One header, several
+  panes: the tab is named by its first leaf, and the palette's tab section
+  is where two sessions in one tab are told apart by id.
+- **Archived (read-only) tabs cannot participate in a split.** An
+  `ArchivedSessionTab` is still a `TabPane` of its own; only live sessions
+  are leaves. Same for subagent transcript tabs.
+- **Terminal-resize degradation is Textual's**, not a policy of ours: `fr`
+  weights shrink with the surface and the tree is never rewritten, so
+  enlarging the terminal restores the layout — but there is no explicit
+  "below the total minimum, do X" behaviour beyond that.
+- Floating windows (item W) and detaching a pane to its own terminal stay
+  out of scope, as the spec says.
+
 ## 0.90.0 — 2026-08-29
 
 **Reported: "plugin calls don't return anything, e.g. `/lore:pending

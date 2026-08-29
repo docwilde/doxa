@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""The keys splits and dividers claim (v0.89.0), and the ones they must
+"""The keys splits and dividers claim (v0.91.0), and the ones they must
 not.
 
 This file exists because a binding collision is invisible until a user
@@ -47,7 +47,7 @@ def test_the_divider_keys_survive_a_focused_prompt():
 
 
 def test_the_split_and_pane_keys_do_not_collide_with_the_existing_set():
-    """The pre-v0.89.0 set, written out rather than derived, so a future
+    """The pre-v0.91.0 set, written out rather than derived, so a future
     release that rebinds one of them trips over this list instead of
     silently taking a key splits already answer."""
     established = {

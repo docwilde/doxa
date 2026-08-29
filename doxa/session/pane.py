@@ -66,7 +66,7 @@ from .commands import PaneCommandsMixin
 from .runtime import PaneRuntimeMixin
 
 #: Serial behind :func:`_auto_pane_id`. A leaf needs an id of its own now
-#: that it is no longer the tab (v0.89.0): the peers chip jumps to a pane
+#: that it is no longer the tab (v0.91.0): the peers chip jumps to a pane
 #: BY id (``DoxaApp._switch_to_tab``), directional focus keys the painted
 #: rectangles by id (``DoxaApp._pane_regions``), and both used to get one
 #: for free from the ``TabPane`` this class no longer is. Process-wide and
@@ -95,7 +95,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
     :mod:`doxa.session`); the class, its name, its bases as Textual's CSS
     sees them, and every method's behaviour are unchanged.
 
-    **v0.89.0 changed the base class, and only the base class.** This was
+    **v0.91.0 changed the base class, and only the base class.** This was
     a ``TabPane`` from Phase 3 until then -- one tab, one session, and
     "which pane is active" derivable from "which tab is showing". Splits
     break that equivalence: two of these can be visible in ONE tab, and a
@@ -266,7 +266,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         # cache actually persist across picker opens instead of being
         # rebuilt (and re-probing the network) every time.
         self._model_provider = providers_mod.ClaudeProvider()
-        # v0.89.0: this pane's OWN "you missed something" state, per class
+        # v0.91.0: this pane's OWN "you missed something" state, per class
         # name. Through v0.88.0 the tab header WAS this state -- one tab,
         # one pane, so writing the class was recording it. A tab can now
         # hold several panes, and the header can only carry one answer for
@@ -282,7 +282,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         # exactly. Proportional, never rows: see doxa.layout.
         self.prompt_ratio: float = 0.0
 
-    # -- the tab that holds this pane (v0.89.0) -----------------------
+    # -- the tab that holds this pane (v0.91.0) -----------------------
 
     @property
     def tab(self) -> "Any | None":
@@ -564,7 +564,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         """Toggle one status class (``-working`` / ``-done-unseen`` /
         ``-attention`` / ``-staged``) for this pane.
 
-        v0.89.0 made this write TWO places, because a tab can now hold
+        v0.91.0 made this write TWO places, because a tab can now hold
         more than one pane and the header can carry only one answer:
 
         * on the PANE itself, as a CSS class, so a split leaf shows its
@@ -599,7 +599,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         ``DoxaApp._clear_seen_marks``."""
         return bool(self._marks.get(class_name, False))
 
-    # -- the in-pane divider: the status bar (v0.89.0) ----------------
+    # -- the in-pane divider: the status bar (v0.91.0) ----------------
 
     def nudge_prompt(self, rows: int) -> bool:
         """Move the status-bar divider by ``rows`` -- positive grows the

@@ -419,7 +419,7 @@ def test_unreachable_bindings_names_the_real_ones(monkeypatch):
     # out loud where it does not work, instead of leaving it documented
     # and silently dead -- which is the defect v0.39.0 exists to close.
     #
-    # Ctrl+Shift+H / Ctrl+Shift+V joined it in v0.89.0 on the same terms:
+    # Ctrl+Shift+H / Ctrl+Shift+V joined it in v0.91.0 on the same terms:
     # they are `/split` and `/vsplit`, and a legacy terminal sends
     # Ctrl+Shift+<letter> as the same byte as Ctrl+<letter>, so the chord
     # cannot be told apart. Both actions have a COMMAND (`/split`,

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Recursive split panes (v0.89.0), against a real Pilot.
+"""Recursive split panes (v0.91.0), against a real Pilot.
 
 The v0.28.0 lesson applies with full force here and the spec says so:
 assertions must be about what the USER SEES. A split that "exists" in the

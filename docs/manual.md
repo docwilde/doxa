@@ -121,9 +121,13 @@ session from the set for good is reaping it by name (`/sessions kill
 attach <prefix>` stays the single-session path. `DOXA_RESTORE_TABS=0`
 returns to attaching only the single most recent session.
 
-There is no split-pane layout — DOXA is a tab strip only (see
-[docs/plans/split-panes.md](plans/split-panes.md) for the unbuilt design),
-so nothing here restores a layout beyond tab order.
+Since v0.91.0 a tab can hold SEVERAL sessions at once (`/split`,
+`/vsplit`), and the record restores that layout too: one tree per tab,
+with proportional sizes and the saved pane focused. The design is
+[docs/plans/split-panes.md](plans/split-panes.md). A record written before
+v0.91.0 carries no tree and restores as one tab per session, exactly as it
+always did; a record written after it still restores under an older DOXA,
+as one tab per pane.
 
 ## Worktrees and finalize
 

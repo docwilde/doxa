@@ -454,7 +454,7 @@ class DoxaApp(App):
             "kitty-protocol terminal)",
             show=False, priority=True,
         ),
-        # -- split panes (v0.89.0) ------------------------------------
+        # -- split panes (v0.91.0) ------------------------------------
         #
         # Ctrl+Up / Ctrl+Down move the IN-PANE divider: the status bar,
         # which SessionPane.compose puts literally between the transcript
@@ -633,7 +633,7 @@ class DoxaApp(App):
         self._restore_tabs = list(restore_tabs or [])
         self._restore_active_id = restore_active_id
         self._restore_report = restore_report
-        # v0.89.0: one :mod:`doxa.layout` tree per saved TAB, in saved tab
+        # v0.91.0: one :mod:`doxa.layout` tree per saved TAB, in saved tab
         # order -- the split structure ``_restore_tabs``' flat list cannot
         # express. ``None``/empty for every record written before this
         # release AND for every ordinary launch, and the absence is the
@@ -849,7 +849,7 @@ class DoxaApp(App):
         label once it boots; this is only the correct BEFORE-boot guess)."""
         return SessionPane(self._tab_title(path), path, self.model, engine_factory)
 
-    # -- tabs are containers now (v0.89.0) ----------------------------
+    # -- tabs are containers now (v0.91.0) ----------------------------
 
     def _make_tab(self, pane: "SessionPane", *, id: "str | None" = None) -> PaneTab:
         """Wrap one pane in the tab that holds it.
@@ -1092,7 +1092,7 @@ class DoxaApp(App):
     @property
     def active_pane(self) -> SessionPane | None:
         """The session the user is driving: the FOCUSED leaf of the active
-        tab (v0.89.0), which through v0.88.0 was the same thing as the
+        tab (v0.91.0), which through v0.88.0 was the same thing as the
         active tab because a tab held exactly one pane.
 
         Every engine-touching caller in this file reads this -- the
@@ -1205,7 +1205,7 @@ class DoxaApp(App):
         focusable closes the gap AUTO_FOCUS was falling into, at the
         source, for every caller in the list above, not just cycling.
 
-        **v0.89.0: a tab may hold several panes, so this needs to name
+        **v0.91.0: a tab may hold several panes, so this needs to name
         ONE.** It takes the tab's remembered focused leaf -- the pane the
         keyboard was in the last time the user was in this tab -- rather
         than its first, because coming back to a split tab and landing
@@ -1257,7 +1257,7 @@ class DoxaApp(App):
 
     def _clear_seen_marks(self, pane: "SessionPane") -> None:
         """"You are looking at this now" -- for the ONE pane that just got
-        the keyboard, and never for its visible siblings (v0.89.0).
+        the keyboard, and never for its visible siblings (v0.91.0).
 
         The three affordances (`-done-unseen`, the needs-input blink, the
         `-staged` tint) all cleared on tab ACTIVATION through v0.88.0,
@@ -1430,7 +1430,7 @@ class DoxaApp(App):
         seen: set[str] = set()
         active_id: "str | None" = None
         # Tab-strip order, and BOTH kinds of restorable tab: a live
-        # PaneTab (v0.89.0: one or MORE session panes, in layout order),
+        # PaneTab (v0.91.0: one or MORE session panes, in layout order),
         # and (v0.32.0) an ArchivedSessionTab, which is one of the user's
         # open tabs too and must not evaporate on the next restart just
         # because the session behind it already has.
@@ -1875,13 +1875,13 @@ class DoxaApp(App):
 
     def _restored_pane(self, spec: "RestoreTabSpec", leaf: "Any" = None) -> SessionPane:
         """One restored LIVE leaf, from the spec doxa.cli resolved and
-        (v0.89.0) the layout leaf that says where in its tab it sits.
+        (v0.91.0) the layout leaf that says where in its tab it sits.
 
         Extracted from :meth:`compose` when a tab stopped being one pane:
         a split tab builds several of these, and every one of them needs
         the identical restore wiring -- the pinned name applied before
         boot, the resume-vs-reattach choice about where the scrollback
-        comes from, the saved cwd, and (v0.89.0) the saved position of the
+        comes from, the saved cwd, and (v0.91.0) the saved position of the
         pane's own status-bar divider."""
         pane = SessionPane(
             self._tab_title(), self.cwd, self.model,
@@ -1919,7 +1919,7 @@ class DoxaApp(App):
         came back, each paired with its leaves' session ids.
 
         Falls back to one single-leaf tree per live spec, which is what a
-        record written before v0.89.0 restores as -- the spec's own "a new
+        record written before v0.91.0 restores as -- the spec's own "a new
         reader must restore old flat records as single-leaf trees",
         implemented as the absence of trees rather than as a migration."""
         live = [s.session_id for s in self._restore_tabs if not s.archived]
@@ -1949,7 +1949,7 @@ class DoxaApp(App):
                 # kinds in that one order: a live spec reattaches its
                 # daemon (SessionPane), an archived one has no daemon left
                 # to reattach and renders its transcript read-only
-                # (ArchivedSessionTab). v0.89.0 adds a third shape without
+                # (ArchivedSessionTab). v0.91.0 adds a third shape without
                 # adding a third kind: several live specs can share ONE
                 # tab, laid out by the saved tree. The report block (if
                 # any) rides on the first LIVE pane -- an archived tab
@@ -2049,7 +2049,7 @@ class DoxaApp(App):
             # this is a no-op refocus for them.
             #
             # The "you missed something" clears ride along INSIDE
-            # _focus_tab now (v0.89.0), scoped to the pane that actually
+            # _focus_tab now (v0.91.0), scoped to the pane that actually
             # gets the keyboard -- see _clear_seen_marks. Doing it here,
             # per tab, would clear the marks of every visible pane in a
             # split, which is the reading the spec rejects.
@@ -2184,7 +2184,7 @@ class DoxaApp(App):
         engine otherwise), attached in a new tab and focused.
 
         All three steps are stated here, in order: mount, activate, focus
-        -- and then PERSIST, which is the fourth (v0.89.0). Focus used to
+        -- and then PERSIST, which is the fourth (v0.91.0). Focus used to
         arrive on its own, from the pane's own mount, and activation used
         to arrive as a side effect of THAT -- so the keystroke's outcome
         was really a race with Textual's mount scheduling (v0.38.0).
@@ -2206,7 +2206,7 @@ class DoxaApp(App):
         self._focus_tab(tab)
         self._persist_tabset()
 
-    # -- splits (v0.89.0) ---------------------------------------------
+    # -- splits (v0.91.0) ---------------------------------------------
 
     async def action_split_pane(self) -> None:
         """Ctrl+Shift+H / ``/split`` -- a fresh session STACKED BELOW this
@@ -2321,7 +2321,7 @@ class DoxaApp(App):
     def action_focus_pane_down(self) -> None:
         self.focus_pane_towards("down")
 
-    # -- dividers (v0.89.0) -------------------------------------------
+    # -- dividers (v0.91.0) -------------------------------------------
 
     def action_divider_up(self) -> None:
         """Ctrl+Up: grow the transcript, shrink the prompt area.
@@ -2652,7 +2652,7 @@ class DoxaApp(App):
         tab = pane.tab
         siblings = [leaf for leaf in tab.leaves() if leaf is not pane] if tab else []
         if siblings:
-            # v0.89.0: closing one leaf of a SPLIT collapses the split, it
+            # v0.91.0: closing one leaf of a SPLIT collapses the split, it
             # does not close the tab -- the spec's own "closing the last
             # pane in a split collapses the split; closing the last pane in
             # a tab closes the tab, matching today's _close_pane
@@ -2784,7 +2784,7 @@ class DoxaApp(App):
         beats as every other explicit switch: activate, move the marker,
         focus (v0.38.0).
 
-        Accepts a LEAF id as well as a tab id (v0.89.0). Every caller
+        Accepts a LEAF id as well as a tab id (v0.91.0). Every caller
         passes a ``SessionPane``'s own id, and with splits that is no
         longer the same string as its tab's -- so this resolves the leaf,
         activates the tab that holds it, and lands the keyboard on THAT
@@ -3117,7 +3117,7 @@ class DoxaApp(App):
         id, purely so this method has something to call it."""
         if not self._restore_tabs:
             return ""  # one pane; Tabs' own first-tab default is already right
-        # v0.89.0: a tab is named after its FIRST leaf, so a saved session
+        # v0.91.0: a tab is named after its FIRST leaf, so a saved session
         # that sits in the middle of a split does not name its own tab.
         # Without this indirection ``initial=`` would name a tab that does
         # not exist, and Textual's ContentSwitcher hangs waiting for it --
@@ -3168,7 +3168,7 @@ class DoxaApp(App):
             return
         target: "Any" = None
         if self._restore_active_id:
-            # The LEAF, not the tab (v0.89.0). A restored split puts three
+            # The LEAF, not the tab (v0.91.0). A restored split puts three
             # sessions in one tab, and "restore the saved active tab"
             # under-specifies which of them the keyboard belongs to --
             # which is the same defect the saved active TAB had from

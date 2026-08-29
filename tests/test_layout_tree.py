@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""The layout MODEL (v0.89.0): doxa/layout.py, with no widget in sight.
+"""The layout MODEL (v0.91.0): doxa/layout.py, with no widget in sight.
 
 Everything here is a pure function, which is the point: the parts of a
 layout that are hardest to get right -- what serialises, what a direction
