@@ -69,7 +69,7 @@ surfaced in the interface.
 justified knowledge. The name is the thesis: belief is the raw material,
 never the finished thing.
 
-<p align="center"><img src="assets/shots/hero.png" width="780" alt="DOXA shell: three tabs, one per model tier, all on the same base branch; a turn asking what the repo believes about deploys, answered with a two-row markdown table of belief ids and their status; a collapsed 'Tool calls (1)' fold; and a status bar carrying model, repo and branch, subscription headroom, context percentage, belief count, session handle and peer count"></p>
+<p align="center"><img src="assets/shots/hero.png" width="780" alt="DOXA shell: three tabs, one per model tier, all on the same base branch; a turn asking what the repo believes about deploys, answered with a two-row markdown table of belief ids and their status; a collapsed 'Tool calls (1)' fold; and a status bar led by the permission-mode chip and carrying model, repo and branch, subscription headroom, context percentage, belief count, session handle and peer count"></p>
 
 *Headless-rendered from the real Textual app (a scripted session, no
 spend, fake account numbers). Every screenshot and GIF below is generated
@@ -149,14 +149,20 @@ default — see the **[manual](docs/manual.md)**.
 
 ## Gallery
 
-<p align="center"><img src="assets/shots/markdown-stream.gif" width="640" alt="An agent reply streaming: prose appears first, then a three-row table fills in one row at a time"></p>
+<p align="center"><img src="assets/shots/markdown-stream.gif" width="640" alt="An agent reply streaming: prose appears first, then a three-row table fills in one row at a time, with the in-flight marker reading 'generating' and counting the seconds beside it"></p>
 <p align="center"><em>Replies stream as real markdown, row by row, as the model's own deltas arrive.</em></p>
 
-<p align="center"><img src="assets/shots/tool-calls.gif" width="640" alt="A turn's 'Tool calls (N)' count ticking from 1 to 3 as chips land; opening the fold reveals three collapsed chips"></p>
-<p align="center"><em>Tool calls fold into one row per call; opening a chip shows its exact arguments and result.</em></p>
+<p align="center"><img src="assets/shots/tool-calls.gif" width="640" alt="A turn's 'Tool calls (N)' count ticking from 1 to 3 as chips land, while the in-flight marker keeps counting up through the wait — 5s, 9s, 14s — even though no output arrives; opening the fold reveals three collapsed chips"></p>
+<p align="center"><em>Tool calls fold into one row per call; opening a chip shows its exact arguments and result. The marker beside them keeps counting through a silent tool call, so a slow one never looks like a hung one.</em></p>
 
 <p align="center"><img src="assets/shots/memory.png" width="640" alt="A lore_belief_search chip expanded, showing a result listing one STEER belief with an outcome count and one CITE-only belief"></p>
 <p align="center"><em>A memory-store call is an ordinary chip — the mechanism deciding what the agent believes is inspectable like any other tool call.</em></p>
+
+<p align="center"><img src="assets/shots/beliefs-picker.png" width="640" alt="The beliefs picker open over a session, rows grouped by scope into 'project' and 'user'; each row starts with fixed date, status and age columns before its claim text, and carries inline actions reading 'y confirmed', 'c contradicted', 's stale', 'r retract' and 'g graph'"></p>
+<p align="center"><em>Every belief the store holds, grouped by scope, with what reality has said about it — and five inline verdicts per row. Four record an outcome; <code>g</code> only looks, opening that belief's graph neighbourhood.</em></p>
+
+<p align="center"><img src="assets/shots/context.png" width="640" alt="/context rendered as a 10 by 20 grid of 200 draughts-piece cells, one per half-percent of the window, with the model and a '61k/180k tokens (33.8%)' headline beside the top rows and a per-category legend beside the lower ones; token counts per category, memory files and MCP tools listed below"></p>
+<p align="center"><em><code>/context</code> is 200 cells, one per half-percent of the window. Every number is the CLI's own accounting of its own request — DOXA runs no second tokenizer and estimates nothing.</em></p>
 
 <p align="center"><img src="assets/shots/subagent-tracker.png" width="640" alt="A status row reading '1 agent' beneath the status bar, plus a second tab in the strip titled from the running subagent's own description"></p>
 <p align="center"><em>A running subagent gets its own status row and a live transcript tab.</em></p>
