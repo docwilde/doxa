@@ -4,6 +4,60 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.90.0 — 2026-08-29
+
+**Reported: "plugin calls don't return anything, e.g. `/lore:pending
+--cluster` does not work. Nothing happens. No error message."** Confirmed
+against `SessionPane.on_prompt_submitted` (`doxa/session/pane.py`): a
+`/`-prefixed line `commands.lookup()` did not recognize fell straight
+through to `_run_turn` with no further check — correct for `/compact` and
+every adopted plugin row (deliberately `passthrough`, and the literal
+point of that convention) but wrong for everything else, because the CLI's
+own local-command parser finds nothing staged for an unknown name and
+answers with total silence: no DOXA error, no CLI text, no visible failure
+of any kind. `/lore:pending` specifically is not missing by accident — the
+LORE plugin is refused BY DESIGN (`claude_plugins.BLOCKLIST`, v0.74.0,
+since `lore_core` already runs in-process inside DOXA) — but a typo
+(`/setings`) or any command from an un-adopted plugin vanished the exact
+same way.
+
+- New **`doxa.commands.is_reachable`/`unreachable_message`**: the one new
+  check between "not a DOXA registry row" and "ship it to the CLI as a
+  turn". `is_reachable` reuses `names()` — the SAME membership the
+  prompt's autocomplete dropdown and the Ctrl+P palette already compute —
+  so `/compact` and every currently-adopted plugin row (`_plugin_rows`)
+  are provably untouched; only a `/`-line neither surface would ever offer
+  gets stopped. Deliberately not a hardcoded allowlist of CLI-accepted
+  commands: that set moves with the CLI version, the operator's own
+  `~/.claude/commands`, and whatever plugins happen to be staged, so a
+  static list would be wrong the day it shipped.
+- Three message shapes out of `unreachable_message`, all mounted as a
+  `SystemBlock` through a new `SessionPane._run_unreachable`
+  (`doxa/session/pane.py`) — the pane's own `_system()`, the same voice
+  `_run_command`'s existing `"unknown command: {name}"` fallback already
+  uses: (1) **blocked plugin** — the name before `:` matches a
+  `claude_plugins.BLOCKLIST` entry (read from there, not re-hardcoded);
+  states the reason (`BLOCKLIST_REASON`'s first clause) and points at
+  DOXA's own equivalent, `/beliefs` and `/pending` for `lore`; (2)
+  **near miss** — `difflib.get_close_matches` against `names()` at cutoff
+  `0.72`, one suggestion (`/setings` → "did you mean /settings?"),
+  nothing offered on a wide miss; (3) **generic unknown** — states plainly
+  that this may still be a genuine CLI-native command or an un-adopted
+  plugin's command, since a client-side check cannot tell those apart from
+  a typo without the allowlist above ruled out.
+- Tests: `tests/test_slash_guard.py`, 14 new — 12 fail against the
+  pre-fix code (confirmed by temporarily reverting the two source files
+  and re-running); the other 2 pin `/compact` and an adopted plugin
+  command as negative controls and pass unmodified both before and after,
+  proving passthrough survives untouched.
+- Not covered: a hand-authored command under the operator's own
+  `~/.claude/commands` (not a plugin, not a skill) stays invisible to this
+  check exactly as before — `doxa.cli_isolation` never carries that
+  directory into the isolated CLI at all, so such a command already failed
+  silently ahead of this fix and still does, just without even a DOXA
+  message, since the guard has no read path to a file it was never
+  offered.
+
 ## 0.88.0 — 2026-08-29
 
 **The one gallery item 0.87.0's regeneration pass flagged and could not
