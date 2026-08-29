@@ -26,6 +26,22 @@ for it rather than new plumbing:
 So: given a PNG, DOXA can already draw it well and degrade honestly. The whole
 question is how a mermaid *string* becomes that PNG.
 
+**v0.88.0 note.** v0.86.0 shipped a second, unrelated mermaid path that this
+spec should not be read as duplicating, and can partly build on. The belief
+graph view (`doxa/beliefgraph.py`, `g` on the beliefs picker) renders mermaid
+through `lore_core.graph.mermaid_source`/`render_html` and opens it in a
+BROWSER, not in the transcript — so it sidesteps the renderer problem below
+entirely by letting the browser run mermaid.js. What it contributes here is
+plumbing, not an answer: a loopback HTTP server on 127.0.0.1 with an
+ephemeral port, a per-process request token (a `file://` page is a null
+origin and some browsers refuse the module fetch from it; a plain loopback
+server would answer any local process), a 0700 output directory under
+`DOXA_HOME`, and `asyncio.to_thread` around both the store reads and the
+browser launch. A `/mermaid` command that opens a fence in the browser is
+therefore already cheap. Rendering a fence INLINE — the thing this spec is
+about — still needs a headless renderer and still carries every cost the
+next section describes.
+
 ## The renderer problem, and why it is the whole spec
 
 **Mermaid is JavaScript.** There is no complete Python implementation. The
