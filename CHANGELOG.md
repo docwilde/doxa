@@ -4,6 +4,46 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.88.0 — 2026-08-29
+
+**The one gallery item 0.87.0's regeneration pass flagged and could not
+capture: the peers chip roster.** 0.79.0 replaced the peers chip's old
+`/sessions` shortcut with a real dropdown (`PaneChipsMixin.
+open_peers_picker`), but the roster only exists once the chip is
+clicked — a still cannot show click-time behaviour, so it stayed
+undocumented until now.
+
+- New scene **`peers`** (`scripts/record_gif.py`, `assets/shots/peers.gif`):
+  a real click on the status bar's `peers 3 (1⌁)` chip (three fabricated
+  peers via new `_demo_peers()`, built on `scripts/screenshot._peer` the
+  same way `_hero_engine` already does) opens the shared `ChipPicker`,
+  showing each peer's first-prompt title and running token total —
+  `86k tok`, `142k tok` — before arrowing to the third peer, which has not
+  finished a turn yet: **`tok —`**, never `0 tok`, the exact distinction
+  `PeerInfo.usage_tokens`'s own docstring calls out and 0.79.0 fixed a bug
+  around. The note row states the figures are self-reported and up to
+  `HEARTBEAT_SECS` (15s) stale. 4 frames, 3068×1734 (250×69 cells), 392 KiB.
+- The click itself is driven by the exact rendered chip text
+  (`"peers 3 (1⌁)"`), not a bare `"peers"` substring — measured on this
+  branch's own worktree, whose `chore/peers-gif` name put a second, earlier
+  `"peers"` inside the status bar's own git-identity text and landed the
+  loose match on the git chip instead, opening the wrong picker with zero
+  rows. Fixed before it could do the same on any future `peers`-named
+  branch or checkout directory.
+- Row selection is not exercised in the scene: selecting a peer attaches
+  through `DoxaApp._cmd_attach` over a real Unix socket, and the fabricated
+  peers' socket paths do not exist — arrowing to highlight the roster's
+  three rows is the honest stopping point for a deterministic capture.
+- Wired into `README.md`'s gallery with alt text describing the roster,
+  the token figures, the detached marker and the staleness note — the
+  condition `beliefs-browser.png` needed (unreferenced, for 18 releases)
+  before this GIF is exempt from it.
+- Version bumped to **0.88.0 before capture**, not after — the same
+  ordering gap that left the whole gallery reading `DOXA 0.67.0` for
+  twenty releases.
+- Everything else 0.87.0 regenerated (24 stills, the other 11 GIFs) is
+  unchanged here.
+
 ## 0.87.0 — 2026-08-29
 
 **The gallery is regenerated against the running product.** Every asset in

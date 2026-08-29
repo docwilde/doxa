@@ -176,6 +176,9 @@ default — see the **[manual](docs/manual.md)**.
 <p align="center"><img src="assets/shots/chip-picker.gif" width="640" alt="Clicking the branch chip in the status bar opens a dropdown of local branches with the current one marked"></p>
 <p align="center"><em>Every selector chip in the status bar opens the same picker — type to filter, enter to apply.</em></p>
 
+<p align="center"><img src="assets/shots/peers.gif" width="640" alt="The status bar's peers chip reading 'peers 3 (1⌁)'; clicking it opens a roster of the three other live DOXA sessions on this repo, each row showing its own first-prompt title and its running token total — '86k tok', '142k tok' — with one detached peer marked '⌁ detached'; arrowing to the third peer, which has not finished a turn yet, shows 'tok —' rather than '0 tok'; a note states the figures are self-reported and up to 15 seconds stale, the heartbeat interval"></p>
+<p align="center"><em>The peers chip opens a roster of every other DOXA session on this repo: what each is working on, and tokens spent so far — self-reported, piggybacked on each peer's own 15-second heartbeat rather than a live read. A peer that has not finished a turn yet reads as unknown, never as zero.</em></p>
+
 <p align="center"><img src="assets/shots/permission-mode.gif" width="640" alt="The permission-mode chip cycling through the shared picker: grey 'default', teal 'plan', amber 'auto', red 'bypassPermissions'"></p>
 <p align="center"><em>The mode chip leads the status bar and is never hidden — auto and bypassPermissions turn it amber or red, because those are the two modes where nothing stops to ask you first.</em></p>
 

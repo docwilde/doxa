@@ -840,6 +840,100 @@ async def _drive_permission_mode(app: DoxaApp, pilot: Any, rec: FrameRecorder) -
 
 
 # --------------------------------------------------------------------- #
+# Scene: peers-picker -- the status bar's peers chip (v0.79.0) opening
+# into the shared ChipPicker: one row per live peer carrying its own
+# first-prompt title and running token total, and a note stating the
+# heartbeat staleness bound. The one gallery item the 0.87.0 regeneration
+# pass could NOT capture as a still -- the roster only exists once the
+# chip is clicked -- so it gets a scene of its own instead.
+# --------------------------------------------------------------------- #
+
+
+def _demo_peers() -> list:
+    """Three fabricated peers -- plausible in-repo work, not foo/bar --
+    covering both fields a roster row shows (title, tokens) and the case
+    doxa/peers.py's own ``PeerInfo.usage_tokens`` docstring names
+    explicitly: a peer that has not completed a turn yet reports
+    ``None``, and that must render as unknown, never as ``0 tok``.
+
+    Built with :func:`scripts.screenshot._peer` (session id, title,
+    clients -- the same helper `hero`/`sessions`/`palette` already use for
+    a plausible, entirely fake registry entry) and then given a token
+    total directly: ``_peer`` itself never takes one, since the ONE scene
+    that needed a peer with unknown usage needs ``usage_tokens`` left at
+    its dataclass default (``None``) rather than passed and overridden."""
+    ingest = _peer(
+        "b7e2f9a1c4", "trace the nightly ingest spool for zero-row folds",
+        clients=1,
+    )
+    ingest.usage_tokens = 86_000
+    auth = _peer(
+        "d4c8e1b503", "chase the token refresh regression in doxa/auth.py",
+        clients=0,
+    )
+    auth.usage_tokens = 142_000
+    curation = _peer(
+        "9a1f5c2e08", "review the v22 consolidation merge order before tagging",
+        clients=1,
+    )
+    # usage_tokens left at PeerInfo's own default (None): this peer has not
+    # finished a turn yet -- doxa.session.chips.PaneChipsMixin.
+    # open_peers_picker renders that as fmt_tokens(None) == "tok --",
+    # never "0 tok", and this is the row that puts that on screen.
+    return [ingest, auth, curation]
+
+
+async def _drive_peers_picker(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
+    """A real click on the peers chip, same "exercise the actual trigger"
+    choice `_drive_rename`'s double-click and `_drive_chip_picker`'s
+    branch click already make -- `_offset_of`'s own convention from
+    tests/test_status_chips.py (content starts at x=2 inside
+    ``#status-bar``, theme.tcss's `padding: 0 2`).
+
+    Peers come from the FakeEngine's own `peers=` kwarg (:func:`_demo_peers`,
+    threaded through this scene's `engine_factory` below) -- the same
+    surface `_hero_engine` already uses in scripts/screenshot.py -- rather
+    than from `doxa.peers.read_registry`, which the module docstring's own
+    isolation block never lets this script's own on-disk registry near in
+    the first place."""
+    await pilot.pause()
+    pane = app.active_pane
+    assert pane is not None
+    await _mount_filler_exchange(app, pilot)
+    # The exact rendered chip text, not a bare "peers" substring -- this
+    # repo's own git identity (branch/repo-dir name) can legitimately
+    # contain "peers" too (this scene's OWN worktree does:
+    # "chore/peers-gif@peers-gif"), and a looser needle would land the
+    # click on the git chip instead, opening the WRONG picker with zero
+    # rows. "peers 3 (1⌁)" is the peers chip's own text -- three peers,
+    # one of them (`auth`, clients=0 in :func:`_demo_peers`) detached.
+    chip_text = "peers 3 (1⌁)"
+    assert await _wait_until(pilot, lambda: chip_text in _status_plain(app))
+    rec.snap(1000, f"status bar: '{chip_text}' -- three live peers on "
+                   "this repo, one running detached")
+
+    plain = _status_plain(app)
+    offset = (2 + plain.index(chip_text), 0)
+    await pilot.click("#status-bar", offset=offset)
+    picker = pane.query_one("#chip-picker", ChipPicker)
+    assert await _wait_until(pilot, lambda: picker.is_open)
+    await pilot.pause()
+    rec.snap(1400, "click opens the roster: each row is a peer's title "
+                   "(its own first-prompt excerpt) and its running token "
+                   "total; the note states the heartbeat staleness bound")
+
+    for _ in range(2):
+        await pilot.press("down")
+        await pilot.pause()
+    rec.snap(1100, "arrowed to the peer with no completed turn yet: "
+                   "renders 'tok —', never '0 tok'")
+
+    await pilot.press("escape")
+    await pilot.pause()
+    rec.snap(900, "Esc closes the picker")
+
+
+# --------------------------------------------------------------------- #
 
 @dataclass
 class Scene:
@@ -916,6 +1010,13 @@ SCENES: list[Scene] = [
         widgets=(ChipPicker,),
         engine_factory=lambda: FakeEngine(
             [], model="claude-opus-4-5", bypass_armed=True,
+        ),
+    ),
+    Scene(
+        "peers", _drive_peers_picker, size=SIZE_TAB_BAR, min_frames=4,
+        widgets=(ChipPicker,),
+        engine_factory=lambda: FakeEngine(
+            [], model="claude-opus-4-5", peers=_demo_peers(),
         ),
     ),
 ]
