@@ -29,6 +29,7 @@ break the very mechanism it names.
 
 from __future__ import annotations
 
+import difflib
 from dataclasses import dataclass
 
 
@@ -454,3 +455,124 @@ def matches(fragment: str) -> list[SlashCommand]:
     if not fragment.startswith("/"):
         return []
     return [cmd for cmd in ordered() if cmd.name.startswith(fragment)]
+
+
+# -- THE GUARD (reported: "/lore:pending does nothing, no error") ---------
+#
+# ``lookup()`` above is deliberately permissive -- "anything else starting
+# with '/' stays a prompt and reaches the model untouched" -- which is
+# correct for ``/compact`` and every adopted plugin row (:func:`_plugin_rows`,
+# neither of which ``lookup``/``find`` ever sees, by design: they have no
+# DOXA handler and must reach the CLI verbatim). It is NOT correct for a
+# line that looks like a slash command but answers to NOBODY: not a
+# REGISTRY row, not an adopted plugin invocable, and -- silently, because
+# the isolated CLI (``doxa.cli_isolation``) never receives a copy of the
+# operator's own ``~/.claude/commands`` and the SDK's headless transport
+# still runs the CLI's own local-command interception -- often not
+# anything the CLI recognizes either. That line reaches ``_run_turn``
+# today, the CLI's local-command parser finds nothing staged for it, and
+# the whole turn answers with total silence: no DOXA error, no CLI text.
+#
+# ``doxa.session.pane.on_prompt_submitted`` calls :func:`unreachable_message`
+# for exactly the lines that fall through both ``lookup()`` and the
+# adopted-plugin fold-in, and mounts whatever it returns as a
+# ``SystemBlock`` instead of starting that doomed turn.
+
+_BLOCKED_PLUGIN_EQUIVALENTS: "dict[str, str]" = {
+    # plugin name (the first element of a claude_plugins.BLOCKLIST tuple)
+    # -> the DOXA-native surface that already does the same job. Deliberately
+    # NOT derived from BLOCKLIST itself -- knowing a plugin is blocked says
+    # nothing about what replaces it, that mapping is domain knowledge that
+    # has to be written down somewhere, and here is the one place a reader
+    # who wants to know "blocked commands, and their equivalents" looks.
+    # A plugin blocklisted with no entry here still gets the blocked
+    # message, just without the "use X instead" pointer.
+    "lore": "/beliefs and /pending",
+}
+
+_SUGGEST_CUTOFF = 0.72
+"""``difflib.get_close_matches``'s cutoff for the "did you mean" hint below
+-- high enough that "/lore:pending" (genuinely unrelated to any REGISTRY
+name) suggests nothing, and "/setings"/"/pendign" (one dropped/swapped
+letter from a real name) still match. Picked by measuring both directions
+against this file's own REGISTRY, not guessed."""
+
+
+def _blocked_plugin_names() -> "set[str]":
+    """The plugin half of every :data:`claude_plugins.BLOCKLIST` entry --
+    read from there, not re-typed here, so this guard can never name a
+    plugin blocked that the blocklist itself does not."""
+    try:
+        from . import claude_plugins as claude_plugins_mod
+    except Exception:  # noqa: BLE001 -- see _plugin_rows' docstring: a
+        # broken import must cost this one check, not every "/" line typed.
+        return set()
+    return {plugin for plugin, _marketplace in claude_plugins_mod.BLOCKLIST}
+
+
+def _blocked_plugin_message(name: str, plugin: str) -> str:
+    try:
+        from . import claude_plugins as claude_plugins_mod
+        reason = claude_plugins_mod.BLOCKLIST_REASON.split(" -- ", 1)[0]
+    except Exception:  # noqa: BLE001
+        reason = "it duplicates a capability DOXA already runs natively"
+    equivalent = _BLOCKED_PLUGIN_EQUIVALENTS.get(plugin)
+    pointer = (
+        f"; use DOXA's own {equivalent} instead" if equivalent
+        else "; see /plugins for why"
+    )
+    return (
+        f"unknown command: {name} -- the {plugin} plugin is blocked by "
+        f"design ({reason}){pointer}"
+    )
+
+
+def _unknown_message(name: str) -> str:
+    suggestion = difflib.get_close_matches(name, names(), n=1, cutoff=_SUGGEST_CUTOFF)
+    if suggestion:
+        return (
+            f"unknown command: {name} -- did you mean {suggestion[0]}? not "
+            "in DOXA's own commands or any adopted plugin, so nothing was "
+            "sent to the CLI"
+        )
+    return (
+        f"unknown command: {name} -- not in DOXA's own commands or any "
+        "adopted plugin, so nothing was sent to the CLI; if this is a live "
+        "Claude Code CLI or plugin command DOXA does not know about yet, "
+        "it will not run from here either"
+    )
+
+
+def is_reachable(name: str) -> bool:
+    """Whether ``name`` (a prompt's bare first token, leading "/" and all)
+    is something THIS session can actually run right now: a REGISTRY row
+    (interactive or passthrough) or a currently-adopted plugin command --
+    the exact membership :func:`names` already computes for the
+    autocomplete dropdown and the palette, reused here so "can this run"
+    never drifts from "does the dropdown offer it"."""
+    return name in names()
+
+
+def unreachable_message(name: str) -> "str | None":
+    """``None`` when :func:`is_reachable` -- the caller's cue to do nothing
+    and let the line reach the CLI as it always has. Otherwise the text a
+    caller mounts instead of starting a turn that would answer with
+    silence, in three shapes:
+
+    1. The token before ":" names a :data:`claude_plugins.BLOCKLIST` entry
+       -- blocked BY DESIGN, not missing by accident, so say so, why in one
+       clause (the blocklist's own reason), and point at the DOXA-native
+       equivalent when :data:`_BLOCKED_PLUGIN_EQUIVALENTS` has one.
+    2. A near miss of a REGISTRY/adopted-plugin name -- one suggestion,
+       via :data:`_SUGGEST_CUTOFF`.
+    3. Neither -- DOXA says exactly what it knows (not one of its own
+       commands, not an adopted plugin) and nothing it does not: this may
+       still be a genuine CLI-native command or a plugin DOXA has not
+       adopted, and the message says that plainly rather than claiming
+       certainty a client-side check cannot have."""
+    if is_reachable(name):
+        return None
+    plugin = name[1:].partition(":")[0] if name.startswith("/") else ""
+    if plugin and plugin in _blocked_plugin_names():
+        return _blocked_plugin_message(name, plugin)
+    return _unknown_message(name)

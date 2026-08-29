@@ -731,6 +731,21 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
         if command is not None and not command.passthrough:
             self.run_worker(self._run_command(prompt), group="command")
             return
+        # THE GUARD (reported: "/lore:pending does nothing, no error"):
+        # `lookup()` returning None does NOT mean this line is bogus --
+        # /compact and every adopted plugin row (doxa.commands._plugin_rows)
+        # answer None too, on purpose, and must still reach the CLI
+        # untouched below. Only a "/"-prefixed line that answers to NOBODY
+        # -- not a registry row, not a currently-adopted plugin command --
+        # gets stopped here; commands_mod.unreachable_message returns None
+        # for everything else, including every non-slash prompt. See its
+        # docstring for what this can and cannot honestly claim.
+        if prompt.startswith("/"):
+            name = prompt.partition(" ")[0]
+            message = commands_mod.unreachable_message(name)
+            if message is not None:
+                self.run_worker(self._run_unreachable(message), group="command")
+                return
         self.run_worker(self._run_turn(prompt), exclusive=True, group="turn")
 
     @on(PromptInput.ClipboardImageNotice)
@@ -761,6 +776,17 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, TabPane):
             await self._system(f"unknown command: {name}")
             return
         await handler(args.strip())
+
+    async def _run_unreachable(self, message: str) -> None:
+        """The guard's own door: mount ``message`` (already built by
+        ``commands_mod.unreachable_message``) and stop -- no engine wait,
+        no worker on ``group="turn"``, because there is nothing to send.
+        A plain method rather than inlining ``self._system(...)`` at the
+        call site so the guard's dispatch in ``on_prompt_submitted`` reads
+        the same shape as the other two doors (``_run_command``,
+        ``_run_shell``, ``_run_turn``), each one line that names a
+        coroutine."""
+        await self._system(message)
 
     async def _run_shell(self, command: str) -> None:
         """Item Q's executor side. **Read doxa/shell.py's module docstring
