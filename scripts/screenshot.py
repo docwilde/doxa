@@ -69,12 +69,13 @@ os.environ.setdefault("DOXA_SKIP_FIRST_RUN", "1")
 
 from datetime import datetime, timezone  # noqa: E402
 
-from doxa.app import DoxaApp, ToolChip, TurnBlock  # noqa: E402
-from doxa.engine import EngineEvent  # noqa: E402
+from doxa.app import ChipPicker, DoxaApp, ToolChip, TurnBlock  # noqa: E402
+from doxa.engine import EngineEvent, context_breakdown  # noqa: E402
 from doxa.identity import Usage, UsageLimit  # noqa: E402
 from doxa.peers import PeerInfo  # noqa: E402
 from textual.widgets import TabbedContent  # noqa: E402
 from tests.fakes import FakeEngine  # noqa: E402
+from tests.helpers import _belief  # noqa: E402
 
 SHOTS = ROOT / "assets" / "shots"
 
@@ -521,6 +522,171 @@ async def _drive_error_block(app: DoxaApp, pilot) -> None:
 
 
 # --------------------------------------------------------------------- #
+# Scene: context (v0.87.0, NEW) -- `/context` as v0.81.0 redrew it: a
+# FIXED 10x20 grid of 200 draughts cells at 0.5% each, model and headline
+# beside the top rows, the per-category legend beside the lower ones, and
+# the source sections below. This replaced v0.75.0's proportional bar, and
+# no asset in this gallery has ever shown either one -- the bar shipped and
+# was retired inside four releases without a scene, so this is the first
+# capture of the surface rather than a refresh of a stale one.
+#
+# GLYPHS, not ascii: `context_grid` (DOXA_CONTEXT_GRID) defaults to the
+# draughts cells (⛀ ⛁ ⛶) and the ascii tier ([#]/[ ]) is the fallback for
+# a font that cannot draw them. A gallery shows the DEFAULT -- the env var
+# is deliberately left unset here so this scene reads whatever a fresh
+# install really renders, and both tiers are 3 columns wide anyway, so the
+# layout is identical either way.
+# --------------------------------------------------------------------- #
+
+# Shaped exactly like the SDK's own ContextUsageResponse -- the same shape
+# tests/test_context.py pins -- and normalized through the ONE path both
+# real engines use (`doxa.engine.context_breakdown`), so this scene renders
+# the identical structure a live session hands the block. Every number is
+# invented and plausible; none is measured off this machine, the same rule
+# `_fake_identity` holds for the status bar. `/context` is a diagnostic
+# surface, so what it must never do is show a breakdown DOXA estimated --
+# and it does not: the categories below stand in for the CLI's own
+# accounting, which is the only thing this command has ever printed.
+CONTEXT_USAGE = {
+    "categories": [
+        {"name": "System prompt", "tokens": 4_150, "color": "blue"},
+        {"name": "System tools", "tokens": 13_400, "color": "green"},
+        {"name": "MCP tools", "tokens": 2_060, "color": "purple"},
+        {"name": "Memory files", "tokens": 2_400, "color": "orange"},
+        {"name": "Messages", "tokens": 38_900, "color": "red"},
+        {"name": "Free space", "tokens": 119_090, "color": "grey"},
+    ],
+    "totalTokens": 60_910,
+    "maxTokens": 180_000,
+    "rawMaxTokens": 200_000,
+    "percentage": 33.8,
+    "model": "claude-opus-4-5",
+    "isAutoCompactEnabled": True,
+    "autoCompactThreshold": 160_000,
+    "memoryFiles": [
+        {"path": "~/Schreibtisch/doxa/CLAUDE.md", "type": "Project", "tokens": 2_400},
+    ],
+    "mcpTools": [
+        {"name": "lore_belief_search", "serverName": "doxa_lore",
+         "tokens": 380, "isLoaded": True},
+        {"name": "lore_belief_show", "serverName": "doxa_lore",
+         "tokens": 420, "isLoaded": True},
+        {"name": "lore_belief_neighbours", "serverName": "doxa_lore",
+         "tokens": 460, "isLoaded": True},
+    ],
+    "agents": [
+        {"agentType": "Explore", "source": "builtin", "tokens": 480},
+        {"agentType": "Plan", "source": "builtin", "tokens": 320},
+    ],
+}
+
+
+async def _drive_context(app: DoxaApp, pilot) -> None:
+    # The same three-tab, real-Q&A fill `settings`/`clock`/`error-block`
+    # use: /context mounts its block at the END of the transcript, so what
+    # sits above it in a 69-row frame should be a session that has actually
+    # been consuming the window this grid is measuring -- not blank canvas
+    # under a block claiming 33.8% of a context is in use.
+    await _fill_hero_conversation(app, pilot)
+    pane = app.active_pane
+    pane.engine.context_usage_result = context_breakdown(CONTEXT_USAGE)
+    await pane._cmd_context("")
+    await _settle(pilot, 12)
+    app.query_one("#block-list").scroll_end(animate=False)
+    await pilot.pause()
+
+
+# --------------------------------------------------------------------- #
+# Scene: beliefs-picker (v0.87.0, NEW FILE -- see below) -- the beliefs
+# surface as it actually exists now: the shared ChipPicker, opened off the
+# beliefs chip.
+#
+# This REPLACES `beliefs-browser.png`/`.svg`, which this release deletes.
+# Those two did not merely drift -- they showed the standalone beliefs
+# BROWSER TAB, a whole surface v0.69.0 removed and v0.73.0 finished
+# removing (`/beliefs` opens this picker instead; `_beliefs_tab` and its
+# Ctrl+W/Ctrl+Q cases are gone). Their generating scene went with it, which
+# is why the files sat in `assets/shots/` for eighteen releases with
+# nothing in either script able to refresh them. A file named for a removed
+# feature is a claim that the feature is still there, so the name goes too;
+# nothing in README.md or docs/ ever referenced either path (checked, not
+# assumed), so no link breaks.
+#
+# What this scene has to show, and what the old pair could not:
+#   * FIXED COLUMNS -- PICKER_STAMP_COL 15 / PICKER_STATUS_COL 28 /
+#     PICKER_AGE_COL 7, one 50-column prefix every row starts its text
+#     after (v0.67.0 gave the two pickers one row shape; v0.77.0 re-checked
+#     the three widths against both row types). The old image predates all
+#     of it and shows the `·`-joined string that drifted with each field's
+#     length -- the reported "the proposals view should be formatted that
+#     the columns have fixed width".
+#   * The `g graph` row action (v0.86.0), beside y/c/s/r.
+# --------------------------------------------------------------------- #
+
+# `_belief` is tests/helpers.py's own fixture builder -- the SAME shape
+# `SessionEngine.list_beliefs` hands the picker, reused rather than
+# re-declared here so this scene cannot drift from what the picker's
+# several hundred tests are written against. Stamps are relative to now
+# (that is what `_belief` does), so the age column reads as a real age
+# rather than a frozen one; the claims themselves are invented, same
+# discipline as every other scene in this file.
+def _beliefs() -> list[dict]:
+    return [
+        _belief(184, "deploys are gated on the release checklist, not on CI alone",
+                subject="project:doxa", created_days=180, idle_days=2,
+                outcome="confirmed", outcome_days=1, outcomes=12, evidence_count=7),
+        _belief(201, "the gallery's geometry constants live in scripts/screenshot.py",
+                subject="project:doxa", created_days=90, idle_days=6,
+                outcomes=0, evidence_count=3),
+        _belief(232, "uv, never pip, for this repo",
+                subject="project:doxa", created_days=140, idle_days=1,
+                outcome="confirmed", outcome_days=3, outcomes=5, evidence_count=4),
+        _belief(248, "worktrees are pruned weekly, so a stale one is a bug",
+                subject="project:doxa", created_days=60, idle_days=11,
+                outcome="contradicted", outcome_days=4, outcomes=3,
+                evidence_count=2),
+        _belief(261, "record_gif.py shares screenshot.py's fake-identity helpers",
+                subject="project:doxa", created_days=45, idle_days=19,
+                outcomes=0, evidence_count=1),
+        _belief(117, "prefers fixed-column tables over ad hoc separator joins",
+                subject="user", created_days=220, idle_days=8,
+                outcome="confirmed", outcome_days=2, outcomes=9, evidence_count=6),
+        _belief(129, "reads the CHANGELOG before the diff",
+                subject="user", created_days=150, idle_days=27,
+                outcomes=0, evidence_count=2),
+    ]
+
+
+async def _drive_beliefs_picker(app: DoxaApp, pilot) -> None:
+    await pilot.pause()
+    pane = app.active_pane
+    beliefs = _beliefs()
+    pane.engine.list_beliefs_result = beliefs
+    # The status bar's `N beliefs` chip and this picker read two DIFFERENT
+    # engine calls by design -- `belief_count()` is the cheap COUNT(*) that
+    # runs on every status refresh, `list_beliefs()` the heavy claim-text
+    # query only a click may make (open_beliefs_picker's own cost-discipline
+    # note). FakeEngine hardcodes the count at 3, so left alone this shot
+    # would show a chip reading `3 beliefs` above a picker listing seven,
+    # and a reader has no way to know that disagreement is a fixture
+    # artifact rather than a bug in the pair. Overridden on the INSTANCE,
+    # before the first status refresh, rather than by editing
+    # tests/fakes.py -- that file is the suite's, and a screenshot may not
+    # move a number several hundred tests are written against. Set here so
+    # the two agree for the same reason `_belief_cap_note` exists: a count
+    # and a list that disagree must mean the cap bit, never the scaffolding.
+    pane.engine.belief_count = lambda: len(beliefs)
+    await _fill_hero_conversation(app, pilot)
+    await pane.open_beliefs_picker()
+    for _ in range(200):
+        picker = pane.query_one("#chip-picker", ChipPicker)
+        if picker.is_open:
+            break
+        await pilot.pause(0.02)
+    await _settle(pilot, 12)
+
+
+# --------------------------------------------------------------------- #
 
 @dataclass
 class Scene:
@@ -611,6 +777,10 @@ SCENES: list[Scene] = [
     Scene("sessions", _drive_sessions, size=WIDE,
           engine_factory=_hero_engine),
     Scene("error-block", _drive_error_block, size=WIDE,
+          engine_factory=_hero_engine, new_session_factory=_sibling_tab_factory()),
+    Scene("context", _drive_context, size=WIDE,
+          engine_factory=_hero_engine, new_session_factory=_sibling_tab_factory()),
+    Scene("beliefs-picker", _drive_beliefs_picker, size=WIDE,
           engine_factory=_hero_engine, new_session_factory=_sibling_tab_factory()),
     # THE banner, since v0.70.0 dropped the raster tier: every terminal
     # draws this. The scene name is kept rather than renamed to `banner`

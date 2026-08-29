@@ -65,6 +65,8 @@ os.environ.setdefault("DOXA_HOME", str(_tmp / "doxa-home"))
 os.environ.setdefault("XDG_CONFIG_HOME", str(_tmp / "xdg"))
 os.environ.setdefault("DOXA_SKIP_FIRST_RUN", "1")
 
+from time import monotonic  # noqa: E402
+
 from PIL import Image  # noqa: E402
 
 from doxa.app import (  # noqa: E402
@@ -80,6 +82,7 @@ from doxa.app import (  # noqa: E402
     TurnBlock,
 )
 from doxa.engine import EngineEvent  # noqa: E402
+from doxa.ui.transcript import SPINNER_FRAMES  # noqa: E402
 from scripts.screenshot import _fake_identity, _peer, _settle  # noqa: E402
 from tests.fakes import FakeEngine  # noqa: E402
 from textual.containers import VerticalScroll  # noqa: E402
@@ -213,6 +216,42 @@ async def _mount_bare_turn(app: DoxaApp, prompt: str) -> TurnBlock:
     return block
 
 
+def _marker(block: TurnBlock, seconds: int, phase: str = "") -> None:
+    """Paint the in-flight marker as a REAL turn's would read ``seconds``
+    into it, in ``phase``.
+
+    v0.87.0, and the fix for a gap CHANGELOG 0.78.0 named and left open.
+    Every scene in this file mounts its TurnBlock directly
+    (:func:`_mount_bare_turn`), which is what gives a scene exact control
+    over ordering -- but it also means nothing here ever reached
+    ``ThinkingMarker.start()``, the method a real turn calls from
+    ``_run_turn`` and the two ``_peer_pump`` branches. So the three scenes
+    that show a turn IN FLIGHT (`tool-calls`, `markdown-stream`,
+    `reasoning`) baked the widget's un-armed CONSTRUCTION text, ``⋯
+    thinking`` -- a state no real turn is ever in for even one frame, and
+    exactly the pre-0.78.0 marker that release replaced with a per-second
+    ``⠋ working (14s)`` ticker.
+
+    Written by assignment rather than by arming the real one-second
+    ``Timer``, and that is this file's own determinism rule (see the module
+    docstring: "nothing here waits out a fixed wall-clock delay"), not a
+    shortcut around it. A live timer would put a DIFFERENT elapsed count in
+    the GIF on every run, which is precisely the non-reproducibility the
+    frozen clock in ``scripts/screenshot.py``'s own `clock` scene exists to
+    avoid. The three values written are the ones the widget computes for
+    itself and are read back off it, not guessed: ``_elapsed()`` floors
+    ``monotonic() - _started_at``, and ``_tick`` advances exactly one frame
+    per second from zero -- so second N here renders the frame a real turn
+    genuinely shows at second N. ``_repaint`` is the widget's own painter
+    (it is deliberately not called ``_render``; see its comment).
+    """
+    marker = block.thinking
+    marker._started_at = monotonic() - seconds
+    marker.phase = phase
+    marker.frame = seconds % len(SPINNER_FRAMES)
+    marker._repaint()
+
+
 async def _mount_filler_exchange(app: DoxaApp, pilot: Any) -> None:
     """One quick, already-FINISHED exchange, mounted before a scene's own
     scripted content -- v0.67.0's answer to every GIF scene here growing
@@ -324,37 +363,55 @@ async def _drive_tool_calls(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> Non
     await _mount_filler_exchange(app, pilot)
     block = await _mount_bare_turn(app, "what changed in the token refresh path?")
     await block.append_text("Checking a few places before I answer.\n\n")
+    _marker(block, 2, "generating")
     await pilot.pause()
-    rec.snap(700, "turn streams: prose before any tool call")
+    rec.snap(700, "turn streams: prose before any tool call -- ⠹ generating (2s)")
 
+    # The elapsed count climbing 5 -> 9 -> 14 across the next three frames
+    # is v0.78.0's whole point, and it is the honest reading of this exact
+    # sequence: between a tool_call and its tool_result NO delta arrives,
+    # so a purely delta-driven marker (everything before 0.78.0) froze
+    # here -- on the one stretch where "is this still working?" is the
+    # question actually being asked. The phase legitimately stops changing
+    # at `working`; the glyph and the seconds do not.
     chip1 = ToolChip("t1", "Grep", {"pattern": "refresh_token", "path": "doxa/auth.py"})
     await block.add_tool_chip(chip1)
+    _marker(block, 5, "working")
     await pilot.pause()
-    rec.snap(550, "Tool calls (1)")
+    rec.snap(550, "Tool calls (1) -- ⠴ working (5s)")
 
     chip2 = ToolChip("t2", "Read", {"path": "doxa/auth.py"})
     await block.add_tool_chip(chip2)
+    _marker(block, 9, "working")
     await pilot.pause()
-    rec.snap(550, "Tool calls (2)")
+    rec.snap(550, "Tool calls (2) -- ⠏ working (9s), ticking through dead air")
 
     chip3 = ToolChip("t3", "Edit", {"path": "doxa/auth.py"})
     await block.add_tool_chip(chip3)
+    _marker(block, 14, "working")
     await pilot.pause()
-    rec.snap(550, "Tool calls (3)")
+    rec.snap(550, "Tool calls (3) -- ⠼ working (14s)")
 
     chip1.update_result("3 hits in doxa/auth.py", False, 12)
     chip2.update_result("214 lines read", False, 6)
     chip3.update_result("1 edit applied", False, 40)
 
     block.tool_section.collapsed = False
+    _marker(block, 17, "working")
     await pilot.pause()
     rec.snap(700, "section expanded: all 3 chips")
 
     chip1.collapsed = False
+    _marker(block, 19, "working")
     await pilot.pause()
     rec.snap(1000, "chip 1 expanded: ARGS + RESULT")
 
+    # mark_done -> hide_thinking(): the marker goes, and the turn's cost
+    # line lands. The LAST frame is what a reader is left looking at, so
+    # it has to be the finished turn, not a spinner frozen mid-flight.
     await block.mark_done(0.0028, 640, False)
+    await pilot.pause()
+    rec.snap(1200, "turn_done: the marker clears, cost and duration land")
 
 
 # --------------------------------------------------------------------- #
@@ -378,10 +435,17 @@ async def _drive_markdown_stream(app: DoxaApp, pilot: Any, rec: FrameRecorder) -
     last = len(MD_CHUNKS) - 1
     for i, chunk in enumerate(MD_CHUNKS):
         await block.append_text(chunk)
+        # A text_delta is exactly what puts the marker in `generating`
+        # (ThinkingMarker.advance's own phase names), so the marker moves
+        # with the stream here rather than through dead air -- two seconds
+        # a chunk, the shape a real reply of this length streams at.
+        _marker(block, 2 * i + 1, "generating")
         await pilot.pause()
         hold = 1000 if i in (0, last) else 550
-        rec.snap(hold, f"chunk {i + 1}/{len(MD_CHUNKS)}")
+        rec.snap(hold, f"chunk {i + 1}/{len(MD_CHUNKS)} -- generating ({2 * i + 1}s)")
     await block.mark_done(0.0019, 420, False)
+    await pilot.pause()
+    rec.snap(1200, "turn_done: the marker clears, the table stands finished")
 
 
 # --------------------------------------------------------------------- #
@@ -404,21 +468,31 @@ async def _drive_reasoning(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None
     await pilot.pause()
     await _mount_filler_exchange(app, pilot)
     block = await _mount_bare_turn(app, "what changed in the token refresh path?")
+    # The opening phase, before ANY event has arrived, renders as
+    # `thinking` -- and since v0.78.0 it already carries a live second
+    # count, deliberately: that silent opening gap is the case the
+    # reported freeze was worst in. v0.56.0 kept this frozen; 0.78.0
+    # reversed it, and this frame is that reversal.
+    _marker(block, 0, "")
     await pilot.pause()
-    rec.snap(700, "turn starts: the ⋯ thinking marker is the only sign of life")
+    rec.snap(700, "turn starts: ⠋ thinking (0s) is the only sign of life")
 
     for i, chunk in enumerate(REASONING_CHUNKS):
         await block.append_reasoning(chunk)
+        _marker(block, 4 * i + 3, "reasoning")
         await pilot.pause()
-        rec.snap(700, f"Reasoning ({block.reasoning_section.chars} chars) -- collapsed, ticking live")
+        rec.snap(700, f"Reasoning ({block.reasoning_section.chars} chars) -- "
+                      f"collapsed, ticking live at {4 * i + 3}s")
 
     block.reasoning_section.collapsed = False
+    _marker(block, 11, "reasoning")
     await pilot.pause()
     rec.snap(1100, "expanded mid-turn: stays open as more streams in")
 
     await block.append_reasoning(
         " That's the one place a stale cache could linger past the window."
     )
+    _marker(block, 15, "reasoning")
     await pilot.pause()
     rec.snap(900, "still expanded, one more chunk arrived")
 
@@ -426,10 +500,17 @@ async def _drive_reasoning(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None
         "The refresh path looks correct: `refresh_token()` renews inside "
         "the grace window via the CLI's own endpoint."
     )
+    # v0.25.0 had the first reasoning_delta HIDE this marker; v0.78.0
+    # reversed that too, so one marker lives for the whole turn and NAMES
+    # the phase it is in. The switch reasoning -> generating is that
+    # reversal's payoff, and it is a frame here rather than a claim.
+    _marker(block, 19, "generating")
     await pilot.pause()
-    rec.snap(1100, "reasoning done, the answer streams in below it")
+    rec.snap(1100, "reasoning done -- the phase flips to generating, answer streams in below")
 
     await block.mark_done(0.0021, 780, False)
+    await pilot.pause()
+    rec.snap(1200, "turn_done: the marker clears")
 
 
 # --------------------------------------------------------------------- #
