@@ -30,20 +30,32 @@ Never raises: a missing, unreadable or malformed record reads as "nothing
 to restore" to every caller, exactly like a broken config.toml costs the
 user their settings, never their session (doxa.config.load's own rule).
 
-**The layout node** (v0.32.0): the record ALSO carries ``{"layout":
-{"kind": "tabs", "tabs": [...]}}`` -- the same tab list, one level down.
-It buys nothing today and is not read in preference to anything: DOXA has
-a tab strip and no split layout at all (``SessionPane`` is a ``TabPane``;
-there is no vertical or horizontal split to persist, which is why the
-reported "prior vertical or horizontal panel split" is NOT restored here
-and cannot be until splits exist). It costs one dict on write and one
-branch on read, and it means the day a split tree does exist the record
-grows a ``{"kind": "split", "orientation": ..., "children": [...]}`` node
-in the same slot instead of needing a format version and a migration.
-``tabs`` stays at the TOP level as the only thing v0.23.0-v0.31.0 knew
-how to read, so a record this version writes still restores under an
-older DOXA -- and :func:`load` still prefers it, so a record an older
-DOXA writes (no layout node at all) restores here.
+**The layout node** (v0.32.0, filled in v0.89.0): the record ALSO
+carries ``{"layout": {"kind": "tabs", "tabs": [...], "trees": [...]}}``.
+That node was reserved three years of releases before it held anything --
+"the day a split tree does exist the record grows a ``{"kind": "split",
+...}`` node in the same slot instead of needing a format version and a
+migration" -- and v0.89.0 is that day. Splits are carried in ``trees``:
+one :mod:`doxa.layout` tree per TAB, in tab order, each a ``leaf`` or a
+``split`` node.
+
+The compatibility rule is the one that was written down then, and it
+survives BOTH ways:
+
+* ``tabs`` stays at the TOP level, flat, every leaf of every tree in
+  layout order. It is the only shape v0.23.0-v0.31.0 knows how to read
+  and the shape :func:`_layout_tabs` still prefers, so a record written
+  by a DOXA with splits still restores under one without them -- as N
+  ordinary tabs, which is the honest degradation, not as nothing.
+* ``kind`` stays ``"tabs"``. Writing ``"split"`` there instead would be
+  read by every DOXA from v0.32.0 to v0.88.0 as "nothing this version can
+  lay out" -- correct, and it would cost the user every tab they had.
+  An unrecognised kind still means that, and :func:`load` still returns
+  ``None`` for one; nothing this version writes produces one.
+* A record with NO ``trees`` key -- anything written before v0.89.0 --
+  reads as one single-leaf tree per saved tab (:func:`_layout_trees`).
+  The absence of the key IS the migration; there is no version field and
+  no upgrade step.
 
 **Restore is a cross-check, not a replay**: :func:`resolve` reads the
 saved record, then filters it against the LIVE daemon registry
@@ -107,6 +119,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config as config_mod
+from . import layout as layout_mod
 from . import peers as peers_mod
 from . import transcript as transcript_mod
 
@@ -157,6 +170,13 @@ class TabSetRecord:
     scope_key: str
     tabs: tuple[TabRecord, ...]
     active_session_id: "str | None"
+    #: One :mod:`doxa.layout` tree per saved TAB, in tab order (v0.89.0).
+    #: NEVER empty on a record this version reads: a record written before
+    #: splits existed has no trees in it, and :func:`load` derives one
+    #: single-leaf tree per saved tab instead -- "a new reader must
+    #: restore old flat records as single-leaf trees", implemented once,
+    #: here, so no caller has to know which kind of record it got.
+    trees: "tuple" = ()
 
 
 @dataclass(frozen=True)
@@ -178,6 +198,13 @@ class ResolvedRestore:
     entries: "list[tuple[TabRecord, peers_mod.PeerInfo | None]]" = field(
         default_factory=list
     )
+    #: The saved layout trees (v0.89.0), one per saved TAB, in saved tab
+    #: order and UNPRUNED -- which sessions survived is the caller's
+    #: cross-check, already answered by ``tabs``/``archived``/``skipped``
+    #: above, and pruning here would mean answering it twice. doxa.app's
+    #: ``_restore_trees_in_order`` does the pruning against the specs it
+    #: actually built.
+    trees: "tuple" = ()
 
     def ordered(self) -> "list[tuple[TabRecord, peers_mod.PeerInfo | None]]":
         """Every surviving tab in SAVED ORDER, live and archived
@@ -216,7 +243,10 @@ def _file_for(scope_key: str) -> Path:
 
 
 def save(
-    scope_key: str, tabs: "list[TabRecord]", active_session_id: "str | None"
+    scope_key: str,
+    tabs: "list[TabRecord]",
+    active_session_id: "str | None",
+    trees: "list | None" = None,
 ) -> None:
     """Atomic write (tmp + ``os.replace``), 0600. Never raises: a
     persistence failure costs the user a future restore, never the
@@ -230,15 +260,28 @@ def save(
         for t in tabs
         if t.session_id
     ]
+    layout: dict = {"kind": "tabs", "tabs": rows}
+    if trees:
+        # v0.89.0: one layout tree per TAB, in tab order -- the split
+        # structure the flat list above cannot express. It rides INSIDE
+        # the layout node rather than replacing its ``kind``, and that is
+        # the whole compatibility story: every DOXA since v0.23.0 reads
+        # the top-level ``tabs`` list first (_layout_tabs below), so a
+        # record with splits in it still restores as N flat tabs under an
+        # older DOXA instead of as nothing. The alternative -- writing
+        # ``{"kind": "split"}`` in that slot -- would have been read by
+        # v0.32.0-v0.88.0 as "nothing this version can lay out", which is
+        # honest but costs the user every tab they had.
+        layout["trees"] = [layout_mod.to_json(tree) for tree in trees]
     payload = {
         "scope_key": scope_key,
         "active_session_id": active_session_id or None,
         # Written TWICE, on purpose -- see the module docstring's "layout
         # node". The top-level list is the only shape v0.23.0-v0.31.0 can
-        # read and stays authoritative; the layout node is the slot a
-        # split tree would grow into without a breaking format change.
+        # read and stays authoritative; the layout node is the slot the
+        # split tree grew into, without a breaking format change.
         "tabs": rows,
-        "layout": {"kind": "tabs", "tabs": rows},
+        "layout": layout,
     }
     path = _file_for(scope_key)
     try:
@@ -270,6 +313,38 @@ def _layout_tabs(data: dict) -> "list | None":
         return None
     raw = layout.get("tabs")
     return raw if isinstance(raw, list) else None
+
+
+def _layout_trees(data: dict, tabs: "list[TabRecord]") -> "tuple":
+    """The saved layout trees, or one single-leaf tree per saved tab.
+
+    The fallback IS the migration (v0.89.0). A record written by any DOXA
+    from v0.23.0 to v0.88.0 has no ``trees`` key at all, and the honest
+    reading of it is that every tab held exactly one pane -- which was
+    true, because splits did not exist. So an old record restores as N
+    single-leaf trees and behaves identically, and no version number, no
+    schema field and no migration step is needed to tell the two apart:
+    the absence of the key is the answer.
+
+    A tree that reads as ``None`` (a kind this version does not know, a
+    malformed child) falls back the same way, per tab, rather than
+    discarding the whole record -- the flat list is still authoritative
+    and still complete."""
+    layout = data.get("layout")
+    raw = layout.get("trees") if isinstance(layout, dict) else None
+    if isinstance(raw, list):
+        trees = [layout_mod.from_json(entry) for entry in raw]
+        trees = [t for t in trees if t is not None]
+        if trees:
+            return tuple(trees)
+    return tuple(
+        layout_mod.Leaf(
+            session_id=tab.session_id,
+            pinned_name=tab.pinned_name,
+            cwd=tab.cwd,
+        )
+        for tab in tabs
+    )
 
 
 def load(scope_key: str) -> "TabSetRecord | None":
@@ -316,6 +391,7 @@ def load(scope_key: str) -> "TabSetRecord | None":
         scope_key=str(data.get("scope_key") or scope_key),
         tabs=tuple(tabs),
         active_session_id=str(active) if active else None,
+        trees=_layout_trees(data, tabs),
     )
 
 
@@ -363,7 +439,7 @@ def resolve(scope_key: str) -> "ResolvedRestore | None":
             active = None  # the saved active tab is gone -- no forced pick
     return ResolvedRestore(
         tabs=live, skipped=skipped, active_session_id=active,
-        archived=archived, entries=entries,
+        archived=archived, entries=entries, trees=record.trees,
     )
 
 

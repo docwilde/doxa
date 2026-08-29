@@ -358,6 +358,11 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
         restore_tabs=specs,
         restore_active_id=resolved.active_session_id,
         restore_report=report,
+        # v0.89.0: the saved SPLIT structure, one tree per tab. Passed
+        # through untouched -- doxa.tabsets already answered "was there
+        # one?" (an older record yields single-leaf trees, so there always
+        # is), and DoxaApp prunes it against the specs above.
+        restore_layout=list(resolved.trees),
     )
     app.run()
     _maybe_restart(app)
