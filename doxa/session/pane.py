@@ -26,6 +26,7 @@ from typing import Any, Callable  # noqa: F401 -- annotation-only
 from textual import events, on
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.widgets import OptionList, TabbedContent, TextArea
 
 from .. import commands as commands_mod
@@ -971,8 +972,29 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
     # -- the three doors a submitted line goes through ----------------
 
     async def _system(self, text: str) -> None:
-        """Mount one doxa-generated block and stay scrolled to it."""
-        block_list = self.query_one("#block-list", VerticalScroll)
+        """Mount one doxa-generated block and stay scrolled to it.
+
+        Silently a no-op when the transcript container is not mountable
+        yet or any more. v0.89.0 made this reachable: a leaf is now born
+        inside a pre-made box, so ``#block-list`` composes strictly later
+        than it did when a pane WAS the tab, and a background task
+        (``_peer_pump``, a boot notice, a peer message) can arrive in the
+        window between "the widget exists" and "the widget is mounted".
+        ``query_one`` SUCCEEDS there -- the node is in the DOM -- and it
+        is ``mount`` that raises ``MountError: Can't mount widget(s)
+        before VerticalScroll(id='block-list') is mounted``, which is why
+        the ``NoMatches`` guards of v0.70.0/v0.75.0 do not cover this and
+        a second condition is needed. Dropping the block is right on both
+        sides of the window: before, nothing is on screen to read it;
+        after (teardown), the pane is going away. Raising instead paints
+        an error block over an ordinary shutdown, which is the defect
+        v0.85.0 closed for ``_peer_pump``."""
+        try:
+            block_list = self.query_one("#block-list", VerticalScroll)
+        except NoMatches:
+            return
+        if not block_list.is_mounted:
+            return
         await block_list.mount(SystemBlock(text))
         block_list.scroll_end(animate=False)
 
