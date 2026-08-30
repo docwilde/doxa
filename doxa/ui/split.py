@@ -217,12 +217,37 @@ class PaneTab(TabPane):
         return self._root
 
     def leaves(self) -> "list[Any]":
-        """Every session leaf in this tab, in DOM order (which is
+        """Every SESSION leaf in this tab, in DOM order (which is
         left-to-right / top-to-bottom, the same order
-        :func:`doxa.layout.leaves` produces)."""
+        :func:`doxa.layout.leaves` produces).
+
+        Sessions only, unchanged from v0.91.0 and deliberately so: every
+        caller of this asks a question only a session can answer ("which
+        session is this tab's", "which engine does this key mean"). The
+        geometric question -- what rectangles are on screen -- is
+        :meth:`surfaces`, and conflating them is how a diff pane would
+        end up being handed to something expecting an engine."""
         from ..session.pane import SessionPane
 
         return list(self.query(SessionPane))
+
+    def surfaces(self) -> "list[Any]":
+        """Every leaf of any kind, in DOM order.
+
+        What directional focus reads: v0.92.0's diff pane is a leaf you
+        can focus and scroll but not type a prompt into, so "panes I can
+        move the keyboard to" and "sessions" stopped being the same
+        list. A leaf qualifies by being able to name itself as one
+        (``layout_leaf()``), which is the same test :func:`_node_of`
+        applies when the tree is read off the widgets."""
+        from ..session.pane import SessionPane
+
+        return [
+            node for node in self.query("*")
+            if isinstance(node, SessionPane) or callable(
+                getattr(node, "layout_leaf", None)
+            )
+        ]
 
     def tree(self) -> "layout_mod.Node | None":
         """This tab's layout as a :mod:`doxa.layout` tree, read off the
@@ -234,26 +259,45 @@ class PaneTab(TabPane):
         return _tree_of(self._root)
 
 
-def _tree_of(box: SplitBox) -> "layout_mod.Node | None":
+def _node_of(kid: Any) -> "layout_mod.Node | None":
+    """One child of a box as a tree node, whatever kind of leaf it is.
+
+    A leaf that is not a ``SessionPane`` answers for ITSELF, through a
+    ``layout_leaf()`` method (:meth:`doxa.ui.diffview.DiffPane.layout_leaf`
+    is the first). Duck-typed rather than a growing ``isinstance`` chain
+    because this module deliberately does not import the widgets it lays
+    out at module scope -- ``SessionPane`` is imported inside functions to
+    break the cycle, and a second such import for every new surface is a
+    cycle waiting to be reintroduced.
+
+    Returning ``None`` here is what v0.91.0 did for EVERY non-session
+    child, and it is not harmless: a used box whose second child yields
+    ``None`` collapses to one child, so ``PaneTab.tree()`` would report
+    "no split" for a screen that plainly shows one, and the persisted
+    record would carry that lie into the next launch."""
     from ..session.pane import SessionPane
 
+    if isinstance(kid, SplitBox):
+        return _tree_of(kid)
+    if isinstance(kid, SessionPane):
+        return _leaf_of(kid)
+    own = getattr(kid, "layout_leaf", None)
+    if callable(own):
+        leaf = own()
+        return leaf if isinstance(leaf, layout_mod.Leaf) else None
+    return None
+
+
+def _tree_of(box: SplitBox) -> "layout_mod.Node | None":
     kids = list(box.children)
     if not kids:
         return None
     if not box.is_used:
-        kid = kids[0]
-        if isinstance(kid, SplitBox):
-            return _tree_of(kid)  # an unused box is transparent
-        if isinstance(kid, SessionPane):
-            return _leaf_of(kid)
-        return None
+        return _node_of(kids[0])  # an unused box is transparent
     children: "list[layout_mod.Node]" = []
     weights: "list[float]" = []
     for kid, weight in zip(kids, layout_mod.normalise(box.weights, len(kids))):
-        node = (
-            _tree_of(kid) if isinstance(kid, SplitBox)
-            else (_leaf_of(kid) if isinstance(kid, SessionPane) else None)
-        )
+        node = _node_of(kid)
         if node is not None:
             children.append(node)
             weights.append(weight)

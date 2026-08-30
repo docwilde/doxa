@@ -42,6 +42,25 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
+#: What a leaf SHOWS. Through v0.91.0 this did not exist because there
+#: was one answer: a leaf was a session pane and nothing else. v0.92.0's
+#: live diff is the first leaf that is not, and the field is what makes
+#: it expressible at all -- without it :func:`doxa.ui.split._leaf_of`
+#: returns ``None`` for the diff, the split node collapses to its one
+#: surviving child, and the persisted record says "one pane" while the
+#: screen shows two. That is the exact defect class the split module's
+#: own docstring warns about (the model says split, the screen says not),
+#: so a leaf now names its kind rather than having it inferred from a
+#: widget class.
+#:
+#: A DIFF leaf still carries the ``session_id`` of the session it is a
+#: diff OF. That is not a spare field: it is what makes :func:`prune`
+#: correct without knowing anything about diffs -- a diff whose session
+#: died is pruned by the same rule that prunes the session.
+VIEW_SESSION = "session"
+VIEW_DIFF = "diff"
+VIEWS = (VIEW_SESSION, VIEW_DIFF)
+
 #: Children side by side -- a vertical divider between them.
 ROW = "row"
 #: Children stacked -- a horizontal divider between them.
@@ -84,12 +103,21 @@ class Leaf:
     :func:`clamp_prompt_ratio`): the fraction of the pane's height the
     prompt area occupies. ``0.0`` means "no divider has been moved here",
     which restores to the content-driven auto height DOXA has always had
-    -- an explicit zero and an absent field are the same statement."""
+    -- an explicit zero and an absent field are the same statement.
+
+    ``view`` is which SURFACE this leaf holds -- see :data:`VIEW_SESSION`
+    / :data:`VIEW_DIFF`. It defaults to the session, so every record
+    written before v0.92.0 reads back as exactly the leaf it was."""
 
     session_id: str
     pinned_name: "str | None" = None
     cwd: "str | None" = None
     prompt_ratio: float = 0.0
+    view: str = VIEW_SESSION
+
+    @property
+    def is_diff(self) -> bool:
+        return self.view == VIEW_DIFF
 
 
 @dataclass(frozen=True)
@@ -181,6 +209,12 @@ def to_json(node: Node) -> dict:
         out["cwd"] = leaf.cwd
     if leaf.prompt_ratio:
         out["prompt_ratio"] = round(leaf.prompt_ratio, 6)
+    if leaf.view != VIEW_SESSION:
+        # Written only when it is not the default, so a v0.91.0 reader
+        # sees byte-identical records for every layout it could produce
+        # and this version's own session-only records stay diffable
+        # against the ones already on disk.
+        out["view"] = leaf.view
     return out
 
 
@@ -197,11 +231,19 @@ def from_json(data: Any) -> "Node | None":
             return None
         pinned = data.get("pinned_name")
         cwd = data.get("cwd")
+        # An unrecognised view degrades to the session, never raises and
+        # never drops the leaf: the same posture normalise() takes on a
+        # corrupt weight list. A record from a LATER version naming a
+        # third surface restores as the session it is attached to, which
+        # is a worse layout than the one saved and an infinitely better
+        # outcome than a pane-shaped hole.
+        view = data.get("view")
         return Leaf(
             session_id=session_id,
             pinned_name=str(pinned) if pinned else None,
             cwd=str(cwd) if cwd else None,
             prompt_ratio=clamp_prompt_ratio(data.get("prompt_ratio") or 0.0),
+            view=view if view in VIEWS else VIEW_SESSION,
         )
     if kind != "split":
         return None
