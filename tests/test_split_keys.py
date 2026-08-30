@@ -60,6 +60,12 @@ def test_the_split_and_pane_keys_do_not_collide_with_the_existing_set():
         "ctrl+shift+up", "ctrl+shift+down",
         "alt+s", "alt+d",
         "alt+up", "alt+down", "alt+left", "alt+right",
+        # v0.92.0's live diff. Added HERE and not only in
+        # tests/test_live_diff.py because this is the list whose whole
+        # job is to make the NEXT release trip over a collision instead
+        # of shipping one -- a key checked only where its own feature is
+        # tested is a key the next feature can quietly take.
+        "alt+g",
     }
     assert established & claimed == set()
 
