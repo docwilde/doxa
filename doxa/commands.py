@@ -287,6 +287,25 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette_prefill=True,
     ),
     SlashCommand(
+        name="/dir",
+        group="Session",
+        summary="This session's own working directory — where its tool calls actually run",
+        palette="Dir: show",
+    ),
+    SlashCommand(
+        name="/cd",
+        group="Panes & tabs",
+        # NOT "changes this session's directory" -- it can't (see the
+        # handler's own docstring): a running CLI subprocess keeps the
+        # cwd it was spawned with. This opens the target in a NEW tab,
+        # same as /resume and the repo-name chip's own directory picker,
+        # and says so plainly rather than pretending to move THIS one.
+        summary="Open a directory in a NEW tab (cannot move this running session)",
+        usage="/cd <path>",
+        palette="Cd: open a directory",
+        palette_prefill=True,
+    ),
+    SlashCommand(
         name="/beliefs",
         group="Memory",
         # v0.69.0 retired item V's standalone browser tab: the chip

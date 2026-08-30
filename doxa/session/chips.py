@@ -503,13 +503,34 @@ class PaneChipsMixin:
                 "click to change the default; this session keeps its own",
             ))
         git_chip = self._git.render(clickable=True) if self._git is not None else None
-        if git_chip:  # hidden entirely outside a repo. ONE painted chip
-            # with several hint rows inside it -- repo, branch and sha are
-            # separate spans of the same string, and GitLine is the thing
-            # that knows how they divide up.
+        if git_chip:  # ONE painted chip with several hint rows inside it --
+            # repo, branch and sha are separate spans of the same string,
+            # and GitLine is the thing that knows how they divide up.
             chips.append(StatusChip.raw(
                 git_chip, git_chip, tuple(self._git.chip_hints()),
             ))
+        elif self._git is not None:
+            # Reported: "if i start in a non-repo dir, there is no
+            # folder/repo chip shown in the status line" -- the git chip
+            # above is hidden entirely outside a repo (GitLine.render()
+            # returns None), which was correct once but left a session
+            # with NO way to see where it is at all. This is deliberately
+            # a DIFFERENT shape from the git chip (`dir NAME`, no ⎇), not
+            # the same one with an empty branch half -- "a repo, on branch
+            # X" and "a plain directory" must read as visibly different
+            # facts, not one blurred into the other. Clickable through the
+            # SAME repo/directory picker the git chip's own repo-name span
+            # opens (open_repo_picker already walks any directory, not
+            # only a repo root -- see PaneChipsMixin._repo_picker_rows).
+            folder = self._git.folder_label()
+            if folder:  # hide-at-zero: an unreadable/root cwd shows nothing
+                chips.append(StatusChip.clickable(
+                    f"dir {folder}",
+                    "open_repo_picker",
+                    "this session's own directory -- not a git repository, "
+                    "so there is no branch chip here; click to browse, or "
+                    "open somewhere else in a new tab",
+                ))
         # Subscription-aware cost: on subscription auth the session costs
         # no dollars, so a bare $ figure is misleading -- show the tier,
         # with the (already-computed) list-price figure demoted to an

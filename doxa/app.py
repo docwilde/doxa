@@ -1034,7 +1034,7 @@ class DoxaApp(App):
         if state == history_mod.RESUME_RUNNING:
             return await self._attach_in_new_tab(session_id, title)
         if state != history_mod.RESUME_OK:
-            return f"cannot resume {session_id[:8]} — {reason}"
+            return await self._resume_read_only(session_id, cwd, title, reason)
         # Already open in this window? Then the answer is the tab that has
         # it, not a second one beside it -- and since it is open, it is
         # also running, which the registry check above would normally have
@@ -1060,6 +1060,59 @@ class DoxaApp(App):
         # draw the prior turns -- see SessionPane._restore_transcript.
         pane._resume_from = session_id
         tab = self._make_tab(pane)
+        await tabbed.add_pane(tab)
+        self._activate_tab(tab)
+        self._focus_tab(tab)
+        self._persist_tabset()
+        return None
+
+    async def _resume_read_only(
+        self, session_id: str, cwd: str, title: str, reason: str,
+    ) -> "str | None":
+        """:meth:`resume_session`'s own fallback (v0.93.0), for the two
+        states :func:`history.resume_state` answers when resuming truly
+        cannot happen: ``RESUME_NO_CWD`` (the directory is gone) and
+        ``RESUME_NO_HISTORY`` (a pre-v0.56.0 conversation the CLI's own
+        store never learned this id under). Through v0.92.0 both landed
+        here as a bare refusal string -- "cannot resume ... — <reason>" --
+        an error where a real answer was sitting on disk the whole time:
+        DOXA's OWN transcript (:mod:`doxa.transcript`, the same
+        ``$LORE_PROJECTS_DIR/<slug>/<id>.jsonl`` /search already indexes)
+        is a SEPARATE store from the CLI's own resume history that
+        :func:`history.resume_state` just found lacking, and neither
+        failure reason says anything about whether IT exists.
+
+        So this reaches for the exact read-only surface a dead-daemon
+        BOOT restore already falls back to -- :class:`ArchivedSessionTab`,
+        the same ``mount_transcript`` call, the same ``resume_note``
+        banner explaining WHY it is read-only (see that class's own
+        v0.56.0 note: "read-only" with no reason reads as the feature
+        having silently not happened) -- rather than building a second
+        transcript viewer for the same fact. A session with no transcript
+        on disk EITHER falls through to the plain refusal unchanged: there
+        is truly nothing to show, and an empty archived tab would be a
+        worse answer than the honest words that were already here.
+
+        An already-open archived tab for this SAME session (from an
+        earlier read-only resume, or from this window's own boot restore)
+        is reused rather than duplicated -- the same "already open" rule
+        the top of :meth:`resume_session` applies to a live pane."""
+        if not await asyncio.to_thread(transcript_mod.exists, session_id, cwd):
+            return f"cannot resume {session_id[:8]} — {reason}"
+        existing = next(
+            (t for t in self.archived_tabs() if t.session_id == session_id), None,
+        )
+        if existing is not None:
+            self._activate_tab(existing)
+            self._focus_tab(existing)
+            return f"{session_id[:8]} is already open here, read-only."
+        tabbed = self.query_one("#session-tabs", TabbedContent)
+        tab = ArchivedSessionTab(
+            session_id, cwd, self._tab_title(cwd or self.cwd),
+            pinned_name=(title[:40] if title else None),
+            id=f"resume-ro-{session_id}",
+            resume_note=reason,
+        )
         await tabbed.add_pane(tab)
         self._activate_tab(tab)
         self._focus_tab(tab)

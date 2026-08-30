@@ -618,7 +618,203 @@ async def test_resuming_an_unresumable_session_spawns_nothing(
         assert len(app.panes()) == before
 
 
+# -- item 3: a resume that cannot happen falls back to a read-only view ---
+#
+# Specified earlier: /search finds a past session, but resuming it can
+# fail (the CLI cannot resume every session -- v0.56.0's own id-space
+# gap, above). Before this, EVERY such failure -- however honest its own
+# words -- was a dead end: a SystemBlock saying why, and nothing else to
+# do about it. But "the CLI's resume history has no record" says nothing
+# about whether DOXA's OWN transcript (doxa.transcript, the file /search
+# already indexes) is still sitting on disk -- and it usually is. When it
+# is, this now opens it read-only instead of just refusing: the SAME
+# ArchivedSessionTab / mount_transcript surface a dead-daemon BOOT
+# restore already falls back to, reused rather than rebuilt.
+
+
+def _write_transcript(session_id: str, cwd: str, prompt: str = "hello") -> Path:
+    """A minimal, real transcript file at the exact path
+    :func:`doxa.transcript.transcript_path` resolves -- one user prompt,
+    enough for :func:`doxa.transcript.read`/:func:`exists` to find
+    something real rather than an empty file."""
+    from doxa import transcript as transcript_mod
+
+    path = transcript_mod.transcript_path(session_id, cwd)
+    assert path is not None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"type": "user", "message": {"content": prompt}}) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.mark.asyncio
+async def test_an_unresumable_session_with_a_transcript_opens_read_only(
+    monkeypatch, tmp_path,
+):
+    """The core of item 3: resuming fails (no CLI history under this id),
+    but DOXA's own transcript exists -- so the reply is a NEW read-only
+    tab, not an error string, and the tab explains WHY it is read-only in
+    the same words the refusal used to be."""
+    work = tmp_path / "work"
+    work.mkdir()
+    _write_transcript(OTHER_ID, str(work), prompt="warpcore realignment plan")
+    resumed: list = []
+    app = await _app(monkeypatch, tmp_path, resumed=resumed)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        note = await app.resume_session({
+            "session_id": OTHER_ID, "cwd": str(work), "title": "old one",
+        })
+        await pilot.pause()
+        assert note is None  # the tab itself is the answer, nothing more to say
+        assert resumed == []  # never a SECOND CLI process on this id
+        archived = app.archived_tabs()
+        assert len(archived) == 1
+        assert archived[0].session_id == OTHER_ID
+        assert "v0.56.0" in archived[0].resume_note  # the SAME reason
+        # the plain refusal used to give, now carried on the tab instead
+
+
+@pytest.mark.asyncio
+async def test_an_unresumable_session_with_no_transcript_still_refuses_in_words(
+    monkeypatch, tmp_path,
+):
+    """The fallback's own honesty check: nothing on disk means nothing to
+    show, and an empty archived tab would be a worse answer than the
+    plain refusal that was already here -- exactly
+    test_resuming_an_unresumable_session_spawns_nothing's own case,
+    pinned again from this angle."""
+    work = tmp_path / "work"
+    work.mkdir()
+    app = await _app(monkeypatch, tmp_path)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        note = await app.resume_session({
+            "session_id": OTHER_ID, "cwd": str(work), "title": "old one",
+        })
+        assert "cannot resume" in (note or "")
+        assert app.archived_tabs() == []
+
+
+@pytest.mark.asyncio
+async def test_resuming_the_same_unresumable_session_twice_reuses_the_tab(
+    monkeypatch, tmp_path,
+):
+    """A second /resume (or search-and-resume) on the SAME un-resumable
+    session must not open a second read-only tab beside the first --
+    the same "already open" rule the live-session branch already
+    enforces, extended to the archived one."""
+    work = tmp_path / "work"
+    work.mkdir()
+    _write_transcript(OTHER_ID, str(work))
+    app = await _app(monkeypatch, tmp_path)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        group = {"session_id": OTHER_ID, "cwd": str(work), "title": "old one"}
+        await app.resume_session(group)
+        await pilot.pause()
+        note = await app.resume_session(group)
+        await pilot.pause()
+        assert "already open" in (note or "")
+        assert len(app.archived_tabs()) == 1
+
+
 # -- /resume, the command --------------------------------------------------
+
+
+def test_resume_row_shares_the_beliefs_pending_column_grid():
+    """Item 4, the SAME defect class the operator reported twice for the
+    other two chip pickers ("the column widths for beliefs and proposal
+    rows is not the same" / "the proposals view should be formatted that
+    the columns have fixed width"): before this, ``_fmt_resume_row`` built
+    a `` · ``-joined string that drifted with every title's own length --
+    the exact defect the proposals row carried before v0.67.0's shared
+    formatter. It now uses that SAME formatter, so a resume row's title
+    starts at the identical column a beliefs/pending row's text does."""
+    from doxa.session.commands import _fmt_resume_row
+    from doxa.ui.labels import PICKER_PREFIX_WIDTH
+
+    row = _fmt_resume_row({
+        "session_id": RESUMED_ID, "title": "delorean wiring",
+        "ts": "2026-08-20T10:00:00Z", "messages": 7,
+    })
+    assert row.index("delorean") == PICKER_PREFIX_WIDTH
+    assert "26-08-20 10:00" in row[:PICKER_PREFIX_WIDTH]
+    assert "7 msgs" in row[:PICKER_PREFIX_WIDTH]
+
+
+def test_resume_row_pads_blank_columns_for_a_hit_with_nothing_to_say():
+    """A hit with no messages count and no timestamp still holds its
+    columns open (padded, never omitted) -- the same "blank field still
+    holds its column open" rule ``format_picker_prefix`` documents for
+    every other caller, so a row missing a fact never shifts its title
+    left of its neighbours."""
+    from doxa.session.commands import _fmt_resume_row
+    from doxa.ui.labels import PICKER_PREFIX_WIDTH
+
+    row = _fmt_resume_row({"session_id": RESUMED_ID, "title": "no metadata"})
+    assert row.index("no metadata") == PICKER_PREFIX_WIDTH
+
+
+@pytest.mark.asyncio
+async def test_resume_picker_shows_the_shared_column_header(monkeypatch, tmp_path):
+    """Bare /resume opens with the SAME "date  status  age  text" header
+    the beliefs/proposals pickers show (``PICKER_COLUMN_HEADER``) -- one
+    header for the one shared row shape, not a picker that carries the
+    grid but never names its columns."""
+    from doxa.session.chips import PICKER_COLUMN_HEADER
+
+    _seed(cwd=str(tmp_path))
+    app = await _app(monkeypatch, tmp_path)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        pane = app.panes()[0]
+        await pane._cmd_resume("")
+        await pilot.pause()
+        picker = app.query_one("#chip-picker")
+        assert picker._column_header == PICKER_COLUMN_HEADER
+
+
+@pytest.mark.asyncio
+async def test_bare_resume_rows_come_back_newest_first(monkeypatch, tmp_path):
+    """Item 4's own instruction ("sort newest-first unless the code shows
+    a better key"): ``history.recent_sessions`` already orders by
+    ``last_ts DESC`` (pinned in isolation in tests/test_history.py) and
+    /resume's own dict-comprehension preserves that insertion order end
+    to end -- this pins THAT, through the real command, so a future
+    refactor that rebuilds ``by_id`` some other way (a set comprehension,
+    a sorted()-by-id "cleanup") cannot silently lose it without a test
+    noticing. Timestamps stamped ahead of any clock this suite can run
+    under, the same 2099 convention test_history.py uses, since the
+    session index is shared across the whole run."""
+    from lore_core.config import project_slug
+    from lore_core import store as lore_store
+
+    project = project_slug(str(tmp_path))
+    conn = lore_store.db_connect()
+    older, newer = "aaaa2222-0000-0000-0000-000000000001", "aaaa2222-0000-0000-0000-000000000002"
+    for sid, title, ts in (
+        (older, "older one", "2099-08-20T10:00:00Z"),
+        (newer, "newer one", "2099-08-21T10:00:00Z"),
+    ):
+        conn.execute("DELETE FROM sessions WHERE session_id = ?", (sid,))
+        conn.execute(
+            "INSERT INTO sessions(session_id, project, cwd, title, first_ts,"
+            " last_ts, messages) VALUES(?,?,?,?,?,?,?)",
+            (sid, project, str(tmp_path), title, ts, ts, 1),
+        )
+    conn.commit()
+    app = await _app(monkeypatch, tmp_path)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        pane = app.panes()[0]
+        await pane._cmd_resume("")
+        await pilot.pause()
+        picker = app.query_one("#chip-picker")
+        rids = [rid for rid, _label in picker._all_rows]
+        assert rids.index(newer) < rids.index(older)
 
 
 def test_resume_reaches_help_the_palette_and_autocomplete():

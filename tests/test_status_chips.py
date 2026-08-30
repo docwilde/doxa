@@ -138,6 +138,49 @@ async def test_click_on_branch_chip_opens_the_picker(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_non_repo_directory_shows_a_folder_chip_not_nothing(
+    monkeypatch, tmp_path,
+):
+    """Reported: "if i start in a non-repo dir, there is no folder/repo
+    chip shown in the status line". Outside a repo the git chip used to
+    just vanish (GitLine.render() returns None there), leaving nothing on
+    the bar that says where this session even is. This is a DIFFERENT
+    shape from the git chip (`dir NAME`, no branch symbol) -- the
+    distinction between "a repo, on a branch" and "a plain directory"
+    has to stay visible, not collapse into the same-looking chip with an
+    empty branch half."""
+    where = tmp_path / "loose-files"
+    where.mkdir()
+    app, _engines = await _app(monkeypatch, where)
+    async with app.run_test() as pilot:
+        pane = app.active_pane
+        assert await _settled(pilot, pane)
+        assert await _wait_status(pilot, app, "dir loose-files")
+        assert "⎇" not in _status_plain(app)
+
+
+@pytest.mark.asyncio
+async def test_click_on_the_folder_chip_opens_the_repo_picker(monkeypatch, tmp_path):
+    """The folder chip carries the SAME affordance the repo-name chip
+    does -- open_repo_picker already walks any directory, repo or not
+    (PaneChipsMixin._repo_picker_rows), so a non-repo session is not left
+    with a chip that merely informs while every other identity chip on
+    the bar is clickable."""
+    where = tmp_path / "loose-files"
+    where.mkdir()
+    app, _engines = await _app(monkeypatch, where)
+    async with app.run_test() as pilot:
+        pane = app.active_pane
+        assert await _settled(pilot, pane)
+        assert await _wait_status(pilot, app, "dir loose-files")
+        picker = app.query_one("#chip-picker", ChipPicker)
+        await pilot.click("#status-bar", offset=_offset_of(app, "dir loose-files"))
+        await pilot.pause()
+        assert picker.is_open
+        assert picker.border_title.startswith("repo · ")
+
+
+@pytest.mark.asyncio
 async def test_click_on_repo_name_opens_the_repo_picker(monkeypatch, tmp_path):
     """v0.24.0 item 4 overrides v0.22.0's "repo name is INERT" call -- the
     repo chip is a SELECTOR now (a directory-walking picker, see

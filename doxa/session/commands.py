@@ -35,18 +35,24 @@ from .. import identity as identity_mod
 from .. import layout as layout_mod
 from .. import peers as peers_mod
 from .. import version as version_mod
+from .. import worktrees as worktrees_mod
 from ..peers import PeerSendError, age_secs
 from ..ui.dialogs import AboutDialog, PermissionModeConfirm
 from ..ui.labels import (
     CONTEXT_UNAVAILABLE,
     MODE_EXPLAIN,
     MODEL_ALIASES,
+    PICKER_PREFIX_WIDTH,
+    PICKER_ROW_MAX,
     _fmt_age,
+    format_picker_row,
     help_text,
+    lore_created_text,
     memory_entries,
     memory_fill,
 )
 from ..ui.transcript import ContextBlock, ImageBlock, ImageShowcaseBlock
+from .chips import PICKER_COLUMN_HEADER
 
 
 @dataclass(frozen=True)
@@ -106,6 +112,8 @@ PANE_COMMANDS: "tuple[CommandBinding, ...]" = (
     CommandBinding("/attach", "_cmd_attach"),
     CommandBinding("/sessions", "_cmd_sessions"),
     CommandBinding("/rename", "_cmd_rename"),
+    CommandBinding("/dir", "_cmd_dir"),
+    CommandBinding("/cd", "_cmd_cd"),
     CommandBinding("/search", "_cmd_search"),
     CommandBinding("/beliefs", "_cmd_beliefs"),
     CommandBinding("/resume", "_cmd_resume"),
@@ -117,20 +125,37 @@ PANE_COMMANDS: "tuple[CommandBinding, ...]" = (
 
 
 def _fmt_resume_row(hit: dict) -> str:
-    """One /resume picker row: title, age, message count. Ellipsized like
-    every other picker row, and the age comes from history.hit_age so the
-    command and the /search popup date a conversation identically."""
+    """One /resume picker row, in the SAME fixed-column shape the
+    beliefs/proposals pickers already share (item 4 -- the operator
+    reported this exact defect class twice for those two: "the column
+    widths for beliefs and proposal rows is not the same" / "the
+    proposals view should be formatted that the columns have fixed
+    width"). Before this it was a `` · ``-joined string that drifted
+    with every field's own length -- the SAME shape the proposals row
+    itself carried before v0.67.0 merged the two menus' formatters, and
+    /resume was simply never brought along.
+
+    ``format_picker_row``'s three fixed columns, reused rather than
+    re-derived: STAMP (when the conversation last spoke, via
+    ``history_mod.hit_age``'s own ``ts`` field -- ``lore_created_text``
+    already tolerates a non-LORE ISO stamp, degrading to a date-only
+    prefix rather than an empty column), STATUS (message count, this
+    row's one substantive fact besides the title) and AGE (the same
+    ``hit_age`` the command and the /search popup already date a
+    conversation with, so the two never disagree). TEXT is the title,
+    the same fallback-to-short-id ``_cmd_resume`` always used."""
     title = str(hit.get("title") or "").strip() or str(
         hit.get("session_id") or "?"
     )[:8]
-    age = history_mod.hit_age(hit)
+    ts = str(hit.get("ts") or "").strip()
+    stamp = lore_created_text({"created": ts}) if ts else ""
     count = hit.get("messages")
-    parts = [title[:44]]
-    if age:
-        parts.append(age)
-    if isinstance(count, int) and count:
-        parts.append(f"{count} msg")
-    return "  ·  ".join(parts)
+    status = (
+        f"{count} msg{'' if count == 1 else 's'}"
+        if isinstance(count, int) and count else ""
+    )
+    age = history_mod.hit_age(hit)
+    return format_picker_row(stamp, status, age, title, width=PICKER_ROW_MAX)
 
 
 class PaneCommandsMixin:
@@ -224,6 +249,14 @@ class PaneCommandsMixin:
             ),
             title="resume",
             note="opens the chosen conversation in a NEW tab; this one keeps running",
+            # Item 4: the SAME fixed-column shape and header the beliefs/
+            # proposals pickers use (PICKER_COLUMN_HEADER,
+            # PICKER_PREFIX_WIDTH) -- rows already newest-first from
+            # history.recent_sessions' own ORDER BY last_ts DESC, which
+            # by_id above preserves (dict insertion order), so this needed
+            # no re-sort, only the column fix.
+            column_header=PICKER_COLUMN_HEADER,
+            row_prefix_width=PICKER_PREFIX_WIDTH,
         )
 
     async def _resume_hit(self, hit: dict) -> None:
@@ -1061,6 +1094,93 @@ class PaneCommandsMixin:
             for h in hits
         ]
         await self._system(f"search: {len(hits)} hit(s)\n" + "\n".join(lines))
+
+    def _dir_line(self) -> str:
+        """The one line both :meth:`_cmd_dir` and :meth:`_cmd_cd` show for
+        "where THIS session actually is" -- the literal cwd
+        :class:`~doxa.engine.SessionEngine` was booted with, which is what
+        every one of its own tool calls resolves relative paths against.
+        Since v0.17.0 that is usually a DOXA-managed worktree
+        (:mod:`doxa.worktrees`), not the directory the user typed at
+        launch, so a worktree session names both the worktree path AND the
+        real repo/base it was forked from -- the same facts the git chip's
+        own tooltip already carries (:meth:`GitLine.chip_hints`), read
+        here from the sidecar directly rather than re-derived."""
+        cwd = str(getattr(self.engine, "cwd", None) or self.cwd)
+        meta = worktrees_mod.read_meta(cwd)
+        if not meta:
+            return cwd
+        main_root = str(meta.get("main_root") or "")
+        base_ref = str(meta.get("base_ref") or "")
+        detail = " -- a DOXA worktree"
+        if main_root:
+            detail += f" of {main_root}"
+        if base_ref:
+            detail += f", based on {base_ref}"
+        return cwd + detail
+
+    async def _cmd_dir(self, args: str) -> None:
+        """``/dir`` -- reports the session's working directory. Read-only,
+        by design: this is the honest half of the pair the operator asked
+        for, and it is what makes ``/cd``'s own honesty checkable -- the
+        "unchanged" it reports after opening a new tab elsewhere is this
+        exact line, unmoved."""
+        await self._system(f"dir: {self._dir_line()}")
+
+    async def _cmd_cd(self, args: str) -> None:
+        """``/cd <path>`` -- what "change directory" can actually MEAN for
+        a session that is already running, worked through and reported
+        rather than assumed:
+
+        The claude CLI subprocess behind this session was spawned once,
+        with its OWN operating-system cwd (``ClaudeAgentOptions.cwd`` at
+        connect, :meth:`doxa.engine.SessionEngine._build_options`) -- an
+        OS-level fact a running process cannot be handed a new one for,
+        the SDK exposes no such control request, and every tool call the
+        model makes for the rest of THIS session resolves relative paths
+        against that original directory regardless of anything DOXA does
+        here. Repainting only this pane's own bookkeeping (``self.cwd``,
+        the git chip, LORE's project scope) to point somewhere else would
+        make the status line claim a location none of the session's own
+        tool calls are actually touching -- which is worse than doing
+        nothing: a status chip that lies about where the agent is working
+        is exactly the "appears to work" failure this command must not
+        become.
+
+        So ``/cd`` does the one thing that is actually true instead: it
+        opens the target directory in a NEW TAB, a real session rooted
+        there from the moment it boots -- the SAME mechanism the repo-name
+        chip's directory picker ("open here", any directory, not only a
+        repo root -- see ``PaneChipsMixin._repo_picker_rows``) and
+        ``/resume`` already use for "go somewhere else"
+        (:meth:`DoxaApp.open_tab_at`). THIS session and this tab are left
+        completely alone, and the reply says so every time, in the exact
+        words ``/dir`` itself would report -- a command that silently
+        changed something else instead is not a working ``/cd``, it is a
+        surprise."""
+        from ..app import DoxaApp  # deferred: doxa.app imports this package
+
+        path = args.strip()
+        if not path:
+            await self._system(
+                "cd: usage: /cd <path> — opens a NEW tab rooted there; "
+                "this session's own directory cannot be changed once it "
+                "is running (no such control exists in the CLI it runs). "
+                f"this session stays at: {self._dir_line()}"
+            )
+            return
+        target = os.path.abspath(os.path.expanduser(path))
+        app = self.app
+        if not isinstance(app, DoxaApp):
+            return
+        error = await app.open_tab_at(target)
+        if error:
+            await self._system(f"cd: {error}")
+            return
+        await self._system(
+            f"cd: opened a new tab at {target} — this session keeps "
+            f"running right where it was: {self._dir_line()}"
+        )
 
     async def _cmd_update(self, args: str) -> None:
         """/update -- fast-forward the checkout DOXA runs from, and say what

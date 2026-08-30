@@ -228,6 +228,27 @@ def test_git_chip_puts_the_sha_immediately_right_of_the_branch(tmp_path):
     assert chip == f"myrepo ⎇ trunk @{_short_sha(repo)}"
 
 
+# -- item 2: the non-repo folder chip (reported: "if i start in a non-repo
+# dir, there is no folder/repo chip shown in the status line") ------------
+
+
+def test_folder_label_is_none_inside_a_repo(tmp_path):
+    """render() already owns "in a repo"; folder_label must not paint a
+    second, differently-shaped chip for the SAME session."""
+    repo = _repo(tmp_path)
+    line = GitLine(str(repo))
+    assert line.render() is not None
+    assert line.folder_label() is None
+
+
+def test_folder_label_names_a_plain_directory(tmp_path):
+    where = tmp_path / "loose-files"
+    where.mkdir()
+    line = GitLine(str(where))
+    assert line.render() is None  # no repo at all -- the old, silent case
+    assert line.folder_label() == "loose-files"
+
+
 def test_git_chip_follows_a_new_commit_without_polling(tmp_path):
     """A commit moves the REF file, not HEAD -- so the sha has its own
     stat, and the next event-driven render sees it."""

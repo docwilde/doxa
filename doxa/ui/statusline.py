@@ -203,6 +203,33 @@ class GitLine:
             chip += f" @{sha}"
         return chip
 
+    def folder_label(self) -> "str | None":
+        """The plain-directory fallback for the status line's leftmost
+        identity chip (item 2, reported: "if i start in a non-repo dir,
+        there is no folder/repo chip shown in the status line"): the
+        directory's own NAME, but only when this session is NOT inside a
+        git repository at all.
+
+        :meth:`render` already owns "in a repo" (``repo ⎇ branch``), so
+        returning something here too -- or returning the SAME shape with
+        no branch half -- would blur the one distinction this pair of
+        chips exists to draw: a repo checked out on a branch reads
+        completely differently from a bare directory that has no branch
+        to be on. Callers use this ONLY when :attr:`repo` is falsy, and
+        the caller (``PaneChipsMixin._status_chips``) marks the result
+        with a DIFFERENT word than the git chip's own shape, not merely a
+        missing ``⎇ branch`` half of the same one -- see that method.
+
+        ``None`` when :attr:`repo` is already set (``render()`` has it)
+        or the cwd's own name cannot be read at all (the filesystem
+        root, whose ``Path(...).name`` is ``""``) -- hide-at-zero, the
+        same rule every other chip in this bar follows, rather than a
+        chip that paints an empty label."""
+        if self.repo:
+            return None
+        name = Path(self._cwd).name or self._cwd
+        return name or None
+
     def chip_hints(self) -> "list[tuple[str, str]]":
         """(plain_text, tooltip) for each segment :meth:`render` prints, in
         the SAME left-to-right order -- item 5's tooltip machinery reads
