@@ -254,6 +254,7 @@ from .ui.labels import (  # noqa: F401
     TAB_MODEL_MIN,
     TAB_REPO_MIN,
 )
+from .ui.diffview import DiffPane  # noqa: F401
 from .ui.prompt import PromptInput  # noqa: F401
 from .ui.split import PaneTab, SplitBox  # noqa: F401
 from .ui import split as split_mod
@@ -536,6 +537,23 @@ class DoxaApp(App):
                 show=False, priority=True),
         Binding("alt+right", "grow_pane_right", "Grow this pane rightward",
                 show=False, priority=True),
+        # -- live diff (v0.92.0) ---------------------------------------
+        #
+        # Alt+G, joining the family Alt+S / Alt+D already established and
+        # for the identical measured reason (doxa/keyboard.py): Alt goes
+        # out as an ESC prefix under BOTH encodings, where every
+        # ctrl+shift+<letter> chord collapses onto plain ctrl+<letter>
+        # and is simply undeliverable. G for "git diff"; D was already
+        # spent on /vsplit and E, R and J are all one slip from a letter
+        # a prompt wants. Re-verified free against the whole resolved set
+        # in tests/test_split_keys.py, which now covers this key too --
+        # so the NEXT release that adds a binding trips over the
+        # collision instead of shipping it.
+        Binding(
+            "alt+g", "toggle_diff",
+            "Live diff of this session's worktree, beside it (/diff)",
+            show=False, priority=True,
+        ),
     ]
 
     def __init__(
@@ -935,6 +953,18 @@ class DoxaApp(App):
         while node is not None:
             if isinstance(node, SessionPane):
                 return node
+            if isinstance(node, DiffPane):
+                # The keyboard is in a diff. "Which session does this
+                # keystroke mean" still has an answer, and it is the
+                # session the diff is OF -- a key aimed at a session,
+                # pressed while looking at that session's diff, is aimed
+                # at that session. Falling through to the tab's last
+                # focused leaf would usually give the same answer and
+                # would give a WRONG one in a tab holding two sessions.
+                owner = node.session_pane()
+                if owner is not None:
+                    return owner
+                break
             node = node.parent
         tab = self._active_tab()
         if isinstance(tab, PaneTab):
@@ -1930,7 +1960,20 @@ class DoxaApp(App):
             pruned = layout_mod.prune(tree, live_set - claimed)
             if pruned is None:
                 continue
-            ids = [leaf.session_id for leaf in layout_mod.leaves(pruned)]
+            # SESSION leaves only. A v0.92.0 diff leaf carries the id of
+            # the session it is a diff OF, so counting it here would
+            # claim that session twice and -- worse -- could make a diff
+            # the tab's FIRST leaf, which is the one every caller below
+            # looks a RestoreTabSpec up by. The owner-first invariant
+            # means the UI can never produce that tree; a hand-edited
+            # record can, and this is where that stops being a crash.
+            ids = [
+                leaf.session_id
+                for leaf in layout_mod.leaves(pruned)
+                if not leaf.is_diff
+            ]
+            if not ids:
+                continue
             claimed.update(ids)
             trees.append((pruned, ids))
         for session_id in live:
@@ -1993,8 +2036,26 @@ class DoxaApp(App):
                     emitted.update(ids)
                     first_pane: "SessionPane | None" = None
 
-                    def _leaf(node: "layout_mod.Leaf") -> SessionPane:
+                    def _leaf(node: "layout_mod.Leaf") -> Any:
                         nonlocal first_pane
+                        if node.is_diff:
+                            # v0.92.0: the diff leaf restores as a diff,
+                            # with no session behind it and nothing to
+                            # reattach -- it re-reads `git diff` on
+                            # mount. Open question 4, answered by
+                            # construction: a QUEUED-but-unapplied
+                            # rejection does NOT survive, because it is
+                            # held on the widget and the widget is new.
+                            # Discarding it silently would be the defect;
+                            # it is discarded with the pane, and the pane
+                            # comes back showing the un-reverted hunk,
+                            # which is the truth.
+                            return DiffPane(
+                                node.session_id,
+                                node.cwd or specs[node.session_id].cwd
+                                or self.cwd,
+                                id=f"{_restore_pane_id(node.session_id)}-diff",
+                            )
                         pane = self._restored_pane(specs[node.session_id], node)
                         if first_pane is None:
                             first_pane = pane
@@ -2271,6 +2332,90 @@ class DoxaApp(App):
         self._persist_tabset()
         return None
 
+    # -- live diff (v0.92.0) ------------------------------------------
+
+    async def action_toggle_diff(self) -> None:
+        """Alt+G / ``/diff``."""
+        note = await self.toggle_diff_pane()
+        if note:
+            self.notify(note, severity="warning", timeout=8)
+
+    def diff_pane_for(self, session_id: str) -> "DiffPane | None":
+        """This session's diff leaf, if it has one open anywhere."""
+        for pane in self.query(DiffPane):
+            if pane.session_id == session_id:
+                return pane
+        return None
+
+    async def toggle_diff_pane(self) -> "str | None":
+        """Open the focused session's live diff BESIDE it, or close it.
+        Returns a refusal to show the user, or ``None`` when it happened.
+
+        This is the spec's design check on v0.91.0's split, run for real:
+        *session left, diff right, both live*. It reuses
+        :meth:`split_active_pane`'s machinery verbatim -- the same free
+        box, the same :func:`doxa.layout.split_refusal` floor, the same
+        ``ROW`` orientation -- and differs in exactly one line, the
+        widget that goes into the new half. Nothing about the split had
+        to be special-cased for a non-session leaf ONCE
+        :attr:`doxa.layout.Leaf.view` existed, which is the honest
+        version of "the split could express it".
+
+        Toggling closes rather than refusing a second one: a session has
+        one diff, per the spec's answer to its own third open question
+        (per-session, matching the isolation model -- two sessions in
+        worktrees off the same branch have two different diffs)."""
+        pane = self.active_pane
+        if pane is None:
+            return "there is no session pane here to diff"
+        tab = pane.tab
+        if tab is None:
+            return "this pane is not in a tab yet"
+        existing = self.diff_pane_for(pane._session_id)
+        if existing is not None:
+            box = split_mod.owning_box(existing)
+            if existing.queued:
+                return (
+                    f"{len(existing.queued)} rejection(s) are still queued "
+                    "in this diff — they apply when the turn ends. closing "
+                    "the pane now would discard them."
+                )
+            await existing.remove()
+            await split_mod.prune_boxes(box)
+            self._focus_tab(pane)
+            self._persist_tabset()
+            return None
+        if not pane._session_id:
+            return "this session has not started yet — nothing to diff"
+        box = split_mod.free_box(pane)
+        if box is None:
+            return (
+                f"this pane is already split as deep as DOXA goes "
+                f"({layout_mod.SPLIT_SLOTS} levels) — close a pane and "
+                "try again"
+            )
+        region = pane.region
+        refusal = layout_mod.split_refusal(
+            region.width, region.height, layout_mod.ROW
+        )
+        if refusal is not None:
+            return refusal
+        diff = DiffPane(
+            pane._session_id,
+            str(getattr(pane.engine, "cwd", None) or pane.cwd),
+            id=f"{pane.id}-diff",
+        )
+        await box.mount(split_mod.chain(diff))
+        box.divide(layout_mod.ROW)
+        # Focus STAYS in the session. A split spawns a session you asked
+        # to work in, so v0.91.0 moves the keyboard there; a diff is
+        # something you asked to LOOK at while you keep typing, and
+        # moving the keyboard out of the prompt to open it would be the
+        # opposite of the feature. "Visible and focused are different
+        # states" cuts both ways, and this is the other way.
+        self._persist_tabset()
+        return None
+
     def _pane_regions(self) -> "dict[str, tuple[int, int, int, int]]":
         """Every VISIBLE pane's painted rectangle, keyed by widget id.
 
@@ -2284,7 +2429,13 @@ class DoxaApp(App):
         if not isinstance(tab, PaneTab):
             return {}
         out: "dict[str, tuple[int, int, int, int]]" = {}
-        for leaf in tab.leaves():
+        # surfaces(), not leaves(): v0.92.0's diff pane is a leaf you can
+        # focus and scroll, so "rectangles the keyboard can move to" is
+        # no longer the same list as "sessions". Reading leaves() here
+        # would leave the diff visibly on screen and unreachable by
+        # Ctrl+Shift+arrow, which is the invisible-button defect in its
+        # keyboard form.
+        for leaf in tab.surfaces():
             region = leaf.region
             if region.width > 0 and region.height > 0 and leaf.id:
                 out[leaf.id] = (region.x, region.y, region.width, region.height)
@@ -2295,19 +2446,39 @@ class DoxaApp(App):
         whether it moved -- ``False`` at the edge of the layout, which is
         deliberately silent: an arrow key that has nowhere to go should do
         nothing, not complain."""
-        pane = self.active_pane
-        if pane is None or not pane.id:
+        here = self.focused_surface()
+        if here is None or not here.id:
             return False
-        target_id = layout_mod.neighbour(self._pane_regions(), pane.id, direction)
-        if target_id is None or target_id == pane.id:
+        target_id = layout_mod.neighbour(self._pane_regions(), here.id, direction)
+        if target_id is None or target_id == here.id:
             return False
-        target = next(
-            (p for p in self.panes() if p.id == target_id), None
-        )
+        tab = self._active_tab()
+        surfaces = tab.surfaces() if isinstance(tab, PaneTab) else []
+        target = next((p for p in surfaces if p.id == target_id), None)
         if target is None:
             return False
+        if isinstance(target, DiffPane):
+            # A diff has no prompt to focus, so _focus_tab's "focus the
+            # pane's prompt" contract does not apply; the widget itself
+            # takes the keyboard, which is what makes it scrollable.
+            target.focus()
+            return True
         self._focus_tab(target)
         return True
+
+    def focused_surface(self) -> "Any | None":
+        """The LEAF holding the keyboard, of whatever kind.
+
+        The geometric twin of :meth:`focused_pane`, which answers the
+        different question "which session does this keystroke mean" and
+        deliberately keeps answering with a session even while the
+        keyboard is in a diff."""
+        node: Any = self.focused
+        while node is not None:
+            if isinstance(node, (SessionPane, DiffPane)):
+                return node
+            node = node.parent
+        return self.focused_pane()
 
     def action_focus_pane_left(self) -> None:
         self.focus_pane_towards("left")
@@ -2348,8 +2519,16 @@ class DoxaApp(App):
         Finds the nearest ancestor split whose orientation matches the
         axis being asked about, and nudges the boundary on this pane's
         side of it. A drag changes weights and weights persist, so this
-        writes the tab set like any other layout change."""
-        pane = self.active_pane
+        writes the tab set like any other layout change.
+
+        Reads :meth:`focused_surface`, not :meth:`active_pane`: with the
+        keyboard in a v0.92.0 diff leaf, Alt+← must widen the DIFF, not
+        the session it is a diff of. This is the gesture the live-diff
+        spec asks for by name ("a left/right split needs the sibling
+        gesture" to Ctrl+Up/Down) and it needed no new key at all --
+        v0.91.0 had already built it; it only had to stop assuming every
+        leaf was a session."""
+        pane = self.focused_surface()
         if pane is None:
             return False
         want = (

@@ -117,6 +117,14 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette="Split: side by side",
     ),
     SlashCommand(
+        name="/diff",
+        group="Panes & tabs",
+        summary="Live diff of this session's worktree, SIDE BY SIDE with "
+                "it — reject a hunk to revert it and tell the agent "
+                "(Alt+G)",
+        palette="Diff: live, beside this session",
+    ),
+    SlashCommand(
         name="/msg",
         group="Panes & tabs",
         summary="Send a message to one same-project peer session",

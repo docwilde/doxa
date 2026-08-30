@@ -27,6 +27,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import Static, TabbedContent
 
 from .. import banner as banner_mod
+from .. import diff as diff_mod
 from .. import identity as identity_mod
 from .. import naming as naming_mod
 from .. import notify as notify_mod
@@ -376,6 +377,35 @@ class PaneRuntimeMixin:
         self._refresh_status()
         # First completed turn of a repo-less session: name the tab from it.
         self._maybe_name_tab(prompt)
+        # Queued hunk rejections apply HERE, not in _render_turn_done:
+        # that renderer runs while this coroutine is still inside its
+        # `async for`, with turn_in_flight still True and this exclusive
+        # "turn" worker still the running one -- and applying a rejection
+        # STARTS a turn (the agent has to be told), which from inside
+        # this worker would cancel the worker doing the telling.
+        # call_after_refresh puts it on the message pump instead, one
+        # step outside this coroutine's own lifetime.
+        self.call_after_refresh(self._flush_diff_rejections)
+
+    def _flush_diff_rejections(self) -> None:
+        """Apply whatever the user rejected while this turn was running.
+
+        Runs from the message pump (see the caller): by the time this is
+        reached the ``"turn"`` worker group is free, so the rejection's
+        own turn can be started without cancelling anything."""
+        app = getattr(self, "app", None)
+        finder = getattr(app, "diff_pane_for", None)
+        if finder is None:
+            return
+        pane = finder(self._session_id)
+        if pane is not None and pane.queued:
+            pane.run_worker(pane.flush_pending(), group="reject")
+        elif pane is not None:
+            # A turn that ended is a turn that may have written; the last
+            # tool_result already ticked, but a turn can also end with
+            # text after its final edit, and a stale diff is the one
+            # thing this surface may not show.
+            pane.schedule_refresh()
 
     async def _handle_event(
         self, ev: EngineEvent, block: TurnBlock, chips: dict[str, ToolChip],
@@ -480,6 +510,35 @@ class PaneRuntimeMixin:
             self._route_transcript_result(chip)
         if ev.data["id"] in self._subagents:
             await self._unregister_subagent(ev.data["id"])
+        # THE TICK for the live diff (v0.92.0). Not a file watcher: DOXA
+        # has a documented no-timer, no-per-frame rule and
+        # docs/plans/code-graph.md already refused a watcher for the same
+        # reason -- a second lifecycle to get wrong. An edit landing IS
+        # the event, and this is where an edit lands.
+        #
+        # The tool INPUT is not on the result event (only the 280-char
+        # result summary is), which is why the predicate reads it off the
+        # chip: a Bash result alone cannot say whether the command wrote
+        # anything, and `chips` is already the call-id -> chip map this
+        # method is handed.
+        self._tick_diff(
+            str(ev.data.get("name") or ""),
+            getattr(chip, "tool_input", None),
+        )
+
+    def _tick_diff(self, tool_name: str, tool_input: "dict | None") -> None:
+        """Tell this session's diff leaf, if it has one open, that the
+        tree may have moved. Costs nothing when nobody is looking: no
+        diff pane, no query, no git."""
+        if not tool_name or not diff_mod.is_tick(tool_name, tool_input):
+            return
+        app = getattr(self, "app", None)
+        finder = getattr(app, "diff_pane_for", None)
+        if finder is None:
+            return
+        pane = finder(self._session_id)
+        if pane is not None:
+            pane.schedule_refresh()
 
     async def _render_turn_done(
         self, ev: EngineEvent, block: TurnBlock, chips: dict[str, ToolChip],

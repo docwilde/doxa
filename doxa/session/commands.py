@@ -101,6 +101,7 @@ PANE_COMMANDS: "tuple[CommandBinding, ...]" = (
     CommandBinding("/clear", "_cmd_clear"),
     CommandBinding("/split", "_cmd_split"),
     CommandBinding("/vsplit", "_cmd_vsplit"),
+    CommandBinding("/diff", "_cmd_diff"),
     CommandBinding("/detach", "_cmd_detach"),
     CommandBinding("/attach", "_cmd_attach"),
     CommandBinding("/sessions", "_cmd_sessions"),
@@ -751,6 +752,17 @@ class PaneCommandsMixin:
         same tab. The named form of Alt+D. Same refusals, same
         place they are reported -- see :meth:`_cmd_split`."""
         note = await self.app.split_active_pane(layout_mod.ROW)
+        if note:
+            await self._system(note)
+
+    async def _cmd_diff(self, args: str) -> None:
+        """/diff -- this session's live diff, SIDE BY SIDE with it. The
+        named form of Alt+G, and a toggle: a second /diff closes it.
+
+        Same refusals in the same place as :meth:`_cmd_split` -- a
+        transcript block in the pane the refusal is about, never a toast
+        floating over some other pane."""
+        note = await self.app.toggle_diff_pane()
         if note:
             await self._system(note)
 
