@@ -662,6 +662,23 @@ async def test_a_rejection_clicked_during_a_turn_is_visibly_pending(tmp_path):
         assert lines[24] == "CHANGED_BOTTOM"
 
 
+def test_building_a_section_that_is_not_mounted_yet_raises_nothing(tmp_path):
+    """Measured in a full-suite run and in none of the targeted ones: a
+    ``Collapsible`` is handed its contents in ``__init__``, so a section's
+    hunk container exists from its first line and is mounted only when the
+    section composes — and ``_remark_queued`` builds a section it JUST
+    mounted, which is exactly that window. It surfaced as ``MountError:
+    Can't mount widget(s) before Vertical(classes='diff-hunks') is
+    mounted`` from a background task, i.e. as an error block nobody
+    claimed. Deferred, not dropped: an unbuilt section is a fold that
+    opens onto nothing."""
+    work = _repo(tmp_path)
+    result = diff_mod.compute(str(work))
+    section = FileSection(next(f for f in result.files if f.path == "f.py"))
+    section.build(120)  # never mounted, never composed
+    assert not section.query(HunkView)
+
+
 @pytest.mark.asyncio
 async def test_a_pending_badge_survives_the_next_edit(tmp_path):
     """The whole argument for queueing over refusing is that the user can

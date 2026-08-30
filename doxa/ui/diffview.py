@@ -150,10 +150,21 @@ class HunkView(Vertical):
     HunkView Button { width: auto; min-width: 10; }
     """
 
-    def __init__(self, file_diff: "diff_mod.FileDiff", hunk: "diff_mod.Hunk") -> None:
+    def __init__(
+        self,
+        file_diff: "diff_mod.FileDiff",
+        hunk: "diff_mod.Hunk",
+        width: int = 0,
+    ) -> None:
         super().__init__()
         self.file_diff = file_diff
         self.hunk = hunk
+        # The width to paint at on mount. Carried in rather than read off
+        # ``self.size`` there, because a widget's size is zero until it
+        # has been laid out -- so a hunk built lazily would paint unified
+        # in a pane wide enough for two columns and stay that way until
+        # the next resize.
+        self._width = width
         self._body = Static("", classes="hunk-body")
         self._pending = Static("", classes="hunk-pending")
         self._pending.display = False  # hide-at-zero, the house convention
@@ -169,7 +180,7 @@ class HunkView(Vertical):
             yield self._button
 
     def on_mount(self) -> None:
-        self.paint(0)
+        self.paint(self._width)
 
     def paint(self, width: int) -> None:
         """Render the body at this width. Called on mount and whenever
@@ -224,9 +235,25 @@ class FileSection(Collapsible):
         """Mount this file's hunks. First expand only -- the same
         ``format_body`` discipline ``ToolChip`` uses, and mounted without
         awaiting for the same reason it is there: this runs from a
-        synchronous ``Collapsible.Expanded`` handler."""
+        synchronous ``Collapsible.Expanded`` handler.
+
+        Deferred while the hunk container is not mountable yet. A
+        ``Collapsible`` is handed its contents in ``__init__``, so
+        ``self._hunks`` exists from the first line of this section's life
+        and is mounted only when the section itself composes -- and
+        :meth:`DiffPane._remark_queued` calls this on a section it JUST
+        mounted, which is exactly that window. Measured as ``MountError:
+        Can't mount widget(s) before Vertical(classes='diff-hunks') is
+        mounted``, from a background task, in one full-suite run and not
+        in the targeted ones: the same race v0.91.0 met in
+        ``SessionPane._system``, met again from a widget that has no
+        transcript to drop a block into. Retried rather than dropped,
+        because an unbuilt section is a fold that opens onto nothing."""
         if self._built:
             self.repaint(width)
+            return
+        if not self._hunks.is_mounted:
+            self.call_after_refresh(self._build_later, width)
             return
         self._built = True
         if self.file_diff.skipped:
@@ -238,7 +265,14 @@ class FileSection(Collapsible):
             )
             return
         for hunk in self.file_diff.hunks:
-            self._hunks.mount(HunkView(self.file_diff, hunk))
+            self._hunks.mount(HunkView(self.file_diff, hunk, width))
+
+    def _build_later(self, width: int) -> None:
+        """The retry :meth:`build` schedules. Silent if this section left
+        the DOM in the meantime -- there is then nothing to build into,
+        and that is the one case where dropping IS the right answer."""
+        if self.is_mounted:
+            self.build(width)
 
     def repaint(self, width: int) -> None:
         for view in self._hunks.query(HunkView):
@@ -424,12 +458,28 @@ class DiffPane(Vertical):
         # run. Measured the same way the first-paint deferral above was.
         self.call_after_refresh(self._apply_badges)
 
-    def _apply_badges(self) -> None:
+    def _apply_badges(self, passes: int = 3) -> None:
+        """Mark every queued hunk that is on screen, and come back for
+        the ones that are not yet.
+
+        ``FileSection.build`` can itself have been deferred (its hunk
+        container was not mountable), so one pass is not enough to
+        promise the badge landed -- and the badge is the whole
+        justification for queueing. Bounded at three passes rather than
+        looped: if a hunk is still not there by then it is not coming
+        back (the file was renamed out from under the queue), and the
+        note above the file list still carries the count."""
+        if not self.queued or not self.is_mounted:
+            return
         wanted = {(item.path, item.hunk.header): item for item in self.queued}
+        marked = 0
         for view in self._files.query(HunkView):
             item = wanted.get((view.file_diff.path, view.hunk.header))
             if item is not None:
                 view.mark_pending(item.mark())
+                marked += 1
+        if marked < len(wanted) and passes > 1:
+            self.call_after_refresh(self._apply_badges, passes - 1)
 
     def _repaint_later(self) -> None:
         """The retry :meth:`_repaint` schedules when its container was
