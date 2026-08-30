@@ -1,6 +1,25 @@
 # Live diff, side by side, with per-hunk reject — specification
 
-Status: **draft for review**. Nothing implemented.
+Status: **shipped in v0.92.0**, in a split pane rather than in a tab, as
+`doxa/diff.py` (the model) and `doxa/ui/diffview.py` (the leaf). The four
+open questions at the bottom are answered in the CHANGELOG entry and in
+the code; what is NOT built is noted there too. The design check this
+document asks for is recorded below.
+
+**The design check, run.** *Session left, diff right, both live* —
+v0.91.0's split could express the GEOMETRY of it and could not express
+the MODEL of it. Everything about painting, focus and sizing worked
+unchanged: `SplitBox` is orientation-agnostic, an unfocused visible leaf
+keeps rendering, and `Alt+←/→` already moved the divider (the "sibling
+gesture" asked for below needed no new key). What did not work is that a
+`layout.Leaf` WAS a session — `split._leaf_of` returned `None` for any
+child that was not a `SessionPane`, so a diff leaf would have been
+dropped from `PaneTab.tree()`, the split would have collapsed to one
+child in the record, and the persisted layout would have said "one pane"
+for a screen showing two. One field (`Leaf.view`) and three call sites
+(`split._node_of`, `PaneTab.surfaces`, `DoxaApp._pane_regions`) closed
+it. So: not wrong, but incomplete in exactly the way a first consumer
+finds.
 
 ## The idea
 

@@ -286,8 +286,12 @@ Once you're in: type a prompt, press enter. `ctrl+p` opens the command
 palette, `ctrl+t` opens a new tab, `/split` and `/vsplit` (or
 `alt+s` stacked below, `alt+d` side by side) put a second
 session in the tab you are
-already in — `ctrl+shift+←/→/↑/↓` moves between panes and `ctrl+↑`/`ctrl+↓`
+already in — `ctrl+shift+←/→/↑/↓` moves between panes, `alt+←/→/↑/↓`
+drags the divider between them, and `ctrl+↑`/`ctrl+↓`
 drags the status-bar divider between the transcript and the prompt —
+`/diff` (or `alt+g`) opens this session's **live diff** in the pane
+beside it, updating as edits land, with a **reject** button on every
+hunk that reverts exactly that hunk and tells the agent why,
 `ctrl+r` searches past sessions,
 `shift+tab` cycles the **permission mode** (what still stops and asks you
 before a tool runs — see the manual's

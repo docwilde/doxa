@@ -4,6 +4,294 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.92.0 — 2026-08-30
+
+**The live diff, to `docs/plans/live-diff.md`.** While an agent edits
+files in its worktree, the session sits on the left and a **live-synced
+diff** sits on the right, red/green, updating as edits land. Any hunk can
+be **rejected**, which reverts exactly that hunk and tells the session's
+agent what was rejected and why. This is the review loop DOXA previously
+made you leave the app for: read a tool-call fold, or open the repo
+elsewhere and diff by hand.
+
+It is the first concrete consumer of v0.91.0's layout tree, and the spec
+posed that as a design check — *if the split cannot express session left,
+diff right, both live, the split is wrong*. It could express the
+geometry and could not express the model; see the last chapter.
+
+### Where the diff comes from
+
+- New `doxa/diff.py` (827 lines): the MODEL half — pure data, pure
+  functions and one thin subprocess boundary, the rule `doxa/layout.py`
+  already follows. `Hunk`, `FileDiff`, `DiffResult`, and `parse()`, which
+  reads `git diff`'s unified output. **No differ was written**: the
+  porcelain is stable, and a second differ would be a second source of
+  truth. If this pane can show something git cannot, it is wrong.
+- **The tool-result stream is the tick. Not a file watcher.** DOXA has a
+  documented no-timer, no-per-frame rule, and `docs/plans/code-graph.md`
+  already refused a watcher for the same reason — a second lifecycle to
+  get wrong. `SessionPane._render_tool_result`
+  (`doxa/session/runtime.py`) now calls `_tick_diff`, which recomputes
+  when an `Edit`, `Write`, `NotebookEdit`, `Task` or tree-touching `Bash`
+  result lands and at no other time. The same reasoning that gave
+  v0.56.0's spinner zero idle cost: a token arriving is a tick, and it
+  costs nothing when nothing is arriving.
+- The tool INPUT is not on a `tool_result` event (only a 280-char result
+  summary is), so the predicate reads the command off `ToolChip.tool_input`
+  — the chip map `_render_tool_result` is already handed.
+- **`diff.bash_touches_tree` is an ALLOW-list of 32 read-only verbs plus
+  16 read-only `git` subcommands, not a deny-list of destructive ones**,
+  and any redirection (`>`) makes a segment a write whatever the verb is.
+  Deliberately over-inclusive: a false tick costs one `git diff` on a
+  local tree, a missed tick costs a diff that silently disagrees with the
+  disk, and only one of those is survivable on a live surface.
+- Rate-limited by `exclusive=True` on its own worker group and by nothing
+  else. A turn landing thirty edits fires thirty ticks, each cancelling
+  the last in-flight git call; the user sees the state after the last
+  edit rather than a queue of thirty stale ones. No interval to tune.
+- Git runs in the TUI process against a worktree on the same machine, so
+  the diff never crosses the daemon socket. `peers.MAX_FRAME_BYTES` and
+  `daemon._fit_page` are therefore **not** on this path and `_fit_page`
+  gains no caller — the same call `doxa/transcript.py` made and for the
+  reason it gives: one implementation enforcing one budget, for the calls
+  that really are frames.
+
+### "No changes" and "cannot tell" are different sentences
+
+- `diff.base_for(cwd)` reads the worktree sidecar (`doxa/worktrees.py`)
+  and returns one of three answers, and `DiffResult.headline()` renders
+  each differently. `STATUS_OK` with no files is **"no changes against
+  main"**. `STATUS_NO_BASE` is **"cannot determine a base — …"**.
+  `STATUS_ERROR` is **"cannot read the diff — …"**.
+- **The one way to reach the refusal is v0.33.0's measured trap:
+  `base_ref == branch`.** Nothing the session committed can appear in a
+  diff against its own branch, so a session that committed all its work
+  would render as untouched. That is the same emptiness that made
+  `commits_ahead` structurally unmeasurable, read as zero, and force-
+  deleted real commits; `worktrees.finalize` already refuses on the
+  identical condition rather than trusting the number, and the diff now
+  inherits the refusal instead of the defect.
+- A MISSING sidecar is not that case — worktree-per-session may simply be
+  off, and uncommitted work against `HEAD` is a real, smaller claim. It
+  comes back as `BASE_HEAD` and the headline says *"against HEAD (no
+  worktree base recorded)"* rather than passing the smaller claim off as
+  the larger one.
+
+### Rendering, and what it refuses to render
+
+- New `doxa/ui/diffview.py` (650 lines): `DiffPane`, `FileSection`,
+  `HunkView`. **Collapsed per file by default with the changed-line
+  counts** on the fold — the `ToolCallsSection` pattern, with
+  `ToolChip.format_body`'s lazy build on top, so forty hunks nobody
+  expanded are not forty mounted widget trees. A twenty-file diff is
+  twenty rows.
+- **Binary and huge files are named, not rendered.** The size cutoff
+  (`MAX_HUNK_LINES_PER_FILE = 2000`) is on the DIFF, not the file: a
+  40 MB asset with a one-line change is cheap and a 3 MB generated file
+  rewritten whole is not. A named file's hunks are DROPPED rather than
+  hidden, so the reject button can never reach a patch nobody saw.
+- Caps at 200 files and 20 000 body lines, and a result that hit either
+  says so (`DiffResult.truncated`, `dropped_files`) rather than handing
+  back a short answer that renders as whole.
+- **Unified is the default; side-by-side is gated on a measured width.**
+  `SIDE_BY_SIDE_MIN_COLS = 100`, the way `CTX_ABSOLUTE_MIN_COLS` gates the
+  ctx chip. The spec's arithmetic backwards: at 80 columns a half-width
+  pane is 40 and each side is 20, which is unreadable. Forwards: a legible
+  side is ~44 columns (`layout.MIN_LEAF_WIDTH` plus a gutter), so
+  2×(44+4)+1 = 97, rounded to 100. Unlike the ctx chip, an UNMEASURED
+  width (0, the first paint) reads as *not* allowed — a chip appearing
+  late is a flicker, a side-by-side that had to fall back after you read
+  it is a page that changed under you.
+- Hunk bodies are Rich `Text`, never console markup: a diff body is
+  arbitrary source and source contains `[`.
+- The pane's first paint is deferred one refresh (`call_after_refresh`)
+  and `_repaint` retries rather than returning: a leaf created at runtime
+  is mounted into a box made empty ahead of time, so its own `compose`
+  children are still arriving when `on_mount` fires. Measured — without
+  it the pane said "reading the diff…" forever. This is the same window
+  v0.91.0 hit from the other side (`SessionPane._system`'s `MountError`),
+  and both conditions are guarded, in order: `NoMatches` first, then
+  `is_mounted`, because `query_one` succeeds for a node that is in the
+  DOM and not yet mountable.
+
+### Reject: two actions, in that order
+
+- Rejecting is **the file going back AND the agent's belief about the
+  file being corrected**. Doing only the first leaves the agent
+  confidently wrong — it patches against a premise that is no longer
+  true. Doing only the second leaves the bad code in the tree. The order
+  matters because the message says the change is already gone.
+- `diff.revert_hunk` builds a ONE-HUNK patch from the recorded header and
+  body (`hunk_patch`) and runs `git apply --reverse --recount`, `--check`
+  first. Two hunks in one file are independently rejectable and rejecting
+  one does not discard the other — asserted against a real git worktree
+  with two edits ten lines apart.
+- **A patch that no longer applies changes nothing and says why**, in the
+  pane's own words: *"that hunk no longer applies to f.py — nothing was
+  changed. the file moved underneath it."* Never forced: a three-way
+  apply is conflict resolution, and this is explicitly not a merge tool.
+- **A rejection during a turn is QUEUED until `turn_done`, and visibly
+  marked** — the spec weighed three answers and this is the one it chose,
+  because a rejection the user has clicked and cannot see the effect of
+  is the worst of the three. Reading the code added a second argument
+  the spec did not have: `daemon._handle_prompt` REFUSES a second
+  concurrent prompt outright (*"a turn is already running in this
+  session"*), so applying immediately could not have delivered the
+  message half of the pair even if the revert half landed. Applying
+  immediately is not a race this app could win.
+- The flush hangs off the tail of `SessionPane._run_turn`, **not**
+  `_render_turn_done`: that renderer fires while `_run_turn` is still
+  inside its `async for`, with `turn_in_flight` still True and the
+  exclusive `"turn"` worker still running — and applying a rejection
+  STARTS a turn, which from inside that worker would cancel the worker
+  doing the telling. `call_after_refresh` puts it on the message pump one
+  step outside that coroutine's lifetime.
+- Queued rejections apply in click order, and a later one that no longer
+  applies (because an earlier one moved the file) is REFUSED and reported
+  rather than recounted into something the user did not ask for.
+- Closing a diff that still holds queued rejections is refused with a
+  count, rather than discarding them silently.
+- **A `FileSection` defers its build until its own hunk container is
+  mountable.** A `Collapsible` is handed its contents in `__init__`, so
+  the container exists from the section's first line and is mounted only
+  when the section composes — and `_remark_queued` builds a section it
+  just mounted. Measured as `MountError: Can't mount widget(s) before
+  Vertical(classes='diff-hunks') is mounted` on one full-suite run and on
+  none of the targeted ones: a race, the same window v0.91.0 met in
+  `SessionPane._system`. Deferred rather than dropped, since an unbuilt
+  section is a fold that opens onto nothing; `_apply_badges` therefore
+  retries, bounded at three passes.
+- A lazily built `HunkView` is given its width rather than reading
+  `self.size`, which is zero until the widget has been laid out — without
+  it a hunk built on first expand rendered unified in a pane wide enough
+  for two columns and stayed that way until the next resize.
+- **The pending badge is put back after every tick.** Each recompute
+  rebuilds the hunk widgets, so without `DiffPane._remark_queued` a
+  queued rejection would be visibly marked only until the agent's next
+  edit — exactly the interval during which it is queued, and the whole
+  justification for queueing rather than refusing. The file it is in is
+  re-expanded for the same reason (a badge inside a fold nobody opened is
+  not a badge), and files the user had open stay open across a rebuild
+  rather than folding shut mid-read.
+
+### The message is user-authored, and that is the whole trust argument
+
+- `diff.reject_message` names the file, the hunk's line range, up to 12
+  quoted changed lines and the user's reason if one was typed — *"a
+  rejection with a reason is worth far more than a bare revert, because
+  it stops the agent re-making the same edit"*. With no reason it SAYS so
+  rather than omitting it, because an agent told only "I rejected this"
+  will guess, and a wrong guess is what makes it re-make the edit.
+- It goes down `SessionPane._run_turn`, the same door
+  `on_prompt_submitted` uses for a line you typed, and it carries no
+  framing marker at all. That is the deliberate contrast with
+  `peers.PEER_UNTRUSTED_INTRO`, which exists because ANOTHER AGENT wrote
+  the text: a human clicking reject in their own session is the user
+  speaking, and wrapping it as untrusted data would tell the agent to
+  weigh its own user's instruction as hearsay. Asserted, not described —
+  `tests/test_live_diff.py` checks the intro is absent.
+
+### The layout tree learned that a leaf is not always a session
+
+This is the design check the spec asked for, and the honest answer is
+*nearly*. Everything about painting, focus and sizing worked unchanged —
+an unfocused visible leaf keeps rendering, `SplitBox` is
+orientation-agnostic, and **`Alt+←/→` already moved the divider**, so the
+"sibling gesture" the spec asks for cost no new key. What did not work is
+that `layout.Leaf` WAS a session:
+
+- `layout.Leaf.view` (`VIEW_SESSION` / `VIEW_DIFF`) is the one new field.
+  Without it `split._leaf_of` returns `None` for a diff child, the split
+  node collapses to its one surviving child, `PaneTab.tree()` reports
+  "no split" for a screen that plainly shows one, and the persisted
+  record carries that lie into the next launch — the exact defect class
+  `doxa/ui/split.py`'s own docstring warns about.
+- It is written to JSON **only when it is not the default**, so every
+  record v0.91.0 could produce is byte-identical and an unrecognised view
+  from a future version degrades to the session rather than dropping the
+  leaf.
+- A diff leaf carries the `session_id` of the session it is a diff OF.
+  Not a spare field: it is what keeps `layout.prune` correct without
+  knowing anything about diffs — a diff whose session died is pruned by
+  the same rule that prunes the session.
+- `split._node_of` replaces the `isinstance` chain in `_tree_of`: a leaf
+  answers for itself through `layout_leaf()`, so `doxa/ui/split.py` does
+  not have to learn what a diff is (it imports `SessionPane` lazily to
+  break a cycle, and a second such import per surface is that cycle
+  waiting to come back).
+- `PaneTab.surfaces()` is new beside `PaneTab.leaves()`, which is
+  unchanged and still sessions-only. `DoxaApp._pane_regions` reads
+  `surfaces()` so `ctrl+shift+→` can land on the diff; every caller that
+  wants an ENGINE still reads `leaves()`. Conflating them is how a diff
+  pane ends up handed to something expecting a session.
+- `DoxaApp.focused_surface()` is the geometric twin of `focused_pane()`.
+  `active_pane` still answers with a SESSION while the keyboard is in a
+  diff — resolved to that diff's own session, which in a tab holding two
+  sessions is a different answer from the tab's last focused leaf.
+- `grow_pane_towards` reads `focused_surface()`, so `Alt+←` widens the
+  DIFF when the keyboard is in it.
+- `DiffPane.session_pane()` searches from the enclosing `PaneTab`, never
+  from `self.app`. `Widget.app` reads a context variable that is only
+  reliable while the app's own message pump is on the stack; measured, it
+  made two tests pass alone and fail in file order. Walking the DOM is
+  also the more correct search — the owner-first invariant puts a diff
+  leaf in the same tab as the session it was opened from.
+
+### Surfaces, keys and the open questions
+
+- `/diff` (registry row, `Panes & tabs`) and `SessionPane._cmd_diff`;
+  refusals land as a transcript block in the pane they are about, not a
+  toast over some other pane, exactly like `/split`.
+- **Alt+G**, joining `Alt+S`/`Alt+D` for the identical measured reason
+  (`doxa/keyboard.py`): Alt goes out as an ESC prefix under BOTH
+  encodings, where every `ctrl+shift+<letter>` chord collapses onto plain
+  `ctrl+<letter>` and is undeliverable. `tests/test_split_keys.py`'s
+  collision list now covers it, so the next release that adds a binding
+  trips over it instead of shipping it.
+- Opening the diff **does not move the keyboard**, unlike a split. A
+  split spawns a session you asked to work in; a diff is something you
+  asked to look at while you keep typing. "Visible and focused are
+  different states" cuts both ways.
+- **Open question 2 — untracked files: yes, included.** A created file is
+  what a reviewer wants to see, and plain `git diff` has no hunk for it.
+  Done with `git diff --no-index` against `/dev/null`, NOT `git add
+  --intent-to-add`: this is explicitly not `git add -p`, staging is a git
+  concept the user owns, and a review surface that writes the index has
+  changed the thing it was reporting on. Capped at 50 files.
+- **Open question 3 — per session.** One diff per session, matching the
+  isolation model; a second `/diff` closes the one that is open.
+- **Open question 4 — a queued rejection does NOT survive a restart.** It
+  is held on the widget and the widget is new; the restored pane comes
+  back showing the un-reverted hunk, which is the truth. Losing it
+  silently would be the defect — losing it visibly, with the hunk still
+  on screen and still rejectable, is not.
+- **Open question 1 — rejecting does not stop the agent, and there is no
+  "reject and interrupt".** Interrupting is a bigger act than rejecting
+  and this release did not make it a side effect of one; it is also not
+  offered as a separate action yet.
+
+### What is not covered
+
+- **No mouse drag on the divider** — `Alt+arrow` only, as in v0.91.0.
+- **No word-level intra-line highlighting.** Side-by-side pairs removed
+  and added runs positionally, which is a layout, not a second differ.
+- **No `git diff` options surface**: no whitespace mode, no context-line
+  control, no submodule handling beyond what git's default output says.
+- **The diff does not cross the daemon socket**, so an attached TUI on a
+  machine that is not the worktree's is not a case this handles. There is
+  no remote case today (the daemon socket is a Unix socket) and this adds
+  none.
+- **Rejecting is per hunk only** — no partial-hunk, no line-level, no
+  editing a hunk by hand. Reject or keep; a half-editor is worse than
+  none.
+- **No merge, no conflict resolution, no staging.** Unchanged from the
+  spec's own "what this is not".
+- 37 new tests in `tests/test_live_diff.py` (812 lines), against a real
+  git worktree for the model half and a real `Pilot` for the leaf. Seven
+  were verified failing first against the specific mechanism each pins,
+  by reverting that mechanism and re-running. Full suite 1600, up from
+  1563.
+
 ## 0.91.0 — 2026-08-30
 
 **Recursive split panes, to `docs/plans/split-panes.md`.** A tab held one

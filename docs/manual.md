@@ -129,6 +129,46 @@ v0.91.0 carries no tree and restores as one tab per session, exactly as it
 always did; a record written after it still restores under an older DOXA,
 as one tab per pane.
 
+## The live diff
+
+`/diff` (or `alt+g`) puts a **live diff of this session's worktree** in
+the pane beside the session — `git diff` against the branch the worktree
+was cut from, recomputed every time an edit lands and never on a timer.
+Files are collapsed by default with their changed-line counts; binary and
+very large files are named rather than rendered; a diff that hit a cap
+says so. Side-by-side turns on above 100 columns and unified is the
+default below it, because at 80 columns a half-width pane is 40 and two
+20-column sides are unreadable.
+
+The diff pane is a real layout leaf: `ctrl+shift+←/→` moves the keyboard
+into it and back, `alt+←/→` widens it, it keeps updating while you type
+in the session, and its position is saved and restored with the rest of
+the tab's layout. A second `/diff` closes it. Each session has its own.
+
+**Reject** on a hunk does two things, in this order: it reverse-applies
+exactly that hunk (a second hunk in the same file is untouched), and it
+tells the session's agent what was rejected, in your own words if you
+typed a reason. That message goes down the same path a prompt you typed
+does — it is you speaking, not another session, so it is not wrapped in
+the untrusted-peer framing a `/msg` from a peer gets.
+
+If a turn is running, the rejection is **queued and visibly marked**, and
+applies when the turn ends: reverting a file under an agent that is
+mid-edit produces a conflict neither side understands, and the daemon
+refuses a second concurrent prompt anyway. If the reverse patch no longer
+applies — the file moved underneath it — nothing changes and the pane
+says why. Closing a diff that still has queued rejections is refused
+rather than losing them. Queued rejections do not survive a restart; the
+diff comes back showing the hunk still there, which is the truth.
+
+Two cases the pane distinguishes on purpose. **"No changes"** means git
+was asked and answered nothing. **"Cannot determine a base"** means the
+worktree's recorded base is its own branch, so nothing it committed could
+appear in a diff against it — the same defect that in v0.33.0 made
+`commits_ahead` read zero and force-deleted real commits. An empty diff
+and an unanswerable one must not look alike. The design is
+[docs/plans/live-diff.md](plans/live-diff.md).
+
 ## Worktrees and finalize
 
 With `worktree_per_session` on (default), each session gets its own linked
