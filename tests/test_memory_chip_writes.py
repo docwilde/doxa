@@ -50,6 +50,7 @@ import pytest
 from tests.fakes import FakeEngine
 from tests.helpers import (  # noqa: F401 -- reused fixtures/helpers
     _belief,
+    _chip_actions,
     _many,
     _open,
     _picker,
@@ -143,7 +144,13 @@ async def test_approving_a_memory_proposal_moves_memory_and_staged_chips(
         await _wait(pilot, lambda: fake.approved == [pid])
 
         await _wait(pilot, lambda: "3 proposals" not in _status_plain(app))
-        assert "proposal" not in _status_plain(app), _status_plain(app)
+        # Anchored on the staged-proposals chip's OWN action, not the bare
+        # word "proposal" -- this pane's cwd is `tmp_path` with no git repo,
+        # so the bar also carries a `dir <cwd name>` chip (GitLine.
+        # folder_label), and under pytest `<cwd name>` IS this test's own
+        # name, which can (and for a sibling test, does) contain "proposal"
+        # with nothing to do with whether the staged chip itself is showing.
+        assert "open_pending_picker" not in _chip_actions(app), _status_plain(app)
         await _wait(pilot, lambda: " p" in _mem_span(app))
         assert "mem u" in _status_plain(app) and " p" in _mem_span(app)
 
@@ -198,7 +205,10 @@ async def test_rejecting_a_proposal_moves_only_the_staged_chip(
         await _wait(pilot, lambda: fake.rejected == [pid])
 
         await _wait(pilot, lambda: "3 proposals" not in _status_plain(app))
-        assert "proposal" not in _status_plain(app)
+        # Same anchoring as the approve test above -- the chip's own
+        # action, not a word the `dir <cwd name>` folder chip can also
+        # contain (and here it literally does: this test's own name).
+        assert "open_pending_picker" not in _chip_actions(app)
         assert _mem_span(app) == mem_before, (
             "the memory chip changed after a reject, which writes nothing"
         )
@@ -259,7 +269,8 @@ async def test_approving_a_belief_proposal_moves_belief_and_staged_chips(
         await _wait(pilot, lambda: fake.approved == [pid])
 
         await _wait(pilot, lambda: "4 beliefs" in _status_plain(app))
-        assert "proposal" not in _status_plain(app)
+        # Same anchoring as the memory-proposal tests above.
+        assert "open_pending_picker" not in _chip_actions(app)
         assert _mem_span(app) == mem_before, (
             "a belief proposal's approval must never move the memory chip"
         )

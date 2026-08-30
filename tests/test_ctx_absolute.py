@@ -41,6 +41,7 @@ from doxa.ui.labels import (
     fmt_tokens,
 )
 from tests.fakes import FakeEngine
+from tests.helpers import _chip_offset
 
 
 # -- the formatters ------------------------------------------------------
@@ -260,12 +261,20 @@ def _measured_engine(pct=42.0, used=24_000, limit=200_000):
 
 def _tooltip_over(app, needle: str) -> "str | None":
     """The tooltip the status bar serves for a hover landing on `needle` --
-    the SAME `#status-bar { padding: 0 2 }` offset the click helpers in
-    tests/test_status_chips.py already subtract."""
+    resolved through :func:`tests.helpers._chip_offset`, which walks the
+    bar's own per-chip hint list rather than a bare
+    ``_status_plain(app).index(needle)``. Outside a git repo the bar also
+    carries a `dir <cwd name>` chip (GitLine.folder_label), and under
+    pytest `<cwd name>` IS this test's own name -- a plain `.index()`
+    lookup for a short needle like "ctx" can land INSIDE that chip's own
+    text instead of the real ctx chip, which is exactly what made this
+    helper report the wrong tooltip (or none) for tests whose own name
+    happens to contain the needle."""
     from doxa.app import StatusBar
 
     bar = app.query_one("#status-bar", StatusBar)
-    return bar._tooltip_for_x(2 + _status_plain(app).index(needle))
+    x, _y = _chip_offset(app, needle)
+    return bar._tooltip_for_x(x)
 
 
 @pytest.mark.asyncio
@@ -278,10 +287,12 @@ async def test_hovering_the_ctx_chip_states_used_and_total_tokens(
     fake = _measured_engine()
     app, _engines = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test(size=(120, 40)) as pilot:
-        assert await _wait_status(pilot, app, "ctx")
+        # "ctx 42%", not the bare "ctx" -- _measured_engine()'s default
+        # percentage, and the chip's own full text (see _chip_offset).
+        assert await _wait_status(pilot, app, "ctx 42%")
         # Default: the chip's own width cost is unchanged.
         assert "24k/200k" not in _status_plain(app)
-        hint = _tooltip_over(app, "ctx")
+        hint = _tooltip_over(app, "ctx 42%")
         assert hint is not None, "the ctx chip serves no tooltip at all"
         assert "24,000" in hint and "200,000" in hint
         assert "176,000" in hint

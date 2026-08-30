@@ -16,6 +16,7 @@ plain, non-test module is the fix that survives the next rename too.
 
 from __future__ import annotations
 
+import re
 import time
 
 from doxa.app import DoxaApp
@@ -33,6 +34,69 @@ def _status_plain(app) -> str:
     from textual.content import Content
 
     return Content.from_markup(str(app.query_one("#status-bar").renderable)).plain
+
+
+# -- chip-identity anchors -------------------------------------------------
+#
+# The folder chip (GitLine.folder_label, wired in
+# PaneChipsMixin._status_chips) paints `dir <cwd name>` whenever a session
+# is NOT inside a git repository -- and under pytest, `<cwd name>` IS the
+# running test's own name (pytest names `tmp_path` after the test). A bare
+# `needle in _status_plain(app)` or `_status_plain(app).index(needle)`
+# check is therefore not anchored on any particular CHIP at all: it can
+# match "peers"/"ctx"/"proposal"/etc. sitting right there inside the
+# directory-name chip's own text, purely because that happens to be a
+# substring of the test's own name -- nothing to do with whether the real
+# peers/ctx/proposals chip is actually showing. The two helpers below
+# anchor on the CHIP instead, the same way the bar resolves a real click or
+# hover to a chip in production (StatusBar._tooltip_for_x).
+_CLICK_ACTION_RE = re.compile(r"\[@click=([A-Za-z0-9_]+)\]")
+
+
+def _chip_actions(app) -> "set[str]":
+    """The set of click actions the status bar currently paints -- e.g.
+    ``open_peers_picker``, ``compact_now``, ``open_pending_picker``. A
+    chip's presence/absence is what a "chip shown/hidden" test means to
+    assert; checking for the chip's OWN action name is immune to the
+    folder chip's text (the directory name) ever containing the same
+    word by coincidence, because the folder chip's own action is always
+    ``open_repo_picker``, never any other chip's."""
+    raw = str(app.query_one("#status-bar").renderable)
+    return set(_CLICK_ACTION_RE.findall(raw))
+
+
+def _chip_offset(app, text: str) -> "tuple[int, int]":
+    """A click/hover x-offset landing on `text` INSIDE the first real chip
+    that contains it -- found by walking the bar's own ``_chip_hints``
+    (one ``(plain_text, tooltip)`` per painted chip, in PAINT ORDER,
+    exactly what ``StatusBar._tooltip_for_x`` walks in production) and
+    advancing a cursor past each chip's own span before moving on to the
+    next. This is what makes it safe against the folder chip: `text` is
+    searched for one WHOLE CHIP at a time, in order, so an occurrence
+    sitting inside an EARLIER chip (the folder chip's directory-name text,
+    under pytest the test's own name) is examined and rejected on its own
+    turn -- unless `text` itself is a piece of THAT chip, which is on the
+    caller to avoid by choosing a needle no other chip's text can contain
+    (e.g. the ctx chip's actual `"ctx 42%"`, never the bare, ambiguous
+    `"ctx"`). ``#status-bar``'s own `padding: 0 2` (theme.tcss) is why the
+    returned x adds 2, matching the convention every click-offset helper
+    in this suite already follows."""
+    from doxa.ui.statusline import StatusBar
+
+    bar = app.query_one("#status-bar", StatusBar)
+    plain = _status_plain(app)
+    cursor = 0
+    for chip_text, _hint in bar._chip_hints:
+        idx = plain.find(chip_text, cursor)
+        if idx == -1:
+            continue
+        within = chip_text.find(text)
+        if within != -1:
+            return (2 + idx + within, 0)
+        cursor = idx + len(chip_text)
+    raise AssertionError(
+        f"no chip on the status bar contains {text!r}: bar reads {plain!r}"
+    )
 
 
 def _belief(bid, claim, *, subject="user", created_days=120, idle_days=40,

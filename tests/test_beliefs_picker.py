@@ -69,6 +69,7 @@ from fakes import FakeEngine
 from helpers import (
     DAY,
     _belief,
+    _chip_actions,
     _many,
     _open,
     _picker,
@@ -1524,7 +1525,12 @@ async def test_the_chip_is_absent_when_nothing_is_staged(monkeypatch, tmp_path):
         await pilot.pause()
         for _ in range(60):
             await pilot.pause(0.02)
-        assert "proposal" not in _status_plain(app)
+        # Anchored on the staged-proposals chip's OWN action, not the bare
+        # word "proposal" -- outside a git repo the bar also carries a
+        # `dir <cwd name>` chip (GitLine.folder_label), and under pytest
+        # `<cwd name>` is the running test's own name, which can (and
+        # elsewhere in this suite, does) contain "proposal" by accident.
+        assert "open_pending_picker" not in _chip_actions(app)
 
 
 @pytest.mark.asyncio

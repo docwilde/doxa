@@ -35,6 +35,7 @@ from textual.content import Content
 from doxa import peers as peers_mod
 from doxa.app import ChipPicker, CompactConfirm, DoxaApp, StatusBar, SystemBlock
 from tests.fakes import FakeEngine
+from tests.helpers import _chip_offset
 
 
 def _repo(tmp_path, branch="trunk", name="myrepo"):
@@ -89,12 +90,18 @@ def _status_plain(app) -> str:
 
 
 def _offset_of(app, needle: str) -> tuple[int, int]:
-    """A click coordinate landing on `needle`'s first character --
-    ``#status-bar``'s own `padding: 0 2` (theme.tcss) means content starts
-    at x=2 within the widget's own region, same as SubagentLine's
-    established click-offset convention."""
-    idx = _status_plain(app).index(needle)
-    return (2 + idx, 0)
+    """A click coordinate landing on `needle` -- delegates to
+    :func:`tests.helpers._chip_offset`, which finds `needle` one whole
+    CHIP at a time (in paint order) rather than a bare
+    ``_status_plain(app).index(needle)`` against the whole bar. Outside a
+    git repo the bar also carries a `dir <cwd name>` chip (GitLine.
+    folder_label), and under pytest `<cwd name>` IS the running test's own
+    name -- a plain `.index()` can land INSIDE that chip's text instead of
+    the real target (measured: `test_ctx_confirm_esc_sends_nothing`'s own
+    name contains "ctx", so a bare "ctx" needle used to click the folder
+    chip instead of the ctx chip and silently never opened the confirm
+    dialog it meant to test)."""
+    return _chip_offset(app, needle)
 
 
 async def _wait_status(pilot, app, needle: str, tries=200) -> bool:
@@ -394,7 +401,12 @@ async def test_peers_chip_click_opens_the_peers_picker(monkeypatch, tmp_path):
     peer = _peer(tmp_path, "peer00001111", "fix the flaky test", usage_tokens=12345)
     fake = FakeEngine([], peers=[peer])
     app, _engines = await _app(monkeypatch, tmp_path, fake)
-    async with app.run_test() as pilot:
+    # Wide enough that the peers chip stays on-screen behind the `dir
+    # <cwd name>` folder chip -- outside a git repo (as `tmp_path` is
+    # here) that chip's own text is this test's own name, and the default
+    # 80-column terminal is not wide enough to fit it plus everything
+    # that paints before the peers chip.
+    async with app.run_test(size=(200, 24)) as pilot:
         assert await _wait_status(pilot, app, "peers 1")
         picker = app.query_one("#chip-picker", ChipPicker)
         assert not picker.is_open
@@ -536,9 +548,9 @@ async def test_ctx_chip_click_opens_a_confirm_and_does_not_compact_yet(
     fake = FakeEngine([])
     fake.last_ctx_percentage = 42.0
     app, engines = await _app(monkeypatch, tmp_path, fake)
-    async with app.run_test() as pilot:
-        assert await _wait_status(pilot, app, "ctx")
-        await pilot.click("#status-bar", offset=_offset_of(app, "ctx"))
+    async with app.run_test(size=(200, 24)) as pilot:
+        assert await _wait_status(pilot, app, "ctx 42%")
+        await pilot.click("#status-bar", offset=_offset_of(app, "ctx 42%"))
         for _ in range(100):
             if isinstance(app.screen, CompactConfirm):
                 break
@@ -552,9 +564,9 @@ async def test_ctx_confirm_accept_sends_compact(monkeypatch, tmp_path):
     fake = FakeEngine([])
     fake.last_ctx_percentage = 91.0
     app, engines = await _app(monkeypatch, tmp_path, fake)
-    async with app.run_test() as pilot:
-        assert await _wait_status(pilot, app, "ctx")
-        await pilot.click("#status-bar", offset=_offset_of(app, "ctx"))
+    async with app.run_test(size=(200, 24)) as pilot:
+        assert await _wait_status(pilot, app, "ctx 91%")
+        await pilot.click("#status-bar", offset=_offset_of(app, "ctx 91%"))
         for _ in range(100):
             if isinstance(app.screen, CompactConfirm):
                 break
@@ -575,9 +587,10 @@ async def test_ctx_confirm_accept_sends_compact(monkeypatch, tmp_path):
 async def test_ctx_confirm_decline_sends_nothing(monkeypatch, tmp_path):
     fake = FakeEngine([])
     app, engines = await _app(monkeypatch, tmp_path, fake)
-    async with app.run_test() as pilot:
-        assert await _wait_status(pilot, app, "ctx")
-        await pilot.click("#status-bar", offset=_offset_of(app, "ctx"))
+    async with app.run_test(size=(200, 24)) as pilot:
+        # No percentage is set on this fake -- ctx_chip(None) == "ctx —".
+        assert await _wait_status(pilot, app, "ctx —")
+        await pilot.click("#status-bar", offset=_offset_of(app, "ctx —"))
         for _ in range(100):
             if isinstance(app.screen, CompactConfirm):
                 break
@@ -594,13 +607,19 @@ async def test_ctx_confirm_decline_sends_nothing(monkeypatch, tmp_path):
 async def test_ctx_confirm_esc_sends_nothing(monkeypatch, tmp_path):
     fake = FakeEngine([])
     app, engines = await _app(monkeypatch, tmp_path, fake)
-    async with app.run_test() as pilot:
-        assert await _wait_status(pilot, app, "ctx")
-        await pilot.click("#status-bar", offset=_offset_of(app, "ctx"))
+    async with app.run_test(size=(200, 24)) as pilot:
+        # No percentage is set on this fake -- ctx_chip(None) == "ctx —".
+        assert await _wait_status(pilot, app, "ctx —")
+        await pilot.click("#status-bar", offset=_offset_of(app, "ctx —"))
         for _ in range(100):
             if isinstance(app.screen, CompactConfirm):
                 break
             await pilot.pause(0.02)
+        # The click must actually have opened it -- previously missing,
+        # which let this test pass vacuously (Esc on a screen that was
+        # never a CompactConfirm "cancels" it trivially) whenever the
+        # click landed on the wrong chip instead.
+        assert isinstance(app.screen, CompactConfirm)
         await pilot.press("escape")
         await pilot.pause()
         assert not isinstance(app.screen, CompactConfirm)
@@ -654,7 +673,10 @@ async def test_session_handle_click_opens_sessions_picker_with_detached_marker(
 
     fake = Detachable([])
     app, _engines = await _app(monkeypatch, tmp_path, fake)
-    async with app.run_test() as pilot:
+    # Wide enough that the session-handle chip stays on-screen behind the
+    # `dir <cwd name>` folder chip -- see the peers-chip test above for
+    # why the default 80-column terminal is not enough here.
+    async with app.run_test(size=(200, 24)) as pilot:
         assert await _wait_status(pilot, app, "session sess-abc")
         entry, sock = _daemon_entry(tmp_path, "aaaa1111live", "other-live", clients=1)
         detached_entry, dsock = _daemon_entry(
@@ -867,7 +889,10 @@ async def test_beliefs_chip_click_opens_grouped_picker(monkeypatch, tmp_path):
         {"id": 3, "subject": "user-model", "claim": "answers in house voice", "confidence": 0.7},
     ]
     app, _engines = await _app(monkeypatch, tmp_path, fake)
-    async with app.run_test() as pilot:
+    # Wide enough that the beliefs chip stays on-screen behind the `dir
+    # <cwd name>` folder chip -- see the peers-chip test above for why
+    # the default 80-column terminal is not enough here.
+    async with app.run_test(size=(200, 24)) as pilot:
         # FakeEngine.belief_count() is a fixed 3 (engine parity, see
         # tests/fakes.py) -- the chip's COUNT and its picker's BODIES are
         # deliberately two different calls (cost discipline, item 3).
@@ -1242,8 +1267,8 @@ async def test_compact_confirm_buttons_have_real_height_and_are_hittable(
     fake.last_ctx_percentage = 42.0
     app, _engines = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test(size=(120, 40)) as pilot:
-        assert await _wait_status(pilot, app, "ctx")
-        await pilot.click("#status-bar", offset=_offset_of(app, "ctx"))
+        assert await _wait_status(pilot, app, "ctx 42%")
+        await pilot.click("#status-bar", offset=_offset_of(app, "ctx 42%"))
         assert await _wait_for(pilot, lambda: isinstance(app.screen, CompactConfirm))
         await pilot.pause()
 
@@ -1272,8 +1297,8 @@ async def test_enter_confirms_the_compact_dialog(monkeypatch, tmp_path):
     fake.last_ctx_percentage = 88.0
     app, engines = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test() as pilot:
-        assert await _wait_status(pilot, app, "ctx")
-        await pilot.click("#status-bar", offset=_offset_of(app, "ctx"))
+        assert await _wait_status(pilot, app, "ctx 88%")
+        await pilot.click("#status-bar", offset=_offset_of(app, "ctx 88%"))
         assert await _wait_for(pilot, lambda: isinstance(app.screen, CompactConfirm))
         await pilot.press("enter")
         assert await _wait_for(
@@ -1289,8 +1314,9 @@ async def test_esc_still_cancels_the_compact_dialog(monkeypatch, tmp_path):
     fake = FakeEngine([])
     app, engines = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test() as pilot:
-        assert await _wait_status(pilot, app, "ctx")
-        await pilot.click("#status-bar", offset=_offset_of(app, "ctx"))
+        # No percentage is set on this fake -- ctx_chip(None) == "ctx —".
+        assert await _wait_status(pilot, app, "ctx —")
+        await pilot.click("#status-bar", offset=_offset_of(app, "ctx —"))
         assert await _wait_for(pilot, lambda: isinstance(app.screen, CompactConfirm))
         await pilot.press("escape")
         assert await _wait_for(

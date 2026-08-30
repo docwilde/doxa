@@ -18,6 +18,7 @@ from doxa import peers
 from doxa.app import DoxaApp, PeerMessageBlock, SystemBlock
 from doxa.engine import EngineEvent, SessionEngine
 from tests.fakes import FakeEngine, factory_with_script
+from tests.helpers import _chip_actions
 
 FAKE_AWS_KEY = "AKIAABCDEFGHIJKLMNOP"
 
@@ -69,7 +70,12 @@ async def test_peers_chip_hidden_at_zero(monkeypatch, tmp_path):
     app = DoxaApp(cwd=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
-        assert "peers" not in str(app.query_one("#status-bar").renderable)
+        # Anchored on the peers chip's OWN click action, not the bare word
+        # "peers" -- outside a git repo the status bar also carries a `dir
+        # <cwd name>` chip (GitLine.folder_label), and under pytest `<cwd
+        # name>` IS this test's own name, which contains "peers" with
+        # nothing to do with whether the peers chip itself is showing.
+        assert "open_peers_picker" not in _chip_actions(app)
 
 
 @pytest.mark.asyncio
