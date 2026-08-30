@@ -9,3 +9,4 @@ pytest.log
 # in the worktree it then commits from, so neither may be committable.
 uv-lock.log
 pr-body.md
+out.txt

@@ -1073,7 +1073,7 @@ class DoxaApp(App):
         states :func:`history.resume_state` answers when resuming truly
         cannot happen: ``RESUME_NO_CWD`` (the directory is gone) and
         ``RESUME_NO_HISTORY`` (a pre-v0.56.0 conversation the CLI's own
-        store never learned this id under). Through v0.92.0 both landed
+        store never learned this id under). Through v0.91.0 both landed
         here as a bare refusal string -- "cannot resume ... — <reason>" --
         an error where a real answer was sitting on disk the whole time:
         DOXA's OWN transcript (:mod:`doxa.transcript`, the same

@@ -4,6 +4,51 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.93.0 — 2026-08-30
+
+**Where am I, and can I move.** Reported: "we should also provide a /cd and
+/dir command where /dir lists the cwd".
+
+- New **`/dir`** (`SessionPane._cmd_dir`, `doxa/session/commands.py`): the
+  session's working directory, plus the worktree sidecar's branch and base
+  when there is one.
+- New **`/cd <path>`** (`_cmd_cd`) — and it does NOT move this session.
+  There is no SDK control request that changes a running CLI subprocess's
+  cwd, so rather than appear to work it opens a new tab at the target
+  (`DoxaApp.open_tab_at`) and says in its own output that the current
+  session is unchanged. A command that silently lies about its effect is
+  worse than one that refuses.
+
+**A directory is not a repo, and the status bar now says which.** Reported:
+"if i start in a non-repo dir, there is no folder/repo chip shown in the
+status line".
+
+- New **`GitLine.folder_label`** (`doxa/ui/statusline.py`) with its chip in
+  `doxa/session/chips.py`: outside a git repo the bar shows `dir NAME`,
+  deliberately a different shape from `repo ⎇ branch` rather than the same
+  chip with a blank branch. Clicking it opens the same directory picker.
+
+**A session that cannot be resumed is still readable.**
+
+- New **`DoxaApp._resume_read_only`** (`doxa/app.py`): when the CLI refuses
+  to resume a session found by `/search`, its surviving transcript opens
+  read-only through the existing `ArchivedSessionTab` and
+  `doxa.transcript.mount_transcript` instead of reporting an error and
+  stopping. No second viewer.
+
+**The resume picker joins the column grid.**
+
+- **`_fmt_resume_row`** now renders through the shared
+  `format_picker_row`/`PICKER_PREFIX_WIDTH` grid, so a resume row starts its
+  text at the same offset as a belief row and a pending row — the third
+  picker to be reported for uneven columns and the last one that was.
+  Sort order was already newest-first; verified, not changed.
+
+**`sub:raven`: nothing to fix.** Investigated rather than patched — the
+label was already corrected in `266d8d3` and is pinned by
+`tests/test_identity.py::test_an_unrecognised_subscription_type_is_not_rendered_as_a_plan`.
+Recorded here because "we looked and it was already right" is a result.
+
 ## 0.92.0 — 2026-08-30
 
 **The live diff, to `docs/plans/live-diff.md`.** While an agent edits
