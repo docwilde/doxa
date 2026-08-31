@@ -4,6 +4,172 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.95.0 — 2026-08-31
+
+Two defects from live use, in one tab: a pair of hotkeys that did
+nothing, and a split that stopped the application for two and a half
+seconds. The second one is the one that mattered.
+
+**"After splitting the pane with vsplit, the whole TUI lags hard (maybe
+CPU load loop wo wait or not async?)"** — two guesses in one sentence,
+and the second one was right.
+
+`SessionPane.on_mount` opened with a plain synchronous
+`self.engine = self._engine_factory()`. In this suite that factory
+returns a `FakeEngine` instantly. In production it is
+`doxa.cli.new_session_factory` → `daemon.spawn_daemon`, which
+`subprocess.Popen`s a fresh daemon and then blocks its caller in a
+`while monotonic() < deadline: _time.sleep(0.1)` registry poll for up to
+`wait_secs` — **60 seconds** as written. On the event loop thread. No
+keys, no repaint, no message pump, no streaming in the pane you were
+already looking at.
+
+Measured with a 10 ms heartbeat task watching the loop across
+`split_active_pane(ROW)`:
+
+| session factory | idle before | **during `/vsplit`** | idle after |
+|---|---|---|---|
+| instant (what the suite uses) | 11.5 ms | **22.6 ms** | 11.5 ms |
+| blocks 0.5 s | 11.3 ms | **513.8 ms** | 11.8 ms |
+| blocks 2.0 s | 13.2 ms | **2028.2 ms** | 11.6 ms |
+| the real `spawn_daemon` | 12.0 ms | **2320.8 ms** | 12.7 ms |
+
+One unbroken ~2.3-second freeze, ~190× the idle gap, with four heartbeat
+ticks landing in the whole window. A real `spawn_daemon()` blocks its
+caller 2307 ms, of which 596 ms is `import doxa.daemon` alone.
+
+- **There is no busy loop, and that is a measurement, not a shrug.** Idle
+  cost stayed at **0.8–2.0 % of one core before AND after a split** over
+  eleven scenarios — no split, vsplit, `/vsplit` as a command, hsplit,
+  vsplit ×2 and ×3, vsplit then close, diff, vsplit+diff, vsplit+divider,
+  vsplit+focus — and never diverged; confirmed again against the real
+  Textual driver on a PTY (1.40 % → 1.80 %, with stdout bytes per 5 s
+  actually *falling*, 2610 → 2030). v0.91.0's unbounded
+  `call_after_refresh` focus retry **stayed fixed** (`retry=False` at
+  `app.py:931` and `:1326`); v0.92.0's live-diff tick is not on the split
+  path; `split.py`'s divider and `_pane_regions` do not re-trigger
+  layout, and `Widget._arrange` ran 836 times *during* a split with six
+  turn blocks and **0** times in every idle window after it. The app was
+  never busy after a split. It was frozen during it.
+- **The fix was already in the file, one method down.** `switch_engine`
+  has built its engine with `await asyncio.to_thread(make_engine)` since
+  it was written, and its docstring gives this exact reason — "off-loop —
+  a daemon spawn blocks on subprocess+registry polling". `/model` and
+  `/attach` were paying attention to it; the path **every** pane takes
+  was not. New `PaneRuntimeMixin._build_and_boot` does the same, so
+  `Ctrl+T` and every restored tab are fixed with the split.
+- The window that opens — `pane.engine` is None between mount and the
+  thread returning — is one the code already models (`_peer_pump`
+  documents it; every chip reader guards it). `_run_turn` did not: it
+  asserted `self.engine is not None` **before** awaiting `_engine_ready`,
+  which was only ever true because `on_mount` was synchronous. Those two
+  lines swapped. A pane closed mid-spawn now finalizes the engine the
+  thread was still building, because `detach`/`stop` cannot clear a
+  handle that does not exist yet.
+- `spawn_daemon`'s 60-second `wait_secs` is left alone on purpose: off
+  the loop it costs a pane that says `connecting…`, not an application
+  that has stopped.
+- **Two unbounded retry loops bounded on the way past**, found while
+  ruling out the busy-loop theory. `DiffPane._repaint` →
+  `call_after_refresh(_repaint_later)` → `run_worker(_repaint())`
+  reschedules itself with no counter and no delay, and
+  `FileSection.build` → `_build_later` → `build` is the same shape;
+  either would spin the pump forever if its container never became
+  mountable. Their own sibling `_apply_badges` has carried a `passes`
+  counter from the day it was written, so the omission reads as an
+  oversight. Neither could be provoked; both are bounded at three passes
+  now anyway.
+- **Four tests, and the reason none existed is the reason this shipped:**
+  every test in `tests/test_split_panes.py` hands `DoxaApp` a factory
+  that returns instantly, and a blocking factory is not an exotic case to
+  simulate — it is the only kind that ships.
+  `test_a_vsplit_never_blocks_the_event_loop` and its `Ctrl+T` twin watch
+  a 10 ms heartbeat across the gesture and fail at **522 ms** and
+  **513 ms** on the pre-fix code; they assert on the *loop*, not on a
+  duration, because a split may take as long as spawning a session takes
+  and may not stop the application while it does.
+  `test_a_slow_spawn_still_produces_a_working_pane` pins the far side of
+  the new window, and `test_the_idle_app_arms_nothing_new_when_it_splits`
+  pins the reporter's first guess as the fact it turned out to be.
+
+**"The hotkeys Alt+D and Alt+S are unresponsive."** `/split` and
+`/vsplit` worked, so the actions and the layout were fine and the fault
+was upstream of binding resolution. It was upstream of the terminal, too.
+
+Measured against textual 5.3.0's own parser rather than its
+documentation:
+
+```
+XTermParser().feed("\x1bs")       -> Key('escape'), Key('s')
+XTermParser().feed("\x1b[115;3u") -> Key('alt+s')      # kitty
+XTermParser().feed("\x1b[1;3D")   -> Key('alt+left')   # legacy, fine
+```
+
+The string `alt` appears **exactly once** in `textual/_xterm_parser.py`
+(line 338), inside the CSI-u modifier table. There is no
+ESC-prefix-to-Alt path in the parser at all, and `_ansi_sequences.py`
+hand-maps a few two-byte ESC pairs (`\x1bf` → `ctrl+right`, `\x1bb` →
+`ctrl+left`, `\x1b\x7f` → `ctrl+w`) and no letter to Alt.
+
+- **v0.91.0's premise was true and its conclusion was wrong.** Every
+  terminal *has* sent Alt as an ESC prefix since long before the kitty
+  protocol — but a binding depends on what **Textual** decodes, not on
+  what the terminal sends, and it decodes `ESC s` as Escape followed by a
+  bare `s` that a focused prompt cheerfully types. `alt+s` only ever
+  fired on a terminal that granted the kitty protocol. This is the third
+  time this project has claimed a key it could not have: Ctrl+C (fixed
+  v0.85.0), Ctrl+Shift+V (rejected 2026-08-29), and now Alt+letter —
+  which was chosen as the *fix* for the second.
+- **`Ctrl+O` splits stacked below, `Ctrl+N` side by side, `F2` opens the
+  live diff.** Which letter was not a free choice. Subtracting from
+  `ctrl+<letter>`: `h i m` have no distinct byte (their C0 code *is*
+  backspace/tab/enter); `a c d e f k u v w x y z` are Textual's own
+  `TextArea.BINDINGS`, and the prompt **is** a TextArea, so a
+  `priority=True` binding would *take* the key from it rather than share
+  it — v0.85.0's lesson applies to a widget as much as to a terminal;
+  `c z s q l b` are the terminal's own (SIGINT, SIGTSTP, XOFF, XON,
+  redraw, and tmux's default prefix, which a tmux user cannot press at
+  all); `j` is literally the LF byte; `p r t w q ,` are already DoxaApp's.
+  The remainder is exactly `ctrl+n` and `ctrl+o`. Deliberately not
+  mnemonic, for the same reason S/D were not — no letter resolves the
+  vim/tmux disagreement about which word means which direction — so every
+  description and summary still spells the direction out in words.
+- `/diff` moves too, because `alt+g` inherited the same defect and would
+  otherwise stay documented and dead. **F2**, not a third ctrl+letter,
+  because the subtraction above leaves none: an F-key arrives as `SS3 Q`
+  / `CSI 12~`, older than the problem, claimed by neither App, Screen nor
+  TextArea, passed through by tmux, and not one of the two most emulators
+  bind (F10 menu, F11 fullscreen).
+- **`alt+←/→/↑/↓` keeps its Alt**, re-checked rather than assumed: a
+  modified *arrow* is `CSI 1;3<final>`, a different physical encoding
+  from a modified *letter*, and Textual decodes it under both protocols.
+- **`alt+s` / `alt+d` / `alt+g` stay bound** as kitty-tier aliases beside
+  the new primaries — the arrangement `Ctrl+Tab` has had beside
+  `Shift+Tab` since v0.42.0. They are real muscle memory on kitty,
+  ghostty, WezTerm and foot, where they always worked, and `/help` now
+  marks them `✗` where they cannot arrive.
+- **`doxa/keyboard.py` was the reason nothing warned.**
+  `unreachable_under_legacy` answered `False` for `alt+<character>` and
+  said so in a comment — *"Alt is absent on purpose: it is sent as an ESC
+  prefix and works fine"*. That is the one entry this module got **wrong**
+  rather than merely omitted. It now answers True for `alt+<character>`
+  and `ctrl+alt+<character>`, and still False for `alt+<named key>`;
+  `/doctor` and `/help` list Alt+S, Alt+D and Alt+G on a legacy terminal.
+- **The tests were green for three releases over a key that could not
+  arrive, because none of them touched the encoding.** `pilot.press`
+  feeds Textual a key *name* and the binding table resolves names.
+  `tests/test_split_keys.py` grew the missing layer: it drives
+  `XTermParser` with the bytes a terminal actually sends, and
+  `test_no_primary_binding_is_unreachable_under_the_legacy_encoding`
+  generalises the defect so the next release cannot repeat it in a new
+  key. That last one found one pre-existing case and **names** it rather
+  than filtering it out — `settings` on `Ctrl+,` has no legacy byte at
+  all, is reached by the `/settings` command, and is marked in `/help`:
+  the v0.39.0 arrangement working as designed.
+- `scripts/screenshot.py` and `scripts/record_gif.py` drive the real key,
+  so both now press `ctrl+n` and `f2`. GIF captions are metadata rather
+  than burned pixels, so the committed assets are unaffected.
+
 ## 0.94.0 — 2026-08-31
 
 **The gallery has not been able to render since v0.91.0, and nobody
