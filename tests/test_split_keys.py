@@ -240,7 +240,17 @@ def test_no_primary_binding_is_unreachable_under_the_legacy_encoding():
         for action, keys in keys_by_action.items()
         if all(keyboard_mod.unreachable_under_legacy(key) for key in keys)
     }
-    assert orphaned.keys() == {"settings"}, (
+    # `focus_group` joined `settings` in v0.97.0, and DELIBERATELY: the
+    # owner chose Ctrl+1..Ctrl+9 for jump-to-group knowing a digit has no
+    # C0 byte, on the same terms Ctrl+, has always shipped on -- /help and
+    # /doctor say where it does not work, and `/pane <n>` is a door that
+    # always does. Adding a name here is the decision being recorded; the
+    # defect this test exists for is a key documented as working that is
+    # not, and an action landing here by ACCIDENT still fails the moment
+    # nobody adds it deliberately.
+    assert orphaned.keys() == {"settings", *(
+        f"focus_group({n})" for n in range(1, 10)
+    )}, (
         "these actions are reachable only on a kitty-protocol terminal: "
         f"{orphaned}"
     )
