@@ -699,12 +699,12 @@ async def _drive_beliefs_picker(app: DoxaApp, pilot) -> None:
 # INDEPENDENT sessions side by side inside ONE tab.
 #
 # That independence is the whole claim and the reason a still can carry
-# it at all: `/vsplit` (Alt+D) does not open a second VIEW onto the
+# it at all: `/vsplit` (Ctrl+N) does not open a second VIEW onto the
 # session you were in, it spawns a second session through the same
 # `new_session_factory` Ctrl+T uses (DoxaApp.split_active_pane) -- so the
 # two panes have their own transcripts, their own models, their own
 # status bars and their own cost lines, and the shot shows exactly that.
-# The split is driven by the REAL key (`pilot.press("alt+d")`), the same
+# The split is driven by the REAL key (`pilot.press("ctrl+n")`), the same
 # "exercise the actual trigger" discipline scripts/record_gif.py's
 # double-click rename and branch-chip click already follow, rather than
 # by calling `split_active_pane` the way tests/test_split_panes.py does.
@@ -761,9 +761,9 @@ async def _until(pilot, cond: Callable[[], bool], tries: int = 250) -> bool:
 async def _drive_split_panes(app: DoxaApp, pilot) -> None:
     await _fill_hero_conversation(app, pilot)
     left = app.active_pane
-    await pilot.press("alt+d")
+    await pilot.press("ctrl+n")
     assert await _until(pilot, lambda: app.active_pane is not left), (
-        "alt+d did not create a second pane"
+        "ctrl+n did not create a second pane"
     )
     right = app.active_pane
     assert right is not None
@@ -949,7 +949,7 @@ async def _drive_live_diff(app: DoxaApp, pilot) -> None:
     assert pane is not None
     assert await _until(pilot, lambda: bool(pane._session_id)), "no session id"
 
-    await pilot.press("alt+g")
+    await pilot.press("f2")
     assert await _until(
         pilot,
         lambda: (

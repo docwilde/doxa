@@ -84,9 +84,9 @@ the same way, by [`scripts/screenshot.py`](scripts/screenshot.py) and
 - **Reasoning and tool calls, on the record.** Markdown below a collapsed
   reasoning fold; each `⚒ Tool calls (N)` chip opens to its arguments and
   result.
-- **Two sessions in one tab.** `alt+d` splits side by side, `alt+s`
+- **Two sessions in one tab.** `ctrl+n` splits side by side, `ctrl+o`
   stacked — independent sessions, not two views of one.
-- **A live diff you can reject one hunk of.** `alt+g` opens this
+- **A live diff you can reject one hunk of.** `f2` opens this
   session's diff beside it, live; a rejected hunk reverts and the agent
   is told why.
 - **Memory that is inert until it earns influence.** `lore_core` runs
@@ -145,12 +145,12 @@ default — see the **[manual](docs/manual.md)**.
 ## Gallery
 
 <p align="center"><img src="assets/shots/live-diff.png" width="640" alt="One tab holding a session on the left and its live worktree diff on the right. The diff header reads '2 files changed, +9 −1 against main', with a note under it saying '1 rejection(s) queued until this turn ends'. The file doxa/auth.py is expanded into two side-by-side hunks: the first changes GRACE_SECONDS from 300 to 900 and carries an amber '⏳ reject queued — applies when this turn ends' badge above its disabled reject button and its 'reason (optional)' field; the second adds a raise on a missing token. The expanded file fills the pane, so the second changed file sits just below the fold behind the scrollbar. The session pane's own next turn is still running, its marker reading '⠋ thinking (0s)'"></p>
-<p align="center"><em><code>/diff</code> (or <code>alt+g</code>) opens this session's live diff in the pane beside it, recomputed as edits land. <strong>Reject</strong> on a hunk reverse-applies exactly that hunk and tells the agent why, in your words. Clicked mid-turn it queues instead — visibly, and it says so — because a rejection you clicked and cannot see the effect of is worse than one that waits.</em></p>
+<p align="center"><em><code>/diff</code> (or <code>f2</code>) opens this session's live diff in the pane beside it, recomputed as edits land. <strong>Reject</strong> on a hunk reverse-applies exactly that hunk and tells the agent why, in your words. Clicked mid-turn it queues instead — visibly, and it says so — because a rejection you clicked and cannot see the effect of is worse than one that waits.</em></p>
 
 <p align="center"><img src="assets/shots/split-panes.png" width="640" alt="One tab split down the middle into two panes, each a session in its own right: identical 'DOXA 0.94.0' identity blocks, different models (claude-opus-4-5 on the left, claude-sonnet-4-5 on the right), separate transcripts, and a status bar apiece that each truncate at their own pane's width. The left pane holds the belief-table answer; the right one a numbered list of the three surfaces that still needed a gallery capture"></p>
-<p align="center"><em><code>alt+d</code> (<code>/vsplit</code>) puts a second session side by side; <code>alt+s</code> (<code>/split</code>) stacks it below. Two <strong>independent</strong> sessions in one tab — a split spawns a session, it does not open a second view of the one you were in.</em></p>
+<p align="center"><em><code>ctrl+n</code> (<code>/vsplit</code>) puts a second session side by side; <code>ctrl+o</code> (<code>/split</code>) stacks it below. Two <strong>independent</strong> sessions in one tab — a split spawns a session, it does not open a second view of the one you were in.</em></p>
 
-<p align="center"><img src="assets/shots/split-panes.gif" width="640" alt="One pane becoming two: a single session, then alt+d and a second session lands to its right with the keyboard already in it; a turn runs there; ctrl+shift+left moves focus back to the first pane, and alt+right drags the divider between them while both keep rendering"></p>
+<p align="center"><img src="assets/shots/split-panes.gif" width="640" alt="One pane becoming two: a single session, then ctrl+n and a second session lands to its right with the keyboard already in it; a turn runs there; ctrl+shift+left moves focus back to the first pane, and alt+right drags the divider between them while both keep rendering"></p>
 <p align="center"><em>The half a still cannot carry: the keystroke, and the pane arriving.</em></p>
 
 <p align="center"><img src="assets/shots/markdown-stream.gif" width="640" alt="An agent reply streaming: prose appears first, then a three-row table fills in one row at a time, with the in-flight marker reading 'generating' and counting the seconds beside it"></p>
@@ -313,12 +313,12 @@ TUI instead, with no daemon and no detach: quitting finalizes on the spot.
 
 Once you're in: type a prompt, press enter. `ctrl+p` opens the command
 palette, `ctrl+t` opens a new tab, `/split` and `/vsplit` (or
-`alt+s` stacked below, `alt+d` side by side) put a second
+`ctrl+o` stacked below, `ctrl+n` side by side) put a second
 session in the tab you are
 already in — `ctrl+shift+←/→/↑/↓` moves between panes, `alt+←/→/↑/↓`
 drags the divider between them, and `ctrl+↑`/`ctrl+↓`
 drags the status-bar divider between the transcript and the prompt —
-`/diff` (or `alt+g`) opens this session's **live diff** in the pane
+`/diff` (or `f2`) opens this session's **live diff** in the pane
 beside it, updating as edits land, with a **reject** button on every
 hunk that reverts exactly that hunk and tells the agent why,
 `ctrl+r` searches past sessions,

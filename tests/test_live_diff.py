@@ -794,11 +794,15 @@ async def test_a_second_diff_command_closes_the_one_that_is_open(tmp_path):
 # -- the keys -----------------------------------------------------------
 
 
-def test_alt_g_is_claimed_by_the_diff_and_by_nothing_else():
+def test_the_diff_key_is_claimed_by_the_diff_and_by_nothing_else():
+    """F2 since v0.95.0, with Alt+G kept beside it for kitty-protocol
+    terminals -- where it was the only place it ever worked. See
+    tests/test_split_keys.py for the parser measurement that moved it."""
     app = DoxaApp(cwd=".")
     resolved = dict(app._bindings.key_to_bindings)
-    assert [b.action for b in resolved["alt+g"]] == ["toggle_diff"]
-    assert all(b.priority for b in resolved["alt+g"])
+    for key in ("f2", "alt+g"):
+        assert [b.action for b in resolved[key]] == ["toggle_diff"], key
+        assert all(b.priority for b in resolved[key]), key
 
 
 def test_diff_is_a_real_command_with_a_registry_row_and_a_handler():
@@ -808,5 +812,5 @@ def test_diff_is_a_real_command_with_a_registry_row_and_a_handler():
     row = commands_mod.lookup("/diff")
     assert row is not None and not row.passthrough
     assert row.group == "Panes & tabs"
-    assert "Alt+G" in row.summary
+    assert "(F2)" in row.summary
     assert {c.name: c.method for c in PANE_COMMANDS}["/diff"] == "_cmd_diff"

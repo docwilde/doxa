@@ -205,14 +205,24 @@ Since v0.91.0 a **tab** is a container and a **pane** is one leaf inside
 it holding one session. A tab that never splits behaves exactly as it
 always did.
 
-`/split` (or `alt+s`) puts a second session **stacked below** this one;
-`/vsplit` (or `alt+d`) puts one **side by side** with it. That is vim's
+`/split` (or `ctrl+o`) puts a second session **stacked below** this one;
+`/vsplit` (or `ctrl+n`) puts one **side by side** with it. That is vim's
 sense of the two words and the opposite of tmux's `split-window -h`, so
 every description spells the direction out rather than trusting the
-letter. The keys are Alt, not Ctrl+Shift: under the legacy encoding
-`ctrl+shift+<letter>` sends the same byte as `ctrl+<letter>` and is
-undeliverable, while Alt goes out as an ESC prefix every terminal has
-sent for decades.
+letter — the letters are not mnemonic and are not trying to be.
+
+They were `alt+s` / `alt+d` through v0.94.0 and were reported dead from
+live use. Both earlier attempts were rejected against the wrong test.
+`ctrl+shift+<letter>` sends the same byte as plain `ctrl+<letter>` under
+the legacy encoding and is undeliverable — correct. Alt then looked safe
+because every terminal has sent it as an ESC prefix for decades, which is
+true of the terminal and irrelevant, because **Textual has no
+ESC-prefix-to-Alt path**: it decodes `\x1b s` as Escape followed by a bare
+`s`. `alt+<letter>` therefore only ever arrived on a terminal that granted
+the kitty protocol. `alt+<arrow>` is unaffected — a modified arrow is
+`CSI 1;3<final>`, which does decode — so the divider keys below keep it.
+`alt+s` / `alt+d` / `alt+g` are still bound as kitty-only aliases and
+`/help` marks them `✗` where they cannot arrive.
 
 A split **spawns a new, independent session** — the same factory `ctrl+t`
 uses — not a second view of the one you were in. Focus moves to the new
@@ -223,7 +233,7 @@ are three different states.
 
 | key | does |
 |---|---|
-| `alt+s` / `alt+d` | split stacked below / side by side |
+| `ctrl+o` / `ctrl+n` | split stacked below / side by side (`alt+s` / `alt+d` on a kitty-protocol terminal) |
 | `ctrl+shift+←/→/↑/↓` | move the keyboard to the pane in that direction — geometric, never "next pane" |
 | `alt+←/→/↑/↓` | move the divider between this pane and its neighbour that way |
 | `ctrl+↑` / `ctrl+↓` | move the **in-pane** divider (the status bar): up grows the transcript, down grows the prompt — and this works in a tab with no splits at all |
@@ -244,7 +254,7 @@ The design is [docs/plans/split-panes.md](plans/split-panes.md).
 
 ## The live diff
 
-`/diff` (or `alt+g`) puts a **live diff of this session's worktree** in
+`/diff` (or `f2`) puts a **live diff of this session's worktree** in
 the pane beside the session — `git diff` against the branch the worktree
 was cut from, recomputed every time an edit lands and never on a timer.
 Files are collapsed by default with their changed-line counts; binary and
@@ -673,6 +683,12 @@ the legacy encoding there is no byte for `Ctrl+,` or for distinguishing
 `Shift+Enter` from plain Enter) is marked `✗` in `/help`. Silence from the
 terminal reads as **not measured**, never as "legacy".
 
+`alt+<letter>` joined that list in v0.95.0, and reachability there is a
+fact about **Textual**, not about the terminal: the terminal does send
+Alt, as an ESC prefix, and `textual/_xterm_parser.py` has no path that
+turns an ESC prefix back into Alt. `alt+<arrow>` and `alt+<F-key>` use
+the `CSI 1;3<final>` encoding instead and stay reachable.
+
 ## Commands
 
 Every command below is defined once in `doxa/commands.py` and reaches the
@@ -704,9 +720,9 @@ palette, the `/` autocomplete and `/help` from that single registry.
 
 | command | does |
 |---|---|
-| `/split` | A second session **stacked below** this pane (`alt+s`) |
-| `/vsplit` | A second session **side by side** with this pane (`alt+d`) |
-| `/diff` | This session's live worktree diff in the pane beside it, or close it (`alt+g`) |
+| `/split` | A second session **stacked below** this pane (`ctrl+o`) |
+| `/vsplit` | A second session **side by side** with this pane (`ctrl+n`) |
+| `/diff` | This session's live worktree diff in the pane beside it, or close it (`f2`) |
 | `/dir` | Where this session actually is |
 | `/cd <path>` | Open that path in a **new** tab; this session stays where it is |
 | `/peers` | Live sessions in this project right now |

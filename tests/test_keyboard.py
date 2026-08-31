@@ -81,6 +81,19 @@ def _fresh_cache():
     # Modifiers the encoding cannot express in any position.
     "super+k",
     "hyper+left",
+    # Alt+<CHARACTER>. Corrected in v0.95.0 after the live report that
+    # Alt+S and Alt+D did nothing. The old entry reasoned about the
+    # TERMINAL (which does send Alt, as an ESC prefix, and always has)
+    # when the binding depends on what TEXTUAL decodes -- and textual
+    # 5.3.0 has no ESC-prefix-to-Alt path at all. Measured:
+    # XTermParser().feed("\x1bs") -> Key('escape'), Key('s'), so a
+    # binding on alt+s never fires and the bare letter lands in the
+    # prompt instead. See test_textual_cannot_decode_alt_from_an_esc_prefix
+    # in tests/test_split_keys.py, which pins the parser itself.
+    "alt+s", "alt+d", "alt+g", "alt+x", "alt+comma", "alt+enter",
+    "alt+tab", "alt+backspace", "alt+space",
+    # Ctrl+Alt is an ESC prefix in front of the C0 byte -- no better.
+    "ctrl+alt+x",
 ])
 def test_known_unreachable_combinations_are_reported_as_such(key):
     assert keyboard_mod.unreachable_under_legacy(key) is True, key
@@ -95,9 +108,12 @@ def test_known_unreachable_combinations_are_reported_as_such(key):
     # CSI 1;<mods><final> since long before the kitty protocol existed.
     "ctrl+left", "ctrl+right", "shift+up", "ctrl+shift+left", "alt+f4",
     "ctrl+home", "shift+delete", "ctrl+pageup",
-    # Alt is an ESC prefix, not an encoding problem. Alt+Enter is why the
-    # prompt binds it beside Shift+Enter.
-    "alt+enter", "alt+x", "alt+comma",
+    # ...INCLUDING under Alt, which is the whole reason alt+arrow kept
+    # its binding in v0.95.0 while alt+<letter> lost its. A modified
+    # ARROW is CSI 1;3<final>, a different physical encoding from the ESC
+    # prefix a modified LETTER uses, and Textual decodes it:
+    # XTermParser().feed("\x1b[1;3D") -> Key('alt+left').
+    "alt+left", "alt+right", "alt+up", "alt+down", "alt+f4",
     # Back-tab: the one modified form the legacy encoding does carry.
     "shift+tab",
     # Unmodified anything.
@@ -419,19 +435,26 @@ def test_unreachable_bindings_names_the_real_ones(monkeypatch):
     # out loud where it does not work, instead of leaving it documented
     # and silently dead -- which is the defect v0.39.0 exists to close.
     #
-    # v0.91.0's split keys are deliberately NOT here. They were
-    # ctrl+shift+s/d in draft, which WOULD have belonged in this list --
-    # a legacy terminal sends ctrl+shift+<letter> as the same byte as
-    # ctrl+<letter>, so the chord cannot be told apart -- and they were
-    # moved to Alt+S / Alt+D precisely so they would not. Alt is an ESC
-    # prefix every terminal has sent since long before the kitty
-    # protocol, so both are reachable under either encoding. The
-    # pane-movement keys (Ctrl+Shift+arrow) and the between-leaf divider
-    # (Alt+arrow) are absent for the same reason: modified cursor keys go
-    # out as CSI 1;6D-style sequences every terminal since xterm sends.
+    # Alt+S / Alt+D / Alt+G are here as of v0.95.0, and the previous
+    # version of this comment claimed the opposite in so many words:
+    # "Alt is an ESC prefix every terminal has sent since long before the
+    # kitty protocol, so both are reachable under either encoding". The
+    # terminal half is true; the conclusion was not, because Textual has
+    # no ESC-prefix-to-Alt path and hands the app Escape-then-letter. The
+    # keys stayed BOUND (real muscle memory on kitty/ghostty/WezTerm/foot)
+    # and moved off the primary slot -- Ctrl+O, Ctrl+N and F2 carry that
+    # now -- so appearing in this list is again the whole deal: a second,
+    # partly deliverable binding is defensible only while /help and
+    # /doctor say out loud where it does not work.
+    #
+    # The pane-movement keys (Ctrl+Shift+arrow) and the between-leaf
+    # divider (Alt+ARROW) are still absent, and for the reason the split
+    # keys turned out not to have: modified cursor keys go out as
+    # CSI 1;<mods><final> sequences every terminal since xterm sends, and
+    # Textual decodes those under both protocols.
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.LEGACY)
     assert unreachable_bindings() == [
-        "Ctrl+,", "Ctrl+Tab",
+        "Ctrl+,", "Ctrl+Tab", "Alt+S", "Alt+D", "Alt+G",
     ]
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.KITTY)
     assert unreachable_bindings() == []

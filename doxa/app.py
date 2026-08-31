@@ -501,27 +501,81 @@ class DoxaApp(App):
         # spells the direction out in words, because no letter resolves the
         # vim/tmux ambiguity for a reader who knows the other convention.
         #
-        # ALT, not Ctrl+Shift, decided 2026-08-29 after measuring what a
-        # terminal can actually deliver (doxa/keyboard.py): under the legacy
-        # encoding ctrl+shift+<letter> sends the SAME BYTE as ctrl+<letter>,
-        # so every ctrl+shift+letter binding is unreachable there -- H/V and
-        # S/D alike, which is why swapping between those pairs changed
-        # nothing. Alt goes out as an ESC prefix, which every terminal has
-        # sent since long before the kitty protocol, so alt+s / alt+d work
-        # under BOTH encodings. They also join the family already here:
-        # alt+arrow grows a pane. Ctrl+Shift+V was additionally most
-        # emulators' own paste gesture; v0.85.0 spent a release on the
-        # mirror-image mistake (DOXA consuming Ctrl+C, a key the terminal
-        # needed), and the lesson generalises -- do not contest a binding
-        # the terminal owns, and prefer an encoding every terminal speaks.
+        # THIRD attempt at this pair, and the first one measured against
+        # the right thing. v0.91.0 rejected ctrl+shift+<letter> correctly
+        # -- under the legacy encoding it sends the same byte as plain
+        # ctrl+<letter>, so H/V and S/D alike were undeliverable, which is
+        # why swapping between those pairs changed nothing. It then moved
+        # to Alt on the reasoning that every terminal has sent Alt as an
+        # ESC prefix since long before the kitty protocol. True, and beside
+        # the point: the question is what TEXTUAL decodes, and it does not
+        # decode that. Measured against textual 5.3.0's own parser
+        # (doxa/keyboard.py carries the transcript):
+        #
+        #     XTermParser().feed("\x1bs")       -> Key('escape'), Key('s')
+        #     XTermParser().feed("\x1b[115;3u") -> Key('alt+s')
+        #
+        # So alt+s arrived only on a terminal that granted the kitty
+        # protocol, and on every other one it delivered a bare Escape and
+        # then typed "s" into the prompt. Reported from live use as "the
+        # hotkeys Alt+D and Alt+S are unresponsive", with `/split` and
+        # `/vsplit` working -- exactly the signature of a key that never
+        # reaches binding resolution at all.
+        #
+        # CTRL+<letter>, then, which is the one modified form the legacy
+        # encoding was built around. Which letter is not a free choice;
+        # subtracting everything already spoken for leaves exactly two:
+        #
+        #   * h, i, m       -- their C0 byte IS backspace/tab/enter, so
+        #                      Textual reports that other key (doxa.keyboard
+        #                      _SHADOWED_BY_C0).
+        #   * a c d e f k u v w x y z
+        #                   -- Textual's own TextArea.BINDINGS, and the
+        #                      prompt IS a TextArea. priority=True would
+        #                      win the key and break line editing with it;
+        #                      v0.85.0's lesson (do not contest a binding
+        #                      something else owns) applies to a widget as
+        #                      much as to a terminal.
+        #   * c z s q l b   -- the terminal's own: SIGINT, SIGTSTP, XOFF,
+        #                      XON, redraw, and tmux's default prefix. A
+        #                      tmux user cannot press ctrl+b at all.
+        #   * j             -- literally the LF byte; \n is how Enter and a
+        #                      pasted newline arrive.
+        #   * p r t w q ,   -- already DoxaApp's above.
+        #
+        # Remainder: ctrl+n and ctrl+o. Deliberately NOT mnemonic, for the
+        # same reason S/D were not -- no letter resolves the vim/tmux
+        # disagreement about which word means which direction -- so the
+        # description and the registry summary spell the direction out in
+        # words, as they always have.
         Binding(
-            "alt+s", "split_pane",
+            "ctrl+o", "split_pane",
             "Split this pane — a second session STACKED BELOW it (/split)",
             show=False, priority=True,
         ),
         Binding(
-            "alt+d", "vsplit_pane",
+            "ctrl+n", "vsplit_pane",
             "Split this pane — a second session SIDE BY SIDE with it (/vsplit)",
+            show=False, priority=True,
+        ),
+        # The Alt pair rides beside them rather than being deleted, the
+        # same arrangement Shift+Tab / Ctrl+Tab already has above: it is
+        # real muscle memory for anyone on kitty, ghostty, WezTerm or foot,
+        # where it always worked. /help marks it unsendable on a terminal
+        # measured legacy (doxa.keyboard.is_unreachable now answers True
+        # for alt+<character>, which through v0.94.0 it wrongly answered
+        # False), so it is documented as conditional instead of documented
+        # as working and silently dead.
+        Binding(
+            "alt+s", "split_pane",
+            "Split stacked below (same as Ctrl+O; needs a kitty-protocol "
+            "terminal)",
+            show=False, priority=True,
+        ),
+        Binding(
+            "alt+d", "vsplit_pane",
+            "Split side by side (same as Ctrl+N; needs a kitty-protocol "
+            "terminal)",
             show=False, priority=True,
         ),
         # The divider BETWEEN leaves. Its own gesture, deliberately: the
@@ -529,6 +583,13 @@ class DoxaApp(App):
         # things, and overloading them silently is the failure mode it
         # names. Alt+arrow moves the boundary between the focused pane and
         # its neighbour in that direction.
+        #
+        # These KEEP their Alt (v0.95.0 re-checked them while moving
+        # alt+s/alt+d/alt+g off it) because a modified ARROW is a different
+        # physical encoding from a modified LETTER: CSI 1;3<final>, the
+        # same shape as the ctrl+arrow pairs above, which Textual's parser
+        # decodes under both protocols. Measured, not assumed --
+        # XTermParser().feed("\x1b[1;3D") -> Key('alt+left').
         Binding("alt+up", "grow_pane_up", "Grow this pane upward",
                 show=False, priority=True),
         Binding("alt+down", "grow_pane_down", "Grow this pane downward",
@@ -539,19 +600,31 @@ class DoxaApp(App):
                 show=False, priority=True),
         # -- live diff (v0.92.0) ---------------------------------------
         #
-        # Alt+G, joining the family Alt+S / Alt+D already established and
-        # for the identical measured reason (doxa/keyboard.py): Alt goes
-        # out as an ESC prefix under BOTH encodings, where every
-        # ctrl+shift+<letter> chord collapses onto plain ctrl+<letter>
-        # and is simply undeliverable. G for "git diff"; D was already
-        # spent on /vsplit and E, R and J are all one slip from a letter
-        # a prompt wants. Re-verified free against the whole resolved set
-        # in tests/test_split_keys.py, which now covers this key too --
-        # so the NEXT release that adds a binding trips over the
-        # collision instead of shipping it.
+        # Alt+G joined the family Alt+S / Alt+D established, and inherited
+        # its defect with it: v0.95.0's measurement condemns all three at
+        # once, so this one moves too rather than being left documented
+        # and dead on every non-kitty terminal.
+        #
+        # It moves to F2 and not to a third ctrl+<letter> because there is
+        # no third one left -- the subtraction in the split comment above
+        # ends at exactly {ctrl+n, ctrl+o}, and the pair spent both. An
+        # F-key is the next thing the legacy encoding delivers without
+        # contest: SS3/CSI sequences older than the problem, claimed by
+        # neither Textual's App, Screen nor TextArea, passed through by
+        # tmux, and not one of the two most emulators bind (F10 menu, F11
+        # fullscreen). Measured like everything else here --
+        # XTermParser().feed("\x1bOQ") and feed("\x1b[12~") both give
+        # Key('f2'). F2 rather than F1, which a terminal may treat as
+        # help.
+        Binding(
+            "f2", "toggle_diff",
+            "Live diff of this session's worktree, beside it (/diff)",
+            show=False, priority=True,
+        ),
         Binding(
             "alt+g", "toggle_diff",
-            "Live diff of this session's worktree, beside it (/diff)",
+            "Live diff beside this session (same as F2; needs a "
+            "kitty-protocol terminal)",
             show=False, priority=True,
         ),
     ]
@@ -2323,7 +2396,8 @@ class DoxaApp(App):
     # -- splits (v0.91.0) ---------------------------------------------
 
     async def action_split_pane(self) -> None:
-        """Alt+S / ``/split`` -- a fresh session STACKED BELOW this
+        """Ctrl+O (Alt+S under the kitty protocol) / ``/split`` -- a fresh
+        session STACKED BELOW this
         one, in the same tab. vim's sense of the word, which is the sense
         ``/split`` has always had here."""
         note = await self.split_active_pane(layout_mod.COLUMN)
@@ -2331,7 +2405,8 @@ class DoxaApp(App):
             self.notify(note, severity="warning", timeout=8)
 
     async def action_vsplit_pane(self) -> None:
-        """Alt+D / ``/vsplit`` -- a fresh session SIDE BY SIDE with
+        """Ctrl+N (Alt+D under the kitty protocol) / ``/vsplit`` -- a fresh
+        session SIDE BY SIDE with
         this one, in the same tab."""
         note = await self.split_active_pane(layout_mod.ROW)
         if note:
@@ -2388,7 +2463,7 @@ class DoxaApp(App):
     # -- live diff (v0.92.0) ------------------------------------------
 
     async def action_toggle_diff(self) -> None:
-        """Alt+G / ``/diff``."""
+        """F2 (Alt+G under the kitty protocol) / ``/diff``."""
         note = await self.toggle_diff_pane()
         if note:
             self.notify(note, severity="warning", timeout=8)

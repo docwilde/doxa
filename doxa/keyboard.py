@@ -26,6 +26,14 @@ key if one arrives, but that is a parse, not a report -- it can only tell us
 anything after the user has already pressed a key we may not be able to
 receive.
 
+**Alt is not the escape hatch it looks like.** v0.91.0 moved the split
+keys onto Alt+letter believing Alt reached every terminal because every
+terminal has sent it as an ESC prefix forever. Measured in v0.95.0, that
+is true of the terminal and false of Textual: its parser has no
+ESC-prefix-to-Alt path, so ``alt+s`` only ever arrives on a terminal that
+granted the kitty protocol. :data:`_ALT_ONLY_UNDER_KITTY` carries the
+transcript.
+
 So DOXA asks the terminal itself, using the protocol's own support query:
 
     ``\\x1b[?u``   -- "which progressive-enhancement flags are set?"
@@ -220,8 +228,31 @@ _SHADOWED_BY_C0 = frozenset({"h", "i", "m", "left_square_bracket"})
 _UNMODIFIABLE = frozenset({"enter", "tab", "escape", "backspace", "space"})
 
 # Modifiers the legacy encoding has no representation for whatsoever.
-# Alt is absent on purpose: it is sent as an ESC prefix and works fine.
 _IMPOSSIBLE_MODIFIERS = frozenset({"super", "hyper", "meta"})
+
+# Alt used to be listed as fine here, on the reasoning that a terminal
+# sends it as an ESC prefix and has done since long before the kitty
+# protocol. The premise is true and the conclusion was wrong, because the
+# question is not what the TERMINAL sends -- it is what TEXTUAL decodes.
+# Measured against textual 5.3.0's own parser (v0.95.0):
+#
+#     XTermParser().feed("\x1bs")  -> Key('escape'), Key('s')
+#     XTermParser().feed("\x1bd")  -> Key('escape'), Key('d')
+#     XTermParser().feed("\x1b[115;3u") -> Key('alt+s')     # kitty
+#     XTermParser().feed("\x1b[1;3D")   -> Key('alt+left')  # legacy, fine
+#
+# The string "alt" appears exactly once in ``textual/_xterm_parser.py``
+# (line 338), inside the CSI-u modifier table -- there is no ESC-prefix
+# to-Alt path in the parser at all. ``textual/_ansi_sequences.py`` maps a
+# handful of two-byte ESC pairs by hand (``\x1bf`` -> ctrl+right,
+# ``\x1bb`` -> ctrl+left, ``\x1b\x7f`` -> ctrl+w) and no letter to Alt.
+#
+# So under the legacy encoding a binding on ``alt+<character>`` can never
+# fire: the app is handed a bare Escape and then the naked letter, which
+# a focused prompt happily types. Alt+<NAMED key> is a different physical
+# encoding -- CSI 1;3<final>, the same shape as Ctrl+arrow -- and does
+# decode, which is why alt+arrow survives this and alt+letter does not.
+_ALT_ONLY_UNDER_KITTY = "alt"
 
 
 def unreachable_under_legacy(key: str) -> bool:
@@ -234,8 +265,14 @@ def unreachable_under_legacy(key: str) -> bool:
     otherwise", which covers everything this function has not been taught,
     and that asymmetry is the point: modified cursor and function keys go
     out as ``CSI 1;5D``-style sequences that every terminal since xterm
-    has sent, plain letters and Alt+anything are fine, and a wrong claim
-    about any of them would be worse than the silence it replaced."""
+    has sent and plain letters are fine, and a wrong claim about any of
+    them would be worse than the silence it replaced.
+
+    Alt+<character> is the one entry this function got WRONG rather than
+    merely omitted, from v0.91.0 until v0.95.0 -- see the
+    :data:`_ALT_ONLY_UNDER_KITTY` note for the measurement that corrected
+    it. Alt+<named key> (arrows, F-keys) is still reachable and still
+    says so."""
     parts = key.split("+")
     # "ctrl+@" is spelled with the character (Keys.ControlAt), unlike every
     # other punctuation key, which uses its Unicode name. Split on "+"
@@ -253,7 +290,17 @@ def unreachable_under_legacy(key: str) -> bool:
         # about.
         if base == "tab" and modifiers == {"shift"}:
             return False
-        return bool(modifiers & {"ctrl", "shift"})
+        return bool(modifiers & {"ctrl", "shift", _ALT_ONLY_UNDER_KITTY})
+    if _ALT_ONLY_UNDER_KITTY in modifiers:
+        # See the _ALT_ONLY_UNDER_KITTY note above. A CHARACTER key under
+        # Alt goes out as an ESC prefix, which textual 5.3.0 does not
+        # decode as Alt at all; a NAMED key goes out as CSI 1;3<final>,
+        # which it does. Checked before the ctrl branch so ctrl+alt+<char>
+        # -- ESC then the C0 byte, decoded no better -- lands here too.
+        if len(base) == 1 or base in _NAMED_PRINTABLE:
+            return True
+        if base in _C0_CTRL_PUNCTUATION or base == "@":
+            return True
     if "ctrl" in modifiers:
         if base in _SHADOWED_BY_C0:
             return True

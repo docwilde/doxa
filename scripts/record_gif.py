@@ -939,20 +939,25 @@ async def _drive_peers_picker(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> N
 # thing a still cannot show about a split: the SECOND PANE APPEARING.
 # scripts/screenshot.py's own `split-panes` shot carries the settled
 # state (two independent sessions, side by side, one tab); this carries
-# the gesture, which is what the owner asked for -- Alt+D, and a pane
+# the gesture, which is what the owner asked for -- Ctrl+N, and a pane
 # arriving where there was one.
 #
-# Driven by the REAL key throughout (`pilot.press("alt+d")`,
+# Driven by the REAL key throughout (`pilot.press("ctrl+n")`,
 # `ctrl+shift+left`, `alt+right`), the same "exercise the actual trigger"
 # choice `_drive_rename`'s double-click and `_drive_chip_picker`'s branch
 # click already make -- tests/test_split_panes.py calls
 # `split_active_pane` directly, which proves the mechanism but not the
 # binding, and a demo of a keystroke has to press the keystroke.
 #
-# Alt, not Ctrl+Shift+letter, is not a preference: under the legacy
-# encoding ctrl+shift+<letter> sends the same byte as ctrl+<letter> and
-# is simply undeliverable (doxa/keyboard.py). That is why this scene can
-# be recorded at all.
+# The key changed under this scene in v0.95.0. `pilot.press` reaches
+# binding resolution directly, so it never saw what a real terminal saw:
+# `alt+d` was undeliverable anywhere without the kitty protocol, because
+# Textual decodes an ESC prefix as Escape-then-letter and not as Alt
+# (doxa/keyboard.py). Recording the REAL key is worth less than it looks
+# when the harness cannot reproduce the encoding -- hence Ctrl+N here and
+# a parser-level assertion in tests/test_split_keys.py that pilot cannot
+# fake. `alt+right` on the divider is untouched: a modified ARROW is
+# CSI 1;3<final> and does decode.
 # --------------------------------------------------------------------- #
 
 
@@ -963,17 +968,17 @@ async def _drive_split_panes(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> No
     await _mount_filler_exchange(app, pilot)
     rec.snap(1200, "one session, one pane -- the tab it is in could hold more")
 
-    await pilot.press("alt+d")
+    await pilot.press("ctrl+n")
     assert await _wait_until(pilot, lambda: app.active_pane is not left)
     right = app.active_pane
     assert right is not None
     assert await _wait_until(pilot, lambda: right.region.width > 0)
     assert right.region.x >= left.region.x + left.region.width
     await pilot.pause()
-    rec.snap(1400, "alt+d: a SECOND SESSION lands beside it -- its own "
+    rec.snap(1400, "ctrl+n: a SECOND SESSION lands beside it -- its own "
                    "transcript, its own status bar, and the keyboard")
 
-    # `_mount_bare_turn` mounts into `app.active_pane`, which alt+d just
+    # `_mount_bare_turn` mounts into `app.active_pane`, which ctrl+n just
     # moved to the NEW pane -- that is where this turn belongs.
     assert app.active_pane is right
     block = await _mount_bare_turn(app, "who is in this tab now?")
