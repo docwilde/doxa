@@ -69,7 +69,7 @@ surfaced in the interface.
 justified knowledge. The name is the thesis: belief is the raw material,
 never the finished thing.
 
-<p align="center"><img src="assets/shots/hero.png" width="780" alt="DOXA shell: three tabs, one per model tier, all on the same base branch; a turn asking what the repo believes about deploys, answered with a two-row markdown table of belief ids and their status; a collapsed 'Tool calls (1)' fold; and a status bar led by the permission-mode chip and carrying model, repo and branch, subscription headroom, context percentage, belief count, session handle and peer count"></p>
+<p align="center"><img src="assets/shots/hero.png" width="780" alt="DOXA shell: three tabs, one per model tier, all on the same base branch; a turn asking what the repo believes about deploys, answered with a two-row markdown table of belief ids and their status; a collapsed '⚒ Tool calls (1)' fold; and a status bar led by the permission-mode chip and carrying model, repo and branch, subscription tier with a list-price what-if, subscription headroom, context percentage, belief count, session handle and peer count"></p>
 
 *Headless-rendered from the real Textual app (a scripted session, no
 spend, fake account numbers). Every screenshot and GIF below is generated
@@ -78,62 +78,57 @@ the same way, by [`scripts/screenshot.py`](scripts/screenshot.py) and
 
 ## What you get
 
-- **Sessions that outlive the window.** Each session is its own daemon
-  process behind a Unix socket; closing the terminal detaches instead of
-  killing it, and `doxa attach` picks the transcript back up later, no
-  tmux involved. `doxa` restores a whole repo's saved tab set — order,
-  names, active tab, and each tab's conversation. See
-  [Sessions and the daemon](docs/manual.md#sessions-and-the-daemon) and
-  [Tabs](docs/manual.md#tabs).
-- **Reasoning and tool calls, on the record.** Replies stream as real
-  markdown. Above each reply, the model's summarized reasoning streams into
-  a collapsed fold; a turn's tool calls compact behind a `Tool calls (N)`
-  fold whose chips open to their exact arguments and result — a memory-store
-  call is an ordinary chip like any other.
-- **Pictures, or a straight answer about why not.** Images fall back through
-  kitty graphics → sixel → half-block cells → text, settled by one probe
-  run before the TUI takes stdin. `/img` reports which tier this terminal
-  actually answered for. See [Images](docs/manual.md#images).
-- **Subagents you can follow while they run.** A `Task`-spawned subagent
-  gets its own status row and a live, read-only transcript tab; once it
-  finishes, the same activity folds into a tree under its parent chip.
-- **Memory that is inert until it earns influence.** LORE's `lore_core`
-  runs in-process: curated memory, an uncapped belief store threaded with
-  typed relations between beliefs, and one write path — a human approving
-  a staged proposal, one row at a time. Nothing reaches the model's
-  context unsupervised. See
-  [LORE integration](docs/manual.md#lore-integration).
-- **A shell the model cannot reach.** A prompt line starting with `!` runs
-  in this session's own worktree with your full privileges and no
-  confirmation — and neither the command nor its output ever enters the
-  model's context. See [Shell escape](docs/manual.md#shell-escape).
-- **Sessions that can be made to talk to each other.** Independently
-  launched sessions on the same repo discover each other and can exchange
-  messages via `/msg` — always sent by a human; the model has no send tool.
-- **A permission mode you can see and change without leaving the
-  keyboard.** `shift+tab` cycles it, the status bar's `mode:` chip always
-  shows it first. `auto` and `bypassPermissions` mean DOXA stops asking
-  before a tool runs, and both are visibly flagged when active. See
-  [Permission modes](docs/manual.md#permission-modes).
-- **Numbers that were measured, not estimated.** The status bar carries
-  mode, model, repo/branch/sha, subscription headroom, context %, belief
-  count, memory fill, staged proposals, session handle and peers — every
-  chip has a tooltip. `/context` breaks the window down using the `claude`
-  CLI's own accounting; nothing here is a guessed token count. See
-  [The status bar](docs/manual.md#the-status-bar).
-- **Worktree isolation, never auto-merged.** Each session gets its own git
-  worktree and branch by default, so two sessions on one repo cannot stomp
-  each other. A clean, unmerged worktree vanishes with the session;
-  anything real is kept for you to merge by hand. See
-  [Worktrees and finalize](docs/manual.md#worktrees-and-finalize).
-- **The spawned CLI gets its own config, plugins and hooks excluded by
-  default.** Every session's `claude` process is isolated behind its own
-  `CLAUDE_CONFIG_DIR` — none of your installed Claude Code plugins, their
-  hooks or their commands load into it unasked. `/plugins` previews what
-  you have installed; turning `adopt_plugins` on (off by default) carries
-  in their commands, skills and agents only — never their hooks or MCP
-  servers, and never the LORE plugin, since `lore_core` already runs
-  in-process here. See [`docs/plans/plugins.md`](docs/plans/plugins.md).
+- **Sessions that outlive the window.** Each is its own daemon behind a
+  Unix socket: closing the terminal detaches; `doxa` restores the repo's
+  tab set.
+- **Reasoning and tool calls, on the record.** Markdown below a collapsed
+  reasoning fold; each `⚒ Tool calls (N)` chip opens to its arguments and
+  result.
+- **Two sessions in one tab.** `alt+d` splits side by side, `alt+s`
+  stacked — independent sessions, not two views of one.
+- **A live diff you can reject one hunk of.** `alt+g` opens this
+  session's diff beside it, live; a rejected hunk reverts and the agent
+  is told why.
+- **Memory that is inert until it earns influence.** `lore_core` runs
+  in-process; nothing new reaches the model but a human approving one
+  staged row.
+- **A shell the model cannot reach.** A `!` prompt line runs in this
+  session's worktree, with your privileges, outside the model's context.
+- **Worktree isolation, never auto-merged.** Each session gets its own
+  worktree and branch; a clean one vanishes, real work is kept to merge
+  by hand.
+- **A permission mode you can see and change.** `shift+tab` cycles it;
+  the `mode:` chip leads the bar, and the modes that stop asking are
+  amber or red.
+- **Numbers that were measured, not estimated.** Fifteen tooltipped
+  chips — `dir NAME` outside a repo — and a `/context` the CLI itself
+  counted.
+- **Subagents you can follow while they run.** A `Task` subagent gets a
+  status row and a live read-only tab, then folds under its parent chip.
+- **Pictures, or a straight answer about why not.** kitty graphics →
+  sixel → half-block → text, settled by one startup probe; `/img` names
+  the tier.
+- **Sessions that can be made to talk to each other.** Same-repo sessions
+  find each other and exchange `/msg` — always human-sent; no model send
+  tool.
+- **The spawned CLI gets its own config.** Every session's `claude` runs
+  behind its own `CLAUDE_CONFIG_DIR`; plugins load only if you opt in.
+
+Each of those has a section of its own in the manual, which is where the
+detail lives: [sessions](docs/manual.md#sessions-and-the-daemon),
+[the transcript](docs/manual.md#the-transcript),
+[split panes](docs/manual.md#split-panes),
+[the live diff](docs/manual.md#the-live-diff),
+[LORE](docs/manual.md#lore-integration),
+[the shell escape](docs/manual.md#shell-escape),
+[worktrees](docs/manual.md#worktrees-and-finalize),
+[permission modes](docs/manual.md#permission-modes),
+[the status bar](docs/manual.md#the-status-bar),
+[subagents](docs/manual.md#the-status-bar),
+[images](docs/manual.md#images),
+[peers](docs/manual.md#search-resume-and-peers),
+[where a session is](docs/manual.md#where-a-session-is) and
+[the spawned CLI](docs/manual.md#the-spawned-cli).
 
 Three smaller invariants hold the rest together: the palette and `/`
 autocomplete read one command registry, so a command cannot exist on one
@@ -149,6 +144,15 @@ default — see the **[manual](docs/manual.md)**.
 
 ## Gallery
 
+<p align="center"><img src="assets/shots/live-diff.png" width="640" alt="One tab holding a session on the left and its live worktree diff on the right. The diff header reads '2 files changed, +9 −1 against main', with a note under it saying '1 rejection(s) queued until this turn ends'. The file doxa/auth.py is expanded into two side-by-side hunks: the first changes GRACE_SECONDS from 300 to 900 and carries an amber '⏳ reject queued — applies when this turn ends' badge above its disabled reject button and its 'reason (optional)' field; the second adds a raise on a missing token. The expanded file fills the pane, so the second changed file sits just below the fold behind the scrollbar. The session pane's own next turn is still running, its marker reading '⠋ thinking (0s)'"></p>
+<p align="center"><em><code>/diff</code> (or <code>alt+g</code>) opens this session's live diff in the pane beside it, recomputed as edits land. <strong>Reject</strong> on a hunk reverse-applies exactly that hunk and tells the agent why, in your words. Clicked mid-turn it queues instead — visibly, and it says so — because a rejection you clicked and cannot see the effect of is worse than one that waits.</em></p>
+
+<p align="center"><img src="assets/shots/split-panes.png" width="640" alt="One tab split down the middle into two panes, each a session in its own right: identical 'DOXA 0.94.0' identity blocks, different models (claude-opus-4-5 on the left, claude-sonnet-4-5 on the right), separate transcripts, and a status bar apiece that each truncate at their own pane's width. The left pane holds the belief-table answer; the right one a numbered list of the three surfaces that still needed a gallery capture"></p>
+<p align="center"><em><code>alt+d</code> (<code>/vsplit</code>) puts a second session side by side; <code>alt+s</code> (<code>/split</code>) stacks it below. Two <strong>independent</strong> sessions in one tab — a split spawns a session, it does not open a second view of the one you were in.</em></p>
+
+<p align="center"><img src="assets/shots/split-panes.gif" width="640" alt="One pane becoming two: a single session, then alt+d and a second session lands to its right with the keyboard already in it; a turn runs there; ctrl+shift+left moves focus back to the first pane, and alt+right drags the divider between them while both keep rendering"></p>
+<p align="center"><em>The half a still cannot carry: the keystroke, and the pane arriving.</em></p>
+
 <p align="center"><img src="assets/shots/markdown-stream.gif" width="640" alt="An agent reply streaming: prose appears first, then a three-row table fills in one row at a time, with the in-flight marker reading 'generating' and counting the seconds beside it"></p>
 <p align="center"><em>Replies stream as real markdown, row by row, as the model's own deltas arrive.</em></p>
 
@@ -158,13 +162,13 @@ default — see the **[manual](docs/manual.md)**.
 <p align="center"><img src="assets/shots/memory.png" width="640" alt="A lore_belief_search chip expanded, showing a result listing one STEER belief with an outcome count and one CITE-only belief"></p>
 <p align="center"><em>A memory-store call is an ordinary chip — the mechanism deciding what the agent believes is inspectable like any other tool call.</em></p>
 
-<p align="center"><img src="assets/shots/beliefs-picker.png" width="640" alt="The beliefs picker open over a session, rows grouped by scope into 'project' and 'user'; each row starts with fixed date, status and age columns before its claim text, and carries inline actions reading 'y confirmed', 'c contradicted', 's stale', 'r retract' and 'g graph'"></p>
+<p align="center"><img src="assets/shots/beliefs-picker.png" width="640" alt="The beliefs picker open over a session, under a header row reading 'date  status  age  text' and grouped by scope into 'project (5 beliefs, 3 tested)' and 'user · stated (2 beliefs, 1 tested)'; each row starts with the same fixed date, status and age columns before its claim text, and carries inline actions reading 'y confirmed', 'c contradicted', 's stale', 'r retract' and 'g graph'; a filter line runs along the bottom"></p>
 <p align="center"><em>Every belief the store holds, grouped by scope, with what reality has said about it — and five inline verdicts per row. Four record an outcome; <code>g</code> only looks, opening that belief's graph neighbourhood.</em></p>
 
-<p align="center"><img src="assets/shots/context.png" width="640" alt="/context rendered as a 10 by 20 grid of 200 draughts-piece cells, one per half-percent of the window, with the model and a '61k/180k tokens (33.8%)' headline beside the top rows and a per-category legend beside the lower ones; token counts per category, memory files and MCP tools listed below"></p>
+<p align="center"><img src="assets/shots/context.png" width="640" alt="/context rendered as a 10 by 20 grid of 200 draughts-piece cells, one per half-percent of the window, with the model and an 'in use 60,910 / 180,000 tokens · 33.8%' headline beside the top rows, the usable-window and autocompact lines under it, and per-source summaries for MCP tools and agents beside the upper rows; the per-category breakdown, memory files and per-MCP-tool costs are listed below, closing on a line stating that every count is the claude CLI's own measurement and nothing on the screen is estimated"></p>
 <p align="center"><em><code>/context</code> is 200 cells, one per half-percent of the window. Every number is the CLI's own accounting of its own request — DOXA runs no second tokenizer and estimates nothing.</em></p>
 
-<p align="center"><img src="assets/shots/subagent-tracker.png" width="640" alt="A status row reading '1 agent' beneath the status bar, plus a second tab in the strip titled from the running subagent's own description"></p>
+<p align="center"><img src="assets/shots/subagent-tracker.png" width="640" alt="A '⧉ 1 agent' chip closing the status bar, with a row beneath it reading '⧉ audit the retry backoff…' — the running subagent's own description — and a second tab in the strip carrying the same title"></p>
 <p align="center"><em>A running subagent gets its own status row and a live transcript tab.</em></p>
 
 <p align="center"><img src="assets/shots/needs-input.gif" width="640" alt="An AskUserQuestion dialog opening above the prompt asking which environment a migration should target"></p>
@@ -180,7 +184,10 @@ default — see the **[manual](docs/manual.md)**.
 <p align="center"><em>The peers chip opens a roster of every other DOXA session on this repo: what each is working on, and tokens spent so far — self-reported, piggybacked on each peer's own 15-second heartbeat rather than a live read. A peer that has not finished a turn yet reads as unknown, never as zero.</em></p>
 
 <p align="center"><img src="assets/shots/permission-mode.gif" width="640" alt="The permission-mode chip cycling through the shared picker: grey 'default', teal 'plan', amber 'auto', red 'bypassPermissions'"></p>
-<p align="center"><em>The mode chip leads the status bar and is never hidden — auto and bypassPermissions turn it amber or red, because those are the two modes where nothing stops to ask you first.</em></p>
+<p align="center"><em>The mode chip leads the status bar, and any mode that is not <code>default</code> is painted at every terminal width — <code>auto</code> amber, <code>bypassPermissions</code> and <code>dontAsk</code> red, because those are the modes where nothing stops to ask you first. Only a plain <code>default</code> stands down, and only on a row too narrow to carry it.</em></p>
+
+<p align="center"><img src="assets/shots/folder-chip.png" width="640" alt="A session started in a plain directory rather than a repository. The status bar's leftmost identity chip reads 'dir design-notes' — no ⎇, no branch half — and the transcript below it shows /dir reporting the session's absolute path, then a bare /cd explaining that a running session's own directory cannot be changed and naming where it stays"></p>
+<p align="center"><em>Outside a repo there is no <code>repo ⎇ branch</code> to draw, so the chip is a <em>different shape</em> rather than the same one with a hole in it. <code>/dir</code> says where the session actually is; <code>/cd</code> opens the target in a new tab and says, every time, that this session stayed where it was — because the CLI process behind it was spawned with an OS-level cwd that nothing can hand it a new one for.</em></p>
 
 <p align="center"><img src="assets/shots/tab-lifecycle.gif" width="640" alt="A second tab starts a turn and turns amber; switching to the first tab leaves it amber in the background; the turn finishes there and the tab turns green"></p>
 <p align="center"><em>A background tab reports its own state by color — amber while running, green once finished unseen.</em></p>
@@ -190,6 +197,28 @@ default — see the **[manual](docs/manual.md)**.
 
 <p align="center"><img src="assets/shots/settings.png" width="560" alt="The settings modal on its Session category, showing each row's effective value and where it came from"></p>
 <p align="center"><em>Every settings row shows its effective value and where it came from — session, config file, or default.</em></p>
+
+Ten more scenes are generated by the same two scripts and live in
+[`assets/shots/`](assets/shots/) without a caption here, because the
+gallery is already long rather than because they went stale — they are
+regenerated in the same pass as everything above:
+[`trace.png`](assets/shots/trace.png) (a subagent's activity as a tree
+under its parent `Task` chip),
+[`reasoning.gif`](assets/shots/reasoning.gif) (the reasoning fold
+ticking, then the phase flipping to `generating`),
+[`sessions.png`](assets/shots/sessions.png) (`/sessions`, attached and
+detached), [`clock.png`](assets/shots/clock.png),
+[`palette.gif`](assets/shots/palette.gif) (`ctrl+p`),
+[`rename.gif`](assets/shots/rename.gif) (double-click a tab),
+[`attention-blink.gif`](assets/shots/attention-blink.gif),
+[`image-support.png`](assets/shots/image-support.png) (`/img`),
+[`banner-blocks.png`](assets/shots/banner-blocks.png) (the boot banner)
+and [`transparent.png`](assets/shots/transparent.png) (the transparent
+background setting). Every still in this gallery keeps its source SVG
+committed beside its PNG, and no rendered asset in `assets/shots/` is
+left unnamed by this file — an unreferenced one is how
+`beliefs-browser.png` rotted for eighteen releases before v0.87.0
+deleted it.
 
 ## How it works
 
@@ -316,16 +345,20 @@ a feature.
 
 ### Specified, but not built
 
-Four documents under [`docs/`](docs/) are **specifications, not shipped
+Eight documents under [`docs/`](docs/) are **specifications, not shipped
 features**, and are written that way on purpose — specifying a thing before
 building it is cheaper than discovering the design in the diff. Each one is a
-design that has been thought through and not yet implemented:
+design that has been thought through and not yet implemented. (Two that used
+to be on this list have left it by being built:
+[`docs/plans/split-panes.md`](docs/plans/split-panes.md) shipped in v0.91.0
+and [`docs/plans/live-diff.md`](docs/plans/live-diff.md) in v0.92.0 — both
+are now described in the [manual](docs/manual.md) as behaviour, and their
+plan documents stay as the reasoning behind them.)
 
 - [`docs/plans/plugin-api.md`](docs/plans/plugin-api.md) — **the plugin API.** There is no loader: no entry-point discovery, no `~/.doxa/plugins` scan, no allowlist, no `Plugin`/`PLUGIN` object, nothing in DOXA that loads third-party PYTHON code into its own process at all. What v0.34.0 actually shipped is the *shape* — the `app.py` split landed along four seams (the command registry `PANE_COMMANDS`, the status-chip records `_status_chips()`, the event dispatch map `EVENT_RENDERERS`, and the `ModelProvider` protocol), so each extension point in the spec names a real structure a loader could bind to. That is the whole claim. The spec also settles two decisions ahead of time: a plugin is never loaded from the working repository, and no plugin-facing write into the belief store will exist. Not to be confused with [`docs/plans/plugins.md`](docs/plans/plugins.md) (shipped, v0.74.0) — a different system entirely: adopting the OPERATOR'S OWN Claude Code plugins (commands/skills/agents only, never hooks or MCP servers) into the CLI process the engine spawns.
 - [`docs/plans/remote.md`](docs/plans/remote.md) — **remote control and a web client.** Nothing here is built. The daemon's sequenced event stream is what a second renderer would consume, which is why the spec exists, but there is no network transport, no authorization model and no client. Note that this document reasons about a permission-mode feature that has also not landed on `main`.
 - [`docs/plans/mermaid.md`](docs/plans/mermaid.md) — **mermaid diagrams in the transcript.** Nothing implemented. A ```` ```mermaid ```` fence renders as a fenced code block today, which is what every other terminal client does; v0.41.0's image ladder is what a rendered diagram would arrive through, and the open question the spec is actually about is where the renderer's dependency lives.
 - [`docs/plans/code-graph.md`](docs/plans/code-graph.md) — **a queryable code graph.** Nothing implemented. One graph per worktree, built from the AST and swept in the background on commit, with `purpose` carried on a node as a *second provenance* beside the structure the parser can see — the spec is mostly about keeping those two provenances distinguishable rather than about the parsing.
-- [`docs/plans/live-diff.md`](docs/plans/live-diff.md) — **a live side-by-side diff with per-hunk reject.** Nothing implemented, and downstream of split panes. Its tick is the `tool_result` stream rather than a file watcher, and the part that needs the care is that rejecting a hunk is *two* acts — the file goes back, and the agent's belief about the file has to be corrected, or its next edit is built on a premise that is no longer true.
 - [`docs/plans/sandbox.md`](docs/plans/sandbox.md) — **sandboxed sessions by default, on top of worktrees.** Nothing implemented. A worktree isolates what a session may *change*; it isolates nothing about what the spawned process may *reach* — `$HOME`, the credentials, every sibling worktree, the network. The mechanism exists (`ClaudeAgentOptions.sandbox`, bubblewrap and seccomp on Linux, measured present on the author's machine), but the SDK's own docstring puts filesystem and network policy in *permission rules* rather than in the sandbox settings, so the work is synthesizing that policy per session from the worktree sidecar. A sandbox that silently fails to apply is the outcome the spec is written to prevent.
 - [`docs/plans/peer-publishing.md`](docs/plans/peer-publishing.md) — **what a session publishes about itself to same-repo peers.** `provider`/`model`/`engine` are still unimplemented; the spec argues which of those are safe to add (self-reported, therefore untrusted, therefore display-only) and why a capability field like context window is not. `usage_tokens` shipped ahead of the rest (v0.79.0, piggybacked on the existing heartbeat) — the peers chip's roster is what reads it.
 - [`docs/plans/model-registry.md`](docs/plans/model-registry.md) — **a model catalog rich enough for an agent to pick from, with per-field provenance.** Nothing implemented. `ModelInfo` is still `id`/`display_name`/`source`; the spec argues a small set of added fields, rejects a benchmark/quality table outright, and finds that picking a model for a `Task`-spawned subagent is outside DOXA's reach today (measured: no LORE snapshot reaches it, no addressable session id).
