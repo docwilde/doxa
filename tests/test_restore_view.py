@@ -82,6 +82,38 @@ async def _wait(pilot, cond, tries=200):
     return cond()
 
 
+async def _wait_settled(pilot, cond, quiet=15, tries=400):
+    """Like :func:`_wait`, but for a value that can be RIGHT and then
+    wrong again a moment later -- not just "eventually true".
+
+    Startup activates a tab in two steps: ``compose()`` hands
+    ``TabbedContent`` an ``initial=`` id synchronously, then ``App.
+    on_mount``'s :meth:`~doxa.app.DoxaApp._activate_initial_tab` explicitly
+    focuses the tab that should REALLY end up active (v0.38.0's fix for
+    the "last pane to mount wins" defect -- see this module's own
+    ``test_the_saved_active_tab_wins_over_the_last_one_to_mount``).
+    Focusing a widget inside a ``TabPane`` reactively reassigns
+    ``TabbedContent.active`` to it (``DoxaApp._focus_tab``'s own
+    docstring), and that reassignment takes a handful of message-pump
+    turns to finish rippling -- measured, up to three ``TabActivated``
+    round trips on a loaded machine. A single ``cond() -> True`` can land
+    INSIDE that ripple and get silently reverted by the next turn of it --
+    which is exactly what made this test flaky before v0.97.0's group
+    indirection widened the window with an extra layer of indirection to
+    pump through. Waiting for ``quiet`` CONSECUTIVE true polls is what
+    tells the two apart."""
+    seen = 0
+    for _ in range(tries):
+        if cond():
+            seen += 1
+            if seen >= quiet:
+                return True
+        else:
+            seen = 0
+        await pilot.pause(0.01)
+    return False
+
+
 def _write_transcript(session_id: str, cwd: str, turns: "list[dict]") -> None:
     """Persist a conversation through SessionEngine's OWN writers.
 
@@ -619,8 +651,22 @@ async def test_ctrl_q_closes_an_archived_tab_and_leaves_the_live_one_alone(tmp_p
         assert await _wait(pilot, lambda: app.archived_tabs())
         assert await _wait(pilot, lambda: app.panes() and app.panes()[0]._session_id)
         tabbed = app.query_one("#session-tabs")
-        archived_id = app.archived_tabs()[0].id
-        tabbed.active = archived_id
+        # Startup lands here in two steps -- see _wait_settled's docstring
+        # -- and this test's own Ctrl+Q dispatch (a worker, behind a real
+        # key press) pumps enough extra message-pump turns for the SECOND
+        # step to still be rippling when a naive single-poll wait would
+        # have moved on. Wait for the live tab to go quiet before touching
+        # anything, or the override below can lose a race it looks like it
+        # won.
+        live_tab_id = app.panes()[0].tab.id
+        assert await _wait_settled(pilot, lambda: tabbed.active == live_tab_id)
+        # And drive the switch the way a user (or _switch_to_tab/_cycle_tab)
+        # does -- _focus_tab, not a raw ``tabbed.active =`` -- so the
+        # keyboard actually leaves the live pane instead of merely hiding
+        # it behind the archive.
+        archived_tab = app.archived_tabs()[0]
+        archived_id = archived_tab.id
+        app._focus_tab(archived_tab)
         assert await _wait(pilot, lambda: tabbed.active == archived_id)
 
         await pilot.press("ctrl+q")
