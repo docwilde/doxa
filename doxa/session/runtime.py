@@ -29,12 +29,18 @@ from textual.widgets import Static, TabbedContent
 from .. import banner as banner_mod
 from .. import diff as diff_mod
 from .. import identity as identity_mod
+from .. import keyboard as keyboard_mod
 from .. import naming as naming_mod
 from .. import notify as notify_mod
 from ..events import EngineEvent
 from ..history import SessionSearch
 from ..ui.dialogs import NeedsInputPopup
-from ..ui.labels import _escape_markup, _needs_input_summary, _subagent_label
+from ..ui.labels import (
+    _escape_markup,
+    _needs_input_summary,
+    _subagent_label,
+    unreachable_notice,
+)
 from ..ui.prompt import PromptInput
 from ..ui.statusline import GitLine
 from ..ui.transcript import (
@@ -233,6 +239,19 @@ class PaneRuntimeMixin:
         identity = SystemBlock(self._identity_text(git_cwd))
         identity.id = "identity-block"
         await block_list.mount(identity)
+        # Startup key notice (v0.96.0): which bound keys THIS terminal
+        # cannot deliver, once, right under the identity block a user
+        # already reads at session start. No tty check here -- there is
+        # nothing to re-derive: unreachable_notice() is empty already on
+        # a headless run (keyboard.detect_protocol() short-circuits to
+        # UNKNOWN before touching stdin/stdout) and on a kitty-protocol
+        # terminal (nothing lost), so this call is the single gate.
+        if keyboard_mod.notice_enabled():
+            notice = unreachable_notice()
+            if notice:
+                key_notice = SystemBlock(notice)
+                key_notice.id = "key-notice-block"
+                await block_list.mount(key_notice)
         if self._boot_report:
             # Item D restore: "restored N tabs, skipped M" -- once, on
             # whichever pane carried the report (doxa.cli picks exactly

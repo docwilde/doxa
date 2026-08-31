@@ -326,6 +326,26 @@ def is_unreachable(key: str) -> bool:
     return detect_protocol() == LEGACY and unreachable_under_legacy(key)
 
 
+def notice_enabled() -> bool:
+    """``DOXA_KEY_NOTICE`` / the config file's ``key_notice`` row, default
+    ON: does an affected terminal get the one-line startup notice
+    (:func:`doxa.ui.labels.unreachable_notice`)? Read per call, like
+    :func:`detect_protocol` and every other env-driven knob, so the
+    settings modal's toggle takes effect on the next launch without a
+    rebuild.
+
+    This is the ONLY gate the caller applies -- whether there is
+    anything to say at all is :func:`doxa.ui.labels.unreachable_notice`'s
+    own call, off the same measured protocol this module already caches,
+    so a headless run (`_is_tty` False, protocol UNKNOWN) produces no
+    notice regardless of this setting rather than needing its own
+    tty check."""
+    raw = config_mod.raw("DOXA_KEY_NOTICE").strip()
+    if not raw:
+        return True
+    return raw.lower() not in ("0", "false", "no", "off")
+
+
 def describe() -> str:
     """One line for a bug report: which protocol, and what follows from
     it. The value of ``/about``'s keyboard row."""

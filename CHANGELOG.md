@@ -4,6 +4,62 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.96.0 — 2026-08-31
+
+**The only way anyone found out a bound key was dead was pressing it and
+getting nothing.** `doxa.keyboard` (v0.39.0) has known which bindings a
+legacy-encoding terminal cannot deliver since the module existed, and
+`/help`/`/doctor` have said so since v0.42.0 — but only to someone who
+went looking. Reported by the owner from live use, twice in one evening
+(`Alt+S`/`Alt+D`, then a `ctrl+shift` chord), both times found the only
+way there is one: silence.
+
+- **`doxa.ui.labels.unreachable_notice`** (new, `doxa/ui/labels.py`) is
+  the one-line startup notice: on the current legacy-encoding binding set
+  it reads *"this terminal can't deliver 2 bound keys: Ctrl+, (use
+  /settings), Ctrl+Tab (use /mode) -- see /doctor for details"*. Past
+  `NOTICE_SUMMARY_THRESHOLD` (3) affected bindings it stops naming them
+  and names the count instead, pointing at `/doctor` for the full table —
+  one line, not a lecture. Empty in exactly the two cases
+  `unreachable_bindings()` already was: a kitty-protocol terminal
+  (nothing lost), and one `doxa.keyboard.detect_protocol()` never
+  measured (`UNKNOWN`) — the second is a deliberate call, not an
+  oversight, pinned by
+  `test_unreachable_notice_is_silent_when_the_protocol_was_never_measured`:
+  this notice's whole claim is "these specific keys are dead", UNKNOWN
+  means there is no evidence for that claim, and firing it anyway on
+  every boot of a slow SSH hop or a multiplexer that ate the probe's
+  reply would be the same false alarm `doxa/keyboard.py`'s docstring
+  exists to prevent, just moved to the loud side.
+- **The door.** `unreachable_bindings()` named the dead keys but not what
+  to press instead, so `doxa.ui.labels.unreachable_doors`/`_door_for`
+  (new) resolve each one against the SAME registry `/help` reads: a
+  direct `SlashCommand.binding` match (`ctrl+comma` → `/settings`), or,
+  when a key has none of its own, another `DoxaApp.BINDINGS` row that
+  fires the identical Textual action and IS a command's binding
+  (`ctrl+tab` shares `cycle_permission_mode` with `shift+tab`, which is
+  `/mode`'s binding → `/mode`). `unreachable_bindings()` itself is now a
+  thin wrapper over `unreachable_doors()`; its return value, and
+  `/doctor`'s and `/help`'s output, are unchanged.
+- **`key_notice`** (`doxa/config.py`, env `DOXA_KEY_NOTICE`), a
+  `bool_on` row beside `boot_banner` in the Appearance tab, default ON.
+  `doxa.keyboard.notice_enabled()` reads it the same way
+  `history.resume_restored()` reads its own knob — off returns to plain
+  silence; `/help` and `/doctor` report the same keys either way.
+- **Wired into boot, not compose.** `PaneRuntimeMixin._boot`
+  (`doxa/session/runtime.py`) mounts a `SystemBlock#key-notice-block`
+  right after the identity block, gated on `keyboard_mod.notice_enabled()`
+  alone — no separate tty check, because `unreachable_notice()` is
+  already empty on a headless run (`_is_tty()` False → `UNKNOWN`) and on
+  kitty, so the one gate covers both. Rides every session start on an
+  affected terminal, same as the identity block it sits under.
+- 16 new tests in `tests/test_keyboard.py` (function-level doors/notice/
+  setting behavior, plus four real-pilot boot tests polling PAINTED
+  `SystemBlock` regions, not mount): 13 fail against pre-change code, the
+  other 3 are pure-absence assertions (kitty/unknown/setting-off) that
+  are vacuously true before the feature exists and are pinned so a later
+  change has to break them on purpose.
+
 ## 0.95.0 — 2026-08-31
 
 Two defects from live use, in one tab: a pair of hotkeys that did

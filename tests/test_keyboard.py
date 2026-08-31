@@ -36,11 +36,14 @@ import time
 
 import pytest
 
+from doxa import config as config_mod
 from doxa import doctor as doctor_mod
 from doxa import keyboard as keyboard_mod
 from doxa import version as version_mod
 from doxa.app import AboutDialog, DoxaApp
+from doxa.ui import labels as labels_mod
 from doxa.ui.labels import UNREACHABLE_MARK, help_text, unreachable_bindings
+from doxa.ui.transcript import SystemBlock
 from tests.fakes import FakeEngine
 
 
@@ -491,3 +494,207 @@ def test_a_legacy_terminal_does_not_fail_the_doctor(monkeypatch):
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.LEGACY)
     checks = [doctor_mod._keyboard_enhancement_check()]
     assert doctor_mod.any_failing(checks) is False
+
+
+# -- the startup notice (v0.96.0) ---------------------------------------
+#
+# The gap the rest of this module's design left open: /help and /doctor
+# both know exactly which bound keys this terminal cannot deliver, but a
+# user has to go LOOK at either one, and the way people actually found
+# out (twice, from the owner, in one evening) was pressing Alt+S/Alt+D
+# and a ctrl+shift chord and getting nothing. The notice below rides the
+# same opening block the identity line already does, once per session,
+# and it inherits every rule this module already enforces: silent at
+# zero (kitty), silent when unmeasured (UNKNOWN is not LEGACY), and a
+# door -- a real slash command, read off the registry -- for every key it
+# does name.
+
+
+def test_unreachable_doors_names_the_real_commands(monkeypatch):
+    """Ctrl+, is /settings's own ``binding``; Ctrl+Tab has none of its
+    own but fires the identical action as Shift+Tab, which IS /mode's
+    binding -- so /mode is the honest door for it too, read off the
+    registry rather than hand-copied."""
+    monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.LEGACY)
+    assert labels_mod.unreachable_doors() == [
+        ("Ctrl+,", "/settings"),
+        ("Ctrl+Tab", "/mode"),
+    ]
+
+
+def test_unreachable_notice_names_the_real_unreachable_keys_and_their_commands(
+    monkeypatch,
+):
+    monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.LEGACY)
+    notice = labels_mod.unreachable_notice()
+    assert "Ctrl+," in notice and "/settings" in notice
+    assert "Ctrl+Tab" in notice and "/mode" in notice
+    assert "/doctor" in notice
+
+
+def test_unreachable_notice_is_silent_at_zero_on_a_kitty_terminal(monkeypatch):
+    """Hide at zero -- the rule every chip in the status bar follows.
+    Nothing renders, not even an empty line."""
+    monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.KITTY)
+    assert labels_mod.unreachable_notice() == ""
+
+
+def test_unreachable_notice_is_silent_when_the_protocol_was_never_measured(
+    monkeypatch,
+):
+    """Pinned deliberately: UNKNOWN is not LEGACY. This notice's entire
+    claim is "these specific keys are dead", and UNKNOWN means DOXA has
+    NO evidence for that claim -- so it says nothing, exactly like a
+    kitty-protocol terminal, rather than announcing "your terminal did
+    not answer" on every boot of a slow SSH hop or a multiplexer that ate
+    the probe's reply. That per-boot alarm would be the same mistake
+    this module's whole docstring exists to prevent, just moved to the
+    loud side. A user who wants the "not measured" fact on request
+    already has it: /doctor's keyboard-enhancement row states it
+    outright (doctor_mod._keyboard_enhancement_check), unprompted by
+    nothing but their own asking."""
+    monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.UNKNOWN)
+    assert labels_mod.unreachable_notice() == ""
+
+
+def test_unreachable_notice_summarizes_instead_of_listing_a_long_run(monkeypatch):
+    """One line, not a lecture: past the threshold, the notice names the
+    COUNT and points at /doctor rather than spelling out every key."""
+    fake_doors = [
+        ("Ctrl+,", "/settings"), ("Ctrl+Tab", "/mode"),
+        ("Ctrl+1", ""), ("Ctrl+2", ""),
+    ]
+    monkeypatch.setattr(labels_mod, "unreachable_doors", lambda: fake_doors)
+    notice = labels_mod.unreachable_notice()
+    assert "4" in notice
+    assert "/doctor" in notice
+    # The point of summarizing: none of the individual keys are spelled
+    # out once the list is long enough to need one.
+    assert "Ctrl+," not in notice
+    assert "Ctrl+1" not in notice
+
+
+def test_notice_enabled_defaults_on(monkeypatch):
+    monkeypatch.delenv("DOXA_KEY_NOTICE", raising=False)
+    assert keyboard_mod.notice_enabled() is True
+
+
+@pytest.mark.parametrize("off_spelling", ["0", "false", "no", "off", "OFF"])
+def test_notice_enabled_recognises_every_off_spelling(monkeypatch, off_spelling):
+    monkeypatch.setenv("DOXA_KEY_NOTICE", off_spelling)
+    assert keyboard_mod.notice_enabled() is False
+
+
+def test_notice_enabled_the_setting_is_in_the_registry_beside_its_kin(monkeypatch):
+    """A user who knows their terminal can stop being told -- the same
+    on/off shape as boot_banner, right beside it, default ON."""
+    setting = config_mod.SETTINGS_BY_KEY["key_notice"]
+    assert setting.env == "DOXA_KEY_NOTICE"
+    assert setting.kind == "bool_on"
+    assert setting.default == "1"
+    assert setting.category == "Appearance"
+
+
+# -- the notice, painted, through a real pane boot -----------------------
+
+
+def _app(tmp_path):
+    def make() -> FakeEngine:
+        return FakeEngine([])
+
+    return DoxaApp(
+        cwd=str(tmp_path), engine_factory=make, new_session_factory=make,
+        new_session_factory_at=lambda path: make(),
+    )
+
+
+async def _wait(pilot, cond, tries=250):
+    for _ in range(tries):
+        if cond():
+            return True
+        await pilot.pause(0.02)
+    return cond()
+
+
+def _painted_key_notice(app) -> "list[SystemBlock]":
+    # PAINTED, not merely mounted (tests/test_split_panes.py's own rule):
+    # a block can sit in the DOM one frame before the compositor has
+    # given it any cells, and an assertion about what a user SEES has to
+    # poll a rectangle, not a query_one that only proves the node exists.
+    return [
+        b for b in app.query(SystemBlock)
+        if b.id == "key-notice-block"
+        and b.region.height > 0 and b.region.width > 0
+    ]
+
+
+def _painted_identity(app) -> "list[SystemBlock]":
+    return [
+        b for b in app.query(SystemBlock)
+        if b.id == "identity-block" and b.region.height > 0 and b.region.width > 0
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_startup_notice_paints_on_a_legacy_terminal(monkeypatch, tmp_path):
+    monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.LEGACY)
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.delenv("DOXA_KEY_NOTICE", raising=False)
+    app = _app(tmp_path)
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: bool(_painted_key_notice(app)))
+        block = _painted_key_notice(app)[0]
+        assert "Ctrl+," in block.text and "/settings" in block.text
+        assert "Ctrl+Tab" in block.text and "/mode" in block.text
+
+
+@pytest.mark.asyncio
+async def test_the_startup_notice_never_paints_on_a_kitty_terminal(
+    monkeypatch, tmp_path,
+):
+    """Hide at zero, asserted as an absence: the identity block (which
+    always paints) is the proxy that boot actually reached this point,
+    and the key-notice block is checked NOT to exist at all -- no line,
+    no space."""
+    monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.KITTY)
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.delenv("DOXA_KEY_NOTICE", raising=False)
+    app = _app(tmp_path)
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: bool(_painted_identity(app)))
+        for _ in range(10):
+            await pilot.pause(0.02)
+        assert _painted_key_notice(app) == []
+        assert list(app.query("#key-notice-block")) == []
+
+
+@pytest.mark.asyncio
+async def test_the_startup_notice_never_paints_when_the_protocol_is_unmeasured(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.UNKNOWN)
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.delenv("DOXA_KEY_NOTICE", raising=False)
+    app = _app(tmp_path)
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: bool(_painted_identity(app)))
+        for _ in range(10):
+            await pilot.pause(0.02)
+        assert _painted_key_notice(app) == []
+        assert list(app.query("#key-notice-block")) == []
+
+
+@pytest.mark.asyncio
+async def test_the_setting_silences_the_notice_on_an_otherwise_affected_terminal(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.LEGACY)
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setenv("DOXA_KEY_NOTICE", "0")
+    app = _app(tmp_path)
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: bool(_painted_identity(app)))
+        for _ in range(10):
+            await pilot.pause(0.02)
+        assert _painted_key_notice(app) == []
+        assert list(app.query("#key-notice-block")) == []

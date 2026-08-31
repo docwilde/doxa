@@ -1449,6 +1449,70 @@ def _binding_mark(key: str) -> str:
     return UNREACHABLE_MARK if keyboard_mod.is_unreachable(key) else ""
 
 
+def _door_for(key: str) -> str:
+    """The slash command that reaches the same place `key` does, read off
+    the SAME registry /help renders -- never guessed, never hand-copied.
+
+    Two ways in: `key` is a command's own ``binding`` (``ctrl+comma`` ->
+    ``/settings``), or `key` shares its Textual ACTION with a different
+    key that IS a command's binding -- ``ctrl+tab`` and ``shift+tab`` both
+    fire ``cycle_permission_mode``, only the latter is ``/mode``'s
+    ``binding``, and Ctrl+Tab riding beside Shift+Tab (see
+    ``DoxaApp.BINDINGS``) is exactly the case this second pass exists for.
+    Empty when neither turns up anything -- a bare hotkey with no slash
+    form at all, which stays true and simply names no door."""
+    for cmd in commands_mod.REGISTRY:
+        if cmd.binding == key:
+            return cmd.name
+    # Deferred, same reason app_bindings() defers it: doxa.app imports
+    # this package, so the arrow only points back at call time.
+    from ..app import DoxaApp
+
+    def _key_action(binding: Any) -> "tuple[str, str]":
+        if isinstance(binding, tuple):
+            return binding[0], binding[1]
+        return binding.key, binding.action
+
+    action = ""
+    for binding in DoxaApp.BINDINGS:
+        raw_key, raw_action = _key_action(binding)
+        if raw_key == key:
+            action = raw_action
+            break
+    if not action:
+        return ""
+    for binding in DoxaApp.BINDINGS:
+        raw_key, raw_action = _key_action(binding)
+        if raw_action != action or raw_key == key:
+            continue
+        for cmd in commands_mod.REGISTRY:
+            if cmd.binding == raw_key:
+                return cmd.name
+    return ""
+
+
+def unreachable_doors() -> "list[tuple[str, str]]":
+    """``(pretty key, door command)`` for every advertised binding this
+    terminal cannot deliver -- the command bindings and the bare hotkeys
+    both, read off the same two sources /help renders. The door is ``""``
+    when nothing in the registry names one. Empty on a terminal that
+    grants the kitty protocol AND on one we never got to measure.
+
+    :func:`unreachable_bindings` is this with the doors dropped; the
+    startup notice (:func:`unreachable_notice`) is this with them kept."""
+    keys = [cmd.binding for cmd in commands_mod.REGISTRY if cmd.binding]
+    keys += [key for key, _description in app_bindings()]
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for key in keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        if _binding_mark(key):
+            out.append((_pretty_key(key), _door_for(key)))
+    return out
+
+
 def unreachable_bindings() -> "list[str]":
     """Every advertised binding this terminal cannot deliver, in pretty
     form (``["Ctrl+,"]``) -- the command bindings and the bare hotkeys
@@ -1456,17 +1520,52 @@ def unreachable_bindings() -> "list[str]":
     that grants the kitty protocol AND on one we never got to measure.
 
     ``/doctor`` names these; /help marks them in place."""
-    keys = [cmd.binding for cmd in commands_mod.REGISTRY if cmd.binding]
-    keys += [key for key, _description in app_bindings()]
-    seen: set[str] = set()
-    out: list[str] = []
-    for key in keys:
-        if key in seen:
-            continue
-        seen.add(key)
-        if _binding_mark(key):
-            out.append(_pretty_key(key))
-    return out
+    return [pretty for pretty, _door in unreachable_doors()]
+
+
+# Above this many affected bindings, the startup notice stops naming them
+# one by one and names the count instead -- one line, not a lecture. Two
+# is the every-day case (Ctrl+, / Ctrl+Tab, see tests/test_keyboard.py)
+# and reads fine spelled out; a terminal missing enough of the kitty
+# protocol to lose a handful of bindings gets a pointer at /doctor's full
+# table instead of a run-on sentence.
+NOTICE_SUMMARY_THRESHOLD = 3
+
+
+def unreachable_notice() -> str:
+    """One line for a session's opening block: which bound keys THIS
+    terminal cannot deliver, and the slash command that reaches them
+    instead -- or ``""`` when there is nothing to say.
+
+    Empty in exactly the two cases :func:`unreachable_bindings` is empty
+    in: a terminal that grants the kitty protocol (nothing is lost), AND
+    one this process never got to measure (``doxa.keyboard.UNKNOWN``).
+    The second one is deliberate, not an oversight -- this notice's whole
+    claim is "these specific keys are dead", and UNKNOWN means we have NO
+    evidence for that claim. Firing it anyway on every boot of a slow SSH
+    hop or a multiplexer that ate the probe's reply would be exactly the
+    false alarm ``doxa.keyboard``'s module docstring exists to prevent,
+    on the loud side instead of the silent one. A user who wants to know
+    "did DOXA even measure my terminal" already has that answer, on
+    request rather than by interruption: ``/doctor``'s keyboard-enhancement
+    row states "not measured" outright (doxa.doctor._keyboard_enhancement_check)."""
+    doors = unreachable_doors()
+    if not doors:
+        return ""
+    count = len(doors)
+    if count > NOTICE_SUMMARY_THRESHOLD:
+        return (
+            f"this terminal can't deliver {count} bound keys -- "
+            "run /doctor for the full list"
+        )
+    plural = "key" if count == 1 else "keys"
+    named = ", ".join(
+        f"{key} (use {door})" if door else key for key, door in doors
+    )
+    return (
+        f"this terminal can't deliver {count} bound {plural}: {named} "
+        "-- see /doctor for details"
+    )
 
 
 def help_text() -> str:

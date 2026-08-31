@@ -301,6 +301,21 @@ SETTINGS: tuple[Setting, ...] = (
              "request, in every tier this terminal answers for.",
     ),
     Setting(
+        key="key_notice", env="DOXA_KEY_NOTICE",
+        label="unreachable key notice", category="Appearance",
+        kind="bool_on", default="1",
+        help="One line at session start naming bound keys THIS terminal "
+             "can't deliver and the slash command that reaches them "
+             "instead (doxa.keyboard.notice_enabled / "
+             "doxa.ui.labels.unreachable_notice)",
+        note="Empty exactly when there is nothing to say: a "
+             "kitty-protocol terminal (nothing lost), or one whose "
+             "protocol was never measured -- UNKNOWN is not LEGACY, so an "
+             "unmeasured terminal stays silent rather than guessing "
+             "(doxa/keyboard.py). Off returns to plain silence; /help and "
+             "/doctor still report the same keys either way.",
+    ),
+    Setting(
         key="context_grid", env="DOXA_CONTEXT_GRID", label="context grid style",
         category="Appearance", kind="choice", choices=("", "glyphs", "ascii"),
         help="Cell style for /context's 10x20 usage grid "
