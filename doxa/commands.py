@@ -134,6 +134,7 @@ REGISTRY: tuple[SlashCommand, ...] = (
                 "right, then top to bottom (Ctrl+1…Ctrl+9). With no "
                 "number, flashes them",
         usage="/pane [n]",
+        binding="ctrl+1",
         palette="Pane: jump to a group",
         palette_prefill=True,
         # No ``binding``, deliberately: Ctrl+1..Ctrl+9 are NINE keys and

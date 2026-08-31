@@ -1465,6 +1465,16 @@ def _binding_mark(key: str) -> str:
     return UNREACHABLE_MARK if keyboard_mod.is_unreachable(key) else ""
 
 
+def _action_name(action: str) -> str:
+    """``focus_group(3)`` -> ``focus_group``. A key family bound to one
+    action with different arguments (v0.97.0's Ctrl+1..Ctrl+9) shares a
+    door with the member that IS a command's ``binding`` -- Ctrl+1 is
+    /pane's -- and comparing the raw strings would miss every other
+    digit, leaving eight keys named in the startup notice with nothing
+    to press instead."""
+    return action.split("(", 1)[0].strip()
+
+
 def _door_for(key: str) -> str:
     """The slash command that reaches the same place `key` does, read off
     the SAME registry /help renders -- never guessed, never hand-copied.
@@ -1499,7 +1509,11 @@ def _door_for(key: str) -> str:
         return ""
     for binding in DoxaApp.BINDINGS:
         raw_key, raw_action = _key_action(binding)
-        if raw_action != action or raw_key == key:
+        # Compare the action NAME, not the raw string: v0.97.0's
+        # Ctrl+1..Ctrl+9 are one action taking the group number, so
+        # `focus_group(7)` must still find `focus_group(1)` -- which IS
+        # /pane's binding -- or eight of the nine name no door at all.
+        if _action_name(raw_action) != _action_name(action) or raw_key == key:
             continue
         for cmd in commands_mod.REGISTRY:
             if cmd.binding == raw_key:
@@ -1588,6 +1602,29 @@ def _doors_worth_naming() -> "list[tuple[str, str]]":
             if pretty not in dead_but_covered]
 
 
+def _collapse_families(doors: "list[tuple[str, str]]") -> "list[tuple[str, str]]":
+    """Fold a run of keys sharing one door into a single entry.
+
+    v0.97.0 binds Ctrl+1..Ctrl+9 to one action taking the group number,
+    so a legacy terminal loses NINE keys that are one gesture. Listing
+    them singly pushed the notice past its summary threshold and turned a
+    line the user could act on ("Ctrl+, -- use /settings") into a count
+    they could not ("10 bound keys, run /doctor"). What matters is how
+    many THINGS are unreachable, not how many keycaps."""
+    out: "list[tuple[str, str]]" = []
+    seen_doors: "dict[str, int]" = {}
+    for key, door in doors:
+        if door and door in seen_doors:
+            first, _ = out[seen_doors[door]]
+            head = first.split("\u2013")[0]
+            out[seen_doors[door]] = (f"{head}\u2013{key.split('+')[-1]}", door)
+            continue
+        if door:
+            seen_doors[door] = len(out)
+        out.append((key, door))
+    return out
+
+
 def unreachable_notice() -> str:
     """One line for a session's opening block: which bound keys THIS
     terminal cannot deliver, and the slash command that reaches them
@@ -1605,7 +1642,7 @@ def unreachable_notice() -> str:
     "did DOXA even measure my terminal" already has that answer, on
     request rather than by interruption: ``/doctor``'s keyboard-enhancement
     row states "not measured" outright (doxa.doctor._keyboard_enhancement_check)."""
-    doors = _doors_worth_naming()
+    doors = _collapse_families(_doors_worth_naming())
     if not doors:
         return ""
     count = len(doors)

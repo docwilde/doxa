@@ -465,9 +465,12 @@ def test_unreachable_bindings_names_the_real_ones(monkeypatch):
     # because `/pane <n>` is a door that always works.
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.LEGACY)
     assert unreachable_bindings() == [
-        "Ctrl+,", "Ctrl+Tab",
-        *[f"Ctrl+{digit}" for digit in range(1, 10)],
-        "Alt+S", "Alt+D", "Alt+G",
+        # Ctrl+1 leads because /pane declares it as its `binding` and sits
+        # earlier in the registry than /settings; the other eight digits
+        # come from DoxaApp.BINDINGS afterwards. Order here is "registry
+        # bindings, then app hotkeys", not alphabetical.
+        "Ctrl+1", "Ctrl+,", "Ctrl+Tab", "Alt+S", "Alt+D", "Alt+G",
+        *[f"Ctrl+{digit}" for digit in range(2, 10)],
     ]
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.KITTY)
     assert unreachable_bindings() == []
@@ -534,14 +537,17 @@ def test_unreachable_doors_names_the_real_commands(monkeypatch):
     # which is /split's own `binding` -- which is the whole reason that
     # pass exists.
     assert labels_mod.unreachable_doors() == [
-        # Ctrl+O / Ctrl+N are deliberately ABSENT: ctrl+<letter> has a C0
-        # byte and arrives on every terminal, which is exactly why v0.95.0
-        # chose them as the primaries.
+        # Every digit resolves to /pane through the ACTION pass, not the
+        # binding pass: they are one action taking the group number, and
+        # only Ctrl+1 is /pane's declared binding. Before v0.97.0 wired
+        # _action_name, eight of the nine named no door at all.
+        ("Ctrl+1", "/pane"),
         ("Ctrl+,", "/settings"),
         ("Ctrl+Tab", "/mode"),
         ("Alt+S", "/split"),
         ("Alt+D", "/vsplit"),
         ("Alt+G", "/diff"),
+        *[(f"Ctrl+{digit}", "/pane") for digit in range(2, 10)],
     ]
 
 
