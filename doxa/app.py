@@ -87,6 +87,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
+from textual.css.query import NoMatches
 from textual.fuzzy import Matcher
 from textual.message import Message
 from textual.screen import ModalScreen
@@ -256,7 +257,7 @@ from .ui.labels import (  # noqa: F401
 )
 from .ui.diffview import DiffPane  # noqa: F401
 from .ui.prompt import PromptInput  # noqa: F401
-from .ui.split import PaneTab, SplitBox  # noqa: F401
+from .ui.split import PaneGroup, PaneTab, SplitBox  # noqa: F401
 from .ui import split as split_mod
 from .ui.statusline import ClockChip, GitLine, StatusBar  # noqa: F401
 from .ui.transcript import (  # noqa: F401
@@ -627,6 +628,39 @@ class DoxaApp(App):
             "kitty-protocol terminal)",
             show=False, priority=True,
         ),
+        # -- pane groups (v0.96.0) -------------------------------------
+        #
+        # Ctrl+1 .. Ctrl+9: jump to a group BY POSITION, numbered in
+        # reading order -- left to right, then top to bottom -- so in a 2x2
+        # Ctrl+1 is upper left, Ctrl+2 upper right, Ctrl+3 lower left,
+        # Ctrl+4 lower right. Position is predictable in a way "next group"
+        # is not, which is the same argument that made focus movement
+        # directional rather than cyclic in v0.91.0.
+        #
+        # Chosen by the owner over the two alternatives, which were
+        # rejected rather than overlooked: Alt+<digit> is terminal
+        # tab-switching in GNOME Terminal and others, and a tmux-style
+        # prefix chord costs two keystrokes for a gesture meant to be
+        # instant.
+        #
+        # UNREACHABLE UNDER THE LEGACY ENCODING and shipped anyway: Ctrl
+        # has a C0 code only for the 26 letters and @ [ \ ] ^ _ ? space, so
+        # a digit produces no byte at all. doxa.keyboard says so
+        # (`unreachable_under_legacy("ctrl+1") -> True`), /help and
+        # /doctor mark it, and `/pane <n>` is the door that always works --
+        # exactly the bargain Ctrl+, and Ctrl+Tab already ship on.
+        #
+        # priority=True for the reason every global here needs it: the
+        # prompt is a focused TextArea and would otherwise eat the key.
+        *[
+            Binding(
+                f"ctrl+{digit}", f"focus_group({digit})",
+                f"Jump to pane group {digit} (reading order; needs a "
+                "kitty-protocol terminal — /pane works everywhere)",
+                show=False, priority=True,
+            )
+            for digit in range(1, 10)
+        ],
     ]
 
     def __init__(
@@ -641,8 +675,15 @@ class DoxaApp(App):
         restore_active_id: "str | None" = None,
         restore_report: "str | None" = None,
         restore_layout: "list[Any] | None" = None,
+        restore_groups: "Any" = None,
     ) -> None:
         super().__init__()
+        # One strip-id sequence per app (see doxa.ui.split.next_tabbed_id):
+        # the FIRST group's TabbedContent is `#session-tabs` exactly, which
+        # is what keeps an unsplit window's DOM identical to every release
+        # before this one -- and identical for each app a suite builds,
+        # rather than climbing across tests in one process.
+        split_mod.reset_tabbed_ids()
         # Explicitly UNBIND Ctrl+C -- see the BINDINGS comment above for
         # why. `self._bindings` (textual.dom.DOMNode.__init__) starts as a
         # COPY of the class-level merge of every base's BINDINGS, App's own
@@ -728,10 +769,37 @@ class DoxaApp(App):
         # order -- the split structure ``_restore_tabs``' flat list cannot
         # express. ``None``/empty for every record written before this
         # release AND for every ordinary launch, and the absence is the
-        # migration: :meth:`_restore_trees_in_order` turns each surviving
-        # spec into its own single-leaf tree, which is exactly the tab it
-        # was.
+        # migration: :meth:`_restore_group_tree` turns each surviving spec
+        # into a tab of one group, which is exactly the tab it was.
         self._restore_layout = list(restore_layout or [])
+        # v0.96.0: the WINDOW's one tree, leaves holding
+        # :class:`doxa.layout.Group`. ``None`` for every ordinary launch and
+        # for every record written before this release; the absence is the
+        # migration, and :meth:`_restore_group_tree` derives one from
+        # whichever of the two older shapes did arrive (or from the flat
+        # spec list alone) using exactly the composition rule
+        # :func:`doxa.tabsets._layout_groups` documents -- shared with it
+        # rather than restated, so a launch from doxa.cli and a launch from
+        # a hand-built DoxaApp cannot disagree about what a record means.
+        self._restore_groups = restore_groups
+        # Which group the number overlay is showing on, and the ONE-SHOT
+        # timer that takes it away. See _flash_group_numbers for why a
+        # one-shot is inside DOXA's no-timer rule and an interval is not.
+        self._group_flash_timer: "Any" = None
+        # The group that had the keyboard last -- read only when focus is
+        # somewhere that is not a group at all (a modal, the palette, the
+        # rename field). See :meth:`focused_group`.
+        self._last_group_id: "str | None" = None
+        # Group widget ids are minted, never reused: an id that moved
+        # between widgets would be a second answer to "which region is
+        # this", and Ctrl+<digit> deliberately does NOT read them (it reads
+        # the painted rectangles). They exist so a DOM dump is legible and
+        # so _last_group_id can name one across a modal.
+        self._group_serial = 0
+        # Groups whose mount-time TabActivated has already been absorbed --
+        # see _on_tab_activated for what that message is and why exactly
+        # the first one per group must not move the keyboard.
+        self._groups_activated: "set[str]" = set()
         # Guards _persist_tabset while a multi-tab restore is still
         # connecting: each restored pane's boot() completion decrements
         # this (see _note_pane_booted), and only the LAST one to finish
@@ -940,25 +1008,183 @@ class DoxaApp(App):
         label once it boots; this is only the correct BEFORE-boot guess)."""
         return SessionPane(self._tab_title(path), path, self.model, engine_factory)
 
-    # -- tabs are containers now (v0.91.0) ----------------------------
+    # -- groups own tabs now (v0.96.0) --------------------------------
+
+    def groups(self) -> "list[PaneGroup]":
+        """Every pane group in the window, in DOM order.
+
+        DOM order is NOT the order ``Ctrl+1``..``Ctrl+9`` counts in --
+        that is :meth:`_group_order`, derived from the painted rectangles,
+        because what the user counts is what is on screen. Every caller
+        that needs the numbering says so by calling the other one."""
+        return list(self.query(PaneGroup))
+
+    def _group_order(self) -> "list[PaneGroup]":
+        """Every VISIBLE group in READING order -- left to right, then top
+        to bottom -- which is the order ``Ctrl+<digit>`` numbers them in and
+        the order the number overlay paints.
+
+        Derived from the painted rectangles, never from tree order: in a
+        2x2 grid a tree order that puts the bottom-left region after the
+        top-right one is indistinguishable from a bug, and it is the same
+        argument :func:`doxa.layout.neighbour` is built on one level down.
+        A group with no painted rectangle yet (mounted this frame, or
+        collapsed to nothing) is not numbered, for the same reason
+        :meth:`_pane_regions` skips it: an unpainted region is not a
+        destination.
+
+        Sorted on the TOP EDGE first and the LEFT EDGE second, so a row of
+        three above a row of two numbers 1 2 3 / 4 5. Rows are compared by
+        their actual y, not bucketed, because DOXA's own splits always
+        align: every region in a row shares an edge by construction."""
+        painted = [
+            (group.region.y, group.region.x, index, group)
+            for index, group in enumerate(self.groups())
+            if group.region.width > 0 and group.region.height > 0
+        ]
+        # The DOM index is the final tie-break so the order is total and
+        # deterministic even for two regions that somehow share a corner.
+        return [group for _y, _x, _i, group in sorted(painted)]
+
+    def group_of(self, widget: "Any") -> "PaneGroup | None":
+        """The group a widget sits in."""
+        return split_mod.group_of(widget)
+
+    def focused_group(self) -> "PaneGroup | None":
+        """The ONE group that holds the keyboard.
+
+        Exactly one, which is the pane-groups spec's own focus rule: the
+        status bar reflects that group's active tab, and every key that
+        means "this tab" means a tab of this group. Derived from
+        ``self.focused`` rather than from a flag this app maintains, for
+        the reason :meth:`focused_pane` gives -- a flag is a second answer
+        to a question the framework already answers, and the two drifting
+        apart is how the v0.32.0 restored-active-tab defect happened.
+
+        Falls back to the remembered last group, then to the first in
+        reading order, for the case focus is legitimately somewhere that is
+        not a group at all (a modal, the command palette, the rename
+        field): a window always has an answer to "which group", and jumping
+        to a different one while a dialog is up would move the user's work
+        under them.
+
+        **The DOM wins, and the remembered id is only a fallback.** That
+        is a deliberate choice against the obvious alternative, which was
+        tried and reverted. ``Widget.focus()`` is deferred in Textual 5.3
+        (it schedules ``screen.set_focus`` with ``call_next``), so for one
+        message-pump turn after a split this answers with the group the
+        user came FROM -- and it would be tempting to believe
+        :meth:`_focus_tab`'s synchronously-recorded intent instead, the way
+        ``PaneTab.focused_leaf`` is believed one level down.
+
+        Measured, that costs more than it buys. A group that has not been
+        painted yet has a zero-area rectangle, so trusting the intent makes
+        the NEXT ``split_active_pane`` in the same turn refuse ("not enough
+        height to split: each pane needs 9 rows and this one has 0") and
+        makes :meth:`active_pane` answer with a pane from a group the
+        keyboard has demonstrably not reached. The window it would fix is
+        one transient write that corrects itself the moment the new pane
+        boots (``_note_pane_booted`` persists again), so the trade is a
+        real refusal against a record nobody reads."""
+        node: Any = self.focused
+        while node is not None:
+            if isinstance(node, PaneGroup):
+                self._last_group_id = node.id or self._last_group_id
+                return node
+            node = node.parent
+        remembered = self._last_group_id
+        groups = self.groups()
+        if remembered:
+            for group in groups:
+                if group.id == remembered and group.is_mounted:
+                    return group
+        return next(iter(self._group_order() or groups), None)
+
+    def tabbed_of(self, widget: "Any" = None) -> "TabbedContent | None":
+        """The tab strip that owns ``widget``, or -- given nothing -- the
+        FOCUSED group's own.
+
+        This is what replaced ``query_one("#session-tabs")`` everywhere in
+        this file. Through v0.95.0 a window had exactly one strip and an id
+        was the right way to name it; a window has N now, and "the strip"
+        is a question about which group, always. Returns ``None`` rather
+        than raising, because most callers were already inside a
+        ``contextlib.suppress`` for the mid-teardown case and the ones that
+        were not read better with an explicit branch."""
+        if widget is not None:
+            return split_mod.tabbed_of(widget)
+        group = self.focused_group()
+        if group is None or not group.is_mounted:
+            return None
+        try:
+            tabbed = group.tabbed
+        except Exception:  # noqa: BLE001 -- group not composed yet
+            return None
+        # query_one succeeding is not the same as mounted -- the guard
+        # SessionPane._system needed for exactly this, in v0.91.0.
+        return tabbed if tabbed.is_mounted else None
+
+    def _strip(self) -> TabbedContent:
+        """The FOCUSED group's tab strip, raising when there is none.
+
+        The drop-in for ``query_one("#session-tabs", TabbedContent)``: it
+        raises the same way in the same states (nothing mounted, app
+        mid-teardown), so every caller that was already wrapped in a
+        ``contextlib.suppress`` keeps behaving exactly as it did."""
+        group = self.focused_group()
+        if group is None:
+            raise NoMatches("no pane group is mounted")
+        return group.tabbed
+
+    def _strip_for(self, tab_id: str) -> TabbedContent:
+        """The strip that HOLDS this tab, falling back to the focused
+        group's.
+
+        The fallback is not a shrug: a tab id that no strip holds is a tab
+        being created (``add_pane`` has not landed) or one already removed,
+        and in both cases the focused group is the only group the caller
+        could have meant. Getting this wrong the other way -- defaulting to
+        the focused group FIRST -- would let a status write aimed at a
+        background group's tab land on the foreground one's."""
+        holder = self.tabbed_holding(tab_id)
+        return holder if holder is not None else self._strip()
+
+    def tabbed_holding(self, tab_id: str) -> "TabbedContent | None":
+        """The strip that holds the tab with this ID, across every group.
+
+        The lookup the tab-status writers need (:func:`doxa.ui.labels.
+        _write_tab_class` and friends): a pane writes ``-working`` onto its
+        own header, and with N strips "the strip" no longer names one."""
+        if not tab_id:
+            return None
+        for group in self.groups():
+            try:
+                tabbed = group.tabbed
+            except Exception:  # noqa: BLE001 -- not composed yet
+                continue
+            if not tabbed.is_mounted:
+                continue
+            with contextlib.suppress(Exception):
+                if tabbed.get_pane(tab_id) is not None:
+                    return tabbed
+        return None
 
     def _make_tab(self, pane: "SessionPane", *, id: "str | None" = None) -> PaneTab:
         """Wrap one pane in the tab that holds it.
 
-        Every tab in this app is a :class:`~doxa.ui.split.PaneTab` whose
-        layout tree starts as a single leaf -- which is exactly what a tab
-        was through v0.88.0, and is what keeps the migration honest: a
-        window that never splits behaves identically to one that could
-        not. The empty :class:`~doxa.ui.split.SplitBox` chain around the
-        leaf is what a later split is built INTO; see that module's
-        docstring for why it cannot be created on demand.
+        Every tab in this app is a :class:`~doxa.ui.split.PaneTab` holding
+        exactly one surface -- which is what a tab was through v0.88.0 and
+        is what it is again since v0.96.0 moved the layout tree up to the
+        window. What a later split is built INTO is the empty
+        :class:`~doxa.ui.split.SplitBox` chain around the GROUP now; see
+        that module's docstring for why it cannot be created on demand.
 
         The TAB takes the id its pane used to carry, so
         :func:`_restore_pane_id`, :data:`_FALLBACK_PANE_ID`,
         :meth:`_initial_active_tab_id` and every ``tabbed.active =``
         assignment in this file keep naming the same strings."""
         tab = PaneTab(
-            pane.born_title, split_mod.chain(pane),
+            pane.born_title, pane,
             # Distinct from the leaf's own id, deliberately. Textual only
             # forbids duplicate ids among SIBLINGS, so a tab and the pane
             # inside it could legally share one -- and every id-selector
@@ -970,6 +1196,13 @@ class DoxaApp(App):
         )
         tab.focused_leaf = pane
         return tab
+
+    def _make_group(self, *tabs: "Any", active_id: "str | None" = None) -> PaneGroup:
+        """One pane group holding ``tabs``. The window's only leaf kind."""
+        self._group_serial += 1
+        return PaneGroup(
+            *tabs, active_id=active_id, id=f"group-{self._group_serial}"
+        )
 
     def _activate_tab(self, tab: "Any", *, retry: bool = True) -> None:
         """Make TAB the active tab, and survive the two moments Textual's
@@ -998,7 +1231,7 @@ class DoxaApp(App):
         if not tab_id:
             return
         try:
-            self.query_one("#session-tabs", TabbedContent).active = tab_id
+            self._strip_for(tab_id).active = tab_id
         except Exception:  # noqa: BLE001 -- see the docstring
             if retry and getattr(tab, "is_mounted", False):
                 self.call_after_refresh(self._activate_tab, tab, retry=False)
@@ -1039,7 +1272,13 @@ class DoxaApp(App):
                     return owner
                 break
             node = node.parent
-        tab = self._active_tab()
+        # Focus is somewhere that is not a leaf at all (a modal, the
+        # command palette, the rename field). The FOCUSED GROUP's active
+        # tab is the answer: the status bar still has to reflect ONE pane,
+        # and moving it to some other group's while a dialog is up would
+        # change the subject under the user.
+        group = self.focused_group()
+        tab = group.active_tab() if group is not None else None
         if isinstance(tab, PaneTab):
             leaf = tab.focused_leaf
             if isinstance(leaf, SessionPane) and leaf.is_mounted:
@@ -1061,7 +1300,7 @@ class DoxaApp(App):
         focus arrives on its own (see :meth:`_focus_tab`)."""
         if not os.path.isdir(path):
             return f"not a directory: {path}"
-        tabbed = self.query_one("#session-tabs", TabbedContent)
+        tabbed = self._strip()
         pane = self._make_pane_at(path, lambda: self._new_session_factory_at(path))
         tab = self._make_tab(pane)
         await tabbed.add_pane(tab)
@@ -1115,11 +1354,11 @@ class DoxaApp(App):
         for pane in self.panes():
             if pane._session_id == session_id:
                 self._focus_tab(pane)
-                self.query_one("#session-tabs", TabbedContent).active = (
+                self._strip_for(pane.tab_id or "").active = (
                     pane.tab_id or ""
                 )
                 return f"{session_id[:8]} is already open in this window."
-        tabbed = self.query_one("#session-tabs", TabbedContent)
+        tabbed = self._strip()
         pane = self._make_pane_at(
             cwd, lambda: self._resume_session_factory(cwd, session_id)
         )
@@ -1179,7 +1418,7 @@ class DoxaApp(App):
             self._activate_tab(existing)
             self._focus_tab(existing)
             return f"{session_id[:8]} is already open here, read-only."
-        tabbed = self.query_one("#session-tabs", TabbedContent)
+        tabbed = self._strip()
         tab = ArchivedSessionTab(
             session_id, cwd, self._tab_title(cwd or self.cwd),
             pinned_name=(title[:40] if title else None),
@@ -1223,7 +1462,7 @@ class DoxaApp(App):
                 "not resumable while it runs — end it first, or use the "
                 "window that owns it."
             )
-        tabbed = self.query_one("#session-tabs", TabbedContent)
+        tabbed = self._strip()
         pane = self._make_pane_at(
             str(getattr(entry, "cwd", "") or self.cwd),
             lambda: EngineClient(socket_path),
@@ -1256,12 +1495,43 @@ class DoxaApp(App):
         surface. With two panes visible, "the tab that is showing" is no
         longer an answer to "which session does this keystroke mean", and
         the pane holding the keyboard is: a key aimed at a session is
-        aimed at the session you are typing into."""
-        tab = self._active_tab()
+        aimed at the session you are typing into.
+
+        **v0.96.0: :meth:`focused_pane` wins outright**, where through
+        v0.95.0 its answer was cross-checked against the active tab and
+        discarded if it belonged to another one. That check existed because
+        a TAB held several panes and the active tab bounded the question.
+        With the keyboard now able to sit in a v0.92.0 diff that is a tab
+        of its OWN group, the check started discarding the right answer:
+        the session a diff is of lives in a different group, ``pane.tab is
+        tab`` was false, and ``active_pane`` came back None while a session
+        was plainly on screen and being typed at. ``focused_pane`` already
+        resolves the diff case deliberately (see its ``DiffPane`` branch);
+        second-guessing it here was the defect -- but only for a pane in
+        ANOTHER group. Inside the focused group the active tab still bounds
+        the question, and it has to: a read-only tab showing (an archived
+        session, a subagent transcript) means there IS no session pane
+        here, and every caller reads that None as "ask
+        ``_close_read_only_tab`` instead". Returning the live pane whose
+        prompt still happened to hold focus made Ctrl+Q on an archived tab
+        end the neighbouring session -- caught by
+        tests/test_restore_view.py, which is exactly the pair of tests that
+        distinction exists for."""
+        group = self.focused_group()
+        tab = group.active_tab() if group is not None else None
+        pane = self.focused_pane()
+        if (
+            pane is not None
+            and pane.is_mounted
+            and split_mod.group_of(pane) is not group
+        ):
+            # The keyboard is in some other group -- a v0.92.0 diff is the
+            # only way that happens, and the session it is a diff OF is the
+            # right answer (focused_pane's own DiffPane branch decided so).
+            return pane
         if not isinstance(tab, PaneTab):
             return None
-        pane = self.focused_pane()
-        if pane is not None and pane.tab is tab:
+        if pane is not None and pane.is_mounted and pane.tab is tab:
             return pane
         leaf = tab.focused_leaf
         if isinstance(leaf, SessionPane) and leaf.is_mounted:
@@ -1282,12 +1552,17 @@ class DoxaApp(App):
         return list(self.query(ArchivedSessionTab))
 
     def _active_tab(self) -> "PaneTab | ArchivedSessionTab | None":
-        """The active tab when it is one restore CARES about -- either
-        kind. ``active_pane`` stays SessionPane-only on purpose (every
-        engine-touching caller depends on that); this is the one question
-        that spans both."""
+        """The FOCUSED GROUP's active tab, when it is one restore CARES
+        about -- either kind. ``active_pane`` stays SessionPane-only on
+        purpose (every engine-touching caller depends on that); this is
+        the one question that spans both.
+
+        "The active tab" is a question about a group since v0.96.0, and
+        every caller of this means the group holding the keyboard: which
+        tab the status bar reflects, which one Ctrl+W closes, which one
+        the record calls active."""
         try:
-            tab = self.query_one("#session-tabs", TabbedContent).active_pane
+            tab = self._strip().active_pane
         except Exception:
             return None
         return tab if isinstance(tab, (PaneTab, ArchivedSessionTab)) else None
@@ -1296,7 +1571,15 @@ class DoxaApp(App):
         """Every tab the persisted set is about, IN STRIP ORDER -- session
         panes and archived tabs interleaved exactly as the user sees them,
         because the record's order IS the tab-bar order it will restore
-        to. Subagent transcript tabs are not sessions and never appear."""
+        to. Subagent transcript tabs are not sessions and never appear.
+
+        Groups in LAYOUT order and, within each, strip order -- which is
+        what a plain DOM walk gives, because the owner-first invariant
+        makes a ``Split``'s children left-to-right / top-to-bottom by
+        construction. Deliberately not :meth:`_group_order`'s painted
+        reading order: this feeds the flat ``tabs`` list, whose companion
+        is the tree written beside it, and the two must agree about order
+        or a record disagrees with itself."""
         return [
             tab for tab in self.query(TabPane)
             if isinstance(tab, (PaneTab, ArchivedSessionTab))
@@ -1315,7 +1598,7 @@ class DoxaApp(App):
         :meth:`_persist_tabset` is the caller that has to tell them
         apart."""
         try:
-            return not self.query_one("#session-tabs", TabbedContent).active
+            return not self._strip().active
         except Exception:
             return True
 
@@ -1370,6 +1653,13 @@ class DoxaApp(App):
         is the one it was built with. Accepts a PANE as well as a tab, for
         the callers that already have the leaf they mean (a split, a
         directional move)."""
+        # Which GROUP this focus move means, remembered for the case
+        # ``self.focused`` stops naming a group at all -- a modal, the
+        # command palette, the rename field. NOT believed over the DOM:
+        # see :meth:`focused_group` for the measurement that settled that.
+        group = split_mod.group_of(tab)
+        if group is not None and group.id:
+            self._last_group_id = group.id
         if isinstance(tab, SessionPane):
             owner = tab.tab
             if isinstance(owner, PaneTab):
@@ -1437,7 +1727,7 @@ class DoxaApp(App):
         only the INITIAL value that arrives late -- see
         :meth:`_activation_pending`)."""
         with contextlib.suppress(Exception):
-            tabbed = self.query_one("#session-tabs", TabbedContent)
+            tabbed = self._strip()
             self._focus_tab(tabbed.active_pane)
 
     @on(events.DescendantFocus)
@@ -1582,31 +1872,22 @@ class DoxaApp(App):
             else:
                 active_leaf = self.active_pane
         tabs: "list[tabsets_mod.TabRecord]" = []
-        trees: "list[Any]" = []
         seen: set[str] = set()
         active_id: "str | None" = None
-        # Tab-strip order, and BOTH kinds of restorable tab: a live
-        # PaneTab (v0.91.0: one or MORE session panes, in layout order),
-        # and (v0.32.0) an ArchivedSessionTab, which is one of the user's
-        # open tabs too and must not evaporate on the next restart just
-        # because the session behind it already has.
+        # Tab-strip order within a group, groups in layout order, and BOTH
+        # kinds of restorable tab: a live PaneTab and (v0.32.0) an
+        # ArchivedSessionTab, which is one of the user's open tabs too and
+        # must not evaporate on the next restart just because the session
+        # behind it already has.
         for tab in self._restorable_tabs():
             if isinstance(tab, ArchivedSessionTab):
                 if tab.session_id in seen or tab.session_id == exclude_session_id:
                     continue
                 seen.add(tab.session_id)
                 tabs.append(tab.as_record())
-                trees.append(
-                    layout_mod.Leaf(
-                        session_id=tab.session_id,
-                        pinned_name=tab.as_record().pinned_name,
-                        cwd=tab.as_record().cwd,
-                    )
-                )
                 if tab is active_tab:
                     active_id = tab.session_id
                 continue
-            kept: "list[str]" = []
             for pane in tab.leaves():
                 sid = pane._session_id
                 if (
@@ -1626,24 +1907,11 @@ class DoxaApp(App):
                 if pane_scope != scope:
                     continue
                 seen.add(sid)
-                kept.append(sid)
                 tabs.append(tabsets_mod.TabRecord(sid, pane.custom_name, pane_cwd))
                 if pane is active_leaf or (
-                    active_leaf is None and tab is active_tab and len(kept) == 1
+                    active_leaf is None and tab is active_tab
                 ):
                     active_id = sid  # noqa: E501 -- see active_leaf above
-            # The tab's own layout, read off the widgets and then PRUNED to
-            # the sessions that actually made it into the flat list above
-            # (a cross-repo leaf, a reaped one, the excluded last tab).
-            # A tree that still named them would restore a pane-shaped
-            # hole; the survivors take the space proportionally instead.
-            if kept:
-                tree = tab.tree()
-                tree = layout_mod.prune(tree, kept) if tree is not None else None
-                trees.append(
-                    tree if tree is not None
-                    else layout_mod.Leaf(session_id=kept[0])
-                )
         if (
             active_id is None
             and self._restore_active_id is not None
@@ -1679,18 +1947,33 @@ class DoxaApp(App):
             ):
                 continue
             seen.add(record.session_id)
-            tabs.append(record)
-            # A session whose tab already left the strip restores as its
-            # own single-leaf tab -- there is no layout left to remember
+            # A session whose tab already left the strip is in the flat
+            # list and nowhere else -- there is no layout left to remember
             # for it, and inventing one would put it back somewhere the
-            # user never had it.
-            trees.append(layout_mod.Leaf(
-                session_id=record.session_id,
-                pinned_name=record.pinned_name,
-                cwd=record.cwd,
-            ))
+            # user never had it. _fill_group appends it to the first group
+            # at restore time, which is "it comes back as a tab", the same
+            # answer v0.91.0 gave with a single-leaf tree.
+            tabs.append(record)
+        # The WINDOW's layout, read off the widgets and then PRUNED to the
+        # sessions that actually made it into the flat list above (a
+        # cross-repo pane, a reaped one, the excluded last tab). A tree
+        # that still named them would restore a pane-shaped hole; the
+        # survivors take the space proportionally instead.
+        groups = split_mod.tree_of(self._window_root())
+        kept = [record.session_id for record in tabs]
+        if groups is not None:
+            groups = layout_mod.prune(groups, kept)
         with contextlib.suppress(Exception):
-            tabsets_mod.save(scope, tabs, active_id, trees=trees)
+            tabsets_mod.save(scope, tabs, active_id, groups=groups)
+
+    def _window_root(self) -> "SplitBox | None":
+        """The OUTERMOST :class:`~doxa.ui.split.SplitBox` on the screen --
+        the window's layout tree, which through v0.95.0 lived one per tab
+        and now lives once per window."""
+        for box in self.query(SplitBox):
+            if not isinstance(box.parent, SplitBox):
+                return box
+        return None
 
     @property
     def engine(self) -> Any | None:
@@ -2070,161 +2353,203 @@ class DoxaApp(App):
             pane.prompt_ratio = layout_mod.clamp_prompt_ratio(leaf.prompt_ratio)
         return pane
 
-    def _restore_trees_in_order(self) -> "list[tuple[layout_mod.Node, list[str]]]":
-        """The saved layout trees, pruned to the LIVE specs that actually
-        came back, each paired with its leaves' session ids.
+    def _restore_group_tree(self) -> "layout_mod.Node | None":
+        """The WINDOW's layout tree for this restore, pruned to the specs
+        that actually came back and guaranteed to place every one of them.
 
-        Falls back to one single-leaf tree per live spec, which is what a
-        record written before v0.91.0 restores as -- the spec's own "a new
-        reader must restore old flat records as single-leaf trees",
-        implemented as the absence of trees rather than as a migration."""
-        live = [s.session_id for s in self._restore_tabs if not s.archived]
-        live_set = set(live)
-        trees: "list[tuple[layout_mod.Node, list[str]]]" = []
-        claimed: set[str] = set()
-        for tree in self._restore_layout or []:
-            pruned = layout_mod.prune(tree, live_set - claimed)
-            if pruned is None:
-                continue
-            # SESSION leaves only. A v0.92.0 diff leaf carries the id of
-            # the session it is a diff OF, so counting it here would
-            # claim that session twice and -- worse -- could make a diff
-            # the tab's FIRST leaf, which is the one every caller below
-            # looks a RestoreTabSpec up by. The owner-first invariant
-            # means the UI can never produce that tree; a hand-edited
-            # record can, and this is where that stops being a crash.
-            ids = [
-                leaf.session_id
-                for leaf in layout_mod.leaves(pruned)
-                if not leaf.is_diff
-            ]
-            if not ids:
-                continue
-            claimed.update(ids)
-            trees.append((pruned, ids))
-        for session_id in live:
-            if session_id not in claimed:
-                claimed.add(session_id)
-                trees.append((layout_mod.Leaf(session_id=session_id), [session_id]))
-        return trees
+        Answers for all three record eras by delegating to the ONE reader
+        that knows them -- :func:`doxa.tabsets._fill_group`, the same
+        function :func:`doxa.tabsets._layout_groups` ends every branch with
+        -- so a launch through ``doxa.cli`` (which passes ``restore_groups``
+        straight through) and a launch through a hand-built ``DoxaApp``
+        (which may pass only the older ``restore_layout``) cannot disagree
+        about what a saved record means.
+
+        The pruning is what makes a restore honest: the saved tree names
+        sessions, and by the time this runs some of them are dead. A tree
+        that still named them would restore a region with nothing in it."""
+        specs = self._restore_tabs
+        if not specs:
+            return None
+        records = [
+            tabsets_mod.TabRecord(s.session_id, s.pinned_name, s.cwd)
+            for s in specs
+        ]
+        tree = self._restore_groups
+        if tree is None and self._restore_layout:
+            # A caller that only had the v0.91.0 shape. The composition
+            # rule is doxa.tabsets' -- the ACTIVE tab's tree is the window,
+            # the rest become its tabs -- restated here only as the choice
+            # of WHICH tree, because that module's copy reads a raw record
+            # and this one has already-parsed trees in hand.
+            chosen = self._restore_layout[0]
+            if self._restore_active_id:
+                for candidate in self._restore_layout:
+                    ids = {
+                        leaf.session_id
+                        for leaf in layout_mod.leaves(candidate)
+                    }
+                    if self._restore_active_id in ids:
+                        chosen = candidate
+                        break
+            tree = layout_mod.groupify(chosen)
+        alive = {s.session_id for s in specs}
+        pruned = layout_mod.prune(tree, alive) if tree is not None else None
+        return tabsets_mod._fill_group(pruned, records, self._restore_active_id)
 
     def compose(self) -> ComposeResult:
         yield BeliefInspector()  # hidden stub, palette-toggled
         yield ClockChip()  # upper-right, own layer -- see theme.tcss
-        with TabbedContent(id="session-tabs", initial=self._initial_active_tab_id()):
-            if self._restore_tabs:
-                # Item D: one tab per resolved saved tab, IN SAVED ORDER --
-                # never the single default pane below. v0.32.0 mixes two
-                # kinds in that one order: a live spec reattaches its
-                # daemon (SessionPane), an archived one has no daemon left
-                # to reattach and renders its transcript read-only
-                # (ArchivedSessionTab). v0.91.0 adds a third shape without
-                # adding a third kind: several live specs can share ONE
-                # tab, laid out by the saved tree. The report block (if
-                # any) rides on the first LIVE pane -- an archived tab
-                # already opens with a block of its own explaining what it
-                # is.
-                report_placed = False
-                # No pane arms a mount-time focus any more (v0.38.0): a
-                # restored pane mounts in the BACKGROUND, and which tab
-                # ends up active and focused is decided once, explicitly,
-                # in _activate_initial_tab. v0.23.0's "three restored tabs
-                # always land on the last one" defect was this same
-                # entanglement -- one pane was allowed to focus on mount so
-                # that exactly one activation-by-side-effect happened. The
-                # side effect is gone, so the workaround is too -- and a
-                # split leaf inherits the rule rather than the race: a new
-                # leaf mounts unfocused, and whatever creates it says where
-                # the keyboard goes.
-                specs = {s.session_id: s for s in self._restore_tabs}
-                trees = self._restore_trees_in_order()
-                tree_by_first = {ids[0]: (tree, ids) for tree, ids in trees if ids}
-                emitted: set[str] = set()
-                for spec in self._restore_tabs:
-                    if spec.archived:
-                        yield ArchivedSessionTab(
-                            spec.session_id,
-                            spec.cwd or self.cwd,
-                            self._tab_title(spec.cwd or self.cwd),
-                            pinned_name=spec.pinned_name,
-                            id=_restore_pane_id(spec.session_id),
-                            # v0.56.0: read-only is now the FALLBACK, so
-                            # the tab says which of the reasons it was.
-                            resume_note=spec.resume_note,
-                        )
-                        continue
-                    if spec.session_id in emitted:
-                        continue
-                    entry = tree_by_first.get(spec.session_id)
-                    if entry is None:
-                        continue  # a later leaf of a tab already emitted
-                    tree, ids = entry
-                    emitted.update(ids)
-                    first_pane: "SessionPane | None" = None
+        if self._restore_tabs:
+            yield self._compose_restored_root()
+        else:
+            pane = self._make_pane(self._engine_factory)
+            # Item D fallback: every saved tab was dead (nothing to
+            # reattach), but doxa.cli still has a report to show --
+            # "restored 0, skipped N" -- on the one fresh tab it spawned
+            # instead. self._restore_report is None on every ordinary
+            # launch, so this is a no-op there.
+            pane._boot_report = self._restore_report
+            # ALWAYS inside the chain of empty SplitBoxes: that chain is
+            # what a later split is created INTO, and it cannot be created
+            # on demand (doxa/ui/split.py's own docstring says why).
+            yield split_mod.chain(self._make_group(self._make_tab(pane)))
 
-                    def _leaf(node: "layout_mod.Leaf") -> Any:
-                        nonlocal first_pane
-                        if node.is_diff:
-                            # v0.92.0: the diff leaf restores as a diff,
-                            # with no session behind it and nothing to
-                            # reattach -- it re-reads `git diff` on
-                            # mount. Open question 4, answered by
-                            # construction: a QUEUED-but-unapplied
-                            # rejection does NOT survive, because it is
-                            # held on the widget and the widget is new.
-                            # Discarding it silently would be the defect;
-                            # it is discarded with the pane, and the pane
-                            # comes back showing the un-reverted hunk,
-                            # which is the truth.
-                            return DiffPane(
-                                node.session_id,
-                                node.cwd or specs[node.session_id].cwd
-                                or self.cwd,
-                                id=f"{_restore_pane_id(node.session_id)}-diff",
-                            )
-                        pane = self._restored_pane(specs[node.session_id], node)
-                        if first_pane is None:
-                            first_pane = pane
-                        return pane
+    def _compose_restored_root(self) -> "Any":
+        """The restored window: one tree of groups, each holding its own
+        tabs, in saved order throughout.
 
-                    # Always a SplitBox: build() wraps a bare leaf in this
-                    # tab's own SPLIT_SLOTS empty boxes, which is what a
-                    # later split is created INTO.
-                    root = split_mod.build(tree, _leaf)
-                    if first_pane is not None and not report_placed:
-                        first_pane._boot_report = self._restore_report
-                        report_placed = True
-                    tab = PaneTab(
-                        self._tab_title(), root,
-                        id=_restore_pane_id(spec.session_id),
-                    )
-                    tab.focused_leaf = first_pane
-                    yield tab
-                if not report_placed:
-                    # Every resolved tab was archived: the window would
-                    # otherwise have no session in it at all -- no prompt,
-                    # nothing Ctrl+W could close without closing the app.
-                    # One fresh tab alongside the archives, carrying the
-                    # report, is the same answer doxa.cli's own "everything
-                    # is dead" branch gives. Explicit id -- _FALLBACK_
-                    # PANE_ID -- so _initial_active_tab_id (which runs
-                    # BEFORE this pane exists) can already name it.
-                    pane = self._make_pane(self._engine_factory)
-                    pane._boot_report = self._restore_report
-                    yield self._make_tab(pane, id=self._FALLBACK_PANE_ID)
-            else:
-                pane = self._make_pane(self._engine_factory)
-                # Item D fallback: every saved tab was dead (nothing to
-                # reattach), but doxa.cli still has a report to show --
-                # "restored 0, skipped N" -- on the one fresh tab it spawned
-                # instead. self._restore_report is None on every ordinary
-                # launch, so this is a no-op there.
+        v0.32.0 mixes two kinds in that order -- a live spec reattaches its
+        daemon (``SessionPane``), an archived one has no daemon left and
+        renders its transcript read-only (``ArchivedSessionTab``) --
+        v0.92.0 adds a third (a ``DiffPane`` tab, restored as a diff with
+        nothing to reattach), and v0.96.0 adds no kind at all: it only
+        changes which container they land in.
+
+        No pane arms a mount-time focus (v0.38.0): a restored pane mounts
+        in the BACKGROUND, and which group ends up focused is decided once,
+        explicitly, in :meth:`_activate_initial_tab`. v0.23.0's "three
+        restored tabs always land on the last one" defect was that same
+        entanglement.
+
+        The report block (if any) rides on the first LIVE pane -- an
+        archived tab already opens with a block of its own explaining what
+        it is."""
+        specs = {s.session_id: s for s in self._restore_tabs}
+        tree = self._restore_group_tree()
+        placed: "set[str]" = set()
+        first_pane: "list[SessionPane]" = []
+
+        def _tab_for(leaf: "layout_mod.Leaf") -> "Any":
+            spec = specs.get(leaf.session_id)
+            if leaf.is_diff:
+                # v0.92.0: the diff restores as a diff, with no session
+                # behind it and nothing to reattach -- it re-reads
+                # `git diff` on mount. A QUEUED-but-unapplied rejection
+                # does NOT survive, because it is held on the widget and
+                # the widget is new; it is discarded WITH the pane, and
+                # the pane comes back showing the un-reverted hunk, which
+                # is the truth.
+                surface = DiffPane(
+                    leaf.session_id,
+                    leaf.cwd or (spec.cwd if spec else None) or self.cwd,
+                    id=f"{_restore_pane_id(leaf.session_id)}-diff",
+                )
+                return PaneTab(
+                    self._tab_title(), surface,
+                    id=f"{_restore_pane_id(leaf.session_id)}-diff-tab",
+                )
+            if spec is None:
+                return None
+            if spec.archived:
+                return ArchivedSessionTab(
+                    spec.session_id,
+                    spec.cwd or self.cwd,
+                    self._tab_title(spec.cwd or self.cwd),
+                    pinned_name=spec.pinned_name,
+                    id=_restore_pane_id(spec.session_id),
+                    # v0.56.0: read-only is now the FALLBACK, so the tab
+                    # says which of the reasons it was.
+                    resume_note=spec.resume_note,
+                )
+            pane = self._restored_pane(spec, leaf)
+            if not first_pane:
+                first_pane.append(pane)
                 pane._boot_report = self._restore_report
-                yield self._make_tab(pane)
+            return PaneTab(
+                self._tab_title(), pane, id=_restore_pane_id(spec.session_id),
+            )
+
+        def _group(node: "layout_mod.Group") -> "Any":
+            tabs: "list[Any]" = []
+            active_id = ""
+            for index, leaf in enumerate(node.tabs):
+                if leaf.session_id in placed and not leaf.is_diff:
+                    continue
+                tab = _tab_for(leaf)
+                if tab is None:
+                    continue
+                placed.add(leaf.session_id)
+                if index == node.active or not active_id:
+                    # ``initial=`` must name a tab that EXISTS: v0.91.0
+                    # measured what happens when it does not -- Textual's
+                    # ContentSwitcher hangs waiting for it, surfacing as a
+                    # Pilot timeout before a single assertion runs. So the
+                    # saved active index only wins if its tab survived, and
+                    # the first surviving tab is the standing fallback.
+                    if index == node.active or not tabs:
+                        active_id = tab.id or ""
+                tabs.append(tab)
+            return self._make_group(*tabs, active_id=active_id)
+
+        if tree is None:
+            pane = self._make_pane(self._engine_factory)
+            pane._boot_report = self._restore_report
+            return split_mod.chain(
+                self._make_group(self._make_tab(pane, id=self._FALLBACK_PANE_ID))
+            )
+        root = split_mod.build(tree, _group)
+        if not first_pane:
+            # Every resolved tab was archived: the window would otherwise
+            # have no session in it at all -- no prompt, nothing Ctrl+W
+            # could close without closing the app. One fresh tab alongside
+            # the archives, carrying the report, is the same answer
+            # doxa.cli's own "everything is dead" branch gives. It joins
+            # the FIRST group rather than opening a second one: an archive
+            # and its replacement are not two regions of work.
+            pane = self._make_pane(self._engine_factory)
+            pane._boot_report = self._restore_report
+            first = split_mod.first_group(root)
+            if first is not None:
+                first._tabs.append(
+                    self._make_tab(pane, id=self._FALLBACK_PANE_ID)
+                )
+        return root
 
     @on(TabbedContent.TabActivated)
     def _on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         self._jump_tab_marker()
+        # **Only a group's SECOND activation onwards moves the keyboard**
+        # (v0.96.0). Every group posts one ``TabActivated`` as it mounts --
+        # Textual's ``Tabs`` defaults itself to its first tab and the
+        # watcher posts the message -- so with N groups this handler used
+        # to fire N times during boot and the LAST one to land won the
+        # keyboard, whatever ``_activate_initial_tab`` had just said.
+        # Measured as a restore with the saved active session in the middle
+        # landing on the last group instead: the exact v0.23.0
+        # "three restored tabs always land on the last one" defect,
+        # re-created one level up.
+        #
+        # Skipping only the FIRST per group is what keeps the MOUSE path --
+        # the one path with no keyboard site to hang focus on, and the only
+        # reason this handler focuses at all -- working: a click on a
+        # background group's tab header is never that group's first
+        # activation.
+        group = split_mod.group_of(event.pane) if event.pane is not None else None
+        group_key = getattr(group, "id", None) or ""
+        if group_key and group_key not in self._groups_activated:
+            self._groups_activated.add(group_key)
+            return
         tab = event.pane if isinstance(event.pane, PaneTab) else self._active_tab()
         if isinstance(tab, PaneTab):
             # Focus here as well as at every keyboard site (v0.38.0), for
@@ -2297,7 +2622,7 @@ class DoxaApp(App):
         if self.query("#tab-rename"):
             return  # one rename at a time
         with contextlib.suppress(Exception):
-            tabbed = self.query_one("#session-tabs", TabbedContent)
+            tabbed = self._strip_for(pane.tab_id)
             tab = tabbed.get_tab(pane.tab_id)
             editor = TabRename(pane.tab_id, pane.display_name())
             editor.styles.width = max(len(editor.value) + 4, 14)
@@ -2322,7 +2647,7 @@ class DoxaApp(App):
 
     def _end_rename(self, pane_id: str) -> None:
         with contextlib.suppress(Exception):
-            tabbed = self.query_one("#session-tabs", TabbedContent)
+            tabbed = self._strip_for(pane_id)
             tabbed.get_tab(pane_id).display = True
         for editor in list(self.query(TabRename)):
             editor.remove()
@@ -2352,7 +2677,7 @@ class DoxaApp(App):
             from textual.widgets import Tabs
             from textual.widgets._tabs import Underline
 
-            tabs = self.query_one("#session-tabs", TabbedContent).query_one(Tabs)
+            tabs = self._strip().query_one(Tabs)
             active = tabs.query_one("#tabs-list > Tab.-active")
             start, end = active.virtual_region.shrink(
                 active.styles.gutter
@@ -2385,7 +2710,7 @@ class DoxaApp(App):
         the tab the user came from -- measured as a real failure of
         tests/test_tabsets.py's own append test under a full-suite run,
         and not reproducible on its own."""
-        tabbed = self.query_one("#session-tabs", TabbedContent)
+        tabbed = self._strip()
         pane = self._make_pane(self._new_session_factory)
         tab = self._make_tab(pane)
         await tabbed.add_pane(tab)
@@ -2436,25 +2761,23 @@ class DoxaApp(App):
         or when this pane has already spent its depth allowance
         (:data:`doxa.layout.SPLIT_SLOTS`). A refusal that performed a
         sliver would be worse than the refusal."""
-        pane = self.active_pane
-        if pane is None:
-            return "there is no session pane here to split"
-        tab = pane.tab
-        if tab is None:
-            return "this pane is not in a tab yet"
-        box = split_mod.free_box(pane)
+        group = self.focused_group()
+        if group is None:
+            return "there is no pane group here to split"
+        box = split_mod.free_box(group)
         if box is None:
             return (
                 f"this pane is already split as deep as DOXA goes "
                 f"({layout_mod.SPLIT_SLOTS} levels) — close a pane, or "
                 "split one of its neighbours instead"
             )
-        region = pane.region
+        region = group.region
         refusal = layout_mod.split_refusal(region.width, region.height, orientation)
         if refusal is not None:
             return refusal
         new_pane = self._make_pane(self._new_session_factory)
-        await box.mount(split_mod.chain(new_pane))
+        new_group = self._make_group(self._make_tab(new_pane))
+        await box.mount(split_mod.chain(new_group))
         box.divide(orientation)
         self._focus_tab(new_pane)
         self._persist_tabset()
@@ -2501,28 +2824,29 @@ class DoxaApp(App):
             return "this pane is not in a tab yet"
         existing = self.diff_pane_for(pane._session_id)
         if existing is not None:
-            box = split_mod.owning_box(existing)
             if existing.queued:
                 return (
                     f"{len(existing.queued)} rejection(s) are still queued "
                     "in this diff — they apply when the turn ends. closing "
                     "the pane now would discard them."
                 )
-            await existing.remove()
-            await split_mod.prune_boxes(box)
+            await self._close_group_tab(existing)
             self._focus_tab(pane)
             self._persist_tabset()
             return None
         if not pane._session_id:
             return "this session has not started yet — nothing to diff"
-        box = split_mod.free_box(pane)
+        group = self.focused_group()
+        if group is None:
+            return "there is no pane group here to diff"
+        box = split_mod.free_box(group)
         if box is None:
             return (
                 f"this pane is already split as deep as DOXA goes "
                 f"({layout_mod.SPLIT_SLOTS} levels) — close a pane and "
                 "try again"
             )
-        region = pane.region
+        region = group.region
         refusal = layout_mod.split_refusal(
             region.width, region.height, layout_mod.ROW
         )
@@ -2533,7 +2857,16 @@ class DoxaApp(App):
             str(getattr(pane.engine, "cwd", None) or pane.cwd),
             id=f"{pane.id}-diff",
         )
-        await box.mount(split_mod.chain(diff))
+        # The spec's own design check, answered by construction: the diff
+        # goes into a GROUP's tab, and nothing about the group had to be
+        # special-cased for it -- a group's tab list is a list of surfaces
+        # and a diff is a surface. Beside the session rather than in the
+        # same group's strip, because the point of a live diff is looking
+        # at it WHILE you type; the same tab list would hide one behind the
+        # other. Both statements are true at once, and that is what makes
+        # the model right rather than merely accommodating.
+        diff_tab = PaneTab(self._tab_title(), diff, id=f"{pane.id}-diff-tab")
+        await box.mount(split_mod.chain(self._make_group(diff_tab)))
         box.divide(layout_mod.ROW)
         # Focus STAYS in the session. A split spawns a session you asked
         # to work in, so v0.91.0 moves the keyboard there; a diff is
@@ -2544,29 +2877,62 @@ class DoxaApp(App):
         self._persist_tabset()
         return None
 
+    async def _close_group_tab(self, surface: "Any") -> None:
+        """Take ONE tab out of its group, and take the group with it when
+        that was its last.
+
+        The single teardown path for "a surface is going away" -- the diff
+        toggle and :meth:`_close_pane` both reach it. Two levels of
+        collapse, in order, because they are two different facts: a group
+        that still has tabs keeps its region and shows another tab; a group
+        with none is not a region any more, and the split above it collapses
+        by exactly the rule v0.91.0 wrote for a leaf.
+
+        Awaits each removal rather than firing and forgetting: the NEXT
+        step reads the parent's child list, and Textual's ``Widget.remove``
+        only takes effect when its ``AwaitRemove`` is awaited."""
+        group = split_mod.group_of(surface)
+        tab = surface.parent
+        while tab is not None and not isinstance(tab, TabPane):
+            tab = tab.parent
+        if group is None or tab is None:
+            with contextlib.suppress(Exception):
+                await surface.remove()
+            return
+        remaining = [t for t in group.tabs() if t is not tab]
+        with contextlib.suppress(Exception):
+            await self._strip_for(tab.id or "").remove_pane(tab.id or "")
+        if remaining:
+            return
+        box = split_mod.owning_box(group)
+        with contextlib.suppress(Exception):
+            await group.remove()
+        await split_mod.prune_boxes(box)
+
     def _pane_regions(self) -> "dict[str, tuple[int, int, int, int]]":
-        """Every VISIBLE pane's painted rectangle, keyed by widget id.
+        """Every VISIBLE surface's painted rectangle, keyed by widget id.
 
         Painted, not structural: the spec's testing bar says a split must
         render two panes with non-zero width and height, because the
         invisible-button defect passed every structural assertion for a
         whole release. Directional focus reads the same rectangles the
         user is looking at, so a pane that is not actually on screen is
-        not a destination."""
-        tab = self._active_tab()
-        if not isinstance(tab, PaneTab):
-            return {}
+        not a destination.
+
+        Across every GROUP since v0.96.0, and only each group's ACTIVE tab:
+        an inactive tab is mounted and running but is not painted, and the
+        two facts have to stay apart here -- reading every tab would let
+        ``Ctrl+Shift+→`` land the keyboard somewhere the user cannot see,
+        which is the invisible-button defect in its keyboard form."""
         out: "dict[str, tuple[int, int, int, int]]" = {}
-        # surfaces(), not leaves(): v0.92.0's diff pane is a leaf you can
-        # focus and scroll, so "rectangles the keyboard can move to" is
-        # no longer the same list as "sessions". Reading leaves() here
-        # would leave the diff visibly on screen and unreachable by
-        # Ctrl+Shift+arrow, which is the invisible-button defect in its
-        # keyboard form.
-        for leaf in tab.surfaces():
-            region = leaf.region
-            if region.width > 0 and region.height > 0 and leaf.id:
-                out[leaf.id] = (region.x, region.y, region.width, region.height)
+        for group in self.groups():
+            # surfaces(), not leaves(): v0.92.0's diff pane is a surface
+            # you can focus and scroll, so "rectangles the keyboard can
+            # move to" is not the same list as "sessions".
+            for leaf in group.surfaces():
+                region = leaf.region
+                if region.width > 0 and region.height > 0 and leaf.id:
+                    out[leaf.id] = (region.x, region.y, region.width, region.height)
         return out
 
     def focus_pane_towards(self, direction: str) -> bool:
@@ -2580,8 +2946,12 @@ class DoxaApp(App):
         target_id = layout_mod.neighbour(self._pane_regions(), here.id, direction)
         if target_id is None or target_id == here.id:
             return False
-        tab = self._active_tab()
-        surfaces = tab.surfaces() if isinstance(tab, PaneTab) else []
+        # Across every GROUP (v0.96.0): the rectangles the keyboard can
+        # move to are the ACTIVE tab of each region, which is exactly what
+        # _pane_regions just answered with.
+        surfaces = [
+            surface for group in self.groups() for surface in group.surfaces()
+        ]
         target = next((p for p in surfaces if p.id == target_id), None)
         if target is None:
             return False
@@ -2663,7 +3033,13 @@ class DoxaApp(App):
             layout_mod.ROW if direction in ("left", "right")
             else layout_mod.COLUMN
         )
-        node: Any = pane
+        # Start from the GROUP, not the surface (v0.96.0): the boxes that
+        # divide the window sit above the group, and a surface's own parent
+        # chain now runs through its tab and its strip first. Reading
+        # ``focused_surface`` and then climbing from the pane -- what this
+        # did through v0.95.0 -- found no SplitBox at all and the key went
+        # silently dead, which is how it was caught.
+        node: Any = split_mod.group_of(pane) or pane
         parent = node.parent
         while isinstance(parent, SplitBox):
             if parent.is_used and parent.orientation == want:
@@ -2688,6 +3064,247 @@ class DoxaApp(App):
     #: legal share, so the boundary is nudgeable rather than jumpy and a
     #: held key still crosses the range in a couple of seconds.
     DIVIDER_STEP = 0.03
+
+    # -- pane groups: jump, flash, move (v0.96.0) ---------------------
+
+    #: How long the ``Ctrl+<digit>`` number overlay stays up. Long enough
+    #: to read a single digit and register where it was, short enough that
+    #: it is gone before the next thought -- and it is CANCELLED by the
+    #: next key either way, so a user who is already moving never waits for
+    #: it.
+    GROUP_FLASH_SECS = 1.2
+
+    def action_focus_group(self, number: int) -> None:
+        """``Ctrl+<digit>`` -- put the keyboard in the group at that
+        position, and flash every group's number.
+
+        Both, always, and in that order. The jump happens IMMEDIATELY: the
+        overlay is feedback and teaching, not a mode, and DOXA does not
+        wait for a second keystroke the way tmux's ``display-panes`` does,
+        because the numbering is meant to become muscle memory and a
+        prompt-then-wait gesture never lets it.
+
+        The flash fires even when the digit names NO group -- pressing
+        Ctrl+7 in a two-group layout shows 1 and 2 and moves nothing. That
+        is the case it earns the most in: it answers "what are my choices"
+        for a user who guessed."""
+        groups = self._group_order()
+        self._flash_group_numbers()
+        if 1 <= number <= len(groups):
+            target = groups[number - 1]
+            surface = next(iter(target.surfaces()), None)
+            if surface is not None:
+                self._focus_tab(surface)
+
+    def _flash_group_numbers(self) -> None:
+        """Paint each group's own number over its own region, briefly.
+
+        **Nothing at all when there is only one group**: there is no choice
+        to make, so there is nothing to teach. Hide-at-zero, as everywhere
+        else in this app.
+
+        **One-shot, never an interval.** DOXA has a no-timer rule and its
+        target is IDLE CPU -- v0.78.0 already amended it for the turn
+        spinner on the grounds that a timer existing only during a turn
+        spends nothing. A ``set_timer`` armed by a keystroke and fired once
+        is the same bargain: no interval, nothing running while idle, and
+        the previous one is cancelled before a new one is armed so a held
+        key cannot stack them.
+
+        Drawn per group from the same rectangles the numbering is derived
+        from, so what is numbered and what is painted cannot disagree."""
+        self._cancel_group_flash()
+        groups = self._group_order()
+        if len(groups) < 2:
+            return
+        for index, group in enumerate(groups, start=1):
+            group.show_number(index)
+        with contextlib.suppress(Exception):
+            self._group_flash_timer = self.set_timer(
+                self.GROUP_FLASH_SECS, self._hide_group_numbers
+            )
+
+    def _cancel_group_flash(self) -> None:
+        timer, self._group_flash_timer = self._group_flash_timer, None
+        if timer is not None:
+            with contextlib.suppress(Exception):
+                timer.stop()
+
+    def _hide_group_numbers(self) -> None:
+        self._group_flash_timer = None
+        for group in self.groups():
+            group.hide_number()
+
+    async def on_event(self, event: "Any") -> None:
+        """Every input event passes through here on its way to the screen,
+        which is the ONE place a key can be seen before some widget
+        consumes it -- the focused prompt is a ``TextArea`` and stops the
+        ``Key`` message dead, so an ``@on(events.Key)`` handler on this
+        class never fires for an ordinary letter. Measured, not assumed:
+        the first version of the number-overlay dismissal was written that
+        way and the overlay simply stayed up.
+
+        Kept to exactly one job for that reason. Anything more here would
+        be a second event pipeline beside Textual's own."""
+        if isinstance(event, events.Key):
+            self._dismiss_group_numbers(event)
+        await super().on_event(event)
+
+    def _dismiss_group_numbers(self, event: "events.Key") -> None:
+        """Any subsequent key takes the overlay away at once.
+
+        The spec's own instruction ("cancelled on the next key"), and the
+        reason the flash never outstays a user who is already moving. A
+        ``Ctrl+<digit>`` is exempt because it is the key that arms one --
+        Textual delivers the key event and runs the action from the same
+        press, and without this exemption the flash would cancel itself."""
+        if self._group_flash_timer is None:
+            return
+        key = event.key or ""
+        if key.startswith("ctrl+") and key[-1].isdigit():
+            return
+        self._cancel_group_flash()
+        self._hide_group_numbers()
+
+    def focus_group_number(self, number: int) -> "str | None":
+        """``/pane <n>`` -- the door that always works, for the terminals
+        where ``Ctrl+<digit>`` produces no byte at all. Returns a refusal
+        to show the user, or ``None`` when it happened."""
+        groups = self._group_order()
+        if len(groups) < 2:
+            return "there is only one pane group — nothing to jump to"
+        if not (1 <= number <= len(groups)):
+            return (
+                f"there is no pane group {number} — this window has "
+                f"{len(groups)}, numbered left to right then top to bottom"
+            )
+        self.action_focus_group(number)
+        return None
+
+    async def move_tab_to_group(self, number: int) -> "str | None":
+        """``/movepane <n>`` -- take the focused group's ACTIVE tab and put
+        it in the group at that position. Returns a refusal, or ``None``.
+
+        **This is the constraint the whole design turns on.** Textual 5.3
+        cannot re-parent a mounted widget: ``mount`` of an already-mounted
+        widget is a silent no-op that ORPHANS it (measured in v0.91.0, not
+        assumed). So this does NOT move the tab. It builds a NEW tab and a
+        NEW surface at the destination, hands the new surface the SESSION
+        the old one was driving, and tears the old tab down.
+
+        The session survives untouched because the session does not live in
+        the widget: it lives in the daemon, behind an engine handle
+        (``doxa.client.EngineClient``, or an in-process ``SessionEngine``),
+        and ``SessionPane.adopt`` is what re-seats that handle. The pane is
+        a VIEW of a session, and this is the first gesture in DOXA that
+        makes the difference load-bearing rather than academic.
+
+        Refused, with no change at all, when there is nowhere to move to,
+        when the destination is where the tab already is, or when the tab
+        is the only one in a group that would then have to close -- moving
+        the last tab OUT of a group is a close and a move at once, and the
+        two have different undo stories."""
+        groups = self._group_order()
+        if len(groups) < 2:
+            return "there is only one pane group — nothing to move a tab to"
+        if not (1 <= number <= len(groups)):
+            return (
+                f"there is no pane group {number} — this window has "
+                f"{len(groups)}, numbered left to right then top to bottom"
+            )
+        source = self.focused_group()
+        target = groups[number - 1]
+        if source is None:
+            return "there is no pane group here to move a tab out of"
+        if source is target:
+            return f"this tab is already in pane group {number}"
+        tab = source.active_tab()
+        if tab is None:
+            return "there is no tab here to move"
+        # SESSION tabs only, and the guard is on the METHOD rather than on
+        # the result: an archived tab and a subagent transcript are both
+        # ``TabPane``s in this strip and neither has ``leaves()`` at all,
+        # so asking one would be an AttributeError rather than a refusal.
+        leaves = getattr(tab, "leaves", None)
+        pane = next(iter(leaves()), None) if callable(leaves) else None
+        if pane is None:
+            return (
+                "only a session tab can be moved between groups today — "
+                "a diff belongs beside the session it is a diff of, and a "
+                "read-only tab has nothing to re-seat"
+            )
+        if len(source.tabs()) < 2:
+            return (
+                f"this is pane group {groups.index(source) + 1}'s last tab — "
+                "moving it would close the group. close it with Ctrl+W, or "
+                "split the destination instead"
+            )
+        return await self._reseat_pane(pane, target)
+
+    async def _reseat_pane(self, pane: "SessionPane", target: "PaneGroup") -> "str | None":
+        """Re-create ``pane`` as a tab of ``target`` and tear down the
+        original, carrying the live session across.
+
+        The order is the load-bearing part, and every step of it exists
+        because of the no-re-parenting constraint:
+
+        1. take the engine handle OFF the source pane, so its teardown
+           cannot stop or detach a session that is about to keep running;
+        2. mount the new pane in the destination, and only then hand it the
+           handle -- a pane that boots before it is adopted would spawn a
+           SECOND session, which is the failure this ordering prevents;
+        3. remove the source tab, collapsing nothing (the source keeps its
+           other tabs, which :meth:`move_tab_to_group` guaranteed).
+
+        Never raises: a half-completed move would leave a session with no
+        view onto it, which is worse than a refusal."""
+        engine = pane.engine
+        session_id = pane._session_id
+        if engine is None or not session_id:
+            return "this session has not started yet — nothing to move"
+        name = pane.custom_name
+        cwd = str(getattr(engine, "cwd", None) or pane.cwd)
+        ratio = layout_mod.clamp_prompt_ratio(getattr(pane, "prompt_ratio", 0.0))
+        marks = dict(getattr(pane, "_marks", {}))
+        source_tab = pane.tab
+        # 1. Release the session from the pane that is going away. From
+        #    here the daemon has no view onto it, which is a state DOXA is
+        #    already fluent in -- it is exactly what Ctrl+W leaves behind.
+        pane.release_engine()
+        # 2. The new view. Its "factory" hands back the handle that is
+        #    already running rather than building one, and ``_adopted``
+        #    is what stops ``_boot`` calling ``start()`` on it -- the one
+        #    line between "the session moved" and "a second CLI is now
+        #    writing this transcript".
+        fresh = self._make_pane_at(cwd, lambda: engine)
+        fresh._adopted = True
+        fresh._session_id = session_id
+        if name:
+            fresh._initial_pinned_name = name
+        fresh.prompt_ratio = ratio
+        # The scrollback comes back from DISK, the same v0.32.0 path a
+        # reattach uses: the widget is new, so the blocks the old one had
+        # painted went with it, and re-reading the transcript is the only
+        # honest way to put them back.
+        fresh._restore_transcript_wanted = True
+        new_tab = self._make_tab(fresh)
+        try:
+            await target.tabbed.add_pane(new_tab)
+        except Exception:  # noqa: BLE001 -- destination went away mid-move
+            pane.adopt_engine(engine, session_id)
+            return "that pane group is no longer there"
+        for class_name, value in marks.items():
+            if value:
+                fresh._marks[class_name] = True
+        # 3. The source tab goes, and the session it was showing does not.
+        with contextlib.suppress(Exception):
+            await self._strip_for(source_tab.id or "").remove_pane(
+                source_tab.id or ""
+            )
+        self._activate_tab(new_tab)
+        self._focus_tab(fresh)
+        self._persist_tabset()
+        return None
 
     def action_grow_pane_up(self) -> None:
         self.grow_pane_towards("up")
@@ -2746,7 +3363,7 @@ class DoxaApp(App):
         release by not having a shared answer here."""
         active: "Any" = None
         with contextlib.suppress(Exception):
-            active = self.query_one("#session-tabs", TabbedContent).active_pane
+            active = self._strip().active_pane
         if isinstance(active, SubagentTranscriptTab):
             await self._close_transcript_tab(active)
             return True
@@ -2765,7 +3382,7 @@ class DoxaApp(App):
         Never the last tab: compose() guarantees a SessionPane beside any
         archive, so this never reaches the close-the-app branch."""
         with contextlib.suppress(Exception):
-            await self.query_one("#session-tabs", TabbedContent).remove_pane(
+            await self._strip_for(tab.id or "").remove_pane(
                 tab.id or ""
             )
         self._persist_tabset()
@@ -2830,7 +3447,7 @@ class DoxaApp(App):
         drop the owning pane's own reference to it."""
         tab.owner._transcript_tabs.pop(tab.call_id, None)
         with contextlib.suppress(Exception):
-            await self.query_one("#session-tabs", TabbedContent).remove_pane(
+            await self._strip_for(tab.id or "").remove_pane(
                 tab.id or ""
             )
 
@@ -2956,28 +3573,60 @@ class DoxaApp(App):
             await App.action_quit(self)
             return
         self._persist_tabset()
-        tab = pane.tab
-        siblings = [leaf for leaf in tab.leaves() if leaf is not pane] if tab else []
-        if siblings:
-            # v0.91.0: closing one leaf of a SPLIT collapses the split, it
-            # does not close the tab -- the spec's own "closing the last
-            # pane in a split collapses the split; closing the last pane in
-            # a tab closes the tab, matching today's _close_pane
-            # semantics". The keyboard goes to the sibling that takes the
-            # space, named explicitly here for the same reason every other
-            # focus move in this file is (v0.38.0): a leaf disappearing is
-            # not a user saying where to go next, so this has to say it.
-            box = split_mod.owning_box(pane)
-            heir = self._closest_sibling(pane, siblings)
-            with contextlib.suppress(Exception):
-                await pane.remove()
-            await split_mod.prune_boxes(box)
+        # **Closing a tab closes ONE session** (v0.96.0, and the third of
+        # the three problems the inversion dissolves rather than patches).
+        # Through v0.95.0 this pane's tab could hold two more sessions and
+        # closing it ended all three; a tab holds one surface now, so the
+        # question is only what INHERITS the keyboard.
+        #
+        # Two collapses, in order, and they are different facts:
+        #   * the group has other tabs   -> it keeps its region, shows one
+        #   * the group has none left    -> the region goes, the split
+        #                                   above it collapses, and the
+        #                                   nearest surviving group takes
+        #                                   the keyboard.
+        # The keyboard's destination is named explicitly for the reason
+        # every other focus move in this file is (v0.38.0): a pane
+        # disappearing is not a user saying where to go next.
+        group = split_mod.group_of(pane)
+        siblings = [t for t in group.tabs() if t is not pane.tab] if group else []
+        heir: "Any" = None
+        if not siblings:
+            heir = self._closest_group_heir(group)
+        await self._close_group_tab(pane)
+        if heir is not None:
             self._focus_tab(heir)
-            self._persist_tabset()
-            return
-        await self.query_one("#session-tabs", TabbedContent).remove_pane(
-            pane.tab_id
-        )
+        else:
+            self._focus_active_tab()
+        self._persist_tabset()
+
+    def _closest_group_heir(self, closing: "PaneGroup | None") -> "Any":
+        """Which surface inherits the keyboard when a whole GROUP closes:
+        the active tab of the group nearest it on screen, measured from the
+        rectangles the user was actually looking at.
+
+        The group-level twin of :meth:`_closest_sibling`, and the same
+        rule: nearest by painted position, falling back to the first
+        remaining group when nothing has been painted yet."""
+        if closing is None:
+            return None
+        here = closing.region
+        best = None
+        best_gap = None
+        for other in self.groups():
+            if other is closing:
+                continue
+            region = other.region
+            if region.width <= 0 or region.height <= 0:
+                continue
+            gap = abs(region.x - here.x) + abs(region.y - here.y)
+            if best_gap is None or gap < best_gap:
+                best, best_gap = other, gap
+        if best is None:
+            best = next((g for g in self.groups() if g is not closing), None)
+        if best is None:
+            return None
+        return next(iter(best.surfaces()), None)
 
     def _closest_sibling(
         self, pane: "SessionPane", siblings: "list[SessionPane]"
@@ -2999,17 +3648,25 @@ class DoxaApp(App):
         return best or siblings[0]
 
     def _cyclable_tabs(self) -> "list[Any]":
-        """Every tab in the strip, VISUAL (DOM/strip) order, for
-        :meth:`_cycle_tab` -- deliberately NOT :meth:`panes` (session tabs
-        only; every engine-touching caller needs that narrower list) and
-        NOT :meth:`_restorable_tabs` (session + archived, but never a
+        """Every tab in the FOCUSED GROUP's strip, VISUAL (strip) order,
+        for :meth:`_cycle_tab` -- deliberately NOT :meth:`panes` (session
+        tabs only; every engine-touching caller needs that narrower list)
+        and NOT :meth:`_restorable_tabs` (session + archived, but never a
         subagent transcript, because the persisted set has no use for
         one). Reported live: "CTRL+ArrowLeft ... only seems to work to
         switch among active sessions ... not between read-only finished
         sessions" -- Ctrl+Left/Right must reach every tab a user can SEE,
         an archived read-only tab and an open subagent transcript
-        included, because both sit right there in the strip."""
-        return list(self.query(TabPane))
+        included, because both sit right there in the strip.
+
+        **Scoped to one group since v0.96.0, and that is the whole point of
+        the inversion.** The reported defect it fixes: *"if i switch tabs,
+        the split out sessions go with the tab. Shouldn't the split out
+        sessions be independent?"* -- Ctrl+←/→ cycles the tabs of the group
+        holding the keyboard and leaves every other group exactly as it
+        was."""
+        group = self.focused_group()
+        return group.tabs() if group is not None else []
 
     def _cycle_tab(self, delta: int) -> None:
         """Ctrl+← / Ctrl+→ -- move to the neighbouring tab, wrapping. One
@@ -3028,7 +3685,7 @@ class DoxaApp(App):
         tabs = self._cyclable_tabs()
         if len(tabs) < 2:
             return
-        tabbed = self.query_one("#session-tabs", TabbedContent)
+        tabbed = self._strip()
         ids = [t.id for t in tabs if t.id]
         try:
             index = ids.index(tabbed.active)
@@ -3101,7 +3758,7 @@ class DoxaApp(App):
         leaf = next((p for p in self.panes() if p.id == pane_id), None)
         target_id = leaf.tab_id if leaf is not None else pane_id
         with contextlib.suppress(Exception):
-            self.query_one("#session-tabs", TabbedContent).active = target_id
+            self._strip_for(target_id).active = target_id
         self._jump_tab_marker()
         if leaf is not None:
             self._focus_tab(leaf)
@@ -3304,9 +3961,7 @@ class DoxaApp(App):
         if len(self.panes()) == 1:
             await App.action_quit(self)
             return
-        await self.query_one("#session-tabs", TabbedContent).remove_pane(
-            pane.tab_id
-        )
+        await self._strip_for(pane.tab_id).remove_pane(pane.tab_id)
 
     def _cmd_run_slash(self, name: str) -> None:
         """Palette -> the ACTIVE pane's slash handler. One dispatch path for
@@ -3421,27 +4076,35 @@ class DoxaApp(App):
         because nothing is mounted yet; :data:`_FALLBACK_PANE_ID` is the
         one case that needs a name before it exists -- every restored tab
         archived, so :meth:`compose` adds one fresh pane under that fixed
-        id, purely so this method has something to call it."""
+        id, purely so this method has something to call it.
+
+        **v0.96.0: this is the id of the tab the group HOLDING the saved
+        active session will open on**, and every other group opens on its
+        own saved active tab. Each ``PaneGroup`` passes its own answer to
+        its own ``TabbedContent``, so the race above is closed once per
+        group by the same mechanism rather than once per window -- and a
+        tab id is unique across the window, so this method's contract is
+        unchanged for every caller that only ever had one group."""
         if not self._restore_tabs:
             return ""  # one pane; Tabs' own first-tab default is already right
-        # v0.91.0: a tab is named after its FIRST leaf, so a saved session
-        # that sits in the middle of a split does not name its own tab.
-        # Without this indirection ``initial=`` would name a tab that does
-        # not exist, and Textual's ContentSwitcher hangs waiting for it --
-        # measured, as a Pilot timeout before a single assertion ran.
-        owner: "dict[str, str]" = {}
-        for _tree, ids in self._restore_trees_in_order():
-            for session_id in ids:
-                owner[session_id] = ids[0]
-        if self._restore_active_id:
-            for spec in self._restore_tabs:
-                if spec.session_id == self._restore_active_id:
-                    return _restore_pane_id(
-                        owner.get(spec.session_id, spec.session_id)
-                    )
+        # A session in a group's tab list names its OWN tab (v0.96.0 --
+        # through v0.95.0 it named its tab's FIRST leaf, because a tab held
+        # a tree). The one indirection left is the diff surface, which has
+        # a tab of its own and never answers for a session.
+        tree = self._restore_group_tree()
+        if tree is not None:
+            for group in layout_mod.groups(tree):
+                for leaf in group.tabs:
+                    if leaf.is_diff:
+                        continue
+                    if (
+                        self._restore_active_id
+                        and leaf.session_id == self._restore_active_id
+                    ):
+                        return _restore_pane_id(leaf.session_id)
         for spec in self._restore_tabs:
             if not spec.archived:
-                return _restore_pane_id(owner.get(spec.session_id, spec.session_id))
+                return _restore_pane_id(spec.session_id)
         return self._FALLBACK_PANE_ID
 
     def _activate_initial_tab(self) -> None:
@@ -3470,7 +4133,7 @@ class DoxaApp(App):
         querying the mounted tree instead of :attr:`_restore_tabs` because
         panes exist now."""
         try:
-            tabbed = self.query_one("#session-tabs", TabbedContent)
+            tabbed = self._strip()
         except Exception:  # noqa: BLE001 -- no tab strip, nothing to choose
             return
         target: "Any" = None

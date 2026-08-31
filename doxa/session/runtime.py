@@ -24,7 +24,7 @@ import contextlib
 
 from textual.css.query import NoMatches
 from textual.containers import VerticalScroll
-from textual.widgets import Static, TabbedContent
+from textual.widgets import Static
 
 from .. import banner as banner_mod
 from .. import diff as diff_mod
@@ -172,7 +172,12 @@ class PaneRuntimeMixin:
 
     async def _boot(self) -> None:
         assert self.engine is not None
-        await self.engine.start()
+        if not self._adopted:
+            # An ADOPTED handle (v0.96.0: this pane inherited a live
+            # session from a pane in another group) is already started, and
+            # every engine kind reads start() as "begin" -- see
+            # SessionPane.adopt_engine for the two ways that goes wrong.
+            await self.engine.start()
         # Engine cwd wins over the pane's own (attach may cross projects);
         # GitLine's constructor runs one git subprocess -- off the loop.
         git_cwd = str(getattr(self.engine, "cwd", None) or self.cwd)
@@ -711,10 +716,15 @@ class PaneRuntimeMixin:
         not move on its own) unless something claims focus in the pane
         being switched to -- exactly what SessionPane's own boot already
         does for itself by focusing its prompt input on mount."""
-        try:
-            tabbed = self.app.query_one("#session-tabs", TabbedContent)
-        except Exception:  # noqa: BLE001 -- app mid-teardown; nothing to open
-            return
+        # THIS pane's own group's strip (v0.96.0) -- a subagent transcript
+        # belongs beside the session that spawned it, never in whichever
+        # group happens to hold the keyboard. Through v0.95.0 there was one
+        # strip and the distinction did not exist.
+        from ..ui import split as split_mod
+
+        tabbed = split_mod.tabbed_of(self)
+        if tabbed is None or not tabbed.is_mounted:
+            return  # app mid-teardown, or this pane is not in a group yet
         existing = self._transcript_tabs.get(call_id)
         if existing is not None:
             tabbed.active = existing.id or tabbed.active

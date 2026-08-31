@@ -119,6 +119,26 @@ async def _settle(pilot, turns: int = 40, step: float = 0.02) -> None:
         await pilot.pause(step)
 
 
+def _activate(app: DoxaApp, pane) -> None:
+    """Show PANE's tab, in whichever pane group holds it (v0.96.0).
+
+    Two facts this file has learned the hard way, in one helper so the
+    next refactor breaks one line rather than five:
+
+    * a pane's own ``id`` is not its tab's -- ``tab_id`` is (v0.91.0);
+    * "the tab strip" is a question about which GROUP (v0.96.0), so the
+      strip is looked up by the tab it holds rather than by an id that
+      only the first group carries.
+
+    Both were re-verified by running this script, which is the only thing
+    that regenerates the gallery and therefore the only thing that catches
+    a break in it."""
+    tab_id = pane.tab_id or ""
+    tabbed = app.tabbed_holding(tab_id)
+    if tabbed is not None and tab_id:
+        tabbed.active = tab_id
+
+
 # --------------------------------------------------------------------- #
 # Scene: hero -- the shell mid-conversation, three tabs, full status bar.
 # --------------------------------------------------------------------- #
@@ -182,7 +202,6 @@ async def _fill_hero_conversation(app: DoxaApp, pilot) -> None:
     await pilot.pause()
     await app.action_new_tab()
     await pilot.pause()
-    tabbed = app.query_one("#session-tabs")
     # `tab_id`, not `id`. Until v0.91.0 a SessionPane WAS the TabPane, so
     # its own id was the tab strip's id and this line worked. Splits made
     # a tab a `PaneTab` CONTAINING panes, and the two ids diverged --
@@ -190,8 +209,14 @@ async def _fill_hero_conversation(app: DoxaApp, pilot) -> None:
     # `ValueError: No Tab with id '--content-tab-pane-1'` before saving
     # anything. Nobody noticed for three releases because nothing
     # regenerates this gallery except running it, and it was last run at
-    # 0.87.0. Measured here, in the run that produced 0.94.0's assets.
-    tabbed.active = app.panes()[0].tab_id or tabbed.active
+    # 0.87.0. Measured at 0.94.0, in the run that produced its assets.
+    #
+    # And `tabbed_holding`, not `query_one("#session-tabs")`: v0.96.0 gave
+    # every pane GROUP a strip of its own, so "the strip" is a question
+    # about which group. Re-checked at 0.96.0 for exactly the reason above
+    # -- this file drives real panes and that refactor moved what a tab is
+    # again.
+    _activate(app, app.panes()[0])
     await pilot.pause()
     app.query_one("#prompt-input").value = "what do we believe about deploys here?"
     await pilot.press("enter")
@@ -337,8 +362,7 @@ async def _drive_subagent_tracker(app: DoxaApp, pilot) -> None:
     # transcript tab (proving it exists, titled from the subagent's own
     # label), while the visible pane is the one carrying the second
     # status row this shot is really about.
-    tabbed = app.query_one("#session-tabs", TabbedContent)
-    tabbed.active = pane.tab_id or tabbed.active
+    _activate(app, pane)
     await pilot.pause()
 
 
@@ -479,8 +503,7 @@ async def _drive_banner(app: DoxaApp, pilot) -> None:
     await pilot.pause()
     await app.action_new_tab()
     await pilot.pause()
-    tabbed = app.query_one("#session-tabs")
-    tabbed.active = app.panes()[0].tab_id or tabbed.active
+    _activate(app, app.panes()[0])
     await pilot.pause()
 
 
@@ -491,8 +514,7 @@ async def _drive_banner_degraded(app: DoxaApp, pilot) -> None:
     await pilot.pause()
     await app.action_new_tab()
     await pilot.pause()
-    tabbed = app.query_one("#session-tabs")
-    tabbed.active = app.panes()[0].tab_id or tabbed.active
+    _activate(app, app.panes()[0])
     await pilot.pause()
 
 
@@ -1051,8 +1073,7 @@ async def _drive_folder_chip(app: DoxaApp, pilot) -> None:
     await pilot.pause()
     await app.action_new_tab()
     await pilot.pause()
-    tabbed = app.query_one("#session-tabs", TabbedContent)
-    tabbed.active = app.panes()[0].tab_id or tabbed.active
+    _activate(app, app.panes()[0])
     await pilot.pause()
     pane = app.active_pane
     assert pane is not None

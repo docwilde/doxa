@@ -643,24 +643,29 @@ class DiffPane(Vertical):
         widget reference is the defect class ``focused_pane``'s docstring
         already names -- a second answer to a question the DOM answers.
 
-        Searched from the enclosing TAB, never from ``self.app``.
-        ``Widget.app`` reads a context variable, so it is only reliable
-        while the app's own message pump is on the stack -- and this runs
-        from workers and, in the suite, straight from a test coroutine,
-        where that variable can still name the PREVIOUS app. Measured:
-        it made two tests pass alone and fail in file order, which is the
-        worst way for a lookup to be wrong. Walking the DOM is also the
-        more correct search -- the owner-first invariant puts a diff leaf
-        in the same tab as the session it was opened from, so that tab is
-        the whole search space by construction."""
+        Searched from the SCREEN up this widget's own parent chain, never
+        from ``self.app``. ``Widget.app`` reads a context variable, so it
+        is only reliable while the app's own message pump is on the stack
+        -- and this runs from workers and, in the suite, straight from a
+        test coroutine, where that variable can still name the PREVIOUS
+        app. Measured: it made two tests pass alone and fail in file
+        order, which is the worst way for a lookup to be wrong.
+
+        **v0.96.0 widened the search space, and had to.** Through v0.95.0
+        the owner-first invariant put a diff leaf in the same TAB as the
+        session it was opened from, so that tab was the whole search space
+        by construction. A diff is now a tab of its own GROUP beside that
+        session's group, so the tab no longer contains both -- the walk
+        goes up to the outermost node on this widget's chain (the screen)
+        and searches from there. Still a DOM walk from ``self``, so the
+        context-variable hazard above is untouched; only the ROOT of the
+        walk moved."""
         from ..session.pane import SessionPane
 
         node: Any = self.parent
         root: Any = None
         while node is not None:
             root = node
-            if hasattr(node, "root_box") and hasattr(node, "leaves"):
-                break  # the PaneTab
             node = node.parent
         if root is None:
             return None

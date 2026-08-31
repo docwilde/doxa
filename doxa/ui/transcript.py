@@ -28,7 +28,7 @@ from typing import Any, Callable  # noqa: F401 -- annotation-only, see below
 from textual import events
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
-from textual.widgets import Collapsible, Markdown, Static, TabbedContent, TabPane
+from textual.widgets import Collapsible, Markdown, Static, TabPane
 from textual.widgets.markdown import MarkdownStream
 
 from .. import images as images_mod
@@ -1436,8 +1436,14 @@ class SubagentTranscriptTab(TabPane):
         self.done = True
         self._set_title(f"{self.base_label} ✓")
         with contextlib.suppress(Exception):
-            tabbed = self.app.query_one("#session-tabs", TabbedContent)
-            if tabbed.active != (self.id or ""):
+            # This tab's OWN strip (v0.96.0): "am I the active tab" is a
+            # question about the group I am in, and reading the focused
+            # group's strip instead would mark a foreground tab unseen
+            # whenever the keyboard was in some other group.
+            from .split import tabbed_of
+
+            tabbed = tabbed_of(self)
+            if tabbed is not None and tabbed.active != (self.id or ""):
                 self._set_tab_class("-done-unseen", True)
 
     def _set_tab_class(self, class_name: str, value: bool) -> None:
@@ -1546,3 +1552,21 @@ class ArchivedSessionTab(TabPane):
         open, and dropping it here would mean a session survived one
         restart and vanished on the next."""
         return tabsets_mod.TabRecord(self.session_id, self.custom_name, self.cwd)
+
+    def layout_leaf(self) -> "Any":
+        """What this tab contributes to the WINDOW's layout tree (v0.96.0)
+        -- the same record :meth:`as_record` gives the flat list, in the
+        tree's own vocabulary.
+
+        Without this an archived tab would be in the flat list and in no
+        group, and ``doxa.tabsets._fill_group`` would put it back at the end
+        of the first group's strip -- so an archive the user had parked in
+        the right-hand group would migrate leftwards every restart. A tab is
+        a tab; which kind it is has never been the tree's business."""
+        from .. import layout as layout_mod
+
+        return layout_mod.Leaf(
+            session_id=self.session_id,
+            pinned_name=self.custom_name,
+            cwd=self.cwd,
+        )

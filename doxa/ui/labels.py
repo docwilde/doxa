@@ -209,6 +209,24 @@ def ellipsize(text: str, limit: int = TAB_LABEL_MAX) -> str:
 # does a little more -- it also prepends the provider glyph and keeps
 # self._title in sync) but _set_tab_class calls straight through to
 # _write_tab_class below, and SubagentTranscriptTab uses both directly.
+def _strip_holding(app: Any, tab_id: str) -> "Any":
+    """The tab strip that holds this tab, of the N a window now has.
+
+    v0.96.0: through v0.95.0 there was exactly one strip and
+    ``query_one("#session-tabs")`` was the right way to name it. Every pane
+    GROUP owns one now, so "the strip" is always a question about which
+    group -- and a status write aimed at a background group's tab must land
+    there and not on the foreground one's."""
+    finder = getattr(app, "tabbed_holding", None)
+    if callable(finder):
+        return finder(tab_id)
+    # A harness that mounted these widgets without a DoxaApp around them.
+    # One strip, the old shape, and the old answer.
+    with contextlib.suppress(Exception):
+        return app.query_one(TabbedContent)
+    return None
+
+
 def _write_tab_label(app: Any, tab_id: str, text: str) -> None:
     """Write `text` straight onto one Tab's label -- no provider glyph.
     SessionPane.set_tab_label prepends one deliberately (every SESSION is
@@ -216,19 +234,17 @@ def _write_tab_label(app: Any, tab_id: str, text: str) -> None:
     never goes through that path at all -- this is its own, glyph-free,
     door onto the same tab strip."""
     with contextlib.suppress(Exception):
-        tabbed = app.query_one("#session-tabs", TabbedContent)
-        tabbed.get_tab(tab_id).label = text
+        _strip_holding(app, tab_id).get_tab(tab_id).label = text
 
 
 def _write_tab_class(app: Any, tab_id: str, class_name: str, value: bool) -> None:
-    """Toggle one status class on one #session-tabs Tab header. Shared by
+    """Toggle one status class on one group's Tab header. Shared by
     SessionPane (-working/-done-unseen/-attention) and
     SubagentTranscriptTab (-done-unseen only) -- same contextlib.suppress
     discipline either caller needs: the tab may not exist yet this early,
     or may already be mid-teardown."""
     with contextlib.suppress(Exception):
-        tabbed = app.query_one("#session-tabs", TabbedContent)
-        tabbed.get_tab(tab_id).set_class(value, class_name)
+        _strip_holding(app, tab_id).get_tab(tab_id).set_class(value, class_name)
 
 
 # Context-pressure escalation. The README calls this out as "a containment

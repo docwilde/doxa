@@ -332,7 +332,11 @@ async def _drive_tab_lifecycle(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> 
     second.query_one("#prompt-input", PromptInput).value = "any updates on the deploy gate?"
     await pilot.press("enter")
     assert await _wait_until(pilot, lambda: second.turn_in_flight)
-    tabbed = app.query_one("#session-tabs", TabbedContent)
+    # `tabbed_holding`, not `query_one("#session-tabs")`: v0.96.0 gave
+    # every pane GROUP a tab strip of its own, so "the strip" is a question
+    # about which group. This scene has one group, but naming it by the tab
+    # it holds is what keeps the next split-shaped scene honest.
+    tabbed = app.tabbed_holding(second.tab_id)
     tab_second = tabbed.get_tab(second.tab_id)
     assert await _wait_until(pilot, lambda: tab_second.has_class("-working"))
     rec.snap(700, "tab 2 starts a turn: amber -working (active)")
@@ -526,13 +530,13 @@ async def _drive_rename(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
     await app.action_new_tab()
     await pilot.pause()
     pane = app.panes()[1]
-    tabbed_early = app.query_one("#session-tabs", TabbedContent)
+    tabbed_early = app.tabbed_holding(pane.tab_id)
     tabbed_early.active = pane.tab_id or tabbed_early.active
     await pilot.pause()
     await _mount_filler_exchange(app, pilot)
     rec.snap(900, "three tabs, before rename")
 
-    tabbed = app.query_one("#session-tabs", TabbedContent)
+    tabbed = app.tabbed_holding(pane.tab_id)
     tab = tabbed.get_tab(pane.tab_id)
     # A REAL double-click, same event-chain path a mouse would take (see
     # doxa.app.DoxaApp._on_click_maybe_rename, event.chain == 2) --

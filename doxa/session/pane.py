@@ -27,7 +27,7 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.css.query import NoMatches
-from textual.widgets import OptionList, TabbedContent, TextArea
+from textual.widgets import OptionList, TextArea
 
 from .. import commands as commands_mod
 from .. import layout as layout_mod
@@ -168,6 +168,11 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         # that method's `require_backlog_skip` argument for the one thing
         # a resume does differently from a reattach.
         self._resume_from: "str | None" = None
+        # v0.96.0 (moving a tab between pane groups): this pane's engine
+        # handle came from ANOTHER pane that released it, so the session
+        # behind it is already started and ``_boot`` must not start it
+        # again. See :meth:`adopt_engine`.
+        self._adopted = False
         # NOTE (v0.38.0): a pane does NOT decide its own focus. It used to
         # -- on_mount focused this pane's prompt, guarded by a
         # _focus_on_mount flag -- and because focusing a widget inside a
@@ -367,6 +372,44 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
             with contextlib.suppress(Exception):
                 await engine.finalize()
 
+    # -- moving a session between panes (v0.96.0) --------------------
+    #
+    # A pane is a VIEW of a session; the session lives in the daemon. That
+    # has been true since v0.17 and cost nothing until pane groups, when
+    # moving a tab between groups made it load-bearing: Textual 5.3 cannot
+    # re-parent a mounted widget (``mount`` of a mounted widget is a silent
+    # no-op that ORPHANS it -- measured in v0.91.0), so a tab that moves
+    # must be RE-CREATED at the destination and torn down at the source,
+    # and the session must not notice.
+    #
+    # These two methods are the whole seam, and they are deliberately not
+    # ``switch_engine``: that one FINALIZES the outgoing engine, which is
+    # exactly what must not happen here.
+
+    def release_engine(self) -> "Any":
+        """Hand this pane's live engine handle away, without finalizing it.
+
+        The pane keeps its widgets and its scrollback and stops driving
+        anything; the handle is the caller's to re-seat. ``detach()`` and
+        ``stop()`` both check ``self.engine`` first, so a released pane
+        torn down afterwards ends nothing -- which is the entire point."""
+        engine, self.engine = self.engine, None
+        return engine
+
+    def adopt_engine(self, engine: "Any", session_id: str) -> None:
+        """Take over a handle another pane released.
+
+        ``_adopted`` is what tells :meth:`_boot` not to call ``start()`` on
+        it: this session is already started, and every engine kind reads
+        that call as "begin" -- an ``EngineClient`` would open a second
+        socket connection, an in-process ``SessionEngine`` would spawn a
+        second CLI on a live conversation. Two writers on one transcript is
+        the exact failure ``resume_session`` refuses by name, and it must
+        not arrive through the back door of a tab move."""
+        self.engine = engine
+        self._session_id = session_id
+        self._adopted = True
+
     async def _restore_transcript(
         self, session_id: str, cwd: str, *, require_backlog_skip: bool = True,
     ) -> None:
@@ -564,8 +607,12 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
                 return
             tab._title = self.render_str(displayed)
         with contextlib.suppress(Exception):
-            tabbed = self.app.query_one("#session-tabs", TabbedContent)
-            tabbed.get_tab(self.tab_id).label = displayed
+            # The strip that HOLDS this tab, not "the" strip: since
+            # v0.96.0 each pane group owns one (doxa/ui/split.py), so a
+            # label written by a background group's pane must land there.
+            self.app.tabbed_holding(self.tab_id).get_tab(
+                self.tab_id
+            ).label = displayed
 
     def _set_tab_class(self, class_name: str, value: bool) -> None:
         """Toggle one status class (``-working`` / ``-done-unseen`` /
