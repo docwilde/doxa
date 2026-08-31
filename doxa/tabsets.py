@@ -57,6 +57,47 @@ survives BOTH ways:
   The absence of the key IS the migration; there is no version field and
   no upgrade step.
 
+**The third format, and the last one** (v0.96.0): ``groups``. The window
+holds ONE tree now, its leaves are :class:`doxa.layout.Group` nodes, and
+that tree rides in ``layout["groups"]`` beside the other two keys on
+exactly the principle the slot was reserved with. Every rule above holds
+unchanged -- ``kind`` stays ``"tabs"``, the flat top-level ``tabs`` list
+stays authoritative and complete, and the absence of the key is again the
+whole migration. :func:`_layout_groups` is the reader, and it answers for
+all three eras:
+
+* ``groups`` present -- v0.96.0 and later. That tree, as written.
+* ``trees`` but no ``groups`` -- v0.91.0 to v0.95.0. Each saved tree's
+  leaves read as **one single-tab group per leaf**
+  (:func:`doxa.layout.groupify`), which is not a guess: a leaf held
+  exactly one session in those releases, so it is the same statement in
+  the new vocabulary.
+* neither -- v0.23.0 to v0.90.0. The saved tabs were tabs.
+
+The COMPOSITION rule the spec left open (how N per-tab trees become the
+window's ONE tree) is answered here, and it is answered by asking what
+was on the user's screen: the window tree is the tree of the tab that was
+ACTIVE, because that is the arrangement the user was looking at when the
+record was written, and every OTHER saved tab becomes a TAB of the group
+that holds it -- in saved order, so nothing is lost and nothing moves.
+A pre-v0.91.0 record therefore restores as ONE group holding N tabs,
+which is exactly what N tabs were.
+
+The literal alternative -- a group per saved tab -- was rejected after
+measuring it: five saved tabs would restore as a five-way split, each
+region 16 columns on a standard 80-column terminal, below
+:data:`doxa.layout.MIN_LEAF_WIDTH` (34) and therefore below the width at
+which DOXA's own :func:`doxa.layout.split_refusal` will create a split at
+all. A restore that produces an arrangement the app refuses to produce
+interactively is not a migration, it is a defect with a rationale.
+
+**Writing back**: ``trees`` is still written, derived from the group tree
+by taking each group's ACTIVE tab as that region's leaf
+(:func:`_trees_from_groups`). A v0.91.0-v0.95.0 DOXA reading a v0.96.0
+record therefore gets the geometry it can express, and picks the
+remaining tabs up from the flat list as ordinary tabs -- the same honest
+degradation the flat list has provided since v0.23.0, one format on.
+
 **Restore is a cross-check, not a replay**: :func:`resolve` reads the
 saved record, then filters it against the LIVE daemon registry
 (``doxa.peers.list_daemons``) for the same scope. A saved session id with
@@ -117,6 +158,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from . import config as config_mod
 from . import layout as layout_mod
@@ -177,6 +219,12 @@ class TabSetRecord:
     #: restore old flat records as single-leaf trees", implemented once,
     #: here, so no caller has to know which kind of record it got.
     trees: "tuple" = ()
+    #: The WINDOW's one layout tree, leaves holding
+    #: :class:`doxa.layout.Group` (v0.96.0). Never ``None`` on a record
+    #: this version reads: :func:`_layout_groups` derives one for all
+    #: three eras, so no caller has to know which kind of record it got --
+    #: the same promise ``trees`` makes one format down.
+    groups: "Any" = None
 
 
 @dataclass(frozen=True)
@@ -202,9 +250,13 @@ class ResolvedRestore:
     #: order and UNPRUNED -- which sessions survived is the caller's
     #: cross-check, already answered by ``tabs``/``archived``/``skipped``
     #: above, and pruning here would mean answering it twice. doxa.app's
-    #: ``_restore_trees_in_order`` does the pruning against the specs it
+    #: ``_restore_group_tree`` does the pruning against the specs it
     #: actually built.
     trees: "tuple" = ()
+    #: The saved WINDOW tree (v0.96.0), UNPRUNED for the same reason
+    #: ``trees`` is: which sessions survived is already answered above, and
+    #: pruning here would mean answering it twice.
+    groups: "Any" = None
 
     def ordered(self) -> "list[tuple[TabRecord, peers_mod.PeerInfo | None]]":
         """Every surviving tab in SAVED ORDER, live and archived
@@ -242,11 +294,50 @@ def _file_for(scope_key: str) -> Path:
     return tabsets_dir() / f"{digest}.json"
 
 
+def _trees_from_groups(groups: "Any") -> "list":
+    """The v0.91.0 ``trees`` shape for a v0.96.0 window tree: one tree per
+    GROUP, in layout order, each region's leaf being that group's ACTIVE
+    tab.
+
+    This is what an older DOXA sees, and it is the most of this record's
+    truth that shape can hold: v0.91.0-v0.95.0 leaves carry one session,
+    so a group of three can only offer the one it is showing. The other
+    two are not lost -- they are in the flat ``tabs`` list, which every
+    reader since v0.23.0 consults first, and an older DOXA restores them
+    as ordinary tabs beside the geometry.
+
+    An empty group contributes nothing rather than an empty tree; if that
+    empties a split, :func:`doxa.layout.from_json` collapses it on the way
+    back in, which is the same rule :func:`doxa.layout.prune` applies."""
+    if groups is None:
+        return []
+
+    def convert(node: "Any") -> "Any":
+        if isinstance(node, layout_mod.Split):
+            kids: "list" = []
+            weights: "list[float]" = []
+            for child, weight in zip(node.children, node.weights):
+                converted = convert(child)
+                if converted is not None:
+                    kids.append(converted)
+                    weights.append(weight)
+            if not kids:
+                return None
+            if len(kids) == 1:
+                return kids[0]
+            return layout_mod.Split(node.orientation, tuple(kids), tuple(weights))
+        return layout_mod.as_group(node).active_tab
+
+    converted = convert(groups)
+    return [converted] if converted is not None else []
+
+
 def save(
     scope_key: str,
     tabs: "list[TabRecord]",
     active_session_id: "str | None",
     trees: "list | None" = None,
+    groups: "Any" = None,
 ) -> None:
     """Atomic write (tmp + ``os.replace``), 0600. Never raises: a
     persistence failure costs the user a future restore, never the
@@ -261,6 +352,11 @@ def save(
         if t.session_id
     ]
     layout: dict = {"kind": "tabs", "tabs": rows}
+    if trees is None and groups is not None:
+        # The caller gave the window tree and nothing else, which is what
+        # doxa.app does: the older shape is DERIVED rather than tracked
+        # separately, so the two halves of the record cannot drift.
+        trees = _trees_from_groups(groups)
     if trees:
         # v0.91.0: one layout tree per TAB, in tab order -- the split
         # structure the flat list above cannot express. It rides INSIDE
@@ -273,6 +369,12 @@ def save(
         # v0.32.0-v0.88.0 as "nothing this version can lay out", which is
         # honest but costs the user every tab they had.
         layout["trees"] = [layout_mod.to_json(tree) for tree in trees]
+    if groups is not None:
+        # v0.96.0: the window's ONE tree, leaves holding groups. Same slot,
+        # same principle, same compatibility story as ``trees`` above -- and
+        # for the third time, the absence of this key on the next reader
+        # that does not understand it is the whole of the migration.
+        layout["groups"] = layout_mod.to_json(groups)
     payload = {
         "scope_key": scope_key,
         "active_session_id": active_session_id or None,
@@ -347,6 +449,157 @@ def _layout_trees(data: dict, tabs: "list[TabRecord]") -> "tuple":
     )
 
 
+def _layout_groups(
+    data: dict,
+    tabs: "list[TabRecord]",
+    trees: "tuple",
+    active_session_id: "str | None",
+) -> "Any":
+    """The WINDOW's layout tree, for a record from ANY of the three eras.
+
+    See the module docstring for the rules and for why the composition
+    rule is what it is. Returns a tree whose leaves are
+    :class:`doxa.layout.Group` -- never ``None``, because the flat ``tabs``
+    list is guaranteed non-empty by the time :func:`load` calls this, and
+    "there is a record but no layout" is not a state any caller should have
+    to handle.
+
+    Every path ends in :func:`_fill_group`, which is what guarantees the
+    invariant the two halves of the record depend on: **every session in
+    the flat list is in exactly one group.** A saved tree that named only
+    some of them (the ordinary case for eras 2 and 3) leaves the rest to be
+    appended as tabs; a hand-edited tree that named one twice has the
+    duplicate dropped."""
+    layout = data.get("layout")
+    raw = layout.get("groups") if isinstance(layout, dict) else None
+    tree = layout_mod.from_json(raw) if isinstance(raw, dict) else None
+    if tree is not None:
+        return _fill_group(layout_mod.groupify(tree), tabs, active_session_id)
+    # Era 2: one tree per TAB. The window tree is the ACTIVE tab's, so the
+    # arrangement on screen survives; the rest become tabs of the group
+    # that holds it.
+    #
+    # Read off the RAW record, never off the ``trees`` argument:
+    # :func:`_layout_trees` already fell back to one single-leaf tree per
+    # saved tab for a record that has no ``trees`` key at all, so that
+    # argument is never empty and could not tell era 2 from era 1. Getting
+    # this backwards put a pre-v0.91.0 record's ACTIVE tab first in its own
+    # group's strip and every other tab after it -- a silent reorder of the
+    # user's tab bar on the one path that has no geometry to justify it.
+    saved_trees = layout.get("trees") if isinstance(layout, dict) else None
+    if isinstance(saved_trees, list) and trees:
+        chosen = trees[0]
+        if active_session_id:
+            for candidate in trees:
+                ids = {leaf.session_id for leaf in layout_mod.leaves(candidate)}
+                if active_session_id in ids:
+                    chosen = candidate
+                    break
+        return _fill_group(layout_mod.groupify(chosen), tabs, active_session_id)
+    # Era 3: no trees at all. N tabs were N tabs, one at a time, in one
+    # region -- so one group holding all of them says exactly that.
+    return _fill_group(None, tabs, active_session_id)
+
+
+def _fill_group(
+    tree: "Any",
+    tabs: "list[TabRecord]",
+    active_session_id: "str | None" = None,
+) -> "Any":
+    """Make every saved tab reachable from ``tree``, and every group's tab
+    list free of duplicates.
+
+    Sessions the tree already places keep their place. Sessions it does not
+    are appended, in saved order, as tabs of the FIRST group -- first
+    because reading order starts there and a tab has to land somewhere the
+    user will look. A ``None`` tree means there is no geometry to preserve
+    at all, so everything lands in one group.
+
+    ``active_session_id`` is the saved active tab, and the group that ends
+    up holding it is pointed AT it. That is load-bearing rather than tidy:
+    the saved active session is the one thing about a restore a user
+    notices immediately, and for an era-3 record (no geometry at all) the
+    group's own ``active`` index is the ONLY place that fact can live --
+    there is no tree to have carried it."""
+    placed: "set[str]" = set()
+
+    def rebuild(node: "Any") -> "Any":
+        if isinstance(node, layout_mod.Split):
+            kids = [rebuild(child) for child in node.children]
+            kept: "list" = []
+            weights: "list[float]" = []
+            for child, weight in zip(kids, node.weights):
+                if child is not None:
+                    kept.append(child)
+                    weights.append(weight)
+            if not kept:
+                return None
+            if len(kept) == 1:
+                return kept[0]
+            return layout_mod.Split(node.orientation, tuple(kept), tuple(weights))
+        group = layout_mod.as_group(node)
+        kept_tabs: "list[layout_mod.Leaf]" = []
+        active = 0
+        was_active = group.active_tab
+        for leaf in group.tabs:
+            if leaf.session_id in placed:
+                continue
+            placed.add(leaf.session_id)
+            if leaf is was_active:
+                active = len(kept_tabs)
+            kept_tabs.append(leaf)
+        if not kept_tabs:
+            return None
+        return layout_mod.Group(tuple(kept_tabs), active)
+
+    rebuilt = rebuild(tree) if tree is not None else None
+    extra = [
+        layout_mod.Leaf(
+            session_id=tab.session_id,
+            pinned_name=tab.pinned_name,
+            cwd=tab.cwd,
+        )
+        for tab in tabs
+        if tab.session_id not in placed
+    ]
+    if rebuilt is None:
+        rebuilt = layout_mod.Group(tuple(extra), 0) if extra else None
+    elif extra:
+        def graft(node: "Any") -> "Any":
+            if isinstance(node, layout_mod.Split):
+                kids = list(node.children)
+                kids[0] = graft(kids[0])
+                return layout_mod.Split(
+                    node.orientation, tuple(kids), node.weights
+                )
+            group = layout_mod.as_group(node)
+            return layout_mod.Group(group.tabs + tuple(extra), group.active)
+
+        rebuilt = graft(rebuilt)
+    return _point_at(rebuilt, active_session_id)
+
+
+def _point_at(tree: "Any", session_id: "str | None") -> "Any":
+    """The tree with whichever group holds ``session_id`` showing it.
+
+    Every OTHER group keeps the active tab the record gave it: a restore
+    that reset four regions to their first tab because the user's keyboard
+    had been in the fifth would lose four facts to record one."""
+    if tree is None or not session_id:
+        return tree
+    if isinstance(tree, layout_mod.Split):
+        return layout_mod.Split(
+            tree.orientation,
+            tuple(_point_at(child, session_id) for child in tree.children),
+            tree.weights,
+        )
+    group = layout_mod.as_group(tree)
+    for index, leaf in enumerate(group.tabs):
+        if leaf.session_id == session_id:
+            return layout_mod.Group(group.tabs, index)
+    return group
+
+
 def load(scope_key: str) -> "TabSetRecord | None":
     """The saved set for this scope, or ``None`` -- a missing file, a
     corrupt one, or one that resolves to zero usable tabs all read as
@@ -387,11 +640,14 @@ def load(scope_key: str) -> "TabSetRecord | None":
     if not tabs:
         return None
     active = data.get("active_session_id")
+    active_id = str(active) if active else None
+    trees = _layout_trees(data, tabs)
     return TabSetRecord(
         scope_key=str(data.get("scope_key") or scope_key),
         tabs=tuple(tabs),
-        active_session_id=str(active) if active else None,
-        trees=_layout_trees(data, tabs),
+        active_session_id=active_id,
+        trees=trees,
+        groups=_layout_groups(data, tabs, trees, active_id),
     )
 
 
@@ -440,6 +696,7 @@ def resolve(scope_key: str) -> "ResolvedRestore | None":
     return ResolvedRestore(
         tabs=live, skipped=skipped, active_session_id=active,
         archived=archived, entries=entries, trees=record.trees,
+        groups=record.groups,
     )
 
 
