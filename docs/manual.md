@@ -689,6 +689,13 @@ Alt, as an ESC prefix, and `textual/_xterm_parser.py` has no path that
 turns an ESC prefix back into Alt. `alt+<arrow>` and `alt+<F-key>` use
 the `CSI 1;3<final>` encoding instead and stay reachable.
 
+On a terminal measured legacy, the opening block also carries a one-line
+notice naming the affected bindings and the slash command that reaches
+each one instead (e.g. `Ctrl+,` → `/settings`) — past a handful it names
+the count and points at `/doctor` rather than the whole list. It says
+nothing on a kitty-protocol terminal or one never measured, and
+`key_notice` (default on) turns it off entirely.
+
 ## Commands
 
 Every command below is defined once in `doxa/commands.py` and reaches the
@@ -780,6 +787,7 @@ environment is winning is read-only in the modal.
 | `ctx_absolute` | `DOXA_CTX_ABSOLUTE` | off | print `24k/200k` beside the `ctx%` chip (below 100 columns it drops again) |
 | `image_mode` | `DOXA_IMAGE_MODE` | probe | force a rung of the image ladder (`kgp`/`sixel`/`halfblock`/`text`) |
 | `boot_banner` | `DOXA_BOOT_BANNER` | on | draw the DOXA mark above the opening identity block |
+| `key_notice` | `DOXA_KEY_NOTICE` | on | one-line startup notice naming any bound keys this terminal can't deliver and the slash command that reaches them instead; silent on a kitty-protocol terminal or one whose protocol was never measured |
 | `context_grid` | `DOXA_CONTEXT_GRID` | `glyphs` | cell style for `/context`'s grid: `glyphs` (⛀⛁⛶) or `ascii` (`[#]`/`[ ]`) for a font that tofu's them |
 | *keyboard override* | `DOXA_KEYBOARD_PROTOCOL` | probe | `kitty`/`legacy`/`unknown`, for a terminal that lies about it; env-only |
 | `show_reasoning` | `DOXA_SHOW_REASONING` | on | stream the model's summarized reasoning into a collapsed fold |
