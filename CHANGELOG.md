@@ -4,6 +4,139 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.94.0 — 2026-08-31
+
+**The gallery has not been able to render since v0.91.0, and nobody
+knew.** Every scene in `scripts/screenshot.py` raised
+`ValueError: No Tab with id '--content-tab-pane-1'` before it wrote a
+single file.
+
+- **`scripts/screenshot.py`, `scripts/record_gif.py`** set
+  `TabbedContent.active` to a `SessionPane`'s own `id`. Correct until
+  v0.91.0, when a pane stopped BEING the tab and became a leaf inside a
+  `PaneTab` — after which the pane id and the tab id are different
+  strings and the tab strip rejects the first. `pane.tab_id` is the
+  property that answers the question the code was asking; six
+  `TabbedContent.active` assignments across the two scripts, plus two
+  `get_tab()` calls carrying the same assumption.
+- Nothing regenerates this gallery except running it, and it was last
+  run at 0.87.0 — so the break rode `main` through three releases
+  unseen. This is the argument for regenerating assets every release
+  rather than when they look wrong: a still cannot look wrong if it was
+  never written.
+
+**Three surfaces that shipped without a picture now have one.**
+
+| asset | scene | shows |
+|---|---|---|
+| `live-diff.png` / `.svg` | **new** | session left, diff right, in one tab: `2 files changed, +9 −1 against main`, `doxa/auth.py` expanded to two side-by-side hunks (the second changed file sits one row below the fold, behind the scrollbar — the expanded section is 66 rows in a 67-row pane), the amber `⏳ reject queued — applies when this turn ends` badge over a disabled reject button, and the session's own turn still in flight |
+| `split-panes.png` / `.svg` | **new** | one tab split down the middle: two identity blocks, two models, two transcripts, two status bars |
+| `split-panes.gif` | **new** | `alt+d` and a pane arriving; a turn in it; `ctrl+shift+←` back; `alt+→` on the divider. 5 frames, 602 KiB |
+| `folder-chip.png` / `.svg` | **new** | `dir design-notes` leading the status bar with no branch half, over `/dir`'s answer and a bare `/cd` explaining why a running session cannot move |
+| 13 existing stills | recaptured | at `DOXA 0.94.0`; they read `0.87.0` before this pass, not `0.93.0` |
+| 12 existing GIFs | recaptured | same |
+
+- `live-diff` and `folder-chip` are the first scenes in this gallery
+  rooted **outside this checkout** (new `Scene.cwd_factory`), and neither
+  could be faked: `doxa.diff.compute` shells out to real `git diff`, so
+  those hunks are hunks git produced; and the folder chip only exists
+  where there is no `.git` above the session, which this repository can
+  never be. Both build under the script's own throwaway temp root, the
+  same isolation block that closed the `205 proposals` / `78 proposals`
+  leak in v0.67.0.
+- The pending badge is reached through a turn that genuinely never ends
+  (`_DiffEngine` holds the second `send()` open), not by assigning
+  `pane.turn_in_flight` — a picture of the feature rather than a picture
+  of a flag.
+- `belief_count` is still hardcoded to 3 in `tests/fakes.py`; the
+  `beliefs-picker` scene keeps overriding it on the INSTANCE, because a
+  screenshot may not move a number several hundred tests are written
+  against.
+- Geometry unchanged and re-verified: 16 SVGs at 3049x1682.6, 16 PNGs and
+  13 GIFs at **3068x1734**, every file non-empty, every SVG parsing as
+  XML.
+
+**"What you get" was eleven paragraphs wearing a hyphen.**
+
+- **3,717 → 1,884 characters.** Eleven bullets averaging 338 (longest
+  563) became thirteen averaging 145, longest 153. Every bold lead-in
+  kept — that half was working.
+- Split panes and the live diff get lead-ins of their own; `/cd`, `/dir`
+  and the folder chip fold into the status-bar bullet, where the chip
+  actually lives.
+- Three claims were **wrong**, not merely long, and are corrected rather
+  than compressed:
+  - *"one write path — a human approving a staged proposal"*. The MODEL
+    has one (`lore_remember`, which only stages). A human has three more
+    from inside DOXA that are not approvals: `retract_belief`,
+    `record_belief_outcome`, `reject_pending`. The claim that survives is
+    that nothing NEW reaches the model but a human approving one staged
+    row.
+  - *"the `mode:` chip ALWAYS shows it first"*. A `default` chip stands
+    down below `MODE_CHIP_MIN_COLS` (110). Every non-default mode is
+    painted at every width, which is the claim worth making.
+  - *"`auto` and `bypassPermissions`"* as the complete list of modes that
+    stop asking. `UNASKED_MODES` is three; `dontAsk` is the third. The
+    `permission-mode.gif` caption carried the same two errors and is
+    fixed with it.
+- And one section-level claim: `docs/plans/live-diff.md` was still listed
+  under **"Specified, but not built"** with *"Nothing implemented"*
+  against it, two releases after v0.92.0 shipped it. Removed, with
+  `split-panes.md` named beside it as the other plan that graduated. That
+  section's own lead sentence said "Four documents" over eight bullets;
+  it says Eight now.
+
+**Nothing was deleted — `docs/manual.md` absorbed it, and mostly already
+held it.** Checked before moving: eight of the eleven bullets were
+already covered there in more depth than the README had them. Four
+sections are new, because those were the four the manual genuinely
+lacked:
+
+- **The spawned CLI** — `CLAUDE_CONFIG_DIR` isolation appeared nowhere in
+  the manual (grep-confirmed), and `/plugins` had a one-line command row
+  with no prose.
+- **The transcript** — there was no transcript-rendering section at all:
+  no markdown streaming, no `✻ Reasoning (N chars)`, no `⚒ Tool calls
+  (N)`, no chip-expands-to-`ARGS`-and-`RESULT`, no in-flight marker.
+- **Split panes** — one paragraph existed about RESTORING a split layout
+  and nothing about making one; `alt+s`/`alt+d`, the focus and divider
+  keys, the depth cap and the 34x9 size floor were undocumented.
+- **Where a session is** — `/dir`, `/cd` and the folder chip predated the
+  manual entirely.
+
+Plus: the folder chip joins the status-bar chip table; `/split`,
+`/vsplit`, `/diff`, `/dir` and `/cd` join the command tables, none of
+which had a row; and the Contents list gains the new sections along with
+**The live diff** and **Restoring tabs**, which were reachable by anchor
+and absent from the manual's own index.
+
+**Three README alt texts described something the image does not show.**
+
+- `context.png` — the alt named a `61k/180k tokens (33.8%)` headline. The
+  block renders `in use 60,910 / 180,000 tokens · 33.8%`; that string was
+  never on screen.
+- `subagent-tracker.png` — the alt read the status ROW as saying
+  `1 agent`. `⧉ 1 agent` is the status BAR's chip; the row beneath it
+  carries the subagent's own description.
+- `hero.png` — `Tool calls (1)` is `⚒ Tool calls (1)`, and the alt's chip
+  inventory skipped the `sub:` tier chip sitting in the middle of the row
+  it was listing.
+- `beliefs-picker.png` — the group headers carry counts
+  (`project (5 beliefs, 3 tested)`), and the user group is
+  `user · stated`; both now named.
+
+**Ten scenes were being generated and referenced by nothing.**
+`trace.png`, `reasoning.gif`, `sessions.png`, `clock.png`,
+`palette.gif`, `rename.gif`, `attention-blink.gif`, `image-support.png`,
+`banner-blocks.png` and `transparent.png` were regenerated every pass and
+named in no document — the exact condition that let `beliefs-browser.png`
+rot for eighteen releases. They now get a named line at the foot of the
+gallery rather than ten more full-width images in an already long one.
+
+**Suite: 1,617 passed**, unchanged from the pre-pass baseline — the two
+script edits touch nothing `tests/test_record_gif.py`'s registry checks or
+`tests/test_banner.py`'s rendering assertions read differently.
+
 ## 0.93.0 — 2026-08-30
 
 **Where am I, and can I move.** Reported: "we should also provide a /cd and
