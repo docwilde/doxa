@@ -107,6 +107,7 @@ REGISTRY: tuple[SlashCommand, ...] = (
         group="Panes & tabs",
         summary="Split this pane — a second session STACKED BELOW it "
                 "(Ctrl+O)",
+        binding="ctrl+o",
         palette="Split: stacked",
     ),
     SlashCommand(
@@ -114,6 +115,7 @@ REGISTRY: tuple[SlashCommand, ...] = (
         group="Panes & tabs",
         summary="Split this pane — a second session SIDE BY SIDE with it "
                 "(Ctrl+N)",
+        binding="ctrl+n",
         palette="Split: side by side",
     ),
     SlashCommand(
@@ -122,6 +124,7 @@ REGISTRY: tuple[SlashCommand, ...] = (
         summary="Live diff of this session's worktree, SIDE BY SIDE with "
                 "it — reject a hunk to revert it and tell the agent "
                 "(F2)",
+        binding="f2",
         palette="Diff: live, beside this session",
     ),
     SlashCommand(

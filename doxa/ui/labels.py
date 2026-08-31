@@ -1532,6 +1532,46 @@ def unreachable_bindings() -> "list[str]":
 NOTICE_SUMMARY_THRESHOLD = 3
 
 
+def _doors_worth_naming() -> "list[tuple[str, str]]":
+    """:func:`unreachable_doors`, minus every key whose ACTION some other
+    binding still reaches on this terminal.
+
+    v0.95.0 moved the split and diff keys to Ctrl+O / Ctrl+N / F2 and kept
+    Alt+S / Alt+D / Alt+G beside them as kitty-tier aliases. All three
+    aliases are undeliverable under the legacy encoding and belong in
+    /doctor's table -- but naming them in a STARTUP notice would tell the
+    user about a loss they do not have: the action is one keystroke away
+    on a key that works. What earns the interruption is a key with no
+    reachable spelling at all (``Ctrl+,`` for /settings), where the door
+    really is the only way in.
+
+    Falls back to naming everything if the action map cannot be read --
+    an over-full notice is a smaller failure than a silent one."""
+    doors = unreachable_doors()
+    try:
+        from ..app import DoxaApp
+        by_action: "dict[str, list[str]]" = {}
+        for binding in DoxaApp.BINDINGS:
+            key = getattr(binding, "key", None)
+            action = getattr(binding, "action", None)
+            if key and action:
+                by_action.setdefault(action, []).append(key)
+        reachable_actions = {
+            action for action, keys in by_action.items()
+            if any(not _binding_mark(k) for k in keys)
+        }
+        dead_but_covered = {
+            _pretty_key(key)
+            for action in reachable_actions
+            for key in by_action[action]
+            if _binding_mark(key)
+        }
+    except Exception:  # noqa: BLE001 -- see docstring
+        return doors
+    return [(pretty, door) for pretty, door in doors
+            if pretty not in dead_but_covered]
+
+
 def unreachable_notice() -> str:
     """One line for a session's opening block: which bound keys THIS
     terminal cannot deliver, and the slash command that reaches them
@@ -1549,7 +1589,7 @@ def unreachable_notice() -> str:
     "did DOXA even measure my terminal" already has that answer, on
     request rather than by interruption: ``/doctor``'s keyboard-enhancement
     row states "not measured" outright (doxa.doctor._keyboard_enhancement_check)."""
-    doors = unreachable_doors()
+    doors = _doors_worth_naming()
     if not doors:
         return ""
     count = len(doors)

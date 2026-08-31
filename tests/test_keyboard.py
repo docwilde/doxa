@@ -516,9 +516,22 @@ def test_unreachable_doors_names_the_real_commands(monkeypatch):
     binding -- so /mode is the honest door for it too, read off the
     registry rather than hand-copied."""
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.LEGACY)
+    # Alt+S / Alt+D / Alt+G joined the list in v0.95.0: that release moved
+    # the split and diff keys to Ctrl+O / Ctrl+N / F2 after measuring that
+    # Textual's parser has no ESC-prefix -> Alt path at all, and kept the
+    # Alt spellings as kitty-tier aliases. Their doors resolve through the
+    # SECOND pass -- alt+s shares the `split_pane` action with ctrl+o,
+    # which is /split's own `binding` -- which is the whole reason that
+    # pass exists.
     assert labels_mod.unreachable_doors() == [
+        # Ctrl+O / Ctrl+N are deliberately ABSENT: ctrl+<letter> has a C0
+        # byte and arrives on every terminal, which is exactly why v0.95.0
+        # chose them as the primaries.
         ("Ctrl+,", "/settings"),
         ("Ctrl+Tab", "/mode"),
+        ("Alt+S", "/split"),
+        ("Alt+D", "/vsplit"),
+        ("Alt+G", "/diff"),
     ]
 
 
@@ -527,9 +540,18 @@ def test_unreachable_notice_names_the_real_unreachable_keys_and_their_commands(
 ):
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.LEGACY)
     notice = labels_mod.unreachable_notice()
+    # Ctrl+, is the only key on this build a legacy terminal genuinely
+    # costs the user: its action has no other spelling.
     assert "Ctrl+," in notice and "/settings" in notice
-    assert "Ctrl+Tab" in notice and "/mode" in notice
     assert "/doctor" in notice
+    # Everything else undeliverable here still has a REACHABLE key firing
+    # the same action -- Ctrl+Tab beside Shift+Tab, and v0.95.0's Alt
+    # aliases beside Ctrl+O / Ctrl+N / F2. They belong in /doctor's table
+    # (unreachable_doors lists them) and NOT in a startup interruption,
+    # because the user has lost nothing: the action is one working
+    # keystroke away. Naming them would be a false alarm of the loud kind.
+    for covered in ("Ctrl+Tab", "Alt+S", "Alt+D", "Alt+G"):
+        assert covered not in notice, covered
 
 
 def test_unreachable_notice_is_silent_at_zero_on_a_kitty_terminal(monkeypatch):
@@ -645,7 +667,9 @@ async def test_the_startup_notice_paints_on_a_legacy_terminal(monkeypatch, tmp_p
         assert await _wait(pilot, lambda: bool(_painted_key_notice(app)))
         block = _painted_key_notice(app)[0]
         assert "Ctrl+," in block.text and "/settings" in block.text
-        assert "Ctrl+Tab" in block.text and "/mode" in block.text
+        # Not Ctrl+Tab: Shift+Tab fires the same action and does arrive
+        # here, so the user has lost nothing worth interrupting for.
+        assert "Ctrl+Tab" not in block.text
 
 
 @pytest.mark.asyncio
