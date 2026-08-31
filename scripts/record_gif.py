@@ -332,7 +332,7 @@ async def _drive_tab_lifecycle(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> 
     second.query_one("#prompt-input", PromptInput).value = "any updates on the deploy gate?"
     await pilot.press("enter")
     assert await _wait_until(pilot, lambda: second.turn_in_flight)
-    # `tabbed_holding`, not `query_one("#session-tabs")`: v0.96.0 gave
+    # `tabbed_holding`, not `query_one("#session-tabs")`: v0.97.0 gave
     # every pane GROUP a tab strip of its own, so "the strip" is a question
     # about which group. This scene has one group, but naming it by the tab
     # it holds is what keeps the next split-shaped scene honest.

@@ -651,7 +651,7 @@ class DiffPane(Vertical):
         app. Measured: it made two tests pass alone and fail in file
         order, which is the worst way for a lookup to be wrong.
 
-        **v0.96.0 widened the search space, and had to.** Through v0.95.0
+        **v0.97.0 widened the search space, and had to.** Through v0.95.0
         the owner-first invariant put a diff leaf in the same TAB as the
         session it was opened from, so that tab was the whole search space
         by construction. A diff is now a tab of its own GROUP beside that

@@ -87,6 +87,12 @@ the same way, by [`scripts/screenshot.py`](scripts/screenshot.py) and
 - **Two sessions in one tab.** `ctrl+n` splits side by side, `ctrl+o`
   stacked — independent sessions, not two views of one.
 - **A live diff you can reject one hunk of.** `f2` opens this
+
+- **Pane groups, each with its own tabs.** `alt+d` splits side by side,
+  `alt+s` stacked; every region owns its own tab strip, so `ctrl+←/→`
+  cycles one group and leaves the rest alone. `ctrl+1`…`ctrl+9` jump by
+  position (`/pane <n>` where the terminal cannot send those).
+- **A live diff you can reject one hunk of.** `alt+g` opens this
   session's diff beside it, live; a rejected hunk reverts and the agent
   is told why.
 - **Memory that is inert until it earns influence.** `lore_core` runs
@@ -117,7 +123,7 @@ the same way, by [`scripts/screenshot.py`](scripts/screenshot.py) and
 Each of those has a section of its own in the manual, which is where the
 detail lives: [sessions](docs/manual.md#sessions-and-the-daemon),
 [the transcript](docs/manual.md#the-transcript),
-[split panes](docs/manual.md#split-panes),
+[pane groups](docs/manual.md#pane-groups),
 [the live diff](docs/manual.md#the-live-diff),
 [LORE](docs/manual.md#lore-integration),
 [the shell escape](docs/manual.md#shell-escape),
@@ -149,6 +155,8 @@ default — see the **[manual](docs/manual.md)**.
 
 <p align="center"><img src="assets/shots/split-panes.png" width="640" alt="One tab split down the middle into two panes, each a session in its own right: identical 'DOXA 0.94.0' identity blocks, different models (claude-opus-4-5 on the left, claude-sonnet-4-5 on the right), separate transcripts, and a status bar apiece that each truncate at their own pane's width. The left pane holds the belief-table answer; the right one a numbered list of the three surfaces that still needed a gallery capture"></p>
 <p align="center"><em><code>ctrl+n</code> (<code>/vsplit</code>) puts a second session side by side; <code>ctrl+o</code> (<code>/split</code>) stacks it below. Two <strong>independent</strong> sessions in one tab — a split spawns a session, it does not open a second view of the one you were in.</em></p>
+
+<p align="center"><em><code>alt+d</code> (<code>/vsplit</code>) puts a second session side by side; <code>alt+s</code> (<code>/split</code>) stacks it below. A split spawns a session, it does not open a second view of the one you were in. Captured at v0.94.0, when both panes shared one tab strip; since v0.97.0 each region is a <strong>pane group</strong> with a strip of its own.</em></p>
 
 <p align="center"><img src="assets/shots/split-panes.gif" width="640" alt="One pane becoming two: a single session, then ctrl+n and a second session lands to its right with the keyboard already in it; a turn runs there; ctrl+shift+left moves focus back to the first pane, and alt+right drags the divider between them while both keep rendering"></p>
 <p align="center"><em>The half a still cannot carry: the keystroke, and the pane arriving.</em></p>
@@ -316,6 +324,16 @@ palette, `ctrl+t` opens a new tab, `/split` and `/vsplit` (or
 `ctrl+o` stacked below, `ctrl+n` side by side) put a second
 session in the tab you are
 already in — `ctrl+shift+←/→/↑/↓` moves between panes, `alt+←/→/↑/↓`
+
+palette, `ctrl+t` opens a new tab in this pane group, `/split` and
+`/vsplit` (or `alt+s` stacked below, `alt+d` side by side) put a second
+GROUP beside the one you are in — each with its own tab strip, so
+`ctrl+←/→` cycles this group's tabs and leaves every other group where
+it was; `ctrl+1`…`ctrl+9` jump to a group by position (numbered left to
+right, then top to bottom, and `/pane <n>` does the same on terminals
+that cannot send `ctrl+<digit>`), `/movepane <n>` moves this tab to
+another group without restarting its session,
+`ctrl+shift+←/→/↑/↓` moves between groups, `alt+←/→/↑/↓`
 drags the divider between them, and `ctrl+↑`/`ctrl+↓`
 drags the status-bar divider between the transcript and the prompt —
 `/diff` (or `f2`) opens this session's **live diff** in the pane
@@ -350,10 +368,12 @@ features**, and are written that way on purpose — specifying a thing before
 building it is cheaper than discovering the design in the diff. Each one is a
 design that has been thought through and not yet implemented. (Two that used
 to be on this list have left it by being built:
-[`docs/plans/split-panes.md`](docs/plans/split-panes.md) shipped in v0.91.0
-and [`docs/plans/live-diff.md`](docs/plans/live-diff.md) in v0.92.0 — both
-are now described in the [manual](docs/manual.md) as behaviour, and their
-plan documents stay as the reasoning behind them.)
+[`docs/plans/split-panes.md`](docs/plans/split-panes.md) shipped in v0.91.0,
+[`docs/plans/live-diff.md`](docs/plans/live-diff.md) in v0.92.0 and
+[`docs/plans/pane-groups.md`](docs/plans/pane-groups.md) in v0.97.0, which
+inverted the first of those — all three are now described in the
+[manual](docs/manual.md) as behaviour, and their plan documents stay as
+the reasoning behind them.)
 
 - [`docs/plans/plugin-api.md`](docs/plans/plugin-api.md) — **the plugin API.** There is no loader: no entry-point discovery, no `~/.doxa/plugins` scan, no allowlist, no `Plugin`/`PLUGIN` object, nothing in DOXA that loads third-party PYTHON code into its own process at all. What v0.34.0 actually shipped is the *shape* — the `app.py` split landed along four seams (the command registry `PANE_COMMANDS`, the status-chip records `_status_chips()`, the event dispatch map `EVENT_RENDERERS`, and the `ModelProvider` protocol), so each extension point in the spec names a real structure a loader could bind to. That is the whole claim. The spec also settles two decisions ahead of time: a plugin is never loaded from the working repository, and no plugin-facing write into the belief store will exist. Not to be confused with [`docs/plans/plugins.md`](docs/plans/plugins.md) (shipped, v0.74.0) — a different system entirely: adopting the OPERATOR'S OWN Claude Code plugins (commands/skills/agents only, never hooks or MCP servers) into the CLI process the engine spawns.
 - [`docs/plans/remote.md`](docs/plans/remote.md) — **remote control and a web client.** Nothing here is built. The daemon's sequenced event stream is what a second renderer would consume, which is why the spec exists, but there is no network transport, no authorization model and no client. Note that this document reasons about a permission-mode feature that has also not landed on `main`.

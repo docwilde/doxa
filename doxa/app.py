@@ -628,7 +628,7 @@ class DoxaApp(App):
             "kitty-protocol terminal)",
             show=False, priority=True,
         ),
-        # -- pane groups (v0.96.0) -------------------------------------
+        # -- pane groups (v0.97.0) -------------------------------------
         #
         # Ctrl+1 .. Ctrl+9: jump to a group BY POSITION, numbered in
         # reading order -- left to right, then top to bottom -- so in a 2x2
@@ -772,7 +772,7 @@ class DoxaApp(App):
         # migration: :meth:`_restore_group_tree` turns each surviving spec
         # into a tab of one group, which is exactly the tab it was.
         self._restore_layout = list(restore_layout or [])
-        # v0.96.0: the WINDOW's one tree, leaves holding
+        # v0.97.0: the WINDOW's one tree, leaves holding
         # :class:`doxa.layout.Group`. ``None`` for every ordinary launch and
         # for every record written before this release; the absence is the
         # migration, and :meth:`_restore_group_tree` derives one from
@@ -1008,7 +1008,7 @@ class DoxaApp(App):
         label once it boots; this is only the correct BEFORE-boot guess)."""
         return SessionPane(self._tab_title(path), path, self.model, engine_factory)
 
-    # -- groups own tabs now (v0.96.0) --------------------------------
+    # -- groups own tabs now (v0.97.0) --------------------------------
 
     def groups(self) -> "list[PaneGroup]":
         """Every pane group in the window, in DOM order.
@@ -1174,7 +1174,7 @@ class DoxaApp(App):
 
         Every tab in this app is a :class:`~doxa.ui.split.PaneTab` holding
         exactly one surface -- which is what a tab was through v0.88.0 and
-        is what it is again since v0.96.0 moved the layout tree up to the
+        is what it is again since v0.97.0 moved the layout tree up to the
         window. What a later split is built INTO is the empty
         :class:`~doxa.ui.split.SplitBox` chain around the GROUP now; see
         that module's docstring for why it cannot be created on demand.
@@ -1497,7 +1497,7 @@ class DoxaApp(App):
         the pane holding the keyboard is: a key aimed at a session is
         aimed at the session you are typing into.
 
-        **v0.96.0: :meth:`focused_pane` wins outright**, where through
+        **v0.97.0: :meth:`focused_pane` wins outright**, where through
         v0.95.0 its answer was cross-checked against the active tab and
         discarded if it belonged to another one. That check existed because
         a TAB held several panes and the active tab bounded the question.
@@ -1557,7 +1557,7 @@ class DoxaApp(App):
         purpose (every engine-touching caller depends on that); this is
         the one question that spans both.
 
-        "The active tab" is a question about a group since v0.96.0, and
+        "The active tab" is a question about a group since v0.97.0, and
         every caller of this means the group holding the keyboard: which
         tab the status bar reflects, which one Ctrl+W closes, which one
         the record calls active."""
@@ -2423,7 +2423,7 @@ class DoxaApp(App):
         daemon (``SessionPane``), an archived one has no daemon left and
         renders its transcript read-only (``ArchivedSessionTab``) --
         v0.92.0 adds a third (a ``DiffPane`` tab, restored as a diff with
-        nothing to reattach), and v0.96.0 adds no kind at all: it only
+        nothing to reattach), and v0.97.0 adds no kind at all: it only
         changes which container they land in.
 
         No pane arms a mount-time focus (v0.38.0): a restored pane mounts
@@ -2530,7 +2530,7 @@ class DoxaApp(App):
     def _on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         self._jump_tab_marker()
         # **Only a group's SECOND activation onwards moves the keyboard**
-        # (v0.96.0). Every group posts one ``TabActivated`` as it mounts --
+        # (v0.97.0). Every group posts one ``TabActivated`` as it mounts --
         # Textual's ``Tabs`` defaults itself to its first tab and the
         # watcher posts the message -- so with N groups this handler used
         # to fire N times during boot and the LAST one to land won the
@@ -2919,7 +2919,7 @@ class DoxaApp(App):
         user is looking at, so a pane that is not actually on screen is
         not a destination.
 
-        Across every GROUP since v0.96.0, and only each group's ACTIVE tab:
+        Across every GROUP since v0.97.0, and only each group's ACTIVE tab:
         an inactive tab is mounted and running but is not painted, and the
         two facts have to stay apart here -- reading every tab would let
         ``Ctrl+Shift+→`` land the keyboard somewhere the user cannot see,
@@ -2946,7 +2946,7 @@ class DoxaApp(App):
         target_id = layout_mod.neighbour(self._pane_regions(), here.id, direction)
         if target_id is None or target_id == here.id:
             return False
-        # Across every GROUP (v0.96.0): the rectangles the keyboard can
+        # Across every GROUP (v0.97.0): the rectangles the keyboard can
         # move to are the ACTIVE tab of each region, which is exactly what
         # _pane_regions just answered with.
         surfaces = [
@@ -3033,7 +3033,7 @@ class DoxaApp(App):
             layout_mod.ROW if direction in ("left", "right")
             else layout_mod.COLUMN
         )
-        # Start from the GROUP, not the surface (v0.96.0): the boxes that
+        # Start from the GROUP, not the surface (v0.97.0): the boxes that
         # divide the window sit above the group, and a surface's own parent
         # chain now runs through its tab and its strip first. Reading
         # ``focused_surface`` and then climbing from the pane -- what this
@@ -3065,7 +3065,7 @@ class DoxaApp(App):
     #: held key still crosses the range in a couple of seconds.
     DIVIDER_STEP = 0.03
 
-    # -- pane groups: jump, flash, move (v0.96.0) ---------------------
+    # -- pane groups: jump, flash, move (v0.97.0) ---------------------
 
     #: How long the ``Ctrl+<digit>`` number overlay stays up. Long enough
     #: to read a single digit and register where it was, short enough that
@@ -3573,7 +3573,7 @@ class DoxaApp(App):
             await App.action_quit(self)
             return
         self._persist_tabset()
-        # **Closing a tab closes ONE session** (v0.96.0, and the third of
+        # **Closing a tab closes ONE session** (v0.97.0, and the third of
         # the three problems the inversion dissolves rather than patches).
         # Through v0.95.0 this pane's tab could hold two more sessions and
         # closing it ended all three; a tab holds one surface now, so the
@@ -3659,7 +3659,7 @@ class DoxaApp(App):
         an archived read-only tab and an open subagent transcript
         included, because both sit right there in the strip.
 
-        **Scoped to one group since v0.96.0, and that is the whole point of
+        **Scoped to one group since v0.97.0, and that is the whole point of
         the inversion.** The reported defect it fixes: *"if i switch tabs,
         the split out sessions go with the tab. Shouldn't the split out
         sessions be independent?"* -- Ctrl+←/→ cycles the tabs of the group
@@ -4078,7 +4078,7 @@ class DoxaApp(App):
         archived, so :meth:`compose` adds one fresh pane under that fixed
         id, purely so this method has something to call it.
 
-        **v0.96.0: this is the id of the tab the group HOLDING the saved
+        **v0.97.0: this is the id of the tab the group HOLDING the saved
         active session will open on**, and every other group opens on its
         own saved active tab. Each ``PaneGroup`` passes its own answer to
         its own ``TabbedContent``, so the race above is closed once per
@@ -4087,7 +4087,7 @@ class DoxaApp(App):
         unchanged for every caller that only ever had one group."""
         if not self._restore_tabs:
             return ""  # one pane; Tabs' own first-tab default is already right
-        # A session in a group's tab list names its OWN tab (v0.96.0 --
+        # A session in a group's tab list names its OWN tab (v0.97.0 --
         # through v0.95.0 it named its tab's FIRST leaf, because a tab held
         # a tree). The one indirection left is the diff surface, which has
         # a tab of its own and never answers for a session.

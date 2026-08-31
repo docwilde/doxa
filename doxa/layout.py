@@ -14,11 +14,11 @@ testable without a running app.
   ``column``: children stacked), an ordered list of children (leaf or
   split, so the recursion is genuine) and per-child weights.
 
-**The inversion** (v0.96.0). Through v0.95.0 each TAB owned one tree and
+**The inversion** (v0.97.0). Through v0.95.0 each TAB owned one tree and
 a leaf held one session. That is now upside down:
 
     v0.91.0   window -> tabs -> each tab owns a layout tree of panes
-    v0.96.0   window -> one layout tree of GROUPS -> each group owns tabs
+    v0.97.0   window -> one layout tree of GROUPS -> each group owns tabs
 
 So there is exactly ONE tree per window, its leaf nodes are
 :class:`Group`, and a group holds an ordered list of :class:`Leaf` tab
@@ -161,7 +161,7 @@ class Leaf:
 @dataclass(frozen=True)
 class Group:
     """A pane GROUP: the thing a leaf of the window's layout tree holds
-    since v0.96.0 -- an ordered list of tab records and which one of them
+    since v0.97.0 -- an ordered list of tab records and which one of them
     is active.
 
     The tab records are :class:`Leaf` values, unchanged, because a group's
@@ -389,7 +389,7 @@ def leaves(node: Node) -> "list[Leaf]":
     is written in, so the two halves of a record never disagree about
     order.
 
-    Still returns :class:`Leaf` after the v0.96.0 inversion, and that is
+    Still returns :class:`Leaf` after the v0.97.0 inversion, and that is
     the point: every caller of this asks "which sessions are in this
     layout", which is a question about tab records and not about regions.
     :func:`groups` is the one that asks about regions. Reads a bare
@@ -427,7 +427,7 @@ def as_group(node: "Node | Leaf") -> Group:
 
 
 def groupify(node: "Node | Leaf | None") -> "Node | None":
-    """A v0.91.0 tree (leaves hold sessions) as a v0.96.0 tree (leaves
+    """A v0.91.0 tree (leaves hold sessions) as a v0.97.0 tree (leaves
     hold groups): **one single-tab group per leaf**, structure untouched.
 
     This IS the middle era's migration, and the reason it needs no version

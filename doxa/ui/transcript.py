@@ -1436,7 +1436,7 @@ class SubagentTranscriptTab(TabPane):
         self.done = True
         self._set_title(f"{self.base_label} ✓")
         with contextlib.suppress(Exception):
-            # This tab's OWN strip (v0.96.0): "am I the active tab" is a
+            # This tab's OWN strip (v0.97.0): "am I the active tab" is a
             # question about the group I am in, and reading the focused
             # group's strip instead would mark a foreground tab unseen
             # whenever the keyboard was in some other group.
@@ -1554,7 +1554,7 @@ class ArchivedSessionTab(TabPane):
         return tabsets_mod.TabRecord(self.session_id, self.custom_name, self.cwd)
 
     def layout_leaf(self) -> "Any":
-        """What this tab contributes to the WINDOW's layout tree (v0.96.0)
+        """What this tab contributes to the WINDOW's layout tree (v0.97.0)
         -- the same record :meth:`as_record` gives the flat list, in the
         tree's own vocabulary.
 

@@ -1,8 +1,30 @@
 # Pane groups — each region owns its own tabs
 
-Status: **draft for review**. Nothing implemented. Written before the work
+Status: **implemented in v0.97.0**, in scope. Written before the work
 because it inverts a hierarchy that shipped three releases ago, and the
 migration is the expensive half.
+
+What shipped, and where it differs from what is written below:
+
+- The model inversion, the per-group tab strip, per-group `Ctrl+←/→`,
+  `Ctrl+1`…`Ctrl+9` + `/pane`, the number overlay, `/movepane <n>`, the
+  three persistence eras, the focus rules. `doxa/layout.py`'s `Group`,
+  `doxa/ui/split.py`'s `PaneGroup`, `tests/test_pane_groups.py`.
+- **The composition rule this document left open.** It says how a LEAF
+  reads in each era and not how N per-tab trees become the window's ONE
+  tree. Implemented as: the window tree is the tree of the tab that was
+  ACTIVE, and every other saved tab becomes a TAB of the group holding
+  it. A pre-v0.91.0 record therefore restores as one group holding N
+  tabs. Read the other way -- a group per saved tab -- five saved tabs
+  would restore as a five-way split, 16 columns each on an 80-column
+  terminal, below `MIN_LEAF_WIDTH` (34) and so below the width at which
+  DOXA's own `split_refusal` will make a split at all. A restore that
+  produces an arrangement the app refuses to produce interactively is not
+  a migration. See `doxa/tabsets.py`'s module docstring.
+- **Moving a tab still has no key.** The command shipped, as this
+  document asks; the spelling stayed deferred.
+- Out, as scoped: floating windows, detaching a pane to its own terminal,
+  mouse drag of a tab, per-group status bars.
 
 ## What provoked it
 
@@ -206,3 +228,20 @@ equivalent question here: **can a group hold a diff leaf?** v0.92.0's diff
 is a surface, not a session, and if a group's tab list cannot carry one
 without a special case, the group model is wrong in the same way `Leaf`
 was.
+
+**Answered, and the answer is yes without qualification.** A group's tab
+list is a list of SURFACES: `PaneTab` holds one surface, `PaneGroup.
+layout_group()` asks each tab for its own `layout_leaf()`, and `Leaf.view`
+— which v0.92.0 added for exactly this reason one level down — carries
+which kind it is. `/diff` opens the diff as a tab of a new group beside
+the session's, and nothing in `PaneGroup`, `layout.Group`, the persistence
+reader or the tab-move path mentions diffs at all. The one place the word
+appears is `_tab_for` in `compose`, which has to know which WIDGET to
+build — the same single branch `_leaf` had in v0.91.0, not a new one.
+
+The stronger form of the check, which is what makes it an answer rather
+than a claim: `tests/test_pane_groups.py::test_a_group_can_hold_a_diff_
+leaf` asserts the group's own model comes back with `is_diff` set, and
+`tests/test_live_diff.py` reads the diff's position out of the WINDOW tree
+through `layout.groups()` — the generic walk, with no diff-shaped
+accessor.

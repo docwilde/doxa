@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Pane groups (v0.96.0) -- the inversion, against a real Pilot.
+"""Pane groups (v0.97.0) -- the inversion, against a real Pilot.
 
 ``window -> tabs -> each tab owns a tree of panes`` became
 ``window -> one tree of GROUPS -> each group owns its own tabs``. What
@@ -627,7 +627,7 @@ def test_era_two_trees_without_groups_read_as_one_group_per_leaf(tmp_path):
 
 
 def test_era_three_a_groups_record_round_trips_exactly(tmp_path):
-    """v0.96.0. Three groups, and one of them holds three tabs with the
+    """v0.97.0. Three groups, and one of them holds three tabs with the
     SECOND active -- the shape the two eras above cannot express and the
     reason this key exists."""
     tree = layout.Split(

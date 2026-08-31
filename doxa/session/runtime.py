@@ -173,7 +173,7 @@ class PaneRuntimeMixin:
     async def _boot(self) -> None:
         assert self.engine is not None
         if not self._adopted:
-            # An ADOPTED handle (v0.96.0: this pane inherited a live
+            # An ADOPTED handle (v0.97.0: this pane inherited a live
             # session from a pane in another group) is already started, and
             # every engine kind reads start() as "begin" -- see
             # SessionPane.adopt_engine for the two ways that goes wrong.
@@ -716,7 +716,7 @@ class PaneRuntimeMixin:
         not move on its own) unless something claims focus in the pane
         being switched to -- exactly what SessionPane's own boot already
         does for itself by focusing its prompt input on mount."""
-        # THIS pane's own group's strip (v0.96.0) -- a subagent transcript
+        # THIS pane's own group's strip (v0.97.0) -- a subagent transcript
         # belongs beside the session that spawned it, never in whichever
         # group happens to hold the keyboard. Through v0.95.0 there was one
         # strip and the distinction did not exist.

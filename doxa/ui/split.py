@@ -7,7 +7,7 @@ them:
 * :class:`SplitBox` -- one node of the tree. Unused (one child) it is a
   transparent container; used (two or more) it lays its children out
   along its orientation with proportional ``fr`` weights.
-* :class:`PaneGroup` -- the LEAF, since v0.96.0: one region of the window,
+* :class:`PaneGroup` -- the LEAF, since v0.97.0: one region of the window,
   owning its own ``TabbedContent`` and therefore its own tab strip. This
   is the inversion the pane-groups spec asks for -- the window holds one
   tree of groups, and each group holds tabs, rather than the window
@@ -233,7 +233,7 @@ class PaneTab(TabPane):
     Three shapes in four releases, and this is the second one again.
     Through v0.88.0 ``SessionPane`` WAS the ``TabPane``. v0.91.0 made the
     tab a CONTAINER of a whole ``SplitBox`` tree, because two panes had to
-    be visible at once and only a tab could hold them. v0.96.0 moves the
+    be visible at once and only a tab could hold them. v0.97.0 moves the
     tree up to the window, where the thing that is visible at once is a
     GROUP -- so a tab is back to holding one surface, and the surface it
     holds may be a ``SessionPane`` or (v0.92.0) a ``DiffPane``.

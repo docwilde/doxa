@@ -12,7 +12,7 @@ never documents a plan as if it were shipped.
 - [The spawned CLI](#the-spawned-cli)
 - [The transcript](#the-transcript)
 - [Tabs](#tabs) — and [restoring them](#restoring-tabs)
-- [Split panes](#split-panes)
+- [Pane groups](#pane-groups)
 - [The live diff](#the-live-diff)
 - [Worktrees and finalize](#worktrees-and-finalize)
 - [Where a session is](#where-a-session-is)
@@ -134,9 +134,15 @@ down.
 
 ## Tabs
 
-`ctrl+t` opens a new tab (fresh session, same repo scope). `ctrl+w`
-closes the active tab and detaches its daemon. `ctrl+q` ends the active
-tab's session for real. `ctrl+left` / `ctrl+right` cycle tabs.
+Since v0.97.0 tabs belong to a **pane group**, not to the window — one
+group unless you split, in which case each region has a strip of its own.
+Everything below is about the group holding the keyboard; see
+[Pane groups](#pane-groups).
+
+`ctrl+t` opens a new tab in this group (fresh session, same repo scope).
+`ctrl+w` closes the active tab and detaches its daemon. `ctrl+q` ends the
+active tab's session for real. `ctrl+left` / `ctrl+right` cycle **this
+group's** tabs and leave every other group alone.
 
 A tab not currently in view reports what is happening on it by color, in
 this precedence (lowest to highest): `-done-unseen` (green, a turn finished
@@ -144,8 +150,10 @@ while unseen) < `-staged` (muted violet, the background reviewer staged a
 LORE proposal — a steady tint, not a blink, since nothing is blocked) <
 `-working` (amber, a turn is in flight) < `-attention` (a blinking red,
 this tab needs an answer to a question or permission request). All but
-`-attention` clear the instant the tab is viewed; `-done-unseen` and
-`-staged` never appear on the active tab at all.
+`-attention` clear the instant the keyboard actually arrives on that tab;
+`-done-unseen` and `-staged` never appear on a tab you are looking at.
+An inactive tab in a group you can SEE is still not one you are looking
+at, so its marks survive.
 
 A tab names itself from its first turn with one cheap Haiku call
 (`doxa/naming.py`), cached in `~/.doxa/names.toml` so a session is never
@@ -191,22 +199,47 @@ session from the set for good is reaping it by name (`/sessions kill
 attach <prefix>` stays the single-session path. `DOXA_RESTORE_TABS=0`
 returns to attaching only the single most recent session.
 
-Since v0.91.0 a tab can hold SEVERAL sessions at once (`/split`,
-`/vsplit`), and the record restores that layout too: one tree per tab,
-with proportional sizes and the saved pane focused. The design is
-[docs/plans/split-panes.md](plans/split-panes.md). A record written before
-v0.91.0 carries no tree and restores as one tab per session, exactly as it
-always did; a record written after it still restores under an older DOXA,
-as one tab per pane.
+Since v0.97.0 the window holds a **tree of pane groups** and each group
+holds its own tabs, and the record restores all of it: the geometry, each
+group's tab list, and which tab each group was showing. The design is
+[docs/plans/pane-groups.md](plans/pane-groups.md).
 
-## Split panes
+Three record shapes exist and all three still read, with no version field
+and no migration step — **the absence of a key is the migration**:
 
-Since v0.91.0 a **tab** is a container and a **pane** is one leaf inside
-it holding one session. A tab that never splits behaves exactly as it
-always did.
+| written by | carries | restores as |
+|---|---|---|
+| v0.23.0 – v0.90.0 | a flat `tabs` list | one group holding all of them, showing the saved active tab |
+| v0.91.0 – v0.95.0 | `trees`, one per tab | the active tab's tree, one single-tab **group per leaf**; the other saved tabs become tabs of the group holding the active session |
+| v0.97.0 | `groups`, the window's one tree | itself |
 
 `/split` (or `ctrl+o`) puts a second session **stacked below** this one;
 `/vsplit` (or `ctrl+n`) puts one **side by side** with it. That is vim's
+
+It goes the other way too. The flat `tabs` list stays authoritative and
+complete, and a v0.97.0 record still writes the older `trees` shape
+alongside — one tree per group, each region's leaf being that group's
+active tab. So an older DOXA reading a grouped record gets the geometry it
+can express and picks the rest up as ordinary tabs, rather than getting
+nothing.
+
+## Pane groups
+
+Since v0.97.0 the window is a **tree of groups**, and each group owns its
+own tab strip. A window that never splits is one group holding every tab
+and behaves exactly as it always did.
+
+This inverts what shipped in v0.91.0, where the window owned the tabs and
+each tab owned a tree of panes. The reason was a report: *"the new
+sessions have no tab menu of their own… if i switch tabs, the split out
+sessions go with the tab. Shouldn't the split out sessions be
+independent?"* They are now. `ctrl+←/→` cycles the tabs of the group
+holding the keyboard and leaves every other group alone — three sessions
+cycling on the left while a fourth stays pinned on the right is the thing
+the old model could not express.
+
+`/split` (or `alt+s`) puts a second group **stacked below** this one;
+`/vsplit` (or `alt+d`) puts one **side by side** with it. That is vim's
 sense of the two words and the opposite of tmux's `split-window -h`, so
 every description spells the direction out rather than trusting the
 letter — the letters are not mnemonic and are not trying to be.
@@ -226,10 +259,13 @@ the kitty protocol. `alt+<arrow>` is unaffected — a modified arrow is
 
 A split **spawns a new, independent session** — the same factory `ctrl+t`
 uses — not a second view of the one you were in. Focus moves to the new
-pane, because someone who just asked for a second pane is asking to work
-in it. The pane it was split off keeps rendering, keeps streaming, and
-keeps any "you missed something" mark it had: visible, focused and seen
-are three different states.
+group, because someone who just asked for a second region is asking to
+work in it. The group it was split off keeps rendering, keeps streaming,
+and keeps any "you missed something" mark it had: visible, focused and
+seen are three different states. An **inactive tab inside a visible
+group** is the stronger case of the same rule — it is neither visible nor
+focused, so its `done` dot, its needs-input blink and its staged tint all
+survive until the keyboard actually arrives there.
 
 | key | does |
 |---|---|
@@ -238,19 +274,60 @@ are three different states.
 | `alt+←/→/↑/↓` | move the divider between this pane and its neighbour that way |
 | `ctrl+↑` / `ctrl+↓` | move the **in-pane** divider (the status bar): up grows the transcript, down grows the prompt — and this works in a tab with no splits at all |
 
-Two refusals, each printed as a block in the pane it is about and
-changing nothing: a pane may be split **twice** (`SPLIT_SLOTS`), which is
-what gives the 2x2 the design is written around — each new pane is born
-with its own fresh allowance, so there is no fixed ceiling on panes,
-only on how deep one lineage goes — and a split that would leave either
-side under **34 columns or 9 rows** is refused with the number it
+| `ctrl+←/→` | cycle the tabs of **this group** — every other group stays put |
+| `ctrl+1` … `ctrl+9` | jump to a group by position — **numbered left to right, then top to bottom**, so in a 2×2 it is upper-left, upper-right, lower-left, lower-right |
+| `alt+s` / `alt+d` | split into a second group, stacked below / side by side |
+| `ctrl+shift+←/→/↑/↓` | move the keyboard to the group in that direction — geometric, never "next group" |
+| `alt+←/→/↑/↓` | move the divider between this group and its neighbour that way |
+| `ctrl+↑` / `ctrl+↓` | move the **in-pane** divider (the status bar): up grows the transcript, down grows the prompt — and this works in a window with no splits at all |
+
+Any `ctrl+<digit>` also **flashes each group's number** over its own
+region, briefly. The jump happens immediately — it is feedback, not a
+mode, and DOXA does not wait for a second keystroke the way tmux's
+`display-panes` does. It fires even when the digit names no group, which
+is when it earns the most: `ctrl+7` in a two-group window shows `1` and
+`2` and moves nothing. A window with one group shows nothing at all,
+because there is no choice to make. Any following key takes it away.
+
+**`ctrl+<digit>` cannot be sent by every terminal.** Under the legacy key
+encoding `ctrl` has a code only for the 26 letters and ``@ [ \ ] ^ _ ?``
+and space; a digit produces no byte at all, so these keys work on
+terminals speaking the kitty protocol and do nothing elsewhere. `/help`
+and `/doctor` say so. **`/pane <n>` is the door that always works**, and
+`/pane` with no number just flashes them.
+
+`/movepane <n>` moves this group's active tab into another group. The
+session does not restart, stop or fork — Textual cannot re-parent a
+mounted widget, so the tab is re-created at the destination and the live
+engine handle is re-seated onto it, which is possible only because the
+session lives in the daemon and never in the widget. It is refused, with
+nothing changed, when the tab is the last one in its group: that would be
+a close and a move at once, and the two have different undo stories.
+
+Two split refusals, each printed as a block in the group it is about and
+changing nothing: a group may be split **twice** (`SPLIT_SLOTS`), which
+is what gives the 2×2 the design is written around — each new group is
+born with its own fresh allowance, so there is no fixed ceiling on
+groups, only on how deep one lineage goes — and a split that would leave
+either side under **34 columns or 9 rows** is refused with the number it
 actually has. A refusal that performed a sliver would be worse than the
 refusal.
 
-`ctrl+w` closes the **focused pane** (detaching its session, as it always
-has) and the surviving sibling takes the whole room back — no dead strip
-where the closed pane was. Closing the last pane in a tab closes the tab.
-The design is [docs/plans/split-panes.md](plans/split-panes.md).
+**A narrow group hides its own tab strip.** Two strips is more chrome
+than one, so below **34 columns** a group draws its labels compactly and
+below **17 columns** it draws no strip at all. Both numbers are the same
+measurement: a tab header costs its label floor (`4 + " · " + 6` from the
+model/repo minimums) plus the provider glyph and Textual's own one-column
+padding each side — 17 columns for one header, 34 for the two a strip is
+actually *for*. The narrowest group DOXA will create is 34 columns, so it
+sits exactly on that boundary.
+
+`ctrl+w` closes the **active tab** of the focused group, detaching its
+session as it always has. Closing a tab closes **one** session — through
+v0.95.0 closing a tab that held a three-way split ended three. When it
+was the group's last tab the group goes with it, the split collapses, the
+survivors take the room back, and the nearest remaining group takes the
+keyboard. Closing the last tab of the last group closes the app.
 
 ## The live diff
 
@@ -730,6 +807,12 @@ palette, the `/` autocomplete and `/help` from that single registry.
 | `/split` | A second session **stacked below** this pane (`ctrl+o`) |
 | `/vsplit` | A second session **side by side** with this pane (`ctrl+n`) |
 | `/diff` | This session's live worktree diff in the pane beside it, or close it (`f2`) |
+
+| `/split` | A second pane group **stacked below** this one (`alt+s`) |
+| `/vsplit` | A second pane group **side by side** with this one (`alt+d`) |
+| `/pane [n]` | Jump to pane group `n`, numbered left to right then top to bottom (`ctrl+1`…`ctrl+9`); with no number, flash them |
+| `/movepane <n>` | Move this group's active tab into group `n` — the session keeps running |
+| `/diff` | This session's live worktree diff in the group beside it, or close it (`alt+g`) |
 | `/dir` | Where this session actually is |
 | `/cd <path>` | Open that path in a **new** tab; this session stays where it is |
 | `/peers` | Live sessions in this project right now |

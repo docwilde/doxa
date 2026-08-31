@@ -120,13 +120,13 @@ async def _settle(pilot, turns: int = 40, step: float = 0.02) -> None:
 
 
 def _activate(app: DoxaApp, pane) -> None:
-    """Show PANE's tab, in whichever pane group holds it (v0.96.0).
+    """Show PANE's tab, in whichever pane group holds it (v0.97.0).
 
     Two facts this file has learned the hard way, in one helper so the
     next refactor breaks one line rather than five:
 
     * a pane's own ``id`` is not its tab's -- ``tab_id`` is (v0.91.0);
-    * "the tab strip" is a question about which GROUP (v0.96.0), so the
+    * "the tab strip" is a question about which GROUP (v0.97.0), so the
       strip is looked up by the tab it holds rather than by an id that
       only the first group carries.
 
@@ -211,9 +211,9 @@ async def _fill_hero_conversation(app: DoxaApp, pilot) -> None:
     # regenerates this gallery except running it, and it was last run at
     # 0.87.0. Measured at 0.94.0, in the run that produced its assets.
     #
-    # And `tabbed_holding`, not `query_one("#session-tabs")`: v0.96.0 gave
+    # And `tabbed_holding`, not `query_one("#session-tabs")`: v0.97.0 gave
     # every pane GROUP a strip of its own, so "the strip" is a question
-    # about which group. Re-checked at 0.96.0 for exactly the reason above
+    # about which group. Re-checked at 0.97.0 for exactly the reason above
     # -- this file drives real panes and that refactor moved what a tab is
     # again.
     _activate(app, app.panes()[0])

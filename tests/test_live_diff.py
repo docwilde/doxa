@@ -489,7 +489,7 @@ async def test_the_diff_paints_beside_the_session_both_with_real_rectangles(
         assert diff.region.width > 0 and diff.region.height > 0
         assert diff.region.x >= pane.region.x + pane.region.width
 
-        # v0.96.0: the WINDOW owns the tree and its leaves are GROUPS, so
+        # v0.97.0: the WINDOW owns the tree and its leaves are GROUPS, so
         # the diff is a tab of the group beside the session's rather than
         # a leaf of the session's tab. The geometry above is unchanged;
         # what moved is which node answers for it.

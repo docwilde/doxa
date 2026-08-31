@@ -212,7 +212,7 @@ def ellipsize(text: str, limit: int = TAB_LABEL_MAX) -> str:
 def _strip_holding(app: Any, tab_id: str) -> "Any":
     """The tab strip that holds this tab, of the N a window now has.
 
-    v0.96.0: through v0.95.0 there was exactly one strip and
+    v0.97.0: through v0.95.0 there was exactly one strip and
     ``query_one("#session-tabs")`` was the right way to name it. Every pane
     GROUP owns one now, so "the strip" is always a question about which
     group -- and a status write aimed at a background group's tab must land

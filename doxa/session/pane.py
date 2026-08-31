@@ -168,7 +168,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         # that method's `require_backlog_skip` argument for the one thing
         # a resume does differently from a reattach.
         self._resume_from: "str | None" = None
-        # v0.96.0 (moving a tab between pane groups): this pane's engine
+        # v0.97.0 (moving a tab between pane groups): this pane's engine
         # handle came from ANOTHER pane that released it, so the session
         # behind it is already started and ``_boot`` must not start it
         # again. See :meth:`adopt_engine`.
@@ -372,7 +372,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
             with contextlib.suppress(Exception):
                 await engine.finalize()
 
-    # -- moving a session between panes (v0.96.0) --------------------
+    # -- moving a session between panes (v0.97.0) --------------------
     #
     # A pane is a VIEW of a session; the session lives in the daemon. That
     # has been true since v0.17 and cost nothing until pane groups, when
@@ -608,7 +608,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
             tab._title = self.render_str(displayed)
         with contextlib.suppress(Exception):
             # The strip that HOLDS this tab, not "the" strip: since
-            # v0.96.0 each pane group owns one (doxa/ui/split.py), so a
+            # v0.97.0 each pane group owns one (doxa/ui/split.py), so a
             # label written by a background group's pane must land there.
             self.app.tabbed_holding(self.tab_id).get_tab(
                 self.tab_id

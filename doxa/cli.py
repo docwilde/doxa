@@ -363,7 +363,7 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
         # one?" (an older record yields single-leaf trees, so there always
         # is), and DoxaApp prunes it against the specs above.
         restore_layout=list(resolved.trees),
-        # v0.96.0: the WINDOW's own tree, leaves holding groups. Also
+        # v0.97.0: the WINDOW's own tree, leaves holding groups. Also
         # answered for all three record eras by doxa.tabsets (see
         # _layout_groups), so it is never None for a record that resolved
         # at all -- and it WINS over restore_layout above, which stays

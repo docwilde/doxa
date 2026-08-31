@@ -4,6 +4,331 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.97.0 — 2026-08-31
+
+**An inversion of a hierarchy that shipped three releases ago.** Reported
+after using v0.91.0's splits: *"the new sessions have no tab menu of
+their own… if i switch tabs, the split out sessions go with the tab.
+Shouldn't the split out sessions be independent?"* — then the shape:
+*"or…each pane has its own tab header bar?"*
+
+```
+v0.91.0   window → tabs → each tab owns a layout tree of panes
+v0.96.0   window → one layout tree of GROUPS → each group owns its tabs
+```
+
+The design is [docs/plans/pane-groups.md](docs/plans/pane-groups.md),
+written before the work and now marked implemented.
+
+### The model
+
+- **`doxa/layout.py` gains `Group(tabs, active)`** and it is what a leaf
+  of the window's tree now is. Its tab records are `Leaf` values,
+  unchanged, field for field — which is not a convenience but the whole
+  migration story: a group's tab and a flat `tabs` row carry the same
+  five facts, so one reader works against either shape.
+- `active` is an INDEX, not an id, clamped at construction. `prune` drops
+  a group's dead tabs and keeps the region — three tabs of which one
+  session survived is still a group, showing the survivor — and
+  re-derives `active` from the tab that HELD it, so a survivor keeps the
+  keyboard even when the deletion moved it two places left.
+- New: `groups()` (regions, in reading order), `as_group()`,
+  `groupify()`. `leaves()` still returns `Leaf` and deliberately so:
+  every caller of it asks "which sessions are in this layout", which is a
+  question about tab records, never about regions.
+- **`doxa/ui/split.py` gains `PaneGroup`**, a container holding one
+  `TabbedContent`. `PaneTab` goes back to holding exactly ONE surface —
+  what it held through v0.88.0 — because the tree moved up to the window.
+  `SplitBox`, the weights, `neighbour`, `rebuild_slots`, the owner-first
+  invariant and `SPLIT_SLOTS` are untouched: this is a re-rooting, not a
+  rebuild, which was the argument for doing it as one.
+- `#session-tabs` became a CLASS in `doxa/theme.tcss` (11 selectors). An
+  id cannot be in two places and a window now has N strips. The FIRST
+  group's strip still carries the literal id, so an unsplit window's DOM
+  is byte for byte the one every release before this produced.
+  `DoxaApp._strip()` / `_strip_for(tab_id)` / `tabbed_holding(tab_id)`
+  replaced 22 `query_one("#session-tabs")` calls in `doxa/app.py` and
+  four more across `doxa/ui/labels.py`, `doxa/session/pane.py`,
+  `doxa/session/runtime.py` and `doxa/ui/transcript.py`. The last three
+  matter beyond mechanics: a subagent transcript now opens in the strip
+  of the group that spawned it, and a background group's tab status
+  lands on that group's header rather than the foreground one's.
+
+### Independence, which is the reported defect
+
+- **`Ctrl+←/→` cycles the FOCUSED GROUP's tabs.** `_cyclable_tabs()`
+  returns one group's strip instead of every `TabPane` in the window.
+  Three sessions cycling on the left while a fourth stays pinned on the
+  right is the thing the old model could not express, and it is the whole
+  of why the hierarchy was worth inverting.
+- **Closing a tab closes ONE session.** Through v0.95.0 closing a tab
+  that held a three-way split ended three, and the only available
+  mitigation was a confirm dialog. `_close_pane` now hands off to
+  `_close_group_tab`, which collapses in two ordered steps that are two
+  different facts: a group with other tabs keeps its region and shows
+  one; a group with none goes, and the split above it collapses by the
+  rule v0.91.0 already wrote for a leaf. `_closest_group_heir` names
+  where the keyboard goes, from the painted rectangles.
+- `/breakout` and `/join` were never built and are not needed: moving a
+  tab between groups is the general gesture they would have been two
+  special cases of.
+
+### Moving a tab between groups
+
+**The single hardest constraint in the spec, and it is a framework one.**
+Textual 5.3 cannot re-parent a mounted widget — `mount` of a mounted
+widget is a silent no-op that ORPHANS it, measured in v0.91.0 — so a tab
+that moves cannot take its widget with it.
+
+- `/movepane <n>` re-creates the tab at the destination and tears the
+  original down. `SessionPane.release_engine()` / `adopt_engine()` are
+  the seam, and they are deliberately not `switch_engine`, which
+  FINALIZES the outgoing engine — exactly what must not happen here.
+- `_boot` skips `engine.start()` for an adopted handle. That one line is
+  the difference between "the session moved" and "a second CLI is now
+  writing this transcript": an `EngineClient` would open a second socket
+  connection, an in-process `SessionEngine` would spawn a second CLI on a
+  live conversation — the two-writers failure `resume_session` already
+  refuses by name, arriving through the back door.
+- The scrollback comes back from disk, through v0.32.0's own
+  `_restore_transcript`. The widget is new, so the blocks it had painted
+  went with it, and re-reading is the only honest way to put them back.
+- Refused, changing nothing, when it is the group's last tab: that is a
+  close and a move at once, and the two have different undo stories.
+- **No key.** `Ctrl+Shift+←/→` is directional focus; the spec defers the
+  spelling and the command is the form that will still work on the
+  terminals where whatever key gets chosen cannot be sent.
+
+`tests/test_pane_groups.py::test_moving_a_tab_between_groups_keeps_the_
+SAME_SESSION_running` is the evidence: same engine OBJECT, same session
+id, `finalized is False`, no second engine built, the source widget out
+of `panes()` with `parent is None`, and the new one painted inside the
+destination group's rectangle.
+
+### Jumping to a group
+
+- **`Ctrl+1` … `Ctrl+9`**, numbered in reading order — left to right,
+  then top to bottom — derived from the painted rectangles
+  (`_group_order`, over `_pane_regions`' own source), never from tree
+  order: what the user counts is what is on screen. In a 2×2 that is
+  upper-left, upper-right, lower-left, lower-right.
+- **These nine keys cannot be sent under the legacy encoding.** `Ctrl`
+  has a C0 code only for the 26 letters and ``@ [ \ ] ^ _ ?`` and space;
+  a digit produces no byte at all. They ship anyway, registered so
+  `doxa.keyboard.unreachable_under_legacy` answers True and `/help` and
+  `/doctor` say where they do not work — the same bargain `Ctrl+,`
+  (v0.39.0) and `Ctrl+Tab` (v0.42.0) already ship on.
+  `tests/test_keyboard.py`'s `unreachable_bindings()` list goes from two
+  entries to eleven. **`/pane <n>` is the door that always works**, and
+  it declares no `binding` of its own: nine keys each name one group, so
+  none of them is "the key for `/pane`", and putting one there would make
+  `/doctor` read as though the command itself were unsendable.
+  `Alt+<digit>` was rejected — it is terminal tab-switching in GNOME
+  Terminal and others — and a tmux-style prefix chord costs two
+  keystrokes for a gesture meant to be instant.
+- **The number overlay.** Any `Ctrl+<digit>` paints each group's own
+  number over its own region, from the same rectangles the numbering
+  comes from, so what is numbered and what is painted cannot disagree.
+  The jump still happens immediately: it is feedback and teaching, not a
+  mode, and DOXA does not wait for a second keystroke the way tmux's
+  `display-panes` does, because the numbering is meant to become muscle
+  memory and a prompt-then-wait gesture never lets it.
+  - It fires when the digit names NO group — `Ctrl+7` in a two-group
+    window shows `1` and `2` and moves nothing. That is where it earns
+    the most: it answers "what are my choices" for a user who guessed.
+  - **One `set_timer`, never `set_interval`**, 1.2 s, cancelled before a
+    new one is armed and by any subsequent key. DOXA's no-timer rule
+    targets idle CPU, and v0.78.0 already amended it on exactly this
+    reasoning for the turn spinner.
+  - Nothing at all in a one-group window. Hide-at-zero, as everywhere.
+  - The dismissal hangs off `DoxaApp.on_event`, not an `@on(events.Key)`
+    handler: the focused prompt is a `TextArea` and stops the `Key`
+    message dead, so the decorated form never fires for an ordinary
+    letter. Written that way first, measured, moved.
+
+### Persistence — the third format, and the last one
+
+`layout.kind` stays `"tabs"` and the flat `tabs` list stays authoritative
+and complete. The window's one tree rides in a new `layout.groups` node,
+on the principle the slot was reserved with in v0.32.0. **Absence of the
+key is the migration** — no version field, no upgrade step, for the third
+format running.
+
+| written by | carries | reads as |
+|---|---|---|
+| v0.23.0 – v0.90.0 | flat `tabs` only | one group holding all of them, showing the saved active tab |
+| v0.91.0 – v0.95.0 | `trees`, one per tab | the ACTIVE tab's tree, one single-tab group per leaf; every other saved tab becomes a tab of the group holding the active session |
+| v0.96.0 | `groups` | itself |
+
+- **The spec left the composition rule open** — it says how a LEAF reads
+  in each era, not how N per-tab trees become the window's ONE tree — and
+  this is where that gap is filled, in `doxa/tabsets.py`'s own docstring.
+  The rule is "what was on the user's screen stays on the user's screen".
+  The literal alternative, a group per saved tab, was rejected after
+  measuring it: five saved tabs would restore as a five-way split, 16
+  columns each on an 80-column terminal, below `MIN_LEAF_WIDTH` (34) and
+  therefore below the width at which DOXA's own `split_refusal` will make
+  a split at all. **A restore that produces an arrangement the app
+  refuses to produce interactively is not a migration.**
+- `_fill_group` guarantees the invariant the two halves of the record
+  depend on: every session in the flat list is in exactly one group, and
+  a hand-edited tree that named one twice has the duplicate dropped.
+  `_point_at` gives the saved active session's group to it while leaving
+  every other group on its own saved tab — a restore that reset four
+  regions to their first tab in order to record one would lose four facts
+  to keep one.
+- **Writing back is the same promise the other way.** A v0.96.0 record
+  still carries `trees`, DERIVED from the group tree (`_trees_from_groups`
+  — each region's leaf is that group's active tab) rather than tracked
+  separately, so the two halves cannot drift. A v0.91.0–v0.95.0 DOXA
+  reading a grouped record gets the geometry it can express and picks the
+  remaining tabs up from the flat list.
+- `ArchivedSessionTab` grew a `layout_leaf()`. Without it an archive
+  would be in the flat list and in no group, and `_fill_group` would put
+  it back at the end of the FIRST group's strip — so an archive parked in
+  the right-hand group would migrate leftwards every restart.
+- Tested with **four** tabs for era 1 (active second), **three** trees for
+  era 2 (active in the second), and **six** sessions across three groups
+  for era 3 — v0.91.0's own spec notes the old two-tab test passed only
+  because the saved tab happened to be last.
+
+### Focus, and what "seen" means one level up
+
+- Exactly one group holds the keyboard (`focused_group()`, derived from
+  `self.focused`, never from a flag this app maintains — the drift that
+  produced the v0.32.0 restored-active-tab defect).
+- **An inactive tab inside a VISIBLE group is neither visible nor
+  focused.** It keeps running, and `-done-unseen`, the needs-input blink
+  and the `-staged` tint do NOT clear for it. v0.91.0 settled that
+  visible-but-unfocused is not seen; an invisible tab is the stronger
+  case of the same thing, and it needed no new code — `_clear_seen_marks`
+  already fires only for the pane that gets the keyboard.
+- **Only a group's SECOND `TabActivated` onwards moves focus.** Every
+  group posts one as it mounts (Textual's `Tabs` defaults itself to its
+  first tab), so with N groups the handler fired N times during boot and
+  the last one to land won the keyboard, whatever
+  `_activate_initial_tab` had just said. Measured as a restore with the
+  saved active session in the middle landing on the last group instead —
+  the v0.23.0 "three restored tabs always land on the last one" defect,
+  re-created one level up. Skipping only the first per group is what
+  keeps the MOUSE path working, which is the only reason that handler
+  focuses at all.
+- Three call sites that walked the wrong tree and went silently dead,
+  each found by a test rather than by reading:
+  - `grow_pane_towards` (`Alt+arrow`) climbed from the SURFACE and found
+    no `SplitBox` — the dividing boxes sit above the GROUP now.
+  - `focus_pane_towards` (`Ctrl+Shift+arrow`) searched the active tab's
+    surfaces instead of every group's.
+  - `DiffPane.session_pane()` searched from the enclosing TAB, which used
+    to contain both the diff and its session and no longer does. It walks
+    to the top of its own parent chain now — still a DOM walk from
+    `self`, so the `Widget.app` context-variable hazard its docstring
+    warns about is untouched; only the ROOT of the walk moved.
+- `active_pane` stopped cross-checking `focused_pane()` against the
+  active tab for a pane in ANOTHER group (that check discarded the right
+  answer once a diff could be a tab of its own group), and kept it INSIDE
+  the focused group, where it has to stay: a read-only tab showing means
+  there is no session pane here, and every caller reads that `None` as
+  "ask `_close_read_only_tab` instead". Both halves are pinned by tests
+  that failed at the intermediate state.
+- **One change tried and reverted, recorded because the reasoning is the
+  useful part.** `Widget.focus()` is deferred in Textual 5.3, so for one
+  message-pump turn after a split `focused_group()` still answers with
+  the group the user came FROM — and believing `_focus_tab`'s
+  synchronously-recorded intent instead, the way `PaneTab.focused_leaf`
+  is believed one level down, looked like the same fix. Measured, it
+  costs more than it buys: an unpainted group has a zero-area rectangle,
+  so a second `split_active_pane` in the same turn refuses with *"not
+  enough height to split: each pane needs 9 rows and this one has 0"*,
+  and `active_pane` answers with a pane from a group the keyboard has
+  demonstrably not reached. The window it would have fixed is one
+  transient record write that corrects itself the moment the new pane
+  boots. `focused_group()` reads the DOM and keeps the remembered id only
+  for the case focus is not in a group at all; the docstring carries the
+  measurement so the next reader does not re-derive it.
+
+### Two tab strips is more chrome
+
+`PaneGroup` puts itself on one of three width rungs, measured rather than
+chosen and restated in
+`test_the_tab_strip_thresholds_are_the_measured_ones` so it fails if
+either input moves:
+
+- **below 17 columns, no strip at all** (`GROUP_STRIP_MIN_COLS`);
+- **below 34, compact labels** (`GROUP_STRIP_COMPACT_COLS`);
+- above that, unchanged.
+
+A tab header costs its label floor — `TAB_MODEL_MIN (4) + " · " (3) +
+TAB_REPO_MIN (6)` — plus the provider glyph and its space (2) and
+Textual's own `Tab` padding of one column each side: 17 for one header,
+34 for the two a strip is actually for. `MIN_LEAF_WIDTH` is 34 too, and
+that is not a coincidence: its own comment already derives it from the
+same two label floors, so the narrowest group DOXA will create sits
+exactly on the compact boundary. `display: none` on the strip rather than
+`height: 0`, so the row it gives back goes to the transcript — a
+zero-height widget still holding its gutter is the invisible-button
+defect in its layout form.
+
+### The check this spec owed itself
+
+**Can a group hold a diff leaf? Yes, with no special case.** A group's
+tab list is a list of SURFACES and v0.92.0's diff is a surface;
+`PaneGroup.layout_group()` asks each tab for its own `layout_leaf()` and
+`Leaf.view` carries which kind it is. Nothing in `PaneGroup`,
+`layout.Group`, `prune`, the persistence reader or the tab-move path
+mentions diffs. The one place the word appears is the branch in `compose`
+that has to know which WIDGET to build — the same single branch v0.91.0's
+`_leaf` had, not a new one. `/diff` opens the diff as a tab of a new
+group beside the session's, and `tests/test_live_diff.py` now reads its
+position out of the window tree through the generic `layout.groups()`
+walk.
+
+### Coverage, and what is not covered
+
+- **26 new tests** in `tests/test_pane_groups.py`. They were written
+  AFTER the model, not before it, and the honest measure of them is what
+  they caught rather than a claim about their order: **eight failed on
+  their first run**, and four of those eight were real defects with fixes
+  in this release — the era-1/era-2 record discrimination (a pre-v0.91.0
+  record silently reordered the user's tab bar), the overlay's key
+  dismissal (an `@on(events.Key)` handler that never fires), the group's
+  own `TabActivated` stealing focus at boot, and
+  `split.first_group` reading `children` where Textual 5.3 keeps
+  constructor children in `_pending_children`. The other four were the
+  tests themselves being wrong about the app.
+- Three more real defects were caught by the EXISTING suite, not by the
+  new file, and are the ones listed under **Focus** above:
+  `grow_pane_towards`, `focus_pane_towards` and
+  `DiffPane.session_pane()`. All three passed every structural assertion
+  and were silently dead keys, which is the failure mode this codebase
+  keeps naming. A fourth — the focus-intent change described under
+  **Focus** — was caught only by the FULL suite, by
+  `test_exactly_one_pane_per_window_holds_the_keyboard`, which is the
+  argument for running the whole thing rather than the files you think
+  you touched.
+- Suite: **1643 tests, all passing** (1617 before this branch).
+- Four existing tests changed their expectations because the model
+  changed, and each says so in place: `test_a_vsplit_paints_two_panes_
+  side_by_side` (a split makes a GROUP), `test_a_saved_split_restores_as_
+  a_split_with_the_right_leaf_focused` and
+  `test_a_restored_split_leaf_can_still_be_split` (a v0.91.0 tree
+  migrates as one group per leaf), and two width assertions that read a
+  tab's rectangle where they now have to read the window's.
+- `scripts/screenshot.py` and `scripts/record_gif.py` re-checked, because
+  this refactor moved what a tab is again and v0.94.0 found them broken
+  for three releases over exactly that. Six `#session-tabs` lookups
+  became `tabbed_holding(tab_id)`; screenshot.py's four gained a shared
+  `_activate()` helper carrying both hard-won facts (`tab_id` not `id`;
+  the strip is a question about which group).
+- **Not covered**, and out of scope by the spec: floating windows;
+  detaching a pane to its own terminal; dragging a tab with the mouse;
+  per-group status bars. Also not done: **no key for `/movepane`**, and
+  **moving a DIFF tab between groups is refused** — `move_tab_to_group`
+  requires a session tab, because a diff belongs beside the session it is
+  a diff of and the general case has no test behind it yet. The assets
+  gallery was **not regenerated** for this release, so every still and
+  GIF still shows `DOXA 0.94.0` and the v0.91.0 one-tab-two-panes layout.
+
 ## 0.96.0 — 2026-08-31
 
 **The only way anyone found out a bound key was dead was pressing it and
@@ -225,6 +550,7 @@ hand-maps a few two-byte ESC pairs (`\x1bf` → `ctrl+right`, `\x1bb` →
 - `scripts/screenshot.py` and `scripts/record_gif.py` drive the real key,
   so both now press `ctrl+n` and `f2`. GIF captions are metadata rather
   than burned pixels, so the committed assets are unaffected.
+
 
 ## 0.94.0 — 2026-08-31
 

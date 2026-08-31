@@ -99,7 +99,7 @@ async def test_a_vsplit_paints_two_panes_side_by_side(tmp_path):
             assert pane.region.height > 0
         assert right.region.x > left.region.x
         assert right.region.y == left.region.y
-        # v0.96.0: a split makes a GROUP, and a group owns its own tabs.
+        # v0.97.0: a split makes a GROUP, and a group owns its own tabs.
         # Through v0.95.0 this asserted the opposite -- one tab, two panes
         # -- and the inversion is exactly the change that turned the
         # reported defect ("the split out sessions go with the tab") into

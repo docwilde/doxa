@@ -313,7 +313,7 @@ def unreachable_under_legacy(key: str) -> bool:
             return False
         if len(base) == 1 or base in _NAMED_PRINTABLE:
             # A printable character with no C0 code: no byte exists. The
-            # DIGITS live here (v0.96.0's Ctrl+1..Ctrl+9, jump to a pane
+            # DIGITS live here (v0.97.0's Ctrl+1..Ctrl+9, jump to a pane
             # group by position) and they are the same bucket as Ctrl+,
             # and Ctrl+Tab, which have shipped since v0.39.0 and v0.42.0:
             # deliverable under the kitty protocol, silently dead under the

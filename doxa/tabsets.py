@@ -57,7 +57,7 @@ survives BOTH ways:
   The absence of the key IS the migration; there is no version field and
   no upgrade step.
 
-**The third format, and the last one** (v0.96.0): ``groups``. The window
+**The third format, and the last one** (v0.97.0): ``groups``. The window
 holds ONE tree now, its leaves are :class:`doxa.layout.Group` nodes, and
 that tree rides in ``layout["groups"]`` beside the other two keys on
 exactly the principle the slot was reserved with. Every rule above holds
@@ -66,7 +66,7 @@ stays authoritative and complete, and the absence of the key is again the
 whole migration. :func:`_layout_groups` is the reader, and it answers for
 all three eras:
 
-* ``groups`` present -- v0.96.0 and later. That tree, as written.
+* ``groups`` present -- v0.97.0 and later. That tree, as written.
 * ``trees`` but no ``groups`` -- v0.91.0 to v0.95.0. Each saved tree's
   leaves read as **one single-tab group per leaf**
   (:func:`doxa.layout.groupify`), which is not a guess: a leaf held
@@ -93,7 +93,7 @@ interactively is not a migration, it is a defect with a rationale.
 
 **Writing back**: ``trees`` is still written, derived from the group tree
 by taking each group's ACTIVE tab as that region's leaf
-(:func:`_trees_from_groups`). A v0.91.0-v0.95.0 DOXA reading a v0.96.0
+(:func:`_trees_from_groups`). A v0.91.0-v0.95.0 DOXA reading a v0.97.0
 record therefore gets the geometry it can express, and picks the
 remaining tabs up from the flat list as ordinary tabs -- the same honest
 degradation the flat list has provided since v0.23.0, one format on.
@@ -220,7 +220,7 @@ class TabSetRecord:
     #: here, so no caller has to know which kind of record it got.
     trees: "tuple" = ()
     #: The WINDOW's one layout tree, leaves holding
-    #: :class:`doxa.layout.Group` (v0.96.0). Never ``None`` on a record
+    #: :class:`doxa.layout.Group` (v0.97.0). Never ``None`` on a record
     #: this version reads: :func:`_layout_groups` derives one for all
     #: three eras, so no caller has to know which kind of record it got --
     #: the same promise ``trees`` makes one format down.
@@ -253,7 +253,7 @@ class ResolvedRestore:
     #: ``_restore_group_tree`` does the pruning against the specs it
     #: actually built.
     trees: "tuple" = ()
-    #: The saved WINDOW tree (v0.96.0), UNPRUNED for the same reason
+    #: The saved WINDOW tree (v0.97.0), UNPRUNED for the same reason
     #: ``trees`` is: which sessions survived is already answered above, and
     #: pruning here would mean answering it twice.
     groups: "Any" = None
@@ -295,7 +295,7 @@ def _file_for(scope_key: str) -> Path:
 
 
 def _trees_from_groups(groups: "Any") -> "list":
-    """The v0.91.0 ``trees`` shape for a v0.96.0 window tree: one tree per
+    """The v0.91.0 ``trees`` shape for a v0.97.0 window tree: one tree per
     GROUP, in layout order, each region's leaf being that group's ACTIVE
     tab.
 
@@ -370,7 +370,7 @@ def save(
         # honest but costs the user every tab they had.
         layout["trees"] = [layout_mod.to_json(tree) for tree in trees]
     if groups is not None:
-        # v0.96.0: the window's ONE tree, leaves holding groups. Same slot,
+        # v0.97.0: the window's ONE tree, leaves holding groups. Same slot,
         # same principle, same compatibility story as ``trees`` above -- and
         # for the third time, the absence of this key on the next reader
         # that does not understand it is the whole of the migration.
