@@ -9,8 +9,13 @@ never documents a plan as if it were shipped.
 ## Contents
 
 - [Sessions and the daemon](#sessions-and-the-daemon)
-- [Tabs](#tabs)
+- [The spawned CLI](#the-spawned-cli)
+- [The transcript](#the-transcript)
+- [Tabs](#tabs) — and [restoring them](#restoring-tabs)
+- [Split panes](#split-panes)
+- [The live diff](#the-live-diff)
 - [Worktrees and finalize](#worktrees-and-finalize)
+- [Where a session is](#where-a-session-is)
 - [Permission modes](#permission-modes)
 - [The status bar](#the-status-bar)
 - [LORE integration](#lore-integration)
@@ -61,6 +66,71 @@ the sessions instead. `ctrl+q` ends the current tab's session for real
 (finalizes and stops its daemon); on a read-only (archived) tab it just
 closes the tab. `ctrl+w` / `/detach` close a tab but leave its session
 running.
+
+## The spawned CLI
+
+The engine behind a session spawns a `claude` CLI process, and that
+process gets a **config directory of its own**. `CLAUDE_CONFIG_DIR` is
+set on the child's environment only (`ClaudeAgentOptions.env` —
+DOXA's own environment is never touched), pointing at a directory DOXA
+writes and owns: a `settings.json` with no `hooks`, no `enabledPlugins`
+and no `plugins` key at all, plus `LORE_SKIP=1` belt-and-braces. So none
+of the Claude Code plugins installed on your machine — none of their
+hooks, commands, skills, agents or MCP servers — load into a DOXA session
+unasked.
+
+`/plugins` shows what DOXA found on the machine and what it did with it:
+discovered, adopted, or refused with the reason. `/reload-plugins`
+re-scans; adoption is read at spawn, so a re-scan reaches new
+sessions and tabs, not the one you are in.
+
+`adopt_plugins` (**off** by default) is the opt-in. Turned on it carries
+in **commands, skills and agents only**. Hooks are refused
+unconditionally, `.mcp.json` / `mcp.json` are not read, and the `hooks`
+and `mcpServers` keys are stripped out of any manifest that carries them.
+The LORE plugin is blocklisted outright even then, because `lore_core`
+already runs in-process here and a second copy would fork one memory
+store into two halves. See
+[docs/plans/plugins.md](plans/plugins.md).
+
+## The transcript
+
+A turn renders as one block, and the block is built in this order, top to
+bottom: the prompt you typed, the reasoning fold, the reply body, the
+tool-call fold.
+
+**Reasoning** streams into a fold headed `✻ Reasoning (N chars)`, whose
+count ticks up live while it is still collapsed — which it is by default.
+It is requested at connect (`thinking={type: adaptive, display:
+summarized}`) and the whole thing is behind `show_reasoning`, on by
+default; off, DOXA asks for nothing extra.
+
+**The reply** streams as real markdown, not as text painted after the
+fact: tables fill in row by row, bold spans and inline code close as
+their deltas arrive, and a delta that splits a table row or a bold span
+mid-token survives it.
+
+**Tool calls** compact behind one fold per turn, headed `⚒ Tool calls
+(N)`, collapsed by default and counting up as calls land. Opening it
+shows one chip per call; opening a chip shows `ARGS:` (the exact JSON the
+model sent) and `RESULT:` (what came back), built lazily so a
+twenty-call turn costs nothing until you look. A memory-store call is an
+ordinary chip like any other — there is no special case for it anywhere
+in the renderer, which is the point: the mechanism deciding what the
+agent believes is inspectable on the same terms as a `Grep`.
+
+**The in-flight marker** sits under the block for the whole turn and
+names the phase it is in — `thinking` before anything has arrived,
+`reasoning` while summarized reasoning is streaming, `generating` while
+the reply is, `working` between a tool call and its result — with a
+spinner and a live second count beside it. The seconds keep climbing
+through the silent stretch between a tool call and its result, which is
+exactly where "is this still working?" gets asked.
+
+**A failure** is a block too. A caught exception renders as a
+collapsible red-ruled block inside the transcript, one line collapsed,
+its traceback and origin one keystroke away — rather than taking the app
+down.
 
 ## Tabs
 
@@ -128,6 +198,49 @@ with proportional sizes and the saved pane focused. The design is
 v0.91.0 carries no tree and restores as one tab per session, exactly as it
 always did; a record written after it still restores under an older DOXA,
 as one tab per pane.
+
+## Split panes
+
+Since v0.91.0 a **tab** is a container and a **pane** is one leaf inside
+it holding one session. A tab that never splits behaves exactly as it
+always did.
+
+`/split` (or `alt+s`) puts a second session **stacked below** this one;
+`/vsplit` (or `alt+d`) puts one **side by side** with it. That is vim's
+sense of the two words and the opposite of tmux's `split-window -h`, so
+every description spells the direction out rather than trusting the
+letter. The keys are Alt, not Ctrl+Shift: under the legacy encoding
+`ctrl+shift+<letter>` sends the same byte as `ctrl+<letter>` and is
+undeliverable, while Alt goes out as an ESC prefix every terminal has
+sent for decades.
+
+A split **spawns a new, independent session** — the same factory `ctrl+t`
+uses — not a second view of the one you were in. Focus moves to the new
+pane, because someone who just asked for a second pane is asking to work
+in it. The pane it was split off keeps rendering, keeps streaming, and
+keeps any "you missed something" mark it had: visible, focused and seen
+are three different states.
+
+| key | does |
+|---|---|
+| `alt+s` / `alt+d` | split stacked below / side by side |
+| `ctrl+shift+←/→/↑/↓` | move the keyboard to the pane in that direction — geometric, never "next pane" |
+| `alt+←/→/↑/↓` | move the divider between this pane and its neighbour that way |
+| `ctrl+↑` / `ctrl+↓` | move the **in-pane** divider (the status bar): up grows the transcript, down grows the prompt — and this works in a tab with no splits at all |
+
+Two refusals, each printed as a block in the pane it is about and
+changing nothing: a pane may be split **twice** (`SPLIT_SLOTS`), which is
+what gives the 2x2 the design is written around — each new pane is born
+with its own fresh allowance, so there is no fixed ceiling on panes,
+only on how deep one lineage goes — and a split that would leave either
+side under **34 columns or 9 rows** is refused with the number it
+actually has. A refusal that performed a sliver would be worse than the
+refusal.
+
+`ctrl+w` closes the **focused pane** (detaching its session, as it always
+has) and the surviving sibling takes the whole room back — no dead strip
+where the closed pane was. Closing the last pane in a tab closes the tab.
+The design is [docs/plans/split-panes.md](plans/split-panes.md).
 
 ## The live diff
 
@@ -201,11 +314,44 @@ at a mere detach):
 With `worktree_per_session` off, every session runs directly in the launch
 directory (the pre-worktree behavior).
 
+## Where a session is
+
+`/dir` reports the directory this session is actually rooted in — the
+literal cwd its engine was booted with, which is what every one of its
+tool calls resolves a relative path against. Since v0.17.0 that is
+usually a DOXA-managed worktree rather than the directory you launched
+in, so a worktree session's answer also names the repo it was forked from
+and the base it is on.
+
+`/cd <path>` **opens that path in a new tab** and says, every time, that
+this session was left where it was. That is the only honest reading of
+"change directory" here: the `claude` CLI subprocess behind a running
+session was spawned with an operating-system cwd, no SDK control request
+exists to hand a running process a new one, and repainting only DOXA's
+own bookkeeping would make the status bar claim a location none of the
+session's tool calls are touching. It is the same mechanism `/resume` and
+the repo chip's directory picker already use. Bare `/cd` explains this
+rather than doing nothing, and names where the session stays.
+
+Outside a git repository the status bar's leftmost identity chip is
+`dir NAME` — the directory's own basename, with no `⎇` and no branch
+half. It is deliberately a **different shape** from the git chip's
+`repo ⎇ branch @sha` rather than the same shape with the branch missing:
+"a repo, on branch X" and "a plain directory" have to read as different
+facts. Before v0.93.0 there was no chip at all there, so a session
+started outside a repo had nothing on screen saying where it was.
+Clicking it opens the same repo/directory picker the git chip's repo
+half does.
+
 ## Permission modes
 
-The `mode:` chip leads the status bar (first position, so it is never the
-chip a narrow terminal drops) and names the session's permission mode —
-what still stops and asks before a tool runs. `shift+tab` cycles it,
+The `mode:` chip leads the status bar (first position, so it is never
+crowded off the end of a narrow row) and names the session's permission
+mode — what still stops and asks before a tool runs. The one case it
+stands down is a chip that would read `default` on a row under
+`MODE_CHIP_MIN_COLS` (110): every mode that is *not* `default` is painted
+at every width, because those are the ones worth the columns.
+`shift+tab` cycles it,
 `/mode [name]` sets it directly, clicking the chip opens a picker. Glyphs
 and colors are read out of the installed `claude` CLI's own permission-mode
 table, not invented by DOXA.
@@ -278,6 +424,7 @@ shown empty. Every chip carries a tooltip on hover, including the plain
 | `⚑ needs input` | a question or permission request is waiting on this pane | no |
 | `effort:` | reasoning effort asserted at connect (hidden when none was) | yes — effort picker, affects future sessions only |
 | repo/branch/sha | the git chip: repo name, the worktree's session branch, sha | yes — repo and branch halves each open their own picker |
+| `dir NAME` | the folder chip, shown **instead of** the git chip when this session is not in a git repository at all (see [Where a session is](#where-a-session-is)) | yes — the same repo/directory picker |
 | `sub:<tier> (≈$…)` or `$…` | subscription tier with a list-price what-if, or the real API spend on API-key auth | no |
 | `s:N% w:N%` | subscription session (5h) and weekly utilization, cached by the `claude` CLI itself | no |
 | `ctx N%` | context window usage, amber at 70%, red at 90%; `ctx_absolute` adds `24k/200k` inline | yes — confirms, then `/compact` |
@@ -557,6 +704,11 @@ palette, the `/` autocomplete and `/help` from that single registry.
 
 | command | does |
 |---|---|
+| `/split` | A second session **stacked below** this pane (`alt+s`) |
+| `/vsplit` | A second session **side by side** with this pane (`alt+d`) |
+| `/diff` | This session's live worktree diff in the pane beside it, or close it (`alt+g`) |
+| `/dir` | Where this session actually is |
+| `/cd <path>` | Open that path in a **new** tab; this session stays where it is |
 | `/peers` | Live sessions in this project right now |
 | `/msg <session_prefix> <text>` | Send a message to one same-project peer session |
 | `/detach` | Close this tab but leave its session running |
