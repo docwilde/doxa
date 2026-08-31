@@ -25,6 +25,10 @@ What each section pins:
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import time
+
 import pytest
 
 from doxa import config as config_mod
@@ -578,3 +582,198 @@ async def test_alt_arrow_moves_the_divider_between_two_leaves(tmp_path):
         assert new.region.width > before
         assert first.region.width > 0  # never dragged into nothing
         assert first.region.width + new.region.width == first.tab.region.width
+
+
+# -- the event loop, during a split (v0.95.0) ---------------------------
+#
+# Reported from live use: "After splitting the pane with vsplit, the whole
+# TUI lags hard (maybe CPU load loop wo wait or not async?)".
+#
+# It was the second guess. `SessionPane.on_mount` opened with a plain
+# `self.engine = self._engine_factory()`, and in production that factory
+# is `doxa.cli.new_session_factory` -> `daemon.spawn_daemon`, which
+# Popens a daemon and then blocks its caller in a
+# `while monotonic() < deadline: _time.sleep(0.1)` registry poll for up to
+# 60 seconds. Measured at 2320.8 ms of unbroken event-loop stall against a
+# 12.0 ms idle gap. There was no busy loop: idle cost was 0.8-2.0% of one
+# core before AND after a split, over eleven scenarios and again through a
+# real PTY, and never diverged.
+#
+# NOTHING in this suite could see it, and the reason is worth stating,
+# because it is why the defect shipped: every test here hands DoxaApp a
+# factory that returns a FakeEngine instantly. A blocking factory is not
+# an exotic case to simulate -- it is the ONLY kind that ships.
+
+
+def _blocking_app(tmp_path, block_secs: float):
+    """A DoxaApp whose new-session factory behaves like the real one:
+    it blocks its caller, synchronously, before returning an engine."""
+    def make() -> FakeEngine:
+        time.sleep(block_secs)
+        return FakeEngine([])
+
+    return DoxaApp(
+        cwd=str(tmp_path),
+        engine_factory=lambda: FakeEngine([]),
+        new_session_factory=make,
+    )
+
+
+class _Heartbeat:
+    """A task that wakes every 10ms and records how long it was actually
+    kept from waking. The longest gap IS the freeze: an event loop that
+    someone is calling `time.sleep` on cannot run this, cannot dispatch a
+    key, and cannot repaint."""
+
+    def __init__(self, interval: float = 0.01) -> None:
+        self.interval = interval
+        self.gaps: list[float] = []
+        self._task: "asyncio.Task | None" = None
+
+    async def _beat(self) -> None:
+        last = time.perf_counter()
+        while True:
+            await asyncio.sleep(self.interval)
+            now = time.perf_counter()
+            self.gaps.append(now - last)
+            last = now
+
+    def start(self) -> None:
+        self._task = asyncio.ensure_future(self._beat())
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+
+    @property
+    def worst(self) -> float:
+        return max(self.gaps) if self.gaps else 0.0
+
+
+#: How long the stand-in factory blocks. Long enough that a synchronous
+#: call is unmistakable against scheduler noise, short enough that the
+#: test costs half a second.
+BLOCK_SECS = 0.5
+
+#: The gap that counts as a freeze. Well above the ~12ms idle gap and the
+#: ~23ms a split costs on its own, well below BLOCK_SECS -- so this fails
+#: on the defect and cannot fail on a slow machine's jitter.
+STALL_LIMIT = 0.25
+
+
+@pytest.mark.asyncio
+async def test_a_vsplit_never_blocks_the_event_loop(tmp_path):
+    """The regression test for the reported lag.
+
+    Asserts on the LOOP, not on a duration: a split is allowed to take as
+    long as spawning a session takes, and is not allowed to stop the
+    application while it does. That distinction is the whole fix -- the
+    engine is built in a thread now, so the ~2.3 seconds still happen and
+    the TUI keeps painting, keeps accepting keys and keeps streaming the
+    OTHER pane's turn throughout.
+
+    Fails at ~514ms on the pre-fix code."""
+    app = _blocking_app(tmp_path, BLOCK_SECS)
+    async with app.run_test(size=BIG) as pilot:
+        await _wait(pilot, lambda: app.active_pane is not None)
+        await pilot.pause()
+        beat = _Heartbeat()
+        beat.start()
+        await pilot.pause()
+        beat.gaps.clear()
+
+        assert await app.split_active_pane(layout.ROW) is None
+        assert await _wait(pilot, lambda: len(app.panes()) == 2)
+
+        await beat.stop()
+        assert beat.worst < STALL_LIMIT, (
+            f"the event loop stalled {beat.worst * 1000:.0f} ms during a "
+            f"vsplit — a blocking session factory is being called on the "
+            f"loop again (SessionPane.on_mount / _build_and_boot)"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_new_tab_never_blocks_the_event_loop_either(tmp_path):
+    """Ctrl+T went through the SAME line and had the same freeze; the
+    split is only where it is most visible, because splitting is the
+    gesture that mounts a pane while you are watching another one stop
+    repainting. Pinned separately so a future change to one path cannot
+    quietly reintroduce it on the other."""
+    app = _blocking_app(tmp_path, BLOCK_SECS)
+    async with app.run_test(size=BIG) as pilot:
+        await _wait(pilot, lambda: app.active_pane is not None)
+        await pilot.pause()
+        beat = _Heartbeat()
+        beat.start()
+        await pilot.pause()
+        beat.gaps.clear()
+
+        await app.action_new_tab()
+        assert await _wait(pilot, lambda: len(app.panes()) == 2)
+
+        await beat.stop()
+        assert beat.worst < STALL_LIMIT, (
+            f"the event loop stalled {beat.worst * 1000:.0f} ms during "
+            f"Ctrl+T"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_slow_spawn_still_produces_a_working_pane(tmp_path):
+    """Moving the factory off the loop must not lose the engine.
+
+    The window it opens is real -- `pane.engine` is None between mount and
+    the thread returning -- and it is the window `_peer_pump` has always
+    modelled and `_run_turn` now waits through. This asserts the far side:
+    the pane ends up holding the engine the factory built, `_boot` really
+    started it, and the pane declares itself ready -- i.e. nothing about
+    moving the construction into the worker dropped the handle."""
+    app = _blocking_app(tmp_path, BLOCK_SECS)
+    async with app.run_test(size=BIG) as pilot:
+        await _wait(pilot, lambda: app.active_pane is not None)
+        assert await app.split_active_pane(layout.ROW) is None
+        assert await _wait(pilot, lambda: len(app.panes()) == 2)
+        new_pane = app.active_pane
+        assert new_pane is not None
+        assert await _wait(pilot, lambda: new_pane.engine is not None, tries=400)
+        assert isinstance(new_pane.engine, FakeEngine)
+        assert await _wait(
+            pilot, lambda: new_pane._engine_ready.is_set(), tries=400
+        )
+        assert new_pane.engine.started
+
+
+@pytest.mark.asyncio
+async def test_the_idle_app_arms_nothing_new_when_it_splits(tmp_path):
+    """The reporter's FIRST guess, pinned as the fact it turned out to be.
+
+    DOXA's no-timer rule says an idle app arms none, and a split must not
+    change that -- measured directly rather than trusted, because a busy
+    loop is otherwise invisible to a test suite. `_auto_refresh_timer` is
+    the slot Textual's own `auto_refresh` uses and the one the existing
+    no-idle-timer guards watch."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await _wait(pilot, lambda: app.active_pane is not None)
+        await pilot.pause()
+
+        def armed() -> int:
+            return sum(
+                1 for node in app.query("*")
+                if getattr(node, "_auto_refresh_timer", None) is not None
+            )
+
+        before = armed()
+        assert await app.split_active_pane(layout.ROW) is None
+        assert await _wait(pilot, lambda: len(app.panes()) == 2)
+        assert await app.split_active_pane(layout.COLUMN) is None
+        assert await _wait(pilot, lambda: len(app.panes()) == 3)
+        for _ in range(20):
+            await pilot.pause()
+        assert armed() == before, (
+            "a split armed an auto-refresh timer — the no-timer rule is "
+            "per app, not per pane"
+        )

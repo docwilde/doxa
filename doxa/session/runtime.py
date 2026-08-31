@@ -101,6 +101,69 @@ class PaneRuntimeMixin:
                 await engine.finalize()
         return note
 
+    async def _build_and_boot(self) -> None:
+        """Build this pane's engine OFF the loop, then boot it.
+
+        **This is the fix for "after splitting the pane with vsplit, the
+        whole TUI lags hard".** ``SessionPane.on_mount`` used to open with
+        a bare ``self.engine = self._engine_factory()``. In the suite that
+        factory returns a ``FakeEngine`` instantly and nothing showed; in
+        production it is ``doxa.cli.new_session_factory`` ->
+        ``daemon.spawn_daemon``, which ``subprocess.Popen``s a fresh
+        daemon and then blocks its caller in a
+        ``while monotonic() < deadline: _time.sleep(0.1)`` registry poll
+        for up to ``wait_secs`` -- 60 seconds as written.
+
+        Measured with a 10ms heartbeat task watching the loop across
+        ``split_active_pane(ROW)``: idle inter-tick gap 12.0 ms, gap
+        DURING the split 2320.8 ms, gap after 12.7 ms -- one unbroken
+        ~2.3-second freeze, about 190x idle, with only four heartbeat
+        ticks landing in the whole window. No keys, no repaint, no message
+        pump. The reporter's own guess ("not async?") was exactly right,
+        and their other guess (a CPU loop that never yields) was not: idle
+        cost was measured at 0.8-2.0% of one core before AND after a
+        split, across eleven scenarios and again through a real PTY, and
+        never diverged. The app is not busy after a split; it was frozen
+        during it.
+
+        ``/split`` and ``/vsplit`` are where it is most visible because
+        splitting is the gesture that mounts a pane while you are looking
+        at another one that stops repainting. ``Ctrl+T`` (``action_new_tab``)
+        and every restored tab went through the same line and had the same
+        freeze.
+
+        The discipline was already here, one method away: ``switch_engine``
+        below has built its engine with ``await asyncio.to_thread`` since
+        it was written, and its docstring gives this exact reason --
+        "off-loop -- a daemon spawn blocks on subprocess+registry
+        polling". ``/model`` and ``/attach`` were paying attention to it;
+        the path EVERY pane takes was not.
+
+        Failure surfaces as a block in this pane rather than an escaping
+        exception, same as ``switch_engine``: a session that could not
+        spawn is a thing to read, not a crash. And a pane that was closed
+        while the thread was still working gets its engine finalized
+        instead of stranded -- ``detach``/``stop`` cannot clear a handle
+        that does not exist yet, so this is the one place that can."""
+        try:
+            engine = await asyncio.to_thread(self._engine_factory)
+        except Exception as exc:  # noqa: BLE001 -- a spawn failure is a block, not a crash
+            # ``_system``, not a raw mount: it holds the NoMatches AND
+            # is_mounted pair this exact window needs (its own docstring
+            # explains why one guard is not enough), and this runs from a
+            # worker on a pane that may still be composing.
+            await self._system(f"session failed to start: {exc}")
+            return
+        if self._stopped or not self.is_mounted:
+            # Closed mid-spawn. Nothing will ever read this handle, and
+            # dropping it on the floor leaks a daemon that thinks it has
+            # a client.
+            with contextlib.suppress(Exception):
+                await engine.finalize()
+            return
+        self.engine = engine
+        await self._boot()
+
     async def _boot(self) -> None:
         assert self.engine is not None
         await self.engine.start()
@@ -341,8 +404,19 @@ class PaneRuntimeMixin:
                 self._refresh_status()
 
     async def _run_turn(self, prompt: str) -> None:
-        assert self.engine is not None
+        # WAIT first, then check -- not the other way round. The assert
+        # used to run before the wait, which was only ever true because
+        # on_mount set ``self.engine`` synchronously; now the engine is
+        # built inside the boot worker (see :meth:`_build_and_boot`), so a
+        # prompt submitted during a slow daemon spawn reaches this line
+        # with the handle legitimately still None. ``_peer_pump`` already
+        # models exactly this window and returns quietly; so does this,
+        # for the same reason it gives -- a pane with no engine has
+        # nothing to send, and an assertion there would surface a visible
+        # error block for a race the user cannot see or avoid.
         await self._engine_ready.wait()
+        if self.engine is None:
+            return
         self.turn_in_flight = True
         self._set_tab_class("-working", True)
         # A fresh turn starting is itself "seen" -- clear any stale

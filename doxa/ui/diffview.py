@@ -231,7 +231,7 @@ class FileSection(Collapsible):
     def _title(self) -> str:
         return f"◈ {self.file_diff.summary()}"
 
-    def build(self, width: int) -> None:
+    def build(self, width: int, passes: int = 3) -> None:
         """Mount this file's hunks. First expand only -- the same
         ``format_body`` discipline ``ToolChip`` uses, and mounted without
         awaiting for the same reason it is there: this runs from a
@@ -248,12 +248,27 @@ class FileSection(Collapsible):
         in the targeted ones: the same race v0.91.0 met in
         ``SessionPane._system``, met again from a widget that has no
         transcript to drop a block into. Retried rather than dropped,
-        because an unbuilt section is a fold that opens onto nothing."""
+        because an unbuilt section is a fold that opens onto nothing.
+
+        BOUNDED, since v0.95.0. This retry and :meth:`DiffPane._repaint`'s
+        were the only two ``call_after_refresh`` loops in the codebase
+        that could reschedule themselves forever: each one calls back into
+        the method that scheduled it, with no counter and no delay, so a
+        container that never becomes mountable would spin the message pump
+        at full speed and never let the app go idle. That is the exact
+        shape v0.91.0 already had to remove once (an unbounded focus
+        retry), and their own sibling :meth:`DiffPane._apply_badges` has
+        carried a pass counter from the day it was written -- the omission
+        here reads as an oversight rather than a decision. Neither could
+        be provoked in measurement; both are bounded now anyway, because
+        "cannot currently be triggered" is not a property a retry loop
+        keeps on its own."""
         if self._built:
             self.repaint(width)
             return
         if not self._hunks.is_mounted:
-            self.call_after_refresh(self._build_later, width)
+            if passes > 1:
+                self.call_after_refresh(self._build_later, width, passes - 1)
             return
         self._built = True
         if self.file_diff.skipped:
@@ -267,12 +282,13 @@ class FileSection(Collapsible):
         for hunk in self.file_diff.hunks:
             self._hunks.mount(HunkView(self.file_diff, hunk, width))
 
-    def _build_later(self, width: int) -> None:
+    def _build_later(self, width: int, passes: int = 3) -> None:
         """The retry :meth:`build` schedules. Silent if this section left
         the DOM in the meantime -- there is then nothing to build into,
-        and that is the one case where dropping IS the right answer."""
+        and that is the one case where dropping IS the right answer -- and
+        silent after ``passes`` attempts, which is the other."""
         if self.is_mounted:
-            self.build(width)
+            self.build(width, passes)
 
     def repaint(self, width: int) -> None:
         for view in self._hunks.query(HunkView):
@@ -384,14 +400,17 @@ class DiffPane(Vertical):
         self.result = result
         await self._repaint()
 
-    async def _repaint(self) -> None:
+    async def _repaint(self, passes: int = 3) -> None:
         """Rebuild the file list.
 
         Guarded on ``is_mounted`` as well as ``NoMatches``, and for the
         v0.91.0 reason ``SessionPane._system`` spells out: ``query_one``
         SUCCEEDS for a node that is in the DOM but not yet mountable, and
         it is ``mount`` that raises ``MountError``. This runs from a
-        worker, so it can land in exactly that window."""
+        worker, so it can land in exactly that window.
+
+        ``passes`` bounds the retry -- see :meth:`FileSection.build` for
+        why these two grew a counter in v0.95.0."""
         if not self.is_mounted:
             return
         try:
@@ -406,7 +425,8 @@ class DiffPane(Vertical):
             # system block, though, a dropped repaint is not harmless --
             # it is a pane frozen on its placeholder -- so this retries
             # once the pump has caught up rather than returning silently.
-            self.call_after_refresh(self._repaint_later)
+            if passes > 1:
+                self.call_after_refresh(self._repaint_later, passes - 1)
             return
         self._head.update(self.result.headline())
         notes = [self.result.truncated] if self.result.truncated else []
@@ -481,12 +501,12 @@ class DiffPane(Vertical):
         if marked < len(wanted) and passes > 1:
             self.call_after_refresh(self._apply_badges, passes - 1)
 
-    def _repaint_later(self) -> None:
+    def _repaint_later(self, passes: int = 3) -> None:
         """The retry :meth:`_repaint` schedules when its container was
         not mountable yet. A worker rather than a direct call because
         ``_repaint`` is a coroutine and this runs from the message pump."""
         if self.is_mounted:
-            self.run_worker(self._repaint(), group="diff-paint")
+            self.run_worker(self._repaint(passes), group="diff-paint")
 
     def _repaint_open(self, width: int) -> None:
         for section in self._files.query(FileSection):

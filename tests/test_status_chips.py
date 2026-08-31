@@ -846,6 +846,21 @@ async def test_sessions_picker_detached_row_opens_a_new_tab(monkeypatch, tmp_pat
             assert app.panes()[0] is original
             assert original.engine is fake  # the original tab is untouched
             new_pane = app.panes()[-1]
+            # The pane EXISTING is not the same event as its engine being
+            # built, and has not been since v0.95.0: a pane's engine is
+            # constructed inside its boot worker, off the loop, because
+            # the real factory forks a daemon and polls for it with
+            # `time.sleep` -- which used to freeze the whole TUI for the
+            # ~2.3 seconds that took (PaneRuntimeMixin._build_and_boot).
+            # So the wait above, which stops at "the tab appeared", is one
+            # step too shallow for an assertion about the ENGINE. Waiting
+            # for the thing being asserted on is the same discipline every
+            # split-pane test already follows for painted rectangles.
+            for _ in range(200):
+                if new_pane.engine is not None:
+                    break
+                await pilot.pause(0.02)
+            assert new_pane.engine is not None
             assert new_pane.engine.session_id == "bbbb2222dead"
         finally:
             sock.close()

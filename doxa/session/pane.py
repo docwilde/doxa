@@ -339,7 +339,13 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         yield PromptInput(dropdown, search, needs_input, picker, id="prompt-input")
 
     async def on_mount(self) -> None:
-        self.engine = self._engine_factory()
+        # The engine is built INSIDE the boot worker, off the loop --
+        # never here. See PaneRuntimeMixin._build_and_boot for the
+        # measurement; the short version is that `self._engine_factory()`
+        # stood on this line as a plain synchronous call, and in
+        # production it forks a daemon and then polls for it with
+        # `time.sleep(0.1)`, so every /split, /vsplit and Ctrl+T froze the
+        # whole TUI for as long as that took.
         if self._initial_pinned_name:
             # Item D restore: pin the saved name BEFORE the boot worker
             # starts, same as a user's own /rename -- set_custom_name is
@@ -347,7 +353,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
             # header, and it only needs the DOM (already mounted here),
             # never the engine.
             self.set_custom_name(self._initial_pinned_name)
-        self.run_worker(self._boot(), exclusive=True, group="engine")
+        self.run_worker(self._build_and_boot(), exclusive=True, group="engine")
         self.run_worker(self._peer_pump(), exclusive=True, group="peers")
 
     # -- lifecycle ---------------------------------------------------
