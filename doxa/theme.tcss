@@ -68,8 +68,14 @@ Screen {
 /* Session tabs (Phase 3): the TabbedContent hosts one SessionPane per
    session; both default to height:auto, which would collapse the panes'
    1fr block list -- pin the whole tab system to the screen. The tab strip
-   itself rides the surface ramp; the active tab gets the orange accent. */
-#session-tabs {
+   itself rides the surface ramp; the active tab gets the orange accent.
+
+   A CLASS, not an id, since v0.96.0: every pane GROUP owns a strip of its
+   own (doxa/ui/split.py's PaneGroup), and an id cannot be in two places.
+   The first group's strip still carries the literal id `session-tabs` --
+   see doxa.ui.split.next_tabbed_id -- so an unsplit window's DOM is the
+   one every release before this produced. */
+.session-tabs {
     height: 1fr;
 }
 
@@ -80,6 +86,36 @@ Screen {
 PaneTab {
     height: 1fr;
     padding: 0;
+}
+
+/* The two narrow rungs (v0.96.0, doxa.layout.GROUP_STRIP_*_COLS). Two tab
+   strips is more chrome than one, and a 40-column half of an 80-column
+   terminal cannot show a tab label at all -- so a group narrower than the
+   measured floor renders its strip compactly, and one narrower still
+   renders none: hide-at-zero, the same discipline the context chip and the
+   side-by-side diff already follow.
+
+   `display: none` on the strip rather than `height: 0`, because a hidden
+   strip must give its row back to the transcript -- a zero-height widget
+   that still reserves its gutter is the "invisible button" defect in its
+   layout form. */
+PaneGroup.-strip-hidden ContentTabs {
+    display: none;
+}
+
+PaneGroup.-strip-compact Tab {
+    padding: 0;
+    max-width: 12;
+}
+
+/* The Ctrl+<digit> number overlay. Painted over the group's own region and
+   nowhere else, on the group's own `groupnum` layer so it never takes a
+   cell away from the pane underneath -- the same layer bargain the clock
+   chip makes. Dim rather than opaque: a flash that hid a streaming
+   response for a second would be worse than no flash. */
+GroupNumber {
+    background: #1E1B15 60%;
+    color: #D97757;
 }
 
 SessionPane {
@@ -107,16 +143,16 @@ SessionPane.-staged {
     border-left: outer #6E8FA8;
 }
 
-#session-tabs ContentTabs {
+.session-tabs ContentTabs {
     background: $doxa-base;
     color: #D8CDBB;
 }
 
-#session-tabs Tab {
+.session-tabs Tab {
     color: #D8CDBB;
 }
 
-#session-tabs Tab.-active {
+.session-tabs Tab.-active {
     color: #D97757;
     text-style: bold;
 }
@@ -138,7 +174,7 @@ SessionPane.-staged {
    invariant: both are cleared the moment a tab activates), so neither
    needs a compound rule of its own -- there is nothing for them to lose a
    fight with. */
-#session-tabs Tab.-done-unseen {
+.session-tabs Tab.-done-unseen {
     color: #6FCF97;
 }
 
@@ -151,32 +187,32 @@ SessionPane.-staged {
    near the green of done-unseen or the amber of working, so a tab
    carrying it is not misread as either, and low-saturation enough that a
    whole strip of them is not a wall of noise. */
-#session-tabs Tab.-staged {
+.session-tabs Tab.-staged {
     color: #A98FD1;
 }
 
-#session-tabs Tab.-working {
+.session-tabs Tab.-working {
     color: #E0A83C;
 }
 
-#session-tabs Tab.-attention {
+.session-tabs Tab.-attention {
     color: #F2E9DD;
     background: #B23B32;
     text-style: bold;
 }
 
-#session-tabs Tab.-active.-working {
+.session-tabs Tab.-active.-working {
     color: #E0A83C;
     text-style: bold;
 }
 
-#session-tabs Tab.-active.-attention {
+.session-tabs Tab.-active.-attention {
     color: #F2E9DD;
     background: #B23B32;
     text-style: bold;
 }
 
-#session-tabs Underline > .underline--bar {
+.session-tabs Underline > .underline--bar {
     color: #D97757;
     background: #3A3429;
 }

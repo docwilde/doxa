@@ -1,16 +1,29 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """doxa.ui.split -- the widget half of recursive split panes.
 
-Two widgets, and the builder that turns a :mod:`doxa.layout` tree into
+Three widgets, and the builder that turns a :mod:`doxa.layout` tree into
 them:
 
 * :class:`SplitBox` -- one node of the tree. Unused (one child) it is a
   transparent container; used (two or more) it lays its children out
   along its orientation with proportional ``fr`` weights.
-* :class:`PaneTab` -- the TAB. Since v0.91.0 a tab is a CONTAINER of
-  leaves, not a leaf itself; ``SessionPane`` stopped being a ``TabPane``
-  and became an ordinary container so that two of them can be visible at
-  once inside one tab.
+* :class:`PaneGroup` -- the LEAF, since v0.96.0: one region of the window,
+  owning its own ``TabbedContent`` and therefore its own tab strip. This
+  is the inversion the pane-groups spec asks for -- the window holds one
+  tree of groups, and each group holds tabs, rather than the window
+  holding tabs and each tab holding a tree.
+* :class:`PaneTab` -- the TAB, and now what a group's tab STRIP holds
+  rather than the root of a tree. Through v0.95.0 a ``PaneTab`` owned a
+  whole ``SplitBox`` tree; it now holds exactly one surface (a
+  ``SessionPane`` or a v0.92.0 ``DiffPane``), which is what it held
+  through v0.88.0 -- the tree moved up a level, to the window.
+
+**Why the group is a widget and not a bare ``TabbedContent``.** The strip
+has to be able to hide itself below a measured width
+(:data:`doxa.layout.GROUP_STRIP_MIN_COLS`) and to paint its own number
+overlay, and both are per-region facts that a ``TabbedContent`` has no
+place to hold. The group is also the thing a split divides and the thing
+``Ctrl+1``..``Ctrl+9`` names, so it needs an identity of its own.
 
 **Why the empty boxes.** Textual 5.3 cannot re-parent a mounted widget --
 mounting an already-mounted widget is a silent no-op that orphans it
@@ -40,7 +53,7 @@ from typing import Any, Callable
 
 from textual.app import ComposeResult
 from textual.containers import Container
-from textual.widgets import TabPane
+from textual.widgets import Static, TabbedContent, TabPane
 
 from .. import layout as layout_mod
 
@@ -183,61 +196,93 @@ class SplitBox(Container):
         return None
 
 
+class GroupNumber(Static):
+    """The brief ``Ctrl+<digit>`` overlay for ONE group: its own number,
+    painted over its own region.
+
+    One per group, mounted with the group and hidden, rather than one
+    screen-level widget positioned from the rectangles: a widget inside the
+    group IS the group's rectangle, so what is numbered and what is painted
+    cannot disagree -- which is the property the spec asks for and the
+    reason the numbering is derived from ``_pane_regions`` in the first
+    place.
+
+    Never on its own timer. :meth:`doxa.app.DoxaApp._flash_group_numbers`
+    arms ONE ``set_timer`` for the whole flash and cancels it on the next
+    key; see that method for why a one-shot timer is inside DOXA's no-timer
+    rule and an interval is not."""
+
+    DEFAULT_CSS = """
+    GroupNumber {
+        layer: groupnum;
+        width: 100%;
+        height: 100%;
+        content-align: center middle;
+        text-style: bold;
+        display: none;
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__("", classes="-group-number")
+
+
 class PaneTab(TabPane):
-    """One tab, and the whole layout tree inside it.
+    """One tab: a title in some group's strip, and exactly one surface.
 
-    Through v0.88.0 ``SessionPane`` WAS the ``TabPane``: one tab, one
-    session, and "which pane is active" was derivable from "which tab is
-    showing". Splits break that equivalence -- two panes can be visible at
-    once -- so the tab became a container and the session surface became
-    an ordinary widget that a container can hold two of.
+    Three shapes in four releases, and this is the second one again.
+    Through v0.88.0 ``SessionPane`` WAS the ``TabPane``. v0.91.0 made the
+    tab a CONTAINER of a whole ``SplitBox`` tree, because two panes had to
+    be visible at once and only a tab could hold them. v0.96.0 moves the
+    tree up to the window, where the thing that is visible at once is a
+    GROUP -- so a tab is back to holding one surface, and the surface it
+    holds may be a ``SessionPane`` or (v0.92.0) a ``DiffPane``.
 
-    What did NOT change: the tab keeps the id every caller in
-    :mod:`doxa.app` already uses (``_restore_pane_id``'s
+    That last clause is the pane-groups spec's own design check, answered
+    by construction rather than by a special case: a group's tab list is a
+    list of SURFACES, and a diff is a surface.
+
+    What did NOT change across any of it: the tab keeps the id every caller
+    in :mod:`doxa.app` already uses (``_restore_pane_id``'s
     ``restore-<session id>``, :data:`DoxaApp._FALLBACK_PANE_ID`), so
-    activation, the tab strip, the rename field, the status classes and
-    the persisted-set lookups all still key off the same strings.
+    activation, the tab strip, the rename field, the status classes and the
+    persisted-set lookups all still key off the same strings.
     ``SessionPane`` reaches it through :attr:`SessionPane.tab`."""
 
-    def __init__(self, title: Any, root: SplitBox, *, id: "str | None" = None) -> None:
+    def __init__(self, title: Any, surface: Any, *, id: "str | None" = None) -> None:
         super().__init__(title, id=id)
-        self._root = root
-        #: The leaf that had the keyboard last time this tab held it.
-        #: Read when focus is somewhere that is not a leaf at all (a modal,
-        #: the command palette) and the app still has to name ONE pane --
-        #: the status bar reflects the FOCUSED pane, so it needs an answer
-        #: that survives a dialog rather than jumping to the first leaf.
-        self.focused_leaf: Any = None
+        self._surface = surface
+        #: Kept for the callers that ask a tab which leaf had the keyboard.
+        #: A tab holds one surface now, so the answer is always that
+        #: surface -- the attribute survives because ``_focus_tab`` and
+        #: ``_persist_tabset`` both read it and the group above is where
+        #: "which of several" is a real question again.
+        self.focused_leaf: Any = surface
 
     def compose(self) -> ComposeResult:
-        yield self._root
+        yield self._surface
 
     @property
-    def root_box(self) -> SplitBox:
-        return self._root
+    def surface(self) -> Any:
+        return self._surface
 
     def leaves(self) -> "list[Any]":
-        """Every SESSION leaf in this tab, in DOM order (which is
-        left-to-right / top-to-bottom, the same order
-        :func:`doxa.layout.leaves` produces).
+        """This tab's SESSION surface, as a list of zero or one.
 
-        Sessions only, unchanged from v0.91.0 and deliberately so: every
-        caller of this asks a question only a session can answer ("which
-        session is this tab's", "which engine does this key mean"). The
-        geometric question -- what rectangles are on screen -- is
-        :meth:`surfaces`, and conflating them is how a diff pane would
-        end up being handed to something expecting an engine."""
+        Still a list, and still sessions-only, because every caller asks a
+        question only a session can answer ("which session is this tab's",
+        "which engine does this key mean") and none of them should have to
+        learn that the answer became singular -- a diff tab correctly
+        answers with an empty list, exactly as a diff LEAF did in
+        v0.92.0."""
         from ..session.pane import SessionPane
 
         return list(self.query(SessionPane))
 
     def surfaces(self) -> "list[Any]":
-        """Every leaf of any kind, in DOM order.
+        """Every surface in this tab, of any kind -- zero or one.
 
-        What directional focus reads: v0.92.0's diff pane is a leaf you
-        can focus and scroll but not type a prompt into, so "panes I can
-        move the keyboard to" and "sessions" stopped being the same
-        list. A leaf qualifies by being able to name itself as one
+        A leaf qualifies by being able to name itself as one
         (``layout_leaf()``), which is the same test :func:`_node_of`
         applies when the tree is read off the widgets."""
         from ..session.pane import SessionPane
@@ -249,43 +294,243 @@ class PaneTab(TabPane):
             )
         ]
 
-    def tree(self) -> "layout_mod.Node | None":
-        """This tab's layout as a :mod:`doxa.layout` tree, read off the
-        widgets rather than kept beside them. One source of truth: a
-        mirror of the tree in Python state is a second thing to keep in
-        sync, and the defect class that produces (the model says split,
-        the screen says not) is precisely what the persisted record would
-        then carry into the next launch."""
-        return _tree_of(self._root)
+    def layout_leaf(self) -> "layout_mod.Leaf | None":
+        """This tab as one :mod:`doxa.layout` tab record, read off the
+        widget rather than kept beside it -- the same one-source-of-truth
+        rule ``PaneTab.tree()`` followed in v0.91.0, one level down."""
+        from ..session.pane import SessionPane
+
+        surface = self._surface
+        if isinstance(surface, SessionPane):
+            return _leaf_of(surface)
+        own = getattr(surface, "layout_leaf", None)
+        if callable(own):
+            leaf = own()
+            return leaf if isinstance(leaf, layout_mod.Leaf) else None
+        return None
+
+
+#: Every group's ``TabbedContent`` carries this class, and the stylesheet
+#: selects on it. Through v0.95.0 the window had exactly one tab strip and
+#: ``#session-tabs`` was an id; N groups means N strips, and an id cannot
+#: be in two places. The FIRST group's strip keeps the literal id anyway
+#: (see :func:`next_tabbed_id`) so that an unsplit window's DOM is byte for
+#: byte the one every previous release produced.
+STRIP_CLASS = "session-tabs"
+
+_TABBED_SEQ = [0]
+
+
+def reset_tabbed_ids() -> None:
+    """Start the strip-id sequence over -- called once per
+    :class:`doxa.app.DoxaApp`, so a suite that builds many apps in one
+    process gets ``#session-tabs`` for each one's first group rather than
+    a number that climbs across tests."""
+    _TABBED_SEQ[0] = 0
+
+
+def next_tabbed_id() -> str:
+    """The next group strip's widget id. The first is ``session-tabs``
+    exactly, and never reused afterwards even if that group closes: an id
+    that moved between widgets would be a second answer to "which strip is
+    this", which is the drift class this file's docstring keeps warning
+    about."""
+    _TABBED_SEQ[0] += 1
+    return "session-tabs" if _TABBED_SEQ[0] == 1 else f"session-tabs-{_TABBED_SEQ[0]}"
+
+
+class PaneGroup(Container):
+    """One REGION of the window: its own tab strip, its own tabs, its own
+    idea of which tab is active.
+
+    This is what the pane-groups inversion makes a layout leaf. Everything
+    about the tree above it -- :class:`SplitBox`, the dividers, the weights,
+    directional focus, :func:`doxa.layout.neighbour` -- is untouched by the
+    change, which is the whole argument for doing it as a re-rooting rather
+    than a rebuild.
+
+    **The tab strip hides itself when it cannot be read.** Two strips is
+    more chrome than one, and a 40-column half of an 80-column terminal
+    cannot show a tab label. :meth:`on_resize` puts the group on one of
+    three rungs measured in :mod:`doxa.layout`
+    (:data:`~doxa.layout.GROUP_STRIP_COMPACT_COLS`,
+    :data:`~doxa.layout.GROUP_STRIP_MIN_COLS`) -- full, compact, gone --
+    the same hide-at-zero discipline the context chip and the side-by-side
+    diff already follow."""
+
+    DEFAULT_CSS = """
+    PaneGroup {
+        layers: base groupnum;
+        height: 1fr;
+        width: 1fr;
+    }
+    """
+
+    def __init__(
+        self,
+        *tabs: Any,
+        active_id: "str | None" = None,
+        id: "str | None" = None,
+        tabbed_id: "str | None" = None,
+    ) -> None:
+        super().__init__(id=id)
+        self._tabs = list(tabs)
+        # "" is what TabbedContent means by "pick the first yourself", and
+        # it is what an unrestored window has always passed.
+        self._active_id = active_id or ""
+        self._tabbed_id = tabbed_id or next_tabbed_id()
+
+    def compose(self) -> ComposeResult:
+        with TabbedContent(
+            id=self._tabbed_id, classes=STRIP_CLASS, initial=self._active_id
+        ):
+            for tab in self._tabs:
+                yield tab
+        yield GroupNumber()
+
+    # -- the strip ----------------------------------------------------
+
+    @property
+    def tabbed(self) -> TabbedContent:
+        """This group's own ``TabbedContent``. Raises ``NoMatches`` before
+        :meth:`compose` has landed, which every caller either guards or
+        deliberately lets propagate -- see
+        :meth:`doxa.app.DoxaApp.tabbed_of`."""
+        return self.query_one(TabbedContent)
+
+    def tabs(self) -> "list[Any]":
+        """This group's tabs, in STRIP order -- every kind, so an archived
+        tab and a subagent transcript count, because both sit right there
+        in the strip and ``Ctrl+←/→`` must reach them.
+
+        The ``parent`` check drops a tab whose ``remove_pane`` has been
+        issued but whose detach has not landed: :meth:`doxa.app.DoxaApp.
+        _close_group_tab` reads this list to decide whether a group has any
+        tabs LEFT, and a half-removed one counted as remaining would leave
+        an empty region behind."""
+        return [kid for kid in self.query(TabPane) if kid.parent is not None]
+
+    def active_tab(self) -> "Any | None":
+        try:
+            tabbed = self.tabbed
+        except Exception:  # noqa: BLE001 -- not composed yet
+            return None
+        if not tabbed.is_mounted:
+            return None
+        try:
+            return tabbed.active_pane
+        except Exception:  # noqa: BLE001 -- active names no mounted tab yet
+            return None
+
+    def surfaces(self) -> "list[Any]":
+        """The surfaces of this group's ACTIVE tab -- what is on screen in
+        this region, which is never more than one thing.
+
+        Deliberately not "every surface in the group": an inactive tab is
+        mounted and running but is not painted, and a rectangle that is not
+        painted is not a destination for directional focus. That is the
+        same "painted, not structural" rule ``_pane_regions`` states."""
+        tab = self.active_tab()
+        return tab.surfaces() if hasattr(tab, "surfaces") else []
+
+    def layout_group(self) -> "layout_mod.Group | None":
+        """This group as a :mod:`doxa.layout` group, read off the widgets.
+
+        One source of truth, the rule v0.91.0 wrote down for
+        ``PaneTab.tree()`` and this inherits: a mirror of the tree kept in
+        Python state is a second thing to keep in sync, and the persisted
+        record is where that drift lands."""
+        tabs: "list[layout_mod.Leaf]" = []
+        active = 0
+        active_tab = self.active_tab()
+        for tab in self.tabs():
+            own = getattr(tab, "layout_leaf", None)
+            if not callable(own):
+                continue
+            leaf = own()
+            if not isinstance(leaf, layout_mod.Leaf):
+                continue
+            if tab is active_tab:
+                active = len(tabs)
+            tabs.append(leaf)
+        if not tabs:
+            return None
+        return layout_mod.Group(tuple(tabs), active)
+
+    # -- chrome -------------------------------------------------------
+
+    def on_resize(self) -> None:
+        self._apply_strip_width()
+
+    def on_mount(self) -> None:
+        self._apply_strip_width()
+
+    def _apply_strip_width(self) -> None:
+        width = self.size.width
+        if width <= 0:
+            return  # not painted yet: no measurement to act on
+        self._apply_strip_width_for(width)
+
+    def _apply_strip_width_for(self, width: int) -> None:
+        """Put this group on its width rung. Two classes, three states, so
+        the stylesheet holds the rendering and this holds only the
+        threshold. Split from :meth:`_apply_strip_width` so the rungs can
+        be measured against stated widths rather than against whatever
+        rectangle a test terminal happens to produce."""
+        self.set_class(width < layout_mod.GROUP_STRIP_MIN_COLS, "-strip-hidden")
+        self.set_class(
+            layout_mod.GROUP_STRIP_MIN_COLS
+            <= width
+            < layout_mod.GROUP_STRIP_COMPACT_COLS,
+            "-strip-compact",
+        )
+
+    # -- the number overlay -------------------------------------------
+
+    def show_number(self, number: int) -> None:
+        with contextlib.suppress(Exception):
+            overlay = self.query_one(GroupNumber)
+            if not overlay.is_mounted:
+                return
+            overlay.update(str(number))
+            overlay.styles.display = "block"
+
+    def hide_number(self) -> None:
+        with contextlib.suppress(Exception):
+            overlay = self.query_one(GroupNumber)
+            if not overlay.is_mounted:
+                return
+            overlay.styles.display = "none"
 
 
 def _node_of(kid: Any) -> "layout_mod.Node | None":
-    """One child of a box as a tree node, whatever kind of leaf it is.
+    """One child of a box as a tree node.
 
-    A leaf that is not a ``SessionPane`` answers for ITSELF, through a
-    ``layout_leaf()`` method (:meth:`doxa.ui.diffview.DiffPane.layout_leaf`
-    is the first). Duck-typed rather than a growing ``isinstance`` chain
-    because this module deliberately does not import the widgets it lays
-    out at module scope -- ``SessionPane`` is imported inside functions to
-    break the cycle, and a second such import for every new surface is a
-    cycle waiting to be reintroduced.
+    A leaf answers for ITSELF, through a ``layout_group()`` method
+    (:meth:`PaneGroup.layout_group` is the only one today). Duck-typed
+    rather than an ``isinstance`` chain because this module deliberately
+    does not import the widgets it lays out at module scope --
+    ``SessionPane`` is imported inside functions to break the cycle, and a
+    second such import for every new surface is a cycle waiting to be
+    reintroduced.
 
-    Returning ``None`` here is what v0.91.0 did for EVERY non-session
-    child, and it is not harmless: a used box whose second child yields
-    ``None`` collapses to one child, so ``PaneTab.tree()`` would report
+    Returning ``None`` here is not harmless: a used box whose second child
+    yields ``None`` collapses to one child, so :func:`tree_of` would report
     "no split" for a screen that plainly shows one, and the persisted
     record would carry that lie into the next launch."""
-    from ..session.pane import SessionPane
-
     if isinstance(kid, SplitBox):
         return _tree_of(kid)
-    if isinstance(kid, SessionPane):
-        return _leaf_of(kid)
-    own = getattr(kid, "layout_leaf", None)
+    own = getattr(kid, "layout_group", None)
     if callable(own):
-        leaf = own()
-        return leaf if isinstance(leaf, layout_mod.Leaf) else None
+        group = own()
+        return group if isinstance(group, layout_mod.Group) else None
     return None
+
+
+def tree_of(box: "SplitBox | None") -> "layout_mod.Node | None":
+    """The WINDOW's layout as a :mod:`doxa.layout` tree, read off the
+    widgets. The public name; ``_tree_of`` stays as the recursive half."""
+    return _tree_of(box) if isinstance(box, SplitBox) else None
 
 
 def _tree_of(box: SplitBox) -> "layout_mod.Node | None":
@@ -337,7 +582,7 @@ def chain(leaf: Any, slots: int = layout_mod.SPLIT_SLOTS) -> SplitBox:
 
 def build(
     node: "layout_mod.Node",
-    make_leaf: "Callable[[layout_mod.Leaf], Any]",
+    make_group: "Callable[[layout_mod.Group], Any]",
     slots: int = layout_mod.SPLIT_SLOTS,
 ) -> Any:
     """A layout tree as unmounted widgets, in the same shape the
@@ -345,19 +590,64 @@ def build(
     :func:`doxa.layout.rebuild_slots` for the arithmetic and the module
     docstring for why the shape has to match.
 
-    ``make_leaf`` builds the session surface for one leaf; it is the app's
-    job (a restored leaf needs an engine factory, a pinned name and the
-    transcript-restore flag, none of which belong in the widget layer)."""
+    ``make_group`` builds the :class:`PaneGroup` for one group; it is the
+    app's job (a restored tab needs an engine factory, a pinned name and
+    the transcript-restore flag, none of which belong in the widget
+    layer). A bare ``Leaf`` reaching here -- a v0.91.0 tree that was not
+    run through :func:`doxa.layout.groupify` first -- is read as the
+    single-tab group it becomes, so the builder cannot be the place a
+    migration is forgotten."""
     if not isinstance(node, layout_mod.Split):
-        return chain(make_leaf(node), slots)
-    first = build(node.children[0], make_leaf, max(0, slots - 1))
+        return chain(make_group(layout_mod.as_group(node)), slots)
+    first = build(node.children[0], make_group, max(0, slots - 1))
     rest = [
-        build(child, make_leaf, layout_mod.SPLIT_SLOTS)
+        build(child, make_group, layout_mod.SPLIT_SLOTS)
         for child in node.children[1:]
     ]
     box = SplitBox(first, *rest, orientation=node.orientation)
     box.weights = layout_mod.normalise(node.weights, len(node.children))
     return box
+
+
+def first_group(node: Any) -> "PaneGroup | None":
+    """The first :class:`PaneGroup` inside an UNMOUNTED tree, in DOM order.
+
+    Unmounted is the point: ``query`` walks the mounted DOM and answers
+    nothing for a tree ``build`` has just returned. It walks
+    ``_pending_children`` as well as ``children`` because Textual 5.3 puts
+    constructor children in the FORMER until mount -- measured, and the
+    reason a first attempt at this returned ``None`` for every tree
+    ``build`` produced. What
+    :meth:`doxa.app.DoxaApp._compose_restored_root` needs to hang the
+    all-archived fallback pane on."""
+    if isinstance(node, PaneGroup):
+        return node
+    kids = list(getattr(node, "children", ())) or list(
+        getattr(node, "_pending_children", ())
+    )
+    for kid in kids:
+        found = first_group(kid)
+        if found is not None:
+            return found
+    return None
+
+
+def group_of(widget: Any) -> "PaneGroup | None":
+    """The :class:`PaneGroup` a widget sits in, or ``None``."""
+    node = getattr(widget, "parent", None)
+    while node is not None and not isinstance(node, PaneGroup):
+        node = getattr(node, "parent", None)
+    return node
+
+
+def tabbed_of(widget: Any) -> "TabbedContent | None":
+    """The tab strip a widget sits in -- a group's own, never the settings
+    modal's, because the walk stops at the first ``TabbedContent`` above
+    the widget and a widget only ever has one."""
+    node = getattr(widget, "parent", None)
+    while node is not None and not isinstance(node, TabbedContent):
+        node = getattr(node, "parent", None)
+    return node
 
 
 def owning_box(pane: Any) -> "SplitBox | None":

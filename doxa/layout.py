@@ -14,9 +14,21 @@ testable without a running app.
   ``column``: children stacked), an ordered list of children (leaf or
   split, so the recursion is genuine) and per-child weights.
 
-Each TAB owns one tree. A tab whose tree is a single leaf IS today's tab,
-which is what keeps the migration honest: a v0.23.0 flat record restores
-to single-leaf trees and behaves identically.
+**The inversion** (v0.96.0). Through v0.95.0 each TAB owned one tree and
+a leaf held one session. That is now upside down:
+
+    v0.91.0   window -> tabs -> each tab owns a layout tree of panes
+    v0.96.0   window -> one layout tree of GROUPS -> each group owns tabs
+
+So there is exactly ONE tree per window, its leaf nodes are
+:class:`Group`, and a group holds an ordered list of :class:`Leaf` tab
+records plus which one is active. ``Leaf`` did not change a field: it is
+still what a flat ``tabs`` row carries, which is deliberate and is the
+whole migration story -- the flat list stays authoritative and one reader
+still works against either shape.
+
+A window whose tree is a single group holding a single tab IS today's
+single-tab window, which is what keeps the migration honest.
 
 **Weights are proportional, never absolute** (the spec's own word). They
 are stored normalised to sum to 1.0 and rendered as ``fr`` units, so a
@@ -83,6 +95,32 @@ SPLIT_SLOTS = 2
 MIN_LEAF_HEIGHT = 9
 MIN_LEAF_WIDTH = 34
 
+#: Below this many columns a group draws its tab strip COMPACTLY: the
+#: label is cut to the model segment alone, which is the one part of
+#: ``model · repo`` that differs between two tabs of the same repo.
+#:
+#: MEASURED, not chosen (tests/test_pane_groups.py::
+#: test_the_tab_strip_thresholds_are_the_measured_ones). A tab header
+#: costs its label plus Textual's own ``Tab`` padding of one column each
+#: side; the label's own documented floor is
+#: ``TAB_MODEL_MIN (4) + " · " (3) + TAB_REPO_MIN (6)`` from
+#: :mod:`doxa.ui.labels`, plus the provider glyph and its space (2) = 15,
+#: so a full header is 17 columns and a strip that can show TWO of them --
+#: the least a tab strip is FOR -- needs 34. One more than
+#: :data:`MIN_LEAF_WIDTH`, which is where the number is checked against
+#: reality: the narrowest group DOXA will create cannot show two full
+#: headers, so the compact rung is not a corner case, it is the ordinary
+#: state of a three-way split on a 100-column terminal.
+GROUP_STRIP_COMPACT_COLS = 34
+
+#: ...and below THIS many, not at all. A group this narrow has room for
+#: one truncated word; a strip there is chrome that costs a row and answers
+#: nothing, and the pane's own status bar already names the session. The
+#: same hide-at-zero discipline :data:`doxa.ui.labels.CTX_ABSOLUTE_MIN_COLS`
+#: and :data:`doxa.diff.SIDE_BY_SIDE_MIN_COLS` follow. Derived the same
+#: way as the rung above, for ONE header rather than two.
+GROUP_STRIP_MIN_COLS = 17
+
 #: The prompt's own floor, in CONTENT rows (the border adds two). A
 #: resize must never leave the input line too small to type into -- the
 #: one region whose collapse makes DOXA unusable rather than awkward.
@@ -121,6 +159,53 @@ class Leaf:
 
 
 @dataclass(frozen=True)
+class Group:
+    """A pane GROUP: the thing a leaf of the window's layout tree holds
+    since v0.96.0 -- an ordered list of tab records and which one of them
+    is active.
+
+    The tab records are :class:`Leaf` values, unchanged, because a group's
+    tab and a flat ``tabs`` row carry exactly the same five facts (session
+    id, pinned name, cwd, prompt ratio, surface). That identity is not a
+    convenience: it is what lets :func:`doxa.tabsets.load` keep reading the
+    flat list as authoritative while the grouped tree rides beside it, and
+    what makes "absence of the key is the migration" a one-line rule rather
+    than a schema version.
+
+    ``active`` is an INDEX, not an id. A saved group whose active tab died
+    between sessions must still name one of its survivors, and an index
+    clamped into range does that with no lookup and no None state --
+    :func:`prune` re-clamps it after it drops the dead tabs. Out-of-range
+    and negative values are clamped at construction for the same reason
+    :func:`normalise` never raises on a corrupt weight list: a layout is
+    chrome, and a corrupt one costs the user their arrangement, never
+    their session."""
+
+    tabs: "tuple[Leaf, ...]" = ()
+    active: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "tabs", tuple(self.tabs))
+        try:
+            index = int(self.active)
+        except (TypeError, ValueError):
+            index = 0
+        if not self.tabs:
+            index = 0
+        else:
+            index = max(0, min(index, len(self.tabs) - 1))
+        object.__setattr__(self, "active", index)
+
+    @property
+    def active_tab(self) -> "Leaf | None":
+        """The tab this group is SHOWING -- the one leaf of this group that
+        is on screen. The other tabs keep running and are neither visible
+        nor focused, which is what :meth:`doxa.app.DoxaApp._clear_seen_marks`
+        depends on."""
+        return self.tabs[self.active] if self.tabs else None
+
+
+@dataclass(frozen=True)
 class Split:
     """A split node: orientation, ordered children, per-child weights.
 
@@ -140,7 +225,7 @@ class Split:
         )
 
 
-Node = Any  # Leaf | Split -- a recursive alias mypy 1.x still cannot spell
+Node = Any  # Group | Split -- a recursive alias mypy 1.x still cannot spell
 
 
 def normalise(weights: "Sequence[float]", count: int) -> "tuple[float, ...]":
@@ -201,6 +286,19 @@ def to_json(node: Node) -> dict:
             "weights": [round(w, 6) for w in node.weights],
             "children": [to_json(child) for child in node.children],
         }
+    if isinstance(node, Group):
+        # ``active`` is written unconditionally, zero included: a group
+        # whose active index is absent would read back as its first tab,
+        # which is a DIFFERENT statement from "this group is showing its
+        # first tab" only when the writer meant something else -- and no
+        # writer here ever does. Written anyway, because the field is one
+        # integer and a reader that has to distinguish "0" from "missing"
+        # is a reader with two code paths for one fact.
+        return {
+            "kind": "group",
+            "active": node.active,
+            "tabs": [to_json(tab) for tab in node.tabs],
+        }
     leaf: Leaf = node
     out: dict = {"kind": "leaf", "session_id": leaf.session_id}
     if leaf.pinned_name:
@@ -245,6 +343,21 @@ def from_json(data: Any) -> "Node | None":
             prompt_ratio=clamp_prompt_ratio(data.get("prompt_ratio") or 0.0),
             view=view if view in VIEWS else VIEW_SESSION,
         )
+    if kind == "group":
+        raw_tabs = data.get("tabs")
+        if not isinstance(raw_tabs, list):
+            return None
+        tabs = [t for t in (from_json(t) for t in raw_tabs) if isinstance(t, Leaf)]
+        if not tabs:
+            # A group with no readable tab is not an empty group, it is a
+            # group this version cannot lay out -- the same answer a split
+            # with no surviving child gets one branch down, and the same
+            # answer the whole record gets in doxa.tabsets.load. An empty
+            # group would restore as a region with nothing in it, which is
+            # the pane-shaped hole prune() exists to prevent.
+            return None
+        active = data.get("active")
+        return Group(tuple(tabs), active if isinstance(active, int) else 0)
     if kind != "split":
         return None
     orientation = data.get("orientation")
@@ -271,15 +384,75 @@ def from_json(data: Any) -> "Node | None":
 
 
 def leaves(node: Node) -> "list[Leaf]":
-    """Every leaf, left-to-right / top-to-bottom -- the order the flat
-    ``tabs`` list is written in, so the two halves of a record never
-    disagree about order."""
+    """Every TAB RECORD in the tree, left-to-right / top-to-bottom and,
+    within a group, in tab-strip order -- the order the flat ``tabs`` list
+    is written in, so the two halves of a record never disagree about
+    order.
+
+    Still returns :class:`Leaf` after the v0.96.0 inversion, and that is
+    the point: every caller of this asks "which sessions are in this
+    layout", which is a question about tab records and not about regions.
+    :func:`groups` is the one that asks about regions. Reads a bare
+    ``Leaf`` too, so a v0.91.0 tree read straight off disk (before
+    :func:`groupify` has run over it) still answers."""
     if isinstance(node, Split):
         out: "list[Leaf]" = []
         for child in node.children:
             out.extend(leaves(child))
         return out
+    if isinstance(node, Group):
+        return list(node.tabs)
     return [node]
+
+
+def groups(node: Node) -> "list[Group]":
+    """Every GROUP, left-to-right / top-to-bottom -- the regions on
+    screen, in the order :func:`doxa.app.DoxaApp._group_order` numbers
+    them from the painted rectangles. A bare ``Leaf`` (a v0.91.0 tree)
+    reads as the single-tab group it becomes."""
+    if isinstance(node, Split):
+        out: "list[Group]" = []
+        for child in node.children:
+            out.extend(groups(child))
+        return out
+    if isinstance(node, Group):
+        return [node]
+    return [Group((node,), 0)]
+
+
+def as_group(node: "Node | Leaf") -> Group:
+    """One node as a group. A ``Leaf`` becomes the single-tab group it
+    always was; a ``Group`` is itself."""
+    return node if isinstance(node, Group) else Group((node,), 0)
+
+
+def groupify(node: "Node | Leaf | None") -> "Node | None":
+    """A v0.91.0 tree (leaves hold sessions) as a v0.96.0 tree (leaves
+    hold groups): **one single-tab group per leaf**, structure untouched.
+
+    This IS the middle era's migration, and the reason it needs no version
+    field: a record with ``trees`` but no ``groups`` was written when a
+    leaf held exactly one session, so reading each of its leaves as a group
+    of one is not a guess, it is the same statement in the new vocabulary.
+    Idempotent -- a tree that is already grouped comes back unchanged --
+    so the reader can run it over anything without asking which era it
+    got."""
+    if node is None:
+        return None
+    if isinstance(node, Split):
+        kept: "list[Node]" = []
+        kept_weights: "list[float]" = []
+        for child, weight in zip(node.children, node.weights):
+            grouped = groupify(child)
+            if grouped is not None:
+                kept.append(grouped)
+                kept_weights.append(weight)
+        if not kept:
+            return None
+        if len(kept) == 1:
+            return kept[0]
+        return Split(node.orientation, tuple(kept), tuple(kept_weights))
+    return as_group(node)
 
 
 def depth(node: Node) -> int:
@@ -301,6 +474,24 @@ def prune(node: Node, keep: "Iterable[str]") -> "Node | None":
     the tree is pruned to the sessions that actually came back and the
     survivors take the missing pane's space proportionally."""
     keep_set = {s for s in keep}
+    if isinstance(node, Group):
+        # A group loses its DEAD TABS, not its region: three tabs of which
+        # one session survived is still a group, showing the survivor. Only
+        # a group that lost every tab is gone, and then the split above it
+        # collapses by the same rule that has always applied to a leaf.
+        #
+        # ``active`` is re-derived rather than re-clamped blindly: the
+        # user's active tab surviving in a different POSITION must stay the
+        # active tab, which an index alone cannot express across a
+        # deletion.
+        surviving = [tab for tab in node.tabs if tab.session_id in keep_set]
+        if not surviving:
+            return None
+        was_active = node.active_tab
+        index = 0
+        if was_active is not None and was_active in surviving:
+            index = surviving.index(was_active)
+        return Group(tuple(surviving), index)
     if not isinstance(node, Split):
         return node if node.session_id in keep_set else None
     kept: "list[Node]" = []
@@ -317,7 +508,7 @@ def prune(node: Node, keep: "Iterable[str]") -> "Node | None":
     return Split(node.orientation, tuple(kept), tuple(kept_weights))
 
 
-def rebuild_slots(node: Node, slots: int = SPLIT_SLOTS) -> "list[tuple[Leaf, int]]":
+def rebuild_slots(node: Node, slots: int = SPLIT_SLOTS) -> "list[tuple[Node, int]]":
     """How many EMPTY split boxes each leaf must be rebuilt inside, so a
     tree read off disk lands in the same widget shape the interactive
     gesture would have produced.
@@ -330,7 +521,7 @@ def rebuild_slots(node: Node, slots: int = SPLIT_SLOTS) -> "list[tuple[Leaf, int
     the same number of times a never-saved one can."""
     if not isinstance(node, Split):
         return [(node, max(0, slots))]
-    out: "list[tuple[Leaf, int]]" = []
+    out: "list[tuple[Node, int]]" = []
     for index, child in enumerate(node.children):
         out.extend(rebuild_slots(child, slots - 1 if index == 0 else SPLIT_SLOTS))
     return out
