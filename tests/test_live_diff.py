@@ -489,12 +489,19 @@ async def test_the_diff_paints_beside_the_session_both_with_real_rectangles(
         assert diff.region.width > 0 and diff.region.height > 0
         assert diff.region.x >= pane.region.x + pane.region.width
 
-        tab = pane.tab
-        assert isinstance(tab, PaneTab)
-        tree = tab.tree()
+        # v0.96.0: the WINDOW owns the tree and its leaves are GROUPS, so
+        # the diff is a tab of the group beside the session's rather than
+        # a leaf of the session's tab. The geometry above is unchanged;
+        # what moved is which node answers for it.
+        from doxa.ui import split as split_mod
+
+        tree = split_mod.tree_of(app._window_root())
         assert isinstance(tree, layout.Split)
         assert tree.orientation == layout.ROW
-        assert [n.is_diff for n in tree.children] == [False, True]
+        groups = layout.groups(tree)
+        assert [g.active_tab.is_diff for g in groups] == [False, True]
+        assert isinstance(pane.tab, PaneTab)
+        assert split_mod.group_of(pane) is not split_mod.group_of(diff)
 
 
 @pytest.mark.asyncio

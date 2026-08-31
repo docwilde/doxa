@@ -272,8 +272,13 @@ async def test_a_saved_split_restores_as_a_split_with_the_right_leaf_focused(
         assert await _wait(pilot, lambda: len(app.panes()) == 3)
         await pilot.pause()
 
-        # ONE tab, three panes -- the split came back as a split.
-        assert len(app.query("PaneTab")) == 1
+        # v0.96.0: the saved v0.91.0 tree migrates as ONE SINGLE-TAB GROUP
+        # PER LEAF -- the absence of the record's ``groups`` key is the
+        # whole migration -- so three leaves come back as three regions,
+        # each with a tab of its own. The GEOMETRY below is what v0.91.0
+        # asserted and is unchanged; only the container is.
+        assert len(app.query("PaneTab")) == 3
+        assert len(app.groups()) == 3
         panes = app.panes()
         assert [p._session_id for p in panes] == ["sid-1", "sid-2", "sid-3"]
         for pane in panes:
@@ -323,8 +328,10 @@ async def test_a_saved_leaf_whose_session_died_leaves_no_hole(tmp_path):
         await pilot.pause()
         panes = app.panes()
         assert [p._session_id for p in panes] == ["sid-1", "sid-3"]
-        tab_width = panes[0].tab.region.width
-        assert panes[0].region.width + panes[1].region.width == tab_width
+        # The WINDOW's own width (v0.96.0: the tree moved up a level, so
+        # the tab's rectangle is now one region's, not the whole thing's).
+        whole = app._window_root().region.width
+        assert panes[0].region.width + panes[1].region.width == whole
 
 
 @pytest.mark.asyncio
@@ -346,6 +353,10 @@ async def test_a_restored_split_leaf_can_still_be_split(tmp_path):
         assert await app.split_active_pane(layout.COLUMN) is None
         assert await _wait(pilot, lambda: len(app.panes()) == 3)
         await pilot.pause()
-        assert len(app.query("PaneTab")) == 1
+        # Three regions, each its own group (v0.96.0). What this test is
+        # about is unchanged: a RESTORED region keeps the slot allowance
+        # the interactive gesture would have left it, so a restored layout
+        # is not a dead end.
+        assert len(app.groups()) == 3
         for pane in app.panes():
             assert pane.region.width > 0 and pane.region.height > 0

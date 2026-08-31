@@ -99,9 +99,14 @@ async def test_a_vsplit_paints_two_panes_side_by_side(tmp_path):
             assert pane.region.height > 0
         assert right.region.x > left.region.x
         assert right.region.y == left.region.y
-        # One tab, two panes -- the tab strip did not grow.
-        assert len(app.query(PaneTab)) == 1
-        assert left.tab is right.tab
+        # v0.96.0: a split makes a GROUP, and a group owns its own tabs.
+        # Through v0.95.0 this asserted the opposite -- one tab, two panes
+        # -- and the inversion is exactly the change that turned the
+        # reported defect ("the split out sessions go with the tab") into
+        # a property the model cannot express.
+        assert len(app.groups()) == 2
+        assert left.tab is not right.tab
+        assert len(app.query(PaneTab)) == 2
 
 
 @pytest.mark.asyncio
@@ -386,13 +391,14 @@ async def test_closing_a_leaf_collapses_the_split_and_keeps_the_tab(tmp_path):
         assert await _wait(pilot, lambda: len(app.panes()) == 2)
         await pilot.pause()
         new = app.panes()[1]
-        whole = first.tab.region
+        whole = app._window_root().region
 
         await app._close_pane(new, terminate=False)
         assert await _wait(pilot, lambda: len(app.panes()) == 1)
         await pilot.pause()
 
         assert len(app.query(PaneTab)) == 1  # the tab is still there
+        assert len(app.groups()) == 1  # ...and so is exactly one group
         assert app.panes() == [first]
         assert app.active_pane is first
         assert app.focused is _prompt_of(first)
@@ -581,7 +587,10 @@ async def test_alt_arrow_moves_the_divider_between_two_leaves(tmp_path):
 
         assert new.region.width > before
         assert first.region.width > 0  # never dragged into nothing
-        assert first.region.width + new.region.width == first.tab.region.width
+        assert (
+            first.region.width + new.region.width
+            == app._window_root().region.width
+        )
 
 
 # -- the event loop, during a split (v0.95.0) ---------------------------

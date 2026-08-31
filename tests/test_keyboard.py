@@ -455,9 +455,19 @@ def test_unreachable_bindings_names_the_real_ones(monkeypatch):
     # keys turned out not to have: modified cursor keys go out as
     # CSI 1;<mods><final> sequences every terminal since xterm sends, and
     # Textual decodes those under both protocols.
+    #
+    # Ctrl+1..Ctrl+9 joined in v0.97.0 -- jump to a pane group by position.
+    # They are here for the Ctrl+, reason rather than the Alt one: Ctrl has
+    # a C0 code only for the 26 letters and @ [ \ ] ^ _ ? space, so a digit
+    # produces no byte at all. They work under the kitty protocol and are
+    # silently dead elsewhere, which is acceptable ONLY because /help and
+    # /doctor say so -- appearing here is what makes them say it -- and
+    # because `/pane <n>` is a door that always works.
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.LEGACY)
     assert unreachable_bindings() == [
-        "Ctrl+,", "Ctrl+Tab", "Alt+S", "Alt+D", "Alt+G",
+        "Ctrl+,", "Ctrl+Tab",
+        *[f"Ctrl+{digit}" for digit in range(1, 10)],
+        "Alt+S", "Alt+D", "Alt+G",
     ]
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.KITTY)
     assert unreachable_bindings() == []
