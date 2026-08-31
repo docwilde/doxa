@@ -183,7 +183,15 @@ async def _fill_hero_conversation(app: DoxaApp, pilot) -> None:
     await app.action_new_tab()
     await pilot.pause()
     tabbed = app.query_one("#session-tabs")
-    tabbed.active = app.panes()[0].id or tabbed.active
+    # `tab_id`, not `id`. Until v0.91.0 a SessionPane WAS the TabPane, so
+    # its own id was the tab strip's id and this line worked. Splits made
+    # a tab a `PaneTab` CONTAINING panes, and the two ids diverged --
+    # after which every scene in this file died with
+    # `ValueError: No Tab with id '--content-tab-pane-1'` before saving
+    # anything. Nobody noticed for three releases because nothing
+    # regenerates this gallery except running it, and it was last run at
+    # 0.87.0. Measured here, in the run that produced 0.94.0's assets.
+    tabbed.active = app.panes()[0].tab_id or tabbed.active
     await pilot.pause()
     app.query_one("#prompt-input").value = "what do we believe about deploys here?"
     await pilot.press("enter")
@@ -330,7 +338,7 @@ async def _drive_subagent_tracker(app: DoxaApp, pilot) -> None:
     # label), while the visible pane is the one carrying the second
     # status row this shot is really about.
     tabbed = app.query_one("#session-tabs", TabbedContent)
-    tabbed.active = pane.id or tabbed.active
+    tabbed.active = pane.tab_id or tabbed.active
     await pilot.pause()
 
 
@@ -472,7 +480,7 @@ async def _drive_banner(app: DoxaApp, pilot) -> None:
     await app.action_new_tab()
     await pilot.pause()
     tabbed = app.query_one("#session-tabs")
-    tabbed.active = app.panes()[0].id or tabbed.active
+    tabbed.active = app.panes()[0].tab_id or tabbed.active
     await pilot.pause()
 
 
@@ -484,7 +492,7 @@ async def _drive_banner_degraded(app: DoxaApp, pilot) -> None:
     await app.action_new_tab()
     await pilot.pause()
     tabbed = app.query_one("#session-tabs")
-    tabbed.active = app.panes()[0].id or tabbed.active
+    tabbed.active = app.panes()[0].tab_id or tabbed.active
     await pilot.pause()
 
 
@@ -687,6 +695,387 @@ async def _drive_beliefs_picker(app: DoxaApp, pilot) -> None:
 
 
 # --------------------------------------------------------------------- #
+# Scene: split-panes (v0.94.0, NEW FILE -- the feature is v0.91.0) -- two
+# INDEPENDENT sessions side by side inside ONE tab.
+#
+# That independence is the whole claim and the reason a still can carry
+# it at all: `/vsplit` (Alt+D) does not open a second VIEW onto the
+# session you were in, it spawns a second session through the same
+# `new_session_factory` Ctrl+T uses (DoxaApp.split_active_pane) -- so the
+# two panes have their own transcripts, their own models, their own
+# status bars and their own cost lines, and the shot shows exactly that.
+# The split is driven by the REAL key (`pilot.press("alt+d")`), the same
+# "exercise the actual trigger" discipline scripts/record_gif.py's
+# double-click rename and branch-chip click already follow, rather than
+# by calling `split_active_pane` the way tests/test_split_panes.py does.
+#
+# Focus is left where the app put it -- in the NEW pane -- because that
+# is v0.91.0's stated rule (a user who just asked for a second pane is
+# asking to work in it) and a shot that quietly moved it back would be
+# showing a state the feature never produces.
+# --------------------------------------------------------------------- #
+
+SPLIT_SECOND_SCRIPT = [
+    EngineEvent("turn_started", {}),
+    EngineEvent("text_delta", {"text": "Three surfaces shipped since the last gallery pass "}),
+    EngineEvent("text_delta", {"text": "and have no asset yet:\n\n"}),
+    EngineEvent("text_delta", {"text": "1. **split panes** (v0.91.0)\n"}),
+    EngineEvent("text_delta", {"text": "2. **the live diff** (v0.92.0)\n"}),
+    EngineEvent("text_delta", {"text": "3. **the folder chip** (v0.93.0)\n\n"}),
+    EngineEvent("text_delta", {"text": "You are looking at the first of them: this pane and "}),
+    EngineEvent("text_delta", {"text": "the one beside it are two separate sessions."}),
+    EngineEvent("turn_done", {"cost_usd": 0.0022, "duration_ms": 1120, "is_error": False,
+                              "session_cost_usd": 0.0022, "ctx_percentage": 6.0}),
+]
+
+
+def _split_tab_factory() -> Callable[[], FakeEngine]:
+    """Engines for every pane this scene creates AFTER the first: the two
+    sibling tabs `_fill_hero_conversation` opens, and then the split leaf
+    itself. All three carry SPLIT_SECOND_SCRIPT; only the split leaf is
+    ever handed a prompt, so only it renders a turn."""
+    models = iter(["claude-sonnet-4-5", "claude-haiku-4-5", "claude-sonnet-4-5"])
+    seq = iter(range(1, 99))
+
+    def factory() -> FakeEngine:
+        model = next(models, "claude-sonnet-4-5")
+        engine = FakeEngine(SPLIT_SECOND_SCRIPT, model=model)
+        engine.detachable = True
+        engine.session_id = f"{model[:6]}{next(seq):04d}"
+        return engine
+
+    return factory
+
+
+async def _until(pilot, cond: Callable[[], bool], tries: int = 250) -> bool:
+    """tests/test_split_panes.py's own `_wait`, borrowed: poll a condition
+    THIS driver already guaranteed will become true, never a bet on
+    timing content into existence."""
+    for _ in range(tries):
+        if cond():
+            return True
+        await pilot.pause(0.02)
+    return cond()
+
+
+async def _drive_split_panes(app: DoxaApp, pilot) -> None:
+    await _fill_hero_conversation(app, pilot)
+    left = app.active_pane
+    await pilot.press("alt+d")
+    assert await _until(pilot, lambda: app.active_pane is not left), (
+        "alt+d did not create a second pane"
+    )
+    right = app.active_pane
+    assert right is not None
+    assert await _until(pilot, lambda: right.region.width > 0), (
+        "the new pane never painted"
+    )
+    prompt = right.query_one("#prompt-input")
+    prompt.focus()
+    prompt.value = "which gallery scenes still need a capture at 0.94.0?"
+    await pilot.press("enter")
+    assert await _until(
+        pilot,
+        lambda: any(
+            "first of them" in getattr(b, "assistant_text", "")
+            for b in right.query(TurnBlock)
+        ),
+    ), "the second pane's turn never finished"
+    await _settle(pilot, 12)
+
+
+# --------------------------------------------------------------------- #
+# Scene: live-diff (v0.94.0, NEW FILE -- the feature is v0.92.0) -- the
+# spec's own design check, run for real: SESSION LEFT, DIFF RIGHT, both
+# live, in one tab.
+#
+# The only scene in this file that is NOT rooted in this checkout (see
+# `Scene.cwd_factory`), and it cannot be: `doxa.diff.compute` shells out
+# to `git diff` for real, so the hunks below are hunks git itself
+# produced from a real commit and a real edit on top of it. A scripted
+# stand-in would be a picture of a diff rather than a picture of THE
+# diff. The repo is built fresh under this module's own throwaway temp
+# root, so nothing outside it is read or written.
+#
+# The PENDING-REJECTION BADGE is the second thing this shot is for, and
+# it exists only mid-turn: `DiffPane.reject` reverts immediately when the
+# session is idle, and QUEUES (badge, disabled button, nothing moved on
+# disk) when a turn is in flight, because a rejection the user has
+# clicked and cannot see the effect of is the worst of the three answers
+# the spec weighed. So the second turn here genuinely never finishes --
+# `_DiffEngine` holds it open -- rather than `pane.turn_in_flight` being
+# poked to a value no real turn is in.
+# --------------------------------------------------------------------- #
+
+_AUTH_BASE = """\
+# SPDX-License-Identifier: AGPL-3.0-only
+\"\"\"Token refresh against the claude CLI's own cached OAuth session.\"\"\"
+
+from __future__ import annotations
+
+GRACE_SECONDS = 300
+
+
+def expires_within(expiry: float, now: float) -> bool:
+    return expiry - now <= GRACE_SECONDS
+
+
+def refresh_token(cached: dict, now: float) -> dict:
+    \"\"\"Renew inside the grace window, never after it.\"\"\"
+    if not expires_within(cached["expires_at"], now):
+        return cached
+    return _renew(cached)
+
+
+def _renew(cached: dict) -> dict:
+    token = cli_refresh(cached["refresh_token"])
+    return {**cached, **token}
+
+
+def cli_refresh(token: str) -> dict:
+    raise NotImplementedError
+"""
+
+_DIFF_SESSION_ID = "a1b2c3d4e5"
+_DIFF_BRANCH = "doxa/a1b2c3d4"
+
+
+def _diff_repo() -> str:
+    """A real git worktree with a real base commit, two edits ten lines
+    apart in one file (so git's default three lines of context puts them
+    in SEPARATE hunks -- the whole "reject one, keep the other" claim
+    rests on that separation being real) and one created file. Plus the
+    DOXA sidecar `doxa.worktrees.read_meta` reads, so the diff resolves
+    its base the way a real session's does instead of falling back to
+    HEAD."""
+    import json
+    import subprocess
+
+    from doxa import worktrees as worktrees_mod
+
+    work = _tmp / "repos" / "doxa"
+    work.mkdir(parents=True, exist_ok=True)
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=str(work), check=True,
+                       capture_output=True)
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "demo@example.invalid")
+    git("config", "user.name", "demo")
+    (work / "doxa").mkdir(exist_ok=True)
+    (work / "doxa" / "auth.py").write_text(_AUTH_BASE, encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    git("checkout", "-q", "-b", _DIFF_BRANCH)
+
+    edited = _AUTH_BASE.replace(
+        "GRACE_SECONDS = 300", "GRACE_SECONDS = 900"
+    ).replace(
+        '    token = cli_refresh(cached["refresh_token"])',
+        '    token = cli_refresh(cached["refresh_token"])\n'
+        '    if not token:\n'
+        '        raise RefreshFailed("the CLI returned no token")',
+    )
+    (work / "doxa" / "auth.py").write_text(edited, encoding="utf-8")
+    (work / "tests").mkdir(exist_ok=True)
+    (work / "tests" / "test_grace_window.py").write_text(
+        "# SPDX-License-Identifier: AGPL-3.0-only\n"
+        "from doxa.auth import expires_within\n\n\n"
+        "def test_renews_inside_the_window():\n"
+        "    assert expires_within(900.0, 1.0)\n",
+        encoding="utf-8",
+    )
+
+    meta = worktrees_mod.worktrees_root() / ".meta"
+    meta.mkdir(parents=True, exist_ok=True)
+    (meta / f"{work.name}.json").write_text(json.dumps({
+        "main_root": str(work), "session_id": _DIFF_SESSION_ID,
+        "base_ref": "main", "branch": _DIFF_BRANCH,
+    }), encoding="utf-8")
+    return str(work)
+
+
+class _DiffEngine(FakeEngine):
+    """`hero`'s own script for the first prompt; the second prompt starts
+    a turn that never finishes.
+
+    Deliberate, and the reason this class exists rather than a
+    `turn_in_flight = True` assignment: the pending badge is only ever
+    shown while a turn is genuinely in flight, and this scene has to be
+    in that state for real -- through `SessionPane._run_turn`, the same
+    door a typed prompt goes down -- for the shot to be a picture of the
+    feature rather than of a flag."""
+
+    def __init__(self, cwd: str) -> None:
+        super().__init__(HERO_SCRIPT, model="claude-opus-4-5", cwd=cwd)
+        self.detachable = True
+        self.session_id = _DIFF_SESSION_ID
+        self._turns = 0
+
+    async def send(self, prompt: str):
+        self._turns += 1
+        if self._turns == 1:
+            async for event in super().send(prompt):
+                yield event
+            return
+        yield EngineEvent("turn_started", {})
+        await asyncio.Event().wait()  # held open for the rest of the scene
+
+
+def _diff_sibling_factory() -> Callable[[], FakeEngine]:
+    """The two sibling tabs `_fill_hero_conversation` opens behind this
+    scene. Plain engines with no script -- they are strip filler, and
+    they carry their OWN session ids so `DoxaApp.diff_pane_for` cannot
+    match the wrong pane's diff."""
+    models = iter(["claude-sonnet-4-5", "claude-haiku-4-5"])
+    seq = iter(range(1, 99))
+
+    def factory() -> FakeEngine:
+        model = next(models, "claude-sonnet-4-5")
+        engine = FakeEngine([], model=model, cwd=str(_tmp / "repos" / "doxa"))
+        engine.detachable = True
+        engine.session_id = f"{model[:6]}{next(seq):04d}"
+        return engine
+
+    return factory
+
+
+async def _drive_live_diff(app: DoxaApp, pilot) -> None:
+    from doxa.ui.diffview import DiffPane, FileSection, HunkView
+
+    await _fill_hero_conversation(app, pilot)
+    pane = app.active_pane
+    assert pane is not None
+    assert await _until(pilot, lambda: bool(pane._session_id)), "no session id"
+
+    await pilot.press("alt+g")
+    assert await _until(
+        pilot,
+        lambda: (
+            app.query(DiffPane)
+            and next(iter(app.query(DiffPane))).region.width > 0
+            and "reading the diff"
+            not in str(next(iter(app.query(DiffPane)))._head.renderable)
+        ),
+    ), "the diff pane never painted"
+    diff = next(iter(app.query(DiffPane)))
+    assert diff.region.x >= pane.region.x + pane.region.width, (
+        "the diff did not land to the RIGHT of the session"
+    )
+
+    assert await _until(pilot, lambda: len(diff.query(FileSection)) == 2), (
+        f"expected 2 files, got {[s.file_diff.path for s in diff.query(FileSection)]}"
+    )
+    section = next(
+        s for s in diff.query(FileSection) if s.file_diff.path.endswith("auth.py")
+    )
+    section.collapsed = False
+    assert await _until(pilot, lambda: len(section.query(HunkView)) == 2), (
+        "the two edits did not parse as two hunks"
+    )
+
+    # A second turn, started for real and never finished -- the state the
+    # pending badge exists for, reached through the same door a typed
+    # prompt uses rather than by writing `turn_in_flight`.
+    prompt = pane.query_one("#prompt-input")
+    prompt.focus()
+    prompt.value = "widen the grace window and make a missing token loud"
+    await pilot.press("enter")
+    assert await _until(pilot, lambda: pane.turn_in_flight), "no turn in flight"
+
+    await diff.reject(section.query(HunkView)[0])
+    assert await _until(
+        pilot, lambda: bool(diff.queued) and section.query(HunkView)[0]._pending.display
+    ), "the rejection did not queue with a visible badge"
+    await _settle(pilot, 12)
+
+
+# --------------------------------------------------------------------- #
+# Scene: folder-chip (v0.94.0, NEW FILE -- the feature is v0.93.0) -- the
+# leftmost identity chip when a session is NOT in a git repository:
+# `dir NAME`, deliberately a DIFFERENT SHAPE from the git chip's
+# `repo ⎇ branch @sha` rather than the same one with an empty branch half
+# (doxa.session.chips.PaneChipsMixin._status_chips). Reported as "if i
+# start in a non-repo dir, there is no folder/repo chip shown in the
+# status line", and before v0.93.0 there was simply no chip at all.
+#
+# Rooted outside this checkout for the one reason no scene before it
+# ever needed `cwd_factory`: this repository cannot be made not to be a
+# repository, and the chip only exists where there is no `.git` above the
+# session at all.
+#
+# `/dir` and `/cd` are in the same shot on purpose -- they are the pair
+# v0.93.0 shipped, and `/cd` with no argument is the surface that
+# explains, in the app itself, why a running session's own directory
+# cannot move (the claude CLI subprocess was spawned with an OS-level cwd
+# nothing can hand it a new one for).
+# --------------------------------------------------------------------- #
+
+FOLDER_SCRIPT = [
+    EngineEvent("turn_started", {}),
+    EngineEvent("text_delta", {"text": "There are three notes here:\n\n"}),
+    EngineEvent("text_delta", {"text": "| file | topic |\n|------|-------|\n"}),
+    EngineEvent("text_delta", {"text": "| `gallery.md` | which scenes still need a capture |\n"}),
+    EngineEvent("text_delta", {"text": "| `bullets.md` | the README rewrite, measured |\n"}),
+    EngineEvent("text_delta", {"text": "| `release.md` | the 0.94.0 chapter order |\n\n"}),
+    EngineEvent("text_delta", {"text": "None of this is a git repository, so this session "}),
+    EngineEvent("text_delta", {"text": "has no branch to be on."}),
+    EngineEvent("turn_done", {"cost_usd": 0.0014, "duration_ms": 760, "is_error": False,
+                              "session_cost_usd": 0.0014, "ctx_percentage": 5.0}),
+]
+
+
+def _plain_folder() -> str:
+    """A plain directory with no `.git` anywhere above it -- under this
+    module's own throwaway temp root, which is exactly why it qualifies."""
+    folder = _tmp / "design-notes"
+    folder.mkdir(parents=True, exist_ok=True)
+    for name, body in (
+        ("gallery.md", "# gallery\n\nsplit panes, the live diff, the folder chip\n"),
+        ("bullets.md", "# bullets\n\n2,511 characters across eleven bullets\n"),
+        ("release.md", "# release\n\n0.94.0, in chapters\n"),
+    ):
+        (folder / name).write_text(body, encoding="utf-8")
+    return str(folder)
+
+
+def _folder_engine() -> FakeEngine:
+    engine = FakeEngine(FOLDER_SCRIPT, model="claude-opus-4-5")
+    engine.detachable = True
+    engine.session_id = "b7e2f9a1c4"
+    return engine
+
+
+async def _drive_folder_chip(app: DoxaApp, pilot) -> None:
+    await pilot.pause()
+    await app.action_new_tab()
+    await pilot.pause()
+    tabbed = app.query_one("#session-tabs", TabbedContent)
+    tabbed.active = app.panes()[0].tab_id or tabbed.active
+    await pilot.pause()
+    pane = app.active_pane
+    assert pane is not None
+    prompt = pane.query_one("#prompt-input")
+    prompt.focus()
+    prompt.value = "what's in this folder?"
+    await pilot.press("enter")
+    assert await _until(
+        pilot,
+        lambda: any(
+            "no branch to be on" in getattr(b, "assistant_text", "")
+            for b in pane.query(TurnBlock)
+        ),
+    ), "the folder turn never finished"
+    await pane._cmd_dir("")
+    await pilot.pause()
+    await pane._cmd_cd("")
+    await pilot.pause()
+    app.query_one("#block-list").scroll_end(animate=False)
+    await _settle(pilot, 12)
+
+
+# --------------------------------------------------------------------- #
 
 @dataclass
 class Scene:
@@ -700,6 +1089,15 @@ class Scene:
     and removed after. The image scenes need it: the banner is mounted
     during pane boot, which is over before `drive` gets its first pause,
     so forcing the tier from inside a driver would be too late."""
+    cwd_factory: "Callable[[], str] | None" = None
+    """Where the app is rooted, built fresh for the scene, defaulting to
+    THIS checkout (every scene before v0.94.0). Two scenes need somewhere
+    else and neither can fake it: `live-diff` runs `git diff` for real
+    against a real worktree with real edits in it, and `folder-chip`
+    exists precisely to show the chip a session gets when it is NOT in a
+    git repository at all -- which this checkout can never be. Built
+    under this module's own throwaway temp root (see the isolation block
+    at the top), so nothing outside it is read or written."""
 
 
 # `size` is a (cols, rows) TERMINAL geometry, not a pixel one -- Textual's
@@ -782,6 +1180,16 @@ SCENES: list[Scene] = [
           engine_factory=_hero_engine, new_session_factory=_sibling_tab_factory()),
     Scene("beliefs-picker", _drive_beliefs_picker, size=WIDE,
           engine_factory=_hero_engine, new_session_factory=_sibling_tab_factory()),
+    Scene("split-panes", _drive_split_panes, size=WIDE,
+          engine_factory=_hero_engine, new_session_factory=_split_tab_factory()),
+    Scene("live-diff", _drive_live_diff, size=WIDE,
+          cwd_factory=_diff_repo,
+          engine_factory=lambda: _DiffEngine(str(_tmp / "repos" / "doxa")),
+          new_session_factory=_diff_sibling_factory()),
+    Scene("folder-chip", _drive_folder_chip, size=WIDE,
+          cwd_factory=_plain_folder,
+          engine_factory=_folder_engine,
+          new_session_factory=_sibling_tab_factory()),
     # THE banner, since v0.70.0 dropped the raster tier: every terminal
     # draws this. The scene name is kept rather than renamed to `banner`
     # so the README's asset path and caption stay valid; there is no
@@ -801,8 +1209,9 @@ async def _run_scene(scene: Scene) -> None:
     # DoxaApp.__init__ settles the image probe and the pane mounts its
     # banner during boot, both before a driver's first pause.
     with mock.patch.dict(os.environ, scene.env or {}):
+        cwd = scene.cwd_factory() if scene.cwd_factory is not None else str(ROOT)
         app = DoxaApp(
-            cwd=str(ROOT),
+            cwd=cwd,
             engine_factory=scene.engine_factory,
             new_session_factory=scene.new_session_factory,
         )

@@ -82,6 +82,7 @@ from doxa.app import (  # noqa: E402
     TurnBlock,
 )
 from doxa.engine import EngineEvent  # noqa: E402
+from doxa.ui.split import PaneTab, SplitBox  # noqa: E402
 from doxa.ui.transcript import SPINNER_FRAMES  # noqa: E402
 from scripts.screenshot import _fake_identity, _peer, _settle  # noqa: E402
 from tests.fakes import FakeEngine  # noqa: E402
@@ -332,7 +333,7 @@ async def _drive_tab_lifecycle(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> 
     await pilot.press("enter")
     assert await _wait_until(pilot, lambda: second.turn_in_flight)
     tabbed = app.query_one("#session-tabs", TabbedContent)
-    tab_second = tabbed.get_tab(second.id or "")
+    tab_second = tabbed.get_tab(second.tab_id)
     assert await _wait_until(pilot, lambda: tab_second.has_class("-working"))
     rec.snap(700, "tab 2 starts a turn: amber -working (active)")
 
@@ -526,13 +527,13 @@ async def _drive_rename(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
     await pilot.pause()
     pane = app.panes()[1]
     tabbed_early = app.query_one("#session-tabs", TabbedContent)
-    tabbed_early.active = pane.id or tabbed_early.active
+    tabbed_early.active = pane.tab_id or tabbed_early.active
     await pilot.pause()
     await _mount_filler_exchange(app, pilot)
     rec.snap(900, "three tabs, before rename")
 
     tabbed = app.query_one("#session-tabs", TabbedContent)
-    tab = tabbed.get_tab(pane.id or "")
+    tab = tabbed.get_tab(pane.tab_id)
     # A REAL double-click, same event-chain path a mouse would take (see
     # doxa.app.DoxaApp._on_click_maybe_rename, event.chain == 2) --
     # scripts/screenshot.py's static rename shot called `_start_rename`
@@ -934,6 +935,70 @@ async def _drive_peers_picker(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> N
 
 
 # --------------------------------------------------------------------- #
+# Scene: split-panes (v0.94.0, NEW -- the feature is v0.91.0) -- the one
+# thing a still cannot show about a split: the SECOND PANE APPEARING.
+# scripts/screenshot.py's own `split-panes` shot carries the settled
+# state (two independent sessions, side by side, one tab); this carries
+# the gesture, which is what the owner asked for -- Alt+D, and a pane
+# arriving where there was one.
+#
+# Driven by the REAL key throughout (`pilot.press("alt+d")`,
+# `ctrl+shift+left`, `alt+right`), the same "exercise the actual trigger"
+# choice `_drive_rename`'s double-click and `_drive_chip_picker`'s branch
+# click already make -- tests/test_split_panes.py calls
+# `split_active_pane` directly, which proves the mechanism but not the
+# binding, and a demo of a keystroke has to press the keystroke.
+#
+# Alt, not Ctrl+Shift+letter, is not a preference: under the legacy
+# encoding ctrl+shift+<letter> sends the same byte as ctrl+<letter> and
+# is simply undeliverable (doxa/keyboard.py). That is why this scene can
+# be recorded at all.
+# --------------------------------------------------------------------- #
+
+
+async def _drive_split_panes(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
+    await pilot.pause()
+    left = app.active_pane
+    assert left is not None
+    await _mount_filler_exchange(app, pilot)
+    rec.snap(1200, "one session, one pane -- the tab it is in could hold more")
+
+    await pilot.press("alt+d")
+    assert await _wait_until(pilot, lambda: app.active_pane is not left)
+    right = app.active_pane
+    assert right is not None
+    assert await _wait_until(pilot, lambda: right.region.width > 0)
+    assert right.region.x >= left.region.x + left.region.width
+    await pilot.pause()
+    rec.snap(1400, "alt+d: a SECOND SESSION lands beside it -- its own "
+                   "transcript, its own status bar, and the keyboard")
+
+    # `_mount_bare_turn` mounts into `app.active_pane`, which alt+d just
+    # moved to the NEW pane -- that is where this turn belongs.
+    assert app.active_pane is right
+    block = await _mount_bare_turn(app, "who is in this tab now?")
+    await block.append_text(
+        "Two independent sessions -- this pane and the one to its left. "
+        "A split spawns a new session through the same factory Ctrl+T "
+        "uses; it is not a second view of the session you were in."
+    )
+    await block.mark_done(0.0016, 410, False)
+    await pilot.pause()
+    rec.snap(1400, "the new pane is a session in its own right, not a view")
+
+    await pilot.press("ctrl+shift+left")
+    assert await _wait_until(pilot, lambda: app.active_pane is left)
+    await pilot.pause()
+    rec.snap(1100, "ctrl+shift+← moves the keyboard back -- directional, "
+                   "never 'next pane'")
+
+    await pilot.press("alt+right")
+    await _settle(pilot, 8)
+    rec.snap(1400, "alt+→ moves the divider: the left pane grows, both "
+                   "keep rendering")
+
+
+# --------------------------------------------------------------------- #
 
 @dataclass
 class Scene:
@@ -1011,6 +1076,12 @@ SCENES: list[Scene] = [
         engine_factory=lambda: FakeEngine(
             [], model="claude-opus-4-5", bypass_armed=True,
         ),
+    ),
+    Scene(
+        "split-panes", _drive_split_panes, size=WIDE, min_frames=5,
+        widgets=(PaneTab, SplitBox, TurnBlock),
+        engine_factory=lambda: FakeEngine([], model="claude-opus-4-5"),
+        new_session_factory=lambda: FakeEngine([], model="claude-sonnet-4-5"),
     ),
     Scene(
         "peers", _drive_peers_picker, size=SIZE_TAB_BAR, min_frames=4,
