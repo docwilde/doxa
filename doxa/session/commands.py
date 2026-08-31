@@ -108,6 +108,8 @@ PANE_COMMANDS: "tuple[CommandBinding, ...]" = (
     CommandBinding("/split", "_cmd_split"),
     CommandBinding("/vsplit", "_cmd_vsplit"),
     CommandBinding("/diff", "_cmd_diff"),
+    CommandBinding("/pane", "_cmd_pane"),
+    CommandBinding("/movepane", "_cmd_movepane"),
     CommandBinding("/detach", "_cmd_detach"),
     CommandBinding("/attach", "_cmd_attach"),
     CommandBinding("/sessions", "_cmd_sessions"),
@@ -797,6 +799,71 @@ class PaneCommandsMixin:
         transcript block in the pane the refusal is about, never a toast
         floating over some other pane."""
         note = await self.app.toggle_diff_pane()
+        if note:
+            await self._system(note)
+
+    async def _cmd_pane(self, args: str) -> None:
+        """``/pane <n>`` -- put the keyboard in pane group ``n``, numbered
+        in READING order: left to right, then top to bottom.
+
+        The door that always works. ``Ctrl+1``..``Ctrl+9`` is the fast
+        gesture, and under the legacy key encoding a terminal has no byte
+        for ``Ctrl+<digit>`` at all (``doxa.keyboard``) -- so the command is
+        not a convenience, it is the only way to reach this on a terminal
+        without the kitty protocol. Same posture ``/settings`` takes beside
+        ``Ctrl+,``.
+
+        With no argument it just FLASHES the numbers, which is the honest
+        answer to "which one is which" and costs nothing to ask."""
+        raw = args.strip()
+        if not raw:
+            self.app._flash_group_numbers()
+            count = len(self.app._group_order())
+            await self._system(
+                f"{count} pane group(s), numbered left to right then top to "
+                "bottom — /pane <n> or Ctrl+<n> to jump to one"
+                if count > 1 else
+                "one pane group — /split or /vsplit makes a second"
+            )
+            return
+        try:
+            number = int(raw)
+        except ValueError:
+            await self._system(f"/pane wants a group number, not {raw!r}")
+            return
+        note = self.app.focus_group_number(number)
+        if note:
+            await self._system(note)
+
+    async def _cmd_movepane(self, args: str) -> None:
+        """``/movepane <n>`` -- move THIS group's active tab into pane
+        group ``n``.
+
+        Given a command from the start and deliberately no key of its own
+        yet: ``Ctrl+Shift+←/→`` is taken by directional focus, and the
+        pane-groups spec defers the spelling rather than contesting a
+        binding that already means something. The command is not a
+        placeholder for that key -- it is the form that will still work on
+        the terminals where whatever key is chosen cannot be sent.
+
+        The session does NOT restart, stop or fork: Textual cannot
+        re-parent a mounted widget, so the tab is re-created at the
+        destination and the live engine handle is re-seated onto it. See
+        :meth:`doxa.app.DoxaApp._reseat_pane`."""
+        raw = args.strip()
+        if not raw:
+            self.app._flash_group_numbers()
+            await self._system(
+                "/movepane <n> — which group? they are numbered left to "
+                "right, then top to bottom"
+            )
+            return
+        try:
+            number = int(raw)
+        except ValueError:
+            await self._system(f"/movepane wants a group number, not {raw!r}")
+            return
+        note = await self.app.move_tab_to_group(number)
         if note:
             await self._system(note)
 

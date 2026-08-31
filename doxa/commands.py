@@ -128,6 +128,31 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette="Diff: live, beside this session",
     ),
     SlashCommand(
+        name="/pane",
+        group="Panes & tabs",
+        summary="Jump to a pane group by position — numbered left to "
+                "right, then top to bottom (Ctrl+1…Ctrl+9). With no "
+                "number, flashes them",
+        usage="/pane [n]",
+        palette="Pane: jump to a group",
+        palette_prefill=True,
+        # No ``binding``, deliberately: Ctrl+1..Ctrl+9 are NINE keys and
+        # each names one group, so none of them is "the key for /pane".
+        # Declaring one here would put it first in
+        # :func:`doxa.ui.labels.unreachable_bindings` and read, in
+        # /doctor, as though the command itself were unsendable -- when
+        # the command is precisely the part that always works.
+    ),
+    SlashCommand(
+        name="/movepane",
+        group="Panes & tabs",
+        summary="Move this group's active tab into another pane group — "
+                "the session keeps running, untouched",
+        usage="/movepane <n>",
+        palette="Pane: move this tab to a group",
+        palette_prefill=True,
+    ),
+    SlashCommand(
         name="/msg",
         group="Panes & tabs",
         summary="Send a message to one same-project peer session",
