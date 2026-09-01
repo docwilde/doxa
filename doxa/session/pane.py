@@ -181,6 +181,11 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         # Textual got round to it. Focus now belongs to DoxaApp, at each
         # site that moves the user on purpose (DoxaApp._focus_tab and its
         # callers). Nothing to store here any more.
+        # "This transcript is supposed to be sitting at its newest block,
+        # and it is not, because when that was asked for this pane had no
+        # box on screen to do it in." Written only by
+        # scroll_transcript_to_end, spent only by _flush_pending_tail.
+        self._tail_pending = False
         # Out-of-band turn rendering state (replayed history after reattach,
         # or a turn another attached client drives) -- see _peer_pump.
         self._oob_turn: TurnBlock | None = None
@@ -467,6 +472,11 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         if not snapshot:
             return
         await mount_transcript(block_list, snapshot)
+        # mount_transcript scroll_end()s on its way out, and a RESTORE is
+        # exactly the case where several panes are built at once and only
+        # one of them is on screen -- so the intent is re-stated through
+        # this pane's own door, which can remember it.
+        self.scroll_transcript_to_end(block_list)
 
     def _refresh_identity(self) -> None:
         """Re-render the identity block in place -- after an auth flow the
@@ -741,6 +751,112 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         re-derives its rows when the pane changes size."""
         if self.prompt_ratio:
             self._apply_prompt_ratio()
+        # A pane can get its box back without a Show (a terminal resize
+        # while its tab was already the active one, and a leaf appearing
+        # out of a split). Same one-line re-statement as on_show below.
+        if self._tail_pending and event.size.height > 0:
+            self._flush_pending_tail()
+
+    def on_show(self, event: events.Show) -> None:
+        """This pane is on screen again -- put its transcript back where
+        it was supposed to be all along. See
+        :meth:`scroll_transcript_to_end`, which is where the whole
+        argument lives."""
+        if self._tail_pending:
+            self._flush_pending_tail()
+
+    def _flush_pending_tail(self) -> None:
+        """Spend a remembered scroll-to-end now that there is a box to
+        spend it in.
+
+        Goes back through :meth:`scroll_transcript_to_end` rather than
+        calling ``scroll_end`` directly, so a flush that arrives while the
+        pane STILL has no geometry re-arms the flag instead of quietly
+        consuming it -- the next ``Show``/``Resize`` then tries again.
+        Nothing re-schedules itself, so there is no callback that can
+        outlive the condition it is waiting for."""
+        self.scroll_transcript_to_end()
+
+    def scroll_transcript_to_end(
+        self, block_list: "VerticalScroll | None" = None
+    ) -> None:
+        """Pin this pane's transcript to its newest block -- the ONE door
+        for every site that appends to it (the boot blocks, the live turn,
+        the peer pump, the shell block, the staged-proposal notice,
+        ``/context``, ``/img``, the restored scrollback).
+
+        **THE FIX for "when a request is running in one tab and i open
+        another, and then i switch back, the old request seem to have been
+        interrupted and i dont see its result".**
+
+        The turn was never interrupted, and no output was ever lost. What
+        was lost was the SCROLL. Every one of those sites used to end in a
+        bare ``block_list.scroll_end(animate=False)``, and that call does
+        nothing at all in a background tab -- measured, not assumed. A
+        hidden ``TabPane`` gives its subtree no geometry, so while another
+        tab is active this pane's ``size`` and ``#block-list``'s are both
+        ``Size(0, 0)``; ``max_scroll_y`` is ``virtual_size.height -
+        container_size.height`` floored at zero, and those two go stale
+        together at their last visible values, so it reads 0 for that
+        whole window. Every scroll the streaming turn issued -- one per
+        engine event -- therefore scrolled to row 0 and reported success.
+        When the tab came back, the layout recomputed, ``max_scroll_y``
+        jumped to the full height of the answer that had landed meanwhile,
+        and nothing re-issued the scroll: the transcript sat at the offset
+        it held when the user walked away, with the entire reply below the
+        fold. A finished answer, in the widget and on disk, one PageDown
+        from being read and no way to know it was there.
+
+        So the intent is REMEMBERED when it cannot be carried out, and
+        :meth:`on_show` spends it. Two things about that are worth
+        stating, because both were got wrong first and measured second:
+
+        * the readiness test is ``block_list.size``, NOT
+          ``container_size``. ``container_size`` and ``virtual_size`` are
+          only rewritten by a layout pass, so a hidden widget keeps
+          reporting the box it had when it was last visible (94x21 here,
+          for a pane that is 0x0) -- a guard on those never fires and the
+          flag is never set. ``size`` really does go to zero.
+        * the flush does not have to hunt for the moment the CONTENT has
+          been re-measured. On the refresh where the pane gets its box
+          back, ``virtual_size`` is still the stale pre-hide value and
+          ``max_scroll_y`` is still 0; it is one refresh later that it
+          becomes the real height. ``scroll_end`` already covers exactly
+          that gap on its own -- it defers ``_lazily_scroll_end`` through
+          ``call_after_refresh`` precisely so it can read
+          ``max_scroll_y`` after the layout it was called during.
+
+        ``Widget.anchor()`` looks like the platform answer to this and is
+        not: Textual 5.3's compositor writes the anchored scroll offset
+        with ``set_reactive``, bypassing ``validate_scroll_y``, so a
+        transcript SHORTER than its container gets a large negative
+        ``scroll_y`` -- an idle pane's opening blocks shoved to the
+        bottom under a screenful of blank rows. Measured on this branch at
+        100x45: ``scroll_y == -20`` with the banner pushed off the top.
+
+        Nothing here decides WHETHER to follow the tail -- that decision
+        was made by the caller, at the time it appended, exactly as before.
+        This only stops the decision from being thrown away because the
+        pane happened to be invisible when it was made.
+
+        The caller may pass the ``#block-list`` it already has in hand;
+        every one of them does, having just mounted into it."""
+        if block_list is None:
+            try:
+                block_list = self.query_one("#block-list", VerticalScroll)
+            except NoMatches:
+                return
+        # query_one succeeding is not the same as mounted -- see _system's
+        # own docstring for the window this covers.
+        if not block_list.is_mounted:
+            return
+        if block_list.size.height <= 0:
+            # No box on screen: this pane's tab is hidden, or it has not
+            # been laid out yet. Remember it; do not pretend it happened.
+            self._tail_pending = True
+            return
+        self._tail_pending = False
+        block_list.scroll_end(animate=False)
 
     def set_needs_input(self, value: bool) -> None:
         """The attention-blink mechanism. Nothing calls this with True yet
@@ -1049,7 +1165,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         if not block_list.is_mounted:
             return
         await block_list.mount(SystemBlock(text))
-        block_list.scroll_end(animate=False)
+        self.scroll_transcript_to_end(block_list)
 
     async def _run_command(self, prompt: str) -> None:
         await self._engine_ready.wait()
@@ -1106,7 +1222,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         block_list = self.query_one("#block-list", VerticalScroll)
         block = ShellBlock(command, cwd)
         await block_list.mount(block)
-        block_list.scroll_end(animate=False)
+        self.scroll_transcript_to_end(block_list)
         result = await shell_mod.run(command, cwd)
         block.complete(result)
-        block_list.scroll_end(animate=False)
+        self.scroll_transcript_to_end(block_list)

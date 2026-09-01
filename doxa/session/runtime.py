@@ -263,7 +263,7 @@ class PaneRuntimeMixin:
             # one), never repeated on a later switch_engine re-boot.
             await block_list.mount(SystemBlock(self._boot_report))
             self._boot_report = None
-        block_list.scroll_end(animate=False)
+        self.scroll_transcript_to_end(block_list)
         if self._resume_from:
             # v0.56.0 (/resume): a resumed session must SHOW what it
             # remembers. The model comes back holding the whole
@@ -339,14 +339,14 @@ class PaneRuntimeMixin:
             if ev.type == "peer_message":
                 block_list = self.query_one("#block-list", VerticalScroll)
                 await block_list.mount(PeerMessageBlock(ev.data))
-                block_list.scroll_end(animate=False)
+                self.scroll_transcript_to_end(block_list)
             elif ev.type == "tool_disabled":
                 block_list = self.query_one("#block-list", VerticalScroll)
                 await block_list.mount(SystemBlock(
                     f"⊘ tool disabled for this session: {ev.data.get('name')}"
                     f" — {ev.data.get('reason')}"
                 ))
-                block_list.scroll_end(animate=False)
+                self.scroll_transcript_to_end(block_list)
             elif ev.type == "needs_input":
                 self._open_needs_input(ev.data)
             elif ev.type == "needs_input_resolved":
@@ -374,7 +374,7 @@ class PaneRuntimeMixin:
                 # elapsed-time ticker (ThinkingMarker.start's own docstring)
                 # arms here too, not only in _run_turn below.
                 self._oob_turn.thinking.start()
-                block_list.scroll_end(animate=False)
+                self.scroll_transcript_to_end(block_list)
                 # A new turn starting (even one another client is driving)
                 # is itself "seen" -- the same stale-dot clear _run_turn
                 # does for a locally-driven turn.
@@ -410,9 +410,7 @@ class PaneRuntimeMixin:
                     await _composed(self._oob_turn.body, self._oob_turn.tools)
                 if self._oob_turn is not None:
                     await self._handle_event(ev, self._oob_turn, self._oob_chips)
-                    self.query_one("#block-list", VerticalScroll).scroll_end(
-                        animate=False
-                    )
+                    self.scroll_transcript_to_end()
                     if ev.type == "turn_done":
                         self._oob_turn = None
                         self._oob_chips = {}
@@ -455,20 +453,20 @@ class PaneRuntimeMixin:
         # argument); block.mark_done (both below and on the error path)
         # is what stops it, on every way this turn can end.
         block.thinking.start()
-        block_list.scroll_end(animate=False)
+        self.scroll_transcript_to_end(block_list)
 
         chips: dict[str, ToolChip] = {}
 
         try:
             async for ev in self.engine.send(prompt):
                 await self._handle_event(ev, block, chips)
-                block_list.scroll_end(animate=False)
+                self.scroll_transcript_to_end(block_list)
         except Exception as exc:  # noqa: BLE001 -- a refused/broken turn must
             # not take the shell down (e.g. the daemon is busy with another
             # client's turn, or the connection dropped mid-stream).
             await block.mark_done(None, None, True)
             await block_list.mount(SystemBlock(f"turn failed: {exc}"))
-            block_list.scroll_end(animate=False)
+            self.scroll_transcript_to_end(block_list)
 
         self.turn_in_flight = False
         self._set_tab_class("-working", False)
@@ -861,7 +859,7 @@ class PaneRuntimeMixin:
                 self.open_pending_picker(), group="command"
             ),
         ))
-        block_list.scroll_end(animate=False)
+        self.scroll_transcript_to_end(block_list)
         self.set_staged(True)
         notify_mod.notify_staged(
             getattr(self.app, "app_has_focus", True),

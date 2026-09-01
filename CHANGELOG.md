@@ -4,6 +4,79 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.99.0 — 2026-09-02
+
+**"When a request is running in one tab and i open another, and then i
+switch back, the old request seem to have been interrupted and i dont see
+its result."** Reported from live use. The turn was never interrupted, and
+nothing it produced was ever lost — the answer was in the widget, in the
+daemon and in the transcript on disk. What was lost was the SCROLL, which
+made a finished turn indistinguishable from a killed one.
+
+- **The mechanism.** Every site that appends to a pane's transcript ended
+  in `block_list.scroll_end(animate=False)` — `_run_turn` once per engine
+  event, `_peer_pump`, `_system`, the boot blocks, `/context`, `/img`,
+  the shell block, the restored scrollback. That call does nothing at all
+  in a background tab. Measured, not reasoned: while another tab is
+  active a hidden `TabPane` gives its whole subtree no geometry, so the
+  pane's own `size` and `#block-list`'s are both `Size(0, 0)`;
+  `max_scroll_y` is `virtual_size.height - container_size.height` floored
+  at zero, and those two go stale together at their last visible values,
+  so it reads 0 for that entire window. Every scroll the streaming turn
+  issued therefore went to row 0 and reported success. When the tab came
+  back the layout recomputed, `max_scroll_y` jumped to the full height of
+  the answer that had landed meanwhile — `0.0 of 78` in the pilot that
+  reproduces it — and nothing re-issued the scroll. The transcript sat at
+  the offset it held when the user walked away, with the whole reply below
+  the fold: an answer one PageDown away, and nothing on screen saying so.
+- **`SessionPane.scroll_transcript_to_end`** (`doxa/session/pane.py`) is
+  now the one door for that intent, and the one thing it can do that a
+  bare `scroll_end` cannot is REMEMBER. A pane with no box on screen sets
+  `_tail_pending` instead of pretending; `on_show` (and `on_resize`, for a
+  pane that gets its box back without a Show) spends it. Every one of the
+  fourteen call sites above goes through it.
+- **Two things this had to get right, both measured before they were
+  written.** The readiness test is `block_list.size`, never
+  `container_size`: only a layout pass rewrites `container_size` and
+  `virtual_size`, so a hidden widget keeps reporting the box it had when
+  it was last visible (94x21 for a pane that is 0x0) — a guard on those
+  never fires and the flag is never set. And the flush does not have to
+  hunt for the moment the content has been re-measured: on the refresh
+  where the pane gets its box back `virtual_size` is still the stale
+  pre-hide value, and it is one refresh later that `max_scroll_y` becomes
+  real — which is exactly the gap `scroll_end` already closes on its own,
+  by deferring its `max_scroll_y` read through `call_after_refresh`.
+- **Not `Widget.anchor()`**, which looks like the platform answer and is
+  not. Textual 5.3's compositor writes the anchored offset with
+  `set_reactive`, bypassing `validate_scroll_y`, so a transcript SHORTER
+  than its container gets a large negative `scroll_y` — measured at `-20`
+  on a 100x45 pane, with the boot banner shoved off the top under a
+  screenful of blank rows. `test_a_short_transcript_is_not_pushed_down_
+  when_a_tab_is_shown` pins that against a later re-attempt.
+- **Not a cancellation, and that is asserted rather than assumed.**
+  Textual's exclusivity groups are node-scoped —
+  `WorkerManager.cancel_group` filters on `worker.node == node` (textual
+  5.3) and `on_prompt_submitted` runs its worker on the PANE — so a second
+  pane starting anything in group `"turn"` cannot touch the first pane's.
+  `SessionPane`'s docstring has claimed this since v0.34.0; it is now
+  pinned by a test that watches the engine's own generator for an outside
+  close, so if it ever stops being true the report comes back with a
+  different cause instead of the same symptom.
+- **The same answer was lost two ways the report did not mention**, both
+  through the identical `scroll_end`: a turn another attached client of
+  the same daemon drives (`_peer_pump`), which needs no keystroke at all,
+  and a `turn failed:` block — a background pane's own error message
+  landed below the fold too.
+- 4 new tests in `tests/test_turn_survives_new_tab.py`, driving the report
+  keystroke for keystroke through a `HalfwayEngine` whose `send()` stops
+  mid-turn on an event the test holds (every other fake in this suite
+  replays its whole script in one loop turn, which is the one shape that
+  cannot reproduce this). They assert against the COMPOSITED screen, never
+  `TurnBlock.assistant_text`, because the widget's own model says "the
+  answer is here" in the broken world too. 2 fail against 0.96.0 and
+  against unmerged `feat/pane-groups` alike; the fix applies cleanly to
+  that branch and passes its own `tests/test_pane_groups.py`.
+
 ## 0.98.0 — 2026-09-01
 
 **The streaming deriver is on by default, every 900 seconds.** Through

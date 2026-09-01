@@ -670,7 +670,7 @@ class PaneCommandsMixin:
             return
         block_list = self.query_one("#block-list", VerticalScroll)
         await block_list.mount(ContextBlock(breakdown))
-        block_list.scroll_end(animate=False)
+        self.scroll_transcript_to_end(block_list)
 
     def _usage_text(self) -> str:
         """/usage: the session's REAL numbers, and the account's real
@@ -1303,14 +1303,14 @@ class PaneCommandsMixin:
         if not path:
             block_list = self.query_one("#block-list", VerticalScroll)
             await block_list.mount(ImageShowcaseBlock())
-            block_list.scroll_end(animate=False)
+            self.scroll_transcript_to_end(block_list)
             return
         if not os.path.isfile(path):
             await self._system(f"img: no such file: {path}")
             return
         block_list = self.query_one("#block-list", VerticalScroll)
         await block_list.mount(ImageBlock(path))
-        block_list.scroll_end(animate=False)
+        self.scroll_transcript_to_end(block_list)
 
     async def _cmd_peers(self, args: str) -> None:
         assert self.engine is not None
