@@ -1037,19 +1037,40 @@ def show_reasoning() -> bool:
     return raw.lower() not in ("0", "false", "no", "off")
 
 
+#: Streaming-deriver debounce, seconds. ON by default as of v0.98.0
+#: (owner's decision): a session that runs for hours and ends without a
+#: clean finalize used to derive NOTHING, because review fired only at
+#: PreCompact and at finalize. Fifteen minutes is the interval, not the
+#: cost -- ``_maybe_schedule_derive`` also refuses while one is in flight
+#: and while finalizing, so a quiet session pays nothing and a busy one
+#: pays at most four reviews an hour.
+DERIVE_SECS_DEFAULT = 900.0
+
+
 def derive_interval() -> float | None:
     """The streaming-deriver debounce interval from ``DOXA_DERIVE_SECS``
-    (LORE_REVIEW_SECS-style: seconds, positive number). Default OFF -- the
-    mid-session deriver is opt-in; unset/empty/zero/garbage all mean None.
+    (LORE_REVIEW_SECS-style: seconds, positive number), defaulting to
+    :data:`DERIVE_SECS_DEFAULT`.
+
+    ``None`` means the mid-session deriver never arms; review then happens
+    only at PreCompact and finalize, which is what every version through
+    v0.97.0 did. Turn it off with ``0``, ``off``, ``no`` or ``false`` --
+    an EXPLICIT off, unlike the empty string, which now means "unset, take
+    the default" the way every other knob in the registry reads. Garbage
+    also takes the default rather than silently disabling a feature the
+    operator believes is on.
+
     Read per call, like lore_core's own env-driven knobs, so a toggle
     doesn't need a new engine."""
     raw = config_mod.raw("DOXA_DERIVE_SECS").strip()
     if not raw:
+        return DERIVE_SECS_DEFAULT
+    if raw.lower() in ("0", "off", "no", "false"):
         return None
     try:
         value = float(raw)
     except ValueError:
-        return None
+        return DERIVE_SECS_DEFAULT
     return value if value > 0 else None
 
 
@@ -1414,7 +1435,7 @@ class SessionEngine:
         # in-flight control request would.
         self._pending_needs_input: dict[str, asyncio.Future] = {}
 
-        # Streaming deriver (opt-in via DOXA_DERIVE_SECS): a debounced
+        # Streaming deriver (DOXA_DERIVE_SECS, default 900s): a debounced
         # background review of the transcript-so-far, reusing the exact
         # deriver machinery finalize/PreCompact already run. Guards:
         # _review_lock serializes every review runner (derive can NEVER

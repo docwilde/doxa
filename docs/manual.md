@@ -675,10 +675,22 @@ it) vs `user-model · inferred` (read off behaviour, never spelled out;
 shapes tone and authorizes nothing) — spelled out in full in a belief's
 own tooltip.
 
-**Streaming review.** With `derive_secs` set, a background reviewer runs
-over the live transcript between turns and stages whatever it judges worth
-remembering, behind the same approval gate. Session-end review (LORE's
-`PreCompact`/finalize pass) always runs regardless of `derive_secs`.
+**Streaming review.** A background reviewer runs over the live transcript
+between turns — at most once every `derive_secs`, **900 seconds by
+default** since v0.98.0 — and stages whatever it judges worth remembering,
+behind the same approval gate as everything else. It never blocks a turn:
+it is scheduled on turn-done, refuses to start while one is already in
+flight or while the session is finalizing, so a quiet session pays nothing
+and a busy one pays at most four reviews an hour.
+
+Each review shells out to a headless `claude -p`, so it is a real cost.
+`derive_secs = 0` (or `off`) turns it off and leaves review where it was
+through v0.97.0: at `PreCompact` and at session end. Those two always run
+regardless, and honour `LORE_DISABLE_REVIEW` the way LORE's own hook does.
+
+Why it defaults on: a session that runs for hours and ends without a clean
+finalize used to derive **nothing at all**, because review fired only at
+compaction and at the end.
 
 ## Shell escape
 
@@ -862,7 +874,7 @@ environment is winning is read-only in the modal.
 | `worktree_per_session` | `DOXA_WORKTREE` | on | give each session its own git worktree |
 | `restore_tabs` | `DOXA_RESTORE_TABS` | on | plain `doxa` restores the whole saved tab set |
 | `resume_restored` | `DOXA_RESUME_RESTORED` | on | a restored tab whose session ended comes back live, continuing the conversation |
-| `derive_secs` | `DOXA_DERIVE_SECS` | off | streaming-deriver interval; unset runs review only at session end |
+| `derive_secs` | `DOXA_DERIVE_SECS` | `900` | streaming-deriver interval, seconds; `0`/`off` disables it and leaves review to PreCompact and session end |
 | `consult_floor` | `DOXA_CONSULT_FLOOR` | 1.0 | act-time belief-consult relevance floor; 0 disables it |
 | `graph_view` | `DOXA_GRAPH_VIEW` | `browser` | how the beliefs picker's `g` shows one belief's neighbourhood: `browser` (mermaid page under `~/.doxa/graphs`) or `ascii` (LORE's edge block, in the TUI) |
 | `lore_root` | `LORE_ROOT` | `~/.claude/lore` | where the belief store and session index live; sticky, set by `/setup` |

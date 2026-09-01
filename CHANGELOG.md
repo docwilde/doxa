@@ -4,6 +4,35 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.98.0 — 2026-09-01
+
+**The streaming deriver is on by default, every 900 seconds.** Through
+v0.97.0 `derive_secs` was opt-in and unset meant off, so review fired only
+at `PreCompact` and at finalize — and a session that ran for hours and
+ended without a clean finalize derived **nothing at all**.
+
+- New **`doxa.engine.DERIVE_SECS_DEFAULT`** (900.0). `derive_interval()`
+  now reads unset, empty AND unparseable as "take the default": silently
+  disabling a feature the operator believes is on is the worse of the two
+  failures.
+- **Off is sayable**: `0`, `off`, `no`, `false` (any case) disable it and
+  leave review where it was — `PreCompact` and session end, which always
+  run regardless and honour `LORE_DISABLE_REVIEW`.
+- Unchanged, and what makes the default affordable: `_maybe_schedule_derive`
+  fires on turn-done, refuses while one review is in flight or the session
+  is finalizing, and never blocks the turn path. A quiet session pays
+  nothing; a busy one pays at most four reviews an hour. Each shells out to
+  a headless `claude -p`, stated plainly in the manual because it is a real
+  cost.
+- `tests/test_derive.py::test_derive_off_by_default` renamed to
+  `test_derive_can_be_turned_off_explicitly` and made to say `off`
+  outright: after the flip it still PASSED, because `_last_derive` is
+  stamped at construction so the first turn of any session sits inside the
+  debounce either way. A test that cannot fail when the thing it names
+  breaks is worse than no test. Its new sibling
+  `test_derive_is_on_by_default_once_the_interval_has_passed` asserts the
+  on path from the other side by ageing `_last_derive`.
+
 ## 0.97.0 — 2026-08-31
 
 **An inversion of a hierarchy that shipped three releases ago.** Reported

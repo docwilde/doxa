@@ -37,7 +37,11 @@ def _isolated_config(monkeypatch, tmp_path):
 def test_default_when_neither_env_nor_file_says_anything(monkeypatch):
     monkeypatch.delenv("DOXA_DERIVE_SECS", raising=False)
     assert config.raw("DOXA_DERIVE_SECS") == ""
-    assert engine.derive_interval() is None  # the reader's own default: off
+    # The registry's `default` and the READER's own default are two
+    # separate statements; this test keeps them equal. v0.98.0 set
+    # both to 900 -- `config.raw` still returns "" because nothing
+    # is written anywhere, and the reader supplies the value.
+    assert engine.derive_interval() == engine.DERIVE_SECS_DEFAULT == 900.0
 
 
 def test_config_file_is_read_when_the_env_is_silent(monkeypatch):

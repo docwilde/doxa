@@ -72,15 +72,24 @@ async def _turn(engine: SessionEngine) -> None:
 
 
 def test_derive_interval_parsing(monkeypatch):
+    from doxa.engine import DERIVE_SECS_DEFAULT
+
+    # v0.98.0 turned the streaming deriver ON by default. Unset and empty
+    # now mean "take the default", the way every other knob in the
+    # registry reads them -- and GARBAGE takes it too, deliberately:
+    # silently disabling a feature the operator believes is on is the
+    # worse failure of the two.
     monkeypatch.delenv("DOXA_DERIVE_SECS", raising=False)
-    assert derive_interval() is None  # default OFF
+    assert derive_interval() == DERIVE_SECS_DEFAULT == 900.0
     monkeypatch.setenv("DOXA_DERIVE_SECS", "")
-    assert derive_interval() is None
-    monkeypatch.setenv("DOXA_DERIVE_SECS", "0")
-    assert derive_interval() is None
-    monkeypatch.setenv("DOXA_DERIVE_SECS", "-5")
-    assert derive_interval() is None
+    assert derive_interval() == DERIVE_SECS_DEFAULT
     monkeypatch.setenv("DOXA_DERIVE_SECS", "banana")
+    assert derive_interval() == DERIVE_SECS_DEFAULT
+    # Off must be sayable, and in the spellings a person actually types.
+    for off in ("0", "off", "no", "false", "OFF"):
+        monkeypatch.setenv("DOXA_DERIVE_SECS", off)
+        assert derive_interval() is None, off
+    monkeypatch.setenv("DOXA_DERIVE_SECS", "-5")
     assert derive_interval() is None
     monkeypatch.setenv("DOXA_DERIVE_SECS", "90")
     assert derive_interval() == 90.0
@@ -89,8 +98,18 @@ def test_derive_interval_parsing(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_derive_off_by_default(tmp_path, monkeypatch):
-    monkeypatch.delenv("DOXA_DERIVE_SECS", raising=False)
+async def test_derive_can_be_turned_off_explicitly(tmp_path, monkeypatch):
+    """v0.98.0 turned the streaming deriver ON by default, so "unset" no
+    longer means off and this test says `off` outright.
+
+    It was `test_derive_off_by_default`, and after the default flipped it
+    still PASSED -- for the wrong reason: `_last_derive` is stamped at
+    construction, so the first turn of a session is inside the 900s
+    debounce whether the feature is on or off. A test that cannot fail
+    when the thing it names breaks is worse than no test, which is why
+    the sibling below asserts the on-by-default path from the other side.
+    """
+    monkeypatch.setenv("DOXA_DERIVE_SECS", "off")
     engine = await _engine(tmp_path)
     runs: list[bool] = []
     monkeypatch.setattr(engine, "_run_review_sync", lambda older: runs.append(older))
@@ -100,6 +119,28 @@ async def test_derive_off_by_default(tmp_path, monkeypatch):
     await engine.finalize()
     # finalize's own review still ran -- the deriver being off only
     # disables the MID-session cadence.
+    assert runs == [False]
+
+
+@pytest.mark.asyncio
+async def test_derive_is_on_by_default_once_the_interval_has_passed(
+    tmp_path, monkeypatch,
+):
+    """The other half of the flip: with nothing set, a turn that lands
+    after the debounce window DOES schedule a review. Ages `_last_derive`
+    rather than sleeping 900 seconds."""
+    monkeypatch.delenv("DOXA_DERIVE_SECS", raising=False)
+    engine = await _engine(tmp_path)
+    runs: list[bool] = []
+    monkeypatch.setattr(engine, "_run_review_sync", lambda older: runs.append(older))
+    engine._last_derive -= 901          # the session has been going a while
+    await _turn(engine)
+    assert engine._derive_task is not None
+    await engine._derive_task
+    # `older=False` -- the same argument finalize and PreCompact pass.
+    # A streaming review is not a different KIND of review, it is the
+    # same job run earlier, which is why _derive_once goes through
+    # _run_review_sync rather than reimplementing anything.
     assert runs == [False]
 
 

@@ -200,9 +200,9 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     Setting(
         key="derive_secs", env="DOXA_DERIVE_SECS", label="derive secs",
-        category="Memory", kind="number",
-        help="Streaming-deriver debounce interval, seconds; empty = off "
-             "(doxa.engine.derive_interval)",
+        category="Memory", kind="number", default="900",
+        help="Streaming-deriver debounce interval, seconds; 0 or off "
+             "disables it (doxa.engine.derive_interval)",
     ),
     Setting(
         key="consult_floor", env="DOXA_CONSULT_FLOOR", label="consult floor",
