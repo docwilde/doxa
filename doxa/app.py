@@ -83,7 +83,7 @@ from typing import Any, Callable
 from functools import partial
 
 from textual import events, on
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, ScreenStackError
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
@@ -1016,8 +1016,20 @@ class DoxaApp(App):
         DOM order is NOT the order ``Ctrl+1``..``Ctrl+9`` counts in --
         that is :meth:`_group_order`, derived from the painted rectangles,
         because what the user counts is what is on screen. Every caller
-        that needs the numbering says so by calling the other one."""
-        return list(self.query(PaneGroup))
+        that needs the numbering says so by calling the other one.
+
+        ``[]`` rather than a raise once the window is gone, for the reason
+        :meth:`_focused_node` gives: ``App.query`` resolves against
+        ``self.screen`` (``DOMNode.query`` -> ``_get_dom_base``), so a
+        handler drained after the screen stacks are cleared would get a
+        ``ScreenStackError`` out of what reads as a plain inventory
+        question. "No groups" is the true answer for a window that no
+        longer exists, and it is the one every caller here already
+        handles."""
+        try:
+            return list(self.query(PaneGroup))
+        except ScreenStackError:
+            return []
 
     def _group_order(self) -> "list[PaneGroup]":
         """Every VISIBLE group in READING order -- left to right, then top
@@ -1049,6 +1061,47 @@ class DoxaApp(App):
     def group_of(self, widget: "Any") -> "PaneGroup | None":
         """The group a widget sits in."""
         return split_mod.group_of(widget)
+
+    def _focused_node(self) -> "Any | None":
+        """``App.focused`` -- the widget Textual says holds the keyboard --
+        or ``None`` when there is no window left to ask.
+
+        Every "which group / which pane / which surface" question below
+        starts here, and every one of them is read from MESSAGE HANDLERS.
+        That is what makes the raw property the wrong thing to call:
+        ``App.focused`` reads ``self.screen``, and at teardown Textual
+        clears the screen stacks in ``App._close_all`` and only THEN drains
+        the app's own message queue (``_close_messages``). Any handler
+        still in flight in that window -- the ``events.DescendantFocus``
+        one every closing screen posts as focus comes off its widgets, for
+        instance, which :meth:`_hold_focus_for_a_blocking_dialog` listens
+        for -- runs against an app whose ``self.screen`` raises
+        ``ScreenStackError``, and ``self.focused`` raises with it.
+
+        Through v0.96.0 nothing met that: ``active_pane`` asked the STRIP
+        first (``_active_tab``, which swallows) and answered None without
+        ever reading ``self.focused``. v0.97.0 made the GROUP the first
+        question -- correctly, since "the active tab" is a question about
+        a group now -- and thereby moved an unguarded ``self.focused`` in
+        front of every ``active_pane`` caller, the error surface included:
+        :meth:`_failure_surface` calls ``active_pane`` to decide where to
+        DRAW the block, so the raise took out the report of itself as
+        well, escaped ``_process_messages`` and failed whichever test was
+        running. Measured as exactly that, in the full suite only, where a
+        busier loop lands the late event after the stacks are gone:
+        tests/test_derive.py::test_looking_at_the_tab_clears_the_staged_tint
+        failing at ``run_test`` EXIT with two ``ScreenStackError``s -- the
+        handler's, and the surface's on top of it.
+
+        So the guard belongs here rather than in the handler: "nothing
+        holds the keyboard" is the honest answer for a window that no
+        longer exists, it is the answer every caller was already written
+        against, and putting it in one accessor keeps the next handler
+        that asks after teardown from having to know any of this."""
+        try:
+            return self.focused
+        except ScreenStackError:
+            return None
 
     def focused_group(self) -> "PaneGroup | None":
         """The ONE group that holds the keyboard.
@@ -1086,7 +1139,7 @@ class DoxaApp(App):
         one transient write that corrects itself the moment the new pane
         boots (``_note_pane_booted`` persists again), so the trade is a
         real refusal against a record nobody reads."""
-        node: Any = self.focused
+        node: Any = self._focused_node()
         while node is not None:
             if isinstance(node, PaneGroup):
                 self._last_group_id = node.id or self._last_group_id
@@ -1255,7 +1308,7 @@ class DoxaApp(App):
         status bar still has to reflect ONE pane, and jumping to the
         tab's first leaf while a dialog is up would move it under the
         user."""
-        node: Any = self.focused
+        node: Any = self._focused_node()
         while node is not None:
             if isinstance(node, SessionPane):
                 return node
@@ -1541,8 +1594,17 @@ class DoxaApp(App):
     def panes(self) -> list[SessionPane]:
         """Every session leaf in the window, in DOM order -- across tabs
         AND across the splits inside one tab. Unchanged as a query; what
-        changed is that one tab can now contribute more than one."""
-        return list(self.query(SessionPane))
+        changed is that one tab can now contribute more than one.
+
+        Empty rather than raising on a window that is gone -- the same
+        guard, and the same reasoning, as :meth:`groups`. This one is the
+        load-bearing case: :meth:`_failure_surface` falls back to it when
+        there is no active pane, so an unguarded query here would be the
+        error surface failing on the one path it exists for."""
+        try:
+            return list(self.query(SessionPane))
+        except ScreenStackError:
+            return []
 
     def archived_tabs(self) -> "list[ArchivedSessionTab]":
         """Restored tabs whose session is gone (v0.32.0) -- read-only
@@ -2971,7 +3033,7 @@ class DoxaApp(App):
         different question "which session does this keystroke mean" and
         deliberately keeps answering with a session even while the
         keyboard is in a diff."""
-        node: Any = self.focused
+        node: Any = self._focused_node()
         while node is not None:
             if isinstance(node, (SessionPane, DiffPane)):
                 return node

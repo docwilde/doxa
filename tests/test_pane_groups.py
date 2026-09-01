@@ -864,3 +864,36 @@ async def test_a_group_can_hold_a_diff_leaf(tmp_path):
         # Both painted, side by side, which is what the diff is FOR.
         assert diff.region.width > 0 and pane.region.width > 0
         assert diff.region.x > pane.region.x
+
+
+# -- the accessors, on a window that is gone ---------------------------
+
+
+def test_the_group_accessors_answer_none_when_there_is_no_window(tmp_path):
+    """"Which group holds the keyboard" must never RAISE -- not even after
+    the window it is about has been torn down.
+
+    Every one of these is read from message handlers, and Textual drains
+    the app's own message queue AFTER ``_close_all`` has cleared the screen
+    stacks: a ``DescendantFocus`` posted as the last screen lets go of its
+    widgets reaches ``_hold_focus_for_a_blocking_dialog`` -> ``active_pane``
+    with no screen left to ask. ``App.focused`` raises ``ScreenStackError``
+    there, and through v0.96.0 nothing noticed because ``active_pane``
+    asked the strip first and answered None; making the GROUP the first
+    question put that raise in front of every caller -- the error surface
+    included, which then could not draw the block about it either. The
+    whole failure was one unguarded property read, so this pins the
+    contract at the accessors rather than at any one handler.
+
+    An app that has never been started is the same state as one whose
+    window has gone (an empty ``_screen_stack``), and it needs no engine,
+    no pilot and no timing to be in it."""
+    app = DoxaApp(cwd=str(tmp_path))
+    assert app.focused_group() is None
+    assert app.focused_pane() is None
+    assert app.focused_surface() is None
+    assert app.active_pane is None
+    # The error surface is the caller that made this fatal rather than
+    # merely wrong: it has to survive being asked where to draw a block
+    # while the window is going away.
+    assert app._failure_surface() is None
