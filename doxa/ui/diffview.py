@@ -48,6 +48,18 @@ from textual.widgets import Button, Collapsible, Input, Static
 
 from .. import diff as diff_mod
 from .. import layout as layout_mod
+from .labels import (
+    DIFF_ADD_BG,
+    DIFF_ADD_FG,
+    DIFF_ADD_NUM,
+    DIFF_CONTEXT_FG,
+    DIFF_DEL_BG,
+    DIFF_DEL_FG,
+    DIFF_DEL_NUM,
+    DIFF_GUTTER_FG,
+    DIFF_NOTE_FG,
+    DIFF_RULE_FG,
+)
 
 #: Rows of a hunk rendered before the hunk itself folds. A hunk longer
 #: than a screenful is still a hunk you reject as one unit, so this
@@ -56,79 +68,225 @@ from .. import layout as layout_mod
 #: screen.
 MAX_HUNK_ROWS = 400
 
+#: Narrowest line-number gutter, in digits. Three, because a two-digit
+#: gutter is visibly ragged the moment a hunk crosses line 100 and the
+#: column would then change width mid-file.
+MIN_GUTTER_DIGITS = 3
 
-def _hunk_text(hunk: "diff_mod.Hunk") -> Text:
-    """One hunk as coloured text, unified.
+#: Widest. A file past a million lines is not being read here, and an
+#: unbounded gutter is a column that can eat the body it labels.
+MAX_GUTTER_DIGITS = 7
+
+#: Columns between the DiffPane's own width and the width a hunk body
+#: actually gets to paint into. MEASURED, not derived from the stylesheet
+#: by hand: ``Collapsible``'s ``padding-left: 1`` plus its ``Contents``'
+#: ``padding-left: 3`` plus the scroll container -- an 80-column pane
+#: gives its hunk bodies 74. It matters now in a way it did not before
+#: v1.0.1: a row with a BACKGROUND is padded out to the full width, and a
+#: row padded six columns too far wraps, putting an empty coloured line
+#: under every changed one. (Side-by-side has always overrun by the same
+#: six; it is subtracted there too now, which is why its columns are a
+#: little narrower and no longer wrap.)
+HUNK_INSET_COLS = 6
+
+#: Added-row and removed-row style strings, built once. Rich parses a
+#: style string per ``append`` call, and a 400-row hunk makes 800 of
+#: those calls -- the parse is cached inside Rich, but naming them here
+#: is also what keeps the four colours from being retyped per branch.
+_ADD_STYLE = f"{DIFF_ADD_FG} on {DIFF_ADD_BG}"
+_DEL_STYLE = f"{DIFF_DEL_FG} on {DIFF_DEL_BG}"
+
+
+def _gutter_digits(hunk: "diff_mod.Hunk") -> int:
+    """How many columns this hunk's line numbers need.
+
+    Sized to the hunk rather than to the file: the numbers rendered are
+    this hunk's own range, and reserving seven columns for a 40-line
+    file would spend the body's width on leading blanks."""
+    last = max(
+        hunk.old_start + max(hunk.old_count, 1),
+        hunk.new_start + max(hunk.new_count, 1),
+    )
+    return max(MIN_GUTTER_DIGITS, min(MAX_GUTTER_DIGITS, len(str(max(last, 1)))))
+
+
+def _hunk_text(hunk: "diff_mod.Hunk", width: int = 0) -> Text:
+    """One hunk as coloured text, unified, with line numbers down the
+    left.
 
     Rich ``Text`` rather than console markup: a diff body is arbitrary
     source, and source contains ``[`` -- markup would try to parse it.
-    v0.28.0's lesson in a smaller key."""
+    v0.28.0's lesson in a smaller key, and the reason every colour here
+    is a ``style=`` argument rather than a tag.
+
+    **Two number columns, old then new**, which is what a unified diff
+    conventionally shows and what makes it navigable: the question a
+    reader has in front of a removed line is "what line was that in the
+    file I had", and in front of an added one "what line is it now".
+    Only the relevant column is filled per row -- a ``-`` row has no new
+    number, a ``+`` row has no old one -- and a context row carries
+    both, which is also what makes the two columns readable as a pair.
+    They are derived by walking the body against the ``@@`` header's own
+    ranges, so nothing is re-parsed and nothing is guessed.
+
+    **The numbers are outside the background wash.** The row's colour is
+    its background (red removed, green added) with a foreground picked
+    to read against it, and the NUMBER is the pure hue (:data:
+    `doxa.ui.labels.DIFF_ADD_NUM` / ``DIFF_DEL_NUM``) on the pane's own
+    ramp -- a green number painted on the green wash would be the one
+    part of this that cannot be read.
+
+    ``width`` pads each changed row's background out to the pane's
+    width, so a wash reads as a ROW rather than as a blob the length of
+    the source line. Padding only, never truncation: a long line still
+    wraps exactly as it did before, carrying its background with it,
+    because a diff that silently cuts the tail off a line is a diff that
+    lies. ``width`` 0 (a hunk built before its pane has a size) pads
+    nothing, which is the old rendering and is corrected on the first
+    resize."""
     out = Text()
-    rows = hunk.lines[:MAX_HUNK_ROWS]
-    for line in rows:
+    digits = _gutter_digits(hunk)
+    blank = " " * digits
+    paint_width = max(0, width - HUNK_INSET_COLS)
+    body_col = max(0, paint_width - (2 * digits + 2)) if width else 0
+    old, new = hunk.old_start, hunk.new_start
+
+    def body(line: str) -> str:
+        return line.ljust(body_col) if body_col > len(line) else line
+
+    for line in hunk.lines[:MAX_HUNK_ROWS]:
         mark = line[:1]
         if mark == "+":
-            out.append(line + "\n", style="#7FB069")
+            out.append(f"{blank} {new:>{digits}} ", style=DIFF_ADD_NUM)
+            out.append(body(line) + "\n", style=_ADD_STYLE)
+            new += 1
         elif mark == "-":
-            out.append(line + "\n", style="#D08770")
+            out.append(f"{old:>{digits}} {blank} ", style=DIFF_DEL_NUM)
+            out.append(body(line) + "\n", style=_DEL_STYLE)
+            old += 1
         elif mark == "\\":
-            out.append(line + "\n", style="#6E6459 italic")
+            # "\ No newline at end of file" belongs to the line above and
+            # numbers nothing of its own -- an empty gutter, and the note
+            # keeps the quiet italic it has always had.
+            out.append(f"{blank} {blank} ", style=DIFF_GUTTER_FG)
+            out.append(line + "\n", style=f"{DIFF_NOTE_FG} italic")
         else:
-            out.append(line + "\n", style="#B4AB9E")
+            out.append(f"{old:>{digits}} {new:>{digits}} ", style=DIFF_GUTTER_FG)
+            out.append(line + "\n", style=DIFF_CONTEXT_FG)
+            old += 1
+            new += 1
     if len(hunk.lines) > MAX_HUNK_ROWS:
         out.append(
             f"… {len(hunk.lines) - MAX_HUNK_ROWS} more lines not shown "
             "(the hunk is whole; only this view is cut)\n",
-            style="#8A8073 italic",
+            style=f"{DIFF_NOTE_FG} italic",
         )
     return out
 
 
 def _side_by_side_text(hunk: "diff_mod.Hunk", width: int) -> Text:
-    """The same hunk in two columns, old on the left, new on the right.
+    """The same hunk in two columns, old on the left, new on the right,
+    each with ITS OWN line number.
+
+    One number per side rather than unified's two, because each side IS
+    one file: the left column is the old file and the number in front of
+    a left-hand line can only be an old line number. A blank number is
+    how a side with nothing on this row says so.
 
     Only ever reached above :data:`doxa.diff.SIDE_BY_SIDE_MIN_COLS` --
     see :func:`doxa.diff.side_by_side_allowed` for why the threshold is
     where it is. Removed and added runs are paired positionally, which is
     what every two-column diff does and is honest as long as the pairing
     is never claimed to be a word-level match: this is a layout, not a
-    second differ."""
-    col = diff_mod.split_columns(width)
+    second differ. The background wash makes that pairing easier to read,
+    not more of a claim than it was.
+
+    Truncation on this path is unchanged (``[:text_col]``): a fixed
+    two-column layout has nowhere to wrap to, which is the trade
+    side-by-side already made before this release and the reason the
+    unified renderer is the one that never cuts."""
+    col = diff_mod.split_columns(max(0, width - HUNK_INSET_COLS))
+    digits = _gutter_digits(hunk)
+    blank = " " * digits
+    text_col = max(1, col - digits - 1)
     out = Text()
 
-    def row(left: str, right: str, lstyle: str, rstyle: str) -> None:
-        out.append(f"{left[:col]:<{col}}", style=lstyle)
-        out.append("│", style="#4A443C")
-        out.append(f"{right[:col]:<{col}}\n", style=rstyle)
+    def row(
+        lnum: str, left: str, lstyle: str, lnum_style: str,
+        rnum: str, right: str, rstyle: str, rnum_style: str,
+    ) -> None:
+        out.append(f"{lnum:>{digits}} ", style=lnum_style)
+        out.append(f"{left[:text_col]:<{text_col}}", style=lstyle)
+        out.append("│", style=DIFF_RULE_FG)
+        out.append(f"{rnum:>{digits}} ", style=rnum_style)
+        out.append(f"{right[:text_col]:<{text_col}}\n", style=rstyle)
 
-    removed: "list[str]" = []
-    added: "list[str]" = []
+    removed: "list[tuple[int, str]]" = []
+    added: "list[tuple[int, str]]" = []
 
     def flush() -> None:
         for i in range(max(len(removed), len(added))):
-            left = removed[i] if i < len(removed) else ""
-            right = added[i] if i < len(added) else ""
+            left = removed[i] if i < len(removed) else None
+            right = added[i] if i < len(added) else None
             row(
-                left, right,
-                "#D08770" if left else "#3A342E",
-                "#7FB069" if right else "#3A342E",
+                str(left[0]) if left else blank,
+                left[1] if left else "",
+                _DEL_STYLE if left else "",
+                DIFF_DEL_NUM if left else DIFF_GUTTER_FG,
+                str(right[0]) if right else blank,
+                right[1] if right else "",
+                _ADD_STYLE if right else "",
+                DIFF_ADD_NUM if right else DIFF_GUTTER_FG,
             )
         removed.clear()
         added.clear()
 
+    old, new = hunk.old_start, hunk.new_start
     for line in hunk.lines[:MAX_HUNK_ROWS]:
-        mark, body = line[:1], line[1:]
+        mark, text = line[:1], line[1:]
         if mark == "-":
-            removed.append(body)
+            removed.append((old, text))
+            old += 1
         elif mark == "+":
-            added.append(body)
+            added.append((new, text))
+            new += 1
         else:
             flush()
             if mark == "\\":
                 continue
-            row(body, body, "#B4AB9E", "#B4AB9E")
+            row(
+                str(old), text, DIFF_CONTEXT_FG, DIFF_GUTTER_FG,
+                str(new), text, DIFF_CONTEXT_FG, DIFF_GUTTER_FG,
+            )
+            old += 1
+            new += 1
     flush()
     return out
+
+
+def _file_title(file_diff: "diff_mod.FileDiff") -> Text:
+    """One file's fold, with its counts in the diff's own two colours.
+
+    A Rich ``Text``, not a string, for BOTH reasons this module already
+    has one: the counts have to be coloured separately from the path,
+    and a path is arbitrary text that can contain ``[`` -- Textual's
+    ``CollapsibleTitle`` runs a plain ``str`` label through
+    ``Content.from_markup``, so the string this used to pass was one
+    bracketed filename away from being parsed as markup. ``Content.
+    from_text`` takes a ``Text`` verbatim instead.
+
+    The WORDING is still :meth:`doxa.diff.FileDiff.summary_parts`'s --
+    the model decides what a fold says, this decides what colour each
+    piece of it is."""
+    name, added, removed = file_diff.summary_parts()
+    title = Text("◈ ", style=DIFF_GUTTER_FG)
+    title.append(name, style=DIFF_CONTEXT_FG)
+    if added:
+        title.append("  ")
+        title.append(added, style=DIFF_ADD_NUM)
+        title.append(" ")
+        title.append(removed, style=DIFF_DEL_NUM)
+    return title
 
 
 class HunkView(Vertical):
@@ -191,7 +349,7 @@ class HunkView(Vertical):
         if diff_mod.side_by_side_allowed(width):
             self._body.update(_side_by_side_text(self.hunk, width))
         else:
-            self._body.update(_hunk_text(self.hunk))
+            self._body.update(_hunk_text(self.hunk, width))
 
     @property
     def reason(self) -> str:
@@ -228,8 +386,8 @@ class FileSection(Collapsible):
         self._hunks = Vertical(classes="diff-hunks")
         super().__init__(self._hunks, title=self._title(), collapsed=True)
 
-    def _title(self) -> str:
-        return f"◈ {self.file_diff.summary()}"
+    def _title(self) -> Text:
+        return _file_title(self.file_diff)
 
     def build(self, width: int, passes: int = 3) -> None:
         """Mount this file's hunks. First expand only -- the same
@@ -606,6 +764,15 @@ class DiffPane(Vertical):
         for item in applied:
             await self._tell_agent(item.file_diff, item.hunk, item.reason)
         await self.refresh_diff()
+        # A reverted hunk is a tree change with no tool result behind it,
+        # so the tick that keeps the status chip honest never fires for
+        # it (v1.0.1). This is the one write in the app that changes the
+        # worktree from inside DOXA rather than from the agent's side,
+        # and a chip still counting the reverted lines would be the diff
+        # pane and the status bar disagreeing about the same tree.
+        pane = self.session_pane()
+        if pane is not None:
+            pane.schedule_diff_counts()
 
     async def _tell_agent(
         self, file_diff: "diff_mod.FileDiff", hunk: "diff_mod.Hunk", reason: str
