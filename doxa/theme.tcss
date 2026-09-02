@@ -65,6 +65,92 @@ Screen {
     layers: base overlay;
 }
 
+/* The session sidebar (v1.0.0) and the row that holds it.
+
+   #window-row is the one structural addition this release makes to the
+   screen: a Horizontal holding the rail and the window's layout tree side
+   by side. It exists from compose and never at runtime -- Textual 5.3
+   cannot re-parent a mounted widget, so the tree cannot be wrapped after
+   the fact (measured v0.91.0; see doxa/ui/sidebar.py).
+
+   The rail is a SIBLING of the tree, never a node in it: DoxaApp._window_root
+   still returns the outermost SplitBox and needs no isinstance special
+   case, and splits, Alt+arrow growth, directional focus and _pane_regions
+   never see the rail. Collapsing it changes the tree's width and nothing
+   else, which is exactly what `width: 1fr` on the tree says here. */
+#window-row {
+    layout: horizontal;
+    height: 1fr;
+    width: 1fr;
+}
+
+#window-row > SplitBox {
+    width: 1fr;
+}
+
+/* The rail's own width and its hidden resting state are set per instance
+   (SessionSidebar.DEFAULT_CSS + set_width) because both are DERIVED
+   numbers -- doxa.layout.SIDEBAR_WIDTH, clamped -- and a stylesheet
+   cannot hold a derivation. What lives here is only the paint. */
+SessionSidebar {
+    background: #1D1B17;
+    border-right: solid #3A3429;
+    padding: 0 1;
+    scrollbar-size-vertical: 1;
+}
+
+SessionSidebar > SidebarLine {
+    height: 1;
+    width: 1fr;
+    color: #D8CDBB;
+}
+
+SessionSidebar > SidebarLine.-heading {
+    color: #8A8073;
+    text-style: bold;
+    margin-top: 1;
+}
+
+SessionSidebar > SidebarLine.-in-collection {
+    padding-left: 2;
+}
+
+/* A row for a session with no pane behind it -- a detached peer, a
+   collection member whose tab was closed. Dimmed rather than hidden: the
+   rail is a session INDEX, and a rail that could only list what the
+   layout tree already holds would be a second tab strip. */
+SessionSidebar > SidebarLine.-closed {
+    color: #8A8073;
+    text-style: italic;
+}
+
+/* The four status marks, in the SAME order and with the SAME colors the
+   tab strip uses below -- done-unseen < staged < working < attention,
+   resolved by equal-specificity cascade exactly as `.session-tabs Tab`
+   resolves them. That shared order is written down once, in
+   doxa.ui.labels.TAB_STATE_MARKS, and both the color here and the row's
+   leading glyph (labels.sidebar_mark_glyph) read it -- so the rail and
+   the strip cannot disagree about which state a session is in without one
+   of them disagreeing with that tuple. Not a second derivation: the same
+   one, painted twice. */
+SessionSidebar > SidebarLine.-done-unseen {
+    color: #6FCF97;
+}
+
+SessionSidebar > SidebarLine.-staged {
+    color: #A98FD1;
+}
+
+SessionSidebar > SidebarLine.-working {
+    color: #E0A83C;
+}
+
+SessionSidebar > SidebarLine.-attention {
+    color: #F2E9DD;
+    background: #B23B32;
+    text-style: bold;
+}
+
 /* Session tabs (Phase 3): the TabbedContent hosts one SessionPane per
    session; both default to height:auto, which would collapse the panes'
    1fr block list -- pin the whole tab system to the screen. The tab strip
