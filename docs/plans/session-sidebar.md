@@ -1,8 +1,29 @@
 # The session sidebar — a permanent rail beside the whole window
 
-Status: **draft for review**. Nothing implemented. Written before the work
-because it is the first chrome that is NOT part of the layout tree, and
-getting that boundary wrong is how it ends up inside a split.
+Status: **shipped in v1.0.0**, in full. Written before the work because it
+is the first chrome that is NOT part of the layout tree, and getting that
+boundary wrong is how it ends up inside a split.
+
+What the build changed about this document, and nothing else did:
+
+- the width numbers were **measured** rather than left open — see
+  [Width, measured](#risks-named) below and `doxa/layout.py`'s
+  `SIDEBAR_*` block for the derivations;
+- `Ctrl+B` was re-verified free against the binding set as it stood at
+  build time, and shipped **with its one real cost stated out loud**: it
+  is tmux's default prefix, and `doxa/app.py`'s own split-panes
+  subtraction had already excluded `ctrl+b` on those grounds. The spec
+  chose it knowing that ("tmux's prefix notwithstanding"), so `/sidebar`
+  is the door that always works;
+- the rail is **mouse- and command-driven and never takes the keyboard**.
+  Rows are plain `Static`s with `can_focus = False`, because a focusable
+  widget beside the prompt is a second place `App.AUTO_FOCUS = "*"` can
+  land, which is the v0.85.0 defect this release declined to re-open. A
+  keyboard model for the rail is a separate piece of work, out of scope
+  here and not smuggled in.
+
+**The check this spec owed itself is answered: yes.** See
+[the check](#the-check-this-spec-owes).
 
 ## What provoked it
 
@@ -130,6 +151,35 @@ see nothing they must understand. A session id in a collection but not in
    open rather than squeeze the tree under its own minimum —
    `SIDE_BY_SIDE_MIN_COLS` (100) and the group tab-strip thresholds (34/17)
    are the precedent, and the number must be **measured, not chosen**.
+
+   **Measured** (`doxa/layout.py`, pinned by
+   `tests/test_sidebar.py::test_the_sidebar_width_thresholds_are_the_
+   measured_ones`, which re-derives every number from the constants it is
+   derived from):
+
+   | number | is | derived as |
+   |---|---|---|
+   | `SIDEBAR_CHROME` | 6 | 1 left pad + 2 collection indent + 2 mark and its space + 1 right pad |
+   | `SIDEBAR_MIN_WIDTH` | 19 | chrome + the tab strip's own label floor, `TAB_MODEL_MIN (4) + " · " (3) + TAB_REPO_MIN (6)` = 13 |
+   | `SIDEBAR_WIDTH` | 22 | chrome + `TAB_LABEL_MAX // 2` (16) — half the cap `ellipsize` writes tab labels at, past which an ellipsis stops trimming a branch name and starts eating the repo segment |
+   | `SIDEBAR_MAX_WIDTH` | 38 | chrome + `TAB_LABEL_MAX` (32): the width at which the whole capped label fits, and wider buys nothing |
+   | `SIDEBAR_MIN_COLS` | 53 | `SIDEBAR_MIN_WIDTH + MIN_LEAF_WIDTH` — the absolute floor on total window width |
+
+   Cross-checked against reality the way `GROUP_STRIP_COMPACT_COLS` is
+   checked against `MIN_LEAF_WIDTH`: on the 100-column reference terminal
+   with one vertical split, the rail may cost at most
+   `100 - 2 × GROUP_STRIP_COMPACT_COLS` = 32 columns before pushing a group
+   onto the compact tab-strip rung. 22 is inside that with 10 to spare.
+
+   The refusal itself is **not** a constant comparison. `sidebar_refusal`
+   reads the **narrowest painted group** — real rectangles, the same rule
+   `neighbour` and `_group_order` follow — and refuses when
+   `narrowest × (total − rail) ÷ total` would fall below `MIN_LEAF_WIDTH`,
+   because every group in a horizontal row gives up a share of the rail's
+   columns proportional to its own weight. Nothing painted degrades to the
+   single-group case, which is the `SIDEBAR_MIN_COLS` floor reached the
+   other way. A window that grows past the threshold opens the rail again
+   by itself (`DoxaApp.on_resize`): the user never chose to shrink it.
 2. **Textual cannot re-parent a mounted widget** (measured, v0.91.0).
    Wrapping the existing root in a new `Horizontal` at runtime is therefore
    impossible; the container must exist from `compose`, with the rail
@@ -160,3 +210,34 @@ not mounted in any group?** A detached peer, an archived transcript, a
 collection member whose tab was closed. If the rail can only list what the
 tree already contains, it is a second tab strip rather than a session index,
 and the design is wrong.
+
+### Answered: yes, and by construction rather than by a special case
+
+The rail's contents come from `DoxaApp._sidebar_order()`, which merges
+**three** sources, and only the first of them is the layout tree:
+
+1. mounted session panes and archived tabs, in strip order —
+   `_restorable_tabs()`, the same walk `_persist_tabset` writes the record
+   from;
+2. `_detached_this_run` — sessions closed with `Ctrl+W` or `/detach`.
+   They keep running, they stay in the persisted set, and they are exactly
+   the peers a user loses track of;
+3. `_ended_this_run` — sessions ended with `Ctrl+Q`, which do not keep
+   running and stay in the set anyway (v0.60.0's rule, unchanged).
+
+A row from sources 2 and 3 has no pane behind it, so
+`DoxaApp._describe_session` reports it `mounted=False`: it renders dimmed
+with `· closed`, and selecting it answers *"`abc12345` is not open in this
+window — `/attach abc12345` brings it back in a new tab"* rather than
+pretending it can be focused. An **archived** tab (`ArchivedSessionTab`,
+a session whose daemon is gone but whose transcript survived) is mounted
+and therefore reveals normally — its transcript is right there.
+
+One session is deliberately absent: a **reaped** one
+(`/sessions kill`, `_killed_this_run`). Reaping is the one gesture in DOXA
+that means "forget this conversation", and it means it on the rail too.
+
+Pinned by `tests/test_sidebar.py::test_the_rail_can_show_a_session_that_
+is_not_mounted_in_any_group` (the pure form) and
+`::test_a_detached_session_keeps_a_row_and_says_it_is_closed` (end to end
+against a running window).

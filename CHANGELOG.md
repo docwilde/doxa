@@ -4,6 +4,246 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.0.0 — 2026-09-03
+
+**A permanent, collapsible rail down the left of the window, listing every
+session this window knows about — outside the layout tree.** Requested from
+live use: *"a permanent, collapsible pane on the left across split panes
+(unaffected by pane splits), allowing to group sessions with editable
+session group labels."*
+
+The design is
+[docs/plans/session-sidebar.md](docs/plans/session-sidebar.md), written
+before the work and now marked shipped. `ctrl+b` or `/sidebar` shows it.
+
+**Why it earns a major.** A session in a background tab of an unfocused
+group is invisible today: its `done` dot, its needs-input blink and its
+staged tint are painted on a tab header nobody is looking at. That is the
+general form of the v0.99.0 lost-turn report — not "the scroll was lost"
+but "you had no way to know anything had happened over there". The rail is
+the one surface that can show all of them at once.
+
+### The boundary, which is the whole design
+
+The rail is a **sibling of the window root, never a node in it**:
+
+```
+Screen
+└── Horizontal #window-row
+    ├── SessionSidebar          ← new
+    └── SplitBox (window root)  ← v0.97.0's tree, untouched
+```
+
+- **`DoxaApp._window_root()` is unchanged**, and that is the payoff, not a
+  coincidence: it returns the outermost `SplitBox` and the rail is not
+  one, so it needs no `isinstance` special case. Splits, `alt+arrow`
+  growth, directional focus, `ctrl+1…9` and `_pane_regions` operate on the
+  tree and never see the rail. Opening it changes the tree's width and
+  nothing else.
+- **Not a `layout.Leaf` with a new `view` kind**, which is the
+  cheap-looking route and looks proven because v0.92.0 did exactly that
+  for the live diff. A leaf can be split, closed, moved between groups and
+  persisted per group; a rail must be none of those, and the first
+  `alt+d` on it would have proved the point.
+- **`Horizontal` exists from `compose`** and could not have been created
+  later: Textual 5.3 cannot re-parent a mounted widget, so the tree cannot
+  be wrapped after the fact — the same constraint `split_mod.chain`'s
+  pre-made empty boxes answer. The rail mounts hidden instead.
+- `tests/test_sidebar.py::test_the_rail_is_a_SIBLING_of_the_window_root_
+  not_a_node_in_it` asserts the parentage, that the rail is absent from
+  `query(SplitBox)` and from `_pane_regions()`, and
+  `::test_a_split_never_sees_the_rail` re-asserts all of it against a
+  window that has actually been split, with two painted rectangles.
+
+### Collections — and the word
+
+New **`doxa/collections.py`** (378 lines): pure data and pure functions,
+no widget and no `self`, the rule `doxa/layout.py` already follows. A
+**collection** is a name the user typed, an **ordered** list of session
+ids, and a collapsed flag.
+
+- **`group` was already taken.** `PaneGroup` is a REGION of screen owning
+  a tab strip; this groups sessions BY NAME wherever they are shown. Two
+  members may sit in different `PaneGroup`s and one `PaneGroup` may show
+  tabs from three collections. The word is `collection` in the code, the
+  record and the UI, never `group` alone.
+- **A session belongs to at most one collection**, enforced in the model
+  rather than trusted: `assign` removes the id from every other collection
+  on the way in, and `from_json` drops a second mention of an id it has
+  already placed — so a hand-edited record cannot violate it either.
+- Sessions in no collection render under an unnamed `— ungrouped —`
+  heading that is **always last and never persisted**. Persisting it would
+  make it a collection with a reserved name and give `rename` and `delete`
+  a case to carry.
+- `delete` drops the grouping and **not the sessions**: they become
+  ungrouped. A grouping is a label, and deleting a label must never be a
+  way to lose a session.
+- `prune(items, keep)` is `doxa.layout.prune`'s rule one shelf over. It
+  distinguishes a collection that was ALREADY empty (kept — `new` makes
+  one on purpose, and the user is about to move a session into it) from
+  one that LOST every member (dropped). That distinction was found by a
+  test, not reasoned about: without it a brand-new collection was pruned
+  away between `/collection new` and `/collection add`.
+
+### What a row shows, and the one place it comes from
+
+- Per row: `SessionPane.display_name()`, rendered **fresh every time**
+  because a display name is not stable — it changes on a rename and again
+  when the first prompt lands — which is why the record stores ids.
+- The four marks the tab strip carries: `-done-unseen`, `-staged`,
+  `-working`, `-attention`, **including the needs-input blink**.
+- **One derivation, two surfaces.** `SessionPane._set_tab_class` used to
+  OR a tab's leaves inline; that OR is now
+  **`doxa.ui.labels.mark_over(leaves, class_name)`** and both the tab
+  header and the rail call it. The PRECEDENCE is stated once, in
+  **`doxa.ui.labels.TAB_STATE_MARKS`** (`-done-unseen` < `-staged` <
+  `-working` < `-attention`), and both the row's colour (an
+  equal-specificity cascade in `doxa/theme.tcss`, mirroring the
+  `.session-tabs Tab` rules exactly) and the row's glyph
+  (`sidebar_mark_glyph`) read that one tuple. Neither surface decides what
+  outranks what.
+- The rail spends a column on a **glyph** the strip has no room for: `✓`
+  finished unseen, `+` staged, `▸` working, `!` waiting for you. So the
+  rail still says something on a monochrome terminal.
+- `_set_tab_class` pokes `DoxaApp.refresh_sidebar_marks`, which writes
+  classes on **one existing row** rather than rebuilding the rail. The
+  blink runs at 2 Hz per waiting session; a rebuild per blink would be the
+  busy-idle cost `GitLine`'s docstring warns about, reintroduced in new
+  chrome.
+- The rail **reuses its line widgets and hides the surplus; it never
+  removes one**. Not tidiness: the first version rebuilt with
+  `remove_children` + `mount_all`, and `Pilot._wait_for_screen` — which
+  every `pilot.click` and `pilot.pause` runs — snapshots the child list
+  and waits on a `call_later` per child. A child removed inside that
+  window never answers. Measured as `WaitForScreenTimeout` on a click that
+  toggled a collection, intermittently and only under the whole file. The
+  user gets the same property: a click always lands on a widget that is
+  still there.
+
+### Can the rail show a session that is not mounted in any group?
+
+**Yes** — the check the spec owed itself, and the difference between a
+session index and a second tab strip. `DoxaApp._sidebar_order()` merges
+three sources and only the first is the tree: mounted panes and archived
+tabs in strip order, then `_detached_this_run` (`ctrl+w` / `/detach` —
+still running, still in the persisted set) and `_ended_this_run`
+(`ctrl+q`). A row with no pane behind it renders dimmed with `· closed`
+and answers a click with *"`abc12345` is not open in this window —
+`/attach abc12345` brings it back in a new tab"*, rather than pretending
+it can be focused. A **reaped** session (`/sessions kill`) is absent:
+reaping means "forget this conversation", and it means it here too.
+
+### Width — measured, not chosen
+
+`doxa/layout.py` gains a `SIDEBAR_*` block, every number derived from the
+constant above it and re-derived in
+`tests/test_sidebar.py::test_the_sidebar_width_thresholds_are_the_measured_ones`:
+
+| | | derived as |
+|---|---|---|
+| `SIDEBAR_CHROME` | 6 | 1 left pad + 2 collection indent + 2 mark and space + 1 right pad |
+| `SIDEBAR_MIN_WIDTH` | 19 | chrome + the tab strip's own label floor, `TAB_MODEL_MIN (4) + " · " (3) + TAB_REPO_MIN (6)` |
+| `SIDEBAR_WIDTH` | 22 | chrome + `TAB_LABEL_MAX // 2` — past half the cap an ellipsis stops trimming a branch name and starts eating the repo segment |
+| `SIDEBAR_MAX_WIDTH` | 38 | chrome + `TAB_LABEL_MAX`: the whole capped label fits, wider buys nothing |
+| `SIDEBAR_MIN_COLS` | 53 | `SIDEBAR_MIN_WIDTH + MIN_LEAF_WIDTH` — total width below which the rail cannot open at all |
+
+Cross-checked the way `GROUP_STRIP_COMPACT_COLS` is checked against
+`MIN_LEAF_WIDTH`: on the 100-column reference terminal with one vertical
+split the rail may cost at most `100 − 2 × 34` = 32 columns before pushing
+a group onto the compact tab-strip rung. 22 leaves 10 of that unspent.
+
+**`sidebar_refusal(total, narrowest_group, rail)` is not a constant
+comparison.** It reads the narrowest PAINTED group — real rectangles, the
+rule `neighbour` and `_group_order` already follow — and refuses when
+`narrowest × (total − rail) ÷ total` would fall under `MIN_LEAF_WIDTH`,
+because each group in a horizontal row gives up a share of the rail's
+columns proportional to its own weight. Nothing painted degrades to the
+single-group case, which is the `SIDEBAR_MIN_COLS` floor reached the other
+way. The refusal names both floors and the width the window actually has,
+and it does **not** write the user's choice: a narrow terminal is a fact
+about the terminal, not a decision about the rail. `DoxaApp.on_resize`
+opens it again the moment there is room.
+
+### Keys, commands, settings
+
+- **`ctrl+b`**, re-verified free against `DoxaApp.BINDINGS` as it stands
+  (the set moved three times this series) and against `TextArea.BINDINGS`,
+  which the focused prompt is. `keyboard.unreachable_under_legacy
+  ("ctrl+b")` is `False` — `ctrl+<letter>` is the one modified form the
+  legacy encoding was built around, unlike `ctrl+<digit>` (v0.97.0) and
+  `alt+<letter>` (v0.91.0), both of which this project chose and walked
+  back. **The one real cost, named rather than discovered later:
+  `ctrl+b` is tmux's default prefix** — `doxa/app.py`'s own split-key
+  subtraction had excluded it on exactly those grounds. The spec chose it
+  anyway and says so; `/sidebar` is the door that always works, the same
+  bargain `ctrl+,` and `ctrl+1…9` ship on.
+- **`/sidebar [on|off]`** carries `binding="ctrl+b"` in the registry, so
+  `/help` and the startup key notice can see it — three commands shipped
+  without one in v0.92.0 and their keys were invisible to both.
+  **`/collection new|rename|delete|add|remove`** carries none, and the
+  registry says so out loud, because it has no key.
+- Two settings beside `context_grid` and `adopt_plugins`:
+  **`sidebar`** (`DOXA_SIDEBAR`) and **`sidebar_width`**
+  (`DOXA_SIDEBAR_WIDTH`, clamped to 19–38 rather than rejected).
+  `sidebar` is `bool_on` for a three-state reason, not a default-on one:
+  empty means **auto** — hide-at-zero, the rail appears once there is a
+  collection or a second session — while `1` and `0` pin it. `ctrl+b`
+  writes `1`/`0`, so the first deliberate toggle ends the guessing for
+  good; a user who closed the rail must not have it come back because they
+  opened a tab.
+- The rail is **not focusable**. Rows are plain `Static`s with
+  `can_focus = False`, driven by the mouse, `ctrl+b` and `/collection`,
+  because a focusable widget beside the prompt is a second place
+  `App.AUTO_FOCUS = "*"` can land — the v0.85.0 defect this release
+  declined to re-open. **A keyboard model for the rail is not in this
+  release** and is not smuggled in under another name.
+
+### The record — the fourth key, and the fourth time the rule holds
+
+`doxa/tabsets.py` grows a **top-level `collections` key, beside `tabs` and
+`layout`** and deliberately not inside the layout node: a collection is
+not geometry.
+
+```json
+{"tabs": [...], "layout": {...}, "collections": [
+  {"name": "ampiric", "sessions": ["abc", "def"], "collapsed": false}]}
+```
+
+- **Absence of the key is the migration.** No version field, no upgrade
+  step: a record written before v1.0.0 reads as no collections. `layout.
+  kind` stays `"tabs"` and the flat top-level `tabs` list stays
+  authoritative and complete, so every reader since v0.23.0 sees a record
+  it fully understands and simply does not know about the grouping. A
+  window with no collections writes no key at all, so this version's own
+  records stay byte-comparable with the ones on disk.
+- **A member not in `tabs` is dropped**, at write time and again at read
+  time, the way `prune` drops a dead leaf. An empty collection is not
+  written: it is indistinguishable from a heading the user forgot about.
+- `resolve()` does **not** re-prune collections against the live daemon
+  registry, and that is the design check made operational — a member whose
+  daemon is gone comes back as an archived tab, or as a row that says it
+  is closed.
+
+### Coverage, and what is not covered
+
+- **32 new tests** in `tests/test_sidebar.py`: 21 pure (the collection
+  model, the width derivations, the record, what `build_rows` shows) and
+  11 driving a real `Pilot`, where every structural claim is paired with a
+  painted rectangle — the v0.28.0 rule the split-panes and
+  pane-groups suites already state. **31 of the 32 were verified to fail
+  against a targeted mutation of the code they pin**; the thirty-second
+  (`test_re_adding_a_session_to_its_own_collection_changes_nothing`) pins
+  behaviour that `Collection.__post_init__`'s dedupe already guarantees a
+  second way, so no single mutation can break it.
+- **Not in this release, and each is a real gap rather than an
+  oversight**: no keyboard navigation of the rail (see above); no drag and
+  drop; no nested collections; no sharing collections between windows or
+  machines; no auto-grouping by repo or branch — a collection is a thing
+  the user decides, not a thing DOXA infers. Inline renaming of a heading
+  is `/collection rename`, not a click-to-edit field.
+- Full suite: **1717 passed**, up from 1685 at v0.99.0 — the 32 above
+  and nothing else touched.
+
 ## 0.99.2 — 2026-09-03
 
 **The README, rewritten: 35,006 characters to 13,123.** A README is

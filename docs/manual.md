@@ -13,6 +13,7 @@ never documents a plan as if it were shipped.
 - [The transcript](#the-transcript)
 - [Tabs](#tabs) — and [restoring them](#restoring-tabs)
 - [Pane groups](#pane-groups)
+- [The session sidebar](#the-session-sidebar)
 - [The live diff](#the-live-diff)
 - [Worktrees and finalize](#worktrees-and-finalize)
 - [Where a session is](#where-a-session-is)
@@ -330,6 +331,85 @@ v0.95.0 closing a tab that held a three-way split ended three. When it
 was the group's last tab the group goes with it, the split collapses, the
 survivors take the room back, and the nearest remaining group takes the
 keyboard. Closing the last tab of the last group closes the app.
+
+## The session sidebar
+
+`ctrl+b` (or `/sidebar`) shows a **collapsible rail down the left of the
+window**: every session this window knows about, in one list, with the
+state marks the tab strips already carry.
+
+That last clause is why it exists. A session in a **background tab of an
+unfocused group** is invisible today — its `done` dot, its needs-input
+blink and its staged tint are painted on a tab header you are not looking
+at. The rail is the one surface that can show all of them at once, and it
+is the answer to the v0.99.0 lost-turn report in its general form: not
+"the scroll was lost" but "you had no way to know anything had happened
+over there".
+
+The rail is **not a pane**. It is a sibling of the whole layout tree, so
+splits, `alt+←/→/↑/↓` growth, `ctrl+shift+arrow` focus and `ctrl+1…9` never
+see it, and it is unaffected by every split and by which group has focus.
+Opening it changes the tree's width and nothing else. It is deliberately
+**not focusable** either — clicking a row moves the keyboard to that
+session, never into the rail.
+
+**Marks are read from one place.** A row carries the same four classes a
+tab header does (`-done-unseen`, `-staged`, `-working`, `-attention`),
+through the same derivation, resolved by the same stylesheet cascade in
+the same order — so the rail and the strip cannot disagree. The rail
+additionally spends a column on a **glyph**, which a strip has no room
+for: `✓` a turn finished unseen, `+` staged proposals, `▸` working, `!`
+waiting for you. The needs-input blink blinks here too.
+
+**Collections** group sessions under a name you choose. `group` already
+means a region of the screen, so this word is different on purpose: two
+sessions in one collection may sit in different pane groups, and one pane
+group may show tabs from three collections. A session belongs to **at most
+one** collection; the rest appear under an unnamed `— ungrouped —` heading
+that is always last and is not itself a collection. Click a heading to
+fold it.
+
+| command | does |
+|---|---|
+| `/sidebar [on\|off]` | Show or hide the rail; with no argument, toggle (`ctrl+b`) |
+| `/collection` | List the collections and how many sessions each holds |
+| `/collection new <name>` | Make an empty collection |
+| `/collection rename <old> <new>` | Rename one |
+| `/collection delete <name>` | Drop the grouping — its sessions become ungrouped, **not** closed |
+| `/collection add <name>` | Move **this** session into that collection, making it if needed |
+| `/collection remove` | Take this session back out |
+
+**`ctrl+b` is tmux's default prefix.** It is the conventional sidebar key
+everywhere else and it is what DOXA binds, but on a tmux session it never
+reaches the app — `/sidebar` is the door that always works, the same
+bargain `ctrl+,`, `ctrl+tab` and `ctrl+1`…`ctrl+9` already ship on. Unlike
+those three, `ctrl+b` *is* deliverable under both keyboard encodings; tmux
+is the only thing in its way.
+
+**It refuses to open on a window too narrow to hold it.** The rail is 22
+columns by default (`sidebar_width`, clamped to 19–38) and a pane needs 34,
+so below **53 columns** it cannot open at all — and it also refuses when
+opening it would take the narrowest pane group below 34, which is measured
+against the rectangles actually on screen rather than against a constant.
+Both numbers come out of the same place the tab-strip rungs do: a row's
+label floor is `4 + " · " + 6`, plus the rail's own six columns of padding,
+indent and mark. It says why, in the transcript, rather than squeezing a
+pane — and it opens by itself the moment the terminal is wide enough
+again.
+
+**With nothing to say, it stays out of the way.** On a fresh install
+`sidebar` is *auto*: the rail appears once there is a collection or a
+second session and not before, the same hide-at-zero discipline the
+context chip, the side-by-side diff and the group tab strips follow. The
+first `ctrl+b` writes the choice, and from then on it is yours.
+
+**Collections are saved with the tab set**, in the same per-repo record,
+and come back with the window. A collection whose sessions are all gone
+does not; a member whose session is gone is dropped from it, the way a
+dead pane is dropped from a saved layout. A member whose **tab** is closed
+but whose session is still around keeps its row, marked `· closed` — the
+rail is a session index, not a second tab strip, and clicking such a row
+tells you `/attach` is how you get it back.
 
 ## The live diff
 
@@ -869,6 +949,8 @@ palette, the `/` autocomplete and `/help` from that single registry.
 | `/vsplit` | A second pane group **side by side** with this one (`alt+d`) |
 | `/pane [n]` | Jump to pane group `n`, numbered left to right then top to bottom (`ctrl+1`…`ctrl+9`); with no number, flash them |
 | `/movepane <n>` | Move this group's active tab into group `n` — the session keeps running |
+| `/sidebar [on\|off]` | Show or hide the session sidebar (`ctrl+b`) |
+| `/collection …` | `new` / `rename` / `delete` / `add` / `remove` — group sessions in the sidebar under a name you choose |
 | `/diff` | This session's live worktree diff in the group beside it, or close it (`alt+g`) |
 | `/dir` | Where this session actually is |
 | `/cd <path>` | Open that path in a **new** tab; this session stays where it is |
@@ -927,6 +1009,8 @@ environment is winning is read-only in the modal.
 | `ctx_absolute` | `DOXA_CTX_ABSOLUTE` | off | print `24k/200k` beside the `ctx%` chip (below 100 columns it drops again) |
 | `image_mode` | `DOXA_IMAGE_MODE` | probe | force a rung of the image ladder (`kgp`/`sixel`/`halfblock`/`text`) |
 | `boot_banner` | `DOXA_BOOT_BANNER` | on | draw the DOXA mark above the opening identity block |
+| `sidebar` | `DOXA_SIDEBAR` | *auto* | the session rail: empty = appear once there is a collection or a second session, `1` = always, `0` = never. `ctrl+b` writes `1`/`0`, so the first toggle ends the guessing |
+| `sidebar_width` | `DOXA_SIDEBAR_WIDTH` | 22 | columns the rail occupies; clamped to 19–38 rather than rejected |
 | `key_notice` | `DOXA_KEY_NOTICE` | on | one-line startup notice naming any bound keys this terminal can't deliver and the slash command that reaches them instead; silent on a kitty-protocol terminal or one whose protocol was never measured |
 | `context_grid` | `DOXA_CONTEXT_GRID` | `glyphs` | cell style for `/context`'s grid: `glyphs` (⛀⛁⛶) or `ascii` (`[#]`/`[ ]`) for a font that tofu's them |
 | *keyboard override* | `DOXA_KEYBOARD_PROTOCOL` | probe | `kitty`/`legacy`/`unknown`, for a terminal that lies about it; env-only |
