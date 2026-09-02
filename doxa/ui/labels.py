@@ -247,6 +247,89 @@ def _write_tab_class(app: Any, tab_id: str, class_name: str, value: bool) -> Non
         _strip_holding(app, tab_id).get_tab(tab_id).set_class(value, class_name)
 
 
+#: Every "you missed something" class a session can carry, in the ORDER
+#: doxa/theme.tcss resolves them in (done-unseen < staged < working <
+#: attention -- equal selector specificity, later rule wins).
+#:
+#: v1.0.0: the session sidebar shows the same four marks per row, and
+#: shows them by writing THESE class names onto the row and letting the
+#: SAME cascade decide, rather than by picking a winner in Python. One
+#: statement of what a mark outranks, in the stylesheet, read by two
+#: surfaces -- which is the "one source, read twice" rule
+#: docs/plans/session-sidebar.md names as the risk of a second place that
+#: renders session state.
+TAB_STATE_MARKS: "tuple[str, ...]" = (
+    "-done-unseen", "-staged", "-working", "-attention",
+)
+
+
+#: One glyph per mark, for the sidebar row that carries it. The tab strip
+#: signals with COLOUR alone, which it can afford: a strip has two columns
+#: of padding per header and no room for more. A rail row has a column to
+#: spend, and spending it means the rail still says something on a
+#: monochrome terminal and to a reader who cannot separate the green of
+#: done-unseen from the amber of working.
+SIDEBAR_MARK_GLYPHS: "dict[str, str]" = {
+    "-done-unseen": "✓",
+    "-staged": "+",
+    "-working": "▸",
+    "-attention": "!",
+}
+
+#: What a row with no mark at all shows, so every label starts in the
+#: same column whether or not its session has news.
+SIDEBAR_MARK_NONE = " "
+
+
+def top_mark(marks: Any) -> str:
+    """The ONE mark that wins, out of however many a session carries.
+
+    Precedence is :data:`TAB_STATE_MARKS`' own order and is not restated
+    here -- that tuple is the single written-down statement of what
+    outranks what, and doxa/theme.tcss resolves the row's COLOUR by
+    cascading the same four classes in the same sequence. So the glyph
+    and the colour cannot disagree about which state a row is in without
+    one of them disagreeing with the tab strip too."""
+    winner = ""
+    held = set(marks or ())
+    for name in TAB_STATE_MARKS:
+        if name in held:
+            winner = name
+    return winner
+
+
+def sidebar_mark_glyph(marks: Any) -> str:
+    """The leading glyph for a sidebar row -- a space when there is
+    nothing to say, so labels stay in one column."""
+    return SIDEBAR_MARK_GLYPHS.get(top_mark(marks), SIDEBAR_MARK_NONE)
+
+
+def mark_over(leaves: Any, class_name: str) -> bool:
+    """Does ANY of these session leaves carry that mark?
+
+    The one derivation of a tab header's status, extracted in v1.0.0 so
+    the sidebar can call it instead of writing a second one.
+    :meth:`doxa.session.pane.SessionPane._set_tab_class` has ORed a
+    tab's leaves since v0.91.0 (a tab could hold several panes then; it
+    holds one now, and the OR is still the correct general statement);
+    a sidebar row ORs the single pane behind that row, which is the same
+    question asked of a shorter list.
+
+    Reads ``has_mark`` where a leaf offers one and falls back to the
+    ``_marks`` dict itself, so an ``ArchivedSessionTab`` -- which has
+    neither, and no state to report -- answers False rather than
+    raising."""
+    for leaf in leaves or ():
+        asker = getattr(leaf, "has_mark", None)
+        if callable(asker):
+            if asker(class_name):
+                return True
+            continue
+        if getattr(leaf, "_marks", {}).get(class_name, False):
+            return True
+    return False
+
+
 # Context-pressure escalation. The README calls this out as "a containment
 # signal, not decoration": the chip changes COLOR as the window fills, and
 # keeps showing the percentage throughout -- a color that replaced the

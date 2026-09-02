@@ -48,6 +48,7 @@ from ..ui.labels import (
     _write_tab_class,
     compose_tab_label,
     ellipsize,
+    mark_over,
     provider_glyph,
     short_model,
 )
@@ -645,18 +646,42 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         Same contextlib.suppress discipline as :meth:`set_tab_label`, and
         for the same reasons: the tab may not exist yet this early in
         boot, or this pane may already be mid-teardown (a closed tab's
-        last event landing after the Tab widget is gone)."""
+        last event landing after the Tab widget is gone).
+
+        v1.0.0 adds a THIRD place, and deliberately does not add a third
+        derivation: the session sidebar shows the same marks per row, so
+        this door pokes it after writing the header (see
+        :meth:`doxa.app.DoxaApp.refresh_sidebar_marks`). Poked from HERE
+        rather than polled by the rail because the needs-input blink is a
+        timer toggling ``-attention`` through this method -- a rail that
+        only re-read on a layout change would show a frozen mark for a
+        session that is stopped waiting for the user, which is the one
+        state the whole feature exists to surface."""
         self._marks[class_name] = value
         with contextlib.suppress(Exception):
             self.set_class(value, class_name)
         tab = self.tab
         if tab is None:
             _write_tab_class(self.app, "", class_name, value)
+            self._poke_sidebar()
             return
-        any_on = any(
-            leaf._marks.get(class_name, False) for leaf in tab.leaves()
+        # ONE derivation of "what does this header say", shared with the
+        # rail -- see doxa.ui.labels.mark_over.
+        _write_tab_class(
+            self.app, tab.id or "", class_name, mark_over(tab.leaves(), class_name)
         )
-        _write_tab_class(self.app, tab.id or "", class_name, any_on)
+        self._poke_sidebar()
+
+    def _poke_sidebar(self) -> None:
+        """Tell the session sidebar this pane's marks moved, if there is
+        one. Duck-typed and suppressed: a pane is mounted under harnesses
+        with no ``DoxaApp`` around it (doxa.ui.labels._strip_holding
+        already carries the same allowance), and at teardown the app is
+        going away under an event still in flight."""
+        with contextlib.suppress(Exception):
+            poke = getattr(self.app, "refresh_sidebar_marks", None)
+            if callable(poke):
+                poke(self)
 
     def has_mark(self, class_name: str) -> bool:
         """Does THIS pane still carry that "you missed something" mark?
