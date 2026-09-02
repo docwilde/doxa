@@ -121,6 +121,128 @@ GROUP_STRIP_COMPACT_COLS = 34
 #: way as the rung above, for ONE header rather than two.
 GROUP_STRIP_MIN_COLS = 17
 
+# -- the session sidebar (v1.0.0) -------------------------------------
+#
+# The rail is NOT part of this tree -- it is a sibling of the window root
+# (docs/plans/session-sidebar.md), and nothing below reads it. Its
+# numbers live here anyway, beside the ones they are derived from and
+# checked against: MIN_LEAF_WIDTH is what the rail must not squeeze the
+# tree under, and the tab-label floors are what a rail row is measured
+# with. A threshold defined next to the constant it is derived from is a
+# threshold the next reader can check.
+
+#: What a rail row costs BESIDE its label: one column of left padding,
+#: two of collection indent (a member sits under its heading, and that
+#: indent is what makes membership visible at all), two for the state
+#: mark and its space, one of right padding.
+SIDEBAR_CHROME = 6
+
+#: The narrowest rail DOXA will draw. MEASURED, not chosen, and measured
+#: against exactly what :data:`GROUP_STRIP_MIN_COLS` is measured against
+#: one field up: a row's label may not fall below the floor the tab strip
+#: itself keeps a label legible at, ``TAB_MODEL_MIN (4) + " · " (3) +
+#: TAB_REPO_MIN (6)`` = 13 from :mod:`doxa.ui.labels`. Plus
+#: :data:`SIDEBAR_CHROME` that is 19.
+#:
+#: Not a width the rail ever opens AT -- it is the floor a configured
+#: width is clamped to, and the width :data:`SIDEBAR_MIN_COLS` prices the
+#: refusal in.
+SIDEBAR_MIN_WIDTH = 19
+
+#: The rail's default width, and the value ``sidebar_width`` in the
+#: settings registry defaults to.
+#:
+#: DERIVED: :data:`SIDEBAR_CHROME` plus half of ``TAB_LABEL_MAX`` (32),
+#: the cap the tab strip's own ``ellipsize`` writes labels at. Half,
+#: because past that an ellipsis stops trimming the tail of a branch name
+#: and starts eating the repo segment -- the exact thing TAB_REPO_MIN
+#: exists to protect -- and because a rail is a rail: every column it
+#: takes is a column the tree cannot use.
+#:
+#: CROSS-CHECKED against reality, the way GROUP_STRIP_COMPACT_COLS is
+#: checked against MIN_LEAF_WIDTH: on the 100-column reference terminal
+#: the rest of this codebase measures against
+#: (:data:`doxa.diff.SIDE_BY_SIDE_MIN_COLS`,
+#: :data:`doxa.ui.labels.CTX_ABSOLUTE_MIN_COLS`) with ONE vertical split
+#: -- the ordinary two-group window -- the rail may cost at most
+#: ``100 - 2 * GROUP_STRIP_COMPACT_COLS`` = 32 columns before pushing a
+#: group onto the compact rung. 22 is inside that budget with 10 columns
+#: to spare, so opening the rail on the reference terminal does not
+#: silently degrade both tab strips as a side effect.
+SIDEBAR_WIDTH = 22
+
+#: ...and the widest. ``SIDEBAR_CHROME + TAB_LABEL_MAX`` (32): the width
+#: at which a row shows the whole label the tab strip caps at. Wider buys
+#: nothing that exists to be shown, and costs the tree columns for it.
+SIDEBAR_MAX_WIDTH = 38
+
+#: The absolute floor on TOTAL window width, below which the rail cannot
+#: open at any width: the narrowest rail plus the narrowest pane. 53.
+#: Stated as a constant because it is the number a refusal message and a
+#: test both want, and derived rather than typed so raising either half
+#: moves it.
+SIDEBAR_MIN_COLS = SIDEBAR_MIN_WIDTH + MIN_LEAF_WIDTH
+
+
+def clamp_sidebar_width(width: Any) -> int:
+    """A rail width the app is allowed to hold. Garbage, a negative and a
+    value past the ceiling all resolve rather than raise -- the same
+    posture :func:`normalise` takes on a corrupt weight list, and for the
+    same reason: chrome must never cost a session."""
+    try:
+        value = int(float(width))
+    except (TypeError, ValueError):
+        return SIDEBAR_WIDTH
+    return max(SIDEBAR_MIN_WIDTH, min(value, SIDEBAR_MAX_WIDTH))
+
+
+def sidebar_refusal(
+    total_width: int, narrowest_group: int, rail_width: int
+) -> "str | None":
+    """Why the rail cannot open, in the words the user will see -- or
+    ``None`` when it can.
+
+    The rail costs the tree columns it cannot get back, and
+    docs/plans/session-sidebar.md names the failure outright: below some
+    total width it must REFUSE to open rather than squeeze the tree under
+    its own minimum. This is :func:`split_refusal`'s posture applied to
+    the one piece of chrome that is not in the tree -- a refusal with a
+    reason, never a silent sliver.
+
+    ``narrowest_group`` is the width of the NARROWEST group currently
+    painted, in cells, read off the real rectangles the way
+    :func:`neighbour` and :meth:`doxa.app.DoxaApp._group_order` are. It is
+    what makes this measured rather than chosen: the tree loses
+    ``rail_width`` columns and every group in a horizontal row gives up a
+    share of them proportional to its own weight, so the narrowest group
+    ends at ``narrowest * (total - rail) / total`` and that is the number
+    :data:`MIN_LEAF_WIDTH` has to be checked against.
+
+    ``0`` (nothing painted yet -- boot, or a window with no groups)
+    degrades to the single-group case, where the tree IS the window and
+    the arithmetic collapses to ``total - rail >= MIN_LEAF_WIDTH``: the
+    :data:`SIDEBAR_MIN_COLS` floor, stated once and reached two ways."""
+    rail = max(1, int(rail_width or 0))
+    total = max(0, int(total_width or 0))
+    tree = total - rail
+    if tree < MIN_LEAF_WIDTH:
+        return (
+            f"not enough width for the sidebar: the panes need "
+            f"{MIN_LEAF_WIDTH} columns and the rail {rail}, and this "
+            f"window has {total}"
+        )
+    narrowest = int(narrowest_group or 0)
+    if narrowest > 0 and total > 0:
+        shrunk = narrowest * tree // total
+        if shrunk < MIN_LEAF_WIDTH:
+            return (
+                f"not enough width for the sidebar: the narrowest pane "
+                f"group would drop to {shrunk} columns and a pane needs "
+                f"{MIN_LEAF_WIDTH}"
+            )
+    return None
+
+
 #: The prompt's own floor, in CONTENT rows (the border adds two). A
 #: resize must never leave the input line too small to type into -- the
 #: one region whose collapse makes DOXA unusable rather than awkward.
