@@ -370,6 +370,13 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
         # wired only because it is still what an older record's shape is
         # called and what a hand-built DoxaApp may be given.
         restore_groups=resolved.groups,
+        # v1.0.0: the user's session COLLECTIONS, already pruned to the
+        # flat tab list by doxa.tabsets.load and deliberately NOT pruned
+        # against the live registry -- a collection member whose daemon is
+        # gone comes back as an archived tab (or as a row that says it is
+        # closed), which is the whole difference between a session index
+        # and a second tab strip.
+        restore_collections=resolved.collections,
     )
     app.run()
     _maybe_restart(app)

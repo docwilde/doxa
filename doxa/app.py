@@ -106,6 +106,7 @@ from textual.widgets.option_list import Option
 
 from . import auth as auth_mod
 from . import clock as clock_mod
+from . import collections as collections_mod
 from . import commands as commands_mod
 from . import config as config_mod
 from . import errors as errors_mod
@@ -182,6 +183,7 @@ from .ui.dialogs import (  # noqa: F401
     TabRename,
     TabRenameCancelled,
 )
+from .ui import labels as labels_mod
 from .ui.labels import (  # noqa: F401
     _belief_scope_label,
     _chip_span,
@@ -257,6 +259,13 @@ from .ui.labels import (  # noqa: F401
 )
 from .ui.diffview import DiffPane  # noqa: F401
 from .ui.prompt import PromptInput  # noqa: F401
+from .ui.sidebar import (  # noqa: F401
+    LOOSE_HEADING,
+    Row as SidebarRow,
+    SessionSidebar,
+    SidebarLine,
+    build_rows,
+)
 from .ui.split import PaneGroup, PaneTab, SplitBox  # noqa: F401
 from .ui import split as split_mod
 from .ui.statusline import ClockChip, GitLine, StatusBar  # noqa: F401
@@ -652,6 +661,48 @@ class DoxaApp(App):
         #
         # priority=True for the reason every global here needs it: the
         # prompt is a focused TextArea and would otherwise eat the key.
+        # -- the session sidebar (v1.0.0) ------------------------------
+        #
+        # Ctrl+B: toggle the rail. The conventional sidebar key -- VS
+        # Code, JetBrains, Zed -- and RE-VERIFIED free against THIS
+        # class's own resolved binding set at the moment it was added,
+        # which is the check docs/plans/session-sidebar.md asks for
+        # because the set moved three times in this release series:
+        # ctrl+p, ctrl+r, ctrl+comma, ctrl+t, ctrl+w, ctrl+q, ctrl+left,
+        # ctrl+right, ctrl+up, ctrl+down, ctrl+o, ctrl+n, ctrl+1..9,
+        # ctrl+shift+arrows, shift+tab, ctrl+tab, f2, alt+s/d/g,
+        # alt+arrows. Textual's own App/Screen defaults claim no ctrl+b,
+        # and neither does TextArea (whose claimed letters are
+        # a c d e f k u v w x y z -- see the split-panes subtraction
+        # above), so the focused prompt does not contest it.
+        # tests/test_sidebar.py asserts the whole of that, so the next
+        # release that adds a binding trips over a collision instead of
+        # shipping one.
+        #
+        # DELIVERABLE UNDER BOTH ENCODINGS, which is why it is a letter:
+        # doxa.keyboard.unreachable_under_legacy("ctrl+b") is False --
+        # ctrl+<letter> is the one modified form the legacy encoding was
+        # built around. ctrl+<digit> (v0.97.0's group keys) and
+        # alt+<letter> (v0.91.0's splits) are both unreachable there, and
+        # this project chose each of them once and had to walk it back.
+        #
+        # The ONE cost, named rather than discovered later: Ctrl+B is
+        # tmux's default prefix, so a tmux user cannot press it -- the
+        # split-panes subtraction above listed ctrl+b among "the
+        # terminal's own" for exactly that reason. The spec chose it
+        # anyway and says so out loud ("tmux's prefix notwithstanding"),
+        # on the reasoning that a tmux user has already remapped or
+        # already knows to double-tap, and that /sidebar is the door that
+        # always works -- the same bargain Ctrl+, Ctrl+Tab and
+        # Ctrl+1..Ctrl+9 already ship on.
+        #
+        # priority=True for the reason every global here needs it: the
+        # prompt is a focused TextArea and would otherwise eat the key.
+        Binding(
+            "ctrl+b", "toggle_sidebar",
+            "Show or hide the session sidebar (/sidebar)",
+            show=False, priority=True,
+        ),
         *[
             Binding(
                 f"ctrl+{digit}", f"focus_group({digit})",
@@ -676,6 +727,7 @@ class DoxaApp(App):
         restore_report: "str | None" = None,
         restore_layout: "list[Any] | None" = None,
         restore_groups: "Any" = None,
+        restore_collections: "Any" = None,
     ) -> None:
         super().__init__()
         # One strip-id sequence per app (see doxa.ui.split.next_tabbed_id):
@@ -782,6 +834,26 @@ class DoxaApp(App):
         # rather than restated, so a launch from doxa.cli and a launch from
         # a hand-built DoxaApp cannot disagree about what a record means.
         self._restore_groups = restore_groups
+        # The user's SESSION COLLECTIONS (v1.0.0, doxa.collections) -- the
+        # rail's model, and the ONE copy of it. Held on the app rather
+        # than on the sidebar widget for two reasons: it survives the rail
+        # being hidden (a hidden widget is still mounted, but a rail that
+        # owned the model would make "the model exists" a fact about
+        # chrome), and _persist_tabset writes it from here on every tab
+        # lifecycle event without having to find a widget first.
+        #
+        # A collection groups sessions BY NAME regardless of which
+        # PaneGroup shows them -- see doxa.collections' docstring on why
+        # the word is not "group".
+        self._collections: "tuple[collections_mod.Collection, ...]" = tuple(
+            restore_collections or ()
+        )
+        # Whether the LAST attempt to open the rail was refused for width,
+        # and what it said. Kept so on_resize can open it for free the
+        # moment the terminal grows past the threshold, rather than making
+        # the user press Ctrl+B again at a window they never chose to
+        # shrink.
+        self._sidebar_wanted = False
         # Which group the number overlay is showing on, and the ONE-SHOT
         # timer that takes it away. See _flash_group_numbers for why a
         # one-shot is inside DOXA's no-timer rule and an interval is not.
@@ -2049,8 +2121,24 @@ class DoxaApp(App):
         kept = [record.session_id for record in tabs]
         if groups is not None:
             groups = layout_mod.prune(groups, kept)
+        # v1.0.0: the COLLECTIONS ride along, pruned to the same flat list
+        # the tree is pruned to, so the three halves of the record agree
+        # about which sessions exist. Pruned on the app's own copy too, not
+        # only in the record -- a collection that kept naming a reaped
+        # session would put a dead row back on the rail the moment
+        # something else caused a refresh.
+        self._collections = collections_mod.prune(self._collections, kept)
         with contextlib.suppress(Exception):
-            tabsets_mod.save(scope, tabs, active_id, groups=groups)
+            tabsets_mod.save(
+                scope, tabs, active_id, groups=groups,
+                collections=self._collections,
+            )
+        # The rail is a view of exactly this snapshot, so the one method
+        # that runs on every tab lifecycle event is the one place it needs
+        # refreshing from. Suppressed and last: a persistence path must
+        # never be the thing that fails because chrome could not repaint.
+        with contextlib.suppress(Exception):
+            self.refresh_sidebar()
 
     def _window_root(self) -> "SplitBox | None":
         """The OUTERMOST :class:`~doxa.ui.split.SplitBox` on the screen --
@@ -2060,6 +2148,400 @@ class DoxaApp(App):
             if not isinstance(box.parent, SplitBox):
                 return box
         return None
+
+    # -- the session sidebar (v1.0.0) ---------------------------------
+    #
+    # Everything here is about a widget that is a SIBLING of the window
+    # root, never a member of it. Nothing in this section touches the
+    # tree, and nothing in the tree section above knows the rail exists --
+    # that separation is the feature's whole design (see
+    # doxa/ui/sidebar.py) and the reason _window_root() one method up
+    # needed no change at all.
+
+    def sidebar(self) -> "SessionSidebar | None":
+        """The rail, or ``None`` when there is no window left to ask.
+
+        Guards BOTH conditions v0.97.0 learned to guard: ``NoMatches``
+        (the rail is not composed yet) and ``ScreenStackError`` (the
+        screen stacks are cleared before the app's queue is drained, so a
+        late handler asking a plain inventory question gets a raise) --
+        and then ``is_mounted`` on top, because ``query_one`` succeeding
+        means the node is in the DOM, not that it is mounted."""
+        try:
+            rail = self.query_one(SessionSidebar)
+        except (NoMatches, ScreenStackError):
+            return None
+        return rail if rail.is_mounted else None
+
+    def sidebar_width(self) -> int:
+        """The rail's configured width, clamped to what a rail can be."""
+        return config_mod.sidebar_width()
+
+    def _window_width(self) -> int:
+        """The whole window's width in cells, or 0 when nothing is
+        painted. Read off the SCREEN and not off the rail: a hidden widget
+        has no geometry (v0.99.0's whole defect), so measuring the thing
+        that is about to be shown is measuring zero."""
+        try:
+            return int(self.size.width)
+        except (ScreenStackError, AttributeError):
+            return 0
+
+    def _narrowest_group(self) -> int:
+        """The narrowest PAINTED group, in cells -- what
+        :func:`doxa.layout.sidebar_refusal` prices the refusal against.
+
+        Painted, never structural: a group with a zero-area rectangle is
+        one that has not been laid out yet, and it is not a region the
+        rail can take columns from. The same rule ``_pane_regions`` and
+        ``_group_order`` state."""
+        widths = [
+            group.region.width
+            for group in self.groups()
+            if group.region.width > 0 and group.region.height > 0
+        ]
+        return min(widths) if widths else 0
+
+    def sidebar_refusal(self) -> "str | None":
+        """Why the rail cannot open right now, or ``None``."""
+        return layout_mod.sidebar_refusal(
+            self._window_width(), self._narrowest_group(), self.sidebar_width()
+        )
+
+    def sidebar_has_something_to_say(self) -> bool:
+        """HIDE AT ZERO, the question the ``auto`` setting asks.
+
+        A rail listing one session under no heading is chrome that answers
+        nothing -- the same judgment
+        :data:`doxa.layout.GROUP_STRIP_MIN_COLS`,
+        :data:`doxa.ui.labels.CTX_ABSOLUTE_MIN_COLS` and
+        :data:`doxa.diff.SIDE_BY_SIDE_MIN_COLS` each make about their own
+        surface. So: any collection at all, or more than one session."""
+        return bool(self._collections) or len(self._sidebar_order()) > 1
+
+    def sidebar_should_show(self) -> bool:
+        """Should the rail be on screen, before width is considered?"""
+        mode = config_mod.sidebar_mode()
+        if mode == config_mod.SIDEBAR_OFF:
+            return False
+        if mode == config_mod.SIDEBAR_ON:
+            return True
+        return self.sidebar_has_something_to_say()
+
+    # -- the rail's model ---------------------------------------------
+
+    def _sidebar_order(self) -> "list[str]":
+        """Every session the rail knows about, in the order LOOSE ones
+        should appear.
+
+        THREE sources, and the third is the design check
+        docs/plans/session-sidebar.md asks this feature to answer: mounted
+        session panes and archived tabs in strip order, then the sessions
+        this window has open but does NOT currently show -- detached
+        (Ctrl+W, ``/detach``) and ended (Ctrl+Q) ones, which stay in the
+        persisted set and are exactly the peers a user loses track of.
+
+        That third source is what makes the rail a session INDEX rather
+        than a second tab strip. A reaped session (``/sessions kill``) is
+        not in it: reaping is the one gesture in this app that means
+        "forget this conversation", and it means it here too."""
+        order: "list[str]" = []
+        seen: "set[str]" = set()
+        for tab in self._restorable_tabs():
+            for session_id in self._tab_session_ids(tab):
+                if session_id and session_id not in seen:
+                    seen.add(session_id)
+                    order.append(session_id)
+        for record in (
+            *self._detached_this_run.values(), *self._ended_this_run.values()
+        ):
+            sid = record.session_id
+            if sid and sid not in seen and sid not in self._killed_this_run:
+                seen.add(sid)
+                order.append(sid)
+        return [s for s in order if s not in self._killed_this_run]
+
+    @staticmethod
+    def _tab_session_ids(tab: "Any") -> "list[str]":
+        """The session ids one restorable tab contributes. A ``PaneTab``
+        answers through its leaves (a diff tab has none, correctly); an
+        ``ArchivedSessionTab`` carries its own."""
+        if isinstance(tab, ArchivedSessionTab):
+            return [tab.session_id]
+        return [
+            leaf._session_id
+            for leaf in getattr(tab, "leaves", list)()
+            if getattr(leaf, "_session_id", "")
+        ]
+
+    def _sidebar_pane(self, session_id: str) -> "Any | None":
+        """The mounted surface for a session, of either kind, or
+        ``None``."""
+        for pane in self.panes():
+            if pane._session_id == session_id:
+                return pane
+        for tab in self.archived_tabs():
+            if tab.session_id == session_id:
+                return tab
+        return None
+
+    def _describe_session(self, session_id: str) -> "tuple[str, tuple[str, ...], bool]":
+        """``(label, marks, mounted)`` for one row of the rail.
+
+        The label is rendered FRESH every time and never stored: a
+        collection records session IDS because ``display_name()`` is not
+        stable -- it changes when a session is renamed and again when its
+        first prompt lands.
+
+        The marks come from :func:`doxa.ui.labels.mark_over`, the same
+        derivation a group's ``Tab`` header uses. Not a second reading of
+        what a mark MEANS -- one source, read twice, which is the risk the
+        spec names and this is the answer to it.
+
+        An UNMOUNTED session still gets a label: its pinned name from the
+        record this run kept, or its short id. It never gets marks (there
+        is no pane to have earned one) and it is reported ``mounted=False``
+        so the row can say so rather than pretend."""
+        surface = self._sidebar_pane(session_id)
+        if isinstance(surface, SessionPane):
+            marks = tuple(
+                name for name in labels_mod.TAB_STATE_MARKS
+                if labels_mod.mark_over([surface], name)
+            )
+            return surface.display_name(), marks, True
+        if surface is not None:  # an ArchivedSessionTab: read-only, no marks
+            return getattr(surface, "base_label", "") or session_id[:8], (), True
+        record = self._detached_this_run.get(session_id) or (
+            self._ended_this_run.get(session_id)
+        )
+        pinned = getattr(record, "pinned_name", None) if record else None
+        return (pinned or session_id[:8]), (), False
+
+    def sidebar_rows(self) -> "list[SidebarRow]":
+        """The rail's contents, built by the pure function that decides
+        what a rail shows -- see :func:`doxa.ui.sidebar.build_rows`."""
+        return build_rows(
+            self._collections,
+            self._sidebar_order(),
+            self._describe_session,
+            width=self.sidebar_width(),
+        )
+
+    # -- painting -----------------------------------------------------
+
+    def refresh_sidebar(self, *, force: bool = False) -> None:
+        """Re-derive the rail: visibility, width, contents.
+
+        Called from ``_persist_tabset`` (every tab lifecycle event), from
+        every collection edit, and from the rail's own ``on_show``.
+        ``force`` only bypasses the widget's own "nothing changed" check
+        and is what ``on_show`` passes: rows mounted while the rail was
+        ``display: none`` were laid out against a zero box."""
+        rail = self.sidebar()
+        if rail is None:
+            return
+        show = self.sidebar_should_show()
+        note = self.sidebar_refusal() if show else None
+        visible = show and note is None
+        rail.set_width(self.sidebar_width())
+        rail.styles.display = "block" if visible else "none"
+        if not visible:
+            # A HIDDEN rail is not built. Not an optimisation for its own
+            # sake: this method runs on every tab lifecycle event and on
+            # every terminal resize, and on the overwhelmingly common
+            # window -- one session, no collections, rail off -- building
+            # rows nobody can see would be work done on every keystroke's
+            # worth of state change. The rail's own ``on_show`` forces the
+            # build back the instant it gets geometry, which is the same
+            # remembered-intent shape ``SessionPane.scroll_transcript_to_end``
+            # uses for the same measured reason (v0.99.0): a hidden widget
+            # has no geometry, so the work has to wait for the show.
+            rail.set_rows([])
+            return
+        if force:
+            rail._rows = []
+        rail.set_rows(self.sidebar_rows())
+
+    def refresh_sidebar_marks(self, pane: "Any") -> None:
+        """One pane's marks moved. Update that ROW rather than the rail.
+
+        Called from ``SessionPane._set_tab_class``, which is also what
+        drives the needs-input blink -- at 2 Hz, per waiting session. A
+        rebuild there would be a repaint of the whole rail per blink,
+        which is the busy-idle cost this app measures and refuses. If the
+        row is not there at all the structure moved, and the full refresh
+        is the right answer once."""
+        rail = self.sidebar()
+        if rail is None:
+            return
+        session_id = getattr(pane, "_session_id", "") or ""
+        if not session_id:
+            return
+        marks = tuple(
+            name for name in labels_mod.TAB_STATE_MARKS
+            if labels_mod.mark_over([pane], name)
+        )
+        if not rail.apply_marks(session_id, marks):
+            self.refresh_sidebar()
+
+    def on_resize(self, event: "events.Resize") -> None:
+        """The terminal changed size, so the width refusal may have.
+
+        A rail refused for width is not a rail the user stopped wanting --
+        they never chose to shrink the window -- so it opens again for
+        free the moment there is room, and closes again when there is not.
+        The same measured-not-remembered posture ``PaneGroup.on_resize``
+        takes for its own tab strip one level down."""
+        with contextlib.suppress(Exception):
+            self.refresh_sidebar()
+
+    # -- toggling -----------------------------------------------------
+
+    def set_sidebar(self, visible: bool) -> "str | None":
+        """Show or hide the rail, and WRITE that choice. Returns the one
+        line the user is told, or ``None``.
+
+        The write is what ends hide-at-zero's guessing (see
+        :func:`doxa.config.sidebar_mode`): a user who closed the rail must
+        not have it reappear because they opened a second tab.
+
+        A refusal does NOT write. The rail could not open at this width,
+        which is a fact about the terminal and not a decision about the
+        rail -- recording it as one would leave the user's next, wider
+        window without the sidebar they asked for."""
+        if visible:
+            note = self.sidebar_refusal()
+            if note:
+                return note
+        with contextlib.suppress(Exception):
+            config_mod.save({"sidebar": "1" if visible else "0"})
+        config_mod.invalidate()
+        self.refresh_sidebar(force=True)
+        return None
+
+    def action_toggle_sidebar(self) -> None:
+        """Ctrl+B. Reports a width refusal where the user is looking --
+        the active pane's transcript -- rather than doing nothing, which
+        is the "documented key that silently does nothing" failure
+        v0.39.0 exists to prevent."""
+        rail = self.sidebar()
+        showing = bool(rail is not None and rail.styles.display != "none")
+        note = self.set_sidebar(not showing)
+        if note:
+            self.notify_sidebar(note)
+
+    def notify_sidebar(self, note: str) -> None:
+        """Put one rail message in front of the user. The active pane's
+        transcript when there is one, Textual's own notification
+        otherwise (a window whose only tab is an archive has no
+        transcript to write into)."""
+        pane = self.active_pane
+        if pane is not None:
+            pane.run_worker(pane._system(note), group="sidebar-note")
+            return
+        with contextlib.suppress(Exception):
+            self.notify(note)
+
+    # -- reveal -------------------------------------------------------
+
+    def reveal_session(self, session_id: str) -> "str | None":
+        """Take me to that session: focus its group, activate its tab.
+
+        Returns the line to show when it cannot -- and "cannot" is a real
+        answer here, not a defect. The rail lists sessions this window
+        knows about, including ones that are not mounted in any group, so
+        a row can genuinely name a session there is nowhere to go TO. It
+        says so and names the door back in (``/attach``) rather than
+        pretending a click did something."""
+        if not session_id:
+            return None
+        surface = self._sidebar_pane(session_id)
+        if isinstance(surface, SessionPane):
+            # _switch_to_tab does the three beats every explicit switch in
+            # this file does -- activate, move the marker, focus -- and
+            # focusing a pane puts the keyboard in its GROUP, which is what
+            # "focus its group" means since v0.97.0.
+            self._switch_to_tab(surface.id or "")
+            return None
+        if surface is not None:  # an archived tab: activate it, focus its scroll
+            self._activate_tab(surface)
+            self._jump_tab_marker()
+            self._focus_tab(surface)
+            return None
+        return (
+            f"{session_id[:8]} is not open in this window — "
+            f"/attach {session_id[:8]} brings it back in a new tab"
+        )
+
+    @on(SessionSidebar.Revealed)
+    def _on_sidebar_revealed(self, event: "SessionSidebar.Revealed") -> None:
+        event.stop()
+        note = self.reveal_session(event.session_id)
+        if note:
+            self.notify_sidebar(note)
+
+    @on(SessionSidebar.CollectionToggled)
+    def _on_sidebar_collection_toggled(
+        self, event: "SessionSidebar.CollectionToggled"
+    ) -> None:
+        event.stop()
+        held = collections_mod.find(self._collections, event.name)
+        if held is None:
+            return
+        self._collections = collections_mod.set_collapsed(
+            self._collections, event.name, not held.collapsed
+        )
+        self.refresh_sidebar(force=True)
+        self._persist_tabset()
+
+    # -- collections --------------------------------------------------
+    #
+    # One shape for all five: apply the pure function from
+    # doxa.collections, keep its note, repaint, persist. The MODEL refuses
+    # (a duplicate name, an unknown one, an empty one) and this layer
+    # never second-guesses it -- the same division doxa.layout's
+    # split_refusal keeps from DoxaApp.split_active_pane.
+
+    def _apply_collections(
+        self, result: "tuple[Any, str | None]"
+    ) -> "str | None":
+        items, note = result
+        if note is None:
+            self._collections = items
+            self.refresh_sidebar(force=True)
+            self._persist_tabset()
+        return note
+
+    def collection_new(self, name: str) -> "str | None":
+        return self._apply_collections(
+            collections_mod.new(self._collections, name)
+        )
+
+    def collection_rename(self, old: str, new_name: str) -> "str | None":
+        return self._apply_collections(
+            collections_mod.rename(self._collections, old, new_name)
+        )
+
+    def collection_delete(self, name: str) -> "str | None":
+        return self._apply_collections(
+            collections_mod.delete(self._collections, name)
+        )
+
+    def collection_assign(self, name: str, session_id: str) -> "str | None":
+        return self._apply_collections(
+            collections_mod.assign(self._collections, name, session_id)
+        )
+
+    def collection_unassign(self, session_id: str) -> "str | None":
+        return self._apply_collections(
+            collections_mod.unassign(self._collections, session_id)
+        )
+
+    def collections(self) -> "tuple[collections_mod.Collection, ...]":
+        """The window's collections. A tuple of frozen records, so a
+        caller reading them cannot edit them by accident -- every edit
+        goes through the five methods above."""
+        return self._collections
 
     @property
     def engine(self) -> Any | None:
@@ -2486,20 +2968,37 @@ class DoxaApp(App):
     def compose(self) -> ComposeResult:
         yield BeliefInspector()  # hidden stub, palette-toggled
         yield ClockChip()  # upper-right, own layer -- see theme.tcss
-        if self._restore_tabs:
-            yield self._compose_restored_root()
-        else:
-            pane = self._make_pane(self._engine_factory)
-            # Item D fallback: every saved tab was dead (nothing to
-            # reattach), but doxa.cli still has a report to show --
-            # "restored 0, skipped N" -- on the one fresh tab it spawned
-            # instead. self._restore_report is None on every ordinary
-            # launch, so this is a no-op there.
-            pane._boot_report = self._restore_report
-            # ALWAYS inside the chain of empty SplitBoxes: that chain is
-            # what a later split is created INTO, and it cannot be created
-            # on demand (doxa/ui/split.py's own docstring says why).
-            yield split_mod.chain(self._make_group(self._make_tab(pane)))
+        # v1.0.0: the session rail is a SIBLING of the window root, never
+        # a member of it. See doxa/ui/sidebar.py's module docstring for
+        # the whole argument; the two consequences that matter HERE are:
+        #
+        # * ``_window_root()`` still returns the outermost ``SplitBox``,
+        #   so it needs no change and no isinstance special case -- the
+        #   rail is not one. Splits, Alt+arrow growth, directional focus
+        #   and ``_pane_regions`` operate on the tree and never see it.
+        # * the ``Horizontal`` exists from HERE and cannot be created on
+        #   demand: Textual 5.3 cannot re-parent a mounted widget
+        #   (measured, v0.91.0 -- a mount of a mounted widget is a silent
+        #   no-op that orphans it), so wrapping the root at runtime is
+        #   impossible. The rail is mounted hidden instead, exactly the
+        #   reason ``split_mod.chain`` pre-makes empty boxes.
+        with Horizontal(id="window-row"):
+            yield SessionSidebar()
+            if self._restore_tabs:
+                yield self._compose_restored_root()
+            else:
+                pane = self._make_pane(self._engine_factory)
+                # Item D fallback: every saved tab was dead (nothing to
+                # reattach), but doxa.cli still has a report to show --
+                # "restored 0, skipped N" -- on the one fresh tab it
+                # spawned instead. self._restore_report is None on every
+                # ordinary launch, so this is a no-op there.
+                pane._boot_report = self._restore_report
+                # ALWAYS inside the chain of empty SplitBoxes: that chain
+                # is what a later split is created INTO, and it cannot be
+                # created on demand (doxa/ui/split.py's own docstring says
+                # why).
+                yield split_mod.chain(self._make_group(self._make_tab(pane)))
 
     def _compose_restored_root(self) -> "Any":
         """The restored window: one tree of groups, each holding its own

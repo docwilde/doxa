@@ -110,6 +110,8 @@ PANE_COMMANDS: "tuple[CommandBinding, ...]" = (
     CommandBinding("/diff", "_cmd_diff"),
     CommandBinding("/pane", "_cmd_pane"),
     CommandBinding("/movepane", "_cmd_movepane"),
+    CommandBinding("/sidebar", "_cmd_sidebar"),
+    CommandBinding("/collection", "_cmd_collection"),
     CommandBinding("/detach", "_cmd_detach"),
     CommandBinding("/attach", "_cmd_attach"),
     CommandBinding("/sessions", "_cmd_sessions"),
@@ -866,6 +868,130 @@ class PaneCommandsMixin:
         note = await self.app.move_tab_to_group(number)
         if note:
             await self._system(note)
+
+    async def _cmd_sidebar(self, args: str) -> None:
+        """``/sidebar`` -- show or hide the session rail.
+
+        The door that always works, beside ``Ctrl+B``. Same posture
+        ``/pane`` takes beside ``Ctrl+<digit>`` and ``/settings`` beside
+        ``Ctrl+,``: the key is the fast gesture, the command is the one
+        that survives a terminal that cannot send it -- and ``Ctrl+B`` is
+        tmux's default prefix, so on a tmux session this IS the door.
+
+        With ``on`` or ``off`` it says which, rather than toggling: a
+        command run from a script or a keybinding wants to assert a state,
+        not flip whatever it finds."""
+        raw = args.strip().lower()
+        rail = self.app.sidebar()
+        showing = bool(rail is not None and rail.styles.display != "none")
+        if raw in ("on", "show", "open"):
+            want = True
+        elif raw in ("off", "hide", "close"):
+            want = False
+        elif not raw:
+            want = not showing
+        else:
+            await self._system(
+                f"/sidebar takes on, off or nothing at all — not {raw!r}"
+            )
+            return
+        note = self.app.set_sidebar(want)
+        if note:
+            await self._system(note)
+            return
+        rail = self.app.sidebar()
+        now = bool(rail is not None and rail.styles.display != "none")
+        await self._system(
+            "session sidebar shown — click a row to go to that session, a "
+            "heading to fold it (Ctrl+B, /collection)"
+            if now else "session sidebar hidden (Ctrl+B, /sidebar)"
+        )
+
+    async def _cmd_collection(self, args: str) -> None:
+        """``/collection new|rename|delete|add|remove [name]`` -- the
+        sidebar's user-named groupings of sessions.
+
+        **collection, never group.** ``group`` is taken: a
+        :class:`doxa.ui.split.PaneGroup` is a REGION of the screen owning
+        its own tab strip. A collection groups sessions by NAME wherever
+        they are shown -- two members may sit in different regions, and one
+        region may show tabs from three collections.
+
+        ``add`` is the verb docs/plans/session-sidebar.md asks for by
+        description ("moving a session into a collection") and it moves
+        THIS session, the one the command was typed in, because that is the
+        session the user is looking at. It creates the collection if it
+        does not exist: "put this session in ampiric" is one intention
+        whether or not ampiric already exists.
+
+        Every refusal comes from :mod:`doxa.collections` and is printed
+        verbatim -- the model refuses, this prints; a second opinion here
+        would be a second set of rules."""
+        parts = args.strip().split(None, 1)
+        verb = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        app = self.app
+        if not verb or verb in ("list", "ls"):
+            items = app.collections()
+            if not items:
+                await self._system(
+                    "no collections yet — /collection add <name> puts this "
+                    "session in one (and makes it)"
+                )
+                return
+            lines = [
+                f"{c.name} — {len(c.sessions)} session"
+                f"{'' if len(c.sessions) == 1 else 's'}"
+                f"{' (folded)' if c.collapsed else ''}"
+                for c in items
+            ]
+            await self._system("\n".join(["collections:", *lines]))
+            return
+        if verb == "new":
+            note = app.collection_new(rest)
+            await self._system(note or f"collection {rest!r} — empty, so far")
+            return
+        if verb == "rename":
+            names = rest.split(None, 1)
+            if len(names) < 2:
+                await self._system("/collection rename <old> <new>")
+                return
+            note = app.collection_rename(names[0], names[1])
+            await self._system(
+                note or f"{names[0]!r} is now {names[1].strip()!r}"
+            )
+            return
+        if verb == "delete":
+            note = app.collection_delete(rest)
+            await self._system(
+                note
+                # Named out loud, because "delete" is the one verb here a
+                # user could reasonably fear means "lose the sessions".
+                or f"collection {rest!r} gone — its sessions are ungrouped, "
+                   "not closed"
+            )
+            return
+        if verb in ("add", "move", "put"):
+            if not self._session_id:
+                await self._system(
+                    "this session has no id yet — try again once it has "
+                    "connected"
+                )
+                return
+            note = app.collection_assign(rest, self._session_id)
+            await self._system(note or f"this session is now in {rest!r}")
+            return
+        if verb in ("remove", "rm", "out"):
+            if not self._session_id:
+                await self._system("this session has no id yet")
+                return
+            note = app.collection_unassign(self._session_id)
+            await self._system(note or "this session is ungrouped again")
+            return
+        await self._system(
+            f"/collection: no verb {verb!r} — new, rename, delete, add, "
+            "remove, or nothing to list them"
+        )
 
     async def _cmd_detach(self, args: str) -> None:
         """/detach -- the deliberate opposite of Ctrl+W: this tab closes,

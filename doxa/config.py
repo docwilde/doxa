@@ -361,6 +361,36 @@ SETTINGS: tuple[Setting, ...] = (
              "text at very low contrast.",
     ),
     Setting(
+        key="sidebar", env="DOXA_SIDEBAR", label="session sidebar",
+        category="Appearance", kind="bool_on", default="",
+        help="Show the collapsible session rail down the left of the "
+             "window (Ctrl+B, /sidebar — doxa.ui.sidebar.SessionSidebar)",
+        note="THREE states, which is why this row is bool_on and not "
+             "bool: empty means AUTO -- the rail appears once there is "
+             "something for it to say (any collection, or a second "
+             "session) and stays hidden before that, the hide-at-zero "
+             "discipline the context chip and the group tab strips "
+             "already follow. 1 pins it open, 0 pins it shut, and Ctrl+B "
+             "writes one of those two, so the first toggle ends the "
+             "guessing for good. The rail REFUSES to open on a window "
+             "too narrow to hold it and the panes both "
+             "(doxa.layout.sidebar_refusal): it says so rather than "
+             "squeezing a pane below its floor.",
+    ),
+    Setting(
+        key="sidebar_width", env="DOXA_SIDEBAR_WIDTH",
+        label="session sidebar: width", category="Appearance",
+        kind="number", default="22",
+        help="Columns the session rail occupies "
+             "(doxa.layout.SIDEBAR_WIDTH; clamped to 19–38)",
+        note="Clamped, never rejected: 22 is derived as the rail's own "
+             "chrome (6 columns) plus half the tab-label cap the strip "
+             "writes at, 19 is the width below which a row cannot show "
+             "the label floor the tab strip keeps legible, and 38 is the "
+             "width at which the whole capped label fits and wider buys "
+             "nothing.",
+    ),
+    Setting(
         key="clock_show", env="DOXA_CLOCK_SHOW", label="clock: show",
         category="Appearance", kind="bool_on", default="1",
         help="Show the fixed-width clock at the right edge of the tab "
@@ -673,6 +703,52 @@ def model() -> "str | None":
     """The configured model for new sessions, or None for the CLI default."""
     value = raw("DOXA_MODEL").strip()
     return value or None
+
+
+#: The session rail has not been decided either way -- see
+#: :func:`sidebar_mode`.
+SIDEBAR_AUTO = ""
+SIDEBAR_ON = "on"
+SIDEBAR_OFF = "off"
+
+
+def sidebar_mode() -> str:
+    """``""`` (auto), ``"on"`` or ``"off"`` for the session rail.
+
+    THREE states, and the third one is the feature. Auto is what a fresh
+    install gets, and it means hide-at-zero: the rail appears once there
+    is something for it to say -- a collection exists, or a second session
+    is open -- and stays out of the way before that, because a rail
+    listing one session under no heading is chrome that answers nothing.
+    The same discipline :data:`doxa.ui.labels.CTX_ABSOLUTE_MIN_COLS`,
+    :data:`doxa.diff.SIDE_BY_SIDE_MIN_COLS` and the group tab strips
+    already follow.
+
+    ``Ctrl+B`` writes ``"1"`` or ``"0"``, never the empty string, so the
+    first deliberate toggle takes the decision away from the heuristic
+    for good -- a user who closed the rail must not have it reappear
+    because they opened a second tab.
+
+    Reachable as three states only because the row is declared
+    ``bool_on``: :func:`_coerce` stores that kind as the STRING "0"/"1"
+    rather than a Python bool, and :func:`raw` collapses a bool ``False``
+    to ``""`` -- which would make "explicitly off" and "never touched"
+    the same answer. See the note on that function."""
+    value = raw("DOXA_SIDEBAR").strip().lower()
+    if not value:
+        return SIDEBAR_AUTO
+    return SIDEBAR_OFF if value in ("0", "false", "no", "off") else SIDEBAR_ON
+
+
+def sidebar_width() -> int:
+    """The rail's width in columns, clamped to what a rail can be. A
+    garbage value in a hand-edited config falls back to the default
+    rather than crashing the window -- :func:`linger_secs`' own posture,
+    one knob over."""
+    from .layout import SIDEBAR_WIDTH, clamp_sidebar_width
+
+    value = raw("DOXA_SIDEBAR_WIDTH").strip()
+    return clamp_sidebar_width(value) if value else SIDEBAR_WIDTH
 
 
 # -- writing ---------------------------------------------------------------

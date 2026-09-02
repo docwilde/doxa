@@ -154,6 +154,35 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette_prefill=True,
     ),
     SlashCommand(
+        name="/sidebar",
+        group="Panes & tabs",
+        summary="Show or hide the session sidebar — every session in this "
+                "window, with the state marks the tab strips carry "
+                "(Ctrl+B)",
+        # DECLARED, because a command whose key is not written here is a
+        # key /help and the startup key notice cannot see -- three
+        # commands shipped without one in v0.92.0 and their bindings were
+        # invisible to both. Spelled the way TEXTUAL spells it, so
+        # doxa.ui.labels.app_bindings can match it against DoxaApp.BINDINGS
+        # verbatim.
+        binding="ctrl+b",
+        palette="Sidebar: show or hide",
+    ),
+    SlashCommand(
+        name="/collection",
+        group="Panes & tabs",
+        summary="Group sessions in the sidebar under a name you choose — "
+                "new, rename, delete, or move THIS session into one",
+        usage="/collection new|rename|delete|add|remove [name]",
+        palette="Collection: new, rename, delete, move",
+        palette_prefill=True,
+        # NO ``binding``, and that is a statement rather than an omission:
+        # this command has no key at all. Declaring an empty one would be
+        # the same thing, but saying so here is what keeps the next reader
+        # from assuming it was forgotten -- the v0.92.0 defect was three
+        # commands that HAD keys and did not name them.
+    ),
+    SlashCommand(
         name="/msg",
         group="Panes & tabs",
         summary="Send a message to one same-project peer session",
