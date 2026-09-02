@@ -88,7 +88,11 @@ TAB_ISOLATION_MARKER = "⎇"
 # today is Claude/Anthropic's (see MODEL_ALIASES) -- so this table has
 # exactly one row. A future provider is a second row here, not a branch in
 # the display logic.
-PROVIDER_GLYPHS: dict[str, str] = {"claude": "✳"}
+# Keyed on providers.CLAUDE_PROVIDER_ID rather than a second literal
+# "claude": a peer publishes that same constant as PeerInfo.provider, and
+# a roster that wants a glyph for it calls provider_glyph(peer.provider) --
+# one vocabulary, not two that happen to agree today.
+PROVIDER_GLYPHS: dict[str, str] = {providers_mod.CLAUDE_PROVIDER_ID: "✳"}
 
 
 PROVIDER_GLYPH_COLOR = "#D97757"  # Claude/Anthropic orange -- theme.tcss's own
@@ -174,6 +178,39 @@ def short_model(model: "str | None") -> str:
         if tier in name:
             return tier.capitalize()
     return name.split("-", 1)[0] or name
+
+
+def peer_self_report(
+    provider: "str | None" = None,
+    model: "str | None" = None,
+    engine: "str | None" = None,
+) -> str:
+    """One human-readable phrase for what a peer SAYS it is
+    (``PeerInfo.provider`` / ``model`` / ``engine``) -- the display half of
+    docs/plans/peer-publishing.md.
+
+    Two rules, both load-bearing:
+
+    * **The phrase names itself as a claim.** It starts with
+      ``self-reported`` and never with anything that reads like a
+      measurement, because these three strings were written by ANOTHER
+      process -- same user, possibly a future non-DOXA engine -- and are
+      advisory forever. `"I am running opus"` is a more persuasive lie
+      than a fabricated title; the label is what stops a reader taking it
+      for a verified capability.
+    * **An unknown value prints ``?``, never a plausible guess.** Exactly
+      what :func:`ctx_absolute_text` already does for an unmeasured
+      context limit, and for the same reason: a session that publishes no
+      ``model`` has told us nothing, and "claude"/"default" would be this
+      surface inventing an answer. All three absent -- an older build's
+      entry, or a writer that has not adopted the fields -- collapses to
+      the single honest word rather than three question marks in a row."""
+    if not (provider or model or engine):
+        return "self-reported: unknown"
+    return (
+        f"self-reported: {model or '?'} via {provider or '?'} "
+        f"on {engine or '?'}"
+    )
 
 
 def _shrink(text: str, width: int) -> str:

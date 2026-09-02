@@ -35,7 +35,13 @@ Mechanism, deliberately boring:
   model, and model-bound peer text is always prefixed with
   :data:`PEER_UNTRUSTED_INTRO` -- the same anti-injection framing posture
   as ``lore_core.deriver._REVIEW_INTRO``: peer text is data to weigh,
-  never an instruction to follow.
+  never an instruction to follow. A registry entry is untrusted the same
+  way a frame is: ``read_registry`` scrubs every free-text field it builds
+  a :class:`PeerInfo` from, and the three SELF-DESCRIPTION fields
+  (``provider``/``model``/``engine`` -- what a session says it IS, next to
+  where it is) are advisory display data forever, never a fact a decision
+  may rest on. See :class:`PeerInfo`'s own block and
+  docs/plans/peer-publishing.md.
 
 Daemon-split note (PHASE0 direction: the TUI becomes a thin client over a
 Unix-socket daemon): the registry entry points at whoever HOSTS the engine.
@@ -56,7 +62,7 @@ import os
 import socket
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields as dataclass_fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -70,6 +76,17 @@ STALE_AFTER_SECS = 60.0
 SEND_TIMEOUT_SECS = 2.0
 RECV_TIMEOUT_SECS = 5.0
 MAX_FRAME_BYTES = 64 * 1024
+
+# How much of a peer's SELF-DESCRIPTION (provider/model/engine) is ever
+# kept. These are short ids by construction -- "claude", "sonnet",
+# "claude-sonnet-4-5", "doxa" -- and nothing validates them at write time
+# (docs/plans/peer-publishing.md deliberately does not: a validated lie is
+# still a lie). What CAN be bounded without pretending to judge content is
+# the size, so a peer cannot hand a roster row a kilobyte of prose. Past
+# the cap the value is visibly truncated with an ellipsis rather than cut
+# silently -- a display that shortens without saying so is the same class
+# of quiet lie the rest of this feature refuses.
+MAX_SELF_DESC_CHARS = 64
 
 # The untrusted-peer framing marker. Mirrors the house anti-injection style
 # of lore_core.deriver._REVIEW_INTRO: name the trust boundary, state that
@@ -100,6 +117,33 @@ class PeerSendError(RuntimeError):
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).strftime(_TS_FMT)
+
+
+def _self_desc(value: Any) -> "str | None":
+    """Normalize one self-described identity string (provider / model /
+    engine) from an untrusted registry entry: scrubbed, bounded, or None.
+
+    Deliberately NOT validation. Nothing here checks that ``provider`` is a
+    provider DOXA knows or that ``engine`` is an engine that exists --
+    docs/plans/peer-publishing.md settles that as free-string, because the
+    field's whole purpose is to let a writer DOXA has never heard of name
+    itself, and because a value checked against a list would read as
+    verified when it is still only a claim. What this does is exactly the
+    three things that bound the damage of an arbitrary string reaching a
+    terminal: coerce to text, run the same ``scrub_secrets`` pass every
+    other peer-written string gets, and cap the length.
+
+    Missing, empty, whitespace-only, or a non-scalar JSON value (a list, a
+    dict, ``null``) all become None -- "unknown", never a guess, never a
+    stringified ``{}``."""
+    if value is None or isinstance(value, (dict, list, tuple, set, bool)):
+        return None
+    text = scrub_secrets(str(value)).strip()
+    if not text:
+        return None
+    if len(text) > MAX_SELF_DESC_CHARS:
+        text = text[: MAX_SELF_DESC_CHARS - 1] + "…"
+    return text
 
 
 def age_secs(ts: str) -> float:
@@ -231,9 +275,100 @@ class PeerInfo:
     turn): unknown, never assumed to be zero -- the same rule
     :attr:`clients` already states, applied to a second field."""
 
+    # -- self-description (docs/plans/peer-publishing.md) ------------
+    #
+    # THE RULE THAT COVERS ALL THREE, stated once here rather than three
+    # times below: these are what a session SAYS it is, written by another
+    # process -- same user, but possibly a future non-DOXA engine -- and
+    # they are ADVISORY FOREVER. They may be displayed and they may be
+    # logged; they may never be treated as verified. No surface may use a
+    # peer's self-reported ``model`` to make a privileged decision (which
+    # peer gets a task, whose output is trusted, whether to relax a check)
+    # without a human in the loop -- the same rule that keeps ``/msg``
+    # human-only, and the reason ``model`` is if anything MORE dangerous
+    # than ``title``: "I am running opus" reads as a capability claim an
+    # orchestrator might act on, where a fabricated title only misleads a
+    # label. None of the three reaches the model today (nothing under
+    # doxa/operators.py or the SDK tool surface exposes a PeerInfo), and
+    # if one ever does it crosses the identical :data:`PEER_UNTRUSTED_INTRO`
+    # framing ``frame_for_model`` already applies to message bodies --
+    # there is no "structured, therefore safer" exception.
+    #
+    # All three are read from the entry with an individual ``.get()`` and
+    # default None, exactly like ``clients``/``usage_tokens``, and are
+    # never added to ``_ENTRY_FIELDS``: an entry written by an OLDER build
+    # that has none of these keys must read as a live peer with three
+    # Nones, not be reaped for a missing key.
+
+    provider: "str | None" = None
+    """Short provider id -- the same vocabulary
+    :data:`doxa.ui.labels.PROVIDER_GLYPHS` keys on
+    (:data:`doxa.providers.CLAUDE_PROVIDER_ID`, ``"claude"``, its one row
+    today), so a roster wanting a glyph calls
+    ``provider_glyph(peer.provider)`` and needs no table of its own. Set
+    once at connect from the provider whose CLI this session's engine
+    drives. None means an older build, or a writer that predates the
+    field: unknown, never "claude"."""
+
+    model: "str | None" = None
+    """The model id or alias currently in force -- the exact string
+    :attr:`doxa.engine.SessionEngine.model` holds and ``/model`` accepts
+    (an alias like ``"sonnet"``, or a resolved id like
+    ``"claude-sonnet-4-5"`` once the CLI's init message names one).
+
+    MUTABLE, and unlike :attr:`usage_tokens` it does NOT ride the
+    heartbeat: ``set_model()`` switches models in place with no reconnect,
+    so :meth:`PeerHost.set_model` rewrites the entry at the moment of the
+    switch -- the same "presence has to move when the answer changes, not
+    on the next heartbeat" discipline :meth:`PeerHost.set_client_count`
+    and :meth:`PeerHost.set_title` already apply. (The number that CAN
+    afford to be a beat old is the one that changes every turn; an
+    identity that changes once an hour cannot, because a peer reading it
+    stale reads a specific wrong answer rather than a slightly old one.)
+
+    None means unknown -- a session riding the CLI's own ``--model``
+    default before its first init message, or an older build. Never
+    "default": ``short_model(None)`` renders that word for a LOCAL session
+    whose default we at least know is in force; for a peer we do not know
+    even that."""
+
+    engine: "str | None" = None
+    """Which engine implementation hosts this session --
+    :data:`doxa.engine.ENGINE_ID` (``"doxa"``) for every session DOXA
+    itself runs today, in-process or behind a daemon alike (the daemon
+    hosts the same :class:`doxa.engine.SessionEngine`;
+    :class:`doxa.client.EngineClient` is a client OF that host and never
+    writes a registry entry, so the daemon split does not produce a second
+    engine identity).
+
+    Free-form on purpose. The field exists so a second engine, or a
+    non-DOXA process writing this same schema, can name itself without a
+    DOXA release -- a fixed set could not admit the very writer the field
+    was added for, and would invite reading membership in the set as
+    verification. None means unknown."""
+
     @property
     def scope_key(self) -> str:
         return self.repo_root or self.cwd
+
+
+def peer_from_mapping(data: "dict[str, Any]") -> PeerInfo:
+    """Build a :class:`PeerInfo` from a dict that came off the DAEMON
+    protocol (``vars(peer)`` in doxa/daemon.py's status/peers replies),
+    tolerating keys this build has never heard of.
+
+    The registry reader gets this property for free -- it names the keys it
+    wants (``{k: data[k] for k in _ENTRY_FIELDS}``) and never unpacks the
+    whole object -- but the daemon path did not: it was a bare
+    ``PeerInfo(**p)``, which raises ``TypeError: unexpected keyword
+    argument`` the first time a NEWER daemon sends a field an OLDER
+    attached client's dataclass lacks. Adding three fields is exactly the
+    event that would have found that, so the same "ignore what you do not
+    know, default what you are missing" rule the presence file has always
+    had now covers the socket too. Unknown keys are dropped; absent ones
+    fall to the dataclass defaults."""
+    known = {f.name for f in dataclass_fields(PeerInfo)}
+    return PeerInfo(**{k: v for k, v in data.items() if k in known})
 
 
 def _pid_alive(pid: int) -> bool:
@@ -313,6 +448,17 @@ def read_registry(reap: bool = True, probe: bool = False) -> list[PeerInfo]:
             info.usage_tokens = (
                 int(usage_tokens) if isinstance(usage_tokens, (int, float)) else None
             )
+            # Self-description (provider/model/engine), same three-part
+            # shape one more time: an individual .get(), a defensive
+            # coercion, default None -- see _self_desc for why the
+            # coercion scrubs and caps but never validates, and PeerInfo's
+            # own block for the trust rule these carry. The scrub happens
+            # HERE, at the one point an entry becomes a PeerInfo, for the
+            # same reason title/cwd are scrubbed here rather than at
+            # whichever display site remembers.
+            info.provider = _self_desc(data.get("provider"))
+            info.model = _self_desc(data.get("model"))
+            info.engine = _self_desc(data.get("engine"))
         except (OSError, ValueError, TypeError, KeyError):
             if reap:
                 with contextlib.suppress(OSError):
@@ -497,6 +643,9 @@ class PeerHost:
         on_peer_left: Callable[[str], Any] | None = None,
         heartbeat_secs: float = HEARTBEAT_SECS,
         daemon_socket: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        engine: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.cwd = str(cwd)
@@ -536,6 +685,18 @@ class PeerHost:
         # picks it up, same as it already does for title/cwd/anything
         # else that can change between beats.
         self.usage_tokens: "int | None" = None
+        # Self-description (see PeerInfo.provider/model/engine): what this
+        # session says it IS, next to what it already published about
+        # where it is. Every one of them is optional and stays None when
+        # the caller does not know -- the honest answer for an unreported
+        # value is "unknown", and the display prints `?` for it (the same
+        # thing `/context` does for a context limit nothing has measured).
+        # Normalized through the same _self_desc the reader uses so a
+        # blank or whitespace-only argument never becomes an empty-string
+        # key on disk.
+        self.provider = _self_desc(provider)
+        self.model = _self_desc(model)
+        self.engine = _self_desc(engine)
         self._on_message = on_message
         self._on_peer_joined = on_peer_joined
         self._on_peer_left = on_peer_left
@@ -595,6 +756,17 @@ class PeerHost:
             entry["clients"] = int(self.client_count)
         if self.usage_tokens is not None:
             entry["usage_tokens"] = int(self.usage_tokens)
+        # Omitted entirely when unknown, never written as null or "": an
+        # absent key and a None value must be indistinguishable to a
+        # reader, which is what makes THIS build's entry readable by an
+        # older one (which ignores the keys) and an older build's entry
+        # readable by this one (which defaults them).
+        if self.provider:
+            entry["provider"] = self.provider
+        if self.model:
+            entry["model"] = self.model
+        if self.engine:
+            entry["engine"] = self.engine
         tmp = self.registry_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
         os.chmod(tmp, 0o600)
@@ -624,6 +796,40 @@ class PeerHost:
         heartbeat interval old, never the instant one; nothing here claims
         otherwise."""
         self.usage_tokens = int(tokens)
+
+    def set_model(self, model: "str | None") -> None:
+        """Republish this session's model -- called by
+        :meth:`doxa.engine.SessionEngine.set_model` at the moment of an
+        in-place switch, and once more when the CLI's ``init`` message
+        finally names the model a session riding the default is actually
+        running.
+
+        WRITES IMMEDIATELY, and that is the whole point. ``usage_tokens``
+        can afford to ride the next heartbeat because a token total that
+        is one beat old is a slightly old number; a model id that is one
+        beat old is a specific WRONG answer -- a peer reads "opus" for
+        another fifteen seconds after this session switched to "haiku".
+        Same discipline, and the same sentence, as
+        :meth:`set_client_count`: presence has to move when the answer
+        changes, not on the next heartbeat.
+
+        No event is emitted for the change (no ``peer_updated`` to match
+        ``peer_joined``/``peer_left``) -- see
+        docs/plans/peer-publishing.md's answer to its own open question 2:
+        the write is immediate, so every reader's NEXT read is already
+        correct, and a new event type would have to fan out an advisory
+        string on a cadence nobody has measured a need for.
+
+        A no-op when nothing changes, so the ordinary case of ``/model``
+        re-selecting what is already in force costs no write. Passing None
+        clears the field back to "unknown" rather than leaving a stale
+        claim standing."""
+        normalized = _self_desc(model)
+        if normalized == self.model:
+            return
+        self.model = normalized
+        with contextlib.suppress(OSError):
+            self._write_entry()
 
     def set_title(self, title: str) -> None:
         """Replace the connect-time cwd-basename fallback with a real

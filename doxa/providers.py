@@ -78,6 +78,17 @@ from typing import Protocol
 FALLBACK_MODEL_ALIASES: tuple[str, ...] = ("haiku", "sonnet", "opus", "fable")
 
 
+# The short provider id for the one provider DOXA drives. ONE string, three
+# readers: ``ClaudeProvider.provider_id()`` returns it,
+# ``doxa.ui.labels.PROVIDER_GLYPHS`` keys on it, and
+# ``doxa.engine.SessionEngine`` publishes it as ``PeerInfo.provider`` at
+# connect (docs/plans/peer-publishing.md). Defined HERE, in the module that
+# owns provider identity, rather than as a literal at each of the three --
+# the peer-publishing spec's "no new vocabulary, two reused ones" is only
+# true if the vocabulary has a place to live.
+CLAUDE_PROVIDER_ID = "claude"
+
+
 @dataclass(frozen=True)
 class ModelInfo:
     """One selectable model, as the picker shows it.
@@ -112,6 +123,14 @@ class ModelProvider(Protocol):
     second module rather than swell), and writing it is feature work for
     the multi-provider engines, not something a refactor gets to invent."""
 
+    def provider_id(self) -> str:
+        """The short, machine-facing id -- ``"claude"``, the same key
+        ``doxa.ui.labels.PROVIDER_GLYPHS`` uses and the same string a
+        session publishes as ``PeerInfo.provider``. Distinct from
+        :meth:`provider_display_name`, which is prose for a picker header
+        ("Claude (Anthropic)") and would be a poor registry value."""
+        ...
+
     def provider_display_name(self) -> str:
         ...
 
@@ -129,6 +148,9 @@ class ClaudeProvider:
 
     def __init__(self) -> None:
         self._cache: "list[ModelInfo] | None" = None
+
+    def provider_id(self) -> str:
+        return CLAUDE_PROVIDER_ID
 
     def provider_display_name(self) -> str:
         return "Claude (Anthropic)"
