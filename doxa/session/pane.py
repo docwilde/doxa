@@ -617,7 +617,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
             return
         self.set_tab_label(label)
 
-    def set_tab_label(self, text: str) -> None:
+    def set_tab_label(self, text: str, *, retry: bool = True) -> None:
         """Write one label onto the tab header AND onto the pane's own
         title, which is what the palette's tab section and any later
         re-add of the pane read.
@@ -631,9 +631,10 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         -- but renaming it back to itself must not hand back
         "✳ my old name" as the seed.
 
-        Records whether the header write LANDED -- see
-        :meth:`refresh_tab_label` on why a swallowed write used to be
-        permanent."""
+        Records whether the header write LANDED, and spends ONE deferred
+        retry when it did not -- see :meth:`refresh_tab_label` on why a
+        swallowed write used to be permanent, and why waiting for the
+        next unrelated ``_refresh_status`` was not enough on its own."""
         self._tab_label = text
         self._tab_label_painted = False
         displayed = f"{provider_glyph()} {text}"
@@ -663,6 +664,23 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
                 self.tab_id
             ).label = displayed
             self._tab_label_painted = True
+        if not self._tab_label_painted and retry:
+            # The strip is not up yet -- a label can be computed a frame
+            # before the Tab widget that shows it exists. Spend the intent
+            # on the NEXT frame rather than on the next unrelated event:
+            # ``_refresh_status`` is event-driven, and a session whose
+            # boot produced exactly one of them would otherwise wear its
+            # birth label until something else happened to it.
+            #
+            # ONE retry, ``retry=False``, and bounded exactly the way
+            # ``DoxaApp._focus_tab`` and ``_activate_tab`` bound theirs --
+            # a pane that never gets a tab at all (a harness that mounts
+            # one bare) must not schedule itself forever. If the frame
+            # after this one is still too early, ``_tab_label_painted``
+            # stays False and the next ``_refresh_status`` picks it up,
+            # which is the slow path this fast one exists beside.
+            with contextlib.suppress(Exception):
+                self.call_after_refresh(self.set_tab_label, text, retry=False)
 
     def _set_tab_class(self, class_name: str, value: bool) -> None:
         """Toggle one status class (``-working`` / ``-done-unseen`` /
