@@ -426,10 +426,35 @@ says so. Side-by-side turns on above 100 columns and unified is the
 default below it, because at 80 columns a half-width pane is 40 and two
 20-column sides are unreadable.
 
+Changed lines are drawn with a **background**, not just a coloured
+foreground — removed rows red, added rows green — and each row carries
+its **line numbers down the left**: both the old and the new number in
+unified (only the relevant one filled per row), one number per side in
+side-by-side. The numbers themselves are green for an added line and red
+for a removed one, and they sit outside the wash so they stay readable.
+A file's fold carries its `+42 −7` in the same two colours.
+
 The diff pane is a real layout leaf: `ctrl+shift+←/→` moves the keyboard
 into it and back, `alt+←/→` widens it, it keeps updating while you type
 in the session, and its position is saved and restored with the rest of
 the tab's layout. A second `/diff` closes it. Each session has its own.
+
+**You do not have to open it to know there is something in it.** When the
+worktree has changes the status bar carries a `diff 3 files +42 −7` chip —
+clickable, and the click is the same toggle `f2` is — and it is hidden
+when there is nothing, like every other chip on that row. Two states are
+not "nothing": a worktree whose recorded base is its own branch cannot be
+diffed at all and reads `diff ⚠ no base`, and a git that refuses reads
+`diff ⚠ unreadable`. A session with no worktree base recorded is diffed
+against `HEAD`, and the chip says `vs HEAD` because that is a smaller
+claim. The counts are `git diff --numstat`, recomputed on the same edit
+that ticks the pane and at no other time.
+
+`auto diff` (settings, **off** by default) opens the pane by itself the
+first time a session edits the worktree — **once** per session, so
+closing it is final. It never takes the keyboard away from the prompt,
+and on a window too narrow to split it says so instead of making an
+unusable sliver.
 
 **Reject** on a hunk does two things, in this order: it reverse-applies
 exactly that hunk (a second hunk in the same file is untouched), and it

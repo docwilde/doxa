@@ -4,6 +4,153 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.0.1 — 2026-09-03
+
+**"Does the diff open automatically when the agent edits code?"** It did
+not, and the consequence was worse than the missing convenience: the live
+diff (0.92.0) opened on `f2` or `/diff` and `_tick_diff` deliberately did
+nothing when no diff pane was open — *"costs nothing when nobody is
+looking: no diff pane, no query, no git"* — so **there was no way to tell
+there were changes without opening it**. A feature behind an F-key nobody
+discovers. Three chapters: a chip that says there is something to look
+at, an opt-in setting that opens it, and the pane's own rendering.
+
+### The diff chip
+
+- **`diff 3 files +42 −7` on the status bar**, clickable, and the click is
+  the same toggle `f2` fires (`StatusBar.action_open_diff` →
+  `PaneChipsMixin.open_diff_view` → `DoxaApp.toggle_diff_pane`, one door).
+  It sits immediately right of the `repo ⎇ branch` chip, because it
+  qualifies exactly what that chip names.
+- **Hidden at zero**, the rule every chip on that row follows — and the
+  three states that are NOT zero are rendered so they cannot be mistaken
+  for it. **`DiffCounts.chip`** (`doxa/diff.py`) is the whole vocabulary:
+  changes → `diff 3 files +42 −7`; changes with no worktree base recorded
+  → the same plus `vs HEAD`, because uncommitted work against the current
+  commit is a smaller claim than a session's work against its branch
+  point; no changes → **absent**; `base_ref == branch` → `diff ⚠ no base`,
+  painted at every width, because 0.33.0's unmeasurable-base trap must
+  never be spelt the way "nothing changed" is spelt. A git that refuses
+  outright reads `diff ⚠ unreadable`. The tooltip is the same sentence the
+  pane's own head line prints — **`diff.headline`** is now one function
+  serving both, rather than one wording copied into two surfaces.
+- **It rides the existing tick, not a timer and not a watcher.**
+  **`PaneRuntimeMixin._tick_diff`** (`doxa/session/runtime.py`) already
+  fired on `Edit`/`Write`/`NotebookEdit`/`Task` and tree-touching `Bash`
+  (`diff.is_tick`); it no longer returns early when no pane is open, and
+  it also fires once at `_boot` so a session resumed into a worktree that
+  is already dirty does not read as clean.
+- **Cost, measured.** **`diff.counts`** is `git diff --numstat` plus
+  `git ls-files --others` (and one `--no-index --numstat` per untracked
+  file, `MAX_UNTRACKED`-bounded, skipped entirely when there are none): on
+  an ordinary ~700-file repo **8 ms + 2.5 ms ≈ 10 ms** a tick; on a
+  deliberately pathological worktree — 6000 tracked files, 3000 modified,
+  50 untracked — **156 ms + 10 ms + 139 ms ≈ 305 ms**. The debounce is the
+  one the diff pane already uses and needs no interval to tune: the worker
+  is `exclusive` in its own `"diff-counts"` group, so a turn landing
+  thirty edits cancels twenty-nine in-flight git calls and the chip
+  settles on the state after the last one, off the event loop via
+  `asyncio.to_thread`. For scale, that same tick already drove
+  **`diff.compute`** whenever the pane was open — 270 ms of git plus
+  840 KB of unified diff to parse on the same tree — so the chip is the
+  cheaper half of a cost the tick already carried. A session with no
+  repository asks for nothing at all. The counts are deliberately NOT
+  capped where `MAX_FILES`/`MAX_TOTAL_LINES` cap the pane's rendering: a
+  page has to end somewhere, a count does not, and `diff 200 files` on a
+  tree with 700 changed would be the short-answer-as-whole-answer those
+  caps exist to prevent.
+- **A reverted hunk refreshes it too.** **`DiffPane.flush_pending`** ends
+  by asking the session pane for a fresh count: a reject is the one write
+  in this app that changes the worktree from DOXA's own side rather than
+  the agent's, so no tool result ticks for it, and a chip still counting
+  the reverted lines would be the pane and the bar disagreeing about the
+  same tree.
+- **Width discipline**: below **`DIFF_CHIP_MIN_COLS`** (110, deliberately
+  the same measured number as `MODE_CHIP_MIN_COLS`, not a second one) the
+  chip drops its noun — `diff 3f +42 −7`. The two ⚠ states neither
+  shorten nor stand down, the same asymmetry the mode chip applies to a
+  mode that has stopped asking.
+
+### `auto diff` — opening it by itself, off by default
+
+- **New setting `auto_diff` / `DOXA_AUTO_DIFF`** (`doxa/config.py`,
+  Session), **off**, read by **`diff.auto_open_enabled`** with the same
+  explicit-truthy-string reading `adopt_plugins` and bypass arming use.
+  Off is the argument, not a default nobody thought about: opening the
+  diff splits the group the session is in and halves the width of the
+  transcript being read, and a surface that rearranges the screen
+  mid-turn unasked is worse than one you have to know about.
+- **On, it opens ONCE per session** — the first tree-touching edit, never
+  again. **`SessionPane._auto_diff_done`** holds that, on the SESSION
+  pane and not on the diff pane it opens: a user who closes the diff has
+  closed it, and a flag living on the closed widget would come back False
+  on the next tick and fight them. Set before the worker starts, so two
+  edits in one turn cannot open two diffs; set also when a tick finds a
+  diff already open, which is what makes a diff restored with the tabset
+  spend the allowance rather than queue a second one behind it. Restore
+  drives no tool results, so restoring opens nothing on its own.
+- **It refuses rather than mangles.** **`DoxaApp._open_diff_beside`**
+  (extracted from `toggle_diff_pane`, which now takes an explicit pane —
+  an edit can land in a background tab) hits the same
+  **`layout.split_refusal`** floor a hand-driven split does; the refusal
+  is shown, naming `f2` for when there is room, and the allowance is spent
+  rather than re-asked on every subsequent edit.
+- **It never takes the keyboard.** `toggle_diff_pane` has never called
+  `_focus_tab` on the way in (0.38.0: a surface mounts unfocused and its
+  creator says where the keyboard goes); that is now asserted rather than
+  described — the prompt keeps focus and keeps receiving keys while the
+  diff appears beside it.
+
+### The diff, in colour
+
+- **Backgrounds, not foregrounds.** 0.92.0 coloured a changed line's text
+  and nothing else. **`_hunk_text`** / **`_side_by_side_text`**
+  (`doxa/ui/diffview.py`) now paint a removed row on `#3B211E` and an
+  added row on `#1E3222`, each with a foreground picked to read against
+  it (`#F3D6CF` / `#DCEBD3`) rather than inherited from the ramp. Context
+  rows carry no wash: a signal on every row is not one. DOXA registers no
+  Theme and `theme.tcss` is a single dark ramp, so there is one palette to
+  be right about, and these are it.
+- **Line numbers down the left**, walked against the `@@` header's own
+  ranges — nothing re-parsed, nothing guessed. Unified shows both columns,
+  old then new, with only the relevant one filled per row; side-by-side
+  shows one number per side, because each side is one file. The number is
+  green for an added line, red for a removed one, and it sits OUTSIDE the
+  wash — a green number on the green background is the one part of this
+  that could not be read. Gutter width is sized per hunk
+  (**`_gutter_digits`**, 3–7 digits).
+- **Rows are padded to the width they are painted into**, never truncated:
+  a long line still wraps and carries its background with it. That needed
+  **`HUNK_INSET_COLS`** (6 — `Collapsible`'s padding plus its `Contents`',
+  measured at 80 → 74, not read off the stylesheet by hand), because a row
+  padded six columns too far wraps and puts an empty coloured line under
+  every change. Side-by-side had always overrun by the same six and now
+  subtracts it too.
+- **`+42 −7` is green-and-red in both places it appears** — the file fold
+  and the status chip — from one pair of constants in `doxa/ui/labels.py`
+  (**`DIFF_ADD_NUM`** / **`DIFF_DEL_NUM`**). **`FileDiff.summary_parts`**
+  splits the fold's wording so the view can colour the pieces without a
+  second copy of the words; `FileSection` now hands `Collapsible` a Rich
+  `Text` instead of a `str`, which also closes a latent trap — Textual
+  runs a `str` label through `Content.from_markup`, so a path containing
+  `[` was one filename away from being parsed as markup.
+- **Still Rich `Text` and `style=`, never console markup**, for the reason
+  0.28.0 paid for: a diff body is arbitrary source and source contains
+  `[`. Pinned by a test whose hunk body is `+items[0] = [red]not
+  markup[/]`. The `\ No newline` note, the truncation note and the pending
+  badge are unchanged.
+- **Paint cost**: the largest hunk `MAX_HUNK_ROWS` allows (400 rows) goes
+  from 17,380 characters/400 spans to 30,000/800 — rendering **4.0 ms →
+  10.8 ms**, building 0.39 ms → 0.66 ms. Per expand or repaint, never per
+  frame. Stated rather than mitigated: 6.8 ms on the worst hunk the cap
+  permits is not worth a second rendering path.
+
+26 new tests in `tests/test_diff_chip.py`. All 26 fail against 0.99.0 —
+the module cannot import there, every symbol it asserts on being new. With
+the model, palette and renderer injected into a 0.99.0 checkout so it can
+import, 12 still fail on the wiring alone (every chip test, every
+auto-open test, and the settings-registry row).
+
 ## 1.0.0 — 2026-09-03
 
 **A permanent, collapsible rail down the left of the window, listing every
