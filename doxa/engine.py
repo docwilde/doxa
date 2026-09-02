@@ -91,6 +91,12 @@ from . import gate as gate_mod
 from . import images as images_mod
 from . import operators as operators_mod
 from . import peers as peers_mod
+# Imported for ONE constant (CLAUDE_PROVIDER_ID, published as
+# PeerInfo.provider at connect) -- doxa.providers costs nothing at import
+# (os + dataclasses + typing; the `anthropic` tier is lazy inside a try),
+# and reading the id from the module that owns provider identity is what
+# keeps this from being a second "claude" literal.
+from . import providers as providers_mod
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -1126,6 +1132,24 @@ def _as_tokens(value: Any) -> "int | None":
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return int(value) if value >= 0 else None
+
+
+ENGINE_ID = "doxa"
+"""What this engine implementation calls itself when it publishes
+``PeerInfo.engine`` (docs/plans/peer-publishing.md).
+
+ONE value exists, and the daemon split does not make a second: a daemon
+hosts this same :class:`SessionEngine` and it is the engine that owns the
+:class:`~doxa.peers.PeerHost`, so a detached session and an in-process one
+publish the identical id. :class:`doxa.client.EngineClient` is a CLIENT of
+that host -- it never constructs a PeerHost and never writes a registry
+entry, so "attached over a socket" is not an engine identity.
+
+A second engine inside DOXA (the multi-provider engines
+doxa/providers.py's docstring gestures at) takes a second id here; a
+non-DOXA process writing this same registry schema names itself whatever
+it likes. Nothing validates the string on either side -- see
+:func:`doxa.peers._self_desc` for why."""
 
 
 PEER_TITLE_MAX = 72
@@ -2272,6 +2296,24 @@ class SessionEngine:
                 on_peer_joined=self._on_peer_joined,
                 on_peer_left=self._on_peer_left,
                 daemon_socket=self.daemon_socket,
+                # What this session IS, alongside where it is (see
+                # PeerInfo's self-description block). All three come from
+                # what this process already knows locally at connect --
+                # no network call, no second source of truth:
+                # `provider` from the module that owns provider identity,
+                # `engine` from this module's own ENGINE_ID, `model` from
+                # the one attribute /model already writes.
+                #
+                # self.model is None here whenever the user rides the
+                # CLI's own --model default, and it stays None on the
+                # wire until the init SystemMessage names the model the
+                # CLI actually chose -- at which point the same handler
+                # that updates self.model republishes it. An unknown
+                # model publishes as ABSENT, never as "default": the
+                # display's job is to say `?`, not this one's to guess.
+                provider=providers_mod.CLAUDE_PROVIDER_ID,
+                model=self.model,
+                engine=ENGINE_ID,
             )
             await self.peer_host.start()
         except Exception as exc:
@@ -2542,6 +2584,16 @@ class SessionEngine:
                 # user rides the CLI default), which the status line shows.
                 if message.subtype == "init" and message.data.get("model"):
                     self.model = str(message.data["model"])
+                    # ...and the peer registry learns it at the same
+                    # moment. This is the ONLY point at which a session
+                    # riding the CLI default finds out what it is
+                    # running, so without this a defaulted session would
+                    # publish `model: unknown` for its whole life while
+                    # its own status bar named the model. Strictly
+                    # additive, like every other peer call in this class.
+                    if self.peer_host is not None:
+                        with contextlib.suppress(Exception):
+                            self.peer_host.set_model(self.model)
                 continue
 
             elif isinstance(message, ResultMessage):
@@ -2610,6 +2662,16 @@ class SessionEngine:
             )
         await setter(model)
         self.model = model
+        # Republish BEFORE returning, not on the next heartbeat: a peer
+        # that reads "opus" for another fifteen seconds after this session
+        # switched to "haiku" is reading a specific wrong answer, not a
+        # slightly old one -- see PeerHost.set_model for the full argument
+        # and why no peer_updated event goes with it. Strictly additive:
+        # a presence failure never fails a model switch that already
+        # succeeded on the client.
+        if self.peer_host is not None:
+            with contextlib.suppress(Exception):
+                self.peer_host.set_model(model)
         return model or "default"
 
     # -- live permission-mode switching (v0.42.0) ---------------------
