@@ -244,22 +244,34 @@ not geometry.
   machines; no auto-grouping by repo or branch — a collection is a thing
   the user decides, not a thing DOXA infers. Inline renaming of a heading
   is `/collection rename`, not a click-to-edit field.
-- Full suite: **1720 passed**, up from 1685 at v0.99.0 — the 32 above,
-  the 3 below, and nothing else touched.
+- Full suite: **1723 passed**, up from 1685 at v0.99.0 — the 32 above,
+  the 6 below, and nothing else touched.
 
 ### What the rail costs the event loop, and the leak it was blamed for
 
 A "one different test fails per full run" report against this branch was
-run down to three separate facts, only the second of which is this
-release's doing. All three are pinned by tests now.
+run down to four separate facts, only the third of which is this
+release's doing. Each is pinned by a test now.
 
-- **Not the rail.** The same failure occurs on v0.99.0: a control full
-  run of `origin/main` failed `test_a_vsplit_never_blocks_the_event_loop`
-  at a 621 ms stall, and under matched CPU starvation
-  `tests/test_tab_labels.py` fails at the same rate on both branches (the
-  `'default · myrepo'` birth label, i.e. `_settled` returning on the
-  FIRST label write rather than the last). `feat/sidebar` ran the full
-  suite clean three times over.
+- **Not the rail.** `feat/sidebar` ran the full suite clean three times
+  (22:23, 22:55, 23:12) while a control run of `origin/main` failed
+  `test_a_vsplit_never_blocks_the_event_loop` at a 621 ms stall — one
+  failure in a 1685-test run, the same signature the report described.
+  Under matched CPU starvation, with the arm order randomised so no
+  branch inherits a slot, the two heartbeat tests are indistinguishable
+  across three arms (`origin/main`, this branch, and this branch with
+  `DOXA_SIDEBAR=0` so the rail never opens): medians 47 / 51 / 49 ms,
+  0 failures in 25 runs each. At module level the same three arms fail
+  2, 6 and 4 times in 10 — the rail-disabled arm sits between the other
+  two, which the rail cannot explain.
+- **The victims are a population, not a cause.** Five distinct tests
+  across five modules have now been observed failing this way, four of
+  them in files this release never touched
+  (`test_split_panes.py`, `test_tab_labels.py`, `test_live_diff.py`,
+  and `test_sidebar.py`'s own). Each is a test whose margin is thin
+  enough that a load spike crosses it; `STALL_LIMIT` is 250 ms and
+  Textual's own synchronous layout peaks at 240–330 ms on this machine
+  on **both** branches.
 - **The suite was a load generator.** `DoxaApp(...)` with no
   `engine_factory` gets a real in-process `SessionEngine`, which spawns
   the bundled `claude` CLI — and nothing closed it, because
@@ -280,6 +292,16 @@ release's doing. All three are pinned by tests now.
   rewrote eight classes per line on every forced refresh. Measured over
   `tests/test_split_panes.py`: **+9.5% layout passes and +22% layout time
   against `origin/main` before, +3.1% and −11% after.**
+- **A tab header could go permanently stale**, which is the single most
+  frequent flake in the suite and predates this release.
+  `SessionPane.set_tab_label` writes the header inside
+  `contextlib.suppress` — it must, because a label can be computed before
+  the `Tab` widget exists — but it recorded the identity string either
+  way, and `refresh_tab_label`'s `label == self._tab_label` guard then
+  made the miss FINAL. The tab kept `_tab_title`'s birth label
+  (`model · dirname`) for the rest of the session, which a user sees as a
+  tab that never picks up its repo and branch. `_tab_label_painted` lets
+  the next `_refresh_status` finish the job.
 
 ## 0.99.2 — 2026-09-03
 
