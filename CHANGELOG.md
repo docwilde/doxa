@@ -4,6 +4,123 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.0.2 — 2026-09-03
+
+**A peer session now says what it is, not only where it is.**
+`PeerInfo` has carried location since it existed — session id, pid,
+socket, cwd, repo root, title, heartbeat. `docs/plans/peer-publishing.md`
+proposed three fields for identity and then sat as a draft while
+`usage_tokens` shipped ahead of it in v0.79.0. This is the rest:
+`provider`, `model`, `engine`, all optional, all defaulting to `None`, all
+**advisory forever**.
+
+- **What each one is, and where the value actually comes from.**
+  `provider` is the short id `doxa.providers.CLAUDE_PROVIDER_ID`, new in
+  this release — one string with three readers
+  (`ClaudeProvider.provider_id()`, `labels.PROVIDER_GLYPHS`' one key, and
+  the engine's connect-time publish) instead of a fourth `"claude"`
+  literal. `engine` is `doxa.engine.ENGINE_ID` (`"doxa"`), also new.
+  `model` is the string `SessionEngine.model` already holds and `/model`
+  already writes; there is no second source of truth for any of the three,
+  and no network call behind any of them.
+- **The draft said `provider` comes "from whichever ModelProvider built
+  this session," and that described nothing.** `ModelProvider` is a
+  catalog-listing seam — `providers.py`'s own docstring says it should
+  stop at listing — and the one `ClaudeProvider` in existence is built per
+  `SessionPane` for the model picker, nowhere near the engine that
+  constructs the `PeerHost`. Rather than route a provider instance into
+  the engine to make the sentence true, the id got a home in the module
+  that owns provider identity, and the engine reads it from there.
+- **`model` writes on the switch, not on the next heartbeat, and the
+  difference is not stylistic.** `usage_tokens` rides the 15-second
+  heartbeat because a token total one beat old is a slightly old number. A
+  model id one beat old is a specific WRONG answer: a peer reads `opus`
+  for another fifteen seconds after this session switched to `haiku`. So
+  `PeerHost.set_model()` writes immediately — the discipline
+  `set_client_count()` and `set_title()` already apply — and
+  `SessionEngine.set_model()` calls it before it returns.
+- **A session riding the CLI's `--model` default publishes nothing, then
+  publishes the truth.** `self.model` is `None` at connect for those
+  sessions, and the CLI's `init` `SystemMessage` is the only moment they
+  learn what they are actually running. That handler now republishes, so a
+  defaulted session stops reading as `unknown` the instant its own status
+  bar knows better. It never publishes `"default"` in the meantime — the
+  honest answer for an unmeasured value is `?`, which is what `/context`
+  has always printed for a context limit nothing measured.
+
+**Untrusted, and built so that staying untrusted is the path of least
+resistance.**
+
+- **These are written by another process** — same user, possibly a future
+  non-DOXA engine — and `model` is a *more* persuasive lie than `title`:
+  "I am running opus" reads as a capability claim an orchestrator might
+  act on, where a fabricated title only misleads a label. The rule is
+  stated once, on `PeerInfo` itself where all three are declared: they may
+  be displayed and logged, never treated as verified, and no surface may
+  use a peer's self-reported model to decide which peer gets a task, whose
+  output to trust, or whether to relax a check — without a human in the
+  loop. Same rule that keeps `/msg` human-only.
+- **They do not reach the model, and three tests keep it that way.**
+  `doxa/operators.py` — the whole model-callable surface — still contains
+  no reference to the peer layer, asserted at source level so what it
+  catches is a *new* tool being added. A live same-scope peer publishing a
+  loud self-description is visible to `/peers` and absent from both the
+  turn's prompt and the connect-time options. And `PEER_UNTRUSTED_INTRO`
+  is pinned verbatim, so if any of this ever does reach the model it goes
+  behind that paragraph unchanged — there is no "structured, therefore
+  safer" exception.
+- **Bounded, never validated.** `peers._self_desc` coerces to text, runs
+  the same `scrub_secrets` pass every other peer-written string gets (the
+  read-time scrub `title`/`cwd` already had — the new fields inherit it,
+  and a test asserts the inheritance rather than assuming it), drops
+  structural JSON, and caps at 64 characters with a visible ellipsis so a
+  shortened value says it was shortened. Nothing checks that `provider` is
+  a provider or `engine` an engine, and that is the settled answer to two
+  of the plan's open questions: a fixed set could not admit the non-DOXA
+  writer the field exists for, and worse, a validated field *reads* as
+  verified.
+- **`/peers` names it as a claim.** `labels.peer_self_report()` renders
+  `self-reported: sonnet via claude on doxa`, prints `?` for anything a
+  peer did not say, and collapses to `self-reported: unknown` when a peer
+  said nothing at all.
+
+**Schema evolution, in both directions — and one place that did not have
+it.**
+
+- **An older entry reads as three unknowns.** The three fields are read
+  with individual `.get()`s below `clients`/`usage_tokens` and are never
+  added to `_ENTRY_FIELDS`; a missing key would otherwise become the
+  `KeyError` `read_registry` reaps the whole entry for, which is one
+  upgraded session deleting every older session's presence file on its way
+  past. A newer entry's unknown keys were already harmless by construction
+  (the reader names the keys it wants and never unpacks the whole object).
+  No version field; the existing mechanism, extended.
+- **`doxa/client.py` rebuilt daemon-supplied peers with a bare
+  `PeerInfo(**p)`** — exactly the construction the plan forbids on the
+  registry path, sitting on the socket path, where it raises
+  `TypeError: unexpected keyword argument` the first time a newer daemon
+  sends a field an older attached client's dataclass lacks, and takes the
+  whole roster with it rather than one row. Adding three fields is the
+  release that would have found this in the field. Both sites now go
+  through `peers.peer_from_mapping()`, which filters to the dataclass's
+  own field names.
+
+**Open questions, settled in place.** `docs/plans/peer-publishing.md` is
+no longer a draft. Question 1 (free-string `engine`) and question 4
+(validate at write time) are answered "free string, bounded not validated"
+with the reasoning above. Question 2 (`peer_updated` event) is answered
+**no**: with the write immediate, an event would only shave latency off a
+reader that already re-reads, `peer_joined`/`peer_left` are themselves
+computed by the heartbeat's registry diff and no fresher, and a
+per-field-change event would have to fire for `usage_tokens` too — roughly
+once per heartbeat per peer, carrying an advisory string. Question 3
+(cross-repo discovery) is untouched and still out of scope. `docs/manual.md`
+gains the `/peers` self-report and the sentence that it is a claim.
+
+- 21 new tests in `tests/test_peer_self_description.py`; 18 verified
+  failing against pre-change code, the other three being regression guards
+  on behaviour that must not change.
+
 ## 1.0.1 — 2026-09-03
 
 **"Does the diff open automatically when the agent edits code?"** It did

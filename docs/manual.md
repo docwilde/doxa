@@ -915,6 +915,16 @@ display and reaches the model only behind an untrusted-peer preamble. The
 model has no send tool — every peer message crosses because a human typed
 `/msg`.
 
+Each `/peers` row also carries what that session *says* it is:
+`self-reported: sonnet via claude on doxa` — its model, its provider, and
+the engine hosting it. Read that line as a claim, because it is one:
+another process wrote it, and DOXA neither verifies it nor lets anything
+act on it. It is there for the same reason a peer's title is — to help you
+decide which session to `/msg` — and for nothing else. A session that does
+not publish one of the three prints `?` in its place, and one that
+publishes none prints `self-reported: unknown`; you will never see a
+plausible-looking default standing in for something nobody measured.
+
 ## Keyboard protocol
 
 Textual's Linux driver requests the kitty keyboard protocol at startup but

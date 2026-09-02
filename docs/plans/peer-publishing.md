@@ -1,18 +1,23 @@
 # Peer publishing — what a session says about itself
 
-Status: **draft for review** for `provider`/`model`/`engine` — nothing
-below implements them; `PeerInfo` does not yet carry any of the three.
-**One field shipped ahead of the rest of this draft:** `usage_tokens`
-(v0.79.0), for reasons that revise this document's own reasoning rather
-than sitting outside it — see "Live telemetry, revisited" below before
-reading the numbered field proposals as unimplemented.
+Status: **shipped.** `usage_tokens` landed first (v0.79.0), for reasons
+that revise this document's own reasoning rather than sitting outside it —
+see "Live telemetry, revisited" below. `provider`, `model` and `engine`
+landed in **v1.0.2**, together with the `title` scrub this document
+recommended (that one shipped earlier, at `read_registry`'s construction
+point, and the three new fields inherit it). What remains open is one
+item, and it is deliberately not attempted here: **cross-repo discovery**
+(open question 3). Open questions 1, 2 and 4 are answered below, in place,
+with what was decided and why.
 
 ## What exists today
 
-`PeerInfo` (`doxa/peers.py`) carries where a session *is*: `session_id`,
-`pid`, `socket_path`, `cwd`, `repo_root`, `title`, `started_at`,
-`heartbeat_at`, `daemon_socket`, `clients`. Nothing about what it *is*.
-`scope_key` (`repo_root or cwd`) is how two sessions decide they are peers;
+*Written against pre-v0.79.0 `PeerInfo`, and kept as written — the "what
+it is" gap it names is what the rest of this document fills.* `PeerInfo`
+(`doxa/peers.py`) carries where a session *is*: `session_id`, `pid`,
+`socket_path`, `cwd`, `repo_root`, `title`, `started_at`, `heartbeat_at`,
+`daemon_socket`, `clients`. Nothing about what it *is*. `scope_key`
+(`repo_root or cwd`) is how two sessions decide they are peers;
 `list_peers` filters `read_registry()` to that key.
 
 The transport underneath is deliberately model-agnostic: one JSON file per
@@ -26,43 +31,65 @@ the whole of this spec.
 
 ## The idea
 
-Three new optional fields on `PeerInfo`, all defaulting to `None`:
+Three new optional fields on `PeerInfo`, all defaulting to `None`. As
+shipped in v1.0.2 (`doxa/peers.py`), with the one place each value is
+known:
 
 ```python
 provider: str | None = None
-"""Short provider id, the same vocabulary doxa.ui.labels.PROVIDER_GLYPHS
-keys on ("claude" today — see that table's one row). Set once at connect
-from whichever ModelProvider built this session. None means an older
-build, or a writer that predates this field: unknown, never "claude"."""
-
-model: str | None = None
-"""The model id or alias currently in force -- the exact string
-SessionEngine.model holds and /model accepts (an alias like "sonnet", or
-a resolved id like "claude-sonnet-4-5"). MUTABLE: set_model() changes it
-mid-session with no reconnect, so the registry entry must be rewritten
-at the moment of the switch, not at the next heartbeat -- the same
-discipline PeerHost.set_client_count() already applies to the attach
-count ("presence has to move when the answer changes, not on the next
-heartbeat, or a just-detached session reads as attached for another
-beat"). None means unknown, never "default"."""
-
-engine: str | None = None
-"""Which SessionEngine implementation hosts this session. Exactly one
-value exists today (DOXA's own, wrapping the claude_agent_sdk-driven CLI
-subprocess); the field exists so a second engine (DeepSeek, Codex — the
-multi-provider engines providers.py's own docstring gestures at)
-identifies itself distinctly from `provider`, and so a non-DOXA process
-writing this same schema can name itself without a DOXA release. None
-means unknown."""
 ```
+Short provider id — `doxa.providers.CLAUDE_PROVIDER_ID` (`"claude"`),
+published at connect by `SessionEngine`. `None` means an older build, or a
+writer that predates this field: unknown, never `"claude"`.
 
-`provider` reuses `doxa.ui.labels.PROVIDER_GLYPHS`' vocabulary
-(`{"claude": "✳"}` today, doxa/ui/labels.py:91) rather than inventing a
-second one — a peers chip that wants to show a provider glyph next to a
+The one thing that changed against the draft is *where* the string comes
+from. The draft said "from whichever ModelProvider built this session,"
+which turned out not to describe anything: `ModelProvider` is a
+catalog-listing seam (`providers.py`'s own docstring says it should stop
+at listing), one `ClaudeProvider` is built per `SessionPane` for the model
+picker, and no provider instance is anywhere near the engine that
+constructs the `PeerHost`. Rather than invent a plumbing route to satisfy
+the sentence, the id got a home: `CLAUDE_PROVIDER_ID` in `providers.py`,
+the module that owns provider identity, read by three callers —
+`ClaudeProvider.provider_id()`, `labels.PROVIDER_GLYPHS`' one key, and the
+engine's connect-time publish. One string, three readers, no second
+literal.
+
+```python
+model: str | None = None
+```
+The model id or alias currently in force — the exact string
+`SessionEngine.model` holds and `/model` accepts. MUTABLE, and it does not
+ride the heartbeat: `PeerHost.set_model()` rewrites the entry at the
+moment of the switch, the discipline `set_client_count()` already applies.
+Published twice more than the draft anticipated, both for the same reason:
+`SessionEngine.set_model()` calls it before returning, and the CLI's
+`init` `SystemMessage` calls it too — that message is the only moment a
+session riding the CLI's `--model` default learns what it is actually
+running, so without it a defaulted session would publish `unknown` for
+life while its own status bar named the model. `None` means unknown, never
+`"default"`.
+
+```python
+engine: str | None = None
+```
+Which engine implementation hosts this session — `doxa.engine.ENGINE_ID`
+(`"doxa"`). Exactly one value exists, and the daemon split does not make a
+second: a daemon hosts the same `SessionEngine`, and it is the engine that
+owns the `PeerHost`, so a detached session and an in-process one publish
+the identical id. `EngineClient` is a client *of* that host — it never
+constructs a `PeerHost` and never writes a registry entry, so "attached
+over a socket" is not an engine identity. The field exists so a second
+engine, or a non-DOXA process writing this schema, can name itself without
+a DOXA release. `None` means unknown.
+
+`provider` reuses `doxa.ui.labels.PROVIDER_GLYPHS`' vocabulary rather than
+inventing a second one — and now literally, since that table keys on
+`CLAUDE_PROVIDER_ID` itself; a peers chip that wants a glyph next to a
 peer's title calls `provider_glyph(peer.provider)` directly. `model`
 reuses whatever string `/model` and the tab label already carry
-(`doxa/ui/labels.py`'s `short_model()` extracts the tier word from exactly
-this string today). No new vocabulary, two reused ones.
+(`short_model()` extracts the tier word from exactly this string). No new
+vocabulary, two reused ones.
 
 ## Identity ages differently than capability
 
@@ -156,6 +183,27 @@ Net: three lines added to the `.get()` block below `clients`, three new
 dataclass fields with `None` defaults, nothing added to `_ENTRY_FIELDS`.
 That is the entire compatibility mechanism; it already exists for
 `daemon_socket` and `clients`, and this spec's job is to not regress it.
+Shipped exactly that way, and both directions are pinned by tests
+(`tests/test_peer_self_description.py`): an entry with none of the three
+keys is read as a live peer and is still on disk afterwards, and an entry
+carrying `context_window` / `capabilities` / `schema_rev` — three
+plausible future additions this build has never heard of — is read with
+every known field intact.
+
+**One place did not have this property, and it was found by adding the
+fields.** `PeerInfo` crosses exactly one other boundary: the daemon
+protocol, where `doxa/daemon.py` ships peers to an attached client as
+`vars(p)` and `doxa/client.py` rebuilt them with a bare `PeerInfo(**p)` —
+the precise construction this section forbids on the registry path,
+sitting on the socket path. It raises `TypeError: unexpected keyword
+argument` the first time a newer daemon sends a field an older attached
+client's dataclass lacks, and the failure is not one row but the whole
+roster. Adding three fields is exactly the release that would have found
+it in the field. Both sites now go through `peers.peer_from_mapping()`,
+which filters to the dataclass's own field names: unknown keys dropped,
+absent keys defaulted, the same rule the presence file has always had.
+Not a version field — the same "name the keys you want" mechanism, applied
+one boundary further out.
 
 ## A peer's self-description is untrusted
 
@@ -185,25 +233,29 @@ Two things follow, and neither is optional:
   field is more structured, so it's safer" exception; a structured lie is
   still a lie.
 
-**Verified, and worth fixing when this ships, not deferred as a footgun for
-the new fields to inherit:** `title` reaches `/peers`' human-facing output
-(`doxa/session/commands.py:1032`, `f"{p.title}  {p.session_id[:8]}
-{p.cwd}"`) with **no `scrub_secrets` call on that path** — unlike the
-message-frame path, where every string field is scrubbed at the one
-receive point before display (`peers.py`'s `_handle_conn`, lines 616-625).
-`_system()` (`doxa/session/pane.py:743`) only mounts a TUI widget; it never
-reaches the model, so this is a terminal-rendering/spoofing risk (a peer
-setting its title to an escape sequence or a fabricated status line), not
-a prompt-injection one. `provider`, `model` and `engine` would land on the
-exact same unscrubbed path if they render the same way. Recommendation:
-registry entries get the same scrub pass message frames already get, at
-read time (`read_registry`), not left to whichever display site remembers.
+**DONE, ahead of these fields rather than as a footgun for them to
+inherit:** `title` reached `/peers`' human-facing output with no
+`scrub_secrets` call on that path — unlike the message-frame path, where
+every string field is scrubbed at the one receive point before display
+(`peers.py`'s `_handle_conn`). This document's recommendation — registry
+entries get the same scrub pass at read time (`read_registry`), not left
+to whichever display site remembers — landed: `read_registry` scrubs
+`info.title` and `info.cwd` at the one point an entry becomes a
+`PeerInfo`. `provider`, `model` and `engine` are scrubbed at that same
+point, through `_self_desc`, and a test asserts it directly rather than
+assuming the inheritance — because the inheritance is a line of code, not
+a language feature.
 
 **What these fields are for, stated affirmatively:** advisory display. A
-human reading `/peers` or a future roster chip sees "this peer says it is
-running `sonnet` via `claude`" — useful context for deciding whether to
-`/msg` it, exactly as `title` is useful today for the same reason. Nothing
-more is claimed.
+human reading `/peers` sees `self-reported: sonnet via claude on doxa` —
+useful context for deciding whether to `/msg` a peer, exactly as `title`
+is useful today for the same reason. Nothing more is claimed, and the
+phrase says so: `doxa.ui.labels.peer_self_report()` opens with the words
+`self-reported:` and prints `?` for anything a peer did not say (the
+convention `ctx_absolute_text` already set for an unmeasured value), or
+the single word `unknown` when a peer said nothing at all. Never
+`"claude"`, never `"default"` — the trap this document names is a display
+inventing a plausible string for a value nobody measured.
 
 ## Cross-project is out of scope, and here is the boundary
 
@@ -303,22 +355,34 @@ them.
 
 ## Testing bar
 
-- an entry written by an older build (missing `provider`/`model`/`engine`
+All met in `tests/test_peer_self_description.py` (21 tests; 18 verified
+failing against pre-change code, the other three being regression guards
+on behaviour that must NOT change).
+
+- ✅ an entry written by an older build (missing `provider`/`model`/`engine`
   entirely) is still read as a live peer, with all three fields `None` —
   not reaped, not defaulted to a guess
-- an entry carrying an extra, unrecognized top-level key (simulating a
+- ✅ an entry carrying extra, unrecognized top-level keys (simulating a
   *newer* build or a third-party engine) is read without error and without
-  losing any of its known fields
-- calling `set_model()` on a connected session updates its registry entry
+  losing any of its known fields — and the same now holds on the daemon
+  protocol, see "Schema evolution" above
+- ✅ calling `set_model()` on a connected session updates its registry entry
   before the next heartbeat tick — asserted by reading the entry
   immediately after the switch, not after sleeping `heartbeat_secs`
-- a registry entry's `title` (and, once added, `provider`/`model`/`engine`)
-  passes through `scrub_secrets` before `/peers` renders it — regression
-  guard for the gap this spec found on the read path
-- nothing under `doxa/operators.py` or the SDK tool surface exposes
-  `PeerInfo` fields to the model — a peer's self-description stays
-  TUI-facing until a future spec explicitly says otherwise, and argues the
-  framing for it
+- ✅ a registry entry's `title`, `cwd`, `provider`, `model` and `engine` all
+  pass through `scrub_secrets` at read time
+- ✅ nothing under `doxa/operators.py` or the SDK tool surface exposes
+  `PeerInfo` fields to the model — asserted at source level, so the thing
+  it catches is a NEW tool being added; plus an end-to-end test where a
+  live same-scope peer publishes a loud self-description, this session can
+  see it, and neither the turn's prompt nor the connect-time options
+  mention it; plus `PEER_UNTRUSTED_INTRO` pinned verbatim, so if any of
+  this ever does reach the model it goes behind that paragraph unchanged
+- ✅ a peer publishing all three, a peer publishing none, and a mixed
+  registry each read on their own terms — a partial answer stays partial
+- ✅ an unknown value is bounded, not validated: oversize truncates with a
+  visible ellipsis, structural JSON reads as unknown, and a provider DOXA
+  has never heard of survives verbatim
 - (shipped, v0.79.0) `usage_tokens`: an entry missing the key entirely
   reads as a live peer with `usage_tokens is None`, never `0`; calling
   `PeerHost.update_usage()` does NOT write to disk by itself — only the
@@ -327,25 +391,75 @@ them.
 
 ## Open questions
 
-1. **Free-string `engine`, or a fixed set?** A free string (matching
-   `ModelInfo.id`'s own looseness) is simplest and costs nothing today with
-   one real value; nothing here validates it, so a typo in a future
-   engine's own code becomes a silent new "engine" nobody asked for. Not
-   settled.
-2. **Does `model` changing mid-session deserve a `peer_updated` event**,
-   symmetric with `peer_joined`/`peer_left` (`doxa/engine.py:1916-1922`),
-   so another session's status display refreshes live rather than on its
-   own next read? No data yet on how often `set_model` actually fires
-   mid-session to justify the extra event type.
-3. **Cross-repo discovery** (see above) — real design work, not attempted
-   here.
-4. **Does `provider`/`engine` get validated against anything at write
-   time**, or is a session free to publish a nonsense value about itself?
-   Given the untrusted-self-description stance above, probably not worth
-   validating — a validated lie is still a lie — but it means the field's
-   only defense is the "advisory, never authoritative" rule holding
-   everywhere it is read, forever. Whether that holds under a future
-   orchestrator is exactly the open question item T3 above gestures at.
+1. **Free-string `engine`, or a fixed set? — ANSWERED: free string.**
+   The original worry was real (a typo in a future engine's own code
+   becomes a silent new "engine" nobody asked for) and is outweighed
+   twice over. A fixed set would have to be enumerated by DOXA, and the
+   one writer this field exists for — a non-DOXA process publishing this
+   same schema without waiting on a DOXA release — is exactly the writer
+   an enumeration cannot admit; the field would validate away its own
+   purpose. Worse, a validated field READS as verified. The moment
+   `engine` is checked against a known list, "it is in the list" starts
+   looking like evidence, and that is precisely the privileged decision
+   the untrusted-self-description rule forbids. Question 4 below already
+   reaches the same conclusion for `provider` from the other direction; a
+   validated lie is still a lie, and a validated lie is a *more expensive*
+   lie because someone will eventually trust the check.
+
+   What IS done instead, in `peers._self_desc`, is to bound the damage
+   without judging the content: coerce to text, run the same
+   `scrub_secrets` pass every other peer-written string gets, drop
+   structural JSON (an object, a list, a null read as unknown, never as
+   the string `"{}"`), and cap at `MAX_SELF_DESC_CHARS` (64) with a
+   visible ellipsis so a shortened value says it was shortened. Length is
+   a property a reader can check honestly; meaning is not. `provider`
+   needs no special case for a value DOXA does not recognize either —
+   `provider_glyph` already degrades to no glyph rather than a broken
+   label.
+
+2. **Does `model` changing mid-session deserve a `peer_updated` event? —
+   ANSWERED: no, and the write moved instead.** The question conflated
+   two different latencies. The publishing side genuinely could not wait:
+   `usage_tokens` rides the heartbeat because a token total one beat old
+   is a slightly old number, but a model id one beat old is a specific
+   WRONG answer — a peer reads `opus` for another fifteen seconds after
+   this session switched to `haiku`. So `PeerHost.set_model` writes at the
+   moment of the switch, the same "presence has to move when the answer
+   changes" discipline `set_client_count` and `set_title` already apply,
+   and `SessionEngine.set_model` calls it before it returns.
+
+   With the write immediate, an event would only shave latency off the
+   *reading* side — a display that already re-reads the registry. That is
+   not worth a third event type, for three reasons. There is still no data
+   on how often `set_model` fires mid-session (the original objection,
+   unchanged). `peer_joined`/`peer_left` are membership changes, computed
+   by the heartbeat's own registry diff (`_diff_peers`) and therefore
+   already up to a beat late themselves — a `peer_updated` built on the
+   same diff would inherit that latency and deliver nothing the next read
+   would not. And a per-field-change event would have to fire for
+   `usage_tokens` too, which changes every turn: a new event type firing
+   roughly per heartbeat per peer, carrying an advisory string, on a
+   stream the TUI pumps. Revisit if a surface appears that must react to a
+   peer's model rather than display it — but note that "react to" is the
+   thing the untrusted rule already governs.
+
+3. **Cross-repo discovery** (see above) — real design work, still not
+   attempted. `read_registry` remains unfiltered by scope and `list_peers`
+   remains scope-filtered; nothing in this change widens that surface.
+
+4. **Does `provider`/`engine` get validated at write time? — ANSWERED:
+   no.** As anticipated: a validated lie is still a lie. Nothing checks
+   these on write and nothing checks them on read (see question 1 for what
+   is bounded instead). The field's only defense is the "advisory, never
+   authoritative" rule holding everywhere it is read, so this release
+   spends its effort making that rule hard to forget rather than
+   pretending to enforce truth: the trust rule is stated once on
+   `PeerInfo` itself where all three fields are declared; the display
+   helper is named `peer_self_report` and its output opens with the words
+   `self-reported:`; and a test asserts the model-callable surface
+   (`doxa/operators.py`) still contains no reference to the peer layer at
+   all, so a future orchestrator has to delete a passing test to get at
+   these strings.
 
 ## See also
 
