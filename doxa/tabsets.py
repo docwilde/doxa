@@ -98,6 +98,24 @@ record therefore gets the geometry it can express, and picks the
 remaining tabs up from the flat list as ordinary tabs -- the same honest
 degradation the flat list has provided since v0.23.0, one format on.
 
+**The fourth key** (v1.0.0): ``collections``, at the TOP level beside
+``tabs`` and ``layout`` rather than inside the layout node::
+
+    {"tabs": [...], "layout": {...}, "collections": [
+      {"name": "ampiric", "sessions": ["abc", "def"], "collapsed": false}
+    ]}
+
+It is not in the layout node because it is not geometry: a collection
+(:mod:`doxa.collections`) groups sessions BY NAME regardless of which
+region shows them -- two members may sit in different ``PaneGroup``s, and
+one ``PaneGroup`` may show tabs from three collections. Every rule that
+held through the three format changes above holds again, unchanged:
+``layout.kind`` stays ``"tabs"``, the flat top-level ``tabs`` list stays
+authoritative and complete, and the absence of the key is the whole
+migration. A session id in a collection but not in ``tabs`` is dropped --
+at write time and again at read time -- the way :func:`doxa.layout.prune`
+drops a leaf whose session is gone.
+
 **Restore is a cross-check, not a replay**: :func:`resolve` reads the
 saved record, then filters it against the LIVE daemon registry
 (``doxa.peers.list_daemons``) for the same scope. A saved session id with
@@ -184,6 +202,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import collections as collections_mod
 from . import config as config_mod
 from . import layout as layout_mod
 from . import peers as peers_mod
@@ -249,6 +268,14 @@ class TabSetRecord:
     #: three eras, so no caller has to know which kind of record it got --
     #: the same promise ``trees`` makes one format down.
     groups: "Any" = None
+    #: The user's SESSION COLLECTIONS (v1.0.0) -- see
+    #: :mod:`doxa.collections`. A fourth format, and the first that does
+    #: not touch the layout node at all: collections group sessions BY
+    #: NAME regardless of where they are shown, so they are neither
+    #: geometry nor a property of a region. ``()`` on every record written
+    #: before v1.0.0, and the absence of the key is once again the whole
+    #: migration.
+    collections: "tuple[collections_mod.Collection, ...]" = ()
 
 
 @dataclass(frozen=True)
@@ -281,6 +308,13 @@ class ResolvedRestore:
     #: ``trees`` is: which sessions survived is already answered above, and
     #: pruning here would mean answering it twice.
     groups: "Any" = None
+    #: The saved collections (v1.0.0), already pruned to the flat ``tabs``
+    #: list by :func:`load` -- which is a DIFFERENT pruning from the one
+    #: this class declines to do for ``trees``/``groups``. That one is
+    #: about which daemons are still alive, and is the caller's; this one
+    #: is about the record being self-consistent, and belongs to whoever
+    #: reads it, exactly once.
+    collections: "tuple[collections_mod.Collection, ...]" = ()
 
     def ordered(self) -> "list[tuple[TabRecord, peers_mod.PeerInfo | None]]":
         """Every surviving tab in SAVED ORDER, live and archived
@@ -362,6 +396,7 @@ def save(
     active_session_id: "str | None",
     trees: "list | None" = None,
     groups: "Any" = None,
+    collections: "Any" = None,
 ) -> None:
     """Atomic write (tmp + ``os.replace``), 0600. Never raises: a
     persistence failure costs the user a future restore, never the
@@ -409,6 +444,24 @@ def save(
         "tabs": rows,
         "layout": layout,
     }
+    if collections:
+        # v1.0.0: a TOP-LEVEL key, beside ``tabs`` and ``layout`` and
+        # deliberately not inside the layout node. A collection is not
+        # geometry: it groups sessions by NAME regardless of which region
+        # shows them, so putting it in the node that describes regions
+        # would be filing it under the one thing it is independent of.
+        #
+        # PRUNED to the flat list on the way out, so the two halves of the
+        # record cannot disagree even for one write. A membership naming a
+        # session no longer in ``tabs`` is the collection equivalent of a
+        # tree naming a dead leaf, and the answer is the same one
+        # :func:`doxa.layout.prune` gives.
+        pruned = collections_mod.prune(
+            collections, [row["session_id"] for row in rows]
+        )
+        written = collections_mod.to_json(pruned)
+        if written:
+            payload["collections"] = written
     path = _file_for(scope_key)
     try:
         tmp = path.with_suffix(".json.tmp")
@@ -672,6 +725,15 @@ def load(scope_key: str) -> "TabSetRecord | None":
         active_session_id=active_id,
         trees=trees,
         groups=_layout_groups(data, tabs, trees, active_id),
+        # Absence of the key is the migration, for the fourth time: a
+        # record with no ``collections`` reads as none, which is exactly
+        # what every record written before v1.0.0 means. Pruned to the
+        # flat list HERE as well as at write time -- a record can be
+        # hand-edited, and a hand-edited one is still a record.
+        collections=collections_mod.prune(
+            collections_mod.from_json(data.get("collections")),
+            [t.session_id for t in tabs],
+        ),
     )
 
 
@@ -721,6 +783,13 @@ def resolve(scope_key: str) -> "ResolvedRestore | None":
         tabs=live, skipped=skipped, active_session_id=active,
         archived=archived, entries=entries, trees=record.trees,
         groups=record.groups,
+        # NOT re-pruned against the live registry, and that is the design
+        # check docs/plans/session-sidebar.md asks for: a collection
+        # member whose daemon is gone still restores as a member. It comes
+        # back as an ARCHIVED tab if its transcript survived, and the rail
+        # keeps a row for it either way -- a rail that could only list
+        # what the tree already holds would be a second tab strip.
+        collections=record.collections,
     )
 
 
