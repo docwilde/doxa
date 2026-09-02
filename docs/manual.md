@@ -17,6 +17,7 @@ never documents a plan as if it were shipped.
 - [Worktrees and finalize](#worktrees-and-finalize)
 - [Where a session is](#where-a-session-is)
 - [Permission modes](#permission-modes)
+- [Containment](#containment)
 - [The status bar](#the-status-bar)
 - [LORE integration](#lore-integration)
 - [Shell escape](#shell-escape)
@@ -25,6 +26,7 @@ never documents a plan as if it were shipped.
 - [Keyboard protocol](#keyboard-protocol)
 - [Commands](#commands)
 - [Settings](#settings)
+- [Screenshots](#screenshots)
 
 ## Sessions and the daemon
 
@@ -497,6 +499,34 @@ the legacy terminal key encoding there is no byte for `Ctrl+Tab` at all, so
 Shift+Tab is the one guaranteed to work everywhere and `/help` marks
 whichever one this terminal cannot send.
 
+## Containment
+
+Permission modes decide what stops to ask you. Two mechanisms sit under
+them and do not move when the mode does.
+
+**The tool gate.** Every tool call passes `doxa/gate.py`'s `ToolGate` at
+the SDK's `PreToolUse` boundary, built-ins included. When the session
+declares an allowed set, a call outside it is denied there and the model
+is told why. DOXA-native operators are re-checked a second time in
+`execute()` — defence in depth at a choke point, never one layer.
+
+**Two strikes.** A *hard* failure is an unknown tool name, a `TypeError`
+from the backend, or any exception the operator raised: the gate returns
+it as an ordinary `{"error": ...}` result the model can read and retry.
+The **second** hard failure of the same tool disables it for the rest of
+the session, and the disabled names collect in the status bar's `⊘` chip.
+A refused-but-known tool counts too, because a repeatedly-refused call is
+the strongest "stop calling this" signal available. Bad arguments are
+*not* hard — a recoverable mistake must stay retryable. Nothing here is
+persisted: the next session starts with a clean slate.
+
+**Nothing auto-denies silently.** A headless SDK run with no callback
+auto-denies an `AskUserQuestion` and a permission request without telling
+anyone. DOXA gives each one a real dialog and blinks the tab that raised
+it. A *desktop* notification is opt-in — `notify_needs_input` is **off**
+by default (see [Settings](#settings)); turned on, a fully detached
+session always notifies. The transcript records the answer either way.
+
 ## The status bar
 
 Chips are built in paint order by `doxa/session/chips.py`; a chip whose
@@ -691,6 +721,21 @@ regardless, and honour `LORE_DISABLE_REVIEW` the way LORE's own hook does.
 Why it defaults on: a session that runs for hours and ends without a clean
 finalize used to derive **nothing at all**, because review fired only at
 compaction and at the end.
+
+**Typed edges between beliefs.** Since LORE 0.41.0 the store carries
+relations as well as beliefs, derived the same way the beliefs are, in
+five asserted verbs: `depends_on`, `specializes`, `explains`,
+`contradicts` and `applies_when`. Support is counted in **distinct
+sessions**, so one session repeating itself does not manufacture
+agreement, and a path's confidence is the **product of its hops**, so a
+long chain of individually plausible steps is weak by construction.
+
+Structure earns no authority. A belief reached by following an edge is
+still CITE-only unless it earned STEER on its own — the graph changes what
+the agent can *find*, never what it may *act on*. DOXA has this today
+because it imports `lore_core` in-process; the only interface onto it is
+the beliefs picker's `g` action, which opens one belief's neighbourhood
+(`graph_view`, see [Settings](#settings)). Nothing else surfaces it yet.
 
 ## Shell escape
 
@@ -913,3 +958,37 @@ daemon sockets and the peer registry, kept out of the home directory
 because home directories can be network-mounted (Unix sockets misbehave
 there). The LORE store is neither — it stays `lore_core`'s own path,
 shared with the Claude Code LORE plugin on purpose.
+
+## Screenshots
+
+Every still and GIF under [`assets/shots/`](../assets/shots/) is generated
+headlessly from the real app by
+[`scripts/screenshot.py`](../scripts/screenshot.py) and
+[`scripts/record_gif.py`](../scripts/record_gif.py) — a scripted session,
+no spend, fake account numbers — and each still keeps its source SVG
+committed beside its PNG. The [README](../README.md#gallery) captions ten
+of them. The rest, catalogued here so that **no rendered asset is left
+unnamed by any document**: that is the exact condition
+`beliefs-browser.png` needed to sit wrong for eighteen releases before
+v0.87.0 deleted it.
+
+| asset | shows |
+|---|---|
+| [`split-panes.gif`](../assets/shots/split-panes.gif) | one pane becoming two — the keystroke, and the pane arriving |
+| [`markdown-stream.gif`](../assets/shots/markdown-stream.gif) | a reply streaming as real markdown, a table row at a time |
+| [`subagent-tracker.png`](../assets/shots/subagent-tracker.png) | a running subagent's status row and its own tab |
+| [`trace.png`](../assets/shots/trace.png) | a subagent's activity as a tree under its parent `Task` chip |
+| [`error-block.png`](../assets/shots/error-block.png) | a caught exception as a collapsible red-ruled transcript block |
+| [`chip-picker.gif`](../assets/shots/chip-picker.gif) | the shared selector picker, opened from the branch chip |
+| [`tab-lifecycle.gif`](../assets/shots/tab-lifecycle.gif) | a background tab amber while running, green once finished unseen |
+| [`search.gif`](../assets/shots/search.gif) | `/search` over every past session, live as you type |
+| [`settings.png`](../assets/shots/settings.png) | the settings modal, each row's effective value and its source |
+| [`reasoning.gif`](../assets/shots/reasoning.gif) | the reasoning fold ticking, then the phase flipping to `generating` |
+| [`sessions.png`](../assets/shots/sessions.png) | `/sessions`, attached and detached |
+| [`clock.png`](../assets/shots/clock.png) | the clock |
+| [`palette.gif`](../assets/shots/palette.gif) | the `ctrl+p` command palette |
+| [`rename.gif`](../assets/shots/rename.gif) | renaming a tab by double-clicking its header |
+| [`attention-blink.gif`](../assets/shots/attention-blink.gif) | a tab blinking for attention |
+| [`image-support.png`](../assets/shots/image-support.png) | `/img` naming the image tier this terminal got |
+| [`banner-blocks.png`](../assets/shots/banner-blocks.png) | the boot banner |
+| [`transparent.png`](../assets/shots/transparent.png) | the transparent-background setting |
