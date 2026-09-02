@@ -1,251 +1,144 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/status-alpha-e03131" alt="alpha: interfaces change between releases">
   <a href="https://github.com/docwilde/doxa/releases"><img src="https://img.shields.io/github/v/release/docwilde/doxa?label=release&color=e8590c" alt="latest release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/ci.yml?branch=main&label=tests" alt="CI status on main"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/built%20on-Claude%20Agent%20SDK-d97757" alt="built on Claude Agent SDK">
-  <img src="https://img.shields.io/badge/TUI-Textual-0b1120" alt="Textual TUI">
   <img src="https://img.shields.io/badge/subscription-no%20API%20key%20needed-2f9e44" alt="billed via Claude subscription">
-  <img src="https://img.shields.io/badge/Linux%20%C2%B7%20macOS-terminal-555" alt="Linux and macOS terminals">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL%20v3-8a8073" alt="license"></a>
 </p>
 
 > [!WARNING]
-> **Alpha — work in progress.** DOXA is `0.x` and moves daily: interfaces,
-> keybindings, config keys and on-disk formats change between releases without
-> a migration path, and releases are cut in hours rather than weeks. It is
-> feature-incomplete by design — several surfaces documented under
-> [Status](#status) are specifications with nothing built behind them.
->
-> What that means concretely for you: it runs an agent that edits your files
-> and, since v0.36.0, a shell that runs with your privileges. It is tested
-> (the suite is real and gates every release) but it is not battle-tested —
-> it has one author, and most defects so far were found by using it, not by
-> the tests. Read [Non-goals](#non-goals) before adopting it for anything you
-> would be upset to lose.
+> **Alpha.** DOXA is `0.x` and moves daily: interfaces, keybindings, config
+> keys and on-disk formats change between releases with no migration path.
+> It runs an agent that edits your files and a shell with your privileges.
+> The suite gates every release, but the project has one author and most
+> defects so far were found by using it, not by the tests. Read
+> [Non-goals](#non-goals) before trusting it with anything you would mind
+> losing.
 
-**DOXA** is a terminal for Claude agents whose sessions outlive your
-window and whose memory of your own codebases you can actually watch
-form — built on the Claude Agent SDK and Textual, billed through your
-Claude subscription rather than an API key.
+**DOXA** is a terminal for Claude agents, built on the Claude Agent SDK
+and Textual and billed through your Claude subscription rather than an API
+key. Each session runs in a **daemon** of its own: close the terminal,
+`doxa attach` an hour later, and the transcript picks up where it stopped.
+No tmux involved.
 
-A session runs in a **daemon** of its own: close the terminal, walk away,
-`doxa attach` an hour later, and the transcript picks up exactly where it
-left off — nothing lost, no tmux involved. See the [manual](docs/manual.md)
-for the full session, tab and worktree model.
-
-Start it inside a repository and the session already knows the project.
-Durable facts about this codebase — conventions, past workarounds,
-corrections a human already made once — are injected before your first
-prompt, per-repo rather than global. Every durable conclusion the agent
-reaches goes through the same gate before it can shape a later answer: it
-starts as a **belief** — visible, queryable, citable but never acted on —
-and only gains real influence by being approved by a human or by building
-an actual track record of being right. That is what the tagline means
-literally, not as a slogan: *where belief earns knowledge* — an idea has
-to earn its way from opinion to something the agent will actually rely
-on. See [LORE integration](docs/manual.md#lore-integration) for the full
-memory model and the review gate.
-
-The memory engine underneath all of this is
-[LORE](https://github.com/docwilde/LORE), which also ships as a
-standalone Claude Code plugin; DOXA compiles it in-process
-(`lore_core`, imported, not shelled out to) rather than requiring the
-plugin to be installed — one memory model, two front ends.
-
-Since LORE 0.41.0 the belief store also carries typed edges *between*
-beliefs — `depends_on`, `specializes`, `explains`, `contradicts`,
-`applies_when` — derived the same way beliefs themselves are, with
-support counted in distinct sessions and a path's confidence the product
-of its hops, so a long chain of plausible steps is weak by construction.
-Structure earns no authority: a belief reached by following an edge is
-still CITE-only unless it earned STEER on its own. DOXA gets this because
-it imports `lore_core` in-process — available to the engine, not yet
-surfaced in the interface.
+Start DOXA inside a repository and the session already knows the project.
+Durable facts about that codebase — conventions, past workarounds,
+corrections a human made once — reach the model before your first prompt,
+per-repo rather than global. Every durable conclusion the agent draws
+enters as a **belief**: visible, queryable, citable, never acted on. It
+earns influence only when a human approves it or it builds a track record
+of being right. The tagline is meant literally.
 
 δόξα (*dóxa*): belief, opinion — as distinct from ἐπιστήμη (*epistēmē*),
 justified knowledge. The name is the thesis: belief is the raw material,
 never the finished thing.
 
-<p align="center"><img src="assets/shots/hero.png" width="780" alt="DOXA shell: three tabs, one per model tier, all on the same base branch; a turn asking what the repo believes about deploys, answered with a two-row markdown table of belief ids and their status; a collapsed '⚒ Tool calls (1)' fold; and a status bar led by the permission-mode chip and carrying model, repo and branch, subscription tier with a list-price what-if, subscription headroom, context percentage, belief count, session handle and peer count"></p>
+Memory is [LORE](https://github.com/docwilde/LORE)'s `lore_core`, imported
+in-process rather than shelled out to. LORE also ships as a Claude Code
+plugin; both front ends share one store. See
+[LORE integration](docs/manual.md#lore-integration).
 
-*Headless-rendered from the real Textual app (a scripted session, no
-spend, fake account numbers). Every screenshot and GIF below is generated
-the same way, by [`scripts/screenshot.py`](scripts/screenshot.py) and
-[`scripts/record_gif.py`](scripts/record_gif.py).*
+![DOXA shell: three tabs, one per model tier; a turn answered with a table of belief ids and status above a collapsed tool-calls fold; a status bar led by the permission-mode chip](assets/shots/hero.png)
+
+*Every image here is rendered headlessly from the real app — scripted, no
+spend, fake account numbers. See
+[screenshots](docs/manual.md#screenshots).*
 
 ## What you get
 
-- **Sessions that outlive the window.** Each is its own daemon behind a
-  Unix socket: closing the terminal detaches; `doxa` restores the repo's
-  tab set.
-- **Reasoning and tool calls, on the record.** Markdown below a collapsed
-  reasoning fold; each `⚒ Tool calls (N)` chip opens to its arguments and
-  result.
-- **Two sessions in one tab.** `ctrl+n` splits side by side, `ctrl+o`
-  stacked — independent sessions, not two views of one.
-- **A live diff you can reject one hunk of.** `f2` opens this
+- **[Sessions outlive the window.](docs/manual.md#sessions-and-the-daemon)**
+  Each is a daemon behind a `0600` socket; closing the terminal detaches,
+  and `doxa` restores the repo's tab set.
+- **[Reasoning and tool calls on the record.](docs/manual.md#the-transcript)**
+  Markdown under a collapsed reasoning fold; each `⚒ Tool calls (N)` chip
+  opens to its arguments and result.
+- **[Pane groups own their tabs.](docs/manual.md#pane-groups)** `ctrl+n`
+  splits side by side, `ctrl+o` stacked; `ctrl+←/→` cycles one group and
+  leaves the rest alone.
+- **[A live diff you can reject one hunk of.](docs/manual.md#the-live-diff)**
+  `f2` opens it beside the session, live. A rejected hunk reverts and the
+  agent is told why.
+- **[Memory stays inert until it earns influence.](docs/manual.md#lore-integration)**
+  `lore_core` runs in-process; nothing new reaches the model until a human
+  approves a staged row.
+- **[A shell the model cannot reach.](docs/manual.md#shell-escape)** A `!`
+  line runs in this session's worktree, with your privileges, outside the
+  model's context.
+- **[Worktrees, never auto-merged.](docs/manual.md#worktrees-and-finalize)**
+  Each session gets its own worktree and branch. A clean one vanishes;
+  real work waits for you.
+- **[A permission mode you can see and change.](docs/manual.md#permission-modes)**
+  `shift+tab` cycles it; the chip leads the bar, and the modes that stop
+  asking are amber or red.
+- **[A tool gate that counts strikes.](docs/manual.md#containment)** Every
+  call passes `PreToolUse`; a tool failing hard twice is disabled for the
+  session.
+- **[Numbers that were measured.](docs/manual.md#the-status-bar)** Fifteen
+  tooltipped chips — `dir NAME` outside a repo — and a `/context` the CLI
+  itself counted.
+- **[Pictures, or a straight answer why not.](docs/manual.md#images)**
+  kitty graphics → sixel → half-block → text, settled by one probe.
+- **[Sessions talk to each other.](docs/manual.md#search-resume-and-peers)**
+  Same-repo sessions find each other and exchange `/msg` — always
+  human-sent; the model has no send tool.
+- **[An isolated CLI config.](docs/manual.md#the-spawned-cli)** Spawned
+  `claude` processes use a config directory DOXA owns, not your
+  `~/.claude`; your plugins load only if you opt in.
 
-- **Pane groups, each with its own tabs.** `alt+d` splits side by side,
-  `alt+s` stacked; every region owns its own tab strip, so `ctrl+←/→`
-  cycles one group and leaves the rest alone. `ctrl+1`…`ctrl+9` jump by
-  position (`/pane <n>` where the terminal cannot send those).
-- **A live diff you can reject one hunk of.** `alt+g` opens this
-  session's diff beside it, live; a rejected hunk reverts and the agent
-  is told why.
-- **Memory that is inert until it earns influence.** `lore_core` runs
-  in-process; nothing new reaches the model but a human approving one
-  staged row.
-- **A shell the model cannot reach.** A `!` prompt line runs in this
-  session's worktree, with your privileges, outside the model's context.
-- **Worktree isolation, never auto-merged.** Each session gets its own
-  worktree and branch; a clean one vanishes, real work is kept to merge
-  by hand.
-- **A permission mode you can see and change.** `shift+tab` cycles it;
-  the `mode:` chip leads the bar, and the modes that stop asking are
-  amber or red.
-- **Numbers that were measured, not estimated.** Fifteen tooltipped
-  chips — `dir NAME` outside a repo — and a `/context` the CLI itself
-  counted.
-- **Subagents you can follow while they run.** A `Task` subagent gets a
-  status row and a live read-only tab, then folds under its parent chip.
-- **Pictures, or a straight answer about why not.** kitty graphics →
-  sixel → half-block → text, settled by one startup probe; `/img` names
-  the tier.
-- **Sessions that can be made to talk to each other.** Same-repo sessions
-  find each other and exchange `/msg` — always human-sent; no model send
-  tool.
-- **The spawned CLI gets its own config.** Every session's `claude` runs
-  behind its own `CLAUDE_CONFIG_DIR`; plugins load only if you opt in.
-
-Each of those has a section of its own in the manual, which is where the
-detail lives: [sessions](docs/manual.md#sessions-and-the-daemon),
-[the transcript](docs/manual.md#the-transcript),
-[pane groups](docs/manual.md#pane-groups),
-[the live diff](docs/manual.md#the-live-diff),
-[LORE](docs/manual.md#lore-integration),
-[the shell escape](docs/manual.md#shell-escape),
-[worktrees](docs/manual.md#worktrees-and-finalize),
-[permission modes](docs/manual.md#permission-modes),
-[the status bar](docs/manual.md#the-status-bar),
-[subagents](docs/manual.md#the-status-bar),
-[images](docs/manual.md#images),
-[peers](docs/manual.md#search-resume-and-peers),
-[where a session is](docs/manual.md#where-a-session-is) and
-[the spawned CLI](docs/manual.md#the-spawned-cli).
-
-Three smaller invariants hold the rest together: the palette and `/`
-autocomplete read one command registry, so a command cannot exist on one
-surface and not the other; `AskUserQuestion` and permission requests get a
-real dialog, a blinking tab and a desktop notification, where a headless
-SDK run with no callback would silently auto-deny both; and precedence is
-**environment > `~/.doxa/config.toml` > default** everywhere, with the
-settings modal (`ctrl+,`) showing each row's effective value and where it
-came from.
-
-For the full walkthrough — every command, every key, every setting and its
-default — see the **[manual](docs/manual.md)**.
+A `Task` subagent also gets a status row and a live read-only tab, and
+`/dir` says [where a session is](docs/manual.md#where-a-session-is)
+outside a repo. `alt+d` / `alt+s` / `alt+g` reach the split and diff
+actions too, but only on a kitty-protocol terminal; `/help` marks every
+binding yours cannot send.
 
 ## Gallery
 
-<p align="center"><img src="assets/shots/live-diff.png" width="640" alt="One tab holding a session on the left and its live worktree diff on the right. The diff header reads '2 files changed, +9 −1 against main', with a note under it saying '1 rejection(s) queued until this turn ends'. The file doxa/auth.py is expanded into two side-by-side hunks: the first changes GRACE_SECONDS from 300 to 900 and carries an amber '⏳ reject queued — applies when this turn ends' badge above its disabled reject button and its 'reason (optional)' field; the second adds a raise on a missing token. The expanded file fills the pane, so the second changed file sits just below the fold behind the scrollbar. The session pane's own next turn is still running, its marker reading '⠋ thinking (0s)'"></p>
-<p align="center"><em><code>/diff</code> (or <code>f2</code>) opens this session's live diff in the pane beside it, recomputed as edits land. <strong>Reject</strong> on a hunk reverse-applies exactly that hunk and tells the agent why, in your words. Clicked mid-turn it queues instead — visibly, and it says so — because a rejection you clicked and cannot see the effect of is worse than one that waits.</em></p>
+![A session left, its live diff right, headed '2 files changed, +9 -1 against main'; one hunk carries an amber 'reject queued' badge above a disabled reject button](assets/shots/live-diff.png)
 
-<p align="center"><img src="assets/shots/split-panes.png" width="640" alt="One tab split down the middle into two panes, each a session in its own right: identical 'DOXA 0.94.0' identity blocks, different models (claude-opus-4-5 on the left, claude-sonnet-4-5 on the right), separate transcripts, and a status bar apiece that each truncate at their own pane's width. The left pane holds the belief-table answer; the right one a numbered list of the three surfaces that still needed a gallery capture"></p>
-<p align="center"><em><code>ctrl+n</code> (<code>/vsplit</code>) puts a second session side by side; <code>ctrl+o</code> (<code>/split</code>) stacks it below. Two <strong>independent</strong> sessions in one tab — a split spawns a session, it does not open a second view of the one you were in.</em></p>
+*`f2` (or `/diff`) opens the live diff beside the session. **Reject** reverse-applies that hunk and tells the agent why; mid-turn it queues, and says so.*
 
-<p align="center"><em><code>alt+d</code> (<code>/vsplit</code>) puts a second session side by side; <code>alt+s</code> (<code>/split</code>) stacks it below. A split spawns a session, it does not open a second view of the one you were in. Captured at v0.94.0, when both panes shared one tab strip; since v0.97.0 each region is a <strong>pane group</strong> with a strip of its own.</em></p>
+![One tab split into two panes, each its own session: same identity block, different models, separate transcripts, a status bar apiece](assets/shots/split-panes.png)
 
-<p align="center"><img src="assets/shots/split-panes.gif" width="640" alt="One pane becoming two: a single session, then ctrl+n and a second session lands to its right with the keyboard already in it; a turn runs there; ctrl+shift+left moves focus back to the first pane, and alt+right drags the divider between them while both keep rendering"></p>
-<p align="center"><em>The half a still cannot carry: the keystroke, and the pane arriving.</em></p>
+*A split spawns a **second session**, not a second view of the first. Shot at v0.94.0; since v0.97.0 each region has its own tab strip.*
 
-<p align="center"><img src="assets/shots/markdown-stream.gif" width="640" alt="An agent reply streaming: prose appears first, then a three-row table fills in one row at a time, with the in-flight marker reading 'generating' and counting the seconds beside it"></p>
-<p align="center"><em>Replies stream as real markdown, row by row, as the model's own deltas arrive.</em></p>
+![A turn's tool-call count ticking 1 to 3 as chips land, the marker counting 5s, 9s, 14s through the silent wait](assets/shots/tool-calls.gif)
 
-<p align="center"><img src="assets/shots/tool-calls.gif" width="640" alt="A turn's 'Tool calls (N)' count ticking from 1 to 3 as chips land, while the in-flight marker keeps counting up through the wait — 5s, 9s, 14s — even though no output arrives; opening the fold reveals three collapsed chips"></p>
-<p align="center"><em>Tool calls fold into one row per call; opening a chip shows its exact arguments and result. The marker beside them keeps counting through a silent tool call, so a slow one never looks like a hung one.</em></p>
+*Calls fold to one row each, opening to exact arguments and result. The marker counts through a silent call, so a slow one never reads as hung.*
 
-<p align="center"><img src="assets/shots/memory.png" width="640" alt="A lore_belief_search chip expanded, showing a result listing one STEER belief with an outcome count and one CITE-only belief"></p>
-<p align="center"><em>A memory-store call is an ordinary chip — the mechanism deciding what the agent believes is inspectable like any other tool call.</em></p>
+![A lore_belief_search chip expanded, listing one STEER belief with an outcome count and one CITE-only belief](assets/shots/memory.png)
 
-<p align="center"><img src="assets/shots/beliefs-picker.png" width="640" alt="The beliefs picker open over a session, under a header row reading 'date  status  age  text' and grouped by scope into 'project (5 beliefs, 3 tested)' and 'user · stated (2 beliefs, 1 tested)'; each row starts with the same fixed date, status and age columns before its claim text, and carries inline actions reading 'y confirmed', 'c contradicted', 's stale', 'r retract' and 'g graph'; a filter line runs along the bottom"></p>
-<p align="center"><em>Every belief the store holds, grouped by scope, with what reality has said about it — and five inline verdicts per row. Four record an outcome; <code>g</code> only looks, opening that belief's graph neighbourhood.</em></p>
+*A memory call is an ordinary chip: what decides the agent's beliefs is as inspectable as anything else it does.*
 
-<p align="center"><img src="assets/shots/context.png" width="640" alt="/context rendered as a 10 by 20 grid of 200 draughts-piece cells, one per half-percent of the window, with the model and an 'in use 60,910 / 180,000 tokens · 33.8%' headline beside the top rows, the usable-window and autocompact lines under it, and per-source summaries for MCP tools and agents beside the upper rows; the per-category breakdown, memory files and per-MCP-tool costs are listed below, closing on a line stating that every count is the claude CLI's own measurement and nothing on the screen is estimated"></p>
-<p align="center"><em><code>/context</code> is 200 cells, one per half-percent of the window. Every number is the CLI's own accounting of its own request — DOXA runs no second tokenizer and estimates nothing.</em></p>
+![The beliefs picker grouped by scope, each row carrying inline actions 'y confirmed', 'c contradicted', 's stale', 'r retract', 'g graph'](assets/shots/beliefs-picker.png)
 
-<p align="center"><img src="assets/shots/subagent-tracker.png" width="640" alt="A '⧉ 1 agent' chip closing the status bar, with a row beneath it reading '⧉ audit the retry backoff…' — the running subagent's own description — and a second tab in the strip carrying the same title"></p>
-<p align="center"><em>A running subagent gets its own status row and a live transcript tab.</em></p>
+*Every belief, grouped by scope, with what reality has said about it. Four verdicts record an outcome; `g` only looks.*
 
-<p align="center"><img src="assets/shots/needs-input.gif" width="640" alt="An AskUserQuestion dialog opening above the prompt asking which environment a migration should target"></p>
-<p align="center"><em>AskUserQuestion and permission requests get a real dialog instead of a silent auto-deny.</em></p>
+![/context as a 10 by 20 grid of 200 cells, headlined 'in use 60,910 / 180,000 tokens - 33.8%'](assets/shots/context.png)
 
-<p align="center"><img src="assets/shots/error-block.png" width="640" alt="A caught TimeoutError rendered as a collapsible red-ruled block inside the transcript, expanded to show its traceback and origin"></p>
-<p align="center"><em>A failure shows up as a block in the transcript, not a dead terminal — collapsed to one line by default, the full traceback one keystroke away.</em></p>
+*One cell per half-percent. Every number is the CLI's own accounting of its own request — DOXA runs no second tokenizer.*
 
-<p align="center"><img src="assets/shots/chip-picker.gif" width="640" alt="Clicking the branch chip in the status bar opens a dropdown of local branches with the current one marked"></p>
-<p align="center"><em>Every selector chip in the status bar opens the same picker — type to filter, enter to apply.</em></p>
+![An AskUserQuestion dialog above the prompt, asking which environment a migration should target](assets/shots/needs-input.gif)
 
-<p align="center"><img src="assets/shots/peers.gif" width="640" alt="The status bar's peers chip reading 'peers 3 (1⌁)'; clicking it opens a roster of the three other live DOXA sessions on this repo, each row showing its own first-prompt title and its running token total — '86k tok', '142k tok' — with one detached peer marked '⌁ detached'; arrowing to the third peer, which has not finished a turn yet, shows 'tok —' rather than '0 tok'; a note states the figures are self-reported and up to 15 seconds stale, the heartbeat interval"></p>
-<p align="center"><em>The peers chip opens a roster of every other DOXA session on this repo: what each is working on, and tokens spent so far — self-reported, piggybacked on each peer's own 15-second heartbeat rather than a live read. A peer that has not finished a turn yet reads as unknown, never as zero.</em></p>
+*Questions and permission requests get a real dialog. A headless run with no callback auto-denies both, silently.*
 
-<p align="center"><img src="assets/shots/permission-mode.gif" width="640" alt="The permission-mode chip cycling through the shared picker: grey 'default', teal 'plan', amber 'auto', red 'bypassPermissions'"></p>
-<p align="center"><em>The mode chip leads the status bar, and any mode that is not <code>default</code> is painted at every terminal width — <code>auto</code> amber, <code>bypassPermissions</code> and <code>dontAsk</code> red, because those are the modes where nothing stops to ask you first. Only a plain <code>default</code> stands down, and only on a row too narrow to carry it.</em></p>
+![The peers chip opening a roster of three sessions with titles and token totals, one detached, one mid-first-turn showing 'tok --'](assets/shots/peers.gif)
 
-<p align="center"><img src="assets/shots/folder-chip.png" width="640" alt="A session started in a plain directory rather than a repository. The status bar's leftmost identity chip reads 'dir design-notes' — no ⎇, no branch half — and the transcript below it shows /dir reporting the session's absolute path, then a bare /cd explaining that a running session's own directory cannot be changed and naming where it stays"></p>
-<p align="center"><em>Outside a repo there is no <code>repo ⎇ branch</code> to draw, so the chip is a <em>different shape</em> rather than the same one with a hole in it. <code>/dir</code> says where the session actually is; <code>/cd</code> opens the target in a new tab and says, every time, that this session stayed where it was — because the CLI process behind it was spawned with an OS-level cwd that nothing can hand it a new one for.</em></p>
+*Who else is on this repo, and tokens spent — self-reported on each peer's 15-second heartbeat. A peer mid-first-turn reads as unknown, never zero.*
 
-<p align="center"><img src="assets/shots/tab-lifecycle.gif" width="640" alt="A second tab starts a turn and turns amber; switching to the first tab leaves it amber in the background; the turn finishes there and the tab turns green"></p>
-<p align="center"><em>A background tab reports its own state by color — amber while running, green once finished unseen.</em></p>
+![The permission-mode chip cycling: grey 'default', teal 'plan', amber 'auto', red 'bypassPermissions'](assets/shots/permission-mode.gif)
 
-<p align="center"><img src="assets/shots/search.gif" width="640" alt="Typing '/search deploy' opens a popup listing matching sessions collapsed to headers; arrowing to one and pressing right expands it to a highlighted snippet"></p>
-<p align="center"><em>`/search` reaches every past session, full-text, live as you type.</em></p>
+*The chip leads the bar at every width — `auto` amber, `bypassPermissions` and `dontAsk` red, the modes where nothing stops to ask.*
 
-<p align="center"><img src="assets/shots/settings.png" width="560" alt="The settings modal on its Session category, showing each row's effective value and where it came from"></p>
-<p align="center"><em>Every settings row shows its effective value and where it came from — session, config file, or default.</em></p>
+![A session in a plain directory: the identity chip reads 'dir design-notes' with no branch half](assets/shots/folder-chip.png)
 
-Ten more scenes are generated by the same two scripts and live in
-[`assets/shots/`](assets/shots/) without a caption here, because the
-gallery is already long rather than because they went stale — they are
-regenerated in the same pass as everything above:
-[`trace.png`](assets/shots/trace.png) (a subagent's activity as a tree
-under its parent `Task` chip),
-[`reasoning.gif`](assets/shots/reasoning.gif) (the reasoning fold
-ticking, then the phase flipping to `generating`),
-[`sessions.png`](assets/shots/sessions.png) (`/sessions`, attached and
-detached), [`clock.png`](assets/shots/clock.png),
-[`palette.gif`](assets/shots/palette.gif) (`ctrl+p`),
-[`rename.gif`](assets/shots/rename.gif) (double-click a tab),
-[`attention-blink.gif`](assets/shots/attention-blink.gif),
-[`image-support.png`](assets/shots/image-support.png) (`/img`),
-[`banner-blocks.png`](assets/shots/banner-blocks.png) (the boot banner)
-and [`transparent.png`](assets/shots/transparent.png) (the transparent
-background setting). Every still in this gallery keeps its source SVG
-committed beside its PNG, and no rendered asset in `assets/shots/` is
-left unnamed by this file — an unreferenced one is how
-`beliefs-browser.png` rotted for eighteen releases before v0.87.0
-deleted it.
+*Outside a repo the chip is a different shape, not the same one with a hole in it. `/cd` opens the target in a new tab and says the session stayed put.*
 
-## How it works
-
-Each session runs as its own daemon process hosting the Claude Agent SDK
-client, the LORE hooks, and the transcript; the TUI is a thin client
-attached over a `0600` Unix socket, so a session survives the terminal
-that started it. Every tool call passes a containment gate at the
-`PreToolUse` boundary — a call outside the declared tool registry is
-denied, and a tool that fails twice in a session is disabled for the rest
-of it.
-
-The memory system is LORE's `lore_core`, compiled in-process as a pinned
-git dependency rather than reimplemented. When the LORE Claude Code plugin
-is also installed on a machine, its checkout wins over the pinned copy —
-both read and write the same `~/.claude/lore` store, so the two front ends
-never fork a user's memory into two halves. `/about` names which copy
-loaded. See [LORE integration](docs/manual.md#lore-integration) in the
-manual, and the [LORE repository](https://github.com/docwilde/LORE) for
-the full memory model.
+Eighteen more scenes come from the same pass; the
+[manual](docs/manual.md#screenshots) catalogues every one. An asset named
+nowhere is how `beliefs-browser.png` rotted for eighteen releases before
+v0.87.0 deleted it.
 
 ## Install
 
@@ -253,24 +146,17 @@ the full memory model.
 curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh
 ```
 
-Checks for Python 3.11+, [`uv`](https://docs.astral.sh/uv/) (offers to
-install it if missing), `git`, and the
-[`claude` CLI](https://docs.claude.com/en/docs/claude-code) signed in
-(`claude auth login`) — DOXA authenticates through that CLI's own OAuth
-session and never reads `ANTHROPIC_API_KEY` — then installs with `uv tool
-install git+https://github.com/docwilde/doxa` (never PyPI; DOXA isn't
-published there). Re-running it is safe: it never touches an existing
-`~/.doxa/config.toml`, and picks up whatever changed on `main` since the
-last run. Install a specific tag instead of `main`'s HEAD with
-`sh -s -- v0.39.0`.
+It checks Python 3.11+, [`uv`](https://docs.astral.sh/uv/) (offering to
+install it), `git`, and the
+[`claude` CLI](https://docs.claude.com/en/docs/claude-code) signed in —
+DOXA authenticates through that CLI's OAuth session and never reads
+`ANTHROPIC_API_KEY` — then runs `uv tool install
+git+https://github.com/docwilde/doxa`. DOXA is not on PyPI. Re-running is
+safe and never touches an existing `~/.doxa/config.toml`. Add `sh -s --
+v0.39.0` for a tag. Read it first if you would rather not pipe a
+stranger's script into `sh`.
 
-Piping a stranger's script into `sh` deserves a second look first:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh -o install.sh && less install.sh   # then: sh install.sh
-```
-
-Or clone-and-run from a source checkout instead of installing at all:
+Or run from a checkout:
 
 ```sh
 git clone https://github.com/docwilde/doxa && cd doxa
@@ -278,119 +164,69 @@ uv sync
 uv run doxa
 ```
 
-**Since v0.37.0 that is genuinely all of it.** DOXA's memory model is
-[LORE](https://github.com/docwilde/LORE)'s `lore_core`, and until v0.37.0
-that package was not declared anywhere — DOXA reached into a LORE Claude
-Code plugin checkout on the machine and hoped it was there. On a clone
-without the plugin, 41 of 52 test modules failed at import. `lore_core` is
-now an ordinary pinned dependency (a git URL in `pyproject.toml`, since
-neither project is on PyPI), so `uv sync` installs it like anything else
-and nothing about the LORE plugin is a prerequisite for running DOXA.
-
-If you *do* have the LORE plugin installed, that checkout still wins over
-the pinned copy: DOXA and the plugin share one SQLite store, the plugin
-writes to it from a hook on every Claude Code session, and a terminal that
-silently stopped reflecting the memory system the rest of the machine runs
-would be a worse surprise than a version that is not the pinned one.
-`/about` names which copy loaded, so it never has to be guessed — see
-[How it works](#how-it-works).
+`uv sync` is all of it: `lore_core` is a pinned git dependency, so the
+LORE plugin is not a prerequisite. Install that plugin anyway and its
+checkout deliberately wins over the pinned copy — both share one store,
+and a terminal quietly disagreeing with the rest of the machine is the
+worse surprise. `/about` names which copy loaded.
 
 ## Quickstart
 
 ```sh
 uv run doxa          # spawn a session here, or restore this repo's saved tab set
 uv run doxa new      # force a fresh session instead of attaching
-uv run doxa new --branch <name>   # fork the session's worktree from <name>, not the launch checkout
+uv run doxa new --branch <name>   # fork the session's worktree from <name>
 uv run doxa attach   # reattach by session id / title prefix
 uv run doxa stop     # finalize now (LORE review + index), daemon exits
 uv run doxa doctor   # read-only health checks, no TUI: pass/fail + fix per check
-uv run doxa launcher install      # XDG start-menu entry + icons (uninstall removes them)
+uv run doxa launcher install      # XDG start-menu entry + icons
 ```
 
-The start-menu entry launches **the DOXA you ran that command from**, by
-absolute path, and the command prints that path with the version it reports —
-so a shortcut that would start something other than what you expected is
-visible when you install it rather than weeks later. If a *different* `doxa`
-is on your `PATH` (a stale `uv tool install`, say), the command names it and
-its version too, and changes nothing about it. `doxa doctor` re-checks both.
+`launcher install` points at **the DOXA you ran it from**, by absolute
+path, and prints that path and version — so a shortcut that would start
+something unexpected shows up now, not in a month. It names any other
+`doxa` on your `PATH` and changes nothing about it.
 
-The daemon finalizes the session — LORE's review and index pass — once every
-client has been detached for `--linger` seconds (120 by default), or
-immediately on `doxa stop`. `doxa --in-process` runs the engine inside the
-TUI instead, with no daemon and no detach: quitting finalizes on the spot.
+A daemon finalizes once every client has been detached for `--linger`
+seconds (120 by default), or at once on `doxa stop`. `doxa --in-process`
+runs the engine inside the TUI: no daemon, no detach, quitting finalizes
+on the spot.
 
-Once you're in: type a prompt, press enter. `ctrl+p` opens the command
-palette, `ctrl+t` opens a new tab, `/split` and `/vsplit` (or
-`ctrl+o` stacked below, `ctrl+n` side by side) put a second
-session in the tab you are
-already in — `ctrl+shift+←/→/↑/↓` moves between panes, `alt+←/→/↑/↓`
-
-palette, `ctrl+t` opens a new tab in this pane group, `/split` and
-`/vsplit` (or `alt+s` stacked below, `alt+d` side by side) put a second
-GROUP beside the one you are in — each with its own tab strip, so
-`ctrl+←/→` cycles this group's tabs and leaves every other group where
-it was; `ctrl+1`…`ctrl+9` jump to a group by position (numbered left to
-right, then top to bottom, and `/pane <n>` does the same on terminals
-that cannot send `ctrl+<digit>`), `/movepane <n>` moves this tab to
-another group without restarting its session,
-`ctrl+shift+←/→/↑/↓` moves between groups, `alt+←/→/↑/↓`
-drags the divider between them, and `ctrl+↑`/`ctrl+↓`
-drags the status-bar divider between the transcript and the prompt —
-`/diff` (or `f2`) opens this session's **live diff** in the pane
-beside it, updating as edits land, with a **reject** button on every
-hunk that reverts exactly that hunk and tells the agent why,
-`ctrl+r` searches past sessions,
-`shift+tab` cycles the **permission mode** (what still stops and asks you
-before a tool runs — see the manual's
-[permission modes](docs/manual.md#permission-modes)), a line starting with
-`!` runs as a shell command instead of a prompt, and `/help` lists every
-command and key binding — marking any binding your terminal cannot
-physically send. The full tab, key and command reference is in the
-[manual](docs/manual.md).
+Then type a prompt and press enter. `ctrl+p` opens the palette, `ctrl+t` a
+tab, `ctrl+r` searches past sessions, `shift+tab` cycles the permission
+mode, a `!` line runs as a shell command, and `/help` lists every command
+and key — marking any your terminal cannot send.
 
 ## Status
 
-DOXA is a working daily driver for its author, not a finished product.
-Everything in [What you get](#what-you-get) and in the [manual](docs/manual.md)
-has shipped and is described as it behaves today; [CHANGELOG.md](CHANGELOG.md)
-has the version-by-version history. Interfaces — config keys, socket
-protocol, command names — can still change between minor versions.
+A working daily driver for its author, not a finished product. Everything
+in [What you get](#what-you-get) and in the [manual](docs/manual.md) has
+shipped and behaves as described; [CHANGELOG.md](CHANGELOG.md) has the
+history. Config keys, socket protocol and command names can still change
+between minor versions.
 
-The rest of this section is the other half: what has been designed and not
-built, and what gets asked about often enough to be worth answering plainly.
-Nothing below this line is available today, and none of it should be read as
-a feature.
+**Specified, not built.** Nine documents in [`docs/plans/`](docs/plans/)
+are designs with nothing behind them, each saying so in its opening lines:
+`plugin-api` (no loader exists — v0.34.0 shipped only the seams one could
+bind to), `remote`, `mermaid`, `code-graph`, `sandbox`, `peer-publishing`,
+`model-registry`, `spawn-session`, `session-sidebar`. Three left that list
+by shipping: `split-panes` (v0.91.0), `live-diff` (v0.92.0), `pane-groups`
+(v0.97.0, which inverted the first). `plugins.md` shipped in v0.74.0 and
+is a different system — it adopts *your own* Claude Code plugins
+(commands, skills, agents; never hooks or MCP servers) into the spawned
+CLI.
 
-### Specified, but not built
+**Not built, not specified.** No orchestration in any form: nothing
+schedules sessions, assigns work between them or supervises a fleet.
+`/msg` is the whole inter-session mechanism and a human always sends it.
+Also absent: history drill-in past `/search`, and custom keybindings.
 
-Eight documents under [`docs/`](docs/) are **specifications, not shipped
-features**, and are written that way on purpose — specifying a thing before
-building it is cheaper than discovering the design in the diff. Each one is a
-design that has been thought through and not yet implemented. (Two that used
-to be on this list have left it by being built:
-[`docs/plans/split-panes.md`](docs/plans/split-panes.md) shipped in v0.91.0,
-[`docs/plans/live-diff.md`](docs/plans/live-diff.md) in v0.92.0 and
-[`docs/plans/pane-groups.md`](docs/plans/pane-groups.md) in v0.97.0, which
-inverted the first of those — all three are now described in the
-[manual](docs/manual.md) as behaviour, and their plan documents stay as
-the reasoning behind them.)
+**Sessions older than v0.56.0 cannot be resumed.** That release stopped
+DOXA and the CLI minting two session ids and pinned them to one, and the
+fix cannot reach backwards: an older conversation is addressed by an id
+the CLI's own store never knew, so it returns read-only and says so first.
 
-- [`docs/plans/plugin-api.md`](docs/plans/plugin-api.md) — **the plugin API.** There is no loader: no entry-point discovery, no `~/.doxa/plugins` scan, no allowlist, no `Plugin`/`PLUGIN` object, nothing in DOXA that loads third-party PYTHON code into its own process at all. What v0.34.0 actually shipped is the *shape* — the `app.py` split landed along four seams (the command registry `PANE_COMMANDS`, the status-chip records `_status_chips()`, the event dispatch map `EVENT_RENDERERS`, and the `ModelProvider` protocol), so each extension point in the spec names a real structure a loader could bind to. That is the whole claim. The spec also settles two decisions ahead of time: a plugin is never loaded from the working repository, and no plugin-facing write into the belief store will exist. Not to be confused with [`docs/plans/plugins.md`](docs/plans/plugins.md) (shipped, v0.74.0) — a different system entirely: adopting the OPERATOR'S OWN Claude Code plugins (commands/skills/agents only, never hooks or MCP servers) into the CLI process the engine spawns.
-- [`docs/plans/remote.md`](docs/plans/remote.md) — **remote control and a web client.** Nothing here is built. The daemon's sequenced event stream is what a second renderer would consume, which is why the spec exists, but there is no network transport, no authorization model and no client. Note that this document reasons about a permission-mode feature that has also not landed on `main`.
-- [`docs/plans/mermaid.md`](docs/plans/mermaid.md) — **mermaid diagrams in the transcript.** Nothing implemented. A ```` ```mermaid ```` fence renders as a fenced code block today, which is what every other terminal client does; v0.41.0's image ladder is what a rendered diagram would arrive through, and the open question the spec is actually about is where the renderer's dependency lives.
-- [`docs/plans/code-graph.md`](docs/plans/code-graph.md) — **a queryable code graph.** Nothing implemented. One graph per worktree, built from the AST and swept in the background on commit, with `purpose` carried on a node as a *second provenance* beside the structure the parser can see — the spec is mostly about keeping those two provenances distinguishable rather than about the parsing.
-- [`docs/plans/sandbox.md`](docs/plans/sandbox.md) — **sandboxed sessions by default, on top of worktrees.** Nothing implemented. A worktree isolates what a session may *change*; it isolates nothing about what the spawned process may *reach* — `$HOME`, the credentials, every sibling worktree, the network. The mechanism exists (`ClaudeAgentOptions.sandbox`, bubblewrap and seccomp on Linux, measured present on the author's machine), but the SDK's own docstring puts filesystem and network policy in *permission rules* rather than in the sandbox settings, so the work is synthesizing that policy per session from the worktree sidecar. A sandbox that silently fails to apply is the outcome the spec is written to prevent.
-- [`docs/plans/peer-publishing.md`](docs/plans/peer-publishing.md) — **what a session publishes about itself to same-repo peers.** `provider`/`model`/`engine` are still unimplemented; the spec argues which of those are safe to add (self-reported, therefore untrusted, therefore display-only) and why a capability field like context window is not. `usage_tokens` shipped ahead of the rest (v0.79.0, piggybacked on the existing heartbeat) — the peers chip's roster is what reads it.
-- [`docs/plans/model-registry.md`](docs/plans/model-registry.md) — **a model catalog rich enough for an agent to pick from, with per-field provenance.** Nothing implemented. `ModelInfo` is still `id`/`display_name`/`source`; the spec argues a small set of added fields, rejects a benchmark/quality table outright, and finds that picking a model for a `Task`-spawned subagent is outside DOXA's reach today (measured: no LORE snapshot reaches it, no addressable session id).
-- [`docs/plans/spawn-session.md`](docs/plans/spawn-session.md) — **an agent starting a new DOXA session and delegating to it.** Nothing implemented. `doxa new` under Bash already does this today, ungated, uncounted and unattributed; the spec argues for a sanctioned operator instead — gated through the same `ToolGate` every write goes through, with depth/count/rate caps enforced server-side, a `parent_session_id` on `PeerInfo`, and an explicit, argued position on the sharpest tension in the design: a spawned session's task prompt is agent-authored data by every rule this codebase already has for that class of input, yet has to be followed as an instruction for delegation to mean anything at all.
-
-### Not built, and not specified either
-
-- **Orchestration.** There is none, in any form. Nothing in DOXA schedules sessions, assigns work between them, or supervises a fleet. `/msg` is the entire inter-session mechanism and a human is always the one who sends it — see [Search, resume, and peers](docs/manual.md#search-resume-and-peers) for exactly how far that goes. One session deciding to start another is now *specified* ([`docs/plans/spawn-session.md`](docs/plans/spawn-session.md)) but not built either — today that only happens through an agent running `doxa new` under Bash, ungated and unattributed.
-- **Resuming a session that predates v0.56.0.** Resuming works now — a restored tab continues its conversation, and `/search` and `/resume` reopen any other in a new tab. It works because v0.56.0 stopped DOXA and the CLI minting *two* session ids and pinned them to one, which is a fix that cannot reach backwards: a conversation started before that release is addressed by an id the CLI's own store never knew, so it comes back read-only and says so before anything spawns.
-- Session-history drill-in past `/search`'s result list, and customizable keybindings. (`/context` grew a proportional bar of the window in v0.76.0 — block art, one colored run per component, above the same measured breakdown it always printed — so a graphical context-window map is no longer on this list.)
-
-Run the test suite with `uv run pytest`.
+Run the suite with `uv run pytest`.
 
 ## Non-goals
 
