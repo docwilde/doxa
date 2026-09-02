@@ -193,7 +193,11 @@ class SidebarLine(Static):
 
     def __init__(self, row: Row) -> None:
         super().__init__("")
-        self.row = row
+        # Deliberately NOT ``self.row = row`` before the call below:
+        # :meth:`set_row` short-circuits on a row it is already showing,
+        # so seeding the attribute here would skip the one write that
+        # gives a fresh line its classes at all.
+        self.row: "Row | None" = None
         self.can_focus = False
         self.set_row(row)
 
@@ -204,7 +208,22 @@ class SidebarLine(Static):
         :meth:`SessionSidebar.set_rows`), so this is the only path by which
         a row's identity changes and it must leave nothing of the previous
         one behind: every class it can carry is written on every call,
-        true or false."""
+        true or false.
+
+        **Unless it is already that row**, which is the common case and is
+        not free to redo. ``refresh_sidebar(force=True)`` -- what
+        ``on_show`` passes, and every collection edit -- clears the rail's
+        own "nothing changed" cache, so without this guard every forced
+        refresh rewrote eight classes and the text on every visible line.
+        Each ``set_class`` marks the node for a stylesheet re-apply, and
+        Textual's ``Stylesheet.apply`` / ``Screen._refresh_layout`` are
+        SYNCHRONOUS: measured on tests/test_split_panes.py, they are where
+        the event loop actually blocks (max 305 ms and 334 ms in one
+        module), so redundant class writes are paid for in loop-stall
+        budget rather than in microseconds. ``Row`` is a frozen dataclass,
+        so the comparison is free."""
+        if row == self.row:
+            return
         self.row = row
         self.set_class(row.kind == Row.HEADING, "-heading")
         self.set_class(row.kind == Row.SESSION, "-session")

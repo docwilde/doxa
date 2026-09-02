@@ -100,6 +100,100 @@ os.environ["DOXA_SKIP_FIRST_RUN"] = "1"
 import pytest
 
 
+# -- v1.0.0: no agent subprocess outlives the test that spawned it -----
+#
+# MEASURED, not suspected. `DoxaApp(...)` with no `engine_factory` gets
+# the real one -- an in-process `SessionEngine`, which connects a
+# `claude_agent_sdk` client and therefore SPAWNS THE BUNDLED `claude`
+# CLI. Around thirty tests in this suite build an app that way
+# (tests/test_banner.py, tests/test_errors.py, tests/test_images.py,
+# tests/test_settings.py among them), and nothing ever closes those
+# clients: `run_test()` tears the app down without ending its sessions,
+# so `SessionEngine.finalize()` -- the only place `_client.__aexit__` is
+# called -- never runs.
+#
+# The child therefore survives its test and is inherited by pytest for
+# the rest of the run. Sampled during a full run on 2026-09-02: 32 live
+# `claude` processes by the 60% mark, ~294 MB RSS and ~1.5% of a core
+# EACH, i.e. ~9 GB and about one whole core of load that grows
+# monotonically and is highest exactly where this suite's timing-marginal
+# tests live -- the last quarter. Two suites at once put 18 GB of them on
+# a 30 GB machine. That is the amplifier behind "one different test fails
+# per full run": every reported victim sat at 83-92% of the run.
+#
+# So: reap. This does not change what any test asserts, and it cannot
+# affect the product -- it removes a process the test already finished
+# with. It is not a substitute for those tests passing a FakeEngine
+# factory, which is what they should do; it is the floor that keeps the
+# suite from becoming a load generator while they do not.
+#
+# Linux `/proc` because that is what this suite runs on, and a miss is
+# silent: a platform without `/proc` gets today's behaviour, not a crash.
+
+import os
+import signal
+import time
+
+
+def _agent_children() -> "set[int]":
+    """PIDs of bundled-`claude` processes this pytest is the parent of."""
+    pid = os.getpid()
+    try:
+        raw_pids = Path(
+            f"/proc/{pid}/task/{pid}/children"
+        ).read_text().split()
+    except OSError:
+        return set()
+    found: "set[int]" = set()
+    for child in raw_pids:
+        try:
+            cmdline = Path(f"/proc/{child}/cmdline").read_bytes()
+        except OSError:
+            continue
+        # The SDK's own bundled binary, driven in stream-json mode --
+        # specific enough that a test's OWN subprocess (git, a pty probe)
+        # can never match it.
+        if b"_bundled/claude" in cmdline and b"stream-json" in cmdline:
+            found.add(int(child))
+    return found
+
+
+def _reap(pids: "set[int]") -> None:
+    """SIGTERM, briefly, then SIGKILL -- and always ``waitpid``, or the
+    process we just ended stays on the table as a zombie, which is the
+    same leak with a smaller price."""
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            continue
+    deadline = time.monotonic() + 2.0
+    pending = set(pids)
+    while pending and time.monotonic() < deadline:
+        for pid in list(pending):
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                    pending.discard(pid)
+            except (ChildProcessError, OSError):
+                pending.discard(pid)
+        if pending:
+            time.sleep(0.02)
+    for pid in pending:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+        except (ChildProcessError, ProcessLookupError, OSError):
+            pass
+
+
+@pytest.fixture(autouse=True)
+def _no_agent_subprocess_outlives_its_test():
+    """End any bundled-`claude` process this test spawned and left."""
+    before = _agent_children()
+    yield
+    _reap(_agent_children() - before)
+
+
 @pytest.fixture(autouse=True)
 def _errors_must_be_claimed(request):
     """Fail any test that quietly produced an error block."""

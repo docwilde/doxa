@@ -106,7 +106,7 @@ def test_known_unreachable_combinations_are_reported_as_such(key):
     # C0 controls: every one of DOXA's other app bindings.
     "ctrl+p", "ctrl+r", "ctrl+t", "ctrl+w", "ctrl+q", "ctrl+c", "ctrl+g",
     "ctrl+j",  # LF, which Textual maps to ctrl+j and nothing else
-    "ctrl+underscore", "f3ackslash", "ctrl+at",
+    "ctrl+underscore", "ctrl+backslash", "ctrl+at",
     # Modified cursor and function keys: xterm has encoded these as
     # CSI 1;<mods><final> since long before the kitty protocol existed.
     "ctrl+left", "ctrl+right", "shift+up", "ctrl+shift+left", "alt+f4",

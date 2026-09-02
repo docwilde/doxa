@@ -9,12 +9,16 @@ What the build changed about this document, and nothing else did:
 - the width numbers were **measured** rather than left open — see
   [Width, measured](#risks-named) below and `doxa/layout.py`'s
   `SIDEBAR_*` block for the derivations;
-- `F3` was re-verified free against the binding set as it stood at
-  build time, and shipped **with its one real cost stated out loud**: it
-  is tmux's default prefix, and `doxa/app.py`'s own split-panes
-  subtraction had already excluded `f3` on those grounds. The spec
-  chose it knowing that ("tmux's prefix notwithstanding"), so `/sidebar`
-  is the door that always works;
+- **the key was reversed**: the spec chose `ctrl+b`, and the build ships
+  `F3` instead. `ctrl+b` is tmux's default *prefix* — a tmux user cannot
+  press it at all — and `doxa/app.py`'s own split-panes subtraction had
+  already excluded it on exactly those grounds. The spec waved that off
+  ("tmux's prefix notwithstanding") on the strength of `/sidebar` being
+  the always-works door; that is true, and still the wrong trade for the
+  primary gesture of a permanent surface. `F3` was re-verified free
+  against the binding set as it stood at build time, follows `F2`'s
+  precedent (`/diff`, v0.92.0), is deliverable under both keyboard
+  encodings, and tmux passes it through;
 - the rail is **mouse- and command-driven and never takes the keyboard**.
   Rows are plain `Static`s with `can_focus = False`, because a focusable
   widget beside the prompt is a second place `App.AUTO_FOCUS = "*"` can
@@ -107,10 +111,11 @@ the row says so rather than pretending it can be focused.
 
 ## Keys and commands
 
-`F3` for toggle — the conventional sidebar key (VS Code, tmux's prefix
+`ctrl+b` for toggle — the conventional sidebar key (VS Code, tmux's prefix
 notwithstanding), and free here: measured against `DoxaApp.BINDINGS` at
-v0.98.0, `f3` is unbound. **Re-verify at build time** — the binding set
-moved three times in this release series.
+v0.98.0, `ctrl+b` is unbound. **Re-verify at build time** — the binding set
+moved three times in this release series. *(The build reversed this: see
+the shipped note at the top. `F3` is what v1.0.0 binds.)*
 
 `ctrl+<letter>` is deliverable under both keyboard encodings (`doxa/keyboard.py`),
 unlike `ctrl+<digit>` and `alt+<letter>`, both of which this project chose

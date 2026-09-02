@@ -2204,7 +2204,9 @@ class DoxaApp(App):
             self._window_width(), self._narrowest_group(), self.sidebar_width()
         )
 
-    def sidebar_has_something_to_say(self) -> bool:
+    def sidebar_has_something_to_say(
+        self, order: "list[str] | None" = None
+    ) -> bool:
         """HIDE AT ZERO, the question the ``auto`` setting asks.
 
         A rail listing one session under no heading is chrome that answers
@@ -2212,17 +2214,24 @@ class DoxaApp(App):
         :data:`doxa.layout.GROUP_STRIP_MIN_COLS`,
         :data:`doxa.ui.labels.CTX_ABSOLUTE_MIN_COLS` and
         :data:`doxa.diff.SIDE_BY_SIDE_MIN_COLS` each make about their own
-        surface. So: any collection at all, or more than one session."""
-        return bool(self._collections) or len(self._sidebar_order()) > 1
+        surface. So: any collection at all, or more than one session.
 
-    def sidebar_should_show(self) -> bool:
+        ``order`` is :meth:`_sidebar_order`'s answer when the caller
+        already has it -- see :meth:`refresh_sidebar` on why that list is
+        derived exactly once per refresh."""
+        if self._collections:
+            return True
+        known = self._sidebar_order() if order is None else order
+        return len(known) > 1
+
+    def sidebar_should_show(self, order: "list[str] | None" = None) -> bool:
         """Should the rail be on screen, before width is considered?"""
         mode = config_mod.sidebar_mode()
         if mode == config_mod.SIDEBAR_OFF:
             return False
         if mode == config_mod.SIDEBAR_ON:
             return True
-        return self.sidebar_has_something_to_say()
+        return self.sidebar_has_something_to_say(order)
 
     # -- the rail's model ---------------------------------------------
 
@@ -2281,7 +2290,30 @@ class DoxaApp(App):
                 return tab
         return None
 
-    def _describe_session(self, session_id: str) -> "tuple[str, tuple[str, ...], bool]":
+    def _sidebar_surfaces(self) -> "dict[str, Any]":
+        """Every session id on screen, mapped to its surface, in ONE pass.
+
+        :meth:`_sidebar_pane` answers for one id and is the right shape
+        for :meth:`reveal_session`, which asks once. A RAIL asks once per
+        row, and ``panes()``/``archived_tabs()`` are ``self.query(...)``
+        -- a full walk of the screen's widget tree, transcript blocks
+        included. Per row that is a walk per session per refresh; this is
+        the same answer derived once. Panes win over archived tabs on a
+        tie for the same reason :meth:`_sidebar_pane` looks at them
+        first: a live session outranks a read-only record of one."""
+        surfaces: "dict[str, Any]" = {}
+        for pane in self.panes():
+            session_id = getattr(pane, "_session_id", "")
+            if session_id and session_id not in surfaces:
+                surfaces[session_id] = pane
+        for tab in self.archived_tabs():
+            if tab.session_id and tab.session_id not in surfaces:
+                surfaces[tab.session_id] = tab
+        return surfaces
+
+    def _describe_session(
+        self, session_id: str, surfaces: "dict[str, Any] | None" = None
+    ) -> "tuple[str, tuple[str, ...], bool]":
         """``(label, marks, mounted)`` for one row of the rail.
 
         The label is rendered FRESH every time and never stored: a
@@ -2297,8 +2329,15 @@ class DoxaApp(App):
         An UNMOUNTED session still gets a label: its pinned name from the
         record this run kept, or its short id. It never gets marks (there
         is no pane to have earned one) and it is reported ``mounted=False``
-        so the row can say so rather than pretend."""
-        surface = self._sidebar_pane(session_id)
+        so the row can say so rather than pretend.
+
+        ``surfaces`` is :meth:`_sidebar_surfaces`' one-pass map when the
+        caller built one; ``None`` falls back to the single-id lookup, so
+        this stays callable on its own."""
+        surface = (
+            self._sidebar_pane(session_id)
+            if surfaces is None else surfaces.get(session_id)
+        )
         if isinstance(surface, SessionPane):
             marks = tuple(
                 name for name in labels_mod.TAB_STATE_MARKS
@@ -2313,13 +2352,16 @@ class DoxaApp(App):
         pinned = getattr(record, "pinned_name", None) if record else None
         return (pinned or session_id[:8]), (), False
 
-    def sidebar_rows(self) -> "list[SidebarRow]":
+    def sidebar_rows(
+        self, order: "list[str] | None" = None
+    ) -> "list[SidebarRow]":
         """The rail's contents, built by the pure function that decides
         what a rail shows -- see :func:`doxa.ui.sidebar.build_rows`."""
+        surfaces = self._sidebar_surfaces()
         return build_rows(
             self._collections,
-            self._sidebar_order(),
-            self._describe_session,
+            self._sidebar_order() if order is None else order,
+            lambda session_id: self._describe_session(session_id, surfaces),
             width=self.sidebar_width(),
         )
 
@@ -2336,7 +2378,17 @@ class DoxaApp(App):
         rail = self.sidebar()
         if rail is None:
             return
-        show = self.sidebar_should_show()
+        # ONE derivation of "which sessions does this window know about"
+        # per refresh. _sidebar_order() is self.query(TabPane) -- a full
+        # walk of the screen's widget tree -- and this method used to run
+        # it twice (through sidebar_should_show, then again through
+        # sidebar_rows) with two more walks PER ROW inside
+        # _describe_session. Textual's layout and stylesheet passes are
+        # synchronous, so DOM work done on a paint path is paid for in
+        # event-loop stall (tests/test_split_panes.py measures exactly
+        # that), not in microseconds.
+        order = self._sidebar_order()
+        show = self.sidebar_should_show(order)
         note = self.sidebar_refusal() if show else None
         visible = show and note is None
         rail.set_width(self.sidebar_width())
@@ -2356,7 +2408,7 @@ class DoxaApp(App):
             return
         if force:
             rail._rows = []
-        rail.set_rows(self.sidebar_rows())
+        rail.set_rows(self.sidebar_rows(order))
 
     def refresh_sidebar_marks(self, pane: "Any") -> None:
         """One pane's marks moved. Update that ROW rather than the rail.
@@ -2366,9 +2418,22 @@ class DoxaApp(App):
         rebuild there would be a repaint of the whole rail per blink,
         which is the busy-idle cost this app measures and refuses. If the
         row is not there at all the structure moved, and the full refresh
-        is the right answer once."""
+        is the right answer once.
+
+        **A rail that is not showing is not touched at all**, and that is
+        the load-bearing half. ``display: none`` means the rail holds no
+        rows (``refresh_sidebar`` empties it), so ``apply_marks`` could
+        never find one and the fallback below fired on EVERY mark toggle
+        -- ``-working`` on and off per turn, ``-done-unseen``,
+        ``-staged``, ``-attention`` per blink -- in every window in the
+        app, which is the overwhelmingly common one because the rail is
+        hidden by default. Each of those ran the whole derivation. A mark
+        moving is by definition NOT a structure change: the structure is
+        refreshed by ``_persist_tabset`` on every tab lifecycle event, by
+        every collection edit, and by the rail's own ``on_show`` the
+        instant it gets geometry."""
         rail = self.sidebar()
-        if rail is None:
+        if rail is None or rail.styles.display == "none":
             return
         session_id = getattr(pane, "_session_id", "") or ""
         if not session_id:
@@ -2416,7 +2481,7 @@ class DoxaApp(App):
         return None
 
     def action_toggle_sidebar(self) -> None:
-        """Ctrl+B. Reports a width refusal where the user is looking --
+        """F3. Reports a width refusal where the user is looking --
         the active pane's transcript -- rather than doing nothing, which
         is the "documented key that silently does nothing" failure
         v0.39.0 exists to prevent."""

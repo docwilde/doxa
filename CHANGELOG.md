@@ -169,14 +169,17 @@ opens it again the moment there is room.
 - **`f3`**, re-verified free against `DoxaApp.BINDINGS` as it stands
   (the set moved three times this series) and against `TextArea.BINDINGS`,
   which the focused prompt is. `keyboard.unreachable_under_legacy
-  ("f3")` is `False` — `ctrl+<letter>` is the one modified form the
-  legacy encoding was built around, unlike `ctrl+<digit>` (v0.97.0) and
-  `alt+<letter>` (v0.91.0), both of which this project chose and walked
-  back. **The one real cost, named rather than discovered later:
-  `f3` is tmux's default prefix** — `doxa/app.py`'s own split-key
-  subtraction had excluded it on exactly those grounds. The spec chose it
-  anyway and says so; `/sidebar` is the door that always works, the same
-  bargain `ctrl+,` and `ctrl+1…9` ship on.
+  ("f3")` is `False`: function keys go out as CSI/SS3 sequences every
+  terminal since xterm sends, which is `f2`'s precedent (`/diff`,
+  v0.92.0). **Not `ctrl+b`, which the spec asked for and this build
+  reversed: `ctrl+b` is tmux's default prefix** — a tmux user cannot
+  press it at all — and `doxa/app.py`'s own split-key subtraction had
+  excluded it on exactly those grounds. This project has picked a
+  contested or undeliverable key three times (`ctrl+c` in v0.85.0,
+  `alt+<letter>` in v0.91.0, `ctrl+shift+<letter>` before it) and walked
+  each one back; `f3` is contested by nobody and tmux passes it through.
+  `/sidebar` is still the door that always works, the same bargain
+  `ctrl+,` and `ctrl+1…9` ship on.
 - **`/sidebar [on|off]`** carries `binding="f3"` in the registry, so
   `/help` and the startup key notice can see it — three commands shipped
   without one in v0.92.0 and their keys were invisible to both.
@@ -241,8 +244,42 @@ not geometry.
   machines; no auto-grouping by repo or branch — a collection is a thing
   the user decides, not a thing DOXA infers. Inline renaming of a heading
   is `/collection rename`, not a click-to-edit field.
-- Full suite: **1717 passed**, up from 1685 at v0.99.0 — the 32 above
-  and nothing else touched.
+- Full suite: **1720 passed**, up from 1685 at v0.99.0 — the 32 above,
+  the 3 below, and nothing else touched.
+
+### What the rail costs the event loop, and the leak it was blamed for
+
+A "one different test fails per full run" report against this branch was
+run down to three separate facts, only the second of which is this
+release's doing. All three are pinned by tests now.
+
+- **Not the rail.** The same failure occurs on v0.99.0: a control full
+  run of `origin/main` failed `test_a_vsplit_never_blocks_the_event_loop`
+  at a 621 ms stall, and under matched CPU starvation
+  `tests/test_tab_labels.py` fails at the same rate on both branches (the
+  `'default · myrepo'` birth label, i.e. `_settled` returning on the
+  FIRST label write rather than the last). `feat/sidebar` ran the full
+  suite clean three times over.
+- **The suite was a load generator.** `DoxaApp(...)` with no
+  `engine_factory` gets a real in-process `SessionEngine`, which spawns
+  the bundled `claude` CLI — and nothing closed it, because
+  `SessionEngine.finalize()` is the only caller of `_client.__aexit__`
+  and `run_test()` never ends a session. **32 live agent processes by the
+  60% mark of a full run**, ~294 MB and ~1.5% of a core each, growing
+  monotonically and heaviest in the last quarter — which is exactly where
+  every reported victim sat (83%, 92%, 83% of the run). `tests/conftest.py`
+  now reaps them per test; `tests/test_agent_subprocess_leak.py` pins
+  the reaper against a stand-in rather than a real CLI.
+- **The rail did narrow the margin, and no longer does.** Textual's
+  `Stylesheet.apply` and `Screen._refresh_layout` are synchronous and are
+  where this app's loop actually blocks. `refresh_sidebar` derived the
+  session list twice per repaint and walked the widget tree twice MORE
+  per row; `refresh_sidebar_marks` ran that whole derivation on every
+  mark toggle of every window, because a hidden rail holds no rows and so
+  always took the "structure moved" fallback; and `SidebarLine.set_row`
+  rewrote eight classes per line on every forced refresh. Measured over
+  `tests/test_split_panes.py`: **+9.5% layout passes and +22% layout time
+  against `origin/main` before, +3.1% and −11% after.**
 
 ## 0.99.2 — 2026-09-03
 

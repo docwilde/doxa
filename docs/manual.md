@@ -379,12 +379,16 @@ fold it.
 | `/collection add <name>` | Move **this** session into that collection, making it if needed |
 | `/collection remove` | Take this session back out |
 
-**`f3` is tmux's default prefix.** It is the conventional sidebar key
-everywhere else and it is what DOXA binds, but on a tmux session it never
-reaches the app — `/sidebar` is the door that always works, the same
-bargain `ctrl+,`, `ctrl+tab` and `ctrl+1`…`ctrl+9` already ship on. Unlike
-those three, `f3` *is* deliverable under both keyboard encodings; tmux
-is the only thing in its way.
+**Why `f3` and not `ctrl+b`.** `ctrl+b` is the conventional sidebar key
+everywhere else, and it is what this feature's spec asked for — but it is
+also tmux's default *prefix*, so a tmux user cannot press it at all, and
+`doxa/app.py`'s own split-key subtraction had already listed it among
+"the terminal's own" for that reason. `f3` follows `f2`'s precedent
+(`/diff`): function keys go out as sequences every terminal since xterm
+sends, so they are deliverable under both keyboard encodings, Textual's
+own defaults claim none of them, and tmux passes them through. `/sidebar`
+is still the door that always works, the same bargain `ctrl+,`,
+`ctrl+tab` and `ctrl+1`…`ctrl+9` already ship on.
 
 **It refuses to open on a window too narrow to hold it.** The rail is 22
 columns by default (`sidebar_width`, clamped to 19–38) and a pane needs 34,

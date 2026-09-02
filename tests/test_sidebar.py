@@ -712,3 +712,126 @@ async def test_the_slash_commands_are_registered_and_reachable(tmp_path):
         assert await _wait(pilot, lambda: app.sidebar().region.width > 0)
         await handlers["/sidebar"]("off")
         assert await _wait(pilot, lambda: app.sidebar().region.width == 0)
+
+
+# -- what the rail costs the event loop (v1.0.0) -----------------------
+#
+# Textual's Stylesheet.apply and Screen._refresh_layout are SYNCHRONOUS,
+# and on this codebase they are where the loop actually blocks: measured
+# over tests/test_split_panes.py, max 305 ms and 334 ms in one module,
+# against the 250 ms STALL_LIMIT that file asserts on. Chrome that adds
+# widgets to the screen and rewrites their classes is therefore not paid
+# for in microseconds, it is paid for out of that budget -- so the three
+# facts below are pinned as facts, not left to a benchmark nobody runs.
+
+
+@pytest.mark.asyncio
+async def test_a_hidden_rail_is_not_rebuilt_when_a_mark_moves(tmp_path):
+    """The measured one. ``_set_tab_class`` pokes the rail on every status
+    change -- ``-working`` on and off per turn, ``-done-unseen``,
+    ``-staged``, ``-attention`` per blink -- and the rail is HIDDEN in the
+    overwhelmingly common window, which is every test in this suite that
+    is not about the sidebar. A hidden rail holds no rows, so
+    ``apply_marks`` could never find one and the "structure moved" fallback
+    fired every single time, running the whole derivation
+    (``_sidebar_order`` is ``query(TabPane)``, a full walk of the widget
+    tree) for a rail nobody can see.
+
+    A mark moving is not a structure change. ``_persist_tabset``,
+    ``on_show`` and the collection edits are what re-derive."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        rail = app.sidebar()
+        assert rail is not None and rail.styles.display == "none"
+        pane = app.panes()[0]
+
+        walks: list[int] = []
+        original = app._sidebar_order
+
+        def counted():
+            walks.append(1)
+            return original()
+
+        app._sidebar_order = counted
+        try:
+            pane._set_tab_class("-working", True)
+            pane._set_tab_class("-working", False)
+            pane._set_tab_class("-done-unseen", True)
+        finally:
+            app._sidebar_order = original
+        assert walks == [], (
+            f"a hidden rail re-derived its whole model {len(walks)} times "
+            f"for three mark toggles that changed no structure"
+        )
+
+
+@pytest.mark.asyncio
+async def test_one_refresh_derives_the_session_list_once(tmp_path):
+    """``refresh_sidebar`` used to walk the DOM for the session list twice
+    -- once through ``sidebar_should_show``, once again through
+    ``sidebar_rows`` -- and then twice MORE per row, because
+    ``_describe_session`` called ``panes()`` and ``archived_tabs()`` for
+    every session it described. On a window with N sessions that is
+    2 + 2N full walks of a tree that contains every transcript block on
+    screen, per repaint."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        await app.action_new_tab()
+        assert await _wait(pilot, lambda: len(app.panes()) == 2)
+        assert app.set_sidebar(True) is None
+        assert await _wait(pilot, lambda: _settled(app, 2))
+
+        orders: list[int] = []
+        panes_calls: list[int] = []
+        original_order, original_panes = app._sidebar_order, app.panes
+
+        def counted_order():
+            orders.append(1)
+            return original_order()
+
+        def counted_panes():
+            panes_calls.append(1)
+            return original_panes()
+
+        app._sidebar_order = counted_order
+        app.panes = counted_panes
+        try:
+            app.refresh_sidebar(force=True)
+        finally:
+            app._sidebar_order = original_order
+            app.panes = original_panes
+        assert len(orders) == 1, f"derived the session list {len(orders)}x"
+        assert len(panes_calls) == 1, (
+            f"walked the widget tree for panes {len(panes_calls)}x on a "
+            f"two-session window -- once per row rather than once"
+        )
+
+
+def test_a_line_told_the_row_it_already_shows_writes_nothing():
+    """``refresh_sidebar(force=True)`` -- what ``on_show`` and every
+    collection edit pass -- clears the rail's own "nothing changed" cache,
+    so without this guard each forced refresh rewrote eight classes and
+    the text on every visible line. Each ``set_class`` marks the node for
+    a stylesheet re-apply."""
+    row = Row(Row.SESSION, "ampiric", session_id="abc", marks=("-working",))
+    line = SidebarLine(row)
+
+    writes: list[str] = []
+    original = line.set_class
+
+    def counted(value, *names, **kwargs):
+        writes.extend(names)
+        return original(value, *names, **kwargs)
+
+    line.set_class = counted
+    line.set_row(Row(Row.SESSION, "ampiric", session_id="abc",
+                     marks=("-working",)))
+    assert writes == [], f"rewrote {len(writes)} classes for the same row"
+
+    # ...and a row that really did change is still written in full.
+    line.set_row(Row(Row.SESSION, "ampiric", session_id="abc",
+                     marks=("-attention",)))
+    assert "-attention" in writes and "-working" in writes
+    assert line.has_class("-attention") and not line.has_class("-working")
