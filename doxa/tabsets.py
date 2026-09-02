@@ -117,29 +117,53 @@ user left is never silent about it.
 
 **Stopped vs. detached vs. killed** (v0.17's ``detached_on_purpose`` /
 stop-path distinction, carried into the record; revised v0.60.0, then
-v0.85.0): a session DETACHED (Ctrl+W, the palette's "Quit: detach") keeps
-running and STAYS in the set, tab closed or not. A session STOPPED from
-inside this window (Ctrl+Q, the palette's "Quit: stop session") also
-STAYS -- through v0.55.0 it did not, because "the daemon is gone" and
-"the tab is gone" were the same fact. v0.56.0 broke that equivalence:
-DOXA now pins its own session id to the CLI's (``ClaudeAgentOptions.
-session_id``), so ``--resume`` can replay a conversation DOXA itself
-ended, and a saved id with no live daemon behind it is resolved by THIS
-function exactly like any other -- archived if the transcript survived,
-dropped if it did not, with no memory of which of Ctrl+Q, a linger
-timeout or ``doxa stop`` from another terminal put it there.
+v0.85.0, then v0.99.1): **Ctrl+Q ends it, Ctrl+W parks it.** A session
+DETACHED (Ctrl+W, the palette's "Quit: detach") keeps running and STAYS
+in the set, tab closed or not -- reattaching it next launch reconnects
+the SAME daemon, still doing whatever it was doing. A session STOPPED
+from inside this window (Ctrl+Q, the palette's "Quit: stop session")
+LEAVES the set, tab closed or not, and does not come back -- not live,
+not archived.
 
-**One exception** (v0.85.0): closing the LAST open tab, by EITHER key,
-never writes that tab's session into the set at all --
-``DoxaApp._close_pane``'s own ``is_last`` branch, not this module.
-Reported live in two parts: Ctrl+Q on the last tab should start the next
-launch fresh (it used to come back archived, read-only); Ctrl+W on the
-last tab should ALSO start fresh, even though -- unlike Ctrl+Q -- the
-session is still running and reattachable by NAME (``/attach``, the
-peers chip). A window with zero tabs left has nothing left to restore
-automatically; that the Ctrl+W session is still there to attach TO is a
-fact about the live daemon registry (``doxa.peers``), never about this
-record.
+That was also true through v0.55.0, for a cruder reason: "the daemon is
+gone" and "the tab is gone" were the same fact then, full stop. v0.56.0
+broke that equivalence -- DOXA now pins its own session id to the CLI's
+(``ClaudeAgentOptions.session_id``), so ``--resume`` CAN replay a
+conversation DOXA itself ended -- and v0.60.0 read that capability as
+license to keep a stopped session in the set too, on the theory that a
+resumable transcript deserved a resumable tab. Reported live as a defect
+instead: *"tabs that i had closed using CTRL+Q are resurrected on the
+next start of DOXA anyway"* -- worse, LIVE rather than read-only, because
+finalize() never removes the conversation from the CLI's own history
+store, so doxa.cli's restore triage (:func:`ended_tab_spec`) found it,
+answered RESUME_OK, and rebuilt it as an ordinary resumable tab. v0.99.1
+is the reversal: ``DoxaApp._persist_tabset``'s own mounted-pane scan
+excludes a ``_stopped`` pane again, the same rule v0.55.0 had, reached
+now from every path that can stop a session (Ctrl+Q on any tab, the
+palette's tab-scoped and all-tabs stop) rather than v0.85.0's one
+carve-out for the LAST tab only. **Nothing on disk is destroyed** by any
+of this -- the transcript stays exactly where :func:`doxa.transcript`
+always wrote it, findable by ``/search`` and the resume picker alike; the
+only thing v0.99.1 changes is whether a session's id is still IN this
+record for a future :func:`resolve` to find in the first place. A session
+whose id was never written here cannot reach :func:`ended_tab_spec` (the
+archived-or-resumed fork below) at all -- it simply is not one of the
+saved tabs, the same as if the user had never opened it in a
+persisted-tabs window.
+
+**One exception, now folded into the rule above** (v0.85.0, superseded by
+v0.99.1's general Ctrl+Q exclusion for the STOPPED half): closing the
+LAST open tab with Ctrl+W never writes that tab's session into the set
+either, even though the session survives and Ctrl+Q's half of this
+carve-out no longer needs one. Reported live in two parts: Ctrl+Q on the
+last tab should start the next launch fresh (it used to come back
+archived, read-only); Ctrl+W on the last tab should ALSO start fresh,
+even though -- unlike Ctrl+Q -- the session is still running and
+reattachable by NAME (``/attach``, the peers chip). A window with zero
+tabs left has nothing left to restore automatically; that the Ctrl+W
+session is still there to attach TO is a fact about the live daemon
+registry (``doxa.peers``), never about this record. See
+``DoxaApp._close_pane``'s own ``is_last`` branch for the mechanics.
 
 Only an EXPLICIT reap (``/sessions kill <prefix>``, ``kill-detached``,
 the palette's kill path) leaves the set for good otherwise: reaping is

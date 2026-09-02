@@ -83,14 +83,17 @@ class PaneRuntimeMixin:
         # v0.55.0 this flag (not "engine is None", which detach() also
         # produces) was what told _persist_tabset to drop the pane from
         # the persisted tab set outright -- ending a session meant losing
-        # the tab for good. v0.60.0: it no longer does (see
-        # DoxaApp._ended_this_run's docstring for why a FINALIZED session
-        # is now still a RESUMABLE one) -- nothing reads this flag to
-        # exclude anything any more. Kept and still set here anyway: it is
-        # the one place that records, honestly, that THIS engine handle's
-        # daemon was told to finalize for real (detach() only ever clears
-        # the handle, never asks the daemon to stop), which is worth
-        # keeping true even with no reader left today.
+        # the tab for good. v0.60.0 dropped that read for one release (see
+        # DoxaApp._ended_this_run's docstring): a finalized session's
+        # transcript is genuinely resumable via --resume, and v0.60.0 read
+        # that as reason enough to keep the tab's record around too. It
+        # is not the same fact -- Ctrl+Q is the user asking to be done
+        # with this tab, not asking for it back next launch -- so v0.99.1
+        # has _persist_tabset read this flag again (its own mounted-pane
+        # scan), the same job it did through v0.55.0: keep this session
+        # out of the tab set the NEXT launch restores, whether or not it
+        # is also the reason CLI's own --resume can still replay it if
+        # asked for by name.
         self._stopped = True
         engine, self.engine = self.engine, None
         if engine is None:

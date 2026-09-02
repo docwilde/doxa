@@ -823,18 +823,22 @@ class DoxaApp(App):
         # gets detached twice (should never happen) doesn't duplicate.
         self._detached_this_run: "dict[str, tabsets_mod.TabRecord]" = {}
         # Sessions ENDED (Ctrl+Q, the palette's "Quit: stop session") THIS
-        # run: same reason as _detached_this_run above -- once the tab
-        # closes, the pane drops out of _restorable_tabs()'s scan and a
-        # LATER persist call (a new tab opened, another tab renamed) would
-        # silently lose it without this. v0.56.0's session-id pinning is
-        # what makes keeping it worth doing at all: the daemon really is
-        # gone, but --resume can replay the transcript, so a saved id with
-        # no live daemon behind it now comes back ARCHIVED (or resumed
-        # outright, per resume_restored) at the next launch instead of
-        # just disappearing. Through v0.55.0 _persist_tabset excluded any
-        # pane marked _stopped outright ("nothing survives but the
-        # transcript" was true then); this dict, plus dropping that
-        # exclusion below, is the whole of what changed.
+        # run: NOT a source _persist_tabset reads any more (v0.99.1 -- see
+        # that method's own docstring). v0.60.0 fed this dict into the
+        # persisted set on the theory that a finalized session was still a
+        # RESUMABLE one, so losing the tab did not have to mean losing the
+        # record of it -- reported live, in two acts: first as the fix
+        # ("a Ctrl+Q'd tab used to vanish from the persisted set"), then as
+        # the defect it actually was ("tabs closed with Ctrl+Q are
+        # resurrected on the next start of DOXA anyway" -- and worse, LIVE,
+        # not read-only, because finalize() never touches the CLI's own
+        # history store, so the next launch's resume_state check found the
+        # conversation and happily resumed it). Ctrl+Q ends the session,
+        # full stop; that verb should not have a sequel. This dict is kept
+        # for what it does NOT touch: within the current run, "this window
+        # ended it" is still worth knowing on its own (the sidebar rail
+        # dims an ended session's row for the rest of the run) -- it just
+        # no longer has any say over what the NEXT launch restores.
         self._ended_this_run: "dict[str, tabsets_mod.TabRecord]" = {}
         # Sessions REAPED on purpose THIS run (`/sessions kill <prefix>`,
         # `kill-detached`, the palette's own kill path) -- the one gesture
@@ -1861,24 +1865,34 @@ class DoxaApp(App):
         READS this file, see doxa.tabsets.enabled/config's own note) --
         gated only on a restore still being in flight (_restore_pending).
 
-        THREE sources, merged: panes still mounted (in tab-bar order --
-        LIVE or _stopped alike, see below), _detached_this_run (sessions
-        Ctrl+W'd out of the strip earlier this run, which keep running and
-        therefore STAY in the set per item D #4) and _ended_this_run (the
-        v0.60.0 counterpart: sessions Ctrl+Q'd or palette-stopped out of
-        the strip, which do NOT keep running but stay in the set anyway --
-        see that dict's own docstring for why). A mounted pane's own
-        _stopped flag no longer excludes it here either, for the identical
-        reason: through v0.55.0 a stopped pane was dropped on the spot,
-        because ending a session really did mean losing the tab for good.
-        v0.56.0 pinned the doxa session id to the CLI's own
+        TWO sources, merged: panes still mounted (in tab-bar order, LIVE
+        only -- a _stopped one is skipped, see below) and
+        _detached_this_run (sessions Ctrl+W'd out of the strip earlier
+        this run, which keep running and therefore STAY in the set per
+        item D #4). _ended_this_run (Ctrl+Q, palette-stopped) is
+        deliberately NOT a source here -- see that dict's own docstring.
+        v0.55.0 dropped a _stopped mounted pane on the spot, because
+        ending a session really did mean losing the tab for good. v0.56.0
+        pinned the doxa session id to the CLI's own
         (SessionEngine._build_options), which is what makes --resume able
-        to replay a transcript DOXA itself indexed -- so "the daemon is
-        gone" stopped being the same fact as "the tab is gone", and
-        excluding a _stopped pane here was still doing the OLD job. The
-        one thing that still has to win over all three sources is an
-        EXPLICIT reap (_killed_this_run, `/sessions kill`) -- checked
-        below wherever a record could otherwise slip through.
+        to replay a transcript DOXA itself indexed, and v0.60.0 read that
+        as license to stop excluding a _stopped pane here at all -- "the
+        daemon is gone" no longer meant "the tab is gone", so why should
+        ending a session cost the user the tab. It still can: v0.60.0
+        never noticed that a pinned-id resume plays back LIVE, not
+        read-only (finalize() never touches the CLI's own history store),
+        so a session the user explicitly ended with Ctrl+Q came back next
+        launch exactly as if it had never closed. v0.99.1 restores the
+        v0.55.0 exclusion -- a mounted _stopped pane is skipped here again
+        -- which is the one piece of this method that changed; the
+        _resume-a-dead-session-as-archived_ path (doxa.cli.ended_tab_spec)
+        this reverses nothing about, because that path is only ever
+        reached for a session that IS still in the persisted set (a
+        Ctrl+W detach whose daemon later died on its own), which is
+        exactly the case v0.55.0 never touched either. The one thing that
+        still has to win over both sources is an EXPLICIT reap
+        (_killed_this_run, `/sessions kill`) -- checked below wherever a
+        record could otherwise slip through.
 
         Cross-repo exclusion (item 4's repo picker, reconciled against
         this method): every tab used to share ONE scope by construction
@@ -1899,7 +1913,13 @@ class DoxaApp(App):
         every source above, for exactly one call -- :meth:`_close_pane`'s
         own ``is_last`` branch, which needs THIS snapshot to read as
         though the closing tab were already gone without actually
-        unmounting it first. An earlier version of that fix called
+        unmounting it first. Still load-bearing for a Ctrl+W is_last close
+        (the pane is only DETACHED, never marked _stopped, so nothing else
+        here would exclude it); redundant but harmless for a Ctrl+Q
+        is_last close since v0.99.1 -- pane.stop() already marked it
+        _stopped by the time this runs, so the mounted-pane scan's own
+        exclusion above would have caught it anyway. An earlier version of
+        that fix called
         ``remove_pane`` before this method to get the same exclusion out
         of the mounted-pane scan -- which worked, but unmounted a pane
         with a still-running ``_peer_pump`` worker moments before
@@ -1954,16 +1974,18 @@ class DoxaApp(App):
                 sid = pane._session_id
                 if (
                     not sid or sid in seen or sid in self._killed_this_run
-                    or sid == exclude_session_id
+                    or sid == exclude_session_id or pane._stopped
                 ):
                     continue
-                # A _stopped pane (Ctrl+Q, palette stop) falls straight
-                # through to the same record the live branch below builds
-                # -- see this method's own docstring for why that is now
-                # correct rather than an oversight. Its engine is gone
-                # (stop() cleared it), so the cwd read below already falls
-                # back to pane.cwd, same as it does for a Ctrl+W-detached
-                # pane at this exact call site.
+                # A _stopped pane (Ctrl+Q, palette stop) is excluded here
+                # again as of v0.99.1 -- see this method's own docstring
+                # for the v0.60.0 detour and why it did not hold. A pane
+                # can still be MOUNTED and _stopped at once (pane.stop()
+                # marks the flag and clears the engine handle, but nothing
+                # unmounts the pane itself until _close_pane's caller gets
+                # around to it, deliberately -- see is_last's own
+                # comment), so this is reached mid-close, not just at
+                # startup.
                 pane_cwd = str(getattr(pane.engine, "cwd", None) or pane.cwd)
                 pane_scope = peers_mod.main_repo_root_of(pane_cwd) or pane_cwd
                 if pane_scope != scope:
@@ -2001,7 +2023,15 @@ class DoxaApp(App):
             # later, when a None active_id is a real answer -- a subagent
             # transcript tab is active, and no session tab is.
             active_id = self._restore_active_id
-        for record in (*self._detached_this_run.values(), *self._ended_this_run.values()):
+        # _detached_this_run ONLY (v0.99.1 -- _ended_this_run used to sit
+        # here too; it no longer does, see that dict's own docstring): a
+        # session whose tab already left the strip is in this flat dict
+        # and nowhere else -- there is no layout left to remember for it,
+        # and inventing one would put it back somewhere the user never had
+        # it. _fill_group appends it to the first group at restore time,
+        # which is "it comes back as a tab", the same answer v0.91.0 gave
+        # with a single-leaf tree.
+        for record in self._detached_this_run.values():
             if (
                 record.session_id in seen
                 or record.session_id in self._killed_this_run
@@ -2009,12 +2039,6 @@ class DoxaApp(App):
             ):
                 continue
             seen.add(record.session_id)
-            # A session whose tab already left the strip is in the flat
-            # list and nowhere else -- there is no layout left to remember
-            # for it, and inventing one would put it back somewhere the
-            # user never had it. _fill_group appends it to the first group
-            # at restore time, which is "it comes back as a tab", the same
-            # answer v0.91.0 gave with a single-leaf tree.
             tabs.append(record)
         # The WINDOW's layout, read off the widgets and then PRUNED to the
         # sessions that actually made it into the flat list above (a
@@ -3550,10 +3574,35 @@ class DoxaApp(App):
         first -- they have no engine and nothing left to route events into
         once the session that spawned their subagents is gone.
 
-        ``is_last`` (v0.85.0) is computed up front and decides whether the
-        closing session enters the persisted restore set at all -- see the
-        branches below for why, and :meth:`_cyclable_tabs`'s sibling fix
-        for the OTHER half of this release's tab-lifecycle report."""
+        ``is_last`` (v0.85.0) is computed up front and, since v0.99.1, no
+        longer decides much: Ctrl+Q now excludes the closing session from
+        the persisted restore set unconditionally (below), so the ONLY
+        thing tab arithmetic still changes is Ctrl+W's disposition -- see
+        the branches below for why -- and :meth:`_cyclable_tabs`'s sibling
+        fix for the OTHER half of the v0.85.0 report.
+
+        **Ctrl+Q ends it, Ctrl+W parks it** is the rule as of v0.99.1: a
+        terminated session leaves the persisted set no matter which tab it
+        was, a detached one stays in it unless it was the last tab (see
+        the ``is_last`` branch below for that one's own reasoning, shared
+        with Ctrl+Q's last-tab case). Reported live: *"tabs that i had
+        closed using CTRL+Q are resurrected on the next start of DOXA
+        anyway"* -- and, once told a finalized session cannot be resumed,
+        *"but all of those sessions are resumed and dont disappear ...
+        there is no way to permanently close a tab."* Both true: v0.60.0
+        kept an ended session's id in the persisted set on purpose (the
+        `if not is_last` guard this replaces), reasoning that a finalized
+        session was still a resumable one, so the record of the tab was
+        worth keeping even once the daemon behind it was gone. What it
+        missed is that finalize() never removes the conversation from the
+        CLI's OWN history store -- so doxa.cli's restore triage
+        (``ended_tab_spec`` -> ``history_mod.resume_state``) found it,
+        answered RESUME_OK, and handed it back as a live, resumable tab,
+        not the read-only one the fix's own comments describe. Nothing
+        about the TRANSCRIPT changes here -- it is still on disk, still
+        findable by /search and the resume picker -- only whether Ctrl+Q'd
+        session ever lands in the file :meth:`_persist_tabset` reads on
+        the NEXT launch."""
         for tab in list(pane._transcript_tabs.values()):
             await self._close_transcript_tab(tab)
         is_last = len(self.panes()) == 1
@@ -3566,16 +3615,15 @@ class DoxaApp(App):
                 # mounted in the closing pane's own block list, which the
                 # user would never get a chance to see.
                 self.notify(note, severity="information", timeout=10)
-            if not is_last:
-                # v0.60.0: this session STAYS in the persisted set even
-                # though its tab is about to leave the strip below --
-                # Ctrl+Q finalizes the SESSION, not the record of having
-                # had the tab. See _ended_this_run's own docstring for why
-                # that is now the right read of "end this session" and
-                # _record_after_close for the scope check this shares with
-                # the detach branch below. Skipped when this IS the last
-                # tab -- see the is_last branch at the bottom for why.
-                self._record_after_close(pane, self._ended_this_run)
+            # Recorded regardless of is_last (v0.99.1): _ended_this_run no
+            # longer feeds the persisted set (see its own docstring), so
+            # there is no longer a reason to skip this on the last tab --
+            # it is pure in-run bookkeeping now (the sidebar rail's dimmed
+            # row for an ended session, for the rest of THIS run only).
+            # pane.stop() above already marked the pane _stopped, which is
+            # what actually keeps it out of the next launch's restore set
+            # -- see _persist_tabset's own mounted-pane scan.
+            self._record_after_close(pane, self._ended_this_run)
         else:
             # Detached ON PURPOSE: it is no longer this window's to end, so
             # a later quit-stop leaves it running.
@@ -3609,31 +3657,42 @@ class DoxaApp(App):
             # tab was closed with CTRL+W, we also start with a fresh
             # session, but the old session could be reattached." Both keys
             # close the LAST tab the same way here: the closing session is
-            # excluded from BOTH the persisted-set write above (the
-            # `if not is_last` guards) and _persist_tabset's own
-            # mounted-pane scan, via `exclude_session_id` -- NOT by
-            # removing the pane from the strip first. An earlier version
-            # of this fix called remove_pane() here before persisting,
-            # to get the same exclusion out of the mounted-pane scan --
-            # which worked, but unmounted a pane with a still-running
-            # _peer_pump worker moments before action_quit tore the app
-            # down under it: an intermittent AssertionError out of that
-            # worker's own `assert self.engine is not None`, surfaced as a
-            # visible in-app error block on the way out. The pane now
-            # stays mounted, exactly as App.action_quit already handled it
-            # before this whole feature existed -- only what
-            # _persist_tabset WRITES changes. The next launch reads an
-            # empty (or unaffected-by-this-tab) record and starts fresh
-            # either way; what differs is not the record, it is whether
-            # the session is still THERE to /attach back to: Ctrl+Q's is
-            # gone (pane.stop() above), Ctrl+W's keeps running (pane.
-            # detach() above, and the toast just said so) -- reachable by
-            # NAME from here on, never by an automatic restore. See
-            # doxa.tabsets' module docstring for the restore side of this
-            # distinction.
+            # excluded from _persist_tabset's own mounted-pane scan via
+            # `exclude_session_id` -- NOT by removing the pane from the
+            # strip first. An earlier version of this fix called
+            # remove_pane() here before persisting, to get the same
+            # exclusion out of the mounted-pane scan -- which worked, but
+            # unmounted a pane with a still-running _peer_pump worker
+            # moments before action_quit tore the app down under it: an
+            # intermittent AssertionError out of that worker's own `assert
+            # self.engine is not None`, surfaced as a visible in-app error
+            # block on the way out. The pane now stays mounted, exactly as
+            # App.action_quit already handled it before this whole feature
+            # existed -- only what _persist_tabset WRITES changes.
+            #
+            # For Ctrl+Q this `exclude_session_id` is belt-and-suspenders
+            # since v0.99.1: pane.stop() above already marked the pane
+            # _stopped, which the mounted-pane scan now excludes on its
+            # own (same rule as the non-last branch below). Still load-
+            # bearing for Ctrl+W: a detached pane is never _stopped, so
+            # nothing else here would keep it out of THIS one snapshot
+            # before the pane is unmounted. The next launch reads an empty
+            # (or unaffected-by-this-tab) record and starts fresh either
+            # way; what differs is not the record, it is whether the
+            # session is still THERE to /attach back to: Ctrl+Q's is gone
+            # (pane.stop() above), Ctrl+W's keeps running (pane.detach()
+            # above, and the toast just said so) -- reachable by NAME from
+            # here on, never by an automatic restore. See doxa.tabsets'
+            # module docstring for the restore side of this distinction.
             self._persist_tabset(exclude_session_id=pane._session_id)
             await App.action_quit(self)
             return
+        # Ctrl+Q's pane is still mounted here (removed only below, by
+        # _close_group_tab) but already _stopped -- this snapshot already
+        # excludes it via _persist_tabset's own mounted-pane scan, no
+        # `exclude_session_id` needed. A Ctrl+W'd pane is not _stopped, so
+        # it is written here exactly as it was before -- still in the set,
+        # per item D #4.
         self._persist_tabset()
         # **Closing a tab closes ONE session** (v0.97.0, and the third of
         # the three problems the inversion dissolves rather than patches).
@@ -4008,22 +4067,22 @@ class DoxaApp(App):
         tab's session NOW; the tab closes with it. Stopping the only tab
         closes the app (the Phase 2 behavior, per-app == per-tab then).
 
-        The palette's own name for Ctrl+Q -- same disposition, same v0.60.0
-        answer: stays in the persisted set (_record_after_close), because
-        finalizing a session is no longer the same fact as losing its tab
-        (see _ended_this_run's docstring)."""
+        The palette's own name for Ctrl+Q -- v0.99.1 makes that literal by
+        delegating to :meth:`_close_pane` (``terminate=True``) instead of
+        re-deriving its disposition here a second time. Through v0.99.0
+        this method reimplemented a SUBSET of that logic directly (no
+        transcript-tab teardown, no split/group-aware removal via
+        _close_group_tab, no is_last handling at all) and inherited none
+        of _close_pane's fixes as a result -- stopping the ONLY tab from
+        the palette left its session in the persisted record even after
+        v0.85.0 taught Ctrl+Q's own path not to, and even after v0.99.1
+        taught it that a stopped pane never belongs in the persisted set
+        regardless of tab position. One implementation now, reached both
+        ways."""
         pane = self.active_pane
         if pane is None:
             return
-        note = await pane.stop()
-        if note:
-            self.notify(note, severity="information", timeout=10)
-        self._record_after_close(pane, self._ended_this_run)
-        self._persist_tabset()
-        if len(self.panes()) == 1:
-            await App.action_quit(self)
-            return
-        await self._strip_for(pane.tab_id).remove_pane(pane.tab_id)
+        await self._close_pane(pane, terminate=True)
 
     def _cmd_run_slash(self, name: str) -> None:
         """Palette -> the ACTIVE pane's slash handler. One dispatch path for
@@ -4346,14 +4405,15 @@ class DoxaApp(App):
         # Item D: one snapshot after the loop -- every pane above is still
         # MOUNTED (detached or stop()-marked _stopped, neither removed:
         # the app quits right below), so _persist_tabset's own per-pane
-        # scan picks all of them up without help from either side dict.
-        # v0.60.0: a stopped pane is no longer excluded there either -- see
-        # _ended_this_run's docstring -- so this method (palette 'Quit:
-        # stop session', all tabs -- Ctrl+C used to reach it too, through
-        # v0.84.0) now leaves every tab resumable, the same as ending them
-        # one at a time with Ctrl+Q does; there is no reason the
-        # all-at-once quit gesture should be the ONE way left to lose the
-        # set for good.
+        # scan reads every one of them without help from either side dict.
+        # A stopped pane is excluded there again as of v0.99.1 (see that
+        # method's own docstring for the v0.60.0 detour) -- so this method
+        # (palette 'Quit: stop session', all tabs -- Ctrl+C used to reach
+        # it too, through v0.84.0) now matches ending them one at a time
+        # with Ctrl+Q exactly: a detached pane is still written (item D
+        # #4, unchanged), a stopped one is not. Nothing special had to
+        # change HERE for that to be true -- the mounted-pane scan this
+        # reads from is the one and only choke point, which is the point.
         self._persist_tabset()
         await App.action_quit(self)
 

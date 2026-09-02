@@ -137,11 +137,15 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         self._session_id: str = ""
         # Set True at the top of stop(): this engine's daemon was told to
         # finalize for real, as opposed to detach()'s "handle cleared, but
-        # nobody told the daemon to stop". Through v0.55.0 this also
-        # excluded the pane from the persisted tab set entirely -- v0.60.0
-        # dropped that (see DoxaApp._ended_this_run's docstring): a
-        # finalized session is a resumable one now, so nothing branches on
-        # this flag any more.
+        # nobody told the daemon to stop". Excludes the pane from the
+        # persisted tab set (DoxaApp._persist_tabset's own mounted-pane
+        # scan) for as long as it stays mounted after stop() -- true again
+        # as of v0.99.1. v0.60.0 dropped that exclusion for one release
+        # (see DoxaApp._ended_this_run's docstring for why, and why it
+        # came back): a finalized session's transcript is still resumable
+        # via --resume, but "resumable" is not the same promise as
+        # "belongs in the NEXT launch's auto-restored tab set", and v0.60.0
+        # conflated the two.
         self._stopped: bool = False
         # Item D restore-only: a pinned name to apply the moment this pane
         # mounts (before boot), and a one-shot SystemBlock to mount right

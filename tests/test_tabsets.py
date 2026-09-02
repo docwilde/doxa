@@ -327,15 +327,67 @@ async def test_ctrl_w_detach_keeps_the_session_in_the_record(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_stop_keeps_the_session_in_the_record(tmp_path):
-    """v0.60.0: through v0.55.0 this was test_stop_drops_the_session_from_
-    the_record and asserted the opposite. What changed underneath it is
-    v0.56.0's session-id pinning (SessionEngine._build_options sends
-    ClaudeAgentOptions.session_id) -- the daemon behind a stopped pane is
-    genuinely gone, but --resume can now replay the transcript DOXA itself
-    wrote, so "the session ended" stopped being the same fact as "the tab
-    is lost". The palette's "Quit: stop session" is Ctrl+Q under a
-    different door; both now leave the record alone."""
+async def test_ctrl_w_parks_it_ctrl_q_ends_it(tmp_path):
+    """The symmetry the fix is built on, stated as one test: Ctrl+W on a
+    non-last tab keeps its session running and IN the persisted record
+    (still reachable by NAME, /attach or the peers chip, next launch or
+    this one) -- Ctrl+Q on a non-last tab ends the session and takes it
+    OUT of the record entirely. Same starting shape (three tabs, close
+    the middle one), opposite key, opposite bookkeeping dict: sid-b lands
+    in _detached_this_run, never _ended_this_run, and its pane is never
+    marked _stopped -- the flag _persist_tabset's mounted-pane scan now
+    reads to drop a Ctrl+Q'd session is the one thing detach never sets."""
+    where = tmp_path / "scratch"
+    where.mkdir()
+    ids = iter(["sid-a", "sid-b", "sid-c"])
+
+    def factory() -> FakeEngine:
+        engine = FakeEngine([])
+        engine.session_id = next(ids)
+        return engine
+
+    app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        await pilot.press("ctrl+t")
+        assert await _wait(
+            pilot, lambda: len(app.panes()) == 2 and app.panes()[1]._session_id
+        )
+        await pilot.press("ctrl+t")
+        assert await _wait(
+            pilot, lambda: len(app.panes()) == 3 and app.panes()[2]._session_id
+        )
+        middle = app.panes()[1]
+        await pilot.press("ctrl+left")
+        assert await _wait(
+            pilot,
+            lambda: app.active_pane is not None
+            and app.active_pane._session_id == "sid-b",
+        )
+        await pilot.press("ctrl+w")  # PARK the middle tab
+        assert await _wait(pilot, lambda: len(app.panes()) == 2)
+        await pilot.pause()
+        assert "sid-b" in app._detached_this_run
+        assert "sid-b" not in app._ended_this_run
+        assert middle._stopped is False
+    record = tabsets.load(str(where))
+    assert {t.session_id for t in record.tabs} == {"sid-a", "sid-b", "sid-c"}
+
+
+@pytest.mark.asyncio
+async def test_stop_drops_the_ended_session_from_the_record(tmp_path):
+    """v0.99.1 reverses v0.60.0's own reversal of this exact test (it used
+    to assert the session STAYED, under the name
+    test_stop_keeps_the_session_in_the_record). v0.56.0's session-id
+    pinning still means --resume CAN replay a session Ctrl+Q ended -- that
+    part was never wrong -- but v0.60.0 read it as license to keep the
+    ended session in the AUTO-RESTORE set too, and DOXA's own finalize
+    never removes the conversation from the CLI's history store, so the
+    next launch's resume_state check found it and came back LIVE, not
+    read-only: reported live as "tabs...are resurrected on the next start
+    of DOXA anyway" (and, pressed further, "there is no way to permanently
+    close a tab"). The palette's "Quit: stop session" is Ctrl+Q under a
+    different door; both now drop the record."""
     where = tmp_path / "scratch"
     where.mkdir()
     ids = iter(["sid-a", "sid-b"])
@@ -356,18 +408,25 @@ async def test_stop_keeps_the_session_in_the_record(tmp_path):
         assert await _wait(pilot, lambda: len(app.panes()) == 1)
         await pilot.pause()
     record = tabsets.load(str(where))
-    assert {t.session_id for t in record.tabs} == {"sid-a", "sid-b"}
+    assert {t.session_id for t in record.tabs} == {"sid-a"}
 
 
 @pytest.mark.asyncio
-async def test_ctrl_q_keeps_the_ended_session_in_the_record(tmp_path):
-    """The exact defect reported from disk: a Ctrl+Q'd tab used to vanish
-    from the persisted set (record.tabs == ["sid-a"] only, pre-v0.60.0).
-    Ctrl+Q still ends the session -- the daemon is really gone -- it just
-    no longer erases the MEMORY of the tab having existed."""
+async def test_ctrl_q_drops_the_ended_session_from_the_record(tmp_path):
+    """The exact defect reported from disk, fixed: Ctrl+Q on a NON-last
+    tab used to leave the ended session in the persisted set anyway
+    (v0.60.0's deliberate choice) -- and worse, it came back LIVE next
+    launch rather than read-only, because finalize() never touches the
+    CLI's own history store (see test_ctrl_q_ended_session_is_not_in_
+    resolve below for that half). Three tabs, closing the MIDDLE one:
+    v0.91.0's spec notes a two-tab version of this test passed even with
+    the old bug still live in one narrow shape, because the saved tab
+    happened to also be the last one in the strip -- ``is_last`` is a
+    COUNT (``len(self.panes()) == 1``), not a position, so a 2-tab test
+    proves nothing about a session that has siblings on BOTH sides."""
     where = tmp_path / "scratch"
     where.mkdir()
-    ids = iter(["sid-a", "sid-b"])
+    ids = iter(["sid-a", "sid-b", "sid-c"])
 
     def factory() -> FakeEngine:
         engine = FakeEngine([])
@@ -381,11 +440,28 @@ async def test_ctrl_q_keeps_the_ended_session_in_the_record(tmp_path):
         assert await _wait(
             pilot, lambda: len(app.panes()) == 2 and app.panes()[1]._session_id
         )
-        await pilot.press("ctrl+q")  # end the active (second) tab's session
-        assert await _wait(pilot, lambda: len(app.panes()) == 1)
+        await pilot.press("ctrl+t")
+        assert await _wait(
+            pilot, lambda: len(app.panes()) == 3 and app.panes()[2]._session_id
+        )
+        await pilot.press("ctrl+left")  # step back onto tab two (sid-b)
+        assert await _wait(
+            pilot,
+            lambda: app.active_pane is not None
+            and app.active_pane._session_id == "sid-b",
+        )
+        middle = app.active_pane
+        await pilot.press("ctrl+q")  # end the MIDDLE tab's session
+        assert await _wait(pilot, lambda: len(app.panes()) == 2)
         await pilot.pause()
+        # _ended_this_run STILL does its (v1.0.0 sidebar) job within this
+        # run -- what changed is that it no longer has any say over what
+        # the NEXT launch restores (that is _persist_tabset reading
+        # middle._stopped, checked directly here too).
+        assert "sid-b" in app._ended_this_run
+        assert middle is not None and middle._stopped is True
     record = tabsets.load(str(where))
-    assert {t.session_id for t in record.tabs} == {"sid-a", "sid-b"}
+    assert {t.session_id for t in record.tabs} == {"sid-a", "sid-c"}
 
 
 # -- v0.85.0: closing the LAST tab starts the next launch fresh -----------
@@ -419,6 +495,32 @@ async def test_ending_the_only_tab_with_ctrl_q_leaves_no_restore_record(tmp_path
     async with app.run_test() as pilot:
         assert await _wait(pilot, lambda: app.panes()[0]._session_id)
         await pilot.press("ctrl+q")
+        await pilot.pause()
+    assert seen == [], [f.headline() for f in seen]
+    record = tabsets.load(str(where))
+    assert record is None or record.tabs == ()
+
+
+@pytest.mark.asyncio
+async def test_palette_stop_active_on_the_only_tab_leaves_no_restore_record(
+    tmp_path,
+):
+    """The palette's "Quit: stop session" (DoxaApp._stop_active) used to
+    be a SEPARATE, partial reimplementation of Ctrl+Q's own disposition --
+    it never grew v0.85.0's is_last carve-out at all, so stopping the
+    ONLY tab from the palette left the session in the persisted record
+    even on a DOXA that got Ctrl+Q's own last-tab case right. v0.99.1
+    makes it delegate to _close_pane instead of re-deriving any of this a
+    second time, which is what closes that gap -- this is the regression
+    test for it."""
+    seen = _claim_failures(DoxaApp)
+    where = tmp_path / "scratch"
+    where.mkdir()
+    factory = _fake_factory("sid-solo")
+    app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
+    async with app.run_test() as pilot:
+        assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        app._cmd_stop_active()  # palette "Quit: stop session" on the only tab
         await pilot.pause()
     assert seen == [], [f.headline() for f in seen]
     record = tabsets.load(str(where))
@@ -478,14 +580,23 @@ async def test_peer_pump_tolerates_the_engine_already_being_gone(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_an_ended_session_resolves_as_archived_not_skipped(tmp_path):
-    """Closes the loop the two tests above only open: a record that
-    SURVIVED a Ctrl+Q must actually come back at the next launch, not just
-    sit in the file unread. No live daemon is registered for the ended
-    session (Ctrl+Q's whole point), so resolve() can only find it via its
-    on-disk transcript -- exactly the v0.32.0/v0.45.0 machinery an
-    ordinary linger-timeout restore already goes through, now fed a record
-    Ctrl+Q produced instead."""
+async def test_ctrl_q_ended_session_is_not_in_resolve_at_all(tmp_path):
+    """Closes the loop test_ctrl_q_drops_the_ended_session_from_the_record
+    only opens, and is the direct "simulated next launch" check: since
+    sid-b was never written into the persisted record, resolve() -- what
+    the CLI's own triage reads on the next launch -- cannot hand it back
+    EITHER way. Not live (no daemon, Ctrl+Q's whole point) -- unsurprising
+    -- but also not ARCHIVED, even with its transcript sitting right there
+    on disk (written below exactly as Ctrl+Q's own finalize path would for
+    real, and doxa.transcript.exists confirms it). Pre-v0.99.1 that
+    transcript is exactly what made resolve() hand sid-b back as an
+    archived tab (doxa.tabsets.resolve's own "Restore is a cross-check"
+    docstring), and doxa.cli.ended_tab_spec would then have called
+    history_mod.resume_state on it and, finding the CLI's own history
+    store still holding the conversation, handed it back LIVE instead --
+    the exact defect reported. None of that runs for a session that was
+    never in the record to begin with. The transcript itself is
+    untouched: this fix changes the AUTO-RESTORE set, never history."""
     from doxa import transcript as transcript_mod
 
     where = tmp_path / "scratch"
@@ -512,29 +623,32 @@ async def test_an_ended_session_resolves_as_archived_not_skipped(tmp_path):
     # resolve as skipped for a reason that has nothing to do with this
     # test (a unit-test artifact, not a live daemon DOXA lost track of);
     # sid-b's is what Ctrl+Q's own finalize path would have written for
-    # real. resolve() only cares that a transcript exists
-    # (doxa.transcript.exists), never why.
+    # real, and is the whole point here: the transcript SURVIVES.
     for sid in ("sid-a", "sid-b"):
         path = transcript_mod.transcript_path(sid, str(where))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             '{"type": "user", "message": {"content": "hi"}}\n', encoding="utf-8"
         )
+    assert transcript_mod.exists("sid-b", str(where))
 
     resolved = tabsets.resolve(str(where))
     assert resolved is not None
-    assert {t.session_id for t in resolved.archived} == {"sid-a", "sid-b"}
+    assert {t.session_id for t in resolved.archived} == {"sid-a"}
+    assert {t.session_id for t, _ in resolved.tabs} == set()
     assert resolved.skipped == 0
 
 
 @pytest.mark.asyncio
-async def test_quit_stop_keeps_every_tab_in_the_record(tmp_path):
-    """action_quit_stop (Ctrl+C twice): the whole-window mirror of the
-    single-tab test above. Through v0.55.0 only the pane already
-    detached_on_purpose survived this; v0.60.0 keeps the stopped one too,
-    for the identical reason single-tab Ctrl+Q now does -- there is no
-    principled reason the ALL-tabs quit gesture should be the one way
-    left to lose the set for good."""
+async def test_quit_stop_drops_the_stopped_tab_keeps_the_detached_one(tmp_path):
+    """action_quit_stop (palette 'Quit: stop session', ALL tabs): the
+    whole-window mirror of the single-tab tests above, and it needed no
+    dedicated fix -- v0.99.1's exclusion lives in _persist_tabset's own
+    mounted-pane scan (a _stopped pane is skipped), which this method's
+    one _persist_tabset() call already goes through. A pane the user
+    detached_on_purpose is never marked _stopped (detach() only clears
+    the engine handle), so it survives exactly as item D #4 always
+    promised; the pane this loop actually stopped does not."""
     where = tmp_path / "scratch"
     where.mkdir()
     ids = iter(["sid-a", "sid-b"])
@@ -555,7 +669,7 @@ async def test_quit_stop_keeps_every_tab_in_the_record(tmp_path):
         first_pane.detached_on_purpose = True
         await app.action_quit_stop()
     record = tabsets.load(str(where))
-    assert {t.session_id for t in record.tabs} == {"sid-a", "sid-b"}
+    assert {t.session_id for t in record.tabs} == {"sid-a"}
 
 
 # -- an explicit kill is the one veto ------------------------------------
