@@ -138,35 +138,25 @@ def _tab_label(app, pane) -> str:
     return raw[len(prefix):] if raw.startswith(prefix) else raw
 
 
-def _painted(app, pane) -> bool:
-    """Has this pane's own label reached the TAB HEADER?
-
-    Not the same question as "has the pane computed one", and the
-    difference is this file's most frequent flake. `pane._tab_label` is
-    the pane's IDENTITY string, set by the first `_refresh_status` after
-    boot; every assertion in this file is about what `_raw_tab_label`
-    PAINTS. Those are two moments, not one: `SessionPane.set_tab_label`
-    writes the header inside `contextlib.suppress`, so a label computed
-    before the tab's `Tab` widget is up records the identity and paints
-    nothing. Waiting for the first while asserting on the second is how
-    this file came to fail with the BIRTH label (`_tab_title`'s
-    `model · dirname`) on a machine one message-pump turn slower than
-    usual."""
-    label = pane._tab_label
-    if not label:
-        return False
-    try:
-        return label in _raw_tab_label(app, pane)
-    except Exception:  # noqa: BLE001 -- no tab yet is "not painted"
-        return False
-
-
 async def _settled(pilot, app, pane, tries=200):
+    """Waits for the pane's own label, NOT for the painted header.
+
+    Those are two different moments -- `SessionPane.set_tab_label` writes
+    the header inside `contextlib.suppress`, so a label computed before
+    the tab's `Tab` widget is up records the identity and paints nothing
+    -- and the assertions below are about the painted one. Waiting for
+    the header instead was tried and MEASURED WORSE: under full-suite
+    load the paint lands after this helper's 200 x 20 ms, so four of
+    these tests turned from "occasionally assert a stale header" into
+    "reliably time out". The staleness itself was the real defect and it
+    is fixed at the source -- `SessionPane._tab_label_painted` retries a
+    swallowed header write on the next `_refresh_status` instead of
+    making the miss permanent."""
     for _ in range(tries):
-        if _painted(app, pane):
+        if pane._tab_label:
             return True
         await pilot.pause(0.02)
-    return _painted(app, pane)
+    return bool(pane._tab_label)
 
 
 @pytest.mark.asyncio

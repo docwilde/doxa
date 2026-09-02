@@ -301,7 +301,13 @@ release's doing. Each is pinned by a test now.
   made the miss FINAL. The tab kept `_tab_title`'s birth label
   (`model · dirname`) for the rest of the session, which a user sees as a
   tab that never picks up its repo and branch. `_tab_label_painted` lets
-  the next `_refresh_status` finish the job.
+  the next `_refresh_status` finish the job. Fixed at the SOURCE and not
+  in the test's wait: making `tests/test_tab_labels.py`'s `_settled` wait
+  for the painted header instead of the pane's identity string was tried
+  and measured worse — under full-suite load the paint lands after that
+  helper's 200 × 20 ms, so four of those tests turned from "occasionally
+  assert a stale header" into "reliably time out". The helper is
+  unchanged; its docstring now says why.
 
 ## 0.99.2 — 2026-09-03
 
