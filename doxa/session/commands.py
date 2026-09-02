@@ -50,6 +50,7 @@ from ..ui.labels import (
     lore_created_text,
     memory_entries,
     memory_fill,
+    peer_self_report,
 )
 from ..ui.transcript import ContextBlock, ImageBlock, ImageShowcaseBlock
 from .chips import PICKER_COLUMN_HEADER
@@ -1439,6 +1440,18 @@ class PaneCommandsMixin:
         self.scroll_transcript_to_end(block_list)
 
     async def _cmd_peers(self, args: str) -> None:
+        """/peers -- who else is in this project, and what each one SAYS
+        it is.
+
+        The second half is advisory and labelled as such
+        (:func:`doxa.ui.labels.peer_self_report` prints "self-reported:"
+        ahead of every value): ``provider``/``model``/``engine`` were
+        written by another process and are useful for deciding whether to
+        ``/msg`` a peer, never for deciding anything on that peer's
+        behalf. A peer that publishes none of the three -- an older
+        build's entry, or a writer that has not adopted the fields --
+        prints "unknown" here rather than being quietly dropped or given
+        a plausible default."""
         assert self.engine is not None
         peers = self.engine.list_peers()
         if not peers:
@@ -1447,6 +1460,7 @@ class PaneCommandsMixin:
         lines = [
             f"{p.title}  {p.session_id[:8]}  {p.cwd}"
             f"  ·  up {_fmt_age(age_secs(p.started_at))}"
+            f"  ·  {peer_self_report(p.provider, p.model, p.engine)}"
             for p in peers
         ]
         await self._system("peers:\n" + "\n".join(lines))
