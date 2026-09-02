@@ -364,13 +364,13 @@ SETTINGS: tuple[Setting, ...] = (
         key="sidebar", env="DOXA_SIDEBAR", label="session sidebar",
         category="Appearance", kind="bool_on", default="",
         help="Show the collapsible session rail down the left of the "
-             "window (Ctrl+B, /sidebar — doxa.ui.sidebar.SessionSidebar)",
+             "window (F3, /sidebar — doxa.ui.sidebar.SessionSidebar)",
         note="THREE states, which is why this row is bool_on and not "
              "bool: empty means AUTO -- the rail appears once there is "
              "something for it to say (any collection, or a second "
              "session) and stays hidden before that, the hide-at-zero "
              "discipline the context chip and the group tab strips "
-             "already follow. 1 pins it open, 0 pins it shut, and Ctrl+B "
+             "already follow. 1 pins it open, 0 pins it shut, and F3 "
              "writes one of those two, so the first toggle ends the "
              "guessing for good. The rail REFUSES to open on a window "
              "too narrow to hold it and the panes both "
@@ -724,7 +724,7 @@ def sidebar_mode() -> str:
     :data:`doxa.diff.SIDE_BY_SIDE_MIN_COLS` and the group tab strips
     already follow.
 
-    ``Ctrl+B`` writes ``"1"`` or ``"0"``, never the empty string, so the
+    ``F3`` writes ``"1"`` or ``"0"``, never the empty string, so the
     first deliberate toggle takes the decision away from the heuristic
     for good -- a user who closed the rail must not have it reappear
     because they opened a second tab.

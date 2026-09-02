@@ -14,7 +14,7 @@ session group labels."*
 
 The design is
 [docs/plans/session-sidebar.md](docs/plans/session-sidebar.md), written
-before the work and now marked shipped. `ctrl+b` or `/sidebar` shows it.
+before the work and now marked shipped. `f3` or `/sidebar` shows it.
 
 **Why it earns a major.** A session in a background tab of an unfocused
 group is invisible today: its `done` dot, its needs-input blink and its
@@ -166,18 +166,18 @@ opens it again the moment there is room.
 
 ### Keys, commands, settings
 
-- **`ctrl+b`**, re-verified free against `DoxaApp.BINDINGS` as it stands
+- **`f3`**, re-verified free against `DoxaApp.BINDINGS` as it stands
   (the set moved three times this series) and against `TextArea.BINDINGS`,
   which the focused prompt is. `keyboard.unreachable_under_legacy
-  ("ctrl+b")` is `False` — `ctrl+<letter>` is the one modified form the
+  ("f3")` is `False` — `ctrl+<letter>` is the one modified form the
   legacy encoding was built around, unlike `ctrl+<digit>` (v0.97.0) and
   `alt+<letter>` (v0.91.0), both of which this project chose and walked
   back. **The one real cost, named rather than discovered later:
-  `ctrl+b` is tmux's default prefix** — `doxa/app.py`'s own split-key
+  `f3` is tmux's default prefix** — `doxa/app.py`'s own split-key
   subtraction had excluded it on exactly those grounds. The spec chose it
   anyway and says so; `/sidebar` is the door that always works, the same
   bargain `ctrl+,` and `ctrl+1…9` ship on.
-- **`/sidebar [on|off]`** carries `binding="ctrl+b"` in the registry, so
+- **`/sidebar [on|off]`** carries `binding="f3"` in the registry, so
   `/help` and the startup key notice can see it — three commands shipped
   without one in v0.92.0 and their keys were invisible to both.
   **`/collection new|rename|delete|add|remove`** carries none, and the
@@ -187,12 +187,12 @@ opens it again the moment there is room.
   (`DOXA_SIDEBAR_WIDTH`, clamped to 19–38 rather than rejected).
   `sidebar` is `bool_on` for a three-state reason, not a default-on one:
   empty means **auto** — hide-at-zero, the rail appears once there is a
-  collection or a second session — while `1` and `0` pin it. `ctrl+b`
+  collection or a second session — while `1` and `0` pin it. `f3`
   writes `1`/`0`, so the first deliberate toggle ends the guessing for
   good; a user who closed the rail must not have it come back because they
   opened a tab.
 - The rail is **not focusable**. Rows are plain `Static`s with
-  `can_focus = False`, driven by the mouse, `ctrl+b` and `/collection`,
+  `can_focus = False`, driven by the mouse, `f3` and `/collection`,
   because a focusable widget beside the prompt is a second place
   `App.AUTO_FOCUS = "*"` can land — the v0.85.0 defect this release
   declined to re-open. **A keyboard model for the rail is not in this

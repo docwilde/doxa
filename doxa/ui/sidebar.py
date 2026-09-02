@@ -185,7 +185,7 @@ class SidebarLine(Static):
     end up. v0.85.0 measured what that costs -- ``App.AUTO_FOCUS = "*"``
     picking the first focusable widget in the DOM, unscoped by which tab
     is visible -- and the rail is not worth re-opening it. The rail is
-    driven by the mouse, by ``Ctrl+B`` and by ``/collection``; nothing in
+    driven by the mouse, by ``F3`` and by ``/collection``; nothing in
     it ever takes the keyboard.
 
     Never overrides ``_render``: that is ``textual.widget.Widget``'s own

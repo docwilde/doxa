@@ -489,19 +489,19 @@ async def test_ctrl_b_toggles_the_rail_and_nothing_else_claims_it(tmp_path):
     """Re-verified against the CURRENT binding set, which is the check the
     spec asks for by name -- it moved three times this release series."""
     keys = [b.key for b in DoxaApp.BINDINGS]
-    assert keys.count("ctrl+b") == 1
+    assert keys.count("f3") == 1
     # Deliverable under BOTH keyboard encodings, unlike ctrl+<digit> and
     # alt+<letter>, which this project chose and had to walk back.
     from doxa import keyboard as keyboard_mod
 
-    assert keyboard_mod.unreachable_under_legacy("ctrl+b") is False
+    assert keyboard_mod.unreachable_under_legacy("f3") is False
     app, _engines = _app(tmp_path)
     async with app.run_test(size=BIG) as pilot:
         await pilot.pause()
         assert app.sidebar().styles.display == "none"
-        await pilot.press("ctrl+b")
+        await pilot.press("f3")
         assert await _wait(pilot, lambda: app.sidebar().region.width > 0)
-        await pilot.press("ctrl+b")
+        await pilot.press("f3")
         assert await _wait(pilot, lambda: app.sidebar().region.width == 0)
         # The toggle WRITES, which is what ends hide-at-zero's guessing.
         assert config_mod.sidebar_mode() == config_mod.SIDEBAR_OFF
@@ -694,7 +694,7 @@ async def test_the_slash_commands_are_registered_and_reachable(tmp_path):
     from doxa import commands as commands_mod
 
     sidebar = commands_mod.find("/sidebar")
-    assert sidebar is not None and sidebar.binding == "ctrl+b"
+    assert sidebar is not None and sidebar.binding == "f3"
     assert sidebar.group == "Panes & tabs"
     collection = commands_mod.find("/collection")
     assert collection is not None and collection.usage.startswith("/collection ")

@@ -9,10 +9,10 @@ What the build changed about this document, and nothing else did:
 - the width numbers were **measured** rather than left open — see
   [Width, measured](#risks-named) below and `doxa/layout.py`'s
   `SIDEBAR_*` block for the derivations;
-- `Ctrl+B` was re-verified free against the binding set as it stood at
+- `F3` was re-verified free against the binding set as it stood at
   build time, and shipped **with its one real cost stated out loud**: it
   is tmux's default prefix, and `doxa/app.py`'s own split-panes
-  subtraction had already excluded `ctrl+b` on those grounds. The spec
+  subtraction had already excluded `f3` on those grounds. The spec
   chose it knowing that ("tmux's prefix notwithstanding"), so `/sidebar`
   is the door that always works;
 - the rail is **mouse- and command-driven and never takes the keyboard**.
@@ -107,9 +107,9 @@ the row says so rather than pretending it can be focused.
 
 ## Keys and commands
 
-`Ctrl+B` for toggle — the conventional sidebar key (VS Code, tmux's prefix
+`F3` for toggle — the conventional sidebar key (VS Code, tmux's prefix
 notwithstanding), and free here: measured against `DoxaApp.BINDINGS` at
-v0.98.0, `ctrl+b` is unbound. **Re-verify at build time** — the binding set
+v0.98.0, `f3` is unbound. **Re-verify at build time** — the binding set
 moved three times in this release series.
 
 `ctrl+<letter>` is deliverable under both keyboard encodings (`doxa/keyboard.py`),

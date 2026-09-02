@@ -663,43 +663,39 @@ class DoxaApp(App):
         # prompt is a focused TextArea and would otherwise eat the key.
         # -- the session sidebar (v1.0.0) ------------------------------
         #
-        # Ctrl+B: toggle the rail. The conventional sidebar key -- VS
-        # Code, JetBrains, Zed -- and RE-VERIFIED free against THIS
-        # class's own resolved binding set at the moment it was added,
-        # which is the check docs/plans/session-sidebar.md asks for
-        # because the set moved three times in this release series:
-        # ctrl+p, ctrl+r, ctrl+comma, ctrl+t, ctrl+w, ctrl+q, ctrl+left,
-        # ctrl+right, ctrl+up, ctrl+down, ctrl+o, ctrl+n, ctrl+1..9,
+        # F3: toggle the rail. RE-VERIFIED free against THIS class's own
+        # resolved binding set at the moment it was added, which is the
+        # check docs/plans/session-sidebar.md asks for because the set
+        # moved three times in this release series: ctrl+p, ctrl+r,
+        # ctrl+comma, ctrl+t, ctrl+w, ctrl+q, ctrl+left, ctrl+right,
+        # ctrl+up, ctrl+down, ctrl+o, ctrl+n, ctrl+1..9,
         # ctrl+shift+arrows, shift+tab, ctrl+tab, f2, alt+s/d/g,
-        # alt+arrows. Textual's own App/Screen defaults claim no ctrl+b,
-        # and neither does TextArea (whose claimed letters are
-        # a c d e f k u v w x y z -- see the split-panes subtraction
-        # above), so the focused prompt does not contest it.
-        # tests/test_sidebar.py asserts the whole of that, so the next
-        # release that adds a binding trips over a collision instead of
-        # shipping one.
+        # alt+arrows. tests/test_sidebar.py asserts the whole of that, so
+        # the next release that adds a binding trips over a collision
+        # instead of shipping one.
         #
-        # DELIVERABLE UNDER BOTH ENCODINGS, which is why it is a letter:
-        # doxa.keyboard.unreachable_under_legacy("ctrl+b") is False --
-        # ctrl+<letter> is the one modified form the legacy encoding was
-        # built around. ctrl+<digit> (v0.97.0's group keys) and
-        # alt+<letter> (v0.91.0's splits) are both unreachable there, and
-        # this project chose each of them once and had to walk it back.
+        # F3, NOT Ctrl+B (owner's decision, 2026-09-02, reversing the
+        # spec's own choice). Ctrl+B is tmux's default PREFIX: a tmux user
+        # cannot press it at all, and the split-panes subtraction a few
+        # hundred lines above had already listed ctrl+b among "the
+        # terminal's own" for exactly that reason. The spec waved that off
+        # ("tmux's prefix notwithstanding") on the grounds that /sidebar is
+        # the always-works door -- true, and still the wrong trade for the
+        # PRIMARY gesture of a permanent surface. This project has now
+        # picked a contested or undeliverable key three times (Ctrl+C in
+        # v0.85.0, alt+<letter> in v0.91.0, ctrl+shift+<letter> before it)
+        # and walked back each one.
         #
-        # The ONE cost, named rather than discovered later: Ctrl+B is
-        # tmux's default prefix, so a tmux user cannot press it -- the
-        # split-panes subtraction above listed ctrl+b among "the
-        # terminal's own" for exactly that reason. The spec chose it
-        # anyway and says so out loud ("tmux's prefix notwithstanding"),
-        # on the reasoning that a tmux user has already remapped or
-        # already knows to double-tap, and that /sidebar is the door that
-        # always works -- the same bargain Ctrl+, Ctrl+Tab and
-        # Ctrl+1..Ctrl+9 already ship on.
+        # F3 follows F2's precedent (/diff, v0.92.0): function keys go out
+        # as CSI/SS3 sequences every terminal since xterm sends, so
+        # doxa.keyboard.unreachable_under_legacy("f3") is False; Textual's
+        # App/Screen defaults claim no F-key, TextArea claims none, and
+        # tmux passes them through rather than swallowing them. Deliverable
+        # under BOTH encodings and contested by nobody -- which is the bar
+        # a letter could not clear here.
         #
-        # priority=True for the reason every global here needs it: the
-        # prompt is a focused TextArea and would otherwise eat the key.
         Binding(
-            "ctrl+b", "toggle_sidebar",
+            "f3", "toggle_sidebar",
             "Show or hide the session sidebar (/sidebar)",
             show=False, priority=True,
         ),

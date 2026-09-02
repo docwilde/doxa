@@ -872,10 +872,10 @@ class PaneCommandsMixin:
     async def _cmd_sidebar(self, args: str) -> None:
         """``/sidebar`` -- show or hide the session rail.
 
-        The door that always works, beside ``Ctrl+B``. Same posture
+        The door that always works, beside ``F3``. Same posture
         ``/pane`` takes beside ``Ctrl+<digit>`` and ``/settings`` beside
         ``Ctrl+,``: the key is the fast gesture, the command is the one
-        that survives a terminal that cannot send it -- and ``Ctrl+B`` is
+        that survives a terminal that cannot send it -- and ``F3`` is
         tmux's default prefix, so on a tmux session this IS the door.
 
         With ``on`` or ``off`` it says which, rather than toggling: a
@@ -903,8 +903,8 @@ class PaneCommandsMixin:
         now = bool(rail is not None and rail.styles.display != "none")
         await self._system(
             "session sidebar shown — click a row to go to that session, a "
-            "heading to fold it (Ctrl+B, /collection)"
-            if now else "session sidebar hidden (Ctrl+B, /sidebar)"
+            "heading to fold it (F3, /collection)"
+            if now else "session sidebar hidden (F3, /sidebar)"
         )
 
     async def _cmd_collection(self, args: str) -> None:

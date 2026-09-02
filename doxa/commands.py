@@ -158,14 +158,14 @@ REGISTRY: tuple[SlashCommand, ...] = (
         group="Panes & tabs",
         summary="Show or hide the session sidebar — every session in this "
                 "window, with the state marks the tab strips carry "
-                "(Ctrl+B)",
+                "(F3)",
         # DECLARED, because a command whose key is not written here is a
         # key /help and the startup key notice cannot see -- three
         # commands shipped without one in v0.92.0 and their bindings were
         # invisible to both. Spelled the way TEXTUAL spells it, so
         # doxa.ui.labels.app_bindings can match it against DoxaApp.BINDINGS
         # verbatim.
-        binding="ctrl+b",
+        binding="f3",
         palette="Sidebar: show or hide",
     ),
     SlashCommand(

@@ -334,7 +334,7 @@ keyboard. Closing the last tab of the last group closes the app.
 
 ## The session sidebar
 
-`ctrl+b` (or `/sidebar`) shows a **collapsible rail down the left of the
+`f3` (or `/sidebar`) shows a **collapsible rail down the left of the
 window**: every session this window knows about, in one list, with the
 state marks the tab strips already carry.
 
@@ -371,7 +371,7 @@ fold it.
 
 | command | does |
 |---|---|
-| `/sidebar [on\|off]` | Show or hide the rail; with no argument, toggle (`ctrl+b`) |
+| `/sidebar [on\|off]` | Show or hide the rail; with no argument, toggle (`f3`) |
 | `/collection` | List the collections and how many sessions each holds |
 | `/collection new <name>` | Make an empty collection |
 | `/collection rename <old> <new>` | Rename one |
@@ -379,11 +379,11 @@ fold it.
 | `/collection add <name>` | Move **this** session into that collection, making it if needed |
 | `/collection remove` | Take this session back out |
 
-**`ctrl+b` is tmux's default prefix.** It is the conventional sidebar key
+**`f3` is tmux's default prefix.** It is the conventional sidebar key
 everywhere else and it is what DOXA binds, but on a tmux session it never
 reaches the app — `/sidebar` is the door that always works, the same
 bargain `ctrl+,`, `ctrl+tab` and `ctrl+1`…`ctrl+9` already ship on. Unlike
-those three, `ctrl+b` *is* deliverable under both keyboard encodings; tmux
+those three, `f3` *is* deliverable under both keyboard encodings; tmux
 is the only thing in its way.
 
 **It refuses to open on a window too narrow to hold it.** The rail is 22
@@ -401,7 +401,7 @@ again.
 `sidebar` is *auto*: the rail appears once there is a collection or a
 second session and not before, the same hide-at-zero discipline the
 context chip, the side-by-side diff and the group tab strips follow. The
-first `ctrl+b` writes the choice, and from then on it is yours.
+first `f3` writes the choice, and from then on it is yours.
 
 **Collections are saved with the tab set**, in the same per-repo record,
 and come back with the window. A collection whose sessions are all gone
@@ -949,7 +949,7 @@ palette, the `/` autocomplete and `/help` from that single registry.
 | `/vsplit` | A second pane group **side by side** with this one (`alt+d`) |
 | `/pane [n]` | Jump to pane group `n`, numbered left to right then top to bottom (`ctrl+1`…`ctrl+9`); with no number, flash them |
 | `/movepane <n>` | Move this group's active tab into group `n` — the session keeps running |
-| `/sidebar [on\|off]` | Show or hide the session sidebar (`ctrl+b`) |
+| `/sidebar [on\|off]` | Show or hide the session sidebar (`f3`) |
 | `/collection …` | `new` / `rename` / `delete` / `add` / `remove` — group sessions in the sidebar under a name you choose |
 | `/diff` | This session's live worktree diff in the group beside it, or close it (`alt+g`) |
 | `/dir` | Where this session actually is |
@@ -1009,7 +1009,7 @@ environment is winning is read-only in the modal.
 | `ctx_absolute` | `DOXA_CTX_ABSOLUTE` | off | print `24k/200k` beside the `ctx%` chip (below 100 columns it drops again) |
 | `image_mode` | `DOXA_IMAGE_MODE` | probe | force a rung of the image ladder (`kgp`/`sixel`/`halfblock`/`text`) |
 | `boot_banner` | `DOXA_BOOT_BANNER` | on | draw the DOXA mark above the opening identity block |
-| `sidebar` | `DOXA_SIDEBAR` | *auto* | the session rail: empty = appear once there is a collection or a second session, `1` = always, `0` = never. `ctrl+b` writes `1`/`0`, so the first toggle ends the guessing |
+| `sidebar` | `DOXA_SIDEBAR` | *auto* | the session rail: empty = appear once there is a collection or a second session, `1` = always, `0` = never. `f3` writes `1`/`0`, so the first toggle ends the guessing |
 | `sidebar_width` | `DOXA_SIDEBAR_WIDTH` | 22 | columns the rail occupies; clamped to 19–38 rather than rejected |
 | `key_notice` | `DOXA_KEY_NOTICE` | on | one-line startup notice naming any bound keys this terminal can't deliver and the slash command that reaches them instead; silent on a kitty-protocol terminal or one whose protocol was never measured |
 | `context_grid` | `DOXA_CONTEXT_GRID` | `glyphs` | cell style for `/context`'s grid: `glyphs` (⛀⛁⛶) or `ascii` (`[#]`/`[ ]`) for a font that tofu's them |
