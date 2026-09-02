@@ -4,6 +4,109 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.99.2 — 2026-09-03
+
+**The README, rewritten: 35,006 characters to 13,123.** A README is
+scanned, not read, and this one had stopped being scannable — its longest
+single paragraph ran **4,621 characters**, with four more at 1,250 or
+above. The
+information in a block that size is worth nothing because nobody reaches
+it. The page now answers the five questions a landing reader actually has,
+in order — what is this, what does it look like, does it work, how do I run
+it, what is it not — and everything else moved to
+[`docs/manual.md`](docs/manual.md). Longest prose block now **661
+characters**.
+
+**Five claims were false, not merely verbose.** The closing section
+promises that everything in *What you get* "has shipped and is described as
+it behaves today", which makes each of these a defect rather than an edit:
+
+- **The split and diff keys named the kitty-only aliases as the
+  primaries.** *What you get* told the reader `alt+d` splits side by side,
+  `alt+s` stacked and `alt+g` opens the live diff. v0.95.0 moved all three
+  off the primary slot after measuring that **`alt+<letter>` cannot arrive
+  at all** unless the terminal granted the kitty protocol — Textual's
+  `_xterm_parser` has no ESC-prefix-to-Alt path. The primaries are
+  **`ctrl+n`** (side by side), **`ctrl+o`** (stacked) and **`f2`** (diff),
+  as `doxa/app.py`'s `BINDINGS` and the manual's own key table have said
+  since v0.95.0. A reader on a legacy terminal was being told to press keys
+  that do nothing. Fixed, with the aliases kept and marked conditional.
+- **"Eight documents under `docs/` are specifications" — nine, and they
+  are under `docs/plans/`.**
+  [`docs/plans/session-sidebar.md`](docs/plans/session-sidebar.md)
+  ("Status: **draft for review**. Nothing implemented.") landed on `main`
+  and was never added to the list, so a shipped-looking count undercounted
+  the unbuilt work.
+- **"Two that used to be on this list have left it by being built"**,
+  followed by three documents and the words "all three". `split-panes`
+  (v0.91.0), `live-diff` (v0.92.0) and `pane-groups` (v0.97.0).
+- **"Every session's `claude` runs behind its own `CLAUDE_CONFIG_DIR`."**
+  There is one directory and DOXA owns it — `cli_config_dir()` takes no
+  arguments and returns `$DOXA_HOME/claude-cli`, shared by every session,
+  not minted per session. The isolation it provides is from your
+  `~/.claude`, which is the claim worth making; now made.
+- **"`AskUserQuestion` and permission requests get a real dialog, a
+  blinking tab and a desktop notification."** The dialog and the blink
+  ship. The desktop notification does not, unless asked for:
+  **`notify_needs_input` defaults to off** (`config.py`: `default=""`,
+  noted "OFF by default"). Stated as opt-in in the manual.
+
+**An unresolved merge had been shipping in the prose since v0.97.0.**
+Four structural corruptions, all in the two sections that document keys:
+a bullet truncated mid-sentence (*"**A live diff you can reject one hunk
+of.** `f2` opens this"*, then nothing); the same bullet again 5 lines
+later with a different key; **two `<em>` captions on one image**
+(`split-panes.png`) contradicting each other about which keys split a
+pane; and a Quickstart paragraph that broke off mid-clause and restarted
+at *"palette, `ctrl+t` opens a new tab…"*. Gone.
+
+**Verified against the code, not against its own prose.** Every surviving
+claim was re-derived from source: **fifteen** tooltipped chips (15 distinct
+positions in `PaneChipsMixin._status_chips`, counting the repo/`dir` and
+tier/cost pairs as the one slot each occupies), `/context`'s **200 cells**
+(`10x20`, `context_grid_text`), `--linger` **120** (`config.py`), the
+**`0600`** daemon socket (`daemon.py:443`), the **two-strikes** tool gate
+(`gate.py`), the image ladder **kgp → sixel → halfblock → text**
+(`images.MODES`), the peers **15-second** heartbeat (`HEARTBEAT_SECS`),
+LORE's **five** asserted verbs, and the beliefs picker's **five** inline
+row actions (four verdicts plus `g`). `beliefs-browser.png` was deleted in
+**v0.87.0**, as the page already said.
+
+**Moved to the manual rather than cut.** Three things had no home there
+and now do:
+
+- **`## Containment`** — the `ToolGate` at the `PreToolUse` boundary, the
+  allowed-set denial, the two-strikes disable and its `⊘` chip, and the
+  invariant that nothing auto-denies silently (a headless SDK run with no
+  callback refuses an `AskUserQuestion` without telling anyone; DOXA gives
+  it a dialog, a tab blink and a notification).
+- **Typed belief edges**, into `## LORE integration`: the five verbs,
+  support counted in **distinct sessions**, a path's confidence the
+  **product of its hops**, and the rule that structure earns no authority —
+  a belief reached by an edge stays CITE-only unless it earned STEER
+  itself. Reachable through the beliefs picker's `g`; nothing else
+  surfaces it.
+- **`## Screenshots`** — the full asset catalogue, eighteen rows naming
+  what each uncaptioned still and GIF shows.
+
+Cut as already-duplicated: the `How it works` section (the daemon, socket
+and `lore_core` paragraphs restated `## Sessions and the daemon` almost
+verbatim), the four-paragraph v0.37.0 `lore_core`-packaging history
+(`CHANGELOG` 0.37.0 has it), and the config-precedence and
+command-registry invariants (already in `## Settings` and `## Tabs`).
+
+**The gallery keeps every asset.** Ten scenes stay captioned inline; the
+other eighteen are catalogued in the manual, so **no rendered asset under
+`assets/shots/` is left unnamed by any document** — the exact condition
+`beliefs-browser.png` needed to rot for eighteen releases. Alt text was
+shortened but not corrected: it described the images accurately. The
+captions did not — the second `split-panes.png` caption named the wrong
+keys. `<p align="center">` wrappers gave way to markdown image syntax,
+which cost the centering and saved ~2,000 characters of markup.
+
+Licence, trademark and AGPL notices are untouched, character for
+character.
+
 ## 0.99.1 — 2026-09-02
 
 **"Tabs that i had closed using CTRL+Q are resurrected on the next start
