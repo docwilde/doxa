@@ -103,6 +103,44 @@ PROVIDER_GLYPH_COLOR = "#D97757"  # Claude/Anthropic orange -- theme.tcss's own
 CLICKABLE_CHIP_ACCENT = PROVIDER_GLYPH_COLOR
 
 
+# -- the diff's own vocabulary (v1.0.1) -------------------------------
+#
+# Added is green, removed is red, and it says so in the SAME two colours
+# on both surfaces that report a diff: the pane's hunk bodies and file
+# folds (doxa.ui.diffview) and the status chip's `+42 −7`
+# (PaneChipsMixin._status_chips). One vocabulary, defined once, because
+# the chip is a summary OF the pane and two palettes would make them
+# look like two different features.
+#
+# ONE THEME, and that is a fact about this app rather than a shortcut:
+# DOXA registers no Theme at all (DoxaApp.get_theme_variable_defaults'
+# own docstring) and theme.tcss is a single warm DARK ramp -- the only
+# variation is $doxa-base, opaque #171512 or `ansi_default` for a
+# terminal the user wants to show through. So there is no light/dark
+# pair to define here; these are picked to read against that dark ramp,
+# exactly as every other colour in this module is, and the `background`
+# setting's own note already records that a LIGHT terminal background
+# renders DOXA's body text at very low contrast regardless.
+#
+# The two FG/BG pairs are the ones that had to be measured rather than
+# chosen: v0.92.0 coloured a changed line's foreground only (#7FB069 /
+# #D08770 on the ramp), and a foreground on the ramp is not a background
+# -- putting those same two hues BEHIND the text would have left the
+# text unreadable on itself. So the backgrounds are deep, desaturated
+# washes two steps off the ramp, and each carries a foreground chosen
+# for contrast against IT rather than inherited from the row above.
+DIFF_ADD_NUM = "#7FB069"     # the added-line number, and `+42` on the chip
+DIFF_DEL_NUM = "#D08770"     # the removed-line number, and `−7` on the chip
+DIFF_ADD_FG = "#DCEBD3"      # added body text, on the wash below
+DIFF_ADD_BG = "#1E3222"
+DIFF_DEL_FG = "#F3D6CF"      # removed body text, on the wash below
+DIFF_DEL_BG = "#3B211E"
+DIFF_CONTEXT_FG = "#B4AB9E"  # unchanged body: the ramp's own secondary
+DIFF_GUTTER_FG = "#6E6459"   # a context row's line numbers: present, quiet
+DIFF_RULE_FG = "#4A443C"     # the side-by-side separator
+DIFF_NOTE_FG = "#8A8073"     # the `\ No newline` note, the truncation note
+
+
 def provider_glyph(provider: str = "claude", *, colored: bool = True) -> str:
     """The provider glyph for `provider`, Claude-orange via Textual markup
     when `colored`. Defaults to "claude" because that is the only engine
@@ -470,6 +508,18 @@ MODE_SHORT = {
 # safe default that stands down instead -- see
 # PaneChipsMixin._mode_chip_cramped, which owns both halves of the rule.
 MODE_CHIP_MIN_COLS = 110
+
+# The diff chip (v1.0.1) shortens at the SAME width, and the equality is
+# deliberate rather than coincidental: it is one measurement of one row,
+# not two chips that each guessed. Below this the chip drops its noun
+# (`diff 3 files +42 −7` -> `diff 3f +42 −7`), eight columns back on the
+# row for a word a reader in front of `3f +42 −7` does not need. It
+# inherits the mode chip's asymmetry too: the two states that mean
+# "cannot tell" (`diff ⚠ no base`, `diff ⚠ unreadable`) neither shorten
+# nor stand down at any width, because they are the only place that fact
+# appears -- see doxa.diff.DiffCounts.chip, which owns the wording, and
+# PaneChipsMixin._diff_chip_cramped, which owns this half.
+DIFF_CHIP_MIN_COLS = MODE_CHIP_MIN_COLS
 
 # One sentence per mode, in the user's terms rather than the SDK's: the
 # question a person actually has in front of a status chip is "does

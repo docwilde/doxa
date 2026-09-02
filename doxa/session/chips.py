@@ -57,12 +57,16 @@ from ..ui.labels import (
     CTX_ABSOLUTE_MIN_COLS,
     CTX_AMBER,
     CTX_RED,
+    DIFF_ADD_NUM,
+    DIFF_CHIP_MIN_COLS,
+    DIFF_DEL_NUM,
     MODE_CHIP_MIN_COLS,
     MODE_EXPLAIN,
     OUTCOME_COLORS,
     PICKER_PREFIX_WIDTH,
     _belief_scope_label,
     _chip_span,
+    _escape_markup,
     _fmt_belief_row,
     _fmt_pending_row,
     format_picker_column_header,
@@ -399,6 +403,41 @@ class PaneChipsMixin:
         width = getattr(width, "width", 0)
         return bool(width) and width < MODE_CHIP_MIN_COLS
 
+    def _diff_chip_cramped(self) -> bool:
+        """Is the status row too narrow to spell out ``files``?
+
+        The third of the width rules on this row, and deliberately the
+        same shape as :meth:`_mode_chip_cramped`: below
+        :data:`~doxa.ui.labels.DIFF_CHIP_MIN_COLS` the chip prints its
+        short form (``diff 3f +42 −7``), and an app with no measurable
+        size yet counts as wide, because refusing to render at an
+        unknown width makes the chip flicker on at first repaint.
+
+        What this does NOT do is stand the chip down. The mode chip's
+        own asymmetry decides that per STATE rather than per width, and
+        so does this one: the two states that mean "cannot tell" keep
+        every column they need at any width (doxa.diff.DiffCounts.chip),
+        because a chip that vanishes is read as "nothing changed" -- the
+        exact confusion the state set exists to prevent."""
+        width = getattr(getattr(self, "app", None), "size", None)
+        width = getattr(width, "width", 0)
+        return bool(width) and width < DIFF_CHIP_MIN_COLS
+
+    async def open_diff_view(self) -> None:
+        """The diff chip's click target -- the SAME door F2, ``/diff``
+        and the auto-open setting use (:meth:`DoxaApp.toggle_diff_pane`),
+        called with THIS pane rather than the focused one.
+
+        It TOGGLES, exactly as the key does, because the operator's own
+        wording for this chip was "clickable to open the diff pane (the
+        same action F2 fires)" -- a chip whose click did something
+        subtly different from the key it advertises is a third behaviour
+        to learn. A refusal (too narrow, too deeply split, queued
+        rejections that would be discarded) is shown, never swallowed."""
+        note = await self.app.toggle_diff_pane(self)
+        if note:
+            self.app.notify(note, severity="warning", timeout=8)
+
     def _status_chips(self) -> "list[StatusChip]":
         """Every chip this pane's status line shows, in paint order.
 
@@ -531,6 +570,59 @@ class PaneChipsMixin:
                     "so there is no branch chip here; click to browse, or "
                     "open somewhere else in a new tab",
                 ))
+        # The worktree's own diff, as a size (v1.0.1). Immediately after
+        # the git chip because it qualifies exactly what that chip names:
+        # `repo ⎇ main` says where this session is, and this says what it
+        # has done there that is not committed. Before the money and the
+        # LORE chips rather than after them, for the reason the mode chip
+        # documents at the top of this method -- the row has no overflow
+        # behaviour, so position IS the guarantee, and a change count that
+        # falls off the end is a change count nobody sees.
+        #
+        # HIDE AT ZERO, with one exception the honesty rules force: a
+        # tree whose base cannot be determined paints `diff ⚠ no base`
+        # rather than nothing, because nothing is how "no changes" is
+        # spelt here and those are different statements (v0.33.0's trap,
+        # inherited -- see doxa.diff.DiffCounts.chip for all four
+        # renderings). `_diff_counts` is None until the first reading
+        # lands, which paints nothing at all: not measured is not the
+        # same claim as measured-and-empty, and neither earns a chip.
+        counts = getattr(self, "_diff_counts", None)
+        parts = (
+            counts.chip_parts(short=self._diff_chip_cramped())
+            if counts is not None else None
+        )
+        if parts is not None:
+            lead, added, removed, tail = parts
+            # Green added, red removed -- the SAME two colours the pane
+            # paints its line numbers and its file folds with
+            # (doxa.ui.labels.DIFF_ADD_NUM / DIFF_DEL_NUM). One
+            # vocabulary across both surfaces: the chip is a summary of
+            # the pane, and a second palette would read as a second
+            # feature.
+            #
+            # Built here rather than through StatusChip.clickable for the
+            # reason the ctx and mode chips give at their own: _chip_span
+            # ESCAPES its text, which would escape this chip's own
+            # already-trusted colouring as if it were arbitrary bracket
+            # text. The accent wrapper stays on the outside so the
+            # clickable affordance still shows on the uncoloured parts,
+            # exactly as the ctx chip does it.
+            body = _escape_markup(lead)
+            if added:
+                body += (
+                    f"[{DIFF_ADD_NUM}]{_escape_markup(added)}[/]"
+                    f"[{DIFF_DEL_NUM}]{_escape_markup(removed)}[/]"
+                )
+            body += _escape_markup(tail)
+            chips.append(StatusChip.raw(
+                # The KEY is the PLAIN text, never the markup:
+                # StatusBar._tooltip_for_x matches against the bar's
+                # markup-stripped string (v0.35.0's ctx defect).
+                "".join(parts),
+                f"[@click=open_diff][{CLICKABLE_CHIP_ACCENT}]{body}[/][/]",
+                (("".join(parts), counts.chip_hint()),),
+            ))
         # Subscription-aware cost: on subscription auth the session costs
         # no dollars, so a bare $ figure is misleading -- show the tier,
         # with the (already-computed) list-price figure demoted to an

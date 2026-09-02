@@ -42,6 +42,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 
+from . import config as config_mod
 from . import worktrees as worktrees_mod
 
 #: Seconds any one git call gets. The same 10 :mod:`doxa.worktrees` uses
@@ -172,17 +173,30 @@ class FileDiff:
     def renamed(self) -> bool:
         return bool(self.old_path) and self.old_path != self.path
 
+    def summary_parts(self) -> "tuple[str, str, str]":
+        """The three pieces :meth:`summary` joins: ``(name, added,
+        removed)``, the last two empty for a file that is named rather
+        than rendered.
+
+        Split out in v1.0.1 so the fold can paint ``+42`` green and
+        ``−7`` red without a second copy of the WORDING living in the
+        widget layer (:func:`doxa.ui.diffview._file_title`). One place
+        decides what a file's fold says; the view decides what colour
+        each piece of it is."""
+        name = f"{self.old_path} → {self.path}" if self.renamed else self.path
+        if self.skipped:
+            return f"{name}  ({self.skipped})", "", ""
+        mark = " (new file)" if self.untracked else ""
+        return f"{name}{mark}", f"+{self.added}", f"−{self.removed}"
+
     def summary(self) -> str:
         """The collapsed line: what the user reads before expanding.
 
         A skipped file says WHY it is skipped instead of showing counts
         it does not have, because "binary" and "+0 −0" look the same at a
         glance and mean opposite things."""
-        name = f"{self.old_path} → {self.path}" if self.renamed else self.path
-        if self.skipped:
-            return f"{name}  ({self.skipped})"
-        mark = " (new file)" if self.untracked else ""
-        return f"{name}{mark}  +{self.added} −{self.removed}"
+        name, added, removed = self.summary_parts()
+        return name if not added else f"{name}  {added} {removed}"
 
 
 @dataclass(frozen=True)
@@ -208,23 +222,314 @@ class DiffResult:
     def headline(self) -> str:
         """One line naming the state of the diff, never ambiguous between
         the two states the spec insists must differ."""
+        return headline(
+            self.status, self.base, self.base_source, self.detail,
+            len(self.files), sum(f.added for f in self.files),
+            sum(f.removed for f in self.files),
+        )
+
+    def counts(self) -> "DiffCounts":
+        """This result, reduced to the four numbers a status chip shows.
+
+        The cheap :func:`counts` path exists so the chip does not need a
+        whole DiffResult; this exists so a caller that ALREADY has one
+        never computes the same thing twice, and so the two paths can be
+        asserted against each other on the same worktree (they are, in
+        tests/test_diff_chip.py) rather than being two independent claims
+        about the same tree."""
+        return DiffCounts(
+            status=self.status, base=self.base, base_source=self.base_source,
+            files=len(self.files), added=sum(f.added for f in self.files),
+            removed=sum(f.removed for f in self.files), detail=self.detail,
+        )
+
+
+def headline(
+    status: str, base: str, base_source: str, detail: str,
+    files: int, added: int, removed: int,
+) -> str:
+    """The sentence for one diff state -- the ONE place the four states
+    are worded, read by the pane's own head line (:meth:`DiffResult.
+    headline`) and by the status chip's tooltip (:meth:`DiffCounts.
+    chip_hint`) alike.
+
+    Shared rather than written twice because the whole point of the state
+    set is that two of its members must not read alike, and a second
+    copy of the wording is exactly how "cannot determine a base" starts
+    reading like "no changes" on one surface and not the other."""
+    if status == STATUS_NO_BASE:
+        return f"cannot determine a base — {detail}"
+    if status == STATUS_ERROR:
+        return f"cannot read the diff — {detail}"
+    against = (
+        f"against {base}" if base_source == BASE_SIDECAR
+        else f"against {base} (no worktree base recorded)"
+    )
+    if not files:
+        return f"no changes {against}"
+    return (
+        f"{files} file{'s' if files != 1 else ''} changed, "
+        f"+{added} −{removed} {against}"
+    )
+
+
+# -- the counts, and the chip that shows them (v1.0.1) ----------------
+#
+# The live diff opens on F2 or /diff and nothing else, and `_tick_diff`
+# deliberately does nothing when no diff pane is open -- "costs nothing
+# when nobody is looking". The cost of that thrift, reported: you cannot
+# tell there are changes without opening the pane, so a feature behind an
+# F-key is a feature nobody finds. The chip is the missing signal, and it
+# is built from COUNTS rather than from a diff: `--numstat` is one line
+# per file where the full diff is one line per changed line.
+
+
+@dataclass(frozen=True)
+class DiffCounts:
+    """How much has changed, and against what -- the status chip's whole
+    model.
+
+    The same closed state set :class:`DiffResult` carries, for the same
+    reason: a chip that renders ``STATUS_NO_BASE`` as an absent chip
+    would be saying "nothing changed" about a tree it could not measure,
+    which is v0.33.0's trap wearing a smaller hat. ``files == 0`` under
+    :data:`STATUS_OK` is the ONLY state that hides."""
+
+    status: str = STATUS_OK
+    base: str = ""
+    base_source: str = BASE_SIDECAR
+    files: int = 0
+    added: int = 0
+    removed: int = 0
+    detail: str = ""
+
+    @property
+    def measurable(self) -> bool:
+        """Did git actually answer? ``False`` is "cannot tell", never
+        "nothing changed".
+
+        Named for the question rather than mirroring
+        :attr:`DiffResult.ok`, because THIS is the property the chip
+        turns on and the distinction it has to keep: ``files == 0`` and
+        ``not measurable`` are both "no counts to show" and they render
+        as opposites."""
+        return self.status == STATUS_OK
+
+    def headline(self) -> str:
+        return headline(
+            self.status, self.base, self.base_source, self.detail,
+            self.files, self.added, self.removed,
+        )
+
+    def chip(self, *, short: bool = False) -> "str | None":
+        """The chip's own text, or ``None`` to paint no chip at all.
+
+        Four states, four renderings, and the hide is available to
+        exactly one of them:
+
+        * changes, base from the sidecar -- ``diff 3 files +42 −7``
+        * changes, no sidecar (``HEAD`` standing in) -- the same, plus
+          ``vs HEAD``, because "uncommitted work against the current
+          commit" is a SMALLER claim than "this session's work against
+          its branch point" and a reader must not take one for the other;
+        * no changes -- **hidden**, the house rule every chip on this row
+          follows (:meth:`PaneChipsMixin._status_chips`);
+        * cannot determine a base -- ``diff ⚠ no base``, at every width,
+          never hidden. Hiding it would spell "cannot tell" exactly the
+          way "nothing changed" is spelt.
+
+        A fifth, git refusing outright (a ref that stopped resolving),
+        renders ``diff ⚠ unreadable`` on the same reasoning. It is only
+        ever reached inside a repository: a session with no repo at all
+        never asks for counts, so this is not the shape a non-repo
+        session wears (see ``PaneRuntimeMixin.schedule_diff_counts``).
+
+        ``short`` drops the noun (``3f``) below
+        :data:`doxa.ui.labels.DIFF_CHIP_MIN_COLS` -- the width lives with
+        the rest of this bar's thresholds, next to the mode chip's own,
+        and the model here just takes the answer. The
+        two ⚠ forms do NOT shorten and do not stand down, the same
+        asymmetry ``_mode_chip_cramped`` documents: a chip that is the
+        only place a fact appears keeps its columns.
+
+        This is the chip's PLAIN text, and the status bar needs it as
+        such whatever colour it paints: ``StatusBar._tooltip_for_x``
+        looks a chip up inside the bar's markup-STRIPPED string, so the
+        key must never be the coloured markup (v0.35.0's ctx defect,
+        which the mode chip's own comment re-states for the same
+        reason)."""
+        parts = self.chip_parts(short=short)
+        return None if parts is None else "".join(parts)
+
+    def chip_parts(self, *, short: bool = False) -> "tuple[str, str, str, str] | None":
+        """:meth:`chip`, in the four pieces the status bar paints
+        separately: ``(lead, added, removed, tail)``.
+
+        Same split, and the same reason, as
+        :meth:`FileDiff.summary_parts`: ``+42`` is green and ``−7`` is
+        red on the chip exactly as they are on the pane's file folds
+        (doxa.ui.labels' DIFF_ADD_NUM/DIFF_DEL_NUM -- one vocabulary,
+        two surfaces), and the wording of the chip has to stay decided
+        HERE rather than in the markup that colours it. ``added`` and
+        ``removed`` are empty for the two ⚠ states, which carry no
+        counts to colour."""
         if self.status == STATUS_NO_BASE:
-            return f"cannot determine a base — {self.detail}"
+            return "diff ⚠ no base", "", "", ""
         if self.status == STATUS_ERROR:
-            return f"cannot read the diff — {self.detail}"
-        against = (
-            f"against {self.base}" if self.base_source == BASE_SIDECAR
-            else f"against {self.base} (no worktree base recorded)"
-        )
+            return "diff ⚠ unreadable", "", "", ""
         if not self.files:
-            return f"no changes {against}"
-        added = sum(f.added for f in self.files)
-        removed = sum(f.removed for f in self.files)
-        n = len(self.files)
+            return None
+        noun = "f" if short else f" file{'s' if self.files != 1 else ''}"
         return (
-            f"{n} file{'s' if n != 1 else ''} changed, "
-            f"+{added} −{removed} {against}"
+            f"diff {self.files}{noun} ",
+            f"+{self.added}",
+            f" −{self.removed}",
+            " vs HEAD" if self.base_source == BASE_HEAD else "",
         )
+
+    def chip_hint(self) -> str:
+        """The chip's tooltip: the SAME sentence the pane's head line
+        prints for this state (:func:`headline`), plus what a click
+        does. The chip is a summary of the pane, so the two must not be
+        able to disagree about which state the tree is in."""
+        return f"{self.headline()} — click to open the live diff (F2)"
+
+
+def _parse_numstat(text: str) -> "tuple[int, int, int]":
+    """``(files, added, removed)`` out of ``git diff --numstat``.
+
+    A binary file's row is ``-\\t-\\tpath``: counted as a FILE with no
+    lines, which is exactly what the pane does with it (named, not
+    rendered, and no counts claimed)."""
+    files = added = removed = 0
+    for line in text.split("\n"):
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        files += 1
+        for raw, sign in ((parts[0], "+"), (parts[1], "-")):
+            if raw == "-":
+                continue
+            try:
+                value = int(raw)
+            except ValueError:
+                continue
+            if sign == "+":
+                added += value
+            else:
+                removed += value
+    return files, added, removed
+
+
+def counts(cwd: str) -> DiffCounts:
+    """The session's diff SIZE, right now -- the chip's entry point.
+
+    The same base rules, the same three states and the same one thin
+    subprocess boundary :func:`compute` uses, and deliberately the same
+    module: a second way of shelling out to git is a second answer to
+    "has anything changed", and the chip exists to agree with the pane.
+
+    **Not capped where the pane is.** :func:`compute` stops RENDERING at
+    :data:`MAX_FILES` / :data:`MAX_TOTAL_LINES` and says how many files
+    it left out, because a page has to end somewhere; a count does not,
+    and `diff 200 files` on a tree with 700 changed would be the one
+    thing the caps exist to prevent -- a short answer presented as a
+    whole one. So on a diff past those caps the chip reads larger than
+    the pane's own head line, and the pane's truncation note is what
+    explains the difference.
+
+    **What it costs, measured** (7 runs, median, warm cache):
+
+    * an ordinary repo (~700 files, nothing or a handful changed):
+      ``--numstat`` 6-8 ms, ``ls-files --others`` ~2.5 ms -- about 10 ms
+      a tick;
+    * a deliberately pathological worktree (6000 tracked files, 3000 of
+      them modified, 50 untracked): ``--numstat`` 156 ms,
+      ``ls-files --others`` 10 ms, and the untracked loop below 139 ms
+      -- ~305 ms.
+
+    That upper figure is real, so it is not run on the event loop and it
+    is not run once per edit either. The debounce is the one the diff
+    pane already uses and needs no interval to tune: the caller's worker
+    is ``exclusive`` in its own group (``PaneRuntimeMixin.
+    schedule_diff_counts``), so a turn landing thirty edits cancels
+    twenty-nine in-flight git calls and the chip shows the state after
+    the last one. For scale, the SAME tick already drives
+    :func:`compute` whenever the pane is open, which on that same tree
+    costs 270 ms in git alone plus 840 KB of unified diff to parse --
+    the chip is the cheaper half of a cost the tick already carries."""
+    if not cwd or not os.path.isdir(cwd):
+        return DiffCounts(
+            status=STATUS_ERROR, detail=f"{cwd or '(unset)'} is not a directory"
+        )
+    base, source, refusal = base_for(cwd)
+    if refusal:
+        return DiffCounts(status=STATUS_NO_BASE, detail=refusal)
+    code, out = _git(
+        cwd, "diff", "--numstat", "--no-color", "--no-ext-diff",
+        "--find-renames", base, "--",
+    )
+    if code < 0 or code > 1:
+        return DiffCounts(
+            status=STATUS_ERROR, base=base, base_source=source,
+            detail=out.splitlines()[0] if out else f"git exited {code}",
+        )
+    files, added, removed = _parse_numstat(out)
+    made, made_added, made_removed = _untracked_counts(cwd)
+    return DiffCounts(
+        status=STATUS_OK, base=base, base_source=source,
+        files=files + made, added=added + made_added,
+        removed=removed + made_removed,
+    )
+
+
+def _untracked_counts(cwd: str) -> "tuple[int, int, int]":
+    """Created files, counted the way :func:`_untracked` renders them.
+
+    Same ``--no-index`` mechanism and the same refusal to run ``git add
+    --intent-to-add``: a chip that quietly writes the index is a chip
+    that changed the thing it was reporting on. Same
+    :data:`MAX_UNTRACKED` bound, and the loop is not entered at all when
+    ``ls-files`` came back empty -- which is the ordinary case, and why
+    the ordinary tick costs ~10 ms rather than the 139 ms fifty new
+    files cost."""
+    code, out = _git(cwd, "ls-files", "--others", "--exclude-standard", "-z")
+    if code != 0 or not out:
+        return 0, 0, 0
+    paths = [p for p in out.split("\0") if p][:MAX_UNTRACKED]
+    files = added = removed = 0
+    for path in paths:
+        code, text = _git(
+            cwd, "diff", "--numstat", "--no-color", "--no-ext-diff",
+            "--no-index", "--", os.devnull, path,
+        )
+        if code < 0 or not text:
+            continue
+        one_file, one_added, one_removed = _parse_numstat(text)
+        files += one_file
+        added += one_added
+        removed += one_removed
+    return files, added, removed
+
+
+def auto_open_enabled() -> bool:
+    """``DOXA_AUTO_DIFF`` / the config file's ``auto_diff`` row.
+
+    **Off by default**, and the default is the argument. Opening the
+    diff rearranges the screen: it splits the group the session is in,
+    halving the width of the transcript the user is reading. A surface
+    that appears unasked, in the middle of a turn, is a surface that
+    moves the words someone is mid-sentence with -- so the app that has
+    never been configured does nothing new, and the user who wants the
+    diff up gets it by turning this on once.
+
+    Same explicit-truthy-string reading ``doxa.claude_plugins.
+    adoption_enabled`` and ``doxa.engine.bypass_arming_enabled`` use for
+    the other two opt-in capability expansions in this codebase."""
+    raw = config_mod.raw("DOXA_AUTO_DIFF").strip()
+    return bool(raw) and raw.lower() not in ("0", "false", "no", "off")
 
 
 # -- the base ---------------------------------------------------------

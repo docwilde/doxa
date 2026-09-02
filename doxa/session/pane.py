@@ -228,6 +228,26 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         # (see _refresh_usage_chip). Cached as a plain string because
         # _refresh_status runs on every peer event and must stay free.
         self._usage_chip: str | None = None
+        # Worktree diff size for the status chip (v1.0.1). None means NOT
+        # MEASURED YET -- which paints no chip, and is a different thing
+        # from a measured zero (also no chip) and from a measured "cannot
+        # tell" (a chip that says so). Written only by
+        # _refresh_diff_counts, off a worker thread, from the two events
+        # that can change it: this pane's boot, and a tool result that
+        # touched the tree (PaneRuntimeMixin._tick_diff). Never a timer,
+        # never per frame -- _refresh_status reads this cached record and
+        # never runs git itself, the same rule _usage_chip above follows.
+        self._diff_counts: Any = None
+        # Has the `auto_diff` setting already spent its ONE open for this
+        # session? Here, on the SESSION pane, and not on the diff pane it
+        # opens -- which is the whole point: a user who closes the diff
+        # has closed it, and a flag living on the closed widget would
+        # come back False with the next tick and fight them. It is not
+        # persisted either, so a restored tabset opens nothing on its own
+        # (restore drives no tool results, so there is no tick to fire
+        # from), and a restored diff marks this spent on the first tick
+        # that finds it already open. See _maybe_auto_open_diff.
+        self._auto_diff_done = False
         # Attention-blink infra (tab status, item: per-status tab colors).
         # Nothing sets this True yet -- the engine-side event that should
         # (can_use_tool / AskUserQuestion plumbing, a session waiting on the
