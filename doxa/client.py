@@ -54,7 +54,7 @@ from .events import (
     PENDING_LIST_LIMIT,
     EngineEvent,
 )
-from .peers import MAX_FRAME_BYTES, PeerInfo, PeerSendError
+from .peers import MAX_FRAME_BYTES, PeerInfo, PeerSendError, peer_from_mapping
 
 CALL_TIMEOUT_SECS = 15.0
 HELLO_TIMEOUT_SECS = 10.0
@@ -486,8 +486,12 @@ class EngineClient:
         if isinstance(status.get("usage"), dict):
             self._usage = status["usage"]
         self._disabled = list(status.get("disabled_tools") or [])
+        # peer_from_mapping, not PeerInfo(**p): the daemon on the other end
+        # of this socket may be a different build than this client, and a
+        # bare ** turns one field it knows about and we do not into a
+        # TypeError that empties the whole roster. See that function.
         self._peers = [
-            PeerInfo(**p) for p in status.get("peers") or []
+            peer_from_mapping(p) for p in status.get("peers") or []
             if isinstance(p, dict)
         ]
         return status
@@ -506,7 +510,7 @@ class EngineClient:
         reply = await self._call("msg", target=target_prefix, text=text)
         if not reply.get("ok"):
             raise PeerSendError(reply.get("error") or "send failed")
-        return PeerInfo(**reply["peer"])
+        return peer_from_mapping(reply["peer"])
 
     def belief_count(self) -> int:
         return self._belief_count
