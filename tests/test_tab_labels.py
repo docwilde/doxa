@@ -138,12 +138,35 @@ def _tab_label(app, pane) -> str:
     return raw[len(prefix):] if raw.startswith(prefix) else raw
 
 
+def _painted(app, pane) -> bool:
+    """Has this pane's own label reached the TAB HEADER?
+
+    Not the same question as "has the pane computed one", and the
+    difference is this file's most frequent flake. `pane._tab_label` is
+    the pane's IDENTITY string, set by the first `_refresh_status` after
+    boot; every assertion in this file is about what `_raw_tab_label`
+    PAINTS. Those are two moments, not one: `SessionPane.set_tab_label`
+    writes the header inside `contextlib.suppress`, so a label computed
+    before the tab's `Tab` widget is up records the identity and paints
+    nothing. Waiting for the first while asserting on the second is how
+    this file came to fail with the BIRTH label (`_tab_title`'s
+    `model · dirname`) on a machine one message-pump turn slower than
+    usual."""
+    label = pane._tab_label
+    if not label:
+        return False
+    try:
+        return label in _raw_tab_label(app, pane)
+    except Exception:  # noqa: BLE001 -- no tab yet is "not painted"
+        return False
+
+
 async def _settled(pilot, app, pane, tries=200):
     for _ in range(tries):
-        if pane._tab_label:
+        if _painted(app, pane):
             return True
         await pilot.pause(0.02)
-    return bool(pane._tab_label)
+    return _painted(app, pane)
 
 
 @pytest.mark.asyncio

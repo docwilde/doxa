@@ -581,9 +581,18 @@ async def test_clicking_a_row_reveals_that_session(tmp_path):
         assert await _wait(pilot, lambda: len(app.groups()) == 2)
         assert app.set_sidebar(True) is None
         assert await _wait(pilot, lambda: _settled(app, 2))
-        first = app.panes()[0]
-        # The keyboard is in the SECOND group after a split.
-        assert app.focused_pane() is not app.panes()[0]
+        first, other = app.panes()[0], app.panes()[1]
+        # PUT the keyboard in the other group rather than assuming the
+        # split left it there. tests/test_pane_groups.py establishes the
+        # same precondition the same way, and for the reason this test
+        # learned the hard way: focus after a split is applied through
+        # ``call_after_refresh`` (doxa/app.py's own note on
+        # ``screen.set_focus``), so "which pane has it" is not a fact that
+        # holds at any particular instant -- and this test is about what a
+        # CLICK does, not about where a split leaves the keyboard, which
+        # tests/test_split_panes.py owns.
+        app._focus_tab(other.tab)
+        assert await _wait(pilot, lambda: app.focused_pane() is other)
         line = next(
             line for line in _lines(app)
             if line.row.session_id == first._session_id

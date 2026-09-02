@@ -203,6 +203,10 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         # status bar is refreshed -- never on a timer, and only WRITTEN
         # when it actually changed, since writing it repaints the tab.
         self._tab_label: str | None = None
+        # Did the last :meth:`set_tab_label` reach the tab HEADER, or was
+        # it swallowed because the Tab widget did not exist yet? Without
+        # this, a miss was permanent -- see refresh_tab_label.
+        self._tab_label_painted = False
         # A tab the user NAMED. Set, it pins the label: model switches and
         # branch changes stop rewriting it, because a name the user typed
         # outranks anything DOXA can derive. Cleared (an empty rename) the
@@ -580,14 +584,36 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         self.refresh_tab_label()
 
     def refresh_tab_label(self) -> None:
-        """Re-render the tab's label if it changed. Cheap, idempotent, and
-        called from exactly where the status bar is refreshed. A NAMED tab
-        keeps its name through every model switch and branch change --
-        that is what pinning means."""
+        """Re-render the tab's label if it changed -- or if the last write
+        never reached the header. Cheap, idempotent, and called from
+        exactly where the status bar is refreshed. A NAMED tab keeps its
+        name through every model switch and branch change -- that is what
+        pinning means.
+
+        **``_tab_label_painted`` is the second half of that condition, and
+        it is a bug fix rather than bookkeeping.** :meth:`set_tab_label`
+        writes the header inside ``contextlib.suppress``, because a label
+        can be computed before this pane's ``Tab`` widget exists (boot) or
+        after it is gone (teardown). When that write is swallowed the
+        identity string is still recorded -- and the equality test above
+        then made the miss PERMANENT: every later call computed the same
+        label, matched, and returned, so the header kept the birth title
+        (``_tab_title``'s ``model · dirname``) for the rest of the
+        session. Visible to a user as a tab that never picks up its repo
+        and branch, and to this suite as
+        ``tests/test_tab_labels.py``'s ``'default · myrepo'`` failures --
+        the most frequent flake in it, on this branch and on v0.99.0
+        alike, because losing that race only needs the tab strip to be one
+        message-pump turn behind the first status refresh.
+
+        Retrying costs nothing: ``_refresh_status`` already runs on every
+        event that could move a label, and a pane with no tab to write to
+        pays one suppressed query per refresh, which is what the first
+        attempt already cost."""
         if self.custom_name:
             return
         label = self.auto_label()
-        if label == self._tab_label:
+        if label == self._tab_label and self._tab_label_painted:
             return
         self.set_tab_label(label)
 
@@ -603,8 +629,13 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         identity string: a pinned (user-renamed) tab still gets the glyph
         -- provider identity is orthogonal to the user's name for the tab
         -- but renaming it back to itself must not hand back
-        "✳ my old name" as the seed."""
+        "✳ my old name" as the seed.
+
+        Records whether the header write LANDED -- see
+        :meth:`refresh_tab_label` on why a swallowed write used to be
+        permanent."""
         self._tab_label = text
+        self._tab_label_painted = False
         displayed = f"{provider_glyph()} {text}"
         # A SPLIT leaf does not own the tab header -- the tab's FIRST leaf
         # names it, and a second session sharing the tab is found by
@@ -619,6 +650,9 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         if tab is not None:
             leaves = tab.leaves()
             if leaves and leaves[0] is not self:
+                # Nothing owed: this leaf never paints the header, so it
+                # must not keep retrying one.
+                self._tab_label_painted = True
                 return
             tab._title = self.render_str(displayed)
         with contextlib.suppress(Exception):
@@ -628,6 +662,7 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
             self.app.tabbed_holding(self.tab_id).get_tab(
                 self.tab_id
             ).label = displayed
+            self._tab_label_painted = True
 
     def _set_tab_class(self, class_name: str, value: bool) -> None:
         """Toggle one status class (``-working`` / ``-done-unseen`` /
