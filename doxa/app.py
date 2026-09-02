@@ -3444,9 +3444,20 @@ class DoxaApp(App):
                 return pane
         return None
 
-    async def toggle_diff_pane(self) -> "str | None":
-        """Open the focused session's live diff BESIDE it, or close it.
-        Returns a refusal to show the user, or ``None`` when it happened.
+    async def toggle_diff_pane(
+        self, pane: "SessionPane | None" = None,
+    ) -> "str | None":
+        """Open a session's live diff BESIDE it, or close it. Returns a
+        refusal to show the user, or ``None`` when it happened.
+
+        ``pane`` defaults to the focused session -- what F2 and ``/diff``
+        mean by "this session". v1.0.1 gives it a caller-supplied
+        alternative for the two doors that are aimed at a PARTICULAR
+        session rather than at the keyboard's: the status chip (which is
+        painted inside one pane's own bar) and the ``auto_diff``
+        auto-open (whose tick can arrive from a session in a background
+        tab, which is precisely the session it must not diff the wrong
+        neighbour of).
 
         This is the spec's design check on v0.91.0's split, run for real:
         *session left, diff right, both live*. It reuses
@@ -3462,7 +3473,7 @@ class DoxaApp(App):
         one diff, per the spec's answer to its own third open question
         (per-session, matching the isolation model -- two sessions in
         worktrees off the same branch have two different diffs)."""
-        pane = self.active_pane
+        pane = pane if pane is not None else self.active_pane
         if pane is None:
             return "there is no session pane here to diff"
         tab = pane.tab
@@ -3480,9 +3491,26 @@ class DoxaApp(App):
             self._focus_tab(pane)
             self._persist_tabset()
             return None
+        return await self._open_diff_beside(pane)
+
+    async def _open_diff_beside(self, pane: "SessionPane") -> "str | None":
+        """The OPEN half of :meth:`toggle_diff_pane`, extracted in v1.0.1
+        so the auto-open setting reaches it without going through a
+        toggle -- an automatic open must never be able to CLOSE a diff
+        the user is reading, which is what calling the toggle blind would
+        do the moment one was already there.
+
+        Every rule the hand-driven open follows is here and nowhere else:
+        the free box, the :func:`doxa.layout.split_refusal` floor, the
+        ``ROW`` orientation, and the deliberate absence of a focus
+        call."""
         if not pane._session_id:
             return "this session has not started yet — nothing to diff"
-        group = self.focused_group()
+        # The group holding THIS pane, falling back to the focused one:
+        # with a caller-supplied pane (the chip, the auto-open) the
+        # keyboard may be somewhere else entirely, and the diff has to
+        # land beside the session it is a diff of.
+        group = split_mod.group_of(pane) or self.focused_group()
         if group is None:
             return "there is no pane group here to diff"
         box = split_mod.free_box(group)
@@ -3520,6 +3548,13 @@ class DoxaApp(App):
         # moving the keyboard out of the prompt to open it would be the
         # opposite of the feature. "Visible and focused are different
         # states" cuts both ways, and this is the other way.
+        #
+        # v1.0.1 makes that load-bearing rather than merely tidy: the
+        # `auto_diff` setting opens this pane while the user is typing,
+        # unasked. A surface that took the keyboard on its way in would
+        # eat the next characters of a prompt someone is mid-sentence
+        # with -- so the absence of a `_focus_tab` call here is asserted
+        # by tests/test_diff_chip.py, not just described.
         self._persist_tabset()
         return None
 

@@ -126,6 +126,25 @@ SETTINGS: tuple[Setting, ...] = (
              "re-scans for NEW sessions without restarting doxa.",
     ),
     Setting(
+        key="auto_diff", env="DOXA_AUTO_DIFF",
+        label="auto-open the live diff", category="Session",
+        kind="bool", default="",
+        help="Open the live diff beside a session the FIRST time it edits "
+             "the worktree, once per session (doxa.diff.auto_open_enabled / "
+             "PaneRuntimeMixin._maybe_auto_open_diff)",
+        note="OFF by default, and the default is the argument: opening the "
+             "diff splits the group the session is in, halving the width of "
+             "the transcript you are reading, and a surface that rearranges "
+             "the screen mid-turn without being asked is worse than one you "
+             "have to know about. ONCE per session, so closing it is final "
+             "-- it never re-opens behind you. It never takes the keyboard "
+             "(the prompt keeps focus), and on a window too narrow to split "
+             "it REFUSES and says so rather than making an unusable sliver. "
+             "The `diff N files +A −R` status chip is on either way and is "
+             "how you see there are changes at all; F2 and /diff open the "
+             "pane by hand at any time.",
+    ),
+    Setting(
         key="permission_mode", env="DOXA_PERMISSION_MODE",
         label="permission mode", category="Session",
         kind="choice", choices=("", "default", "acceptEdits", "plan"),

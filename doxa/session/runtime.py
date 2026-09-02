@@ -208,6 +208,14 @@ class PaneRuntimeMixin:
         self._refresh_usage_chip()
         self._engine_ready.set()
         self._refresh_status()
+        # The diff chip's first reading (v1.0.1). Boot is an EVENT, not a
+        # timer, and it is the one that answers the case the tick alone
+        # cannot: a session resumed (or attached, or spawned by /branch)
+        # into a worktree that ALREADY carries changes has not edited
+        # anything yet, and a chip that stays hidden until the agent's
+        # next edit would be spelling "nothing changed" for a tree that
+        # has plenty. One `git diff --numstat` per boot, on a thread.
+        self.schedule_diff_counts()
         # Initial identity block: who/where this session actually is --
         # only fields the CLI/config really reported, never guesses.
         #
@@ -626,18 +634,139 @@ class PaneRuntimeMixin:
         )
 
     def _tick_diff(self, tool_name: str, tool_input: "dict | None") -> None:
-        """Tell this session's diff leaf, if it has one open, that the
-        tree may have moved. Costs nothing when nobody is looking: no
-        diff pane, no query, no git."""
+        """The tree may have moved: tell everything that shows it.
+
+        Three riders on ONE tick, and it is the same tick v0.92.0
+        established -- ``Edit``/``Write``/``NotebookEdit``/``Task`` and a
+        ``Bash`` that could have written (:func:`doxa.diff.is_tick`).
+        Nothing here is a timer and nothing here is a watcher.
+
+        1. the status chip's counts (v1.0.1), which is why this no longer
+           returns early when no pane is open: "costs nothing when nobody
+           is looking" was exactly the property that made the diff
+           invisible until you already knew to press F2;
+        2. the diff leaf, if one is open, exactly as before;
+        3. and, when no leaf is open and the ``auto_diff`` setting says
+           so, the one automatic open this session gets."""
         if not tool_name or not diff_mod.is_tick(tool_name, tool_input):
             return
+        self.schedule_diff_counts()
         app = getattr(self, "app", None)
         finder = getattr(app, "diff_pane_for", None)
         if finder is None:
             return
         pane = finder(self._session_id)
         if pane is not None:
+            # A diff that is already open IS this session's open. Marking
+            # it here is what makes a RESTORED diff (v0.92.0 restores the
+            # leaf, and restore fires no ticks of its own) spend the
+            # allowance rather than queue a second one behind it.
+            self._auto_diff_done = True
             pane.schedule_refresh()
+            return
+        self._maybe_auto_open_diff()
+
+    # -- the diff chip (v1.0.1) ---------------------------------------
+
+    def schedule_diff_counts(self) -> None:
+        """Recompute the status chip's ``git diff --numstat``, off the
+        loop, at most one in flight.
+
+        ``exclusive=True`` on its own worker group is the whole debounce,
+        and it is the same one :meth:`DiffPane.schedule_refresh` already
+        relies on for the heavier full diff: a turn landing thirty edits
+        fires thirty ticks, each cancelling the last in-flight git call,
+        so the chip settles on the state after the LAST edit instead of
+        queueing thirty stale ones. No interval to tune, no second
+        lifecycle -- which is the only kind of rate limit this app's
+        no-timer rule leaves room for.
+
+        Refused outright outside a repository: :meth:`GitLine.render`
+        already paints no chip there, and there is no diff to have.
+        Costing a session with no repo two subprocess calls per edit --
+        to learn each time that git still has nothing to say -- would be
+        the one case where this chip is pure overhead."""
+        git = getattr(self, "_git", None)
+        if git is None or not getattr(git, "repo", None):
+            return
+        if not self.is_mounted:
+            return
+        self.run_worker(
+            self._refresh_diff_counts(), exclusive=True, group="diff-counts",
+        )
+
+    async def _refresh_diff_counts(self) -> None:
+        """Read the counts and repaint the bar.
+
+        ``asyncio.to_thread`` for the reason :meth:`DiffPane.refresh_diff`
+        gives at its own call: these are git subprocesses, and a
+        keystroke must not wait behind one."""
+        cwd = str(getattr(self.engine, "cwd", None) or self.cwd)
+        try:
+            result = await asyncio.to_thread(diff_mod.counts, cwd)
+        except Exception as exc:  # noqa: BLE001 -- a chip degrades to a
+            # statement about itself, never to an unclaimed error block:
+            # this runs from a worker, where an escaping exception is a
+            # failure nobody asked for.
+            result = diff_mod.DiffCounts(
+                status=diff_mod.STATUS_ERROR, detail=str(exc)
+            )
+        self._diff_counts = result
+        self._refresh_status()
+
+    def _maybe_auto_open_diff(self) -> None:
+        """The ``auto_diff`` setting's ONE open, or nothing at all.
+
+        Off by default (:func:`doxa.diff.auto_open_enabled`), so the
+        ordinary session's first edit does exactly what it did before
+        this release: nothing.
+
+        The flag is set BEFORE the worker starts, not after it finishes.
+        A turn that lands two edits in quick succession ticks twice, and
+        both ticks would otherwise pass the check while the first open
+        was still awaiting its mount -- one session, two diffs, in the
+        one code path that cannot be retried away."""
+        if self._auto_diff_done or not self._session_id:
+            return
+        if not diff_mod.auto_open_enabled():
+            return
+        app = getattr(self, "app", None)
+        if app is None or not hasattr(app, "toggle_diff_pane"):
+            return
+        self._auto_diff_done = True
+        self.run_worker(self._auto_open_diff(), group="diff-auto")
+
+    async def _auto_open_diff(self) -> None:
+        """Open the diff beside this session, once, without taking the
+        keyboard.
+
+        Through :meth:`DoxaApp.toggle_diff_pane` -- the SAME door F2,
+        ``/diff`` and the chip's own click use, passing THIS pane rather
+        than the focused one (an edit can land in a background tab, and
+        the diff belongs to the session that was edited, not to the one
+        being looked at). Two properties come with that door rather than
+        being re-implemented here:
+
+        * **it refuses rather than mangles.** A group too narrow to
+          halve is turned down by :func:`doxa.layout.split_refusal`, the
+          same floor a hand-driven split hits, and the refusal is shown
+          rather than swallowed. It does NOT retry later: the allowance
+          is already spent, because a setting that re-asks on every edit
+          in a narrow window is a setting that nags. The notice names
+          F2, which still works the moment there is room.
+        * **it does not steal focus.** ``toggle_diff_pane`` never calls
+          ``_focus_tab`` on the way in -- v0.38.0's rule that a new
+          surface mounts unfocused and its creator says where the
+          keyboard goes, and here the answer is "it stays where it was".
+          That was already true for F2 (a diff is something you look at
+          while you keep typing); it is load-bearing for an open the
+          user did not ask for at all, mid-sentence."""
+        note = await self.app.toggle_diff_pane(self)
+        if note:
+            self.app.notify(
+                f"auto-open diff: {note} — F2 opens it when there is room",
+                severity="warning", timeout=8,
+            )
 
     async def _render_turn_done(
         self, ev: EngineEvent, block: TurnBlock, chips: dict[str, ToolChip],
