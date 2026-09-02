@@ -4,6 +4,56 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 0.99.1 — 2026-09-02
+
+**"Tabs that i had closed using CTRL+Q are resurrected on the next start
+of DOXA anyway"** — and, once told a finalized session cannot be resumed:
+**"there is no way to permanently close a tab."** Reported from live use.
+Both true. **Ctrl+Q ends it, Ctrl+W parks it** is the rule from here on.
+
+- **The mechanism.** `DoxaApp._close_pane`'s `terminate=True` branch
+  (Ctrl+Q) recorded the closing session into `_ended_this_run`, and
+  `_persist_tabset` folded that dict into every snapshot it wrote for the
+  rest of the run — deliberate, v0.60.0 policy: a finalized session's
+  transcript is genuinely `--resume`-able (v0.56.0 pinned DOXA's own
+  session id to the CLI's), so v0.60.0 read "resumable" as reason enough
+  to keep the TAB'S RECORD too. What it missed: `finalize()` never
+  removes the conversation from the CLI's own history store, so the next
+  launch's restore triage (`doxa.cli.ended_tab_spec` →
+  `history_mod.resume_state`) found it, answered `RESUME_OK`, and handed
+  the tab back **live**, not the read-only "archived" tab v0.60.0's own
+  comments describe. Only v0.85.0's `is_last` branch (closing a window's
+  ONE remaining tab) ever excluded a Ctrl+Q'd session from the record —
+  every other tab position kept resurrecting.
+- **`DoxaApp._persist_tabset`**'s mounted-pane scan excludes a `_stopped`
+  pane again — the same exclusion v0.55.0 had, dropped for one release by
+  v0.60.0. This is the one choke point every close path already runs
+  through, so it is also the whole fix: `_close_pane`'s `is_last` and
+  `not is_last` branches collapse into the same rule (Ctrl+Q always
+  excludes, whatever the tab count), and two duplicate reimplementations
+  inherit it for free. `DoxaApp._stop_active` (the palette's "Quit: stop
+  session") now delegates to `_close_pane` instead of re-deriving a
+  SUBSET of its disposition — through 0.99.0 it never grew the `is_last`
+  fix at all, so stopping the ONLY tab from the palette left the session
+  in the record even when Ctrl+Q's own path on the same tab did not.
+  `action_quit_stop` (all tabs) needed no code change at all: it already
+  read `_persist_tabset`'s mounted-pane scan for its one snapshot.
+- **`_ended_this_run` keeps its OTHER job.** It still fills every run
+  Ctrl+Q closes a tab — that bookkeeping is unchanged and (per the
+  sidebar rail landing in v1.0.0) still worth having, dimming an ended
+  session's row for the rest of the run. What changed is only that
+  `_persist_tabset` no longer reads it as a source: whether a session
+  survives to the NEXT launch's restore set is decided by `pane._stopped`
+  at the mounted-pane scan, never by this dict.
+- **Nothing on disk is destroyed.** The transcript stays exactly where
+  `doxa.transcript` always wrote it — `/search`, the resume picker, and
+  `--resume <id>` by hand all still find a Ctrl+Q'd session. This changes
+  the AUTO-RESTORE set only; `doxa.tabsets`' own module docstring now
+  states the rule plainly (`**Stopped vs. detached vs. killed**`) instead
+  of describing the v0.60.0 policy this reverses.
+
+Full suite: **N passed**.
+
 ## 0.99.0 — 2026-09-02
 
 **"When a request is running in one tab and i open another, and then i
