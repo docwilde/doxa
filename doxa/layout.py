@@ -133,9 +133,24 @@ GROUP_STRIP_MIN_COLS = 17
 
 #: What a rail row costs BESIDE its label: one column of left padding,
 #: two of collection indent (a member sits under its heading, and that
-#: indent is what makes membership visible at all), two for the state
-#: mark and its space, one of right padding.
-SIDEBAR_CHROME = 6
+#: indent is what makes membership visible at all), THREE for the state
+#: glyphs and their space, one of right padding.
+#:
+#: Three, not two, since v1.2.0: the rail now spends
+#: :data:`doxa.triage.GLYPH_COLUMNS` (2) on Part 0's two independent
+#: states -- the mark's own glyph and the ctx glyph -- plus the single
+#: space that separates them from the label. That is one more column than
+#: v1.0.0's single mark glyph, and it is the whole width cost of
+#: collection triage. Everything derived from this constant below moves
+#: with it, which is why they are derived and why
+#: tests/test_sidebar.py re-derives them rather than restating numbers.
+#: Stated as a literal and not as an import of
+#: :data:`doxa.triage.GLYPH_COLUMNS`: this module has NO imports at all
+#: and that is the property that lets every other module read it,
+#: doxa.triage included. tests/test_sidebar.py re-derives the sum from
+#: that constant instead, so moving the glyph budget still moves the
+#: number rather than leaving a stale one documented as measured.
+SIDEBAR_CHROME = 7
 
 #: The narrowest rail DOXA will draw. MEASURED, not chosen, and measured
 #: against exactly what :data:`GROUP_STRIP_MIN_COLS` is measured against
@@ -147,7 +162,7 @@ SIDEBAR_CHROME = 6
 #: Not a width the rail ever opens AT -- it is the floor a configured
 #: width is clamped to, and the width :data:`SIDEBAR_MIN_COLS` prices the
 #: refusal in.
-SIDEBAR_MIN_WIDTH = 19
+SIDEBAR_MIN_WIDTH = 20
 
 #: The rail's default width, and the value ``sidebar_width`` in the
 #: settings registry defaults to.
@@ -166,18 +181,18 @@ SIDEBAR_MIN_WIDTH = 19
 #: :data:`doxa.ui.labels.CTX_ABSOLUTE_MIN_COLS`) with ONE vertical split
 #: -- the ordinary two-group window -- the rail may cost at most
 #: ``100 - 2 * GROUP_STRIP_COMPACT_COLS`` = 32 columns before pushing a
-#: group onto the compact rung. 22 is inside that budget with 10 columns
+#: group onto the compact rung. 23 is inside that budget with 9 columns
 #: to spare, so opening the rail on the reference terminal does not
 #: silently degrade both tab strips as a side effect.
-SIDEBAR_WIDTH = 22
+SIDEBAR_WIDTH = 23
 
 #: ...and the widest. ``SIDEBAR_CHROME + TAB_LABEL_MAX`` (32): the width
-#: at which a row shows the whole label the tab strip caps at. Wider buys
+#: at which a row shows the whole label the tab strip caps at (39). Wider buys
 #: nothing that exists to be shown, and costs the tree columns for it.
-SIDEBAR_MAX_WIDTH = 38
+SIDEBAR_MAX_WIDTH = 39
 
 #: The absolute floor on TOTAL window width, below which the rail cannot
-#: open at any width: the narrowest rail plus the narrowest pane. 53.
+#: open at any width: the narrowest rail plus the narrowest pane. 54.
 #: Stated as a constant because it is the number a refusal message and a
 #: test both want, and derived rather than typed so raising either half
 #: moves it.

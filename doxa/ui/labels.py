@@ -344,11 +344,19 @@ TAB_STATE_MARKS: "tuple[str, ...]" = (
 #: spend, and spending it means the rail still says something on a
 #: monochrome terminal and to a reader who cannot separate the green of
 #: done-unseen from the amber of working.
+#: v1.2.0: ``-attention`` IS Part 0's *needs input* state, and its glyph
+#: is :data:`doxa.triage.GLYPH_NEEDS_INPUT` -- the hourglass, not the bang
+#: it wore in v1.0.0. Stated here rather than in doxa.triage because this
+#: dict is the ONE place a mark's glyph is written down, and a second
+#: table that overrode one of its four entries would be exactly the "one
+#: source, read twice" rule broken in the file that states it. The other
+#: three stay ASCII: they cost no font coverage at all, and the codepoint
+#: budget this feature spends is the two glyphs the spec names.
 SIDEBAR_MARK_GLYPHS: "dict[str, str]" = {
     "-done-unseen": "✓",
     "-staged": "+",
     "-working": "▸",
-    "-attention": "!",
+    "-attention": "⏳",
 }
 
 #: What a row with no mark at all shows, so every label starts in the
