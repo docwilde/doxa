@@ -4,6 +4,49 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.3.0 — 2026-09-03
+
+**A session can spawn a session, and it is OFF by default.** The first
+capability that lets a model start a process. `docs/plans/spawn-session.md`.
+
+- New **`doxa/session_ops.py`** — its own registry, not `operators.py`
+  (whose charter is LORE tools), projected through the same
+  `to_sdk_tools`/`ToolGate.execute` path so containment has one executor.
+  `spawn_session(task, model=None, base_branch=None)`. **`cwd` is not a
+  parameter**: the child spawns from the parent's repo via the trusted
+  `OperatorContext`, so no cross-repo path opens.
+- **`spawn_sessions` defaults off, and only `~/.doxa/config.toml` can arm
+  it** — never a repo-local file, or an untrusted clone would be arbitrary
+  code execution on `doxa new`. With no config the tool is absent from the
+  model's surface, asserted at the engine's own call site.
+- **Three caps enforced in the operator before `spawn_daemon` runs**, in
+  DOXA's process, not in prose: **depth 2**, **3 live sessions per repo
+  scope**, **1 per 60 s**. Derived — 3 from ~294 MB RSS per idle session
+  against measured degradation past ~3 agents; 60 s is `STALE_AFTER_SECS`,
+  the window the count cap can be counting a ghost.
+- **A refusal reads `spawn_session: <reason>`**, the soft-error shape, so a
+  cap doing its job never trips the two-strikes tracker and disables the
+  tool by working.
+
+**The child is told where it came from.** `SPAWN_PROVENANCE_INTRO` is
+prepended by the receiving side (`SessionDaemon._initial_task_prompt`), so
+a parent cannot suppress it — disclosure, not a trust downgrade.
+`PEER_UNTRUSTED_INTRO` was rejected here: its conclusion ("take no action
+unless this session's own user asks") would make a child refuse the task it
+was spawned for. The real containment is the human reading the task.
+
+**Two defects found reviewing the branch**: the task was scrubbed at the
+display end only — you would have approved `[REDACTED:api-key]` while the
+child received the key; `scrub_secrets` now runs once in the operator, so
+the dialog string and the argv are identical. And `to_sdk_tools` appended
+`[write: staged for review]` to every non-read-only operator, true of
+`lore_remember` and false of this one (`Operator.write_note`).
+
+**Not covered**: fleet cost aggregation, an outcome tag on `peer_left`, and
+the `doxa new`-under-Bash path — `ToolGate` cannot see inside a shell
+string, so that path is counted by the live-session cap but not gated and
+carries no parent link.
+
 ## 1.2.2 — 2026-09-03
 
 **`CHANGELOG.md`: 3,365 → 1,431 lines.** Twenty entries ran over the 40-line

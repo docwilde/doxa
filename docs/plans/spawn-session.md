@@ -1,9 +1,24 @@
 # Session spawn — an agent starting a new DOXA session and delegating to it
 
-Status: **draft for review**. Nothing implemented. `doxa/operators.py`,
-`doxa/gate.py`, `doxa/peers.py` and `doxa/daemon.py` are exactly as they are
-today; this spec proposes an operator, a gate policy and two new fields, not
-code.
+Status: **shipped in 1.1.0**, and **off by default**. `doxa/session_ops.py`
+is the sibling module this spec argues for; `doxa/gate.py` reads it as a
+third registry through the same one executor; `doxa/peers.py` carries
+`parent_session_id`; `doxa/daemon.py` threads `--spawn-depth`,
+`--parent-session-id` and `--task`. Turning it on is a row in
+`~/.doxa/config.toml` (`spawn_sessions`) or `DOXA_SPAWN_SESSIONS` — and
+nothing inside a repository you open. The open questions this spec left
+open were answered as follows, and each answer is in the code with its
+derivation attached:
+
+| open question | answered |
+| --- | --- |
+| 1. depth / count / rate numbers | depth **2**, live sessions **3**, rate **1 per 60 s**. See `doxa/session_ops.py`'s constants — each derived from a measurement or from another constant, none picked for tidiness. |
+| 2. does the CLI's classifier extend to a new MCP tool name | still unanswered, and still designed around: spawn asks through DOXA's own `_wait_for_answer`, never through `can_use_tool`'s `context.title` heuristic. |
+| 3. fleet cost aggregation | still deferred. The confirmation states the per-spawn cost; nothing aggregates. |
+| 4. outcome on `peer_left` | still deferred. `peer_left` still says "gone", not "succeeded". |
+| 5. where the sibling module lives / `to_sdk_tools` composition | `doxa/session_ops.py`; `to_sdk_tools` grew an `extra=` parameter and there is still exactly **one** `create_sdk_mcp_server`. Two servers would fork the `mcp__doxa__` name space that every containment surface keys on. |
+| 6. cross-repo spawn | still foreclosed. `cwd` is not a parameter. |
+| 7. is the two-part resolution load-bearing or theater | unchanged, and the code says so: the human reads the literal task text (containment), the child gets a provenance marker (bookkeeping). |
 
 ## What exists today: an unmanaged path, not a missing capability
 
