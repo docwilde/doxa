@@ -4,6 +4,29 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.0.3 — 2026-09-03
+
+**Three README claims went stale the moment v1.0.0 and v1.0.2 shipped.**
+Caught by the owner, not by a test — the README's own promise is that
+everything it describes "has shipped and is described as it behaves
+today", and nothing enforces it.
+
+- **"Specified, not built" listed nine plans; it is six.** `session-sidebar`
+  shipped in v1.0.0 and `peer-publishing` in v1.0.2, and both were still
+  named as designs with nothing behind them. The five that have now left
+  that list are named with their versions. The remaining six were each
+  re-checked against their own status lines: `plugin-api`, `remote`,
+  `mermaid`, `code-graph`, `sandbox`, `model-registry` all still read
+  "draft for review".
+- **The peers bullet described discovery and `/msg` and stopped there**,
+  a release after peers began publishing `provider`/`model`/`engine`. It
+  now says what a peer publishes AND that none of it is believed — a
+  self-description is displayed, never verified, and decides nothing.
+- **`peers.gif`'s caption** predated the same release. It now names the
+  one field that does not ride the 15-second heartbeat: a model change
+  publishes immediately, because a stale model id is a wrong answer where
+  a stale token total is only an old number.
+
 ## 1.0.2 — 2026-09-03
 
 **A peer session now says what it is, not only where it is.**

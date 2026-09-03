@@ -82,7 +82,10 @@ spend, fake account numbers. See
   kitty graphics → sixel → half-block → text, settled by one probe.
 - **[Sessions talk to each other.](docs/manual.md#search-resume-and-peers)**
   Same-repo sessions find each other and exchange `/msg` — always
-  human-sent; the model has no send tool.
+  human-sent; the model has no send tool. Each publishes what it is —
+  provider, model, engine, tokens spent — and none of it is believed: a
+  peer's self-description is displayed, never verified, and never decides
+  anything.
 - **[An isolated CLI config.](docs/manual.md#the-spawned-cli)** Spawned
   `claude` processes use a config directory DOXA owns, not your
   `~/.claude`; your plugins load only if you opt in.
@@ -125,7 +128,7 @@ binding yours cannot send.
 
 ![The peers chip opening a roster of three sessions with titles and token totals, one detached, one mid-first-turn showing 'tok --'](assets/shots/peers.gif)
 
-*Who else is on this repo, and tokens spent — self-reported on each peer's 15-second heartbeat. A peer mid-first-turn reads as unknown, never zero.*
+*Who else is on this repo, what each says it is running, and tokens spent — self-reported on each peer's 15-second heartbeat, except a model change, which publishes at once because a stale model id is a wrong answer rather than an old number. A peer mid-first-turn reads as unknown, never zero.*
 
 ![The permission-mode chip cycling: grey 'default', teal 'plan', amber 'auto', red 'bypassPermissions'](assets/shots/permission-mode.gif)
 
@@ -205,13 +208,13 @@ shipped and behaves as described; [CHANGELOG.md](CHANGELOG.md) has the
 history. Config keys, socket protocol and command names can still change
 between minor versions.
 
-**Specified, not built.** Nine documents in [`docs/plans/`](docs/plans/)
+**Specified, not built.** Six documents in [`docs/plans/`](docs/plans/)
 are designs with nothing behind them, each saying so in its opening lines:
 `plugin-api` (no loader exists — v0.34.0 shipped only the seams one could
-bind to), `remote`, `mermaid`, `code-graph`, `sandbox`, `peer-publishing`,
-`model-registry`, `spawn-session`, `session-sidebar`. Three left that list
-by shipping: `split-panes` (v0.91.0), `live-diff` (v0.92.0), `pane-groups`
-(v0.97.0, which inverted the first). `plugins.md` shipped in v0.74.0 and
+bind to), `remote`, `mermaid`, `code-graph`, `sandbox`, `model-registry`.
+Five left that list by shipping: `split-panes` (v0.91.0), `live-diff`
+(v0.92.0), `pane-groups` (v0.97.0, which inverted the first),
+`session-sidebar` (v1.0.0) and `peer-publishing` (v1.0.2). `plugins.md` shipped in v0.74.0 and
 is a different system — it adopts *your own* Claude Code plugins
 (commands, skills, agents; never hooks or MCP servers) into the spawned
 CLI.
