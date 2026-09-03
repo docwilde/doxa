@@ -27,6 +27,11 @@ capability that lets a model start a process. `docs/plans/spawn-session.md`.
 - **A refusal reads `spawn_session: <reason>`**, the soft-error shape, so a
   cap doing its job never trips the two-strikes tracker and disables the
   tool by working.
+- **One SDK MCP server, two registries**: `to_sdk_tools` grew `extra=`
+  rather than a second `create_sdk_mcp_server`, because a second server
+  means a second wire prefix and `gate.registry_name` strips exactly one.
+  `ToolGate.execute` settles awaitables, so a refusal stays synchronous
+  and only the spawning path parks.
 
 **The child is told where it came from.** `SPAWN_PROVENANCE_INTRO` is
 prepended by the receiving side (`SessionDaemon._initial_task_prompt`), so
