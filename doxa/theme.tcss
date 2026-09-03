@@ -115,6 +115,22 @@ SessionSidebar > SidebarLine.-in-collection {
     padding-left: 2;
 }
 
+/* A member of a multi-tab PANE (v1.2.0): one level in from its entry row,
+   which is itself one level in from its heading. Three levels is the most
+   this rail will ever have -- collection or project, pane, tab -- and the
+   indent is what makes each of them visible without a second glyph. */
+SessionSidebar > SidebarLine.-in-entry {
+    padding-left: 4;
+}
+
+/* The pane group's own line. Slightly muted against its members: the
+   members are the destinations, the entry is the summary above them --
+   and a summary that shouted louder than the rows it summarises would
+   make a three-tab pane read as three times as urgent as it is. */
+SessionSidebar > SidebarLine.-entry {
+    color: #B9AE9B;
+}
+
 /* A row for a session with no pane behind it -- a detached peer, a
    collection member whose tab was closed. Dimmed rather than hidden: the
    rail is a session INDEX, and a rail that could only list what the
@@ -122,6 +138,50 @@ SessionSidebar > SidebarLine.-in-collection {
 SessionSidebar > SidebarLine.-closed {
     color: #8A8073;
     text-style: italic;
+}
+
+/* PART 1: colour keyed to the PROJECT (v1.2.0).
+
+   Base colour is IDENTITY (which project), the glyph is STATE (what is
+   happening). Two channels, two jobs -- a session cannot be "the red
+   project" and "red because it needs you" at once, which is why the
+   status rules come AFTER these and win on a row that has both: a row's
+   state is glyphed in doxa.triage.entry_glyphs and therefore never needs
+   the colour, while its project is named by the heading above it. Equal
+   specificity, later rule wins -- the same cascade this file already uses
+   to resolve done-unseen < staged < working < attention.
+
+   The NAMES are doxa.triage.PALETTE; the hexes live HERE and only here,
+   so a config file storing "teal" re-resolves through a theme change
+   instead of stranding a colour that no longer contrasts. None of them is
+   one of the four status colours below: a project wearing #E0A83C would
+   make the identity channel read as a state.
+
+   No rule for "no project": a row with no repo has no -project- class at
+   all and keeps the rail's own #D8CDBB, which is exactly what grey means
+   here -- the ABSENCE of a project colour, and nothing else. */
+SessionSidebar > SidebarLine.-project-teal { color: #5FB3B3; }
+SessionSidebar > SidebarLine.-project-sky { color: #6FA8DC; }
+SessionSidebar > SidebarLine.-project-rose { color: #D98D9E; }
+SessionSidebar > SidebarLine.-project-clay { color: #C98A5B; }
+SessionSidebar > SidebarLine.-project-moss { color: #9BB167; }
+SessionSidebar > SidebarLine.-project-mauve { color: #B58FC9; }
+
+/* AGE is a channel of its OWN, and this rule is the whole of it: reduce
+   contrast, never recolour. The request said "old sessions fade colour to
+   grey" and "uncategorized entries are grey by default", which would make
+   a grey row ambiguous -- old, or ungrouped? Dimming resolves it: an old
+   entry in a coloured project stays THAT PROJECT's colour, faded, which
+   is what "fade to grey" actually describes and composes with grouping
+   instead of competing with it.
+
+   `text-style: dim` and not a second colour, deliberately: a colour would
+   be a third statement to keep out of the way of the other two, and dim
+   is the one appearance that means "less" regardless of what it is
+   applied to. What "old" IS -- ended, and not detached, and not merely
+   idle -- is doxa.triage.OLD_STATES. */
+SessionSidebar > SidebarLine.-old {
+    text-style: dim;
 }
 
 /* The four status marks, in the SAME order and with the SAME colors the

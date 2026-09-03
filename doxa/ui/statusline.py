@@ -110,6 +110,27 @@ class GitLine:
         self._base_mtime: float | None = None
         self._base_ref_cached: str | None = None
 
+    @property
+    def main_root(self) -> "str | None":
+        """The MAIN checkout's root -- the identity two sessions of one
+        repo share even when one of them is in a linked worktree.
+
+        The same answer :func:`doxa.peers.main_repo_root_of` gives, and
+        deliberately not a second call to it: that function shells out to
+        ``git rev-parse``, and this class's whole discipline is "one
+        subprocess total, filesystem reads after that". ``_commondir``
+        already resolved THROUGH a worktree's commondir pointer for the
+        sha read, and its parent is the main repo root in every case.
+
+        This is what :func:`doxa.triage.colour_for` keys a project's
+        colour on, so a worktree-per-session session wears its repo's
+        colour rather than a colour of its own -- which is the same
+        fracture ``main_repo_root_of`` exists to prevent for peer scope,
+        one surface over."""
+        if self._commondir is not None and self._commondir.name == ".git":
+            return str(self._commondir.parent)
+        return self.repo_root
+
     @staticmethod
     def _resolve_commondir(gitdir: Path) -> Path:
         """A linked worktree's private gitdir (``<main>/.git/worktrees/

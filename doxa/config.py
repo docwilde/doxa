@@ -399,15 +399,17 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="sidebar_width", env="DOXA_SIDEBAR_WIDTH",
         label="session sidebar: width", category="Appearance",
-        kind="number", default="22",
+        kind="number", default="23",
         help="Columns the session rail occupies "
-             "(doxa.layout.SIDEBAR_WIDTH; clamped to 19–38)",
-        note="Clamped, never rejected: 22 is derived as the rail's own "
-             "chrome (6 columns) plus half the tab-label cap the strip "
-             "writes at, 19 is the width below which a row cannot show "
-             "the label floor the tab strip keeps legible, and 38 is the "
+             "(doxa.layout.SIDEBAR_WIDTH; clamped to 20–39)",
+        note="Clamped, never rejected: 23 is derived as the rail's own "
+             "chrome (7 columns) plus half the tab-label cap the strip "
+             "writes at, 20 is the width below which a row cannot show "
+             "the label floor the tab strip keeps legible, and 39 is the "
              "width at which the whole capped label fits and wider buys "
-             "nothing.",
+             "nothing. All three moved by one in v1.2.0: the rail spends "
+             "a second glyph column on collection triage's two status "
+             "states (doxa.triage.GLYPH_COLUMNS).",
     ),
     Setting(
         key="clock_show", env="DOXA_CLOCK_SHOW", label="clock: show",
@@ -757,6 +759,44 @@ def sidebar_mode() -> str:
     if not value:
         return SIDEBAR_AUTO
     return SIDEBAR_OFF if value in ("0", "false", "no", "off") else SIDEBAR_ON
+
+
+#: The config table that overrides a project's assigned rail colour --
+#: ``[projects]`` in ``~/.doxa/config.toml``, keyed by ``repo_root``::
+#:
+#:     [projects]
+#:     "/home/me/src/doxa" = "teal"
+#:
+#: A TABLE and not a flat ``DOXA_*`` knob, because there is one entry per
+#: repo and a settings-modal row cannot hold a map. It is therefore not in
+#: :data:`SETTINGS` and has no env override: env beats file for a single
+#: value, and "which colour is repo X" is not a value a shell exports.
+#: The file stays the trusted non-repo-local source, which is the rule
+#: docs/plugin-api.md already states for everything DOXA reads that a
+#: checked-out repo must not be able to set.
+PROJECTS_KEY = "projects"
+
+
+def project_colour(repo_root: Any) -> "str | None":
+    """The palette NAME configured for one project, or ``None``.
+
+    A NAME, never a hex -- :func:`doxa.triage.colour_for` refuses
+    anything that is not in :data:`doxa.triage.PALETTE`, so a hand-typed
+    ``#3a3a3a`` (unreadable on half the terminals in the world) falls
+    back to the assigned colour rather than being honoured. This function
+    does not validate; it reads. Never raises, the posture every reader
+    in this module takes: a broken config costs the user a colour, never
+    a session."""
+    root = str(repo_root or "").strip()
+    if not root:
+        return None
+    table = load().get(PROJECTS_KEY)
+    if not isinstance(table, dict):
+        return None
+    value = table.get(root)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
 
 
 def sidebar_width() -> int:
