@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
+import threading
 import time
 
 import pytest
@@ -614,29 +616,53 @@ async def test_alt_arrow_moves_the_divider_between_two_leaves(tmp_path):
 # an exotic case to simulate -- it is the ONLY kind that ships.
 
 
-def _blocking_app(tmp_path, block_secs: float):
-    """A DoxaApp whose new-session factory behaves like the real one:
-    it blocks its caller, synchronously, before returning an engine."""
-    def make() -> FakeEngine:
-        time.sleep(block_secs)
+class _SpawnProbe:
+    """The stand-in for ``doxa.cli.new_session_factory``.
+
+    It blocks its caller the way the real one does, and it records the two
+    facts the probes below assert on: the thread it was called on, and the
+    exact window it spent blocking."""
+
+    def __init__(self, block_secs: float) -> None:
+        self.block_secs = block_secs
+        self.threads: list[int] = []
+        self.windows: list[tuple[float, float]] = []
+
+    def __call__(self) -> FakeEngine:
+        self.threads.append(threading.get_ident())
+        began = time.perf_counter()
+        time.sleep(self.block_secs)
+        self.windows.append((began, time.perf_counter()))
         return FakeEngine([])
 
+
+def _blocking_app(tmp_path, block_secs: float):
+    """A DoxaApp whose new-session factory behaves like the real one: it
+    blocks its caller, synchronously, before returning an engine.
+
+    Returns the app AND the probe, because where and when that factory ran
+    is the thing under test."""
+    probe = _SpawnProbe(block_secs)
     return DoxaApp(
         cwd=str(tmp_path),
         engine_factory=lambda: FakeEngine([]),
-        new_session_factory=make,
-    )
+        new_session_factory=probe,
+    ), probe
 
 
 class _Heartbeat:
     """A task that wakes every 10ms and records how long it was actually
     kept from waking. The longest gap IS the freeze: an event loop that
     someone is calling `time.sleep` on cannot run this, cannot dispatch a
-    key, and cannot repaint."""
+    key, and cannot repaint.
+
+    It also keeps the tick TIMESTAMPS, so a caller can ask the sharper
+    question: did the loop wake at all across a named window?"""
 
     def __init__(self, interval: float = 0.01) -> None:
         self.interval = interval
         self.gaps: list[float] = []
+        self.ticks: list[float] = []
         self._task: "asyncio.Task | None" = None
 
     async def _beat(self) -> None:
@@ -645,6 +671,7 @@ class _Heartbeat:
             await asyncio.sleep(self.interval)
             now = time.perf_counter()
             self.gaps.append(now - last)
+            self.ticks.append(now)
             last = now
 
     def start(self) -> None:
@@ -656,20 +683,153 @@ class _Heartbeat:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
 
+    def clear(self) -> None:
+        self.gaps.clear()
+        self.ticks.clear()
+
+    def ticks_within(self, began: float, ended: float) -> int:
+        """How many times the loop woke between two `perf_counter` marks."""
+        return sum(1 for t in self.ticks if began <= t <= ended)
+
     @property
     def worst(self) -> float:
         return max(self.gaps) if self.gaps else 0.0
 
 
+@contextlib.contextmanager
+def _without_collector_pauses():
+    """Hold CPython's cyclic collector off across the measured window.
+
+    See the note below on what these probes measure. A generation-2 pass
+    is not the thing under test and it is the whole of the noise, so it is
+    excluded from the window rather than budgeted for -- which is what
+    raising the bar to clear it would have amounted to."""
+    was_on = gc.isenabled()
+    gc.collect()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if was_on:
+            gc.enable()
+
+
+# -- what these probes measure, and what they deliberately do not -------
+#
+# v0.95.0 wrote the two probes below as a single wall-clock assertion:
+# start a 10ms heartbeat, do the split, require the worst inter-tick gap
+# to come in under 250 ms. That is the right INTENT and it was the wrong
+# WINDOW, and between v0.95.0 and v1.0.2 the pair failed intermittently
+# for three separate readers -- always late in a full run, always passing
+# in isolation, and, decisively, ALSO ON THE FIXED CODE. Two of those
+# readings: 621 ms and 446 ms, both against that 250 ms bar, both with the
+# factory demonstrably running in a thread.
+#
+# The window contained two things. One is the stand-in factory's
+# `time.sleep`, which IS under test. The other is Textual's own mount
+# work, which is not, and which is where the bar went wrong. Measured on
+# this machine with a NON-blocking factory -- nothing under test inside
+# the window -- ten splits each:
+#
+#   idle, collector running   worst gap  20.7 - 167.3 ms
+#   idle, collector held off  worst gap  18.2 -  43.9 ms
+#   ~290 MB live heap, collector held off  265 ms (split) / 310 ms (Ctrl+T)
+#   full suite, collector held off         379 ms (split) / 399 ms (Ctrl+T)
+#
+# Two separate costs, both outside the test's control:
+#
+# 1. GENERATION-2 COLLECTION. With `gc.callbacks` recording every pass,
+#    each of the four idle runs above 90 ms contained exactly one gen-2
+#    collection, of 85.8, 101.5, 112.3, 115.4 and 140.4 ms. Nothing else
+#    correlated. A gen-2 pause costs what the live heap costs -- i.e. what
+#    fraction of the suite has already run. `_without_collector_pauses`
+#    takes it out of the window, because it is not what is being measured.
+# 2. TEXTUAL'S AGGREGATE MOUNT COST, which survives that. Mounting a pane
+#    runs ~545 `Stylesheet.apply` calls and up to 8 `Screen._refresh_layout`
+#    calls as one uninterrupted run of the message pump. NO SINGLE CALL is
+#    the stall -- with the collector off and a 290 MB heap, apply's worst
+#    call is 1.8 ms and layout's is 96.7 ms -- but their sums (121 ms and
+#    183 ms) land back to back with nothing awaiting in between, and the
+#    heartbeat sees one 265 ms gap. It grows with the heap the same way,
+#    which is why it reads as "fails at 85-95% of a run": conftest.py's
+#    reaper clears the leaked agent subprocesses, it cannot clear the
+#    pytest process's own heap. (The 305/334 ms figures in
+#    tests/test_sidebar.py's rail note are this same aggregate, attributed
+#    to the two functions and measured with the collector running.)
+#
+# So the old bar sat at 250 ms, BELOW a floor measured at 265-399 ms on
+# correct code. A bar that cannot be met on correct code is not a strict
+# test, it is a coin toss, and this one had already been waved off as
+# noise three times.
+#
+# What replaces it, in the order the failures should be read:
+#
+#   1. the MECHANISM. The stand-in factory records `threading.get_ident()`;
+#      the loop's own id must not be in it. This is the property the fix
+#      actually established, it cannot be fooled by a fast machine or
+#      failed by a slow one, and it is the assertion to trust.
+#   2. LIVENESS while the factory blocks. The heartbeat must have woken
+#      inside the factory's own blocking window. Threaded: ~200 wakes in
+#      2 s. On the loop: none, by construction -- one thread cannot run
+#      the heartbeat and `time.sleep` at once. The bar is a wake COUNT and
+#      not a duration precisely so that a mount burst landing inside the
+#      window cannot fail it.
+#   3. the whole-window gap, kept but re-derived, because 1 and 2 only
+#      watch the factory's own window and a future blocking call could
+#      land outside it. Its bar is now set FROM the measurements above
+#      rather than guessed under them.
+
 #: How long the stand-in factory blocks. Long enough that a synchronous
-#: call is unmistakable against scheduler noise, short enough that the
-#: test costs half a second.
+#: call is unmistakable, short enough that the test costs half a second.
+#: Used by the far-side test below, which only needs the spawn to be slow.
 BLOCK_SECS = 0.5
 
-#: The gap that counts as a freeze. Well above the ~12ms idle gap and the
-#: ~23ms a split costs on its own, well below BLOCK_SECS -- so this fails
-#: on the defect and cannot fail on a slow machine's jitter.
-STALL_LIMIT = 0.25
+#: What the two loop probes block for. Four times BLOCK_SECS, and the
+#: extra 1.5 s is bought deliberately: STALL_LIMIT has to clear a 399 ms
+#: measured mount cost with room to spare AND still sit well under the
+#: stall the defect produces, and only a longer block gives both margins
+#: at once. Pre-fix, the worst gap is this number.
+PROBE_BLOCK_SECS = 2.0
+
+#: The gap that counts as a freeze. Measured ceiling above: 399 ms of
+#: Textual mount work with the collector held off, in a full run. This is
+#: 2.5x that ceiling and half of PROBE_BLOCK_SECS -- the first margin is
+#: why it does not fail on correct code, the second is why it still fails
+#: on the defect.
+STALL_LIMIT = 1.0
+
+#: How many times the loop must wake while the factory is blocking.
+#: PROBE_BLOCK_SECS / 0.01 = ~200 when it is threaded, exactly 0 when it
+#: is not. A mount burst can eat a quarter of that window; it cannot take
+#: it to zero.
+LIVE_TICKS_MIN = 5
+
+
+def _assert_the_spawn_stayed_off_the_loop(probe, beat, loop_thread, gesture):
+    """The three assertions, in order of how much they should be trusted."""
+    assert probe.threads, f"the session factory never ran during {gesture}"
+    assert loop_thread not in probe.threads, (
+        f"the session factory ran ON the event loop thread during "
+        f"{gesture} — it is being called synchronously again "
+        f"(SessionPane.on_mount / PaneRuntimeMixin._build_and_boot)"
+    )
+    began, ended = probe.windows[-1]
+    awake = beat.ticks_within(began, ended)
+    assert awake >= LIVE_TICKS_MIN, (
+        f"the event loop woke {awake} times in the "
+        f"{(ended - began) * 1000:.0f} ms the session factory spent "
+        f"blocking during {gesture} — a live loop wakes about "
+        f"{int((ended - began) / beat.interval)} times and a frozen one "
+        f"wakes none"
+    )
+    assert beat.worst < STALL_LIMIT, (
+        f"the event loop stalled {beat.worst * 1000:.0f} ms during "
+        f"{gesture}. If the two assertions above passed, the session "
+        f"factory is not the cause — it ran off the loop and the loop "
+        f"kept waking through it — so either something ELSE on this "
+        f"path is blocking, or Textual's mount cost has grown past the "
+        f"399 ms this bar was measured against"
+    )
 
 
 @pytest.mark.asyncio
@@ -683,24 +843,32 @@ async def test_a_vsplit_never_blocks_the_event_loop(tmp_path):
     the TUI keeps painting, keeps accepting keys and keeps streaming the
     OTHER pane's turn throughout.
 
-    Fails at ~514ms on the pre-fix code."""
-    app = _blocking_app(tmp_path, BLOCK_SECS)
+    On the pre-fix code -- `await asyncio.to_thread(self._engine_factory)`
+    in `PaneRuntimeMixin._build_and_boot` put back to a plain call -- all
+    three assertions fail, and each was checked with the earlier ones
+    neutralised: the factory runs on the loop thread; the loop wakes
+    0 times in the 2000 ms block; the worst gap is 2011 ms here and
+    2017 ms in the Ctrl+T probe, against a 1000 ms bar."""
+    app, probe = _blocking_app(tmp_path, PROBE_BLOCK_SECS)
     async with app.run_test(size=BIG) as pilot:
         await _wait(pilot, lambda: app.active_pane is not None)
         await pilot.pause()
+        loop_thread = threading.get_ident()
         beat = _Heartbeat()
         beat.start()
         await pilot.pause()
-        beat.gaps.clear()
+        with _without_collector_pauses():
+            beat.clear()
 
-        assert await app.split_active_pane(layout.ROW) is None
-        assert await _wait(pilot, lambda: len(app.panes()) == 2)
+            assert await app.split_active_pane(layout.ROW) is None
+            assert await _wait(pilot, lambda: len(app.panes()) == 2)
+            # The mount returns BEFORE the factory does now -- that is the
+            # fix -- so the window being measured has to be waited out.
+            assert await _wait(pilot, lambda: bool(probe.windows), tries=400)
 
-        await beat.stop()
-        assert beat.worst < STALL_LIMIT, (
-            f"the event loop stalled {beat.worst * 1000:.0f} ms during a "
-            f"vsplit — a blocking session factory is being called on the "
-            f"loop again (SessionPane.on_mount / _build_and_boot)"
+            await beat.stop()
+        _assert_the_spawn_stayed_off_the_loop(
+            probe, beat, loop_thread, "a vsplit"
         )
 
 
@@ -711,22 +879,24 @@ async def test_a_new_tab_never_blocks_the_event_loop_either(tmp_path):
     gesture that mounts a pane while you are watching another one stop
     repainting. Pinned separately so a future change to one path cannot
     quietly reintroduce it on the other."""
-    app = _blocking_app(tmp_path, BLOCK_SECS)
+    app, probe = _blocking_app(tmp_path, PROBE_BLOCK_SECS)
     async with app.run_test(size=BIG) as pilot:
         await _wait(pilot, lambda: app.active_pane is not None)
         await pilot.pause()
+        loop_thread = threading.get_ident()
         beat = _Heartbeat()
         beat.start()
         await pilot.pause()
-        beat.gaps.clear()
+        with _without_collector_pauses():
+            beat.clear()
 
-        await app.action_new_tab()
-        assert await _wait(pilot, lambda: len(app.panes()) == 2)
+            await app.action_new_tab()
+            assert await _wait(pilot, lambda: len(app.panes()) == 2)
+            assert await _wait(pilot, lambda: bool(probe.windows), tries=400)
 
-        await beat.stop()
-        assert beat.worst < STALL_LIMIT, (
-            f"the event loop stalled {beat.worst * 1000:.0f} ms during "
-            f"Ctrl+T"
+            await beat.stop()
+        _assert_the_spawn_stayed_off_the_loop(
+            probe, beat, loop_thread, "Ctrl+T"
         )
 
 
@@ -740,7 +910,7 @@ async def test_a_slow_spawn_still_produces_a_working_pane(tmp_path):
     the pane ends up holding the engine the factory built, `_boot` really
     started it, and the pane declares itself ready -- i.e. nothing about
     moving the construction into the worker dropped the handle."""
-    app = _blocking_app(tmp_path, BLOCK_SECS)
+    app, _probe = _blocking_app(tmp_path, BLOCK_SECS)
     async with app.run_test(size=BIG) as pilot:
         await _wait(pilot, lambda: app.active_pane is not None)
         assert await app.split_active_pane(layout.ROW) is None
