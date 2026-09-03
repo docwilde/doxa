@@ -1378,7 +1378,7 @@ class SessionEngine:
         # engine, so `doxa attach` discovers the session through the SAME
         # registry the peer layer already maintains.
         self.daemon_socket = daemon_socket
-        # Session spawn (v1.1.0, doxa.session_ops). Read ONCE, here, from
+        # Session spawn (v1.3.0, doxa.session_ops). Read ONCE, here, from
         # a value that reached this process on its own command line
         # (doxa.daemon's --spawn-depth) -- never recomputed, never derived
         # from the peer registry. 0 is a session a human started.
@@ -1847,7 +1847,7 @@ class SessionEngine:
         return PermissionResultDeny(message="the user denied this tool call")
 
     async def _confirm_spawn(self, payload: dict) -> dict:
-        """The approval gate for ``spawn_session`` (v1.1.0,
+        """The approval gate for ``spawn_session`` (v1.3.0,
         doxa.session_ops) -- wired onto the OperatorContext as
         ``spawn_confirm`` and awaited by the operator itself, before any
         process is started.

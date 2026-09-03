@@ -1093,11 +1093,11 @@ def spawn_daemon(
     only way anything reaches ``SessionDaemon.__init__``'s own
     ``base_branch`` parameter.
 
-    ``spawn_depth`` / ``parent_session_id`` / ``task`` (v1.1.0,
+    ``spawn_depth`` / ``parent_session_id`` / ``task`` (v1.3.0,
     ``doxa.session_ops``) ride the same channel for the same reason, and
     each is appended ONLY when it says something: a session a human
     started produces a byte-identical argv to the one this function built
-    before v1.1.0, which is the same discipline the bypass arming flag
+    before v1.3.0, which is the same discipline the bypass arming flag
     follows -- a new capability must not change the command line of every
     session that does not use it.
 
@@ -1201,7 +1201,7 @@ def main(argv: "list[str] | None" = None) -> int:
                              "(spawn_daemon passes the same value as "
                              "--session-id -- a resume keeps its id)")
     parser.add_argument("--spawn-depth", type=int, default=0,
-                        help="v1.1.0 (doxa.session_ops): how deep this "
+                        help="v1.3.0 (doxa.session_ops): how deep this "
                              "session sits in a spawn chain. 0 -- the "
                              "default, and what a human-started session "
                              "always gets -- is a root. The depth cap is "
@@ -1210,11 +1210,11 @@ def main(argv: "list[str] | None" = None) -> int:
                              "chain that loses its ancestors when they are "
                              "reaped")
     parser.add_argument("--parent-session-id", default=None,
-                        help="v1.1.0: the session that asked for this one "
+                        help="v1.3.0: the session that asked for this one "
                              "(peers.PeerInfo.parent_session_id). Display "
                              "and lineage only -- never enforcement")
     parser.add_argument("--task", default=None,
-                        help="v1.1.0: the first prompt this session runs "
+                        help="v1.3.0: the first prompt this session runs "
                              "by itself, before anyone attaches. The "
                              "provenance marker is prepended by the daemon, "
                              "not by whoever passed this")

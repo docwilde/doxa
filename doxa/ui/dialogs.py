@@ -294,7 +294,7 @@ class NeedsInputPopup(OptionList):
     pick per question is rare enough that the SDK's own comma-joined-
     answer convention degrades gracefully to "just that one"), a plain
     permission request (tool name + input summary, Allow/Deny), and the
-    ``spawn`` confirmation (v1.1.0) -- the same two-row Allow/Deny shape,
+    ``spawn`` confirmation (v1.3.0) -- the same two-row Allow/Deny shape,
     with a multi-line heading carrying the child session's literal task
     text; see :func:`_spawn_heading`.
 
@@ -339,7 +339,7 @@ class NeedsInputPopup(OptionList):
             self._questions = list(data.get("questions") or [])
             self._show_next_question()
         elif self.kind == "spawn":
-            # The spawn confirmation (v1.1.0, doxa.session_ops). Same two
+            # The spawn confirmation (v1.3.0, doxa.session_ops). Same two
             # rows and the same answer payload as a permission request --
             # it IS one -- but its heading is a BLOCK, not a line, and
             # that difference is the containment argument rather than a
