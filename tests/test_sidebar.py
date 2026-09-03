@@ -34,6 +34,7 @@ from doxa import collections as collections_mod
 from doxa import config as config_mod
 from doxa import layout
 from doxa import tabsets as tabsets_mod
+from doxa import triage as triage_mod
 from doxa.app import DoxaApp
 from doxa.ui import labels as labels_mod
 from doxa.ui.sidebar import LOOSE_HEADING, NOT_OPEN, Row, SessionSidebar, SidebarLine, build_rows
@@ -214,23 +215,27 @@ def test_the_sidebar_width_thresholds_are_the_measured_ones():
         labels_mod.TAB_MODEL_MIN + len(" · ") + labels_mod.TAB_REPO_MIN
     )
     assert label_floor == 13
-    # 1 left pad + 2 collection indent + 2 mark and its space + 1 right pad.
-    assert layout.SIDEBAR_CHROME == 6
-    assert layout.SIDEBAR_MIN_WIDTH == layout.SIDEBAR_CHROME + label_floor == 19
+    # 1 left pad + 2 collection indent + the state glyphs and their space
+    # + 1 right pad. The glyph budget is doxa.triage's, re-derived here so
+    # that spending another column moves this number rather than leaving a
+    # stale one documented as measured.
+    assert triage_mod.GLYPH_COLUMNS == 2
+    assert layout.SIDEBAR_CHROME == 1 + 2 + triage_mod.GLYPH_COLUMNS + 1 + 1 == 7
+    assert layout.SIDEBAR_MIN_WIDTH == layout.SIDEBAR_CHROME + label_floor == 20
     # The default: chrome plus HALF the cap the tab strip's own ellipsize
     # writes labels at.
     assert layout.SIDEBAR_WIDTH == (
         layout.SIDEBAR_CHROME + labels_mod.TAB_LABEL_MAX // 2
-    ) == 22
+    ) == 23
     # The ceiling: the width at which the whole capped label fits.
     assert layout.SIDEBAR_MAX_WIDTH == (
         layout.SIDEBAR_CHROME + labels_mod.TAB_LABEL_MAX
-    ) == 38
+    ) == 39
     # The absolute floor on TOTAL width: the narrowest rail plus the
     # narrowest pane DOXA will create.
     assert layout.SIDEBAR_MIN_COLS == (
         layout.SIDEBAR_MIN_WIDTH + layout.MIN_LEAF_WIDTH
-    ) == 53
+    ) == 54
     # The cross-check against reality: on the 100-column reference
     # terminal with one vertical split, the rail must not push either
     # group onto the compact tab-strip rung.
@@ -420,7 +425,10 @@ def test_a_row_glyph_and_the_tab_colour_agree_about_precedence():
     assert labels_mod.top_mark(["-done-unseen", "-working"]) == "-working"
     assert labels_mod.top_mark(["-attention", "-working"]) == "-attention"
     assert labels_mod.sidebar_mark_glyph(()) == labels_mod.SIDEBAR_MARK_NONE
-    assert labels_mod.sidebar_mark_glyph(["-attention"]) == "!"
+    # v1.2.0: -attention IS Part 0's *needs input* state, so its glyph is
+    # the hourglass, from the block doxa/diff.py's own already ships in --
+    # no fifth codepoint class, and no ascii fallback to carry.
+    assert labels_mod.sidebar_mark_glyph(["-attention"]) == triage_mod.GLYPH_NEEDS_INPUT
 
 
 # -- the boundary, against a real Pilot --------------------------------
@@ -549,7 +557,10 @@ async def test_a_row_carries_the_marks_the_tab_header_carries(tmp_path):
         await app.action_new_tab()
         assert await _wait(pilot, lambda: len(app.panes()) == 2)
         assert app.set_sidebar(True) is None
-        assert await _wait(pilot, lambda: _settled(app, 2))
+        # THREE lines, not two: both tabs live in ONE pane group since
+        # v0.97.0, so the rail draws that group's entry row above its
+        # two members (v1.2.0, Part 1b).
+        assert await _wait(pilot, lambda: _settled(app, 3))
         pane = app.panes()[0]
         pane._set_tab_class("-done-unseen", True)
         assert await _wait(
@@ -790,7 +801,10 @@ async def test_one_refresh_derives_the_session_list_once(tmp_path):
         await app.action_new_tab()
         assert await _wait(pilot, lambda: len(app.panes()) == 2)
         assert app.set_sidebar(True) is None
-        assert await _wait(pilot, lambda: _settled(app, 2))
+        # THREE lines, not two: both tabs live in ONE pane group since
+        # v0.97.0, so the rail draws that group's entry row above its
+        # two members (v1.2.0, Part 1b).
+        assert await _wait(pilot, lambda: _settled(app, 3))
 
         orders: list[int] = []
         panes_calls: list[int] = []
