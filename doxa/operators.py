@@ -44,6 +44,7 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see that module
@@ -659,14 +660,23 @@ OP_CTX_OPERATORS = frozenset({
 })
 
 
-def configured_names(ctx: "dict | None" = None) -> set[str]:
-    """Names (across both registries) whose is_configured(ctx) holds.
-    ctx=None means "don't gate on configuredness" and returns every
-    registered name -- never "nothing is configured"."""
+def configured_names(
+    ctx: "dict | None" = None,
+    extra: "Sequence[dict[str, Operator]]" = (),
+) -> set[str]:
+    """Names (across this module's registries, plus any ``extra`` ones the
+    caller composes in) whose is_configured(ctx) holds. ctx=None means
+    "don't gate on configuredness" and returns every registered name --
+    never "nothing is configured".
+
+    ``extra`` defaults to empty, so this function's answer for THIS
+    module's own registries is exactly what it always was."""
+    everything: dict[str, Operator] = {**OPERATORS, **WRITE_OPERATORS}
+    for registry in extra:
+        everything.update(registry)
     if ctx is None:
-        return set(OPERATORS) | set(WRITE_OPERATORS)
-    return {name for name, op in {**OPERATORS, **WRITE_OPERATORS}.items()
-            if op.is_configured(ctx)}
+        return set(everything)
+    return {name for name, op in everything.items() if op.is_configured(ctx)}
 
 
 def _mcp_result(result: Any) -> dict:
@@ -686,6 +696,7 @@ def to_sdk_tools(
     allowed: "set[str] | None" = None,
     include_write: bool = False,
     ctx: "dict | None" = None,
+    extra: "Sequence[dict[str, Operator]]" = (),
 ) -> list[SdkMcpTool]:
     """Project the registry to claude_agent_sdk.SdkMcpTool definitions, in
     registration order. All three gates compose (harness contract): a write
@@ -696,8 +707,29 @@ def to_sdk_tools(
     Every handler routes through `executor(name, args)` -- in DOXA that is
     ToolGate.execute, so containment (allowed-set, graceful degradation,
     two-strikes, op_ctx injection) applies to every call with no per-tool
-    wiring to forget."""
-    configured = configured_names(ctx) if ctx is not None else None
+    wiring to forget.
+
+    ``extra`` composes SIBLING registries defined in other modules
+    (``doxa.session_ops.SESSION_OPERATORS``) onto the SAME SDK MCP server
+    rather than a second one, and that is the deliberate half of the
+    decision. A second ``create_sdk_mcp_server`` would give its tools a
+    second wire prefix (``mcp__<other>__``), and :func:`registry_name` --
+    the function every containment surface in ``doxa.gate`` keys on to map
+    a wire name back to a registry name -- strips exactly one. Two servers
+    therefore means two name spaces, which means the allowed-set policy
+    and the two-strikes disable would have to learn about both, in three
+    places, forever. One server keeps one name space and one prefix; the
+    registries stay separate modules, which is what the charter boundary
+    was actually about.
+
+    ``extra`` operators are appended AFTER the write ones, and each is
+    still subject to every filter above -- an ``is_configured`` that says
+    no (spawn_session with the setting off) is simply not projected, and
+    a tool the model cannot see is a tool the model cannot call."""
+    configured = configured_names(ctx, extra=extra) if ctx is not None else None
+    tail: list[Operator] = []
+    for registry in extra:
+        tail.extend(registry.values())
 
     def make_handler(name: str):
         async def handler(args: dict) -> dict:
@@ -716,7 +748,8 @@ def to_sdk_tools(
             handler=make_handler(op.name),
         )
         for op in (list(OPERATORS.values())
-                   + (list(WRITE_OPERATORS.values()) if include_write else []))
+                   + (list(WRITE_OPERATORS.values()) if include_write else [])
+                   + tail)
         if (allowed is None or op.name in allowed)
         and (configured is None or op.name in configured)
     ]

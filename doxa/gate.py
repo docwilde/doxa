@@ -42,14 +42,42 @@ Four contracts, all session-scoped state on one ToolGate:
 
 from __future__ import annotations
 
+import inspect
 import re
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .operators import OP_CTX_OPERATORS, OPERATORS, WRITE_OPERATORS, registry_name
+from .session_ops import SESSION_OP_CTX_OPERATORS, SESSION_OPERATORS
 
 TOOL_DISABLE_AFTER = 2
+
+# Every registry a DOXA-native tool can be defined in, in lookup order.
+# doxa.session_ops is a SIBLING of doxa.operators, not a part of it (see
+# its module docstring for the charter argument), and contract 2 above is
+# why that costs nothing: containment does not care which module an
+# Operator came from, only that every call flows through this one
+# executor. Adding a registry here is the only wiring a new one needs.
+_REGISTRIES: "tuple[dict[str, Any], ...]" = (
+    OPERATORS, WRITE_OPERATORS, SESSION_OPERATORS,
+)
+
+# The union of every registry's own "declares the op_ctx sidecar" set.
+# One rule, applied across both modules -- see contract 4.
+_OP_CTX_NAMES = frozenset(OP_CTX_OPERATORS) | SESSION_OP_CTX_OPERATORS
+
+
+def _registry_for(name: str) -> "dict[str, Any] | None":
+    """Which registry defines ``name``, or None for an unknown tool."""
+    for registry in _REGISTRIES:
+        if name in registry:
+            return registry
+    return None
+
+
+def _known(name: str) -> bool:
+    return _registry_for(name) is not None
 
 
 @dataclass(frozen=True)
@@ -69,6 +97,27 @@ class OperatorContext:
     cwd: str
     repo_root: str
     belief_store: "Callable[[], Any] | None" = None
+
+    spawn_depth: int = 0
+    """How deep this session already sits in a spawn chain -- 0 for one a
+    human started. Carried on the SIDECAR rather than passed as a tool
+    argument for the obvious reason: a depth the model could write is not
+    a depth limit. Its value reaches this process on its own command line
+    (``doxa.daemon``'s ``--spawn-depth``) and never from the registry, so
+    reaping an ancestor's entry cannot lose it. See
+    ``doxa.session_ops.MAX_SPAWN_DEPTH``."""
+
+    spawn_confirm: "Callable[[dict], Any] | None" = None
+    """Async seam for "ask the human, and wait for a real answer" --
+    ``SessionEngine._confirm_spawn``, which parks the call on the same
+    out-of-band needs_input queue ``AskUserQuestion`` already uses and
+    resolves it with ``{"decision": "allow"|"deny"}``.
+
+    A seam rather than a direct engine call for the same reason
+    ``belief_store`` is one: an operator must not import the engine, and a
+    test must be able to answer without a TUI. None means this session has
+    no channel to ask on at all -- ``doxa.session_ops`` treats that as a
+    refusal, never as an implied yes."""
 
 
 def repo_root_of(cwd: str) -> str:
@@ -148,7 +197,7 @@ class ToolGate:
                 f"{base} is disabled for the rest of this session after repeated failures"
             )
         if self.allowed is not None and base not in self.allowed:
-            if base in OPERATORS or base in WRITE_OPERATORS:
+            if _known(base):
                 # A repeatedly-refused known tool is the strongest "stop
                 # calling this" signal there is -- it feeds the same
                 # two-strikes counter as any other hard failure (harness
@@ -159,24 +208,50 @@ class ToolGate:
 
     # -- executor side (DOXA-native operators) ------------------------
 
-    def execute(self, name: str, args: dict) -> dict:
+    def execute(self, name: str, args: dict) -> Any:
         """Run one DOXA-native tool call against the registry. NEVER raises:
         every failure is an ordinary {"error": ...} result the model sees
         (contract 2 in the module docstring). Hard failures feed the
-        two-strikes tracker."""
+        two-strikes tracker.
+
+        Usually returns a dict. An operator whose ``fn`` returns an
+        AWAITABLE (``doxa.session_ops.spawn_session``: it has to park on a
+        human's answer and then hand a 60-second subprocess poll to a
+        worker thread) gets a coroutine back instead, which settles
+        through the SAME classifier and the SAME two-strikes tracker the
+        moment it is awaited -- ``to_sdk_tools``' handler already awaits
+        exactly this. The alternative, a second async executor, would put
+        containment in two places, which is the one thing this module
+        exists to prevent."""
         base = registry_name(name)
         result = self._execute_inner(base, args)
-        if is_hard_failure(base, result):
-            self._note_hard(base, result["error"])
+        if inspect.isawaitable(result):
+            return self._settle_async(base, result)
+        return self._settle(base, result)
+
+    def _settle(self, name: str, result: Any) -> Any:
+        if is_hard_failure(name, result):
+            self._note_hard(name, result["error"])
         return result
 
-    def _execute_inner(self, name: str, args: dict) -> dict:
+    async def _settle_async(self, name: str, awaitable: Any) -> dict:
+        """The awaitable half of :meth:`execute`'s contract -- including
+        its never-raises half: an exception escaping the coroutine becomes
+        the same ``"<name> failed: ..."`` result (and therefore the same
+        strike) a synchronous one would have."""
+        try:
+            result = await awaitable
+        except Exception as exc:  # noqa: BLE001 -- parity with the sync path
+            result = {"error": f"{name} failed: {type(exc).__name__}: {exc}"}
+        return self._settle(name, result)
+
+    def _execute_inner(self, name: str, args: dict) -> Any:
         if name in self.disabled:
             return {"error": (
                 f"{name} is disabled for the rest of this session after "
                 "repeated failures -- stop calling it")}
-        registry = OPERATORS if name in OPERATORS else WRITE_OPERATORS
-        if name not in registry:
+        registry = _registry_for(name)
+        if registry is None:
             return {"error": f"unknown tool: {name!r}. Available tools: {sorted(OPERATORS)}"}
         if self.allowed is not None and name not in self.allowed:
             # Defence in depth behind the hook deny: server-side enforced,
@@ -188,7 +263,7 @@ class ToolGate:
         # args, and only for operators that declare it.
         args = {k: v for k, v in dict(args or {}).items() if k != "op_ctx"}
         kwargs = args
-        if self.op_ctx is not None and name in OP_CTX_OPERATORS:
+        if self.op_ctx is not None and name in _OP_CTX_NAMES:
             kwargs = dict(args)
             kwargs["op_ctx"] = self.op_ctx
         try:
