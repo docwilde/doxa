@@ -357,9 +357,52 @@ session, never into the rail.
 tab header does (`-done-unseen`, `-staged`, `-working`, `-attention`),
 through the same derivation, resolved by the same stylesheet cascade in
 the same order — so the rail and the strip cannot disagree. The rail
-additionally spends a column on a **glyph**, which a strip has no room
-for: `✓` a turn finished unseen, `+` staged proposals, `▸` working, `!`
-waiting for you. The needs-input blink blinks here too.
+additionally spends **two columns on glyphs**, which a strip has no room
+for: `✓` a turn finished unseen, `+` staged proposals, `▸` working, `⏳`
+**waiting for you**, and in a second column `⧉` for **context at or past
+50%**. The needs-input blink blinks here too.
+
+Those two — waiting for you, and half the window gone — are the two states
+worth interrupting for, and they are glyphs so that the rail still says
+them on a monochrome terminal, in a screenshot, and to a reader who cannot
+separate the colours. Two, not a scale of five: a scale is a gauge, and
+the `ctx` chip already is one.
+
+**A session whose context limit was never reported gets no ctx glyph at
+all** — not the absence of a warning, which would read as "plenty of
+room". That is `/context`'s `?` rule one level down: DOXA does not guess a
+window size, here either.
+
+**An entry is a pane, not a session.** A pane group owns its own tabs, so
+one visible pane can hold three sessions of which two are invisible — and
+the invisible one waiting for you is exactly what the rail exists to
+surface. A multi-tab pane gets an **entry row** above its members carrying
+the *most urgent* state over all of them, and a count: `·3` means three
+tabs and what you see is what is on screen; **`·2/3` means three tabs and
+the state came from the second one, the one you cannot see.** Clicking the
+entry takes you to *that* tab. A one-tab pane gets no entry row.
+
+**Colour says which PROJECT, never which state.** Each repo gets one of
+six named colours — teal, sky, rose, clay, moss, mauve — assigned by a
+stable hash of the repo root, so the same repo is the same colour on every
+machine with nothing stored anywhere. Sessions auto-group under their
+project's heading (a manual collection overrides that for the sessions it
+names). Override a colour by NAME in `~/.doxa/config.toml`, never by hex:
+
+    [projects]
+    "/home/me/src/doxa" = "teal"
+
+Six names and a hash means two projects eventually share a colour. That
+costs redundancy, not meaning: the project's **name** is the primary
+channel, grouping is keyed on the repo and never on the colour, and two
+same-coloured projects stay two separate named headings.
+
+**Grey means exactly one thing: no project colour.** A session outside a
+repo has no project, so it has no colour. **Age is a separate channel and
+it dims** — an ended session's row loses contrast but keeps its project's
+colour, faded. "Old" means *ended*, and deliberately not *detached*: a
+detached session is live and may be doing work right now, so it renders
+`· closed` (its pane is gone) without being dimmed.
 
 **Collections** group sessions under a name you choose. `group` already
 means a region of the screen, so this word is different on purpose: two
@@ -390,9 +433,9 @@ own defaults claim none of them, and tmux passes them through. `/sidebar`
 is still the door that always works, the same bargain `ctrl+,`,
 `ctrl+tab` and `ctrl+1`…`ctrl+9` already ship on.
 
-**It refuses to open on a window too narrow to hold it.** The rail is 22
-columns by default (`sidebar_width`, clamped to 19–38) and a pane needs 34,
-so below **53 columns** it cannot open at all — and it also refuses when
+**It refuses to open on a window too narrow to hold it.** The rail is 23
+columns by default (`sidebar_width`, clamped to 20–39) and a pane needs 34,
+so below **54 columns** it cannot open at all — and it also refuses when
 opening it would take the narrowest pane group below 34, which is measured
 against the rectangles actually on screen rather than against a constant.
 Both numbers come out of the same place the tab-strip rungs do: a row's
@@ -1049,7 +1092,7 @@ environment is winning is read-only in the modal.
 | `image_mode` | `DOXA_IMAGE_MODE` | probe | force a rung of the image ladder (`kgp`/`sixel`/`halfblock`/`text`) |
 | `boot_banner` | `DOXA_BOOT_BANNER` | on | draw the DOXA mark above the opening identity block |
 | `sidebar` | `DOXA_SIDEBAR` | *auto* | the session rail: empty = appear once there is a collection or a second session, `1` = always, `0` = never. `f3` writes `1`/`0`, so the first toggle ends the guessing |
-| `sidebar_width` | `DOXA_SIDEBAR_WIDTH` | 22 | columns the rail occupies; clamped to 19–38 rather than rejected |
+| `sidebar_width` | `DOXA_SIDEBAR_WIDTH` | 23 | columns the rail occupies; clamped to 20–39 rather than rejected |
 | `key_notice` | `DOXA_KEY_NOTICE` | on | one-line startup notice naming any bound keys this terminal can't deliver and the slash command that reaches them instead; silent on a kitty-protocol terminal or one whose protocol was never measured |
 | `context_grid` | `DOXA_CONTEXT_GRID` | `glyphs` | cell style for `/context`'s grid: `glyphs` (⛀⛁⛶) or `ascii` (`[#]`/`[ ]`) for a font that tofu's them |
 | *keyboard override* | `DOXA_KEYBOARD_PROTOCOL` | probe | `kitty`/`legacy`/`unknown`, for a terminal that lies about it; env-only |

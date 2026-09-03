@@ -4,6 +4,213 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.2.0 — 2026-09-03
+
+**"Which of these sessions needs me, and which project is it?"** The rail
+(1.0.0) listed every session in one flat column and painted four status
+marks on them. It could not answer either question: a session waiting for
+a human looked like a session that was merely busy once the colour was
+gone, and a window holding three repos looked like a window holding one.
+Worse, since 0.97.0 a `PaneGroup` owns its own tabs, so **one visible pane
+can hold three sessions of which two are invisible** — and the invisible
+one waiting for input was exactly the thing the rail existed to surface
+and exactly the thing it could not.
+
+Parts 0, 1 and 1b of `docs/plans/collection-triage.md`. Parts 2 (default
+labels) and 3 (ordering by urgency) are **not** in this release; see
+*What is deferred* at the end, which says so plainly rather than leaving
+it to be discovered.
+
+### Status glyphs — the two states worth interrupting for
+
+- **`doxa/triage.py`**, new: pure data and pure functions, the rule
+  `doxa.layout` and `doxa.collections` already follow. The rail renders
+  what it decides; `doxa.app` reads the facts off the widgets and hands
+  them over. Nothing in it needs a screen, which is why the parts that are
+  hard to get right are the parts under test.
+- **Two states, two columns.** *Needs input* → **`⏳`**; *context ≥ 50%* →
+  **`⧉`**. Two, not five: a scale of glyphs is a gauge and `ctx_chip`
+  already is one. Two independent columns and not one winner, because a
+  session can be waiting for you AND half full, and dropping the second
+  drops the one that stops being recoverable.
+- **`CTX_GLYPH_PCT = 50.0`**, a named constant and never a literal — it is
+  the first threshold anyone will want to tune and a second one (75%?
+  90%?) is a plausible follow-up. Deliberately below `CTX_AMBER_PCT` (70):
+  the chip's amber is about the session you are looking at, the rail's job
+  is the session you are not.
+- **Unknown context is NOT `< 50%`.** A session whose limit the CLI never
+  reported gets **no** ctx glyph — not the absence-of-warning that reads
+  as "plenty of room". `/context`'s `?` rule, one level down, and the
+  `None` survives all the way onto the row (`Row.ctx_percentage`) rather
+  than being flattened to `0.0` somewhere in between, so moving the
+  threshold later can never accidentally rank a session nobody measured.
+  `test_unknown_context_is_not_below_the_threshold_and_earns_no_glyph`.
+- **No fifth codepoint class, and no `ascii` fallback to carry.** The
+  banner work rejected Geometric Shapes for tofu risk and 0.81.0's
+  draughts glyphs (`⛀⛁⛶`) ship only behind `context_grid = ascii`. Both
+  glyphs here come from blocks this codebase already ships: `⏳` is
+  U+23F3 (Miscellaneous Technical), already in `doxa/diff.py`'s queued-
+  reject line; `⧉` is U+29C9 (Miscellaneous Mathematical Symbols-B),
+  already in `doxa.paste.placeholder`, the subagent chip and the
+  transcript's running-task rows. Asserted against the shipped source, not
+  against a comment claiming it.
+- **`SIDEBAR_MARK_GLYPHS["-attention"]` is now `⏳`, not `!`.**
+  `-attention` **is** *needs input* — it is the class
+  `SessionPane._set_tab_class` writes and blinks at 2 Hz — so its glyph is
+  stated once, in the dict that is the one written-down statement of what
+  a mark looks like, rather than in a second table that would override it.
+- **Not a second derivation.** The marks are the tab header's own, ORed
+  through `labels.mark_over`; the ctx% is `engine.last_ctx_percentage`,
+  the number the status chip prints. `DoxaApp._pane_ctx` and
+  `_pane_repo_root` read attributes on the surfaces the rail's existing
+  one-pass `_sidebar_surfaces` already gathered — no new DOM walk, and
+  `refresh_sidebar` still does nothing at all for a hidden rail (1.0.0's
+  measured +22% layout time stands unpaid).
+- **The rail costs one more column**: `SIDEBAR_CHROME` 6 → **7**, and
+  `SIDEBAR_MIN_WIDTH`/`SIDEBAR_WIDTH`/`SIDEBAR_MAX_WIDTH` 19/22/38 →
+  **20/23/39**. Still inside the reference terminal's budget (23 ≤
+  `100 − 2 × GROUP_STRIP_COMPACT_COLS` = 32) with 9 columns to spare, so
+  opening the rail on a 100-column two-group window still does not push
+  either tab strip onto the compact rung.
+
+### Colour keyed to the PROJECT, glyph keyed to the state
+
+- **Two channels, two jobs.** Base colour is *which project* — identity,
+  derived from `repo_root`. The glyphs are *what state* — urgency. A
+  session cannot be "the red project" and "red because it needs you" at
+  once, and the split is what stops it.
+- **`triage.colour_for(repo_root)`** — assigned, never configured, and
+  stored nowhere: a `blake2b` digest of the root modulo a fixed
+  six-name palette (**teal, sky, rose, clay, moss, mauve**). `blake2b`
+  and **not** `hash()`, and that is the whole point of the line: CPython
+  salts string hashing per process, so `hash()` would give one repo a
+  different colour in every window on one machine. A digest is the only
+  thing that makes "nothing stored" and "the same everywhere" true at
+  once.
+- **The NAME is stored, never a hex.** The hexes live once, in
+  `doxa/theme.tcss` as `SidebarLine.-project-<name>`, so a future theme
+  change re-resolves a colour rather than stranding one that no longer
+  contrasts. None of the six is one of the four status colours: a project
+  wearing `#E0A83C` would make the identity channel read as a state.
+- **Override in `~/.doxa/config.toml`**, by name:
+
+      [projects]
+      "/home/me/src/doxa" = "teal"
+
+  A table and not a `DOXA_*` knob, because there is one entry per repo and
+  a settings-modal row cannot hold a map — so it is not in `SETTINGS` and
+  has no env override. **A hex is refused**, not honoured: a hand-typed
+  `#3a3a3a` is unreadable on half the terminals in the world, and an
+  unrecognised value falls back to the assignment rather than silently
+  uncolouring the project (`config.project_colour`).
+- **Collision is expected and is not hidden.** Six names and a hash means
+  two projects eventually share a colour. That costs **redundancy, not
+  meaning**: the project's own name is the primary channel, and grouping
+  is keyed on `repo_root` and never on the colour, so two same-coloured
+  projects are two named headings that happen to match — never one group.
+  `test_a_colour_collision_costs_redundancy_and_never_meaning` builds an
+  actual collision and asserts two headings and no row filed under the
+  wrong one.
+- **`GitLine.main_root`** (`doxa/ui/statusline.py`), new: the MAIN
+  checkout's root, resolved through the commondir pointer the class had
+  already read, so a worktree-per-session session wears its repo's colour
+  instead of a colour of its own — the same fracture `main_repo_root_of`
+  prevents for peer scope, one surface over, and at **no** extra
+  subprocess on a paint path.
+
+### A rail entry is a PANE, not a session
+
+- **`triage.PaneEntry` / `triage.aggregate`, `Row.ENTRY`.** One entry per
+  `PaneGroup`, its tabs as members, and **state aggregates most-urgent-
+  wins over every member including the invisible ones** — which is the
+  whole point: the hidden tab needing input is exactly what a flat rail
+  could not surface. The mark ranks are `TAB_STATE_MARKS`' own index, not
+  a second precedence table; the one thing `triage.urgency` adds is where
+  ctx% slots in (just under needs input). Where that ordering differs from
+  the spec's Part 3 list (staged vs working) the tuple wins, and the
+  deviation is recorded in the function rather than resolved by writing a
+  second order the stylesheet would then drift from.
+- **The entry says how many it holds, and whether the state is its
+  visible tab's.** `·3` — three tabs, what you see is what is on screen.
+  `·2/3` — three tabs, and the state came from the **second** one, the one
+  you cannot see. Plain digits and a middle dot: the two glyph columns are
+  the codepoint budget this feature spends, and a count is the one thing
+  ASCII renders perfectly everywhere. The entry's label is the visible
+  tab's (that is what the pane shows) and **a click goes to the member the
+  state came from** — the row points at one thing and delivers that thing.
+  Without this an entry would be a lie the user discovers by opening the
+  pane and finding a calm tab.
+- **Both an aggregate and its members.** The spec left it open whether an
+  entry expands or shows only a count; it does both. The entry row sits
+  above its members, and a **one-tab pane gets no entry row at all** —
+  hide at zero, and such a window renders exactly as it did in 1.0.0.
+- **A collection claims SESSIONS, a project claims the rest.** A manual
+  collection overriding the automatic grouping is about sessions, so a
+  collection holding one tab of a three-tab pane does not drag the other
+  two in behind it. Auto-grouping by project needs no naming at all
+  (`repo_root` is `scope_key`'s own key), and headings stay hidden at
+  zero: one project and no collections is still a flat list.
+- **A mark moving on a member of a multi-tab pane rebuilds** rather than
+  updating in place, because it can change which member wins and that is a
+  structure change. `SessionSidebar._aggregated` is empty on the
+  overwhelmingly common window — every pane holds one tab — so the 2 Hz
+  needs-input blink still runs on the cheap in-place path it has run on
+  since 1.0.0.
+
+### Grey means exactly one thing
+
+- The request put two facts on one appearance — *"old sessions fade colour
+  to grey"* and *"uncategorized entries are grey by default"* — which
+  would make a grey row ambiguous: old, or ungrouped? **Resolution: grey
+  is the absence of a project colour, and nothing else.** A session
+  outside a repo has no project, so it has no colour.
+- **Age is a separate channel and it dims** (`SidebarLine.-old` →
+  `text-style: dim`), never recolours — so an old entry in a coloured
+  project stays *that project's* colour, faded, which is what "fade to
+  grey" actually describes and is what lets age compose with grouping
+  instead of competing with it.
+- **"Old" is ENDED, and that is the whole of it** (`triage.OLD_STATES`,
+  a frozenset so the exclusions are visible as absences). **Not
+  detached** — a detached session is live and may be doing work right now,
+  and dimming it would be the rail saying "nothing here" about the row
+  most likely to have something; it renders `· closed` because its *pane*
+  is gone, which is a statement about the window, not the session. **Not
+  idle-for-N-minutes** — an attached session idle for an hour is one
+  keystroke from being the thing you are doing, and it is the only
+  candidate needing a clock the rail deliberately does not run.
+
+### The check this spec owed itself
+
+**Can a collection AND every session's status be identified with colour
+stripped entirely? Yes.**
+`test_the_rail_reads_with_every_colour_stripped` builds a rail with two
+projects that *actually collide on a colour*, a waiting session, a
+half-full one, an unmeasured one, an ungrouped one and a pane hiding a
+waiting tab — then reads only `SidebarLine._text()`, which carries no
+markup, no classes and no stylesheet. It asserts that every project is
+named, every status is glyphed, the colliding projects are still two named
+groups, the hidden tab is reported as `·2/2`, and the unmeasured session
+says **nothing** rather than saying "fine". If that test ever needs a
+colour to pass, colour is doing work a glyph or a name should be doing.
+
+### What is deferred, and said plainly
+
+- **Part 2 (default labels: customer · project · task)** — not shipped.
+- **Part 3 (ordering collections by urgency)** — not shipped. Its
+  *ranking* is here, because Part 1b's aggregation needs it; the
+  *reordering* is the part with the hazard (a list that moves under your
+  click, at the blink's 2 Hz) and it ships with its settling boundary and
+  its `collection_sort` setting or it does not ship.
+- **Glyphs on the tab header** — **deliberately deferred**, and the gap is
+  real: a user with the rail hidden is blind to what the rail exists to
+  show. The strip signals by colour alone for a measured reason (two
+  columns of padding per header, and `GROUP_STRIP_COMPACT_COLS` already
+  cuts the label to the model segment on a split window), so putting a
+  glyph there is a width negotiation and not a render change, and it
+  belongs with Part 2's label work. Pinned as a test
+  (`test_the_glyphs_are_deliberately_NOT_on_the_tab_header_yet`) so the
+  day it changes, someone re-reads the paragraph that decided it.
+
 ## 1.0.3 — 2026-09-03
 
 **Three README claims went stale the moment v1.0.0 and v1.0.2 shipped.**
