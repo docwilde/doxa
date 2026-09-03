@@ -346,6 +346,26 @@ class PeerInfo:
     DOXA release -- a fixed set could not admit the very writer the field
     was added for, and would invite reading membership in the set as
     verification. None means unknown."""
+    parent_session_id: "str | None" = None
+    """The session_id of the DOXA session whose ``spawn_session`` call
+    created this one (doxa.session_ops). None means either a human started
+    this session directly, or it was started through the ungoverned Bash
+    path (``doxa new`` inside a shell string), which has no channel to
+    populate this field -- the two are NOT distinguishable from this field
+    alone, and nothing here adds a third state to make them so.
+
+    Same three-part compatibility mechanism as ``daemon_socket``,
+    ``clients`` and ``usage_tokens`` above, and for the same stated
+    reason: a dataclass default of None, an individual ``.get()`` in
+    :func:`read_registry`, and NEVER a member of ``_ENTRY_FIELDS`` -- so
+    an entry written by an older build, which has no such key at all, is
+    still read as a live peer rather than reaped for a missing one.
+
+    For DISPLAY and LINEAGE only. Depth is not stored here and must not be
+    derived from here (see ``session_ops.MAX_SPAWN_DEPTH``): enforcement
+    runs off a value each process carries on its own command line, so it
+    survives an ancestor's entry being reaped, which a chain-walk through
+    this field would not."""
 
     @property
     def scope_key(self) -> str:
@@ -459,6 +479,11 @@ def read_registry(reap: bool = True, probe: bool = False) -> list[PeerInfo]:
             info.provider = _self_desc(data.get("provider"))
             info.model = _self_desc(data.get("model"))
             info.engine = _self_desc(data.get("engine"))
+            # Same defensive .get() again, for the same reason -- see
+            # PeerInfo.parent_session_id. Scrubbed like the other free
+            # text on this path: another process wrote it.
+            parent = data.get("parent_session_id")
+            info.parent_session_id = scrub_secrets(str(parent)) if parent else None
         except (OSError, ValueError, TypeError, KeyError):
             if reap:
                 with contextlib.suppress(OSError):
@@ -646,6 +671,7 @@ class PeerHost:
         provider: str | None = None,
         model: str | None = None,
         engine: str | None = None,
+        parent_session_id: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.cwd = str(cwd)
@@ -670,6 +696,11 @@ class PeerHost:
         # hosts the engine, written into the same registry entry -- one
         # discovery surface for peers AND `doxa attach`, not two.
         self.daemon_socket = daemon_socket
+        # Lineage marker (see PeerInfo.parent_session_id): who ASKED for
+        # this session to exist. Set once, at construction, from a value
+        # this process received on its own command line -- never mutable
+        # afterwards, because "who spawned me" is not a fact that changes.
+        self.parent_session_id = parent_session_id or None
         # Attached-client count, written into the presence entry so OTHER
         # sessions can tell a detached session from a watched one. The
         # daemon owns the number (it holds the sockets); an in-process
@@ -752,6 +783,8 @@ class PeerHost:
         }
         if self.daemon_socket:
             entry["daemon_socket"] = self.daemon_socket
+        if self.parent_session_id:
+            entry["parent_session_id"] = self.parent_session_id
         if self.client_count is not None:
             entry["clients"] = int(self.client_count)
         if self.usage_tokens is not None:

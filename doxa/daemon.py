@@ -325,6 +325,9 @@ class SessionDaemon:
         ring_capacity: int = RING_CAPACITY,
         base_branch: str | None = None,
         resume: str | None = None,
+        spawn_depth: int = 0,
+        parent_session_id: str | None = None,
+        task: str | None = None,
     ) -> None:
         self.cwd = str(cwd or os.getcwd())
         self.model = model
@@ -342,12 +345,28 @@ class SessionDaemon:
         # worktrees.create's own (permissive) resolution, never trusting
         # the flag blindly.
         self.base_branch = base_branch
+        # Session spawn (doxa.session_ops). All three ride the command
+        # line for the reason spawn_daemon's docstring already states
+        # about base_branch: a daemon is a separate process and its argv
+        # is the only channel that reaches SessionDaemon.__init__ at all.
+        #
+        # spawn_depth is the one the caps actually enforce on, and its
+        # being argv-borne rather than registry-derived IS the design --
+        # see session_ops.MAX_SPAWN_DEPTH. It is clamped at 0 here because
+        # a negative depth handed in by a hand-run daemon must read as
+        # "root", never as extra headroom.
+        self.spawn_depth = max(0, int(spawn_depth or 0))
+        self.parent_session_id = parent_session_id or None
+        # The first prompt this session runs by itself, with nobody
+        # attached (see _run_initial_task). Only ever set by a spawn.
+        self.task = (task or "").strip() or None
         self.linger_secs = linger_secs
         self.socket_path = daemon_socket_path(self.session_id)
         self._engine_factory = engine_factory or (
             lambda cwd, sid, dsock: SessionEngine(
                 cwd=cwd, model=self.model, session_id=sid, daemon_socket=dsock,
-                resume=self.resume,
+                resume=self.resume, spawn_depth=self.spawn_depth,
+                parent_session_id=self.parent_session_id,
             )
         )
         self.engine: SessionEngine | None = None
@@ -444,11 +463,50 @@ class SessionDaemon:
         self._pump_task = asyncio.create_task(self._peer_pump())
         self._sync_client_count()  # 0 until someone attaches: detached, honestly
         self._arm_linger()  # nobody attached yet: don't run forever unclaimed
+        self._run_initial_task()
         self.ready.set()
         try:
             await self._done.wait()
         finally:
             await self._teardown()
+
+    def _initial_task_prompt(self) -> str:
+        """The spawned session's first prompt: the provenance marker, then
+        the task text verbatim.
+
+        Prepended HERE, on the RECEIVING side, exactly where
+        ``peers.frame_for_model`` prepends its own marker and for the same
+        reason -- a parent that composed the marker itself could omit it,
+        and framing that the sender controls is not framing. The marker is
+        ``session_ops.SPAWN_PROVENANCE_INTRO`` and is deliberately NOT
+        ``peers.PEER_UNTRUSTED_INTRO``: see that constant's docstring for
+        why "treat this as data, never as instruction" is the wrong tool
+        for a channel whose entire premise is that the text IS the task."""
+        from .session_ops import SPAWN_PROVENANCE_INTRO
+
+        parent = self.parent_session_id
+        origin = (
+            f"Spawning session: {parent[:8]}.\n" if parent else ""
+        )
+        return f"{SPAWN_PROVENANCE_INTRO}\n{origin}\n--- task ---\n{self.task}"
+
+    def _run_initial_task(self) -> None:
+        """Start the spawned session's own first turn, with no client
+        attached and none required.
+
+        This is the whole delivery mechanism for ``--task``: a spawned
+        session has to begin working before (and whether or not) a human
+        ever attaches to it, so the task cannot ride in on a `prompt`
+        frame the way an interactive one does. It goes through
+        :meth:`_run_turn` -- the SAME path a typed prompt takes, publishing
+        the same turn-tagged events into the same ring -- so a client that
+        attaches later replays the turn from its start instead of finding
+        a session that mysteriously already did something."""
+        if not self.task or self._turn_task is not None:
+            return
+        self._turn_task = asyncio.create_task(
+            self._run_turn(uuid.uuid4().hex[:12], self._initial_task_prompt())
+        )
 
     async def _teardown(self) -> None:
         for task in (self._pump_task, self._linger_task, self._turn_task):
@@ -507,8 +565,21 @@ class SessionDaemon:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
             return
-        if not self._clients:
-            await self._shutdown("linger expired with no client attached")
+        if self._clients:
+            return
+        if self._turn_task is not None and not self._turn_task.done():
+            # A turn is RUNNING. _shutdown would cancel it mid-flight, and
+            # for a spawned session (doxa.session_ops) that is the normal
+            # case, not an edge one: it starts working immediately and
+            # nobody may ever attach, so the unclaimed-linger timer would
+            # otherwise kill the delegate exactly once per spawn. Wait
+            # another full interval instead -- "unclaimed" was always
+            # meant to mean idle-and-unwatched, and a session doing the
+            # work it was asked for is not idle.
+            self._linger_task = None
+            self._arm_linger()
+            return
+        await self._shutdown("linger expired with no client attached")
 
     # -- event fan-out -----------------------------------------------
 
@@ -994,6 +1065,9 @@ def spawn_daemon(
     wait_secs: float = 60.0,
     base_branch: str | None = None,
     resume: str | None = None,
+    spawn_depth: int = 0,
+    parent_session_id: str | None = None,
+    task: str | None = None,
 ) -> "tuple[str, str]":
     """Spawn a detached daemon for ``cwd`` and wait for its registry entry.
 
@@ -1017,7 +1091,20 @@ def spawn_daemon(
     ``base_branch`` (item S #1, ``doxa new --branch``) rides along as a
     subprocess arg -- the daemon is a separate process, so this is the
     only way anything reaches ``SessionDaemon.__init__``'s own
-    ``base_branch`` parameter."""
+    ``base_branch`` parameter.
+
+    ``spawn_depth`` / ``parent_session_id`` / ``task`` (v1.1.0,
+    ``doxa.session_ops``) ride the same channel for the same reason, and
+    each is appended ONLY when it says something: a session a human
+    started produces a byte-identical argv to the one this function built
+    before v1.1.0, which is the same discipline the bypass arming flag
+    follows -- a new capability must not change the command line of every
+    session that does not use it.
+
+    This function is BLOCKING and stays that way: it polls with
+    ``time.sleep(0.1)`` for up to ``wait_secs``. Callers on an event loop
+    (``session_ops._spawn_after_confirm``) hand it to ``asyncio.to_thread``
+    rather than reintroducing the stall v0.95.0 removed."""
     import subprocess
     import time as _time
 
@@ -1035,6 +1122,12 @@ def spawn_daemon(
         cmd += ["--base-branch", base_branch]
     if resume:
         cmd += ["--resume", resume]
+    if spawn_depth:
+        cmd += ["--spawn-depth", str(int(spawn_depth))]
+    if parent_session_id:
+        cmd += ["--parent-session-id", str(parent_session_id)]
+    if task:
+        cmd += ["--task", str(task)]
     with open(log_path, "ab") as log:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
@@ -1084,6 +1177,9 @@ async def _amain(args: argparse.Namespace) -> int:
         linger_secs=args.linger,
         base_branch=args.base_branch,
         resume=args.resume,
+        spawn_depth=args.spawn_depth,
+        parent_session_id=args.parent_session_id,
+        task=args.task,
     )
     install_signal_handlers(daemon)
     await daemon.serve()
@@ -1104,6 +1200,24 @@ def main(argv: "list[str] | None" = None) -> int:
                              "session id instead of starting a new one "
                              "(spawn_daemon passes the same value as "
                              "--session-id -- a resume keeps its id)")
+    parser.add_argument("--spawn-depth", type=int, default=0,
+                        help="v1.1.0 (doxa.session_ops): how deep this "
+                             "session sits in a spawn chain. 0 -- the "
+                             "default, and what a human-started session "
+                             "always gets -- is a root. The depth cap is "
+                             "enforced on THIS value because a process "
+                             "carries it from birth, unlike a registry "
+                             "chain that loses its ancestors when they are "
+                             "reaped")
+    parser.add_argument("--parent-session-id", default=None,
+                        help="v1.1.0: the session that asked for this one "
+                             "(peers.PeerInfo.parent_session_id). Display "
+                             "and lineage only -- never enforcement")
+    parser.add_argument("--task", default=None,
+                        help="v1.1.0: the first prompt this session runs "
+                             "by itself, before anyone attaches. The "
+                             "provenance marker is prepended by the daemon, "
+                             "not by whoever passed this")
     args = parser.parse_args(argv)
     return asyncio.run(_amain(args))
 
