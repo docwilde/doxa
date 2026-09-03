@@ -398,6 +398,18 @@ class PaneGroup(Container):
         :meth:`doxa.app.DoxaApp.tabbed_of`."""
         return self.query_one(TabbedContent)
 
+    @property
+    def entry_key(self) -> str:
+        """This group's stable identity for the rail, which lists one
+        entry per pane group (v1.2.0, Part 1b).
+
+        The ``TabbedContent``'s id, because it is the one string that is
+        already unique per group, already stable across a refresh, and
+        already persisted-adjacent (:func:`next_tabbed_id`). Not
+        ``self.id``, which is ``None`` for every group the interactive
+        split gesture makes."""
+        return self._tabbed_id
+
     def tabs(self) -> "list[Any]":
         """This group's tabs, in STRIP order -- every kind, so an archived
         tab and a subagent transcript count, because both sit right there

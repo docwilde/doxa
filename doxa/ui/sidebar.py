@@ -61,14 +61,22 @@ from textual.message import Message
 from textual.widgets import Static
 
 from .. import collections as collections_mod
+from .. import config as config_mod
 from .. import layout as layout_mod
-from .labels import ellipsize, sidebar_mark_glyph
+from .. import triage as triage_mod
+from .labels import ellipsize
 
 #: The implicit heading loose sessions live under: unnamed, always last,
 #: and NOT a collection. It is derived at render time and never written to
 #: the record -- see :mod:`doxa.collections`' docstring for why persisting
 #: it would make it a collection with a reserved name and give every edit
 #: function a case to carry.
+#:
+#: v1.2.0 narrows what lands here. An entry with a ``repo_root`` gets its
+#: PROJECT's heading (auto-grouping, Part 1); only an entry with no
+#: project at all -- a session outside any repo -- is ungrouped, and it is
+#: the one row that is genuinely grey, because grey is the absence of a
+#: project colour and nothing else (:data:`doxa.triage.NO_COLOUR`).
 LOOSE_HEADING = "— ungrouped —"
 
 #: What a row for a session with no pane behind it says. Short, because it
@@ -84,12 +92,23 @@ FOLD_OPEN = "\u25be"
 
 @dataclass(frozen=True)
 class Row:
-    """One line of the rail: a collection heading, or a session.
+    """One line of the rail: a heading, or an ENTRY.
 
-    ``collection`` is the heading's own name on a heading row and the
-    holding collection's name on a session row (empty for a loose
-    session), so a click on either knows what it is about without the
-    widget keeping an index beside the list."""
+    ``collection`` is the heading's own name on a collection heading and
+    the holding collection's name on an entry row (empty for an entry
+    under a project heading or under the ungrouped one), so a click on
+    either knows what it is about without the widget keeping an index
+    beside the list.
+
+    **An entry row is a PANE, not a session** (v1.2.0, Part 1b). Since
+    v0.97.0 a :class:`doxa.ui.split.PaneGroup` owns its own tabs, so one
+    visible pane can hold three sessions of which two are invisible; a
+    rail that listed sessions flat could not show the two. ``count`` is
+    how many tabs the entry holds and ``position``/``hidden`` say whether
+    the state it is reporting is the visible tab's -- see
+    :meth:`doxa.triage.EntryState.count_chip`. ``session_id`` is the
+    member the STATE came from, so a click reveals the tab the row is
+    actually talking about."""
 
     kind: str
     text: str
@@ -98,17 +117,61 @@ class Row:
     collapsed: bool = False
     marks: "tuple[str, ...]" = field(default=())
     mounted: bool = True
+    #: The palette NAME for this row's project, or "" for none. Never a
+    #: hex: doxa/theme.tcss resolves ``-project-<name>`` so a theme change
+    #: re-resolves the colour rather than stranding one.
+    project: str = ""
+    #: Dim this row -- reduced contrast, never a recolour, so an old entry
+    #: in a coloured project stays that project's colour, faded. See
+    #: :data:`doxa.triage.OLD_STATES` for what "old" is and is not.
+    old: bool = False
+    #: The CLI's own accounting for this entry, or ``None`` for a session
+    #: whose limit was never reported. ``None`` renders NO ctx glyph --
+    #: not the absence of a warning, which would read as "plenty of room".
+    ctx_percentage: "float | None" = None
+    count: int = 0
+    position: int = 0
+    hidden: bool = False
+    #: How deep this row sits: 0 at the rail's own margin, 1 under a
+    #: heading (a collection's or a project's), 2 under an ENTRY row. An
+    #: int rather than a flag because there are now three levels and a
+    #: second bool would have to be kept consistent with the first.
+    indent: int = 0
 
     HEADING = "heading"
     SESSION = "session"
+    #: A PANE GROUP's own line, drawn above its member rows and only when
+    #: it has more than one of them (hide at zero: a one-tab pane and its
+    #: single row are the same thing said twice). It carries the
+    #: aggregate -- most urgent over every member, the invisible ones
+    #: included -- and the count chip that says how many tabs there are
+    #: and which of them the state came from.
+    ENTRY = "entry"
+
+
+def _facts(answer: Any) -> "triage_mod.Facts":
+    """One session's facts, however the caller phrased them.
+
+    :class:`doxa.triage.Facts` is what :meth:`doxa.app.DoxaApp.
+    _describe_session` returns; the ``(label, marks, mounted)`` triple is
+    what v1.0.0's callers passed and what a harness that only cares about
+    row structure still wants to pass. Accepting both is four lines here
+    and saves every such caller from restating four defaults."""
+    if isinstance(answer, triage_mod.Facts):
+        return answer
+    label, marks, mounted = answer
+    return triage_mod.Facts(
+        label=label, marks=tuple(marks or ()), mounted=bool(mounted)
+    )
 
 
 def build_rows(
     items: "Sequence[collections_mod.Collection]",
     order: "Sequence[str]",
-    describe: "Callable[[str], tuple[str, tuple[str, ...], bool]]",
+    describe: "Callable[[str], Any]",
     *,
     width: int = layout_mod.SIDEBAR_WIDTH,
+    panes: "Sequence[triage_mod.PaneEntry]" = (),
 ) -> "list[Row]":
     """The rail's contents, top to bottom.
 
@@ -118,30 +181,164 @@ def build_rows(
     keep their COLLECTION's order instead, which is the user's and is the
     whole reason a collection stores a list rather than a set.
 
-    ``describe`` answers, for one session id, ``(label, marks, mounted)``
-    -- the app's job, because a label is ``display_name()`` off a live
-    pane and a mark is that pane's own ``has_mark``, and neither belongs
-    in a module that must stay importable without a screen.
+    ``describe`` answers, for one session id, its
+    :class:`doxa.triage.Facts` -- the app's job, because a label is
+    ``display_name()`` off a live pane, a mark is that pane's own
+    ``has_mark`` and a ctx% is its engine's last reported number, and none
+    of them belongs in a module that must stay importable without a
+    screen.
 
-    Collections come first in their own order, the implicit heading last.
-    A collection with no members at all still gets its heading: it is a
-    thing the user made two seconds ago with ``/collection new`` and is
-    about to move a session into, and a heading that appeared only once it
-    was non-empty would read as the command having failed."""
+    ``panes`` is the window's pane GROUPS, each with its member sessions
+    in strip order and its visible one named. A session no entry claims
+    becomes its own single-member entry -- a detached peer, an ended
+    session, an archived transcript -- which is v1.0.0's "a rail is a
+    session index, not a second tab strip" restated now that an entry is
+    a pane.
+
+    **Three grouping levels, and a session belongs to exactly one.** A
+    manual collection claims it if one names it (the user decided); its
+    PROJECT claims it otherwise (``repo_root``, derivable, no naming
+    needed); and only a session with no project at all falls to the
+    implicit ungrouped heading. Collections come first in their own
+    order, projects next in first-appearance order, ungrouped last.
+
+    **Headings are hidden at zero**, the same judgment v1.0.0 made and
+    for the same reason: a header over a flat list answers nothing. They
+    are drawn when there is a collection, or when the loose entries span
+    more than one section -- never over a window that is one project's
+    sessions and nothing else."""
     label_room = max(4, int(width) - layout_mod.SIDEBAR_CHROME)
-    rows: "list[Row]" = []
+    known = [s for s in order if s]
+    known_set = set(known)
+    facts = {session_id: _facts(describe(session_id)) for session_id in known}
 
-    def session_row(session_id: str, collection: str) -> "Row | None":
-        label, marks, mounted = describe(session_id)
-        if not label:
+    # -- who claims what, decided BEFORE anything is drawn.
+    #
+    # A collection claims SESSIONS, not panes. That is the whole meaning
+    # of "a manual collection overrides the automatic grouping": the user
+    # said these three sessions are one piece of work, and a pane group
+    # they happen to share is not an argument against it. So a collection
+    # member is drawn as a plain row under its heading, and the pane
+    # grouping applies to what is LEFT -- which is also why a collection
+    # can hold one tab of a three-tab pane without dragging the other two
+    # in behind it.
+    claimed: "dict[str, list[str]]" = {}
+    taken: "set[str]" = set()
+    for item in items:
+        picked = [
+            session_id for session_id in item.sessions
+            # Dropped for the same reason doxa.layout.prune drops a dead
+            # leaf: the record names sessions, and one this window has
+            # never heard of is not a row it can describe.
+            if session_id in known_set and session_id not in taken
+            and facts[session_id].label
+        ]
+        taken.update(picked)
+        claimed[item.name] = picked
+
+    entries = triage_mod.entries_for(
+        [s for s in known if s not in taken], panes
+    )
+    by_key = {entry.key: entry for entry in entries}
+    states: "dict[str, triage_mod.EntryState]" = {}
+    for entry in entries:
+        state = triage_mod.aggregate(entry, facts)
+        if state is not None:
+            states[entry.key] = state
+
+    # One config read and one hash per PROJECT, not per row: a window is
+    # far more rows than it is projects, and this runs on a paint path.
+    colours: "dict[str, str]" = {}
+
+    def colour_of(repo_root: str) -> str:
+        if repo_root not in colours:
+            colours[repo_root] = triage_mod.colour_for(
+                repo_root, config_mod.project_colour(repo_root)
+            )
+        return colours[repo_root]
+
+    def session_row(session_id: str, collection: str, indent: int) -> "Row | None":
+        fact = facts.get(session_id)
+        if fact is None or not fact.label:
             return None
-        text = ellipsize(label, label_room)
         return Row(
-            Row.SESSION, text, session_id=session_id, collection=collection,
-            marks=tuple(marks), mounted=bool(mounted),
+            Row.SESSION,
+            ellipsize(fact.label, label_room),
+            session_id=session_id,
+            collection=collection,
+            marks=fact.marks,
+            mounted=fact.mounted,
+            project=colour_of(fact.repo_root),
+            old=triage_mod.is_old(fact.state),
+            ctx_percentage=fact.ctx_percentage,
+            indent=indent,
         )
 
-    known = {s for s in order if s}
+    def entry_rows(
+        key: str, collection: str, indent: int
+    ) -> "list[Row]":
+        """One pane group's lines: its ENTRY row when it holds more than
+        one tab, then a row per member.
+
+        **Both, and that is the decision.** The spec left it open whether
+        an entry expands to its tabs or shows only an aggregate with a
+        count, and an aggregate ALONE would have cost the rail the
+        property v1.0.0 built it for -- that every session this window
+        knows about has a row of its own, reachable with one click. So the
+        members stay, and the entry row is added ABOVE them: the aggregate
+        is what a hidden tab's state needs to reach, and the members are
+        what a click needs to land on.
+
+        Hidden at zero, like every other piece of chrome in this app: a
+        one-tab pane gets NO entry row, because an entry row over a single
+        member is the same sentence twice, and such a window renders
+        exactly as it did in v1.0.0."""
+        state = states.get(key)
+        if state is None:
+            return []
+        entry = by_key[key]
+        out: "list[Row]" = []
+        if state.count > 1:
+            visible = facts.get(entry.active)
+            out.append(
+                Row(
+                    Row.ENTRY,
+                    ellipsize(
+                        (visible.label if visible else state.label),
+                        label_room,
+                    ),
+                    session_id=state.session_id,
+                    collection=collection,
+                    marks=state.marks,
+                    mounted=state.mounted,
+                    project=colour_of(state.repo_root),
+                    old=state.old,
+                    ctx_percentage=state.ctx_percentage,
+                    count=state.count,
+                    position=state.position,
+                    hidden=state.hidden,
+                    indent=indent,
+                )
+            )
+        member_indent = indent + 1 if state.count > 1 else indent
+        for session_id in entry.sessions:
+            row = session_row(session_id, collection, member_indent)
+            if row is not None:
+                out.append(row)
+        return out
+
+    #: project root -> its entry keys, in first-appearance order. "" is
+    #: the ungrouped section and is always drawn last.
+    sections: "dict[str, list[str]]" = {}
+    for entry in entries:
+        if entry.key not in states:
+            continue
+        sections.setdefault(states[entry.key].repo_root, []).append(entry.key)
+    loose_keys = sections.pop("", [])
+
+    headed = bool(items) or (len(sections) + (1 if loose_keys else 0)) > 1
+
+    rows: "list[Row]" = []
     for item in items:
         rows.append(
             Row(
@@ -149,30 +346,44 @@ def build_rows(
                 collection=item.name, collapsed=item.collapsed,
             )
         )
+        # A collection with no members at all still gets its heading: it
+        # is a thing the user made two seconds ago with `/collection new`
+        # and is about to move a session into, and a heading that appeared
+        # only once it was non-empty would read as the command having
+        # failed.
         if item.collapsed:
             continue
-        for session_id in item.sessions:
-            if session_id not in known:
-                # Dropped for the same reason doxa.layout.prune drops a
-                # dead leaf: the record names sessions, and one this
-                # window has never heard of is not a row it can describe.
-                continue
-            row = session_row(session_id, item.name)
-            if row is not None:
-                rows.append(row)
-    stray = collections_mod.loose(items, order)
-    if stray:
-        # The implicit heading is drawn only when it has something under
-        # it, and it is drawn even when it is the ONLY heading -- a rail
-        # with no collections at all is a flat list of sessions, and a
-        # header over a flat list is chrome that answers nothing. So:
-        # only when at least one real collection exists.
-        if items:
-            rows.append(Row(Row.HEADING, LOOSE_HEADING, collection=""))
-        for session_id in stray:
-            row = session_row(session_id, "")
-            if row is not None:
-                rows.append(row)
+        rows.extend(
+            row for row in (
+                session_row(session_id, item.name, 1)
+                for session_id in claimed[item.name]
+            ) if row is not None
+        )
+
+    for repo_root, keys in sections.items():
+        if headed:
+            rows.append(
+                Row(
+                    Row.HEADING,
+                    ellipsize(
+                        triage_mod.project_name(repo_root),
+                        max(4, int(width) - 4),
+                    ),
+                    project=colour_of(repo_root),
+                )
+            )
+        rows.extend(
+            row for key in keys
+            for row in entry_rows(key, "", 1 if headed else 0)
+        )
+
+    if loose_keys:
+        if headed:
+            rows.append(Row(Row.HEADING, LOOSE_HEADING))
+        rows.extend(
+            row for key in loose_keys
+            for row in entry_rows(key, "", 1 if headed else 0)
+        )
     return rows
 
 
@@ -224,29 +435,75 @@ class SidebarLine(Static):
         so the comparison is free."""
         if row == self.row:
             return
+        previous = self.row
         self.row = row
         self.set_class(row.kind == Row.HEADING, "-heading")
-        self.set_class(row.kind == Row.SESSION, "-session")
+        self.set_class(row.kind in (Row.SESSION, Row.ENTRY), "-session")
+        self.set_class(row.kind == Row.ENTRY, "-entry")
         self.set_class(
-            bool(row.collection) and row.kind == Row.SESSION, "-in-collection"
+            row.indent == 1 and row.kind != Row.HEADING, "-in-collection"
         )
-        self.set_class(row.kind == Row.SESSION and not row.mounted, "-closed")
+        self.set_class(
+            row.indent >= 2 and row.kind != Row.HEADING, "-in-entry"
+        )
+        self.set_class(row.kind != Row.HEADING and not row.mounted, "-closed")
+        # AGE is its own channel: dim, never a recolour. An old entry in a
+        # coloured project stays that project's colour, faded -- which is
+        # what "fade to grey" actually describes, and it composes with
+        # grouping instead of competing with it. Grey stays reserved for
+        # exactly one thing: the absence of a project colour.
+        self.set_class(row.old, "-old")
+        self._write_project(previous, row)
         self._write_marks(row.marks)
         self.update(self._text())
 
-    def apply_marks(self, marks: "Sequence[str]") -> None:
-        """Update ONLY the status marks, without rebuilding the row.
+    def apply_marks(
+        self, marks: "Sequence[str]", ctx_percentage: "float | None" = None
+    ) -> None:
+        """Update ONLY the status marks and the ctx reading, without
+        rebuilding the row.
 
         What :meth:`doxa.app.DoxaApp.refresh_sidebar_marks` calls when a
         pane's marks move -- including once per blink of the needs-input
-        timer, which is why it must not cost a row rebuild."""
-        self.row = Row(
-            self.row.kind, self.row.text, self.row.session_id,
-            self.row.collection, self.row.collapsed, tuple(marks or ()),
-            self.row.mounted,
+        timer, which is why it must not cost a row rebuild. Everything
+        identity-shaped (the project colour, the count chip, whether the
+        state came from a hidden tab) is carried over untouched: a mark
+        moving is by definition not a structure change, and re-deriving
+        the structure here is precisely the +22% layout cost v1.0.0
+        measured and refused.
+
+        ``ctx_percentage`` is passed through rather than defaulted,
+        because ``None`` is a REAL value here -- a session whose limit was
+        never reported -- and a default that meant "leave it alone" would
+        make the two indistinguishable at the one call site that can tell
+        them apart."""
+        from dataclasses import replace
+
+        self.row = replace(
+            self.row,
+            marks=tuple(marks or ()),
+            ctx_percentage=ctx_percentage,
         )
         self._write_marks(self.row.marks)
         self.update(self._text())
+
+    def _write_project(self, previous: "Row | None", row: Row) -> None:
+        """Paint this line's PROJECT -- identity, one class, resolved by
+        doxa/theme.tcss.
+
+        Only the class that changed is written: a line is reused in place
+        and there are :data:`doxa.triage.PALETTE` classes it could carry,
+        so writing all of them on every row would be six stylesheet
+        re-applies per line per refresh. Each ``set_class`` marks the node
+        for a synchronous ``Stylesheet.apply``, which is where the event
+        loop actually blocks (see :meth:`set_row`)."""
+        was = previous.project if previous is not None else ""
+        if was == row.project:
+            return
+        if was:
+            self.set_class(False, f"-project-{was}")
+        if row.project:
+            self.set_class(True, f"-project-{row.project}")
 
     def _write_marks(self, marks: "Sequence[str]") -> None:
         """Write the four status classes onto this line and let the
@@ -261,16 +518,35 @@ class SidebarLine(Static):
             self.set_class(name in held, name)
 
     def _text(self) -> str:
+        """The line, in plain text and nothing else.
+
+        No markup, no styles, no colour: everything this string says, it
+        says in characters. That is the design check the spec owes itself
+        -- render the rail monochrome and every project and every session
+        status must still be identifiable -- and this method is where the
+        answer is either yes or no. A collection or project is named; a
+        state is glyphed; a pane's tab count and which of them the state
+        came from are digits. Colour is redundancy on all three."""
         row = self.row
         if row.kind == Row.HEADING:
             if not row.collection:
+                # A project heading and the ungrouped one: neither folds,
+                # so neither wears a caret that would promise it does.
                 return row.text
             return f"{FOLD_SHUT if row.collapsed else FOLD_OPEN} {row.text}"
-        glyph = sidebar_mark_glyph(row.marks)
+        glyphs = triage_mod.entry_glyphs(row.marks, row.ctx_percentage)
+        chip = triage_mod.EntryState(
+            count=row.count, position=row.position, hidden=row.hidden
+        ).count_chip()
         tail = f" {NOT_OPEN}" if not row.mounted else ""
-        return f"{glyph} {row.text}{tail}"
+        return f"{glyphs} {row.text}{chip}{tail}"
 
     def on_click(self, event: events.Click) -> None:
+        """A click on an ENTRY row goes to the member its state came
+        from, not to the pane's visible tab: the row is reporting that
+        member, its count chip names it, and a click that landed anywhere
+        else would be the rail pointing at one thing and delivering
+        another."""
         event.stop()
         if self.row.kind == Row.HEADING:
             if self.row.collection:
@@ -340,6 +616,15 @@ class SessionSidebar(VerticalScroll):
         #: ``GitLine``'s docstring warns about, reintroduced in new
         #: chrome.
         self._lines: "dict[str, SidebarLine]" = {}
+        #: Sessions whose mark ALSO feeds an ENTRY row's aggregate -- the
+        #: members of a multi-tab pane group. A mark moving on one of
+        #: these can change which member wins, and that is a structure
+        #: change, so :meth:`apply_marks` refuses the in-place update and
+        #: asks for the rebuild instead of quietly leaving the entry row
+        #: reporting a state that has moved. Empty on the overwhelmingly
+        #: common window (every pane holds one tab), which is why the
+        #: in-place path is still the one that runs per blink.
+        self._aggregated: "set[str]" = set()
         self._rows: "list[Row]" = []
 
     # -- contents -----------------------------------------------------
@@ -396,6 +681,16 @@ class SessionSidebar(VerticalScroll):
             for index, row in enumerate(rows)
             if row.kind == Row.SESSION and row.session_id
         }
+        self._aggregated = set()
+        depth = -1
+        for row in rows:
+            if row.kind == Row.ENTRY:
+                depth = row.indent
+                continue
+            if row.kind == Row.SESSION and depth >= 0 and row.indent > depth:
+                self._aggregated.add(row.session_id)
+                continue
+            depth = -1
         self._rows = list(rows)
 
     def lines(self) -> "list[SidebarLine]":
@@ -404,14 +699,28 @@ class SessionSidebar(VerticalScroll):
         contents."""
         return self._pool[: len(self._rows)]
 
-    def apply_marks(self, session_id: str, marks: "Sequence[str]") -> bool:
+    def apply_marks(
+        self,
+        session_id: str,
+        marks: "Sequence[str]",
+        ctx_percentage: "float | None" = None,
+    ) -> bool:
         """Update ONE row's marks in place. Returns whether a row for
         that session was on the rail at all -- False is the caller's cue
-        that the structure moved and a rebuild is due."""
+        that the structure moved and a rebuild is due.
+
+        Keyed by the session the ROW is reporting, which since v1.2.0 is
+        the pane entry's most urgent member and not necessarily its
+        visible tab. A mark moving on a member that is NOT the winner can
+        change which member wins, and that is a structure change: it is
+        answered by the False return and the rebuild behind it, not by a
+        second aggregation here."""
+        if session_id in self._aggregated:
+            return False
         line = self._lines.get(session_id)
         if line is None or not line.is_mounted:
             return False
-        line.apply_marks(marks)
+        line.apply_marks(marks, ctx_percentage)
         return True
 
     def rows(self) -> "list[Row]":

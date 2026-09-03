@@ -121,6 +121,7 @@ from . import peers as peers_mod
 from . import providers as providers_mod
 from . import tabsets as tabsets_mod
 from . import transcript as transcript_mod
+from . import triage as triage_mod
 from . import version as version_mod
 from . import worktrees as worktrees_mod
 # The caps and the event record come from doxa.events; SessionEngine does
@@ -2311,10 +2312,88 @@ class DoxaApp(App):
                 surfaces[tab.session_id] = tab
         return surfaces
 
+    def _sidebar_panes(self) -> "list[triage_mod.PaneEntry]":
+        """Every pane GROUP in this window, as the rail's entries.
+
+        **A rail entry is a pane, not a session** (v1.2.0, Part 1b).
+        Since v0.97.0 each :class:`doxa.ui.split.PaneGroup` owns its own
+        tab strip, so one visible pane can hold three sessions of which
+        two are invisible -- and the invisible tab needing input is
+        exactly what v1.0.0's flat rail could not surface.
+
+        Read off the widgets, once per refresh, in the same pass
+        discipline :meth:`_sidebar_surfaces` states: ``groups()`` and
+        ``tabs()`` are queries, and asking them per ROW would be the
+        walk-per-session cost v1.0.0 measured at +22% layout time.
+        Sessions no group claims -- detached, ended, archived -- are not
+        invented here; :func:`doxa.triage.entries_for` gives each its own
+        single-member entry, which is the honest reading: there is no
+        visible tab because there is no pane."""
+        entries: "list[triage_mod.PaneEntry]" = []
+        for group in self.groups():
+            members: "list[str]" = []
+            for tab in group.tabs():
+                if not isinstance(tab, (PaneTab, ArchivedSessionTab)):
+                    continue
+                for session_id in self._tab_session_ids(tab):
+                    if session_id and session_id not in members:
+                        members.append(session_id)
+            if not members:
+                continue
+            active_tab = group.active_tab()
+            active = ""
+            if isinstance(active_tab, (PaneTab, ArchivedSessionTab)):
+                ids = self._tab_session_ids(active_tab)
+                active = ids[0] if ids else ""
+            entries.append(
+                triage_mod.PaneEntry(
+                    group.entry_key, tuple(members), active
+                )
+            )
+        return entries
+
+    @staticmethod
+    def _pane_ctx(pane: "Any") -> "float | None":
+        """This session's context share, or ``None`` when its limit was
+        never reported.
+
+        The CLI's OWN accounting, read straight off the engine attribute
+        the ctx chip prints (:attr:`doxa.engine.Engine.last_ctx_percentage`)
+        -- not a second measurement, and not a guess. ``None`` stays
+        ``None`` all the way to the glyph, where it renders nothing at
+        all: ``/context``'s rule that an unreported limit reads ``?`` and
+        stays ``?``, one level down. Treating it as 0% would turn an
+        honesty rule into a wrong answer -- the rail would say "plenty of
+        room" about a window it never measured."""
+        engine = getattr(pane, "engine", None)
+        value = getattr(engine, "last_ctx_percentage", None)
+        try:
+            return None if value is None else float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _pane_repo_root(pane: "Any") -> str:
+        """The project this session belongs to, as an identity key.
+
+        ``GitLine.main_root`` (v1.2.0), which is the MAIN checkout's root
+        even from inside a linked worktree and costs no subprocess: the
+        pane's status line already resolved it at construction. Falling
+        back to the pane's cwd rather than to "" keeps two sessions in
+        one non-repo directory grouped together, which is the same answer
+        :attr:`doxa.peers.PeerInfo.scope_key` gives (``repo_root or
+        cwd``)."""
+        git = getattr(pane, "_git", None)
+        root = getattr(git, "main_root", None) if git is not None else None
+        if root:
+            return str(root)
+        engine = getattr(pane, "engine", None)
+        return str(getattr(engine, "cwd", None) or getattr(pane, "cwd", "") or "")
+
     def _describe_session(
         self, session_id: str, surfaces: "dict[str, Any] | None" = None
-    ) -> "tuple[str, tuple[str, ...], bool]":
-        """``(label, marks, mounted)`` for one row of the rail.
+    ) -> "triage_mod.Facts":
+        """One session's :class:`doxa.triage.Facts` for the rail.
 
         The label is rendered FRESH every time and never stored: a
         collection records session IDS because ``display_name()`` is not
@@ -2343,14 +2422,39 @@ class DoxaApp(App):
                 name for name in labels_mod.TAB_STATE_MARKS
                 if labels_mod.mark_over([surface], name)
             )
-            return surface.display_name(), marks, True
+            return triage_mod.Facts(
+                label=surface.display_name(),
+                marks=marks,
+                mounted=True,
+                ctx_percentage=self._pane_ctx(surface),
+                state=triage_mod.STATE_LIVE,
+                repo_root=self._pane_repo_root(surface),
+            )
         if surface is not None:  # an ArchivedSessionTab: read-only, no marks
-            return getattr(surface, "base_label", "") or session_id[:8], (), True
-        record = self._detached_this_run.get(session_id) or (
-            self._ended_this_run.get(session_id)
-        )
+            return triage_mod.Facts(
+                label=getattr(surface, "base_label", "") or session_id[:8],
+                mounted=True,
+                # An archived tab is a read-only record of a session that
+                # is already over: ENDED, and therefore old, whether or
+                # not THIS run is the one that ended it.
+                state=triage_mod.STATE_ENDED,
+                repo_root=str(getattr(surface, "cwd", "") or ""),
+            )
+        detached = self._detached_this_run.get(session_id)
+        record = detached or self._ended_this_run.get(session_id)
         pinned = getattr(record, "pinned_name", None) if record else None
-        return (pinned or session_id[:8]), (), False
+        return triage_mod.Facts(
+            label=(pinned or session_id[:8]),
+            mounted=False,
+            # DETACHED is not OLD. A detached session is live and may be
+            # doing work right now -- see doxa.triage.OLD_STATES for the
+            # whole of that decision and what it deliberately excludes.
+            state=(
+                triage_mod.STATE_DETACHED if detached is not None
+                else triage_mod.STATE_ENDED
+            ),
+            repo_root=str(getattr(record, "cwd", "") or "") if record else "",
+        )
 
     def sidebar_rows(
         self, order: "list[str] | None" = None
@@ -2363,6 +2467,7 @@ class DoxaApp(App):
             self._sidebar_order() if order is None else order,
             lambda session_id: self._describe_session(session_id, surfaces),
             width=self.sidebar_width(),
+            panes=self._sidebar_panes(),
         )
 
     # -- painting -----------------------------------------------------
@@ -2442,7 +2547,7 @@ class DoxaApp(App):
             name for name in labels_mod.TAB_STATE_MARKS
             if labels_mod.mark_over([pane], name)
         )
-        if not rail.apply_marks(session_id, marks):
+        if not rail.apply_marks(session_id, marks, self._pane_ctx(pane)):
             self.refresh_sidebar()
 
     def on_resize(self, event: "events.Resize") -> None:
