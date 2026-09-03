@@ -97,6 +97,7 @@ from . import peers as peers_mod
 # and reading the id from the module that owns provider identity is what
 # keeps this from being a second "claude" literal.
 from . import providers as providers_mod
+from . import session_ops as session_ops_mod
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -1268,6 +1269,63 @@ def _tool_result_image_path(tool_use_id: str, content: Any, result_text: str) ->
     return None
 
 
+def _human_mb(count: "int | None") -> str:
+    if not isinstance(count, (int, float)):
+        return "unknown"
+    if count >= 1024 ** 3:
+        return f"{count / 1024 ** 3:.1f} GB"
+    return f"{count / 1024 ** 2:.0f} MB"
+
+
+def _spawn_summary(payload: dict) -> str:
+    """One line for the notification body and the status-line label --
+    the same numbers the caps just checked, never a second computation."""
+    live = payload.get("live_sessions")
+    depth = payload.get("child_depth")
+    task = " ".join(str(payload.get("task") or "").split())
+    head = task[:80] + ("…" if len(task) > 80 else "")
+    return f"spawn a session at depth {depth} ({live} live here) — {head}"
+
+
+def _spawn_confirm_body(payload: dict) -> str:
+    """WHAT STARTS HAPPENING, in the second person.
+
+    The shape is ``doxa.ui.dialogs.PermissionModeConfirm``'s, and the
+    reasoning transfers exactly: that dialog states what stops happening
+    rather than asking "are you sure?", a question nobody has ever
+    answered with information. Here the asymmetry runs the other way -- a
+    spawn is not lossy, it is ADDITIVE, and the three things it adds
+    (a process, a worktree, a bill) are precisely what the user cannot
+    see from the tool name.
+
+    Every number in it comes from the payload the operator's own cap
+    checks produced. A dialog that recomputed its own would be free to
+    disagree with what enforcement actually looked at, which is worse
+    than showing nothing."""
+    live = payload.get("live_sessions")
+    cap = payload.get("max_live_sessions")
+    depth = payload.get("child_depth")
+    max_depth = payload.get("max_depth")
+    root = payload.get("worktrees_root") or "the worktree root"
+    model = payload.get("model") or "this session's model"
+    base = payload.get("base_branch")
+    lines = [
+        "a new claude process starts, a new git worktree is created under "
+        f"{root} (the working tree, not a clone — git worktree add shares "
+        "the object store), and that session's token spend is SEPARATE "
+        "from and ADDITIVE to this one's.",
+        f"this repo has {live} live session(s) now, cap {cap}. the child "
+        f"would run at spawn depth {depth}, cap {max_depth}. "
+        f"{_human_mb(payload.get('free_bytes'))} free on that filesystem.",
+        f"model: {model}" + (f" · base branch: {base}" if base else ""),
+        "nothing reports back: you will see it leave, not whether it "
+        "succeeded. its result is the commits on its own doxa/<short> "
+        "branch.",
+        "it is told EXACTLY this, and nothing else about this session:",
+    ]
+    return "\n\n".join(lines)
+
+
 def _permission_summary(tool_name: str, tool_input: dict) -> str:
     """A one-line ``tool_name arg-json`` summary for the permission
     dialog -- SCRUBBED (see the module docstring's secret-scrub choke
@@ -1301,6 +1359,8 @@ class SessionEngine:
         allowed_tools: "set[str] | None" = None,
         daemon_socket: str | None = None,
         resume: str | None = None,
+        spawn_depth: int = 0,
+        parent_session_id: str | None = None,
     ) -> None:
         self.cwd = cwd
         self.model = model
@@ -1318,6 +1378,21 @@ class SessionEngine:
         # engine, so `doxa attach` discovers the session through the SAME
         # registry the peer layer already maintains.
         self.daemon_socket = daemon_socket
+        # Session spawn (v1.1.0, doxa.session_ops). Read ONCE, here, from
+        # a value that reached this process on its own command line
+        # (doxa.daemon's --spawn-depth) -- never recomputed, never derived
+        # from the peer registry. 0 is a session a human started.
+        #
+        # This is the whole depth cap. Deriving it instead by walking
+        # parent_session_id chains through the registry would break the
+        # moment an ancestor's entry is reaped: a still-live grandchild
+        # whose parent already finalized has nothing left to walk, and
+        # would silently read as a root. A number carried from birth has
+        # no such failure mode, and the model has no way to reach it.
+        self.spawn_depth = max(0, int(spawn_depth or 0))
+        # Lineage only, never enforcement -- see peers.PeerInfo.
+        # parent_session_id. Threaded to the PeerHost at start().
+        self.parent_session_id = parent_session_id or None
         self.slug = project_slug(cwd)
         self._client_factory = client_factory
         self._client: Any = None
@@ -1444,6 +1519,14 @@ class SessionEngine:
                 cwd=self.cwd,
                 repo_root=gate_mod.repo_root_of(self.cwd),
                 belief_store=lore_store.db_connect,
+                # Both HOST-resolved, like everything else on this
+                # sidecar: the depth came in on this process's argv, and
+                # the confirm seam is this engine's own bound method. A
+                # model-supplied "op_ctx" key is stripped before dispatch
+                # regardless (gate contract 4), so neither is reachable
+                # from the args namespace.
+                spawn_depth=self.spawn_depth,
+                spawn_confirm=self._confirm_spawn,
             ),
             on_disable=self._on_tool_disabled,
         )
@@ -1762,6 +1845,68 @@ class SessionEngine:
         if decision == "allow":
             return PermissionResultAllow()
         return PermissionResultDeny(message="the user denied this tool call")
+
+    async def _confirm_spawn(self, payload: dict) -> dict:
+        """The approval gate for ``spawn_session`` (v1.1.0,
+        doxa.session_ops) -- wired onto the OperatorContext as
+        ``spawn_confirm`` and awaited by the operator itself, before any
+        process is started.
+
+        **Why this and not the CLI's own permission prompt.**
+        :meth:`_on_can_use_tool` escalates to an interactive dialog only
+        when the CLI populates ``context.title``/``display_name``/
+        ``decision_reason``, which it does "for a call it would genuinely
+        have shown its own interactive permission prompt for". Whether the
+        installed CLI's dangerousness classifier extends that treatment to
+        a brand-new, DOXA-defined MCP tool name it has never seen is not
+        something this repository's code can answer -- that behaviour
+        lives inside the ``claude`` binary. Depending on it would mean the
+        single most consequential tool DOXA offers asks only when a
+        heuristic nobody here can read decides to. So spawn asks through
+        the mechanism DOXA already owns: park on the out-of-band
+        needs_input queue, emit the event, block for a real answer.
+
+        **The permission modes, each checked rather than assumed.**
+        ``plan`` never reaches this method at all -- no tool executes in
+        that mode, so spawn is blocked for free by the same mechanism that
+        blocks everything else, with no spawn-specific code path involved.
+        ``default`` and ``acceptEdits`` ask, because ``acceptEdits`` only
+        stops asking about FILE EDITS and a spawn is not one. ``auto``
+        asks too, and that is the one deliberate exception this method
+        adds: ``auto`` hands tool decisions to a model classifier, and a
+        fleet spawning further fleet with nobody watching is exactly the
+        outcome nobody asked for. ``engine.py`` already carries one named
+        asymmetry of this kind (``dontAsk`` alone in ``GATED_MODES``,
+        "because it was not asked for"); this is a second, for a
+        comparably strong reason -- git can revert a wrongly-approved
+        edit, and nothing reverts a process that has already spent tokens
+        and disk. ``bypassPermissions`` does NOT ask, and gets no carve-
+        out: a user who cycled all the way out there, past that mode's own
+        confirmation dialog, accepted this in general terms, and making
+        spawn the one exception would be inconsistent with a mode this
+        codebase respects as an explicit decision.
+
+        What does not relax under any mode: session_ops' depth, count and
+        rate caps already ran before this method was called. They answer
+        "how many, ever", which is a different question from "may this one
+        call happen", and both apply on every call."""
+        if self.permission_mode == "bypassPermissions":
+            return {"decision": "allow", "mode": "bypassPermissions"}
+        answer = await self._wait_for_answer("spawn", {
+            "tool_name": "spawn_session",
+            "title": "start a second DOXA session in this repo?",
+            "input_summary": _spawn_summary(payload),
+            "body": _spawn_confirm_body(payload),
+            # The literal text the child will be given, scrubbed but NOT
+            # summarized: the containment argument in
+            # docs/plans/spawn-session.md rests entirely on a human
+            # reading what the child is actually told, and a summary of a
+            # prompt is not that prompt.
+            "task": _scrub_text(str(payload.get("task") or "")),
+        })
+        if not isinstance(answer, dict):
+            return {"decision": "deny"}
+        return {"decision": "allow" if answer.get("decision") == "allow" else "deny"}
 
     async def answer_needs_input(self, req_id: str, answer: dict) -> bool:
         """Resolve one pending needs_input request -- the daemon's
@@ -2116,6 +2261,15 @@ class SessionEngine:
             allowed=self.tool_gate.allowed,
             include_write=True,
             ctx={"belief_store": lore_store.db_connect, "lore_root": str(lore_core.ROOT)},
+            # The SIBLING registry (doxa.session_ops), composed onto the
+            # SAME MCP server rather than a second one -- see
+            # to_sdk_tools' own docstring for why two servers would fork
+            # the one name space every containment surface keys on.
+            # spawn_session's is_configured reads ~/.doxa/config.toml and
+            # nothing else, so with the setting off (the default) it is
+            # not projected here at all: the model never learns the tool
+            # exists, which is a stronger position than refusing it.
+            extra=(session_ops_mod.SESSION_OPERATORS,),
         )
         effort = effort_level()
         # Captured on self (not just the local var) so the status bar's
@@ -2314,6 +2468,7 @@ class SessionEngine:
                 provider=providers_mod.CLAUDE_PROVIDER_ID,
                 model=self.model,
                 engine=ENGINE_ID,
+                parent_session_id=self.parent_session_id,
             )
             await self.peer_host.start()
         except Exception as exc:

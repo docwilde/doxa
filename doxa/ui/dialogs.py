@@ -262,17 +262,41 @@ class SlashComplete(OptionList):
 _NEEDS_INPUT_DIGIT_KEYS = frozenset("123456789")
 
 
+def _spawn_heading(data: dict) -> str:
+    """The whole spawn confirmation as one renderable block: the title,
+    what starts happening (already composed engine-side, from the numbers
+    the caps themselves checked), and the child's task text VERBATIM.
+
+    Verbatim is the point. ``doxa.session_ops`` caps the task at
+    :data:`doxa.session_ops.MAX_TASK_CHARS` precisely so that this block
+    is readable in full rather than needing an ellipsis here -- the
+    review this dialog performs is the actual containment, and a reviewer
+    who is shown a summary reviewed the summary."""
+    title = str(data.get("title") or "start a second DOXA session?")
+    body = str(data.get("body") or "")
+    task = str(data.get("task") or "")
+    parts = [title]
+    if body:
+        parts.append(body)
+    if task:
+        parts.append("\n".join(f"  │ {line}" for line in task.splitlines()))
+    return "\n\n".join(parts)
+
+
 class NeedsInputPopup(OptionList):
     """The needs-input dialog (queue item 5): same mount position, same
     "never takes focus" discipline as SlashComplete/SessionSearch -- above
     the prompt, driven entirely through :class:`PromptInput`'s key
-    protocol. It serves BOTH interactive cases ``doxa.engine``'s
+    protocol. It serves every interactive case ``doxa.engine``'s
     ``needs_input`` event carries: an ``AskUserQuestion`` (one or more
     questions, answered one at a time -- multi-select collapses to the
     single highlighted/numbered choice; a model asking for more than one
     pick per question is rare enough that the SDK's own comma-joined-
-    answer convention degrades gracefully to "just that one") and a plain
-    permission request (tool name + input summary, Allow/Deny).
+    answer convention degrades gracefully to "just that one"), a plain
+    permission request (tool name + input summary, Allow/Deny), and the
+    ``spawn`` confirmation (v1.1.0) -- the same two-row Allow/Deny shape,
+    with a multi-line heading carrying the child session's literal task
+    text; see :func:`_spawn_heading`.
 
     Row 0 is always a disabled heading (the question text, or the
     tool+summary) -- same "label, never a destination" convention
@@ -314,6 +338,21 @@ class NeedsInputPopup(OptionList):
         if self.kind == "ask_user":
             self._questions = list(data.get("questions") or [])
             self._show_next_question()
+        elif self.kind == "spawn":
+            # The spawn confirmation (v1.1.0, doxa.session_ops). Same two
+            # rows and the same answer payload as a permission request --
+            # it IS one -- but its heading is a BLOCK, not a line, and
+            # that difference is the containment argument rather than a
+            # cosmetic one: docs/plans/spawn-session.md rests on a human
+            # reading the literal text the child will be given, so a
+            # truncated one-line summary of it would be the dialog
+            # quietly failing at its only job. Structurally this is still
+            # one disabled Option at row 0 (see _render's contract) --
+            # the block is one multi-line renderable, never extra rows,
+            # so the number keys and the arrow math below are untouched.
+            self._questions = []
+            self._rows = [{"label": "start the session"}, {"label": "Deny"}]
+            self._render(_spawn_heading(data), self._rows)
         else:
             self._questions = []
             heading = str(data.get("title") or data.get("tool_name") or "permission request")
