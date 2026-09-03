@@ -6,104 +6,36 @@ not written from memory.
 
 ## 1.2.1 — 2026-09-03
 
-**The two event-loop probes on the split path failed for three separate
-readers, and they were right to — on the FIXED code.** 621 ms and 446 ms
-were measured against a 250 ms bar with the session factory demonstrably
-running in a thread. Always at 85–95% of a full run, always passing in
-isolation. This is not a flake being papered over: the bar was set below
-the measured floor of something the tests do not test.
+**The two loop probes asserted a wall clock and fired on load.** They guard
+v0.95.0's fix (the session factory ran on the event loop; 2320.8 ms of
+frozen TUI per split). `STALL_LIMIT` was 250 ms — below the floor correct
+code already sits at.
 
-### The floor, measured
+- **Measured the floor, ten splits per condition, nothing under test in the
+  window**: 18–44 ms idle with the collector held off, 265 ms at a ~290 MB
+  heap, **379–399 ms mid-suite**. Two causes, neither the test's: one gen-2
+  GC per run over 90 ms (85–140 ms, scaling with live heap — that is
+  "fails at 85–95%, passes alone"), and Textual's aggregate mount cost,
+  ~545 `Stylesheet.apply` and 8 `_refresh_layout` calls as one
+  uninterrupted pump pass. **No single call is the stall.**
+- **The probes now assert the mechanism.** `_SpawnProbe` records
+  `threading.get_ident()`; the loop's id must not appear. `_Heartbeat`
+  keeps tick timestamps and `ticks_within()` asks whether the loop woke
+  *during* the factory's block — ~200 wakes threaded, 0 on-loop. A wake
+  count, not a duration, so a mount burst cannot fail it.
+- **The gap assertion is kept and re-derived**, because the first two watch
+  only the factory: `_without_collector_pauses` removes the gen-2 pause,
+  `STALL_LIMIT` 250 ms → **1000 ms** (2.5× the measured 399 ms ceiling) and
+  `PROBE_BLOCK_SECS` 2.0 s, so the bar also sits at half the defect. +3 s.
 
-`_Heartbeat` recorded the worst loop gap across the whole split, and that
-window held the stand-in factory's `time.sleep` (under test) and Textual's
-own mount work (not). With a NON-blocking factory — nothing under test
-inside the window — ten splits each on this machine:
+**Verified against pre-fix code**, each assertion in isolation: factory on
+the loop thread, 0 wakes in 2000 ms, worst gap 2011/2017 ms vs the 1000 ms
+bar. Split probes then passed 4 consecutive full runs, one entirely
+concurrent with another suite.
 
-| condition | worst loop gap |
-| --- | --- |
-| idle, collector running | 20.7 – 167.3 ms |
-| idle, collector held off | 18.2 – 43.9 ms |
-| ~290 MB live heap, collector held off | 265 ms split / 310 ms Ctrl+T |
-| full suite, collector held off | **379 ms split / 399 ms Ctrl+T** |
-
-- **Generation-2 collection is the first cost.** With `gc.callbacks`
-  recording every pass, each of the four idle runs above 90 ms contained
-  exactly one gen-2 collection, of **85.8, 101.5, 112.3, 115.4 and
-  140.4 ms**. Nothing else correlated. A gen-2 pause costs what the live
-  heap costs, so it grows with how far into the suite you are.
-- **Textual's aggregate mount cost is the second, and it survives holding
-  the collector off.** Mounting a pane runs **~545 `Stylesheet.apply`
-  calls and up to 8 `Screen._refresh_layout` calls as one uninterrupted
-  run of the message pump**. No single call is the stall — with the
-  collector provably off (`gc` pass count 0) and a 290 MB heap, apply's
-  worst call is **1.8 ms** and layout's is **96.7 ms** — but their sums,
-  **121 ms and 183 ms**, land back to back with nothing awaiting between
-  them, and the heartbeat sees one **265 ms** gap.
-- That is the whole of "fails at 85–95%, passes alone": `conftest.py`'s
-  reaper clears the leaked agent subprocesses, it cannot clear the pytest
-  process's own heap. The 305 ms / 334 ms figures in
-  `tests/test_sidebar.py`'s rail note are this same aggregate, attributed
-  to those two functions and measured with the collector running.
-
-### What the probes assert now
-
-**`test_a_vsplit_never_blocks_the_event_loop`** and
-**`test_a_new_tab_never_blocks_the_event_loop_either`**
-(`tests/test_split_panes.py`) keep their intent — the session factory must
-not run on the event loop — and replace one wall-clock bar with three
-assertions, in the order their failures should be read.
-
-- **The mechanism.** The stand-in factory is now **`_SpawnProbe`**, which
-  records `threading.get_ident()`; the loop's own id must not appear in
-  it. This is the property the v0.95.0 fix actually established, and it
-  cannot be failed by a slow machine or passed by a fast one.
-- **Liveness while the factory blocks.** `_SpawnProbe` also records the
-  window it spent in `time.sleep`, and **`_Heartbeat`** now keeps tick
-  timestamps as well as gaps, so **`_Heartbeat.ticks_within`** can ask
-  whether the loop woke *inside that window*. Threaded: ~200 wakes in 2 s.
-  On the loop: **zero, by construction** — one thread cannot run the
-  heartbeat and `time.sleep` at once. **`LIVE_TICKS_MIN = 5`** leaves an
-  order of magnitude either side, and it is a wake COUNT rather than a
-  duration precisely so a mount burst landing inside the window cannot
-  fail it.
-- **The whole-window gap, kept but re-derived**, because the first two
-  watch only the factory's own window and a future blocking call could
-  land outside it. **`_without_collector_pauses`** takes the gen-2 pause
-  out of the window; **`STALL_LIMIT` is 250 ms → 1000 ms**, which is 2.5x
-  the 399 ms mount cost measured in a full run, and **`PROBE_BLOCK_SECS`
-  is a new 2.0 s** (the far-side test keeps `BLOCK_SECS = 0.5`) so the bar
-  also sits at half the stall the defect produces. Both margins come from
-  the table above rather than from a guess under it. Cost: +3 s of suite
-  time.
-- **Still fails on the defect, all three ways.** With
-  `await asyncio.to_thread(self._engine_factory)` reverted to a plain call
-  in **`PaneRuntimeMixin._build_and_boot`**, each assertion was checked
-  with the earlier ones neutralised: the factory runs on the loop thread;
-  the loop wakes **0 times** in the 2000 ms block; the worst gap is
-  **2011 ms** (vsplit) and **2017 ms** (Ctrl+T) against the 1000 ms bar.
-- The v0.95.0 account of the original defect is unchanged — 2320.8 ms of
-  unbroken stall against a 12.0 ms idle gap, and the reporter's "the whole
-  TUI lags hard" — because that is why the probes exist.
-- **`_blocking_app`** now returns the app and its probe; the mount returns
-  before the factory does, which is the fix, so the probes wait the
-  factory's window out before measuring it.
-
-### Not changed, and why
-
-- **`tests/test_tab_labels.py::test_the_glyph_prepends_every_painted_tab_label`**
-  is load-sensitive for a different reason and is left alone. It asserts a
-  painted label one `pilot.pause()` after `set_custom_name`, and
-  `SessionPane.set_tab_label` may swallow that write and retry it on the
-  next frame — the case `_settled` exists for. That is an under-wait, not
-  a bar sitting under another component's measured floor.
-- **`tests/test_picker_row_actions.py::test_a_keystroke_does_not_rebuild_rows_before_the_debounce_fires`**
-  is a race against a real deadline, `history.DEBOUNCE_SECS` (0.13 s): it
-  needs the two `pilot.press` calls to finish inside the debounce, so it
-  needs the machine to be FAST — the opposite polarity to the split
-  probes. The same pauses can lose it, but the sound fix is to stop the
-  assertion depending on wall-clock at all, which is a different change to
-  a different test. Both modules pass on this branch (69 passed together).
+**Not fixed, adjacent**: `tests/test_tab_labels.py` has an under-wait
+affecting three tests (~1-in-3), asserting a painted label one pause after
+the write. Pre-existing; its own task.
 
 ## 1.2.0 — 2026-09-03
 
