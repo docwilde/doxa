@@ -370,6 +370,24 @@ def _spawn_session(
             f"{MAX_TASK_CHARS} a human can actually read in the approval "
             "dialog -- shorten it, or put the detail in a file and point at it")}
 
+    # model and base_branch are the two model-written strings that reach
+    # the child's COMMAND LINE. They cannot smuggle a value past argparse
+    # -- Popen is given a list, so each is exactly one argv element, and
+    # argparse refuses an option-looking token where it wants a value --
+    # so a crafted base_branch cannot, for instance, reset --spawn-depth.
+    # What it CAN do is make the child exit during startup, which
+    # spawn_daemon surfaces as a RuntimeError, which is_hard_failure reads
+    # as "<name> failed:" -- a real strike. Two of those and the model has
+    # disabled a working tool with nothing but a bad argument. Refuse the
+    # shape up front, softly, the way bad arguments are meant to be
+    # refused.
+    for label, value in (("model", model), ("base_branch", base_branch)):
+        if value is not None and str(value).startswith("-"):
+            return {"error": (
+                f"spawn_session: {label} may not start with '-' "
+                f"(got {str(value)[:40]!r}) -- it is passed to the child "
+                "process as a command-line value, not as a flag")}
+
     # -- bound 1: depth (argv-threaded, never chain-walked) ------------
     depth = int(getattr(op_ctx, "spawn_depth", 0) or 0)
     if depth >= MAX_SPAWN_DEPTH:
@@ -546,6 +564,9 @@ _SPAWN_SESSION = Operator(
     fn=_spawn_session,
     cost="high",
     read_only=False,
+    # NOT operators.py's default ("staged for review"), which would be a
+    # flat lie here: nothing about a spawn is staged. See Operator.
+    write_note="starts a real process once you approve it",
     is_configured=_spawn_configured,
 )
 

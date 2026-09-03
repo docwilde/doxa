@@ -396,6 +396,41 @@ def test_no_approval_channel_means_refuse_not_spawn(tmp_path, armed, runtime, no
 # The gate: an ordinary tool call, and the auto carve-out
 # ======================================================================
 
+def test_the_write_suffix_the_model_reads_is_true_for_this_tool(tmp_path, armed):
+    """`to_sdk_tools` appends "[write: staged for review]" to every
+    non-read-only operator, which is true of lore_remember and FALSE of
+    this one: a spawn is not staged, it starts a process on approval. A
+    lie in the one text the model reads about what a tool costs is the
+    same defect class as a settings menu listing something inert."""
+    projected = {
+        t.name: t.description for t in ops.to_sdk_tools(
+            lambda name, args: {}, include_write=True,
+            ctx={"belief_store": object(), "lore_root": str(tmp_path)},
+            extra=(spawn_mod.SESSION_OPERATORS,),
+        )
+    }
+    assert "[write: staged for review]" in projected["lore_remember"]
+    assert "[write: staged for review]" not in projected["spawn_session"]
+    assert "[write: starts a real process once you approve it]" in (
+        projected["spawn_session"])
+    assert "[cost: high]" in projected["spawn_session"]
+
+
+def test_an_option_shaped_argument_is_refused_softly_not_as_a_crash(
+        tmp_path, armed, runtime, no_spawn):
+    """model/base_branch reach the child's command line. They cannot
+    smuggle a value past argparse, but they CAN make the child die during
+    startup, which spawn_daemon raises and is_hard_failure reads as a real
+    strike -- so the model could disable a working tool with nothing but a
+    bad argument. Refused up front, softly."""
+    for kwargs in ({"model": "--spawn-depth"}, {"base_branch": "-x"}):
+        out = spawn_mod.SESSION_OPERATORS["spawn_session"].fn(
+            task="delegate", op_ctx=_ctx(tmp_path), **kwargs)
+        assert "may not start with '-'" in out["error"]
+        assert is_hard_failure("spawn_session", out) is False
+    assert no_spawn == []
+
+
 def test_spawn_is_an_ordinary_operator_not_an_engine_rpc():
     """The "blocked by plan mode for free" claim depends entirely on spawn
     being a TOOL CALL. This pins that down rather than assuming it: the

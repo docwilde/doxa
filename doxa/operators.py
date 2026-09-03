@@ -117,6 +117,20 @@ class Operator:
     read_only: bool
     is_configured: Callable[["dict | None"], bool] = _always_configured
 
+    write_note: str = "staged for review"
+    """What the projected ``[write: ...]`` suffix says for a NON-read-only
+    operator. The default is the true statement about the only write
+    operator this module has -- ``lore_remember`` really does stage a
+    proposal a human applies later.
+
+    It is a field rather than a constant because a sibling registry
+    (``doxa.session_ops``) has a write operator for which that sentence is
+    FALSE: ``spawn_session`` starts a process the moment you approve it,
+    and nothing about it is staged. A suffix that told the model otherwise
+    would be a lie in the one text the model actually reads about what a
+    tool costs -- the same defect class as a settings menu listing
+    something inert."""
+
 
 def _conn(op_ctx: "OperatorContext | None"):
     """Belief-store connection: the OperatorContext's handle when the gate
@@ -743,7 +757,7 @@ def to_sdk_tools(
         SdkMcpTool(
             name=op.name,
             description=f"{op.description} [cost: {op.cost}]"
-                        + ("" if op.read_only else " [write: staged for review]"),
+                        + ("" if op.read_only else f" [write: {op.write_note}]"),
             input_schema=op.parameters,
             handler=make_handler(op.name),
         )
