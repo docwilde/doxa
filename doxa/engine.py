@@ -1897,12 +1897,15 @@ class SessionEngine:
             "title": "start a second DOXA session in this repo?",
             "input_summary": _spawn_summary(payload),
             "body": _spawn_confirm_body(payload),
-            # The literal text the child will be given, scrubbed but NOT
-            # summarized: the containment argument in
-            # docs/plans/spawn-session.md rests entirely on a human
-            # reading what the child is actually told, and a summary of a
-            # prompt is not that prompt.
-            "task": _scrub_text(str(payload.get("task") or "")),
+            # The literal text the child will be given -- not a summary of
+            # it, and not a second rendering of it. The containment
+            # argument in docs/plans/spawn-session.md rests entirely on a
+            # human reading what the child is actually told, so this is
+            # passed through unchanged: session_ops already scrubbed it
+            # once, before the caps ran, precisely so that the string
+            # shown here and the string on the child's command line
+            # cannot differ.
+            "task": str(payload.get("task") or ""),
         })
         if not isinstance(answer, dict):
             return {"decision": "deny"}

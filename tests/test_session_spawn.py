@@ -766,6 +766,47 @@ async def test_the_unclaimed_linger_timer_does_not_kill_a_working_delegate(tmp_p
     assert stopped == ["linger expired with no client attached"]
 
 
+@pytest.mark.asyncio
+async def test_what_you_approve_is_byte_for_byte_what_the_child_is_given(
+        tmp_path, armed, runtime, monkeypatch):
+    """The whole containment argument is "a human read the task before it
+    ran". That is only true if the string in the dialog and the string on
+    the child's command line are the SAME string -- so the scrub happens
+    once, in the operator, before the caps, and neither end re-renders it.
+
+    The task here carries something scrub_secrets redacts, which is the
+    case where a display-only scrub would have diverged."""
+    shown: list = []
+
+    async def _confirm(payload):
+        shown.append(payload["task"])
+        return {"decision": "allow"}
+
+    delivered: list = []
+
+    def _record(cwd, **kwargs):
+        delivered.append(kwargs["task"])
+        return "child", "/tmp/s.sock"
+
+    monkeypatch.setattr(daemon_mod, "spawn_daemon", _record)
+    raw = "deploy with token sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH"
+    gate = ToolGate(op_ctx=_ctx(tmp_path, confirm=_confirm))
+    await gate.execute("mcp__doxa__spawn_session", {"task": raw})
+
+    assert shown == delivered            # approved == delivered
+    assert delivered[0] != raw           # and the scrub really did fire
+
+    # ...and the engine's own confirmation payload does not re-render it
+    # either: what session_ops handed it is what reaches the dialog.
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory_with_script([])[0])
+    engine.permission_mode = "default"
+    task = asyncio.create_task(engine._confirm_spawn({"task": delivered[0]}))
+    event = await asyncio.wait_for(engine._peer_queue.get(), timeout=2)
+    assert event.data["task"] == delivered[0]
+    await engine.answer_needs_input(event.data["id"], {"decision": "deny"})
+    assert (await task) == {"decision": "deny"}
+
+
 def test_a_spawned_session_gets_its_OWN_lore_snapshot(tmp_path):
     """The regression guard for "sessions, not subagents": a Task subagent
     measurably gets no snapshot at all. A spawned SESSION is a normal boot
@@ -786,8 +827,15 @@ def test_a_spawned_session_gets_its_OWN_lore_snapshot(tmp_path):
 
 def test_the_task_is_capped_at_what_a_human_can_review(tmp_path, armed, runtime,
                                                        no_spawn):
+    # Real words, not a run of one character: scrub_secrets runs BEFORE
+    # this check (deliberately -- see the operator) and reads a long
+    # high-entropy blob as a token, which would shorten it back under the
+    # cap and make this test pass for the wrong reason.
+    long_task = ("refactor the parser and keep every test green. " *
+                 (spawn_mod.MAX_TASK_CHARS // 46 + 2))
+    assert len(long_task) > spawn_mod.MAX_TASK_CHARS
     out = spawn_mod.SESSION_OPERATORS["spawn_session"].fn(
-        task="x" * (spawn_mod.MAX_TASK_CHARS + 1), op_ctx=_ctx(tmp_path))
+        task=long_task, op_ctx=_ctx(tmp_path))
     assert "over the" in out["error"]
     assert no_spawn == []
 

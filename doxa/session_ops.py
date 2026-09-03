@@ -5,9 +5,12 @@ A sibling of :mod:`doxa.operators`, deliberately, and not a sixth entry in
 it. That module's first line names its own charter -- "the registry of
 DOXA's native LORE tools" -- and everything in it reaches ``lore_core`` and
 nothing else. The one tool defined here reaches ``doxa.daemon``,
-``doxa.worktrees`` and ``doxa.peers``, and never touches ``lore_core`` at
-all; filing it next to the belief-search tools would blur a boundary that
-module states about itself. So: a second registry, in the IDENTICAL
+``doxa.worktrees`` and ``doxa.peers``, and touches ``lore_core`` only for
+``scrub_secrets`` -- the one utility every text-carrying path in this
+codebase runs through, ``doxa.peers`` included -- rather than for a belief
+store, a memory file or an index. Filing it next to the belief-search
+tools would blur a boundary that module states about itself. So: a second
+registry, in the IDENTICAL
 :class:`doxa.operators.Operator` shape, gated through the IDENTICAL
 :meth:`doxa.gate.ToolGate.execute` path (containment does not care which
 module an ``Operator`` was defined in, only that every call flows through
@@ -71,6 +74,10 @@ import asyncio
 import os
 import shutil
 from typing import TYPE_CHECKING, Any
+
+from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see that module
+
+from lore_core.scrub import scrub_secrets
 
 from . import config as config_mod
 from . import peers as peers_mod
@@ -346,7 +353,15 @@ def _spawn_session(
             f"-- the user turns it on in ~/.doxa/config.toml (spawn_sessions) "
             f"or {SPAWN_ENV}, and nothing in this repository can")}
 
-    task = str(task or "").strip()
+    # Scrubbed ONCE, HERE, before anything else looks at it -- the same
+    # order ``_remember`` uses ("scrub BEFORE truncation ... on approval
+    # this text lands verbatim"). This is not decoration: the containment
+    # argument is that a human approved the text the child receives, so
+    # the string in the confirmation dialog and the string on the child's
+    # command line have to be THE SAME STRING. Scrubbing only at the
+    # display end would mean approving a redacted rendering of a prompt
+    # that then ran unredacted.
+    task = scrub_secrets(str(task or "")).strip()
     if not task:
         return {"error": "spawn_session: empty task -- a child needs something to do"}
     if len(task) > MAX_TASK_CHARS:
