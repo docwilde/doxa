@@ -143,6 +143,8 @@ SETTINGS: tuple[Setting, ...] = (
              "The `diff N files +A −R` status chip is on either way and is "
              "how you see there are changes at all; F2 and /diff open the "
              "pane by hand at any time.",
+    ),
+    Setting(
         key="spawn_sessions", env="DOXA_SPAWN_SESSIONS",
         label="let sessions spawn sessions", category="Session",
         kind="bool", default="",
