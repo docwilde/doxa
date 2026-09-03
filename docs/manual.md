@@ -679,6 +679,47 @@ it. A *desktop* notification is opt-in — `notify_needs_input` is **off**
 by default (see [Settings](#settings)); turned on, a fully detached
 session always notifies. The transcript records the answer either way.
 
+### Session spawn — off unless you turn it on
+
+With `spawn_sessions` on, the model gets one extra tool,
+`spawn_session`: it starts a **second daemon-backed session in the same
+repository**, gives it a task, and returns as soon as that session exists
+— delegation, not a blocking call. The child is a full peer with its own
+`claude` process, its own worktree and `doxa/<short>` branch, and its own
+LORE context. It does not receive this session's transcript or state, and
+it cannot send anything back; what "comes back" is its commits on its
+branch, which you read with `git log` and `git diff` like any other
+session's.
+
+**It is off by default, and the setting lives only in
+`~/.doxa/config.toml` (or `DOXA_SPAWN_SESSIONS` in your own shell).**
+Nothing inside a repository you open can turn it on — a repo that could
+would be arbitrary code execution on `doxa new` against a clone you have
+not read. While it is off, the tool is not offered at all: the model
+never learns the name exists.
+
+Turning it on costs real machine and real money per spawn — another
+`claude` process (~294 MB), another worktree (~18 MB for a repo this
+size), and a second token bill additive to this session's. DOXA does not
+aggregate cost across a fleet.
+
+Every call **stops and asks you**, showing the exact task text the child
+will be given, in every permission mode except `bypassPermissions` —
+including `auto`, which is the one deliberate exception to that mode
+handing tool decisions to a classifier. Under `plan` nothing runs at all.
+Independently of the mode, three caps are enforced inside DOXA before any
+process starts: spawn **depth 2**, **3 live sessions** per repo, and **1
+spawn per 60 seconds**, plus a free-disk preflight. A cap saying no is a
+soft refusal the model can read; it never counts toward the two-strikes
+disable above.
+
+Two honest limits. An agent with the `Bash` tool can already run `doxa
+new` itself — the gate cannot see inside a shell string, so that path is
+counted by the live-session cap but is not gated and records no parent.
+And `peer_left` tells you a delegate is *gone*, never whether it
+succeeded. The design, including what is deliberately not built, is
+[docs/plans/spawn-session.md](plans/spawn-session.md).
+
 ## The status bar
 
 Chips are built in paint order by `doxa/session/chips.py`; a chip whose
@@ -1078,6 +1119,7 @@ environment is winning is read-only in the modal.
 | `effort` | `DOXA_EFFORT` | CLI default | reasoning effort, new sessions only |
 | `allow_bypass` | `DOXA_ALLOW_BYPASS` | off | let new sessions reach `bypassPermissions` at all |
 | `adopt_plugins` | `DOXA_ADOPT_PLUGINS` | off | load commands/skills/agents from your OWN installed Claude Code plugins into new sessions — never their hooks or MCP servers, never LORE (see [docs/plans/plugins.md](plans/plugins.md)) |
+| `spawn_sessions` | `DOXA_SPAWN_SESSIONS` | off | offer the model `spawn_session`, which starts a second session in this repo and gives it a task (see [Session spawn](#session-spawn--off-unless-you-turn-it-on)) — read from this file and the environment only, never from a repository |
 | `permission_mode` | `DOXA_PERMISSION_MODE` | `default` | mode new sessions connect in; accepts `default`/`acceptEdits`/`plan` only |
 | `linger_secs` | `DOXA_LINGER_SECS` | 120 | seconds a daemon outlives its last detached client |
 | `worktree_per_session` | `DOXA_WORKTREE` | on | give each session its own git worktree |
