@@ -143,6 +143,27 @@ SETTINGS: tuple[Setting, ...] = (
              "The `diff N files +A −R` status chip is on either way and is "
              "how you see there are changes at all; F2 and /diff open the "
              "pane by hand at any time.",
+        key="spawn_sessions", env="DOXA_SPAWN_SESSIONS",
+        label="let sessions spawn sessions", category="Session",
+        kind="bool", default="",
+        help="Offer the model the spawn_session tool, which starts a "
+             "SECOND daemon-backed DOXA session in this repo and hands it "
+             "a task (doxa.session_ops)",
+        note="OFF by default, and this row is the ONLY place it can be "
+             "turned on: it is read through config.raw, so ~/.doxa/"
+             "config.toml or DOXA_SPAWN_SESSIONS in your own shell are the "
+             "two doors, and nothing inside a repository you open is one "
+             "of them -- a repo that could arm this would be arbitrary "
+             "code execution on `doxa new` against an untrusted clone. "
+             "Turning it on costs real money and real machine: each "
+             "spawned session is another claude process (~294 MB "
+             "measured), another linked worktree (~18 MB measured for "
+             "this repo), and its own token spend, additive to the "
+             "session that asked for it. Every call still stops and asks "
+             "you, showing the exact task text the child will be given, "
+             "in every permission mode except bypassPermissions; the "
+             "depth/live-count/rate caps in doxa.session_ops are enforced "
+             "regardless of mode and cannot be raised from here.",
     ),
     Setting(
         key="permission_mode", env="DOXA_PERMISSION_MODE",
