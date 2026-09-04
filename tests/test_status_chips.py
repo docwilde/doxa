@@ -1365,18 +1365,29 @@ async def test_close_confirm_buttons_have_real_height_and_are_hittable(
             assert button.size.height > 0, f"{wid} collapsed: {button.size}"
             assert button.size.width > 0, f"{wid} collapsed: {button.size}"
             assert _hit(app, button) is button, f"{wid} is not hittable"
-        # Same self-describing rule as the compact dialog.
-        assert "t" in str(app.screen.query_one("#close-terminate").renderable)
-        assert "enter" in str(app.screen.query_one("#close-detach").renderable)
+        # Same self-describing rule as the compact dialog. The DEFAULT
+        # door is terminate (see CloseWithTurnRunning's docstring and
+        # tests/test_sessions.py) -- this label pair moved with it.
+        assert "enter" in str(app.screen.query_one("#close-terminate").renderable)
+        assert "· d ]" in str(app.screen.query_one("#close-detach").renderable)
         assert "esc" in str(app.screen.query_one("#close-cancel").renderable)
 
 
 @pytest.mark.asyncio
-async def test_enter_on_the_close_confirm_detaches(monkeypatch, tmp_path):
+async def test_enter_on_the_close_confirm_terminates(monkeypatch, tmp_path):
     """Consistency with CompactConfirm's Enter, argued the same way: Enter
-    takes the action the gesture that OPENED the dialog asked for. Ctrl+Q
-    means "close this tab", and the non-destructive reading of that is
-    detach -- terminate stays a deliberate `t`, never a default."""
+    takes the action the gesture that OPENED the dialog asked for.
+
+    Which gesture that IS was this test's own mistake, and it stood for six
+    releases: it read "Ctrl+Q means 'close this tab', and the
+    non-destructive reading of that is detach". Ctrl+W means close this
+    tab. **Ctrl+Q means END this session, finalize now** -- and Ctrl+Q is
+    the only key that opens this dialog at all (action_close_tab stopped
+    asking in v0.58.0). So Enter takes the terminate door, which is the
+    one the keystroke asked for; `d` is the deliberate detach now, and Esc
+    still keeps the tab. Reported twice from live use as "CTRL+Q is still
+    just sending a session to background and detaches it" -- the operator
+    was pressing the default this test used to pin."""
     from doxa.app import CloseWithTurnRunning
 
     app = DoxaApp(cwd=str(tmp_path))
@@ -1389,7 +1400,7 @@ async def test_enter_on_the_close_confirm_detaches(monkeypatch, tmp_path):
         )
         await pilot.press("enter")
         assert await _wait_for(pilot, lambda: bool(chosen))
-        assert chosen == ["detach"]
+        assert chosen == ["terminate"]
 
 
 # -- defect 3: a chosen branch / directory did not visibly apply ----------

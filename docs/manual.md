@@ -147,6 +147,13 @@ Everything below is about the group holding the keyboard; see
 active tab's session for real. `ctrl+left` / `ctrl+right` cycle **this
 group's** tabs and leave every other group alone.
 
+`ctrl+q` with a turn still in flight is the one close that asks first,
+because killing work you are waiting for is not something a keystroke
+should decide alone. The confirm has three doors and states each one's
+key: **enter** (or `t`) terminates — the door `ctrl+q` already asked for —
+`d` detaches instead and leaves the turn running, and **esc** keeps the
+tab open. An idle session ends with no prompt at all.
+
 A tab not currently in view reports what is happening on it by color, in
 this precedence (lowest to highest): `-done-unseen` (green, a turn finished
 while unseen) < `-staged` (muted violet, the background reviewer staged a

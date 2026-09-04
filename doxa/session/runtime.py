@@ -100,7 +100,25 @@ class PaneRuntimeMixin:
             return None
         stop = getattr(engine, "stop", None)
         note: "str | None" = None
-        with contextlib.suppress(Exception):
+        # NOT contextlib.suppress(Exception), which is what stood here
+        # through v1.6.0. A finalize that RAISED left the pane marked
+        # _stopped, the tab closed, the toast silent -- and the daemon
+        # alive. That is indistinguishable, from the operator's chair,
+        # from a detach, which is precisely the failure this whole path
+        # exists to prevent; a lifecycle key that can fail silently gets
+        # reported as "it didn't do anything" and looks correct in the
+        # source every time it is read.
+        #
+        # It still does not RAISE, and it still closes the tab. The pane
+        # cannot drive the session either way -- the handle is already
+        # gone above, and EngineClient.stop closes its socket on the way
+        # through -- so refusing to close would only strand the operator
+        # on a dead window; retrying is worse, since a daemon wedged
+        # inside its own LORE review would hang the close on the retry.
+        # What changes is that the failure TRAVELS: back through the
+        # `note` channel DoxaApp._close_pane already toasts, naming the
+        # one command that finishes the job.
+        try:
             if stop is not None:
                 event = await stop()
                 data = getattr(event, "data", None) or {}
@@ -108,6 +126,12 @@ class PaneRuntimeMixin:
                 note = str(value) if value else None
             else:
                 await engine.finalize()
+        except Exception as exc:  # noqa: BLE001 -- reported, never raised
+            sid = (self._session_id or "")[:8] or "<id>"
+            note = (
+                f"could not finalize this session ({exc}); it may still be "
+                f"running in the background — end it with `doxa stop {sid}`"
+            )
         return note
 
     async def _build_and_boot(self) -> None:

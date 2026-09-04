@@ -1490,7 +1490,7 @@ class ChipPicker(OptionList):
 
 
 class CloseWithTurnRunning(ModalScreen[str]):
-    """Ctrl+W with a turn still running: terminate, detach, or neither.
+    """**Ctrl+Q** with a turn still running: terminate, detach, or neither.
 
     The three-way choice is the point. Silently killing a running turn
     throws away work the user is waiting for; silently keeping it alive is
@@ -1503,11 +1503,35 @@ class CloseWithTurnRunning(ModalScreen[str]):
     Textual's border-box model renders every button at zero height (see
     theme.tcss's own comment on #close-confirm-buttons), and Enter did
     nothing. Enter now takes the action the keystroke that OPENED this
-    dialog already asked for -- Ctrl+W means "close this tab", and the
-    non-destructive reading of that is DETACH (the tab closes, the turn
-    survives, and `/sessions` can re-attach it); terminate stays a
-    deliberate `t`, never a default. Every label states its own key, so
-    the dialog says what to press instead of leaving it to be guessed."""
+    dialog already asked for -- and *that* rule is what this class got
+    wrong for six releases.
+
+    **The default is TERMINATE.** Reported twice from live use: *"CTRL+Q
+    is still just sending a session to background and detaches it instead
+    of finalising the session"* -- the operator's words are, almost
+    verbatim, the toast ``DoxaApp._close_pane`` prints on the DETACH
+    branch ("detached -- still running in the background"), which is the
+    tell: they were reaching this dialog and taking the door it labelled
+    as the default. Through v1.6.0 that door was ``detach``, on the
+    reasoning quoted in this docstring's own history: *Ctrl+W means "close
+    this tab", and the non-destructive reading of that is DETACH.* True
+    when it was written -- and stale by v0.58.0, when ``action_close_tab``
+    stopped asking anything and went straight to ``_close_pane(terminate=
+    False)``. Ctrl+Q has been this dialog's ONLY caller ever since (see
+    ``DoxaApp._end_session``, and tests/test_subagent_tracker.py, which
+    asserts Ctrl+W never opens it), and Ctrl+Q does not mean "close this
+    tab" -- it means *end this session, finalize now*. A confirm whose
+    Enter key does the opposite of the keystroke that opened it is not a
+    safety net, it is a trap: the operator pressed the key documented as
+    "End this session (finalize now)", pressed the labelled default, and
+    got a session left running in the background.
+
+    So Enter (and ``t``) terminate, ``d`` is the deliberate detach, and
+    Escape still cancels -- the destructive answer is the one the gesture
+    asked for, and the un-asked-for one now costs a letter. Nothing about
+    ASKING changes: a turn in flight is still never killed without this
+    dialog. Every label states its own key, so the dialog says what to
+    press instead of leaving it to be guessed."""
 
     BINDINGS = [("escape", "pick_cancel", "Cancel")]
 
@@ -1515,14 +1539,14 @@ class CloseWithTurnRunning(ModalScreen[str]):
         with Vertical(id="close-confirm"):
             yield Static("▎ a turn is still running", id="close-confirm-title")
             yield Static(
-                "terminate  — stop the session now, losing the running turn\n"
+                "terminate  — end the session now, losing the running turn\n"
                 "detach     — close this tab and leave the turn running\n"
                 "cancel     — keep the tab open",
                 id="close-confirm-body",
             )
             with Horizontal(id="close-confirm-buttons"):
-                yield Static("[ terminate · t ]", id="close-terminate")
-                yield Static("[ detach · enter ]", id="close-detach")
+                yield Static("[ terminate · enter ]", id="close-terminate")
+                yield Static("[ detach · d ]", id="close-detach")
                 yield Static("[ cancel · esc ]", id="close-cancel")
 
     def action_pick_cancel(self) -> None:
@@ -1532,11 +1556,12 @@ class CloseWithTurnRunning(ModalScreen[str]):
         choice = {
             "t": "terminate",
             "d": "detach",
-            # Enter = the default door, the one the buttons label as such.
-            # "return" is listed alongside "enter" only for terminals whose
-            # key name Textual has not normalized; both mean one keycap.
-            "enter": "detach",
-            "return": "detach",
+            # Enter = the default door, the one the buttons label as such,
+            # and the one Ctrl+Q already asked for. "return" is listed
+            # alongside "enter" only for terminals whose key name Textual
+            # has not normalized; both mean one keycap.
+            "enter": "terminate",
+            "return": "terminate",
             "c": "cancel",
         }.get(event.key)
         if choice:
