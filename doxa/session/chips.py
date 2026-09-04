@@ -38,6 +38,7 @@ from typing import Any, Callable  # noqa: F401 -- annotation-only
 from textual.css.query import NoMatches
 
 from .. import config as config_mod
+from .. import engines as engines_mod
 from .. import identity as identity_mod
 from .. import peers as peers_mod
 from ..events import BELIEF_LIST_LIMIT, PENDING_LIST_LIMIT
@@ -505,11 +506,19 @@ class PaneChipsMixin:
         # is written down here as well as there. The GLYPH is part of the
         # key, deliberately: it is text, it survives stripping, and the
         # lookup has to match what the widget actually paints.
+        # v1.4.0, the capability rule: a chip that opens a picker which
+        # changes nothing is worse than no chip. An engine whose posture is
+        # not a permission mode (Codex's is a sandbox policy, fixed for the
+        # session) reports permission_modes=False and this chip is not
+        # drawn at all -- the honest degradation, not a greyed-out one.
+        caps = engines_mod.capabilities_of(engine)
         mode = str(getattr(engine, "permission_mode", None) or
                    engine_mod.DEFAULT_PERMISSION_MODE)
         chip_armed = bool(getattr(engine, "bypass_armed", False))
         cramped = self._mode_chip_cramped()
-        if mode != engine_mod.DEFAULT_PERMISSION_MODE or not cramped:
+        if caps.permission_modes and (
+            mode != engine_mod.DEFAULT_PERMISSION_MODE or not cramped
+        ):
             mode_plain = mode_text(mode, short=cramped)
             chips.append(StatusChip.raw(
                 mode_plain,
@@ -629,7 +638,14 @@ class PaneChipsMixin:
         # explicit what-if. API-key auth keeps the real $ estimate.
         account = getattr(engine, "account", None) or {}
         tier = identity_mod.account_tier(account)
-        if tier:
+        if not caps.cost:
+            # Nothing said, so nothing shown. `$0.0000` is not the absence
+            # of a cost, it is the CLAIM that this session was free -- and
+            # an engine whose event stream has no cost field in it has not
+            # made that claim. Same rule the usage chip below already
+            # follows ("only when real numbers exist").
+            pass
+        elif tier:
             # The "if API" words were dropped from the CHIP (they cost row
             # width, which is the scarcest thing in the status bar) but NOT
             # the meaning: `sub:` already says this session bills no
@@ -669,6 +685,15 @@ class PaneChipsMixin:
         # width-gated -- see _ctx_absolute_inline -- but the numbers
         # themselves are UNCONDITIONAL in the tooltip below, which is what
         # actually answers "12% of what?" without spending a column.
+        #
+        # v1.4.0: and it is drawn ONLY by an engine that can report a
+        # window. `ctx —` is the right paint for "not measured yet", which
+        # is what a Claude session shows before its first turn; it is the
+        # WRONG paint for "this engine has no window accounting and never
+        # will", where it would sit there forever reading as a pending
+        # measurement. Codex reports token counts and no window size (they
+        # are different facts), so its tokens show up in /usage and its ctx
+        # chip does not show up at all.
         used = getattr(engine, "last_ctx_tokens", None)
         limit = getattr(engine, "last_ctx_max_tokens", None)
         inline = self._ctx_absolute_inline()
@@ -678,28 +703,45 @@ class PaneChipsMixin:
         ctx_markup = ctx_chip(
             engine.last_ctx_percentage, used, limit, absolute=inline
         )
-        chips.append(StatusChip.raw(
-            # The KEY (and the tooltip's match string) is the PLAIN text,
-            # never the colored markup: StatusBar._tooltip_for_x looks the
-            # chip up inside the bar's markup-stripped string, so a key
-            # still carrying `[#D9534F]…[/]` matched nothing and the ctx
-            # tooltip silently vanished at the amber and red tiers.
-            ctx_plain,
-            f"[@click=compact_now][{CLICKABLE_CHIP_ACCENT}]{ctx_markup}[/][/]",
-            ((
+        if caps.context_window:
+            chips.append(StatusChip.raw(
+                # The KEY (and the tooltip's match string) is the PLAIN
+                # text, never the colored markup: StatusBar._tooltip_for_x
+                # looks the chip up inside the bar's markup-stripped
+                # string, so a key still carrying `[#D9534F]…[/]` matched
+                # nothing and the ctx tooltip silently vanished at the
+                # amber and red tiers.
                 ctx_plain,
-                f"{_ctx_tooltip_absolute(used, limit)} -- click to "
-                "compact (asks first: compacting summarizes and discards "
-                "earlier detail)",
-            ),),
-        ))
-        chips.append(StatusChip.clickable(
-            f"{engine.belief_count()} beliefs",
-            "open_beliefs_picker",
-            "active beliefs LORE holds for this session -- click for the "
-            "grouped list; confirmed/contradicted/stale/retract are inline "
-            "on each row, Right expands its evidence trail",
-        ))
+                f"[@click=compact_now][{CLICKABLE_CHIP_ACCENT}]{ctx_markup}[/][/]",
+                ((
+                    ctx_plain,
+                    f"{_ctx_tooltip_absolute(used, limit)} -- click to "
+                    "compact (asks first: compacting summarizes and "
+                    "discards earlier detail)",
+                ),),
+            ))
+        # The belief COUNT is the project's, not the engine's -- one
+        # SELECT against the shared store -- so every engine shows the real
+        # number. Whether the chip OPENS anything is a different question:
+        # the picker is SessionEngine's (list_beliefs and the outcome
+        # writers live there), so an engine without it gets a plain chip
+        # that says so rather than a clickable one that does nothing.
+        belief_text = f"{engine.belief_count()} beliefs"
+        if caps.lore_pickers:
+            chips.append(StatusChip.clickable(
+                belief_text,
+                "open_beliefs_picker",
+                "active beliefs LORE holds for this session -- click for "
+                "the grouped list; confirmed/contradicted/stale/retract "
+                "are inline on each row, Right expands its evidence trail",
+            ))
+        else:
+            chips.append(StatusChip.plain(
+                belief_text,
+                "active beliefs LORE holds for this project -- the picker "
+                "is not available on this engine, `lore ask` and /search "
+                "still are",
+            ))
         # Curated-memory fill, right after the belief count: both answer
         # "what does LORE hold for this session", and the caps are the one
         # LORE number that fails a WRITE when exceeded rather than
@@ -962,6 +1004,11 @@ class PaneChipsMixin:
         from .. import engine as engine_mod
 
         if self.engine is None:
+            return
+        if not engines_mod.capabilities_of(self.engine).permission_modes:
+            # Unreachable through the chip (it is not drawn on such an
+            # engine) but reachable through the palette, so the picker
+            # refuses rather than offering six modes that do nothing.
             return
         # Per-SESSION since v0.58.0. A mode this session's CLI cannot be
         # put into is not listed at all -- not listed-and-refused -- which

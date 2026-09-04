@@ -471,8 +471,21 @@ class PaneCommandsMixin:
         keystroke means. The persistent default is its own settings row
         (``permission_mode``), narrowed to the three cycle-safe modes."""
         from .. import engine as engine_mod
+        from .. import engines as engines_mod
 
         engine = self.engine
+        # v1.4.0: an engine whose posture is not a permission mode says so
+        # here, once, instead of listing six modes it cannot enter and then
+        # failing on the seventh line. Same rule as the unavailable-mode
+        # branch below -- name the reason, never "unknown".
+        if not engines_mod.capabilities_of(engine).permission_modes:
+            await self._system(
+                "mode: this engine has no permission modes.\n"
+                "  Permission modes are the Claude CLI's; this session's "
+                "posture is its own\n"
+                "  sandbox policy, fixed when the session started."
+            )
+            return
         current = str(getattr(engine, "permission_mode", None) or
                       engine_mod.DEFAULT_PERMISSION_MODE)
         armed = bool(getattr(engine, "bypass_armed", False))
@@ -721,11 +734,19 @@ class PaneCommandsMixin:
             rows.append(("context", "  ".join(ctx_bits)))
         account = getattr(engine, "account", None) or {}
         tier = identity_mod.account_tier(account)
-        cost = float(summary.get("total_cost_usd") or 0.0)
-        if tier:
-            rows.append(("plan", f"{tier}  (≈${cost:.4f} if API)"))
+        # v1.4.0: `$0.0000` is a claim, and an engine whose stream carries
+        # no cost field has not made it. /usage is a surface people paste
+        # into bug reports, so the absence is spelled out in words rather
+        # than rendered as a zero.
+        reported_cost = summary.get("total_cost_usd")
+        if reported_cost is None:
+            rows.append(("cost", "not reported by this engine"))
+        elif tier:
+            rows.append(
+                ("plan", f"{tier}  (≈${float(reported_cost):.4f} if API)")
+            )
         else:
-            rows.append(("cost", f"${cost:.4f}"))
+            rows.append(("cost", f"${float(reported_cost):.4f}"))
         lines = [f"{label:<12} {value}" for label, value in rows]
 
         usage = identity_mod.usage()
