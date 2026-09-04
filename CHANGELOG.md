@@ -4,6 +4,36 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.7.1 — 2026-09-04
+
+**Fix Ctrl+Q on a BUSY session, which detached instead of finalizing.**
+Reported twice. The idle path was never broken, which is why an earlier pass
+found nothing.
+
+- A turn in flight opens **`CloseWithTurnRunning`**, and its Enter default was
+  **detach**, labelled `[ detach · enter ]`. That default was chosen for
+  **Ctrl+W** — its docstring still opened *"Ctrl+W with a turn still
+  running"* — and went stale in **v0.58.0**, when `action_close_tab` stopped
+  asking and went straight to `_close_pane(terminate=False)`. Ctrl+Q has been
+  the dialog's only caller ever since, inheriting a default meaning the
+  opposite of what the key means. **The default is now TERMINATE.**
+- The tell was the toast: the reported wording is `_close_pane`'s own
+  "detached — still running in the background", printed on the detach branch.
+- **The dialog still asks** — only its default moved. Ctrl+W still detaches and
+  leaves the daemon running.
+- Measured against real daemons: on `main` the process was `S`/alive at t+30s
+  with its presence file intact and the session still attachable; now it exits
+  by t+10s (a running turn is cancelled first; idle sessions still exit in
+  ~1s).
+- **`PaneRuntimeMixin.stop` no longer swallows a failing finalize.**
+  `contextlib.suppress(Exception)` hid it; the failure now travels back through
+  the `note` channel `_close_pane` already toasts, naming `doxa stop <id>`. It
+  still closes the tab: the handle is cleared and the socket closed by then, so
+  refusing would strand a dead window.
+- The new tests own a real child process rather than mocking the engine — a
+  mock proving a coroutine was awaited is what let this ship twice. 1943
+  passed.
+
 ## 1.7.0 — 2026-09-04
 
 **Every rail row highlights on hover, the divider says it moves, and a closed
