@@ -78,6 +78,19 @@ class Setting:
 # lists something inert teaches the user that the menu lies.
 SETTINGS: tuple[Setting, ...] = (
     Setting(
+        key="engine", env="DOXA_ENGINE", label="engine", category="Session",
+        kind="choice", choices=("", "claude", "codex"), default="claude",
+        help="Which engine drives NEW sessions (doxa.engines -- `doxa "
+             "--engine <id>` is the flag layer)",
+        note="Not every session surface exists on every engine, and the "
+             "ones that do not are HIDDEN rather than shown inert: a codex "
+             "session has no permission-mode chip, no ctx chip (it reports "
+             "tokens but no window size) and no cost chip, and it does not "
+             "carry DOXA's LORE tools. A codex session also runs inside "
+             "this TUI rather than in a daemon, so Ctrl+Q ends it instead "
+             "of detaching.",
+    ),
+    Setting(
         key="model", env="DOXA_MODEL", label="model", category="Session",
         help="Model for new sessions (doxa.cli --model default; /model "
              "switches the live session)",
@@ -747,6 +760,19 @@ def model() -> "str | None":
     """The configured model for new sessions, or None for the CLI default."""
     value = raw("DOXA_MODEL").strip()
     return value or None
+
+
+def engine() -> str:
+    """WHICH engine drives a new session (v1.4.0) -- ``"claude"`` unless
+    told otherwise.
+
+    Same flag > env > file > default precedence as every other row here;
+    the flag layer is ``doxa --engine``. NOT validated at this layer, on
+    purpose: :func:`doxa.engines.get` is the one place an unknown id is
+    refused, and it refuses by LISTING the real ones. A second validator
+    here would either duplicate that list or diverge from it."""
+    value = raw("DOXA_ENGINE").strip().lower()
+    return value or "claude"
 
 
 #: The session rail has not been decided either way -- see

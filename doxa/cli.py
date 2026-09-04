@@ -420,6 +420,12 @@ def main(argv: "list[str] | None" = None) -> int:
     # Flag > env > config file > default: argparse supplies the flag layer,
     # doxa.config supplies the two beneath it (see doxa/config.py).
     parser.add_argument("--model", default=config.model())
+    parser.add_argument("--engine", default=config.engine(),
+                        help="which engine drives the session "
+                             "(doxa.engines; default %(default)s). A "
+                             "non-default engine runs IN-PROCESS -- no "
+                             "daemon hosts it, so there is nothing to "
+                             "detach from and Ctrl+Q ends the session")
     parser.add_argument("--linger", type=float, default=config.linger_secs(),
                         help="seconds a spawned daemon outlives its last "
                              "client before finalizing (default %(default)s)")
@@ -447,7 +453,54 @@ def main(argv: "list[str] | None" = None) -> int:
     if moved is not None:
         print(f"doxa: settings moved to {moved}", file=sys.stderr)
 
+    # v1.4.0, the per-session engine choice. Resolved BEFORE anything
+    # else touches the registry so an unknown id fails as one line of
+    # usage, not as a traceback out of a half-built app -- and it is
+    # resolved for `--in-process` too, which is the same session with the
+    # same engine question.
+    from . import engines as engines_mod
+
+    try:
+        provider = engines_mod.get(args.engine)
+    except KeyError as exc:
+        print(f"doxa: {exc.args[0]}", file=sys.stderr)
+        return 2
+
+    if provider.engine_id() != engines_mod.DEFAULT_ENGINE_ID:
+        # A second engine has no daemon: doxa.daemon hosts a SessionEngine
+        # specifically (its RPC surface is that class's), so a Codex
+        # session lives in the TUI process. That is reported, not hidden --
+        # `supports().detachable` is False and the attach chip is absent.
+        #
+        # `asyncio.to_thread` is what the pane does with this factory
+        # (SessionPane._build_and_boot, and v1.2.1's probes assert it), so
+        # a factory that blocks is a factory that blocks a THREAD. This one
+        # does not block at all: CodexEngine.__init__ makes a directory and
+        # CodexEngine.start() runs shutil.which.
+        DoxaApp(
+            cwd=cwd,
+            model=args.model,
+            engine_factory=lambda: provider.new_session(
+                cwd=cwd, model=args.model,
+            ),
+            new_session_factory=lambda: provider.new_session(
+                cwd=cwd, model=args.model,
+            ),
+            new_session_factory_at=lambda path: provider.new_session(
+                cwd=path, model=args.model,
+            ),
+            resume_session_factory=lambda path, session_id: provider.new_session(
+                cwd=path, model=args.model,
+                session_id=session_id, resume=session_id,
+            ),
+        ).run()
+        return 0
+
     if args.in_process:
+        # Unchanged: the Claude in-process path still goes through
+        # DoxaApp's own default factory, which resolves SessionEngine
+        # through `doxa.app`'s module attribute so the suite's
+        # monkeypatch.setattr(doxa.app, "SessionEngine", ...) keeps working.
         DoxaApp(cwd=cwd, model=args.model).run()
         return 0
 
