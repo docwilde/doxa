@@ -460,11 +460,23 @@ async def _open_diff(pilot, app):
     assert await _wait(pilot, lambda: bool(pane._session_id)), "no session id"
     note = await app.toggle_diff_pane()
     assert note is None, note
+    # The diff having a WIDTH is not the same as the split having been
+    # APPLIED: mid-layout the new pane can report a real size while both
+    # rectangles still sit at x=0 and the session still spans the whole
+    # window. Asserting relative positions from that state fails as
+    # `assert 0 >= (0 + 160)` -- observed under full-suite load.
+    #
+    # So the settle condition also requires the SESSION to have given up
+    # its full width, which is what "the split happened" means. It is
+    # deliberately NOT the diff's own x-offset: waiting on precisely what
+    # the caller is about to assert would make that assertion vacuous.
     ok = await _wait(
         pilot,
         lambda: (
             _diff_of(app) is not None
             and _diff_of(app).region.width > 0
+            and pane.region.width > 0
+            and pane.region.width < app.size.width
             and "reading the diff" not in str(_diff_of(app)._head.renderable)
         ),
     )
