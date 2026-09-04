@@ -451,6 +451,41 @@ async def test_a_drag_that_would_squeeze_a_pane_is_refused_not_clamped(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_the_edge_really_drags_and_only_the_last_move_is_written(
+    tmp_path,
+):
+    """The mouse half, driven through the real events.
+
+    Only the mouse-UP is persisted: a config write per mouse-move event
+    would be a file rewrite per cell the pointer crossed, and the rail has
+    to track the pointer either way."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        assert app.set_sidebar(True) is None
+        await pilot.pause()
+        rail = app.sidebar()
+        start = app.sidebar_width()
+        edge = rail.outer_size.width - 1
+        # A click INSIDE the rail is a row gesture, not a drag.
+        assert rail._edge_grabbed(0) is False
+        assert rail._edge_grabbed(edge) is True
+
+        await pilot.mouse_down(rail, offset=(edge, 1))
+        await pilot.pause()
+        assert rail._dragging is True
+        await pilot.hover(app.screen, offset=(rail.region.x + start + 3, 1))
+        assert await _wait(pilot, lambda: app.sidebar_width() == start + 4)
+        # ...tracked, but not yet written down.
+        assert config_mod.sidebar_width() == start
+        await pilot.mouse_up(app.screen, offset=(rail.region.x + start + 3, 1))
+        assert await _wait(pilot, lambda: rail._dragging is False)
+        assert await _wait(pilot, lambda: config_mod.sidebar_width() == start + 4)
+        # ...and the override is spent, so the registry is the answer again.
+        assert app._sidebar_width_override is None
+
+
+@pytest.mark.asyncio
 async def test_the_rail_reports_a_width_it_can_still_open_at(tmp_path):
     """``sidebar_refusal`` is asked from the SHOWN state now, and the
     narrowest painted group is already short by the rail's own columns

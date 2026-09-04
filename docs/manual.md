@@ -283,6 +283,7 @@ survive until the keyboard actually arrives there.
 | `ctrl+shift+←/→/↑/↓` | move the keyboard to the group in that direction — geometric, never "next group" |
 | `alt+←/→/↑/↓` | move the divider between this group and its neighbour that way |
 | `ctrl+↑` / `ctrl+↓` | move the **in-pane** divider (the status bar): up grows the transcript, down grows the prompt — and this works in a window with no splits at all |
+| `alt+shift+←/→` | move the divider between the **session sidebar** and the panes (it also drags with the mouse) |
 
 Any `ctrl+<digit>` also **flashes each group's number** over its own
 region, briefly. The jump happens immediately — it is feedback, not a
@@ -373,14 +374,34 @@ all** — not the absence of a warning, which would read as "plenty of
 room". That is `/context`'s `?` rule one level down: DOXA does not guess a
 window size, here either.
 
-**An entry is a pane, not a session.** A pane group owns its own tabs, so
-one visible pane can hold three sessions of which two are invisible — and
-the invisible one waiting for you is exactly what the rail exists to
-surface. A multi-tab pane gets an **entry row** above its members carrying
-the *most urgent* state over all of them, and a count: `·3` means three
+**An entry is a pane group, and its rows are that group's tabs.** A pane
+group owns its own tabs, so one visible pane can hold three sessions of
+which two are invisible — and the invisible one waiting for you is exactly
+what the rail exists to surface.
+
+So a group gets a **heading row** carrying the *most urgent* state over
+all of its tabs, the invisible ones included, and a count: `·3` means three
 tabs and what you see is what is on screen; **`·2/3` means three tabs and
-the state came from the second one, the one you cannot see.** Clicking the
-entry takes you to *that* tab. A one-tab pane gets no entry row.
+the state came from the second one, the one you cannot see.** Underneath
+it sit its tabs, one row each, carrying **their own** marks and not the
+heading's roll-up. A **one-tab group gets no child row** — one tab is the
+heading's own subject, and a row repeating it is noise.
+
+Three gestures, and they are deliberately not one:
+
+| click | does |
+|---|---|
+| a **tab row** | switches that group to that tab and focuses it — the one gesture that changes what is drawn |
+| a group **heading** | focuses the group and leaves its active tab exactly where it is |
+| a heading's **caret** (`▸`/`▾`) | folds the group's tab rows away. Remembered per group, across restarts |
+
+None of them is rail-only. `ctrl+←/→` cycles the focused group's tabs,
+`ctrl+1…9` and `/pane <n>` focus a group, and folding hides rows rather
+than taking anything away — so closing the rail with `f3` costs you no
+capability.
+
+**Hovering a row highlights it.** Presentation only: the rail is not
+focusable and hovering never rebuilds it.
 
 **Colour says which PROJECT, never which state.** Each repo gets one of
 six named colours — teal, sky, rose, clay, moss, mauve — assigned by a
@@ -409,12 +430,20 @@ means a region of the screen, so this word is different on purpose: two
 sessions in one collection may sit in different pane groups, and one pane
 group may show tabs from three collections. A session belongs to **at most
 one** collection; the rest appear under an unnamed `— ungrouped —` heading
-that is always last and is not itself a collection. Click a heading to
-fold it.
+that is always last and is not itself a collection. Click a collection
+heading anywhere along it to fold it.
+
+**The rail's right edge moves.** Drag it with the mouse, or press
+`alt+shift+←` / `alt+shift+→`, or run `/sidebar width <n>`. The width is
+remembered in `sidebar_width`. A drag **refuses at the same floor opening
+the rail refuses at** — it stops rather than squeezing a pane below its
+own minimum, so the mouse cannot build an arrangement DOXA will not
+create for you.
 
 | command | does |
 |---|---|
 | `/sidebar [on\|off]` | Show or hide the rail; with no argument, toggle (`f3`) |
+| `/sidebar width <n>` | Set the rail's width in columns; `wider` / `narrower` step it (`alt+shift+←/→`) |
 | `/collection` | List the collections and how many sessions each holds |
 | `/collection new <name>` | Make an empty collection |
 | `/collection rename <old> <new>` | Rename one |
@@ -433,16 +462,17 @@ own defaults claim none of them, and tmux passes them through. `/sidebar`
 is still the door that always works, the same bargain `ctrl+,`,
 `ctrl+tab` and `ctrl+1`…`ctrl+9` already ship on.
 
-**It refuses to open on a window too narrow to hold it.** The rail is 23
-columns by default (`sidebar_width`, clamped to 20–39) and a pane needs 34,
-so below **54 columns** it cannot open at all — and it also refuses when
-opening it would take the narrowest pane group below 34, which is measured
-against the rectangles actually on screen rather than against a constant.
-Both numbers come out of the same place the tab-strip rungs do: a row's
-label floor is `4 + " · " + 6`, plus the rail's own six columns of padding,
-indent and mark. It says why, in the transcript, rather than squeezing a
-pane — and it opens by itself the moment the terminal is wide enough
-again.
+**It refuses to open on a window too narrow to hold it.** The rail is 25
+columns by default (`sidebar_width`, clamped to 22–41) and a pane needs 34,
+so below **56 columns** it cannot open at all — and it also refuses when
+opening it, or widening it, would take the narrowest pane group below 34,
+which is measured against the rectangles actually on screen rather than
+against a constant. Both numbers come out of the same place the tab-strip
+rungs do: a row's label floor is `4 + " · " + 6`, plus the rail's own nine
+columns of padding, indent, caret and marks — measured against the
+DEEPEST row it draws, a tab under a group heading under a project. It says
+why, in the transcript, rather than squeezing a pane — and it opens by
+itself the moment the terminal is wide enough again.
 
 **With nothing to say, it stays out of the way.** On a fresh install
 `sidebar` is *auto*: the rail appears once there is a collection or a
@@ -1072,7 +1102,7 @@ palette, the `/` autocomplete and `/help` from that single registry.
 | `/vsplit` | A second pane group **side by side** with this one (`alt+d`) |
 | `/pane [n]` | Jump to pane group `n`, numbered left to right then top to bottom (`ctrl+1`…`ctrl+9`); with no number, flash them |
 | `/movepane <n>` | Move this group's active tab into group `n` — the session keeps running |
-| `/sidebar [on\|off]` | Show or hide the session sidebar (`f3`) |
+| `/sidebar [on\|off\|width <n>\|wider\|narrower]` | Show or hide the session sidebar (`f3`), or move its right edge (`alt+shift+←/→`) |
 | `/collection …` | `new` / `rename` / `delete` / `add` / `remove` — group sessions in the sidebar under a name you choose |
 | `/diff` | This session's live worktree diff in the group beside it, or close it (`alt+g`) |
 | `/dir` | Where this session actually is |
@@ -1134,7 +1164,7 @@ environment is winning is read-only in the modal.
 | `image_mode` | `DOXA_IMAGE_MODE` | probe | force a rung of the image ladder (`kgp`/`sixel`/`halfblock`/`text`) |
 | `boot_banner` | `DOXA_BOOT_BANNER` | on | draw the DOXA mark above the opening identity block |
 | `sidebar` | `DOXA_SIDEBAR` | *auto* | the session rail: empty = appear once there is a collection or a second session, `1` = always, `0` = never. `f3` writes `1`/`0`, so the first toggle ends the guessing |
-| `sidebar_width` | `DOXA_SIDEBAR_WIDTH` | 23 | columns the rail occupies; clamped to 20–39 rather than rejected |
+| `sidebar_width` | `DOXA_SIDEBAR_WIDTH` | 25 | columns the rail occupies; clamped to 22–41 rather than rejected. Written by a drag of the rail's edge and by `alt+shift+←/→` |
 | `key_notice` | `DOXA_KEY_NOTICE` | on | one-line startup notice naming any bound keys this terminal can't deliver and the slash command that reaches them instead; silent on a kitty-protocol terminal or one whose protocol was never measured |
 | `context_grid` | `DOXA_CONTEXT_GRID` | `glyphs` | cell style for `/context`'s grid: `glyphs` (⛀⛁⛶) or `ascii` (`[#]`/`[ ]`) for a font that tofu's them |
 | *keyboard override* | `DOXA_KEYBOARD_PROTOCOL` | probe | `kitty`/`legacy`/`unknown`, for a terminal that lies about it; env-only |
