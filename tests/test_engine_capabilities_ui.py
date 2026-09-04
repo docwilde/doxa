@@ -63,11 +63,25 @@ async def _app(monkeypatch, cwd, fake):
 
 
 async def _settled(pilot, app, tries=200):
+    """Wait until the status line has painted its CHIPS, not merely some
+    text.
+
+    The two are different states and the gap between them is real: the
+    bar renders plain identity text before the actionable
+    ``[@click=...]`` spans exist, so a predicate reading only
+    ``_status_plain`` returns True on a bar with an EMPTY action set.
+    Under full-suite load that surfaced as
+    ``assert 'open_beliefs_picker' in set()`` -- read as "the picker is
+    gone" when the truth was "no chip has painted yet".
+
+    Deliberately waits for ANY action rather than for the one a caller is
+    about to assert on: waiting for that would make the assertion
+    vacuous. Same distinction as ``_open_diff``'s in test_live_diff.py."""
     for _ in range(tries):
-        if _status_plain(app).strip():
+        if _status_plain(app).strip() and _chip_actions(app):
             return True
         await pilot.pause(0.02)
-    return bool(_status_plain(app).strip())
+    return bool(_status_plain(app).strip() and _chip_actions(app))
 
 
 def _system_texts(app) -> "list[str]":

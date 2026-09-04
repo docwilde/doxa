@@ -865,6 +865,15 @@ async def test_the_strip_appearing_does_not_cost_the_transcript_its_tail(tmp_pat
         # trigger do not reliably land inside one frame under full-suite
         # load, and this is SETUP -- it fails as "there is no tail to
         # lose" long before the behaviour under test is exercised.
+        # Two facts in order, because they fail differently: the list must
+        # have a HEIGHT (it has none until laid out, and a zero-height
+        # list reports max_scroll_y 0 no matter how much it contains),
+        # and only then can it have a scroll to lose. Collapsing them
+        # into one predicate reports "there is no scroll" for a list that
+        # simply has not been painted -- which is what the loaded run
+        # actually hit.
+        assert await _wait(pilot, lambda: block_list.size.height > 0), (
+            "the transcript never painted")
         assert await _wait(pilot, lambda: block_list.max_scroll_y > 0), (
             "there is a scroll to lose")
         assert await _wait(pilot, lambda: pane.transcript_at_end()), (
