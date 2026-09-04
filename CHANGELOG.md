@@ -4,6 +4,46 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.7.0 — 2026-09-04
+
+**Every rail row highlights on hover, the divider says it moves, and a closed
+row hands you `/attach`.** Reported: hover worked on group labels only, the
+divider gave no sign it was draggable, and the pointer never changed.
+
+- **Hover was shipped in v1.5.0 and never worked.** Textual applies
+  **`background-tint`** only over a widget's own `background`, and only when it
+  states one (`widget.py:1148`) — a row stating none tinted `transparent`,
+  which is still transparent. The rows that DID light up were the two that
+  state a background: a heading and `.-attention`. Every row now states the
+  ground it was already painted on, via one `$rail-ground` variable the rail's
+  own `background` reads.
+- The guarding test asserted the CSS rule was **in the file**. The new ones
+  drive the pilot's mouse and read the composited colour back (`#1d1b17 →
+  `#383632`).
+- **The divider** inverts under the pointer and stays lit for the whole drag.
+  Its hot colour is computed by **`triage.contrast_text`** from the resting
+  colour read off the stylesheet, so re-hueing the rail moves both. Edge
+  detection now rebases on screen columns: a mouse event starting on a row
+  reached the rail by bubbling and carried the row's coordinates.
+- **The mouse pointer is deliberately NOT changed.** `OSC 22` is unimplemented
+  in Warp (warpdotdev/Warp#13383), is write-only everywhere but kitty so DOXA
+  could never verify it, and Textual 5.3.0 has no API for it. The divider
+  highlight carries the affordance; `test_doxa_does_not_try_to_change_the_
+  mouse_pointer` pins the decision.
+- **Divider drag: 38 width messages → 13** for a 12-column gesture (25 named a
+  width the rail already had), via `WidthDragged.can_replace` and a hand-rolled
+  equivalent for `MouseMove`. **This does not measurably reduce settle time** —
+  one applied width change costs ~138 ms in Textual's compositor, and no DOXA
+  frame appears in a drag profile's top 45. The redundant work is gone; the
+  138 ms is not.
+- **Double-clicking a CLOSED row stages `/attach <8-char-prefix>`** in the
+  active pane's prompt — staged, never submitted. Single click is untouched, an
+  archived tab still reveals, and a reaped session still has no row at all.
+- Two test under-waits fixed in passing, same class as v1.3.1: the strip
+  transition's setup (60 mounts, one frame) and `_open_diff`, which waited for
+  the diff to have a WIDTH rather than for the split to be APPLIED — it failed
+  as `assert 0 >= (0 + 160)`. 1940 passed.
+
 ## 1.6.0 — 2026-09-04
 
 **A group's tab strip hides itself at one tab.** Reported: *"only show the tab
