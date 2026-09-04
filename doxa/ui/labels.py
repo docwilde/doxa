@@ -92,7 +92,14 @@ TAB_ISOLATION_MARKER = "⎇"
 # "claude": a peer publishes that same constant as PeerInfo.provider, and
 # a roster that wants a glyph for it calls provider_glyph(peer.provider) --
 # one vocabulary, not two that happen to agree today.
-PROVIDER_GLYPHS: dict[str, str] = {providers_mod.CLAUDE_PROVIDER_ID: "✳"}
+PROVIDER_GLYPHS: dict[str, str] = {
+    providers_mod.CLAUDE_PROVIDER_ID: "✳",
+    # v1.4.0: a second engine means a second glyph, and an unknown
+    # provider still renders as "" (provider_glyph's own .get default) --
+    # a peer that names a vendor DOXA has never heard of gets no mark
+    # rather than a borrowed one.
+    providers_mod.CODEX_PROVIDER_ID: "◇",
+}
 
 
 PROVIDER_GLYPH_COLOR = "#D97757"  # Claude/Anthropic orange -- theme.tcss's own
