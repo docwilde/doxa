@@ -4,6 +4,34 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.6.0 — 2026-09-04
+
+**A group's tab strip hides itself at one tab.** Reported: *"only show the tab
+top bar when another tab is actually opened, otherwise it just eats space."*
+One row back for every unsplit window.
+
+- **`PaneGroup.strip_should_hide`** is the whole condition — narrow **or** ≤1
+  tab, one OR in one place. `-strip-compact` stays purely width-driven, so a
+  second tab arriving in a narrow group gets the right strip with nothing to
+  untangle. `_strip_width` remembers the last measured width, because the tab
+  count moves on a DOM event that can arrive with no geometry.
+- **No attention signal is lost.** `SessionPane` has painted `-done-unseen` /
+  `-attention` / `-staged` on the pane itself since v0.91.0, with a
+  `border-left` rule added in v0.89.0 for exactly the visible-but-unfocused
+  case; `StatusBar` carries `⚑ needs input` and the staged chip; v1.5.0's rail
+  wears all four marks per tab. Three surfaces, none of them the strip.
+- **The transition re-pins the tail.** Showing the strip takes a row and left a
+  pinned transcript one row short of its end (measured). `refresh_strip_
+  visibility` asks which transcripts were at the tail BEFORE anything moves,
+  re-pins only those, only when a strip actually moved, and only on the next
+  frame — issuing it inline reads geometry the pane is about to lose. A pane
+  scrolled up on purpose is left alone.
+- **Two hooks, because one is not enough**: `_persist_tabset` covers every
+  restorable tab, `TabbedContent.TabActivated` covers a subagent transcript
+  tab, which opens and closes without persisting anything and is still a
+  second tab.
+- No new record field — the tab count implies it. 1927 passed.
+
 ## 1.5.0 — 2026-09-04
 
 **The rail switches now.** An entry has been a pane GROUP since v1.2.0 and
