@@ -4,6 +4,42 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.7.2 — 2026-09-05
+
+**The screenshot gallery regenerates again.** It had stopped completing at all
+— two runs died at different scenes — and the cause was a focus/activation
+**livelock in the drivers, not in DOXA**: no product code changed here.
+
+- **`scripts/screenshot.py`'s `_activate`** set `TabbedContent.active` and said
+  nothing about the keyboard. It was the ONE writer in the tree doing that —
+  all eight `_activate_tab` sites in `doxa/app.py` pair it with **`_focus_tab`**
+  on the next line, as v0.38.0 requires. `scripts/record_gif.py:534` carried
+  its own copy of the same omission.
+- **The loop, measured** (textual 5.3.0): hiding the TabPane holding focus makes
+  Textual re-home focus with `Screen._reset_focus` to a widget INSIDE that same
+  hidden pane; focusing a widget in a `TabPane` re-activates it
+  (`TabbedContent._on_tab_pane_focused`); `_on_tab_activated` then moves the
+  keyboard into the newly active tab — back inside whichever pane is hidden
+  next. **~90 focus moves per 40 idle pump turns, with no input.** An app in
+  that state never goes idle, so every later `pilot.pause`-polled wait raced a
+  busy pump. One line, three symptoms: `split-panes` failing ~half of runs,
+  `live-diff`'s "no turn in flight", and the gallery never finishing.
+- **The split itself was never broken.** `ctrl+n` puts the keyboard in the new
+  pane **40/40**; `ctrl+n` then `ctrl+1` lands correctly 12/12. The old
+  assertion `app.active_pane is not left` passed **10/10 while focus arrived
+  0/10** — `_focus_tab` records `_last_group_id` synchronously, before asking
+  Textual for focus, so `active_pane` reports a move that may not have
+  happened. The scene now asserts on identity AND focus.
+- **`tests/test_screenshot_driver.py`** (new) fails 3/3 without the fix and
+  passes 3/3 with it, counting focus moves during idle pump turns rather than
+  timing anything; `tests/test_focus_ownership.py` gains 5, naming the livelock.
+  1950 passed.
+- **Every asset regenerated**: 16 stills, 13 GIFs, 16 PNGs re-exported from the
+  fresh SVGs (the README embeds PNGs). The committed `split-panes` shot had
+  been rendered from a run with the keyboard in the wrong pane — a picture of
+  the bug. Expect content shifts from v1.6.0 (no strip row on single-tab
+  groups) and v1.7.0 (the rail's hover ground).
+
 ## 1.7.1 — 2026-09-04
 
 **Fix Ctrl+Q on a BUSY session, which detached instead of finalizing.**
