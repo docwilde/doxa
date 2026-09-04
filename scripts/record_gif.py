@@ -532,6 +532,18 @@ async def _drive_rename(app: DoxaApp, pilot: Any, rec: FrameRecorder) -> None:
     pane = app.panes()[1]
     tabbed_early = app.tabbed_holding(pane.tab_id)
     tabbed_early.active = pane.tab_id or tabbed_early.active
+    # ...and say where the KEYBOARD goes, never just which tab shows.
+    # v0.38.0's rule, and the same one-line omission that livelocked
+    # scripts/screenshot.py's `_activate` (fixed in 2dac09b, whose
+    # docstring traces the loop event by event): a raw `active` write
+    # leaves the keyboard inside a TabPane that has just been hidden,
+    # Textual re-homes focus INTO that hidden pane, focusing a widget
+    # there re-activates it, and the two writers then fight forever at
+    # ~90 focus moves per 40 idle pump turns. The app never goes idle,
+    # so every later `_wait_until` in this scene races a busy pump --
+    # which is how the real double-click below came to wait out its
+    # budget for a `#tab-rename` that was never going to be reached.
+    app._focus_tab(pane)
     await pilot.pause()
     await _mount_filler_exchange(app, pilot)
     rec.snap(900, "three tabs, before rename")
