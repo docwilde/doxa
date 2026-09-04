@@ -7,23 +7,20 @@ not written from memory.
 ## 1.5.0 — 2026-09-04
 
 **The rail switches now.** An entry has been a pane GROUP since v1.2.0 and
-every group is on screen at once, so a click could only ever move focus.
+every group is on screen at once, so a click could only move focus.
 `docs/plans/rail-interaction.md`, option C.
 
-- **A group's row is its HEADING; the rows under it are its TABS.** A
-  click on a tab row switches that group's active tab and focuses it; a
-  click on the heading focuses the group and leaves the active tab alone.
-- **A single-tab group grows no child row**, and the fold caret appears
-  only where there is something to fold — `Row.entry_key`, `Row.expanded`,
-  `SidebarLine.fold_zone`.
+- **A group's row is its HEADING; the rows under it are its TABS.** A tab
+  row switches that group's active tab; the heading only focuses.
+- **A single-tab group grows no child row**, and only a foldable heading
+  wears a caret — `Row.entry_key`, `Row.expanded`, `SidebarLine.fold_zone`.
 - **Folds persist per group** in a new top-level `rail_folded` key in the
-  tabset record. Absence of the key is the whole migration.
+  tabset record; absence of the key is the whole migration.
 
 **Heading contrast is computed, not chosen.**
 
-- **`triage.contrast_text`** picks black or white by WCAG relative
-  luminance against **`CONTRAST_PIVOT`** (`sqrt(0.0525) - 0.05` ≈ 0.1791),
-  where the two contrast equally — not the 0.5 that gets reached for.
+- **`triage.contrast_text`** picks black or white by WCAG luminance against
+  **`CONTRAST_PIVOT`** (`sqrt(0.0525) - 0.05` ≈ 0.1791), never 0.5.
 - **`triage.PALETTE_HEX`** now holds the six palette hexes;
   **`heading_paint`** caches the (background, text) pair per palette NAME.
 - Every heading wears a background, the ungrouped one included
@@ -31,14 +28,12 @@ every group is on screen at once, so a click could only ever move focus.
 
 **Hover, and a divider that moves.**
 
-- **`SidebarLine:hover` uses `background-tint`**, not `background`, so it
-  composites over `-attention`'s red and a heading's computed pair instead
-  of replacing them. No Python on the path, no focus, no rebuild.
+- **`SidebarLine:hover` uses `background-tint`**, so it composites over
+  `-attention`'s red and a heading's pair. No Python, no focus, no rebuild.
 - **The rail's right edge drags**; **`Alt+Shift+←/→`** and **`/sidebar
   width <n>|wider|narrower`** are the keyboard and always-works doors.
-- **A drag refuses at the floor opening refuses at.**
-  `DoxaApp.sidebar_refusal` takes a candidate width and un-shrinks the
-  narrowest group when the rail is already open — it double-counted before.
+- **A drag refuses where opening refuses.** `DoxaApp.sidebar_refusal` takes
+  a candidate width and stops double-counting the open rail's own columns.
 
 **Breaking: the rail is two columns wider.** `SIDEBAR_CHROME` 7 → 9,
 re-measured against the three-level row v1.2.0 added and never priced;
