@@ -2279,6 +2279,11 @@ class DoxaApp(App):
         if narrowest <= 0 or rail is None or rail.styles.display == "none":
             return narrowest
         total = self._window_width()
+        # A rail that is shown but not yet LAID OUT has no width to undo
+        # (v0.99.0: geometry is a property of being painted, not of being
+        # displayed), and that degrades to the un-shrunk answer -- which
+        # is the same one the hidden case gives and is the conservative
+        # half either way.
         tree = total - int(rail.outer_size.width or 0)
         if tree <= 0 or total <= 0:
             return narrowest
@@ -2763,8 +2768,14 @@ class DoxaApp(App):
             if group.entry_key != entry_key:
                 continue
             surface = next(iter(group.surfaces()), None)
-            if surface is not None:
-                self._focus_tab(surface)
+            if surface is None:
+                # The group is in the DOM but has nothing PAINTED -- mid
+                # teardown, or not laid out yet. "There is no such group"
+                # is the wrong answer and "I focused it" is a lie, so
+                # this reports the only true one and lets the caller fall
+                # back to revealing the session by itself.
+                return False
+            self._focus_tab(surface)
             return True
         return False
 
@@ -2840,13 +2851,24 @@ class DoxaApp(App):
         note = self.sidebar_refusal(want)
         if note:
             return note
+        # The override is spent only when the write actually LANDED. A
+        # failed save (read-only home, a full disk) costs the user the
+        # next launch's width and nothing else -- but clearing the
+        # override anyway would leave the painted rail at ``want`` while
+        # ``sidebar_width()`` answered with the value still on disk, and
+        # the next refresh would snap the rail back under the user's
+        # hand. Chrome never costs a session, and it does not get to
+        # disagree with itself either.
+        kept = want
         if persist:
-            self._sidebar_width_override = None
-            with contextlib.suppress(Exception):
+            try:
                 config_mod.save({"sidebar_width": str(want)})
+            except Exception:  # noqa: BLE001 -- chrome never costs a session
+                pass
+            else:
+                kept = None
             config_mod.invalidate()
-        else:
-            self._sidebar_width_override = want
+        self._sidebar_width_override = kept
         rail = self.sidebar()
         if rail is not None:
             rail.set_width(want)

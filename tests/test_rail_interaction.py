@@ -486,6 +486,36 @@ async def test_the_edge_really_drags_and_only_the_last_move_is_written(
 
 
 @pytest.mark.asyncio
+async def test_a_width_that_could_not_be_WRITTEN_still_holds_on_screen(
+    tmp_path, monkeypatch,
+):
+    """A failed save costs the next launch's width and nothing else.
+
+    Spending the drag override anyway would leave the painted rail at the
+    new width while ``sidebar_width()`` answered with what is still on
+    disk -- and the next refresh would snap the rail back under the
+    user's hand."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        assert app.set_sidebar(True) is None
+        await pilot.pause()
+        want = app.sidebar_width() + 2
+
+        def boom(*_args, **_kwargs):
+            raise OSError("read-only home")
+
+        monkeypatch.setattr(config_mod, "save", boom)
+        assert app.resize_sidebar(want) is None
+        assert app.sidebar_width() == want
+        assert app._sidebar_width_override == want
+        # ...and the rail keeps it across the refresh that follows.
+        app.refresh_sidebar(force=True)
+        await pilot.pause()
+        assert app.sidebar_width() == want
+
+
+@pytest.mark.asyncio
 async def test_the_rail_reports_a_width_it_can_still_open_at(tmp_path):
     """``sidebar_refusal`` is asked from the SHOWN state now, and the
     narrowest painted group is already short by the rail's own columns
