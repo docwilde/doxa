@@ -41,6 +41,27 @@ always last and never persisted -- is the part that is hard to get right,
 so it is the part that is testable without a running app. The same split
 :mod:`doxa.layout` keeps from :mod:`doxa.ui.split`.
 
+**What a click DOES** (v1.5.0, option C). A rail entry has been a pane
+GROUP since v1.2.0, and every group is on screen at once -- so a click on
+one could only ever move focus, which is the defect the owner reported:
+there was nothing hidden to reveal. The rows under a group's heading are
+now its TABS, which are the one genuinely hidden thing a window has, and
+the three gestures are separated rather than overloaded:
+
+* the heading's **caret** folds the group (persisted -- see
+  :meth:`doxa.app.DoxaApp.toggle_group_expanded`);
+* the rest of the **heading** focuses the group and leaves its active tab
+  alone -- it is the group's summary, and a summary that silently switched
+  what you were looking at would be the rail pointing at one thing and
+  delivering another;
+* a **tab row** switches that group's active tab and focuses it. That is
+  the reveal, and it is the only gesture here that changes what is drawn.
+
+None of the three is rail-only: ``Ctrl+1..9`` / ``/pane <n>`` focus a
+group and ``Ctrl+←/→`` cycles the focused group's tabs, so a user who
+closed the rail with ``F3`` has lost no capability -- which is the check
+docs/plans/rail-interaction.md asks this feature to answer.
+
 **A rail is not a tab strip**, and :func:`build_rows` is where that is
 true rather than merely claimed: a row is built for every session the
 CALLER knows about, and the caller knows about sessions that are not
@@ -52,6 +73,7 @@ saying so instead of pretending it can be focused.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
@@ -88,6 +110,20 @@ NOT_OPEN = "· closed"
 #: uses, so it needs no legend.
 FOLD_SHUT = "\u25b8"
 FOLD_OPEN = "\u25be"
+
+#: What a caret and the space after it cost, and the width of the hit area
+#: a click has to land in to FOLD rather than to focus. Two gestures on one
+#: line is what every tree view in every file manager does -- the arrow
+#: folds, the label selects -- and the caret is the affordance that
+#: promises it, so the zone is exactly the caret's own columns.
+FOLD_COLUMNS = 2
+
+#: Columns of indent per level, matching ``.-in-collection`` and
+#: ``.-in-entry`` in doxa/theme.tcss. Capped at level 2 because that is
+#: the deepest the rail goes -- heading, pane group, tab -- and priced
+#: into :data:`doxa.layout.SIDEBAR_CHROME`.
+INDENT_COLUMNS = 2
+MAX_INDENT = 2
 
 
 @dataclass(frozen=True)
@@ -132,6 +168,17 @@ class Row:
     count: int = 0
     position: int = 0
     hidden: bool = False
+    #: Which pane GROUP this row belongs to -- :attr:`doxa.ui.split.
+    #: PaneGroup.entry_key`. Carried by an ENTRY row (it IS that group)
+    #: and by every tab row under it (it is a tab OF that group), so a
+    #: click knows which group's active tab it is switching without the
+    #: widget keeping an index beside the list. Empty on a heading and on
+    #: a collection member, neither of which is about one group.
+    entry_key: str = ""
+    #: Is this group's tab list showing? ENTRY rows only, and only
+    #: meaningful when :attr:`count` is above 1 -- a single-tab group has
+    #: nothing to fold and wears no caret (hide at zero).
+    expanded: bool = True
     #: How deep this row sits: 0 at the rail's own margin, 1 under a
     #: heading (a collection's or a project's), 2 under an ENTRY row. An
     #: int rather than a flag because there are now three levels and a
@@ -140,9 +187,10 @@ class Row:
 
     HEADING = "heading"
     SESSION = "session"
-    #: A PANE GROUP's own line, drawn above its member rows and only when
-    #: it has more than one of them (hide at zero: a one-tab pane and its
-    #: single row are the same thing said twice). It carries the
+    #: A PANE GROUP's own line, and since v1.5.0 the group's HEADING: it
+    #: is drawn for every group, above its tab rows when it has more than
+    #: one and alone when it has one (hide at zero -- a one-tab pane and a
+    #: row repeating it are the same thing said twice). It carries the
     #: aggregate -- most urgent over every member, the invisible ones
     #: included -- and the count chip that says how many tabs there are
     #: and which of them the state came from.
@@ -172,6 +220,7 @@ def build_rows(
     *,
     width: int = layout_mod.SIDEBAR_WIDTH,
     panes: "Sequence[triage_mod.PaneEntry]" = (),
+    collapsed_groups: "Sequence[str]" = (),
 ) -> "list[Row]":
     """The rail's contents, top to bottom.
 
@@ -246,6 +295,16 @@ def build_rows(
         if state is not None:
             states[entry.key] = state
 
+    #: The groups the user has folded shut. A SET of entry keys, defaulting
+    #: empty, so the rail opens showing every tab it knows about and a fold
+    #: is a thing the user did -- the same default a collection has, and
+    #: the same posture ``Collection.collapsed`` takes about being written
+    #: only when true. A key naming a group this window no longer has is
+    #: simply never asked about; it costs nothing and survives the layout
+    #: changing under it, which is the whole reason this is a set of keys
+    #: rather than a flag on a widget.
+    folded = {key for key in collapsed_groups if key}
+
     # One config read and one hash per PROJECT, not per row: a window is
     # far more rows than it is projects, and this runs on a paint path.
     colours: "dict[str, str]" = {}
@@ -257,7 +316,9 @@ def build_rows(
             )
         return colours[repo_root]
 
-    def session_row(session_id: str, collection: str, indent: int) -> "Row | None":
+    def session_row(
+        session_id: str, collection: str, indent: int, entry_key: str = ""
+    ) -> "Row | None":
         fact = facts.get(session_id)
         if fact is None or not fact.label:
             return None
@@ -266,6 +327,7 @@ def build_rows(
             ellipsize(fact.label, label_room),
             session_id=session_id,
             collection=collection,
+            entry_key=entry_key,
             marks=fact.marks,
             mounted=fact.mounted,
             project=colour_of(fact.repo_root),
@@ -277,52 +339,65 @@ def build_rows(
     def entry_rows(
         key: str, collection: str, indent: int
     ) -> "list[Row]":
-        """One pane group's lines: its ENTRY row when it holds more than
-        one tab, then a row per member.
+        """One pane group's lines: **its own row, always**, then a row per
+        tab when it has more than one and is not folded.
 
-        **Both, and that is the decision.** The spec left it open whether
-        an entry expands to its tabs or shows only an aggregate with a
-        count, and an aggregate ALONE would have cost the rail the
-        property v1.0.0 built it for -- that every session this window
-        knows about has a row of its own, reachable with one click. So the
-        members stay, and the entry row is added ABOVE them: the aggregate
-        is what a hidden tab's state needs to reach, and the members are
-        what a click needs to land on.
+        **The heading IS the group** (v1.5.0, option C -- the owner's
+        choice of the three docs/plans/rail-interaction.md put up). It
+        carries the group's colour, the aggregate over every member
+        including the tabs no pixel of which is on screen (Part 1b's
+        most-urgent-wins) and the count chip that says which member the
+        state came from; a click on it focuses the group and does NOT
+        move the active tab. The rows BELOW it are the group's tabs, each
+        carrying its own marks rather than the roll-up, because two rows
+        under one heading claiming the same state would be a lie.
 
-        Hidden at zero, like every other piece of chrome in this app: a
-        one-tab pane gets NO entry row, because an entry row over a single
-        member is the same sentence twice, and such a window renders
-        exactly as it did in v1.0.0."""
+        **A single-tab group grows no child row.** Hide at zero, the same
+        judgment every other piece of chrome in this app makes: one tab is
+        the heading's own subject, and a row repeating it is the same
+        sentence twice. Such a group is one line, exactly as it was in
+        v1.0.0 and v1.2.0 -- which is the overwhelmingly common window.
+
+        v1.2.0 drew this the other way round: the members always, and the
+        entry row only above two or more of them. The reversal is what
+        makes the rail able to REVEAL anything at all. A group's inactive
+        tab is the one genuinely hidden thing this window has, and until
+        the rail listed tabs UNDER the group that owns them, a click could
+        only move focus -- which is the defect the owner reported."""
         state = states.get(key)
         if state is None:
             return []
         entry = by_key[key]
-        out: "list[Row]" = []
-        if state.count > 1:
-            visible = facts.get(entry.active)
-            out.append(
-                Row(
-                    Row.ENTRY,
-                    ellipsize(
-                        (visible.label if visible else state.label),
-                        label_room,
-                    ),
-                    session_id=state.session_id,
-                    collection=collection,
-                    marks=state.marks,
-                    mounted=state.mounted,
-                    project=colour_of(state.repo_root),
-                    old=state.old,
-                    ctx_percentage=state.ctx_percentage,
-                    count=state.count,
-                    position=state.position,
-                    hidden=state.hidden,
-                    indent=indent,
-                )
+        expanded = key not in folded
+        visible = facts.get(entry.active)
+        out: "list[Row]" = [
+            Row(
+                Row.ENTRY,
+                ellipsize(
+                    (visible.label if visible else state.label), label_room
+                ),
+                # The member the STATE came from, so a fallback that can
+                # only reveal a session still lands on the one this row is
+                # reporting -- see SessionSidebar.GroupFocused.
+                session_id=state.session_id,
+                collection=collection,
+                entry_key=key,
+                expanded=expanded,
+                marks=state.marks,
+                mounted=state.mounted,
+                project=colour_of(state.repo_root),
+                old=state.old,
+                ctx_percentage=state.ctx_percentage,
+                count=state.count,
+                position=state.position,
+                hidden=state.hidden,
+                indent=indent,
             )
-        member_indent = indent + 1 if state.count > 1 else indent
+        ]
+        if state.count <= 1 or not expanded:
+            return out
         for session_id in entry.sessions:
-            row = session_row(session_id, collection, member_indent)
+            row = session_row(session_id, collection, indent + 1, key)
             if row is not None:
                 out.append(row)
         return out
@@ -439,7 +514,12 @@ class SidebarLine(Static):
         self.row = row
         self.set_class(row.kind == Row.HEADING, "-heading")
         self.set_class(row.kind in (Row.SESSION, Row.ENTRY), "-session")
-        self.set_class(row.kind == Row.ENTRY, "-entry")
+        # Muted against its members -- and therefore ONLY when it has
+        # members drawn under it. A single-tab group's heading is the
+        # whole of that group on the rail, and muting a line that
+        # summarises nothing but itself would dim the ordinary window's
+        # every row (see doxa/theme.tcss's ``.-entry``).
+        self.set_class(row.kind == Row.ENTRY and row.count > 1, "-entry")
         self.set_class(
             row.indent == 1 and row.kind != Row.HEADING, "-in-collection"
         )
@@ -453,6 +533,7 @@ class SidebarLine(Static):
         # grouping instead of competing with it. Grey stays reserved for
         # exactly one thing: the absence of a project colour.
         self.set_class(row.old, "-old")
+        self._write_heading_paint(row)
         self._write_project(previous, row)
         self._write_marks(row.marks)
         self.update(self._text())
@@ -486,6 +567,39 @@ class SidebarLine(Static):
         )
         self._write_marks(self.row.marks)
         self.update(self._text())
+
+    def _write_heading_paint(self, row: Row) -> None:
+        """A heading wears a BACKGROUND, and its text is black or white --
+        COMPUTED, never chosen.
+
+        :func:`doxa.triage.heading_paint` resolves the pair once per
+        palette name and keeps it, because this runs per heading per
+        refresh and a refresh runs on every tab lifecycle event: v1.2.0
+        measured re-deriving in the rail at +22% layout time, and a pow()
+        per row per paint is that mistake in a new place.
+
+        **Written INLINE and not as a class**, which is the one thing here
+        worth arguing about. The obvious alternative -- a generated rule
+        per palette name -- would have to out-rank doxa/theme.tcss's own
+        ``.-project-<name>`` colour, and the moment it did it would also
+        out-rank the four STATUS rules that are supposed to win on a row
+        carrying both. A heading never carries a mark (``build_rows``
+        builds it with none), so the conflict cannot arise here and
+        nowhere else gets an inline colour: the three-channel design
+        (identity / state / age) survives intact, and only the surface
+        that has no state to show is painted from Python.
+
+        Cleared on every non-heading row rather than left behind: a line is
+        REUSED in place, so a heading that becomes a session row must lose
+        the paint or it would carry a project background into a row whose
+        colour means something else."""
+        if row.kind != Row.HEADING:
+            self.styles.clear_rule("background")
+            self.styles.clear_rule("color")
+            return
+        background, text = triage_mod.heading_paint(row.project)
+        self.styles.background = background
+        self.styles.color = text
 
     def _write_project(self, previous: "Row | None", row: Row) -> None:
         """Paint this line's PROJECT -- identity, one class, resolved by
@@ -539,23 +653,74 @@ class SidebarLine(Static):
             count=row.count, position=row.position, hidden=row.hidden
         ).count_chip()
         tail = f" {NOT_OPEN}" if not row.mounted else ""
+        if self.folds():
+            caret = FOLD_OPEN if row.expanded else FOLD_SHUT
+            return f"{caret} {glyphs} {row.text}{chip}{tail}"
         return f"{glyphs} {row.text}{chip}{tail}"
 
+    def folds(self) -> bool:
+        """Does this line wear a fold caret? A pane group with more than
+        one tab, and nothing else.
+
+        Hide at zero, the same rule the count chip follows one field over:
+        a single-tab group has nothing under it to fold, and a caret that
+        promised otherwise would be chrome that lies. A collection heading
+        answers False here because its caret is written by the HEADING
+        branch of :meth:`_text` and its whole row is the hit area."""
+        row = self.row
+        return bool(
+            row is not None and row.kind == Row.ENTRY and row.count > 1
+        )
+
+    def fold_zone(self) -> int:
+        """The column, relative to this line's own box, past which a click
+        means FOCUS rather than FOLD. ``0`` when the row has no caret.
+
+        Derived from the row's indent and doxa/theme.tcss's padding, so a
+        change to either moves the hit area with the glyph rather than
+        leaving the two a level apart."""
+        if not self.folds():
+            return 0
+        return INDENT_COLUMNS * min(self.row.indent, MAX_INDENT) + FOLD_COLUMNS
+
     def on_click(self, event: events.Click) -> None:
-        """A click on an ENTRY row goes to the member its state came
-        from, not to the pane's visible tab: the row is reporting that
-        member, its count chip names it, and a click that landed anywhere
-        else would be the rail pointing at one thing and delivering
-        another."""
+        """Three gestures, told apart by what was clicked -- see this
+        module's docstring for why they are three and not one.
+
+        A GROUP heading focuses its group and leaves the active tab where
+        it is; its caret folds it instead. A TAB row switches that group's
+        active tab and focuses it, which is the reveal the rail could not
+        perform before v1.5.0. A COLLECTION heading folds, as it has since
+        v1.0.0, on a click anywhere along it -- it has no second gesture to
+        make room for.
+
+        v1.2.0 sent an entry row's click to the member its state came
+        from, which under option C would be the summary silently switching
+        the tab underneath the user. The state's member is still carried
+        (``session_id``) and is still where the FALLBACK lands, for the
+        entry that is not a live group at all -- a detached or ended
+        session, which :func:`doxa.triage.entries_for` gives an entry of
+        its own."""
         event.stop()
-        if self.row.kind == Row.HEADING:
-            if self.row.collection:
+        row = self.row
+        if row is None:
+            return
+        if row.kind == Row.HEADING:
+            if row.collection:
                 self.post_message(SessionSidebar.CollectionToggled(
-                    self.row.collection
+                    row.collection
                 ))
             return
-        if self.row.session_id:
-            self.post_message(SessionSidebar.Revealed(self.row.session_id))
+        if row.kind == Row.ENTRY:
+            if self.folds() and event.x < self.fold_zone():
+                self.post_message(SessionSidebar.GroupToggled(row.entry_key))
+                return
+            self.post_message(
+                SessionSidebar.GroupFocused(row.entry_key, row.session_id)
+            )
+            return
+        if row.session_id:
+            self.post_message(SessionSidebar.Revealed(row.session_id))
 
 
 class SessionSidebar(VerticalScroll):
@@ -585,6 +750,30 @@ class SessionSidebar(VerticalScroll):
         def __init__(self, name: str) -> None:
             super().__init__()
             self.name = name
+
+    class GroupFocused(Message):
+        """A pane group's heading was clicked: put the keyboard in that
+        group and leave its active tab exactly where it is.
+
+        ``session_id`` is the member the heading's STATE came from, and it
+        is what the app falls back to when ``entry_key`` names no group in
+        this window -- a detached or ended session, which gets an entry of
+        its own (:func:`doxa.triage.entries_for`) and is the one case
+        where "focus the group" has no group to mean."""
+
+        def __init__(self, entry_key: str, session_id: str = "") -> None:
+            super().__init__()
+            self.entry_key = entry_key
+            self.session_id = session_id
+
+    class GroupToggled(Message):
+        """A pane group's caret was clicked: show or hide its tab rows.
+        Persisted per group, beside the collapsed flag a collection has
+        (:mod:`doxa.tabsets`)."""
+
+        def __init__(self, entry_key: str) -> None:
+            super().__init__()
+            self.entry_key = entry_key
 
     #: Width and the hidden default live HERE rather than in
     #: doxa/theme.tcss because both are DERIVED numbers
@@ -626,6 +815,9 @@ class SessionSidebar(VerticalScroll):
         #: in-place path is still the one that runs per blink.
         self._aggregated: "set[str]" = set()
         self._rows: "list[Row]" = []
+        #: Is the right edge being dragged right now? See
+        #: :meth:`on_mouse_down`.
+        self._dragging = False
 
     # -- contents -----------------------------------------------------
 
@@ -676,16 +868,32 @@ class SessionSidebar(VerticalScroll):
                 line.styles.display = "block"
             else:
                 line.styles.display = "none"
+        # A SINGLE-TAB group's heading is indexed too, and that is
+        # load-bearing rather than tidy: since v1.5.0 the ordinary window
+        # -- one group, one tab -- renders as an ENTRY row and no session
+        # row at all, so keying this map on Row.SESSION alone would make
+        # ``apply_marks`` miss every row on it and fall back to a full
+        # rebuild per blink of the needs-input timer. Only the single-tab
+        # case: with two tabs the row's state is an AGGREGATE, a mark
+        # moving can change which member wins, and that is a structure
+        # change ``_aggregated`` below routes to the rebuild on purpose.
         self._lines = {
             row.session_id: self._pool[index]
             for index, row in enumerate(rows)
-            if row.kind == Row.SESSION and row.session_id
+            if row.session_id and (
+                row.kind == Row.SESSION
+                or (row.kind == Row.ENTRY and row.count <= 1)
+            )
         }
         self._aggregated = set()
         depth = -1
         for row in rows:
             if row.kind == Row.ENTRY:
-                depth = row.indent
+                # A single-tab group's heading is not an aggregate of
+                # anything -- it IS its one member -- so it opens no
+                # aggregated span. Indexed for the in-place mark path
+                # above instead.
+                depth = row.indent if row.count > 1 else -1
                 continue
             if row.kind == Row.SESSION and depth >= 0 and row.indent > depth:
                 self._aggregated.add(row.session_id)
@@ -730,6 +938,77 @@ class SessionSidebar(VerticalScroll):
 
     def set_width(self, width: int) -> None:
         self.styles.width = layout_mod.clamp_sidebar_width(width)
+
+    # -- the moveable divider (v1.5.0) --------------------------------
+    #
+    # The rail's right EDGE is a divider like the two this app already
+    # has, and it behaves like them: draggable with the mouse AND
+    # adjustable from the keyboard (``Alt+Shift+←/→``, ``/sidebar width``).
+    # A mouse-only control is unreachable for a keyboard user, which this
+    # project has ruled on twice -- and the keyboard half is also the half
+    # that still works over ssh into a terminal with no mouse reporting.
+    #
+    # The WIDGET only reports the gesture. Whether a width is allowed is
+    # doxa.layout.sidebar_refusal's answer and DoxaApp's to ask, exactly as
+    # it is when the rail OPENS: a drag that could produce an arrangement
+    # F3 refuses to create would be a second, looser floor.
+
+    #: How wide the grab area on the right edge is. One column, which is
+    #: the border the stylesheet already draws there -- a wider zone would
+    #: be a strip of rail that swallows clicks meant for the rows under it.
+    GRAB_COLUMNS = 1
+
+    class WidthDragged(Message):
+        """The right edge was dragged to this width in columns.
+
+        ``final`` is the mouse BUTTON coming up. Every move posts a
+        message so the rail tracks the pointer, and only the last of them
+        is written to the settings registry: a config write per mouse-move
+        event would be a file rewrite per cell crossed."""
+
+        def __init__(self, width: int, final: bool = False) -> None:
+            super().__init__()
+            self.width = int(width)
+            self.final = bool(final)
+
+    def _edge_grabbed(self, x: int) -> bool:
+        """Is this x on the divider rather than on a row?"""
+        width = int(self.outer_size.width or 0)
+        return width > 0 and x >= width - self.GRAB_COLUMNS
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        if not self._edge_grabbed(event.x):
+            return
+        event.stop()
+        self._dragging = True
+        # Capture, so the pointer can leave the rail -- which it must,
+        # because dragging the edge RIGHT means the pointer is over the
+        # panes for the whole gesture.
+        with contextlib.suppress(Exception):
+            self.capture_mouse()
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        if not self._dragging:
+            return
+        event.stop()
+        self.post_message(self.WidthDragged(self._width_at(event)))
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        if not self._dragging:
+            return
+        event.stop()
+        self._dragging = False
+        with contextlib.suppress(Exception):
+            self.release_mouse()
+        self.post_message(self.WidthDragged(self._width_at(event), final=True))
+
+    def _width_at(self, event: "events.MouseEvent") -> int:
+        """The width the rail would have if its edge were under the
+        pointer. Screen coordinates, not widget-relative: the widget's own
+        box is the thing being resized, so measuring inside it would make
+        the number chase itself."""
+        left = int(self.region.x)
+        return max(1, int(event.screen_x) - left + 1)
 
     def on_show(self) -> None:
         """The rail just got geometry. Ask the app to rebuild it: rows

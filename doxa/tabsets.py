@@ -276,6 +276,15 @@ class TabSetRecord:
     #: before v1.0.0, and the absence of the key is once again the whole
     #: migration.
     collections: "tuple[collections_mod.Collection, ...]" = ()
+    #: The pane groups the user FOLDED SHUT on the rail (v1.5.0), by
+    #: :attr:`doxa.ui.split.PaneGroup.entry_key`. The fifth key, at the
+    #: top level beside ``collections`` and for the same reason: it is
+    #: about the RAIL, not about geometry -- the group is on screen at its
+    #: usual size either way, and only its tab rows are hidden. Written
+    #: only when non-empty, so absence of the key is once again the whole
+    #: migration, and a key naming a group this window no longer has is
+    #: simply never asked about.
+    rail_folded: "tuple[str, ...]" = ()
 
 
 @dataclass(frozen=True)
@@ -315,6 +324,11 @@ class ResolvedRestore:
     #: is about the record being self-consistent, and belongs to whoever
     #: reads it, exactly once.
     collections: "tuple[collections_mod.Collection, ...]" = ()
+    #: The rail's folded pane groups (v1.5.0), straight off the record.
+    #: Not cross-checked against anything: an entry key names a widget in
+    #: a window that no longer exists, so the only honest check is the one
+    #: the rail itself makes -- does a group with this key exist NOW.
+    rail_folded: "tuple[str, ...]" = ()
 
     def ordered(self) -> "list[tuple[TabRecord, peers_mod.PeerInfo | None]]":
         """Every surviving tab in SAVED ORDER, live and archived
@@ -397,6 +411,7 @@ def save(
     trees: "list | None" = None,
     groups: "Any" = None,
     collections: "Any" = None,
+    rail_folded: "Any" = None,
 ) -> None:
     """Atomic write (tmp + ``os.replace``), 0600. Never raises: a
     persistence failure costs the user a future restore, never the
@@ -462,6 +477,14 @@ def save(
         written = collections_mod.to_json(pruned)
         if written:
             payload["collections"] = written
+    if rail_folded:
+        # v1.5.0. A plain list of strings and nothing richer: the ONLY
+        # thing a fold is, is the absence of the default, and the default
+        # is expanded. Written only when non-empty for the same reason
+        # ``Collection.collapsed`` is written only when true.
+        folded = sorted({str(key) for key in rail_folded if str(key or "")})
+        if folded:
+            payload["rail_folded"] = folded
     path = _file_for(scope_key)
     try:
         tmp = path.with_suffix(".json.tmp")
@@ -734,6 +757,26 @@ def load(scope_key: str) -> "TabSetRecord | None":
             collections_mod.from_json(data.get("collections")),
             [t.session_id for t in tabs],
         ),
+        rail_folded=_rail_folded(data),
+    )
+
+
+def _rail_folded(data: Any) -> "tuple[str, ...]":
+    """The rail's folded pane groups, out of whatever the file holds.
+
+    Never raises and never validates beyond "it is a non-empty string":
+    an entry key is a widget id in a window that is gone, so there is
+    nothing here to check it against. A hand-edited record with a number
+    in the list costs the user one fold, never a session -- the posture
+    :func:`doxa.layout.normalise` takes on a corrupt weight list."""
+    raw = data.get("rail_folded") if isinstance(data, dict) else None
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(
+        dict.fromkeys(
+            str(key).strip() for key in raw
+            if isinstance(key, str) and str(key).strip()
+        )
     )
 
 
@@ -790,6 +833,7 @@ def resolve(scope_key: str) -> "ResolvedRestore | None":
         # keeps a row for it either way -- a rail that could only list
         # what the tree already holds would be a second tab strip.
         collections=record.collections,
+        rail_folded=record.rail_folded,
     )
 
 

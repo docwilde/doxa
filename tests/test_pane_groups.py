@@ -518,6 +518,14 @@ async def test_a_narrow_group_renders_its_strip_compactly(tmp_path):
         await pilot.pause()
         assert await app.split_active_pane(layout.ROW) is None
         assert await _wait(pilot, lambda: len(app.groups()) == 2)
+        # THE RAIL IS SHUT, said rather than assumed. This test is about
+        # what a group's WIDTH does to its tab strip, and the rail takes
+        # columns off the tree -- two sessions in a 100-column window is
+        # exactly the case its `auto` mode opens for (v1.5.0 stopped it
+        # double-counting its own columns and flapping shut again), so
+        # leaving it to the heuristic would make the number below depend
+        # on chrome this test is not measuring.
+        assert app.set_sidebar(False) is None
         await pilot.pause()
         for group in app.groups():
             assert group.region.width == 50

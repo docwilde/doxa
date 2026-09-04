@@ -1,9 +1,14 @@
 # The rail as a switcher — hover, headings, a moveable divider, and what a click reveals
 
-Status: **approved, not implemented**. Item 3 resolved by the owner
-2026-09-04: **option C** — entries stay pane groups, and their rows expand
-to the group's tabs. Splits and the live-diff layout are kept; A and B are
-closed.
+Status: **shipped in v1.5.0** (2026-09-04). Item 3 was resolved by the
+owner as **option C** — entries stay pane groups, and their rows expand to
+the group's tabs; splits and the live-diff layout are kept, A and B are
+closed. All four items and the collapsed-rail check are implemented and
+pinned by `tests/test_rail_interaction.py`. Two numbers in this document
+were stale when it was written and are corrected in the code: the width
+floors are `SIDEBAR_MIN_WIDTH` 20 / `SIDEBAR_MAX_WIDTH` 39 /
+`SIDEBAR_MIN_COLS` 54 as of v1.2.0, and C's re-measurement moves them to
+22 / 41 / 56.
 
 ## What provoked it
 

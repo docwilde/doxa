@@ -39,6 +39,7 @@ tests/test_triage.py asserts exactly that with every style removed.
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -197,6 +198,134 @@ PALETTE: "tuple[str, ...]" = ("teal", "sky", "rose", "clay", "moss", "mauve")
 #: looks like rather than a colour that means something. Age does NOT
 #: recolour a row -- see :data:`OLD_STATES`.
 NO_COLOUR = ""
+
+#: The hex behind each palette NAME, and the one place it is written.
+#:
+#: v1.2.0 put these in doxa/theme.tcss and kept only the name in Python,
+#: which was right for the one thing the rail did with a colour then:
+#: paint a row's text and let the stylesheet resolve it. v1.5.0 needs a
+#: SECOND thing derived from the same colour -- the heading's text has to
+#: be black or white depending on which contrasts against it
+#: (:func:`contrast_text`) -- and a derivation is exactly what a
+#: stylesheet cannot hold. That is the same argument
+#: :attr:`doxa.ui.sidebar.SessionSidebar.DEFAULT_CSS` already makes for
+#: the rail's width.
+#:
+#: So the hexes live here and doxa/theme.tcss keeps its
+#: ``.-project-<name>`` rules as the paint they always were.
+#: tests/test_rail_interaction.py parses that file and asserts the two
+#: agree, so a theme change that moves a hue moves this table with it
+#: rather than stranding a contrast computed against a colour nobody
+#: paints any more.
+PALETTE_HEX: "dict[str, str]" = {
+    "teal": "#5FB3B3",
+    "sky": "#6FA8DC",
+    "rose": "#D98D9E",
+    "clay": "#C98A5B",
+    "moss": "#9BB167",
+    "mauve": "#B58FC9",
+}
+
+#: The background a heading with NO project colour wears -- a collection's
+#: heading and the ungrouped one. A heading is highlighted because it is a
+#: heading, not because it belongs to a project, so the two cases differ in
+#: hue and not in whether there is a hue at all. Its text is computed by
+#: the same function as every other heading's.
+HEADING_HEX = "#3A3429"
+
+#: The two answers :func:`contrast_text` can give. TRUE black and TRUE
+#: white, not the theme's off-white: this is the one place in the app that
+#: is maximising a contrast ratio rather than matching a palette, and any
+#: step toward the background is a step away from the number being
+#: maximised.
+CONTRAST_DARK = "#000000"
+CONTRAST_LIGHT = "#FFFFFF"
+
+#: The luminance at which black and white contrast EQUALLY WELL, and the
+#: reason this is a computed constant rather than the 0.5 everyone reaches
+#: for first.
+#:
+#: WCAG contrast is ``(lighter + 0.05) / (darker + 0.05)``. Against white
+#: (L=1) a background of luminance L scores ``1.05 / (L + 0.05)``; against
+#: black (L=0) it scores ``(L + 0.05) / 0.05``. They are equal when
+#: ``(L + 0.05)^2 == 0.0525``, i.e. at ``sqrt(0.0525) - 0.05`` ≈ 0.1791 --
+#: nowhere near 0.5, because luminance is not lightness. A 0.5 threshold
+#: puts white text on every mid-tone in :data:`PALETTE_HEX` and every one
+#: of them would be the worse of the two choices.
+CONTRAST_PIVOT = math.sqrt(0.0525) - 0.05
+
+
+def _srgb_channel(value: int) -> float:
+    """One 0-255 channel, linearised per WCAG 2.x (sRGB transfer curve)."""
+    channel = max(0.0, min(1.0, value / 255.0))
+    if channel <= 0.03928:
+        return channel / 12.92
+    return ((channel + 0.055) / 1.055) ** 2.4
+
+
+def relative_luminance(colour: Any) -> float:
+    """WCAG relative luminance of a ``#rrggbb`` (or ``#rgb``) colour.
+
+    Garbage answers 0.0 rather than raising -- :func:`colour_for`'s own
+    posture, and chrome never costs a session. 0.0 is black, which lands
+    :func:`contrast_text` on white: the safe half of a wrong answer,
+    because a colour nobody can parse is far more likely to be a dark
+    terminal default than a light one."""
+    text = str(colour or "").strip().lstrip("#")
+    if len(text) == 3:
+        text = "".join(char * 2 for char in text)
+    if len(text) != 6:
+        return 0.0
+    try:
+        red, green, blue = (int(text[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return 0.0
+    return (
+        0.2126 * _srgb_channel(red)
+        + 0.7152 * _srgb_channel(green)
+        + 0.0722 * _srgb_channel(blue)
+    )
+
+
+def contrast_text(colour: Any) -> str:
+    """Black or white on that background -- COMPUTED, never chosen.
+
+    :data:`CONTRAST_DARK` above :data:`CONTRAST_PIVOT`,
+    :data:`CONTRAST_LIGHT` at or below it, which is by construction
+    whichever of the two scores the higher WCAG contrast ratio. This is
+    the same rule :func:`colour_for` follows one level up -- the palette
+    is stored by NAME so a theme change re-resolves it -- applied to the
+    thing a name alone cannot answer. A hardcoded ``black`` over a
+    mid-tone project colour is that rule broken, not an approximation of
+    it."""
+    return (
+        CONTRAST_DARK if relative_luminance(colour) > CONTRAST_PIVOT
+        else CONTRAST_LIGHT
+    )
+
+
+#: palette name -> (background, text). Resolved ONCE per colour and kept,
+#: because the rail asks per heading per refresh and a refresh runs on
+#: every tab lifecycle event: v1.2.0 measured re-deriving in the rail at
+#: +22% layout time, and a pow() per row per paint is that same mistake in
+#: a new place. Bounded by :data:`PALETTE` plus one, so it cannot grow.
+_HEADING_PAINT: "dict[str, tuple[str, str]]" = {}
+
+
+def heading_paint(name: Any) -> "tuple[str, str]":
+    """The (background, text) one heading wears, cached by palette NAME.
+
+    :data:`NO_COLOUR` -- a collection's heading, the ungrouped one -- gets
+    :data:`HEADING_HEX`, and an unknown name gets it too rather than
+    raising: a heading with a colour nobody recognises is still a
+    heading."""
+    key = str(name or "")
+    paint = _HEADING_PAINT.get(key)
+    if paint is None:
+        background = PALETTE_HEX.get(key, HEADING_HEX)
+        paint = (background, contrast_text(background))
+        _HEADING_PAINT[key] = paint
+    return paint
 
 
 def colour_for(

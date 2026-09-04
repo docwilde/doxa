@@ -885,6 +885,9 @@ class PaneCommandsMixin:
         raw = args.strip().lower()
         rail = self.app.sidebar()
         showing = bool(rail is not None and rail.styles.display != "none")
+        if raw.startswith("width") or raw in ("wider", "narrower"):
+            await self._sidebar_width(raw, showing)
+            return
         if raw in ("on", "show", "open"):
             want = True
         elif raw in ("off", "hide", "close"):
@@ -903,9 +906,60 @@ class PaneCommandsMixin:
         rail = self.app.sidebar()
         now = bool(rail is not None and rail.styles.display != "none")
         await self._system(
-            "session sidebar shown — click a row to go to that session, a "
-            "heading to fold it (F3, /collection)"
+            "session sidebar shown — click a tab row to switch that "
+            "group to it, a group's caret to fold it, its edge to resize "
+            "(F3, /collection)"
             if now else "session sidebar hidden (F3, /sidebar)"
+        )
+
+    async def _sidebar_width(self, raw: str, showing: bool) -> None:
+        """``/sidebar width <n>``, ``/sidebar wider``, ``/sidebar
+        narrower`` -- the rail divider's always-works door.
+
+        The edge is draggable with the mouse and moves under
+        ``Alt+Shift+←/→``; this is the third way, and it is the one that
+        survives a terminal with no mouse reporting AND no way to send a
+        modified arrow. Same posture ``/pane <n>`` takes beside
+        ``Ctrl+<digit>``.
+
+        A refusal is shown rather than clamped away: the rail refuses a
+        width that would squeeze a pane below its floor, and that is the
+        same refusal opening it hits (:meth:`doxa.app.DoxaApp.
+        sidebar_refusal`), so the user gets the reason instead of a
+        divider that quietly stops."""
+        if not showing:
+            await self._system(
+                "the session sidebar is hidden — /sidebar on shows it first"
+            )
+            return
+        current = self.app.sidebar_width()
+        if raw == "wider":
+            want = current + 1
+        elif raw == "narrower":
+            want = current - 1
+        else:
+            rest = raw[len("width"):].strip()
+            if not rest:
+                await self._system(
+                    f"the session sidebar is {current} columns wide — "
+                    f"/sidebar width <n> sets it, /sidebar wider and "
+                    f"/sidebar narrower step it (Alt+Shift+←/→)"
+                )
+                return
+            try:
+                want = int(rest)
+            except ValueError:
+                await self._system(
+                    f"/sidebar width wants a number of columns, not {rest!r}"
+                )
+                return
+        note = self.app.resize_sidebar(want)
+        if note:
+            await self._system(note)
+            return
+        await self._system(
+            f"session sidebar {self.app.sidebar_width()} columns wide "
+            f"(Alt+Shift+←/→, or drag its right edge)"
         )
 
     async def _cmd_collection(self, args: str) -> None:

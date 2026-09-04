@@ -131,38 +131,51 @@ GROUP_STRIP_MIN_COLS = 17
 # with. A threshold defined next to the constant it is derived from is a
 # threshold the next reader can check.
 
-#: What a rail row costs BESIDE its label: one column of left padding,
-#: two of collection indent (a member sits under its heading, and that
-#: indent is what makes membership visible at all), THREE for the state
-#: glyphs and their space, one of right padding.
+#: What a rail row costs BESIDE its label, measured on the DEEPEST row the
+#: rail can draw: one column of left padding, FOUR of indent, THREE for the
+#: state glyphs and their space, one of right padding.
 #:
-#: Three, not two, since v1.2.0: the rail now spends
+#: Three glyph columns, not two, since v1.2.0: the rail spends
 #: :data:`doxa.triage.GLYPH_COLUMNS` (2) on Part 0's two independent
 #: states -- the mark's own glyph and the ctx glyph -- plus the single
-#: space that separates them from the label. That is one more column than
-#: v1.0.0's single mark glyph, and it is the whole width cost of
-#: collection triage. Everything derived from this constant below moves
-#: with it, which is why they are derived and why
-#: tests/test_sidebar.py re-derives them rather than restating numbers.
-#: Stated as a literal and not as an import of
+#: space that separates them from the label.
+#:
+#: **Four indent columns, not two, since v1.5.0, and RE-MEASURED rather
+#: than assumed.** Through v1.2.0 this counted one level of indent because
+#: that is all the rail had when the number was first written; v1.2.0 then
+#: added a third level (heading → pane entry → tab) whose members render at
+#: ``padding-left: 4`` in doxa/theme.tcss, and this constant was not moved
+#: with it -- so the deepest rows were ellipsized two columns too
+#: generously and could overrun the rail. v1.5.0's option C makes that the
+#: ORDINARY row rather than the rare one, and prices it:
+#:
+#: * a tab row under a pane entry under a heading -- ``1 + 4 + 2 + 1 + 1``;
+#: * a pane entry's own row, one level shallower but carrying the fold
+#:   caret and its space that the entry rows gained with expansion --
+#:   ``1 + 2 + 2 + 2 + 1 + 1``.
+#:
+#: Both are 9, so 9 is the floor every derived width below is measured
+#: from. Everything derived from this constant moves with it, which is why
+#: they are derived and why tests re-derive them rather than restating
+#: numbers. Stated as a literal and not as an import of
 #: :data:`doxa.triage.GLYPH_COLUMNS`: this module has NO imports at all
 #: and that is the property that lets every other module read it,
 #: doxa.triage included. tests/test_sidebar.py re-derives the sum from
 #: that constant instead, so moving the glyph budget still moves the
 #: number rather than leaving a stale one documented as measured.
-SIDEBAR_CHROME = 7
+SIDEBAR_CHROME = 9
 
 #: The narrowest rail DOXA will draw. MEASURED, not chosen, and measured
 #: against exactly what :data:`GROUP_STRIP_MIN_COLS` is measured against
 #: one field up: a row's label may not fall below the floor the tab strip
 #: itself keeps a label legible at, ``TAB_MODEL_MIN (4) + " · " (3) +
 #: TAB_REPO_MIN (6)`` = 13 from :mod:`doxa.ui.labels`. Plus
-#: :data:`SIDEBAR_CHROME` that is 19.
+#: :data:`SIDEBAR_CHROME` that is 22.
 #:
 #: Not a width the rail ever opens AT -- it is the floor a configured
 #: width is clamped to, and the width :data:`SIDEBAR_MIN_COLS` prices the
 #: refusal in.
-SIDEBAR_MIN_WIDTH = 20
+SIDEBAR_MIN_WIDTH = 22
 
 #: The rail's default width, and the value ``sidebar_width`` in the
 #: settings registry defaults to.
@@ -181,18 +194,20 @@ SIDEBAR_MIN_WIDTH = 20
 #: :data:`doxa.ui.labels.CTX_ABSOLUTE_MIN_COLS`) with ONE vertical split
 #: -- the ordinary two-group window -- the rail may cost at most
 #: ``100 - 2 * GROUP_STRIP_COMPACT_COLS`` = 32 columns before pushing a
-#: group onto the compact rung. 23 is inside that budget with 9 columns
+#: group onto the compact rung. 25 is inside that budget with 7 columns
 #: to spare, so opening the rail on the reference terminal does not
-#: silently degrade both tab strips as a side effect.
-SIDEBAR_WIDTH = 23
+#: silently degrade both tab strips as a side effect. Two of those nine
+#: columns were spent in v1.5.0, when :data:`SIDEBAR_CHROME` was
+#: re-measured against the rail's deepest row -- see that constant.
+SIDEBAR_WIDTH = 25
 
 #: ...and the widest. ``SIDEBAR_CHROME + TAB_LABEL_MAX`` (32): the width
-#: at which a row shows the whole label the tab strip caps at (39). Wider buys
+#: at which a row shows the whole label the tab strip caps at (41). Wider buys
 #: nothing that exists to be shown, and costs the tree columns for it.
-SIDEBAR_MAX_WIDTH = 39
+SIDEBAR_MAX_WIDTH = 41
 
 #: The absolute floor on TOTAL window width, below which the rail cannot
-#: open at any width: the narrowest rail plus the narrowest pane. 54.
+#: open at any width: the narrowest rail plus the narrowest pane. 56.
 #: Stated as a constant because it is the number a refusal message and a
 #: test both want, and derived rather than typed so raising either half
 #: moves it.

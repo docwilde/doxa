@@ -422,17 +422,21 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="sidebar_width", env="DOXA_SIDEBAR_WIDTH",
         label="session sidebar: width", category="Appearance",
-        kind="number", default="23",
+        kind="number", default="25",
         help="Columns the session rail occupies "
-             "(doxa.layout.SIDEBAR_WIDTH; clamped to 20–39)",
-        note="Clamped, never rejected: 23 is derived as the rail's own "
-             "chrome (7 columns) plus half the tab-label cap the strip "
-             "writes at, 20 is the width below which a row cannot show "
-             "the label floor the tab strip keeps legible, and 39 is the "
+             "(doxa.layout.SIDEBAR_WIDTH; clamped to 22–41). Drag the "
+             "rail's right edge, or Alt+Shift+←/→, to change it",
+        note="Clamped, never rejected: 25 is derived as the rail's own "
+             "chrome (9 columns) plus half the tab-label cap the strip "
+             "writes at, 22 is the width below which a row cannot show "
+             "the label floor the tab strip keeps legible, and 41 is the "
              "width at which the whole capped label fits and wider buys "
-             "nothing. All three moved by one in v1.2.0: the rail spends "
-             "a second glyph column on collection triage's two status "
-             "states (doxa.triage.GLYPH_COLUMNS).",
+             "nothing. All three moved by two in v1.5.0: "
+             "doxa.layout.SIDEBAR_CHROME was re-measured against the "
+             "rail's DEEPEST row -- a tab row under a pane entry under a "
+             "heading -- which v1.2.0 added without re-pricing. A drag "
+             "and the keys write this row, and both refuse at the same "
+             "floor opening the rail refuses at.",
     ),
     Setting(
         key="clock_show", env="DOXA_CLOCK_SHOW", label="clock: show",

@@ -113,9 +113,19 @@ def test_unknown_context_is_not_below_the_threshold_and_earns_no_glyph():
             "k": _facts("known", ctx_percentage=0.0, repo_root="/p"),
         }),
     )
-    by_label = {row.text: row for row in rows if row.kind == Row.SESSION}
+    by_label = {row.text: row for row in rows if row.kind in NAMES_A_SESSION}
     assert by_label["unknown"].ctx_percentage is None
     assert by_label["known"].ctx_percentage == 0.0
+
+
+#: Rows that NAME a session, as opposed to a heading over several.
+#:
+#: Under option C (v1.5.0) a pane GROUP's row IS that group's heading, so
+#: the single-tab groups this file is written against -- the ordinary
+#: window -- are ``Row.ENTRY`` rather than ``Row.SESSION``. One line
+#: either way, and every claim below is about what that line SAYS, which
+#: did not move.
+NAMES_A_SESSION = (Row.SESSION, Row.ENTRY)
 
 
 def test_the_two_glyphs_come_from_codepoint_classes_that_already_ship():
@@ -171,7 +181,12 @@ def test_two_states_get_two_columns_and_a_session_can_be_in_both():
 def test_the_glyph_columns_are_what_the_rail_width_is_priced_against():
     """The one column this feature costs the rail is DERIVED, not typed
     twice -- moving the glyph budget moves the width."""
-    assert layout.SIDEBAR_CHROME == 1 + 2 + triage_mod.GLYPH_COLUMNS + 1 + 1
+    from doxa.ui import sidebar as sidebar_mod
+
+    deepest = sidebar_mod.INDENT_COLUMNS * sidebar_mod.MAX_INDENT
+    assert layout.SIDEBAR_CHROME == (
+        1 + deepest + triage_mod.GLYPH_COLUMNS + 1 + 1
+    )
 
 
 # -- Part 1: colour keyed to the PROJECT -------------------------------
@@ -218,7 +233,7 @@ def test_a_session_outside_a_repo_has_no_project_and_therefore_no_colour():
             "b": _facts("beta", repo_root=""),
         }),
     )
-    by_label = {row.text: row for row in rows if row.kind == Row.SESSION}
+    by_label = {row.text: row for row in rows if row.kind in NAMES_A_SESSION}
     assert by_label["alpha"].project in triage_mod.PALETTE
     assert by_label["beta"].project == triage_mod.NO_COLOUR
     assert LOOSE_HEADING in [row.text for row in rows if row.kind == Row.HEADING]
@@ -279,7 +294,7 @@ def test_a_colour_collision_costs_redundancy_and_never_meaning():
     }
     # Same colour, two groups -- and no row of one is filed under the
     # other, which is the thing a collision must never cause.
-    assert [row.text for row in rows if row.kind == Row.SESSION] == [
+    assert [row.text for row in rows if row.kind in NAMES_A_SESSION] == [
         "alpha", "beta"
     ]
 
@@ -335,7 +350,7 @@ def test_age_dims_and_never_recolours_so_an_old_row_keeps_its_project():
             ),
         }),
     )
-    by_label = {row.text: row for row in rows if row.kind == Row.SESSION}
+    by_label = {row.text: row for row in rows if row.kind in NAMES_A_SESSION}
     assert by_label["alive"].old is False
     assert by_label["over"].old is True
     # The old row is the SAME project colour as the live one, faded.
@@ -365,12 +380,16 @@ def test_an_entry_is_a_pane_and_says_how_many_tabs_it_holds():
         ],
     )
     entries = [row for row in rows if row.kind == Row.ENTRY]
-    assert len(entries) == 1
-    assert entries[0].count == 3
+    # Two GROUPS, two headings -- and only the three-tab one grows child
+    # rows under it (v1.5.0, option C: hide at zero, so a one-tab group's
+    # heading is the whole of that group on the rail).
+    assert [(row.text, row.count) for row in entries] == [
+        ("alpha", 3), ("solo", 1),
+    ]
     assert "·3" in SidebarLine(entries[0])._text()
-    # ...and the one-tab pane has no entry row of its own.
+    assert SidebarLine(entries[1])._text().strip() == "solo"
     assert [row.text for row in rows if row.kind == Row.SESSION] == [
-        "alpha", "beta", "gamma", "solo",
+        "alpha", "beta", "gamma",
     ]
 
 
@@ -470,14 +489,18 @@ def test_a_manual_collection_claims_SESSIONS_and_a_project_claims_the_rest():
         (Row.HEADING, "work"),
         (Row.SESSION, "alpha"),
         (Row.HEADING, "one"),
-        (Row.SESSION, "beta"),
+        (Row.ENTRY, "beta"),
         (Row.HEADING, "two"),
-        (Row.SESSION, "gamma"),
+        (Row.ENTRY, "gamma"),
     ]
-    # ...and no entry row: with alpha claimed, the pane has one member
-    # left, and an entry row over a single member is a sentence said
-    # twice.
-    assert not [row for row in rows if row.kind == Row.ENTRY]
+    # ...and no entry row grows a CHILD: with alpha claimed, the pane has
+    # one member left, and a row repeating a group's only tab is the same
+    # sentence twice (v1.5.0, option C -- the group's own heading is that
+    # one line, and there is nothing under it).
+    assert all(
+        row.count <= 1 for row in rows if row.kind == Row.ENTRY
+    )
+    assert not [row for row in rows if row.kind == Row.SESSION and row.entry_key]
 
 
 def test_one_project_and_no_collections_is_still_a_flat_list():
@@ -564,7 +587,7 @@ def test_the_rail_reads_with_every_colour_stripped():
     # 2. Every session's status is legible from characters alone.
     text_of = {
         row.session_id: line for row, line in zip(rows, painted)
-        if row.kind == Row.SESSION
+        if row.kind in NAMES_A_SESSION
     }
     assert triage_mod.GLYPH_NEEDS_INPUT in text_of["wait"]
     assert triage_mod.GLYPH_CTX in text_of["full"]
@@ -575,7 +598,10 @@ def test_the_rail_reads_with_every_colour_stripped():
     assert triage_mod.GLYPH_NEEDS_INPUT not in text_of["unknown"]
 
     # 3. The pane hiding a waiting tab says so, in digits.
-    entry = next(line for row, line in zip(rows, painted) if row.kind == Row.ENTRY)
+    entry = next(
+        line for row, line in zip(rows, painted)
+        if row.kind == Row.ENTRY and row.count > 1
+    )
     assert triage_mod.GLYPH_NEEDS_INPUT in entry
     assert "·2/2" in entry
     assert "on screen" in entry
