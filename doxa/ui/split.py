@@ -356,7 +356,34 @@ class PaneGroup(Container):
     (:data:`~doxa.layout.GROUP_STRIP_COMPACT_COLS`,
     :data:`~doxa.layout.GROUP_STRIP_MIN_COLS`) -- full, compact, gone --
     the same hide-at-zero discipline the context chip and the side-by-side
-    diff already follow."""
+    diff already follow.
+
+    **And when it has nothing to say.** A strip listing ONE tab is a row
+    of chrome that answers a question nobody asked: there is nothing to
+    switch to, nothing to compare against, and the tab's own label is
+    already in this pane's status bar (:class:`doxa.ui.statusline.
+    StatusBar`, which is per-pane and always visible). So a group holding
+    exactly one tab wears ``-strip-hidden`` too, and gives the row to the
+    transcript -- the same judgment the group-number overlay makes about a
+    single-group window and the rail makes about a single session
+    (:meth:`doxa.app.DoxaApp.sidebar_has_something_to_say`).
+
+    The two conditions COMPOSE rather than fight, and that is why they are
+    written as one OR in :meth:`_apply_strip_width_for` rather than as two
+    writers of the same class: a 16-column group holding three tabs and a
+    120-column group holding one are both hidden, and the second tab
+    arriving in the narrow one must not un-hide it. ``-strip-compact``
+    stays purely width-driven -- it says how a SHOWN strip renders, so it
+    is already correct the instant the count half stops hiding it.
+
+    No attention signal is lost to this. A pane that is visible but not
+    focused paints its own marks on ITSELF since v0.89.0
+    (``SessionPane.-done-unseen`` / ``-attention`` / ``-staged`` in
+    ``doxa/theme.tcss``, written by the same
+    :meth:`doxa.session.pane.SessionPane._set_tab_class` door that writes
+    the tab header), and the status bar carries ``needs input`` and the
+    staged count as chips of its own -- see the note on
+    :meth:`refresh_strip`."""
 
     DEFAULT_CSS = """
     PaneGroup {
@@ -379,6 +406,16 @@ class PaneGroup(Container):
         # it is what an unrestored window has always passed.
         self._active_id = active_id or ""
         self._tabbed_id = tabbed_id or next_tabbed_id()
+        #: Last width this group was actually MEASURED at, 0 until it has
+        #: been painted once. Remembered because the two halves of
+        #: ``-strip-hidden`` are asked at different moments: the tab count
+        #: moves on a DOM event, which can land while the group has no
+        #: geometry at all (Textual 5.3.0 gives a hidden or unpainted
+        #: widget none -- the readiness rule ``SessionPane.
+        #: scroll_transcript_to_end`` is written against). Recomputing the
+        #: OR from a width of 0 would read as "not narrow" and silently
+        #: un-hide a strip the rungs had hidden.
+        self._strip_width = 0
 
     def compose(self) -> ComposeResult:
         with TabbedContent(
@@ -477,25 +514,96 @@ class PaneGroup(Container):
     def on_mount(self) -> None:
         self._apply_strip_width()
 
+    def holds_one_tab(self) -> bool:
+        """Is there nothing in this group's strip worth painting a strip
+        for? True at one tab and at none.
+
+        None counts because a group mid-teardown (its last tab's
+        ``remove_pane`` awaited, the group's own ``remove`` not yet) would
+        otherwise flash its strip back on for the frames before it goes --
+        and "hide" is the right answer for an empty strip on every reading
+        of the rule.
+
+        Counted through :meth:`tabs`, never through
+        ``TabbedContent.tab_count``, so a half-removed tab is excluded by
+        exactly the ``parent`` check ``_close_group_tab`` already relies
+        on -- one derivation of "how many tabs are in here", not two."""
+        return len(self.tabs()) <= 1
+
+    def refresh_strip(self) -> bool:
+        """Re-apply the strip's visibility after this group's TAB COUNT
+        moved, and report whether the strip actually appeared or vanished.
+
+        The return value is the whole reason this is not just a private
+        call: showing the strip takes a row away from the transcript
+        underneath, and a pane sitting at the tail of its transcript would
+        be left one row short of it -- so
+        :meth:`doxa.app.DoxaApp.refresh_strip_visibility` re-pins the tail
+        of the panes that were AT it, and only when something moved.
+
+        Called from the app, through two doors that between them see
+        every count this window can reach
+        (:meth:`doxa.app.DoxaApp.refresh_strip_visibility` names both),
+        and never from a Textual message handled here: ``TabbedContent``
+        posts nothing on ``add_pane``/``remove_pane`` that MEANS "the
+        count changed" -- ``TabActivated`` is about an activation, which a
+        removal of an inactive tab is not -- so a group that listened for
+        itself would be right most of the time and wrong exactly where a
+        tab closes in the background."""
+        before = self.has_class("-strip-hidden")
+        self._apply_strip_width()
+        return self.has_class("-strip-hidden") != before
+
+    def strip_should_hide(self) -> bool:
+        """What ``-strip-hidden`` OUGHT to be right now, asked without
+        writing anything.
+
+        The cheap half of :meth:`refresh_strip`, so a caller that runs on
+        a frequent event can find out for free that nothing is going to
+        move and skip the expensive part -- which is not this class's at
+        all: it is
+        :meth:`doxa.app.DoxaApp._pinned_transcripts`, a query per leaf,
+        and it is only worth paying when a strip is actually about to
+        appear or vanish."""
+        narrow = 0 < self._strip_width < layout_mod.GROUP_STRIP_MIN_COLS
+        return narrow or self.holds_one_tab()
+
     def _apply_strip_width(self) -> None:
         width = self.size.width
-        if width <= 0:
-            return  # not painted yet: no measurement to act on
-        self._apply_strip_width_for(width)
+        if width > 0:
+            self._strip_width = width
+        # NOT an early return at width 0 any more: the tab-count half of
+        # the answer is a DOM fact and is true whether or not this group
+        # has been painted, and it is at mount -- before the first resize
+        # -- that a restored single-tab group has to come back already
+        # hidden rather than flashing a strip for a frame.
+        self._apply_strip_width_for(self._strip_width)
 
     def _apply_strip_width_for(self, width: int) -> None:
-        """Put this group on its width rung. Two classes, three states, so
-        the stylesheet holds the rendering and this holds only the
-        threshold. Split from :meth:`_apply_strip_width` so the rungs can
-        be measured against stated widths rather than against whatever
-        rectangle a test terminal happens to produce."""
-        self.set_class(width < layout_mod.GROUP_STRIP_MIN_COLS, "-strip-hidden")
-        self.set_class(
-            layout_mod.GROUP_STRIP_MIN_COLS
-            <= width
-            < layout_mod.GROUP_STRIP_COMPACT_COLS,
-            "-strip-compact",
-        )
+        """Put this group on its width rung AND on its tab-count rung. Two
+        classes, and the stylesheet still holds all the rendering. Split
+        from :meth:`_apply_strip_width` so the rungs can be measured
+        against stated widths rather than against whatever rectangle a
+        test terminal happens to produce.
+
+        ``width`` of 0 means "never measured": the rungs are left exactly
+        where they were and only the count is applied. That is the same
+        readiness test ``SessionPane.scroll_transcript_to_end`` uses --
+        ``size`` is the thing that is honest about a widget with no
+        geometry, and a stale ``container_size`` is not."""
+        if width > 0:
+            self._strip_width = width
+            self.set_class(
+                layout_mod.GROUP_STRIP_MIN_COLS
+                <= width
+                < layout_mod.GROUP_STRIP_COMPACT_COLS,
+                "-strip-compact",
+            )
+        # ONE writer of ``-strip-hidden``, over ONE statement of the OR
+        # (:meth:`strip_should_hide`). Two writers of one boolean class is
+        # the drift this file keeps warning about: whichever ran last would
+        # clear the other's reason.
+        self.set_class(self.strip_should_hide(), "-strip-hidden")
 
     # -- the number overlay -------------------------------------------
 

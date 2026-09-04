@@ -269,6 +269,15 @@ PaneTab {
    renders none: hide-at-zero, the same discipline the context chip and the
    side-by-side diff already follow.
 
+   `-strip-hidden` carries a SECOND reason as of this release, and the OR
+   between them is computed in one place (PaneGroup._apply_strip_width_for,
+   never here): a group holding exactly ONE tab hides its strip too, at any
+   width, because a strip listing one tab offers nothing to switch to and
+   the pane's own always-visible status bar already names the session.
+   `-strip-compact` stays purely width-driven -- it says how a SHOWN strip
+   renders -- so the two do not have to be untangled when a second tab
+   arrives in a narrow group.
+
    `display: none` on the strip rather than `height: 0`, because a hidden
    strip must give its row back to the transcript -- a zero-height widget
    that still reserves its gutter is the "invisible button" defect in its

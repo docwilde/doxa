@@ -1161,6 +1161,130 @@ class DoxaApp(App):
         except ScreenStackError:
             return []
 
+    @staticmethod
+    def _pinned_transcripts(group: "PaneGroup") -> "list[Any]":
+        """Every leaf in ``group`` -- across ALL of its tabs, not only the
+        one it is showing -- whose transcript is standing on its newest
+        block.
+
+        Duck-typed twice over, the way every walker in this file is: a
+        group holds ``PaneTab``s beside ``ArchivedSessionTab``s and
+        subagent transcripts, and only the first has ``leaves()``, only a
+        ``SessionPane`` has ``transcript_at_end()``. Anything that answers
+        neither has no tail to keep."""
+        pinned: "list[Any]" = []
+        for tab in group.tabs():
+            leaves = getattr(tab, "leaves", None)
+            if not callable(leaves):
+                continue
+            for leaf in leaves():
+                at_end = getattr(leaf, "transcript_at_end", None)
+                if callable(at_end) and at_end():
+                    pinned.append(leaf)
+        return pinned
+
+    def refresh_strip_visibility(self) -> None:
+        """Put every group's tab strip where its TAB COUNT now says it
+        belongs, and keep the transcripts underneath from jumping.
+
+        A strip appearing takes a row away from the pane below it, and a
+        transcript that was pinned to its newest block would be left one
+        row short of it -- the same "the scroll was lost, not the output"
+        defect ``SessionPane.scroll_transcript_to_end`` exists for, in its
+        layout form. So the panes that were AT the tail are asked FIRST
+        (afterwards the question is unanswerable -- they are one row off
+        either way, and a pane the user had deliberately scrolled up in
+        must not be dragged to the bottom), and re-pinned only when a
+        strip actually moved. A group whose visibility did not change
+        pays nothing.
+
+        Every group, not just the one that gained or lost a tab: moving a
+        tab between groups (:meth:`move_tab_to_group`) changes two counts
+        at once, and closing the last tab of a group removes a third
+        thing. One loop over a handful of widgets, on a tab lifecycle
+        event, is cheaper than being wrong about which group to visit.
+
+        Every TAB's leaves, not just the group's visible one: opening a
+        second tab ACTIVATES it, so the pane that is about to lose a row
+        is already in the background by the time this runs. Its
+        ``#block-list`` still answers for where it was standing (see
+        ``SessionPane.transcript_at_end``), and ``scroll_transcript_to_end``
+        leaves ``_tail_pending`` behind for its next Show rather than
+        scrolling a box that is not on screen.
+
+        TWO doors reach this, and neither alone is complete:
+        :meth:`_persist_tabset`, which every tab a restart would bring
+        back passes through, and
+        :meth:`_strip_visibility_on_tab_activated`, which catches the
+        tabs it does not -- a subagent transcript tab is opened and closed
+        without persisting anything. A removal that leaves the active tab
+        alone posts no activation; a transcript tab writes no record; the
+        two together have no gap between them.
+        """
+        for group in self.groups():
+            # The cheap question first. This runs on every tab ACTIVATION
+            # as well as every tab lifecycle event, and a tab switch moves
+            # no strip at all -- so a group that is already where it
+            # belongs never pays for the per-leaf scan below.
+            pinned = (
+                self._pinned_transcripts(group)
+                if group.strip_should_hide() != group.has_class("-strip-hidden")
+                else ()
+            )
+            if not group.refresh_strip():
+                continue
+            for surface in pinned:
+                # AFTER the refresh, never during it. The strip has only
+                # just been told to appear; the row it takes has not been
+                # taken yet, so a re-pin issued here would compute the tail
+                # against the geometry the pane is about to lose and land
+                # one row short of the one it is about to get -- measured,
+                # and the exact defect this loop exists to prevent. One
+                # frame later the pane is either painted (and is scrolled)
+                # or is a background tab (and gets ``_tail_pending`` for
+                # its next Show), which is the fork
+                # ``scroll_transcript_to_end`` already owns.
+                with contextlib.suppress(Exception):
+                    self.call_after_refresh(surface.scroll_transcript_to_end)
+
+    @on(TabbedContent.TabActivated)
+    def _strip_visibility_on_tab_activated(
+        self, _event: TabbedContent.TabActivated
+    ) -> None:
+        """The second door onto :meth:`refresh_strip_visibility`, and the
+        reason it needs one.
+
+        :meth:`_persist_tabset` is this app's hook for "the tab set
+        changed", and it covers every tab a RESTART would bring back. It
+        does not cover the tabs a restart would not: a subagent transcript
+        tab (``SessionPane.open_transcript_tab``) is opened and closed
+        without persisting anything, deliberately -- it is a view of a
+        turn, not a session -- and it is still a second tab in its group,
+        which is the only thing the strip is asking about.
+
+        ``TabActivated`` is what those two paths do have in common: every
+        way this app adds a tab activates it, and closing the active one
+        activates whatever is left. It fires on ordinary tab SWITCHES too,
+        which move no strip at all -- and cost nothing, because
+        :meth:`~doxa.ui.split.PaneGroup.strip_should_hide` answers that for
+        free before anything is scanned.
+
+        Deliberately not the only door. A removal that leaves the active
+        tab alone posts nothing, and ``_persist_tabset`` is what catches
+        that -- neither hook is complete, and between them there is no gap
+        this app can reach.
+
+        AFTER the refresh, because of the order ``TabbedContent.
+        remove_pane`` works in: it takes the Tab out of the strip (which
+        is what posts this message, the removed one having been active)
+        and only then detaches the ``TabPane`` itself, so a count taken
+        synchronously here still sees the tab that is leaving and the
+        strip would stay up after its second-to-last tab closed. One frame
+        later the detach has landed and :meth:`~doxa.ui.split.PaneGroup.
+        tabs`'s own ``parent`` check agrees with it."""
+        with contextlib.suppress(Exception):
+            self.call_after_refresh(self.refresh_strip_visibility)
+
     def _group_order(self) -> "list[PaneGroup]":
         """Every VISIBLE group in READING order -- left to right, then top
         to bottom -- which is the order ``Ctrl+<digit>`` numbers them in and
@@ -2056,6 +2180,14 @@ class DoxaApp(App):
         that plain exclusion does not create: the pane stays mounted,
         exactly as unconditional ``App.action_quit`` already handled it
         pre-v0.85.0, and only what gets WRITTEN changes."""
+        # ABOVE the restore guard, and above the write itself: every tab
+        # lifecycle event passes through this method (see the docstring),
+        # which makes it the one honest hook for "some group's tab count
+        # moved" -- and a restore still in flight is precisely when a
+        # group is gaining the tabs that decide whether it shows a strip.
+        # Nothing here writes to disk, so the guard has nothing to protect
+        # against.
+        self.refresh_strip_visibility()
         if self._restore_pending > 0:
             return
         scope = peers_mod.main_repo_root_of(self.cwd) or self.cwd

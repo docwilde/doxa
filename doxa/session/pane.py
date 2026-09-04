@@ -879,6 +879,46 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         outlive the condition it is waiting for."""
         self.scroll_transcript_to_end()
 
+    def transcript_at_end(self) -> bool:
+        """Is this pane's transcript standing on its newest block, as of
+        the last layout it had?
+
+        Asked before something resizes the box the transcript lives in --
+        today exactly one thing does, a tab strip appearing above it when
+        its group gains a second tab
+        (:meth:`doxa.app.DoxaApp.refresh_strip_visibility`) -- so that a
+        PINNED transcript can be put back on its last line without also
+        dragging a user who had deliberately scrolled UP back down to it.
+        That is the only question separating those two cases, and it is
+        only answerable before the layout moves.
+
+        **As of the last layout, deliberately.** A background tab's
+        ``#block-list`` has ``size`` ``Size(0, 0)`` while its
+        ``container_size`` and ``virtual_size`` keep the values of the
+        last frame it was painted in (measured against Textual 5.3.0:
+        ``size.height`` 0, ``container_size.height`` still 17), so
+        ``max_scroll_y`` still describes where this transcript was
+        standing when the user last saw it. That staleness is a liability
+        in every other method here -- it is the whole reason
+        :meth:`scroll_transcript_to_end` exists -- and it is exactly the
+        right answer to THIS question, which is about the past. It also
+        has to be: opening a second tab ACTIVATES it, so the pane whose
+        row the new strip takes is already hidden by the time anything
+        gets to ask. ``scroll_transcript_to_end`` then leaves
+        ``_tail_pending`` behind for its next Show, which is the mechanism
+        that already exists for exactly this.
+
+        A pane whose transcript was never laid out reads 0 >= 0 and
+        answers True. That is not a wrong answer to act on: an empty
+        transcript pinned to its end is where a fresh pane wants to be."""
+        try:
+            block_list = self.query_one("#block-list", VerticalScroll)
+        except NoMatches:
+            return False
+        if not block_list.is_mounted:
+            return False
+        return block_list.scroll_offset.y >= block_list.max_scroll_y
+
     def scroll_transcript_to_end(
         self, block_list: "VerticalScroll | None" = None
     ) -> None:

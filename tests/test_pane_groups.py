@@ -35,6 +35,8 @@ from doxa import config as config_mod
 from doxa import layout
 from doxa import tabsets as tabsets_mod
 from doxa.app import DoxaApp, RestoreTabSpec
+from textual.widgets import TabPane
+
 from doxa.ui.split import GroupNumber, PaneGroup, PaneTab
 from tests.fakes import FakeEngine
 
@@ -508,11 +510,23 @@ def test_the_tab_strip_thresholds_are_the_measured_ones():
 
 
 @pytest.mark.asyncio
-async def test_a_narrow_group_renders_its_strip_compactly(tmp_path):
+async def test_a_narrow_group_renders_its_strip_compactly(tmp_path, monkeypatch):
     """Two tab strips is more chrome than one. Below the measured width a
     group compacts its strip; below the floor it drops it entirely -- and
     the row it gives back goes to the transcript, which is the difference
-    between hiding a widget and zeroing its height."""
+    between hiding a widget and zeroing its height.
+
+    A SECOND tab in each group, because as of v1.5.0 a strip is hidden at
+    one tab whatever the width, and a group showing no strip cannot
+    demonstrate anything about how WIDE a strip has to be. The count is
+    held at two so that this test is about width alone; the interaction
+    between the two rungs has a test of its own below.
+
+    The rail is pinned off for the same reason: a second session opens it
+    on the ``auto`` default, and a rail is columns this test is measuring
+    the absence of."""
+    monkeypatch.setenv("DOXA_SIDEBAR", "off")
+    config_mod.invalidate()
     app, _engines = _app(tmp_path)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
@@ -526,6 +540,22 @@ async def test_a_narrow_group_renders_its_strip_compactly(tmp_path):
         # leaving it to the heuristic would make the number below depend
         # on chrome this test is not measuring.
         assert app.set_sidebar(False) is None
+        await pilot.pause()
+        # The group the split just made owns the keyboard already, so it
+        # gets its second tab first -- asking for a DIFFERENT group before
+        # the split's own deferred focus has landed races it, and the
+        # split wins (Textual 5.3 defers ``Widget.focus``, the same thing
+        # ``_persist_tabset`` documents about ``active_pane``).
+        await app.action_new_tab()
+        assert await _wait(
+            pilot, lambda: sum(len(g.tabs()) for g in app.groups()) == 3
+        )
+        await pilot.pause()
+        other = app._group_order()[0]
+        app.action_focus_group(1)
+        assert await _wait(pilot, lambda: app.focused_group() is other)
+        await app.action_new_tab()
+        assert await _wait(pilot, lambda: len(other.tabs()) == 2)
         await pilot.pause()
         for group in app.groups():
             assert group.region.width == 50
@@ -543,6 +573,338 @@ async def test_a_narrow_group_renders_its_strip_compactly(tmp_path):
             group._apply_strip_width_for(width)
             assert group.has_class("-strip-compact") is compact, width
             assert group.has_class("-strip-hidden") is hidden, width
+
+
+# -- the strip hides at ONE tab ----------------------------------------
+#
+# *"I think we should only show the tab top bar, when another tab is
+# actually openend, otherwise it just eats space"* -- reported by the
+# operator from live use. A strip listing one tab offers nothing to switch
+# to, and the row it spends is a row of transcript.
+
+
+def _strip_rows(group) -> int:
+    """How many rows this group's tab strip actually occupies on screen.
+
+    The PAINTED rectangle, never the class: the mechanism is `display:
+    none` in the stylesheet, and a class-only assertion would keep passing
+    for a rule that had stopped applying -- the v0.28.0 pairing this suite
+    is written to."""
+    return group.tabbed.query_one("ContentTabs").region.height
+
+
+def _transcript_rows(pane) -> int:
+    return pane.query_one("#block-list").region.height
+
+
+@pytest.mark.asyncio
+async def test_a_group_holding_one_tab_shows_no_strip(tmp_path):
+    """The floor of the whole feature, and the row is really given back:
+    the transcript underneath is exactly as many rows TALLER as the strip
+    is when it comes back. Hiding a widget, not zeroing its height."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        group = app.groups()[0]
+        assert len(group.tabs()) == 1
+        assert group.has_class("-strip-hidden")
+        assert _strip_rows(group) == 0
+        alone = _transcript_rows(app.active_pane)
+
+        await app.action_new_tab()
+        assert await _wait(pilot, lambda: len(group.tabs()) == 2)
+        await pilot.pause()
+        assert not group.has_class("-strip-hidden")
+        rows = _strip_rows(group)
+        assert rows > 0
+        assert _transcript_rows(app.active_pane) == alone - rows
+
+
+@pytest.mark.asyncio
+async def test_closing_back_to_one_tab_hides_the_strip_again(tmp_path):
+    """It is a live condition, not a boot-time one -- and it has to run
+    BOTH ways, because a strip that appeared and never left would be worse
+    than one that never hid."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        group = app.groups()[0]
+        await app.action_new_tab()
+        assert await _wait(pilot, lambda: len(group.tabs()) == 2)
+        await pilot.pause()
+        assert not group.has_class("-strip-hidden")
+        assert _strip_rows(group) > 0
+
+        await app.action_close_tab()
+        assert await _wait(pilot, lambda: len(group.tabs()) == 1)
+        await pilot.pause()
+        assert group.has_class("-strip-hidden")
+        assert _strip_rows(group) == 0
+
+
+@pytest.mark.asyncio
+async def test_each_group_answers_for_its_own_strip(tmp_path):
+    """Per GROUP, independently -- the same thing the pane-groups
+    inversion says about everything else a group owns. One region of a
+    split can be showing a strip while the region beside it is not."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        assert await app.split_active_pane(layout.ROW) is None
+        assert await _wait(pilot, lambda: len(app.groups()) == 2)
+        await pilot.pause()
+        left, right = app._group_order()
+        assert left.has_class("-strip-hidden")
+        assert right.has_class("-strip-hidden")
+
+        # A second tab in the LEFT group only.
+        app._focus_tab(next(iter(left.surfaces())))
+        await pilot.pause()
+        await app.action_new_tab()
+        assert await _wait(pilot, lambda: len(left.tabs()) == 2)
+        await pilot.pause()
+
+        assert not left.has_class("-strip-hidden")
+        assert _strip_rows(left) > 0
+        assert right.has_class("-strip-hidden"), "its neighbour's tab is not its own"
+        assert _strip_rows(right) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_tab_that_persists_nothing_still_moves_the_strip(tmp_path):
+    """Not every tab is a session.
+
+    A subagent transcript tab (``SessionPane.open_transcript_tab``) is
+    opened and closed without writing to the persisted record at all --
+    deliberately: it is a view of one turn, not a session that a restart
+    should bring back. It is still a SECOND TAB in its group, which is the
+    only thing the strip is asking about, so the tab-count hook cannot
+    live only on ``_persist_tabset``.
+
+    Stood in for here by the primitive that path uses -- ``add_pane``
+    straight onto the group's own strip, with nothing persisting anywhere
+    near it -- so this fails if the ``TabActivated`` door is removed and
+    keeps passing whatever the subagent tracker does with its own
+    plumbing."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        group = app.groups()[0]
+        assert group.has_class("-strip-hidden")
+
+        await group.tabbed.add_pane(TabPane("view", id="bare-tab"))
+        group.tabbed.active = "bare-tab"
+        assert await _wait(pilot, lambda: not group.has_class("-strip-hidden"))
+        await pilot.pause()
+        assert _strip_rows(group) > 0
+
+        await group.tabbed.remove_pane("bare-tab")
+        assert await _wait(pilot, lambda: group.has_class("-strip-hidden"))
+        await pilot.pause()
+        assert _strip_rows(group) == 0
+
+
+@pytest.mark.asyncio
+async def test_the_width_rung_and_the_tab_count_compose(tmp_path):
+    """The two reasons to hide a strip are ONE class, so the OR has to be
+    computed in one place. What this pins is that neither reason can clear
+    the other's answer: a narrow group with two tabs stays hidden, a wide
+    group with one tab is hidden, and a second tab arriving in the narrow
+    one does NOT un-hide it (it un-hides only when it is also wide
+    enough). ``-strip-compact`` stays width-only throughout -- it says how
+    a SHOWN strip renders, so it is already right when the count stops
+    hiding."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        group = app.groups()[0]
+        narrow = layout.GROUP_STRIP_MIN_COLS - 1
+        wide = layout.GROUP_STRIP_COMPACT_COLS + 1
+        cramped = layout.GROUP_STRIP_COMPACT_COLS - 1
+
+        # One tab: hidden at every width, and the compact rung is still
+        # tracked underneath so it is correct the moment the count lets go.
+        for width in (narrow, cramped, wide):
+            group._apply_strip_width_for(width)
+            assert group.has_class("-strip-hidden"), width
+        group._apply_strip_width_for(cramped)
+        assert group.has_class("-strip-compact")
+
+        await app.action_new_tab()
+        assert await _wait(pilot, lambda: len(group.tabs()) == 2)
+        await pilot.pause()
+
+        group._apply_strip_width_for(narrow)
+        assert group.has_class("-strip-hidden"), "two tabs do not fit in 16 cols"
+        group._apply_strip_width_for(cramped)
+        assert not group.has_class("-strip-hidden")
+        assert group.has_class("-strip-compact")
+        group._apply_strip_width_for(wide)
+        assert not group.has_class("-strip-hidden")
+        assert not group.has_class("-strip-compact")
+
+        # And back to one tab at a WIDE measurement: the count hides it
+        # again without the width rung having moved at all.
+        await app.action_close_tab()
+        assert await _wait(pilot, lambda: len(group.tabs()) == 1)
+        await pilot.pause()
+        group._apply_strip_width_for(wide)
+        assert group.has_class("-strip-hidden")
+        assert not group.has_class("-strip-compact")
+
+
+@pytest.mark.asyncio
+async def test_a_restore_brings_each_group_back_with_the_right_strip(tmp_path):
+    """No new field in the tabset record, and none needed: the tab COUNT
+    already implies the answer, so a restored two-tab group comes back
+    showing its strip and a restored one-tab group comes back without
+    one."""
+    where = tmp_path / "scope"
+    where.mkdir()
+    tree = layout.Split(
+        layout.ROW,
+        (
+            layout.Group((layout.Leaf("sid-1"), layout.Leaf("sid-2")), 1),
+            layout.Group((layout.Leaf("sid-3"),), 0),
+        ),
+    )
+    specs = [
+        RestoreTabSpec(f"sid-{n}", _factory(f"sid-{n}", str(where)))
+        for n in (1, 2, 3)
+    ]
+    app = DoxaApp(
+        cwd=str(where), restore_tabs=specs, restore_groups=tree,
+        restore_active_id="sid-2",
+    )
+    async with app.run_test(size=BIG) as pilot:
+        assert await _wait(pilot, lambda: len(app.panes()) == 3)
+        await pilot.pause()
+        two, one = app._group_order()
+        assert [len(g.tabs()) for g in (two, one)] == [2, 1]
+        assert not two.has_class("-strip-hidden")
+        assert _strip_rows(two) > 0
+        assert one.has_class("-strip-hidden")
+        assert _strip_rows(one) == 0
+
+
+@pytest.mark.asyncio
+async def test_hiding_the_strip_keeps_every_attention_signal(tmp_path):
+    """The one real cost, and why it is already paid.
+
+    A single-tab group that is not focused used to say "this one needs
+    you" through its strip glyph. It has not stopped saying it: the marks
+    are written by ONE door (``SessionPane._set_tab_class``) onto BOTH the
+    tab header and the PANE, and the pane's own copy has been painted as a
+    left border since v0.89.0 for exactly this case -- visible, but not
+    focused. On top of that the always-visible status bar carries the
+    needs-input state as a chip of its own.
+
+    So this asserts the two carriers that do NOT depend on the strip, on a
+    group whose strip is genuinely gone."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        assert await app.split_active_pane(layout.ROW) is None
+        assert await _wait(pilot, lambda: len(app.groups()) == 2)
+        await pilot.pause()
+        left, right = app._group_order()
+        unattended = next(iter(left.surfaces()))
+        # One tab in this group, so its strip is gone.
+        assert left.has_class("-strip-hidden")
+        assert _strip_rows(left) == 0
+
+        # The keyboard is somewhere else entirely.
+        app._focus_tab(next(iter(right.surfaces())))
+        await pilot.pause()
+
+        unattended._set_tab_class("-done-unseen", True)
+        unattended.set_needs_input(True)
+        unattended.set_staged(True)
+        await pilot.pause()
+
+        # 1. On the PANE itself, as the classes theme.tcss paints a left
+        #    border for -- not on a tab header nobody can see.
+        assert unattended.has_class("-done-unseen")
+        assert unattended.has_class("-staged")
+        assert unattended.has_mark("-done-unseen")
+        assert unattended.needs_input is True
+        assert unattended.region.width > 0, "and it is painted"
+
+        # 2. And needs-input is a status-bar chip, on a bar that is
+        #    per-pane and never hidden.
+        assert any(
+            "needs input" in chip.key for chip in unattended._status_chips()
+        )
+        bar = unattended.query_one("#status-bar")
+        assert bar.region.height > 0
+
+        unattended.set_needs_input(False)
+
+
+@pytest.mark.asyncio
+async def test_the_strip_appearing_does_not_cost_the_transcript_its_tail(tmp_path):
+    """The transition, which is the part that could go wrong quietly.
+
+    A strip appearing takes a row from the transcript below it, and a
+    transcript pinned to its newest block would be left one row short of
+    it -- the scroll lost, not the output, which is the defect
+    ``scroll_transcript_to_end`` already exists for. The pane that was AT
+    the tail is put back on it; the pane that was NOT is left where the
+    user put it."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        group = app.groups()[0]
+        pane = app.active_pane
+        block_list = pane.query_one("#block-list")
+        for n in range(60):
+            await pane._system(f"line {n}")
+        await pilot.pause()
+        assert block_list.max_scroll_y > 0, "there is a scroll to lose"
+        assert pane.transcript_at_end()
+
+        await app.action_new_tab()
+        assert await _wait(pilot, lambda: len(group.tabs()) == 2)
+        await pilot.pause()
+        assert _strip_rows(group) > 0
+
+        # A settle loop, not a bare pause: the re-pin is deliberately
+        # deferred past the frame that moves the layout, and the pane it
+        # lands on is a background tab, so it is spent on the NEXT Show.
+        app._focus_tab(pane)
+        assert await _wait(pilot, lambda: pane.transcript_at_end()), (
+            "still on its newest block"
+        )
+        assert block_list.scroll_offset.y == block_list.max_scroll_y
+
+
+@pytest.mark.asyncio
+async def test_the_strip_does_not_drag_a_scrolled_up_pane_to_the_bottom(tmp_path):
+    """The other half of the same rule, and the reason "was it pinned" is
+    asked BEFORE the layout moves rather than "scroll everything to the
+    end afterwards": a user who has deliberately scrolled up to read
+    something is reading it, and a strip appearing must not throw them at
+    the newest block."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        group = app.groups()[0]
+        pane = app.active_pane
+        block_list = pane.query_one("#block-list")
+        for n in range(60):
+            await pane._system(f"line {n}")
+        await pilot.pause()
+        block_list.scroll_to(y=0, animate=False)
+        await pilot.pause()
+        assert not pane.transcript_at_end()
+
+        await app.action_new_tab()
+        assert await _wait(pilot, lambda: len(group.tabs()) == 2)
+        await pilot.pause()
+        app._focus_tab(pane)
+        for _ in range(6):
+            await pilot.pause()
+        assert block_list.scroll_offset.y == 0, "left where the user put it"
 
 
 # -- persistence: three eras, three or more of each ---------------------
