@@ -4,6 +4,46 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.4.0 — 2026-09-04
+
+**A DOXA session can be driven by Codex.** The session seam has a name and a
+second engine behind it. `docs/plans/engine-providers.md`.
+
+- New **`doxa/engines.py`** — the `Engine`/`EngineProvider` Protocols and an
+  explicit registry. `doxa --engine codex`, or the `engine` setting.
+- New **`doxa/codex.py`** — `codex exec --json` mapped onto `EngineEvent`.
+  One process per turn, resuming its own thread; the prompt rides stdin.
+- **The check the spec owed itself passed**: `EngineClient` satisfies
+  `Engine` unchanged, and so does `SessionEngine`.
+
+**The Protocol is the measured intersection, not a wish.**
+
+- **`stop` is not on both sides** — `SessionEngine` never had it. It is the
+  daemon's verb, and the pane already reaches it through `getattr`.
+- **`lore_write_state`/`belief_action_state`** are sync on one side and
+  async on the other; no one signature is honest about both.
+- **The belief PICKERS** are lore_core queries that merely live on
+  `SessionEngine`. Reported as `lore_pickers`, not faked with empty lists.
+
+**`supports()` is honest and every surface obeys it.** Codex reports tokens
+and no window, so:
+
+- **the ctx chip is absent, not `ctx —`** — that paint means "not measured
+  yet"; here the truth is "never". `/context` says so, `/usage` keeps tokens.
+- **the cost chip is absent** — `$0.0000` is the claim a session was free,
+  and nothing in the stream made it. `/usage` prints "not reported".
+- **no permission-mode chip or picker** — Codex's posture is a sandbox
+  policy. `/mode` names the reason rather than listing six dead rows.
+
+**`codex mcp add` works — and DOXA still cannot use it.** Verified live: the
+tool was offered and called, with `default_tools_approval_mode = "approve"`
+(the default auto-cancels). But a server carrying DOXA's operators is a
+process outside `ToolGate` — no refusal, no two-strikes, no `tool_disabled`
+— so `mcp_tools` is False and the session says so.
+
+**Not covered**: cross-engine spawn, a Codex daemon (a Codex session runs
+in-process, so Ctrl+Q ends it), and the LORE review at finalize.
+
 ## 1.3.1 — 2026-09-04
 
 **Fix `tests/test_tab_labels.py`, which failed 6 of 10 runs on main** with no
@@ -25,6 +65,7 @@ passed only when the repaint happened to land in that frame.
   `generated_name`), that order is kept.
 - **10 runs, 10 green**, against the 6-of-10-failing baseline. No product
   code changed.
+
 
 ## 1.3.0 — 2026-09-03
 
