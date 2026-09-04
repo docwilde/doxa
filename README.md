@@ -183,7 +183,17 @@ uv run doxa attach   # reattach by session id / title prefix
 uv run doxa stop     # finalize now (LORE review + index), daemon exits
 uv run doxa doctor   # read-only health checks, no TUI: pass/fail + fix per check
 uv run doxa launcher install      # XDG start-menu entry + icons
+uv run doxa --engine codex        # drive the session with Codex instead
 ```
+
+**A second engine (v1.4.0).** `--engine codex` (or the `engine` setting)
+runs a DOXA session on the Codex CLI: its own tab, transcript, turns,
+status bar, peer rail and `/msg`. What Codex does not report, DOXA does
+not paint — no ctx chip (it counts tokens but never reports a window
+size), no cost chip, no permission-mode chip — and it does not carry
+DOXA's LORE tools. A Codex session runs inside the TUI, so `ctrl+q` ends
+it instead of detaching. `doxa.engines.get("codex").supports()` is the
+whole map.
 
 `launcher install` points at **the DOXA you ran it from**, by absolute
 path, and prints that path and version — so a shortcut that would start

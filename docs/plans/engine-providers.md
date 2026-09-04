@@ -1,8 +1,42 @@
 # Swappable engines — a session driven by something other than Claude Code
 
-Status: **draft for review**. Nothing implemented. Written before the work
-because the seam already exists informally, and naming it wrongly is more
-expensive than not naming it.
+Status: **shipped in v1.4.0**, with four corrections recorded below. The
+`Engine`/`EngineProvider` Protocols are `doxa/engines.py`; the second
+engine is `doxa/codex.py`.
+
+## What building it corrected in this spec
+
+1. **`stop` is not on both sides.** The paragraph below lists `stop` among
+   what `SessionEngine` and `EngineClient` already agree on. Measured:
+   `SessionEngine` has no `stop` at all -- it is `EngineClient`'s
+   "finalize the daemon NOW" verb, and `PaneRuntimeMixin.stop` already
+   reaches it through `getattr`, falling back to `finalize()`. A Protocol
+   containing it would have been written against `EngineClient`'s
+   implementation rather than the seam -- the mistake the check below
+   exists to catch, in the mirror image. It is out of the Protocol.
+2. **The check passed.** `EngineClient` satisfies `Engine` **unchanged**,
+   and so does `SessionEngine`. What the measurement changed was the
+   Protocol's CONTENTS, not either class: besides `stop`,
+   `lore_write_state` and `belief_action_state` are sync on one side and
+   async on the other, so no one signature is honest about both.
+3. **`codex mcp add` works, and DOXA still cannot use it.** Verified live
+   against a throwaway one-tool stdio server: Codex ran `initialize` and
+   `tools/list`, the model chose the tool, and the result came back --
+   with `mcp_servers.<name>.default_tools_approval_mode = "approve"`; on
+   the default (and on `auto`/`writes`) the call is auto-cancelled with
+   `user cancelled MCP tool call`. But reaching DOXA's operators needs a
+   server PROCESS outside DOXA, and therefore outside `ToolGate`: no
+   `can_use_tool` refusal, no two-strikes disable, no `tool_disabled`
+   event. That is the second projection this spec put out of scope, and
+   the reason is now measured rather than assumed. `supports().mcp_tools`
+   is False and the session says so.
+4. **The LORE pickers are not on the seam either.** `list_beliefs`,
+   `list_pending` and the approve/outcome writers are lore_core queries
+   with no engine in them, but they live on `SessionEngine`. A second
+   engine inherits the belief COUNT (one SELECT, so a Codex tab shows the
+   real number) and not the pickers. Reported as `supports().lore_pickers`
+   rather than papered over with empty lists. Un-coupling it is its own
+   piece of work.
 
 ## What provoked it
 
