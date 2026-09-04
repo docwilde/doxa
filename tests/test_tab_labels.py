@@ -209,7 +209,7 @@ async def test_a_model_switch_moves_the_label(monkeypatch, tmp_path):
         assert _tab_label(app, pane).startswith("Sonnet")
 
         await pane._cmd_model("haiku")
-        await pilot.pause()
+        assert await _settled(pilot, app, pane)
         assert _tab_label(app, pane) == "Haiku@myrepo:trunk"
 
 
@@ -231,8 +231,8 @@ async def test_the_label_follows_a_branch_switch_without_polling(
                        check=True)
         pane._git._mtime = None  # defeat same-second mtime granularity
         pane._refresh_status()   # what a finished turn or a peer event calls
-        await pilot.pause()
         assert pane.auto_label() == "Sonnet@myrepo:side"
+        assert await _settled(pilot, app, pane)
         assert _tab_label(app, pane) == "Sonnet@myrepo:side"
 
 
@@ -253,7 +253,7 @@ async def test_each_tab_carries_its_own_label(monkeypatch, tmp_path):
         assert await _settled(pilot, app, second)
 
         await second._cmd_model("opus")
-        await pilot.pause()
+        assert await _settled(pilot, app, second)
         assert _tab_label(app, first) == "Sonnet@myrepo:trunk"
         assert _tab_label(app, second) == "Opus@myrepo:trunk"
 
@@ -366,8 +366,8 @@ async def test_tab_label_follows_a_base_switch_without_rebuilding_gitline(
         assert result["ok"] is True
         pane._git._base_mtime = None  # defeat same-second mtime granularity
         pane._refresh_status()
-        await pilot.pause()
         assert pane.auto_label() == f"Sonnet@myrepo:develop{TAB_ISOLATION_MARKER}"
+        assert await _settled(pilot, app, pane)
         assert _tab_label(app, pane) == f"Sonnet@myrepo:develop{TAB_ISOLATION_MARKER}"
     config_mod.invalidate()
 
@@ -437,7 +437,7 @@ async def test_enter_commits_and_pins_the_name(monkeypatch, tmp_path):
         editor = await _rename_editor(app, pilot)
         editor.value = "graph importer"
         await pilot.press("enter")
-        await pilot.pause()
+        assert await _settled(pilot, app, pane)
 
         assert pane.custom_name == "graph importer"
         assert _tab_label(app, pane) == "graph importer"
@@ -495,13 +495,13 @@ async def test_an_emptied_name_returns_the_automatic_label(monkeypatch, tmp_path
         editor = await _rename_editor(app, pilot)
         editor.value = "   "
         await pilot.press("enter")
-        await pilot.pause()
+        assert await _settled(pilot, app, pane)
 
         assert pane.custom_name is None
         assert _tab_label(app, pane) == "Sonnet@myrepo:trunk"
         # ...and it tracks again, because un-pinning is what emptying means.
         await pane._cmd_model("opus")
-        await pilot.pause()
+        assert await _settled(pilot, app, pane)
         assert _tab_label(app, pane) == "Opus@myrepo:trunk"
 
 
@@ -514,11 +514,11 @@ async def test_rename_command_is_the_keyboard_door(monkeypatch, tmp_path):
         assert await _settled(pilot, app, pane)
 
         await pane._cmd_rename("importer work")
-        await pilot.pause()
+        assert await _settled(pilot, app, pane)
         assert _tab_label(app, pane) == "importer work"
 
         await pane._cmd_rename("")
-        await pilot.pause()
+        assert await _settled(pilot, app, pane)
         assert pane.custom_name is None
         assert _tab_label(app, pane) == "Sonnet@myrepo:trunk"
 
@@ -678,7 +678,7 @@ async def test_the_glyph_prepends_every_painted_tab_label(monkeypatch, tmp_path)
         assert _raw_tab_label(app, pane) == "✳ Sonnet@myrepo:trunk"
 
         pane.set_custom_name("pinned work")
-        await pilot.pause()
+        assert await _settled(pilot, app, pane)
         assert _raw_tab_label(app, pane) == "✳ pinned work"
         # ...while the rename field seeds from the plain identity, glyph
         # stripped -- renaming "✳ pinned work" back to itself must not
@@ -742,6 +742,7 @@ async def test_out_of_repo_tab_is_named_from_the_first_turn(
                 break
             await pilot.pause(0.02)
         assert pane.generated_name == "Flux capacitor rewire"
+        assert await _settled(pilot, app, pane)
         assert _tab_label(app, pane) == "Opus@Flux capacitor rewire"
         assert calls == ["help me rewire the flux capacitor"]
 
@@ -850,6 +851,7 @@ async def test_a_restored_session_reuses_its_cached_name(monkeypatch, tmp_path):
                 break
             await pilot.pause(0.02)
         assert pane.generated_name == "Earlier work here"
+        assert await _settled(pilot, app, pane)
         assert _tab_label(app, pane) == "Opus@Earlier work here"
         assert calls == []  # no call was spent
 
