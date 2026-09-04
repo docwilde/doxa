@@ -700,6 +700,42 @@ class DoxaApp(App):
             "Show or hide the session sidebar (/sidebar)",
             show=False, priority=True,
         ),
+        # -- the rail's own divider (v1.5.0) ---------------------------
+        #
+        # The edge between the rail and the panes is draggable with the
+        # mouse (SessionSidebar.on_mouse_down), and these are the other
+        # half of it: a mouse-only control is unreachable for a keyboard
+        # user, and this project has ruled on that twice.
+        #
+        # Alt+Shift+arrow, and the reason it is an ARROW is the reason
+        # Alt+arrow survived v0.95.0's cull of alt+<letter>: a modified
+        # arrow is a different physical encoding from a modified letter --
+        # CSI 1;4<final>, the same shape as the ctrl+arrow and alt+arrow
+        # pairs above -- which Textual's parser decodes under BOTH
+        # protocols. Measured like everything else here, not assumed:
+        # XTermParser().feed("\x1b[1;4D") -> Key('alt+shift+left'), and
+        # doxa.keyboard.unreachable_under_legacy answers False for both.
+        #
+        # RE-VERIFIED free against this class's own resolved binding set,
+        # which is the check every key added here since v0.91.0 has had to
+        # pass: neither Textual's App/Screen defaults nor TextArea claims
+        # an alt+shift+arrow, and tests/test_split_keys.py asserts it so
+        # the next release that reaches for one trips over the collision.
+        #
+        # A HORIZONTAL pair, because the divider they move is vertical --
+        # the same reading that made Ctrl+Up/Down the in-pane divider's
+        # keys, one axis over. /sidebar width <n> is the door for a
+        # terminal that sends neither.
+        Binding(
+            "alt+shift+left", "sidebar_narrower",
+            "Narrow the session sidebar (/sidebar width)",
+            show=False, priority=True,
+        ),
+        Binding(
+            "alt+shift+right", "sidebar_wider",
+            "Widen the session sidebar (/sidebar width)",
+            show=False, priority=True,
+        ),
         *[
             Binding(
                 f"ctrl+{digit}", f"focus_group({digit})",
@@ -725,6 +761,7 @@ class DoxaApp(App):
         restore_layout: "list[Any] | None" = None,
         restore_groups: "Any" = None,
         restore_collections: "Any" = None,
+        restore_rail_folded: "Any" = None,
     ) -> None:
         super().__init__()
         # One strip-id sequence per app (see doxa.ui.split.next_tabbed_id):
@@ -845,6 +882,26 @@ class DoxaApp(App):
         self._collections: "tuple[collections_mod.Collection, ...]" = tuple(
             restore_collections or ()
         )
+        # Which pane GROUPS are folded shut on the rail (v1.5.0), by
+        # entry_key. Held here for the same two reasons the collections
+        # are: it survives the rail being hidden, and _persist_tabset
+        # writes it from here without having to find a widget.
+        #
+        # A SET of the exceptions, defaulting empty, because expanded is
+        # the default and a fold is a thing the user did -- the same shape
+        # ``Collection.collapsed`` has, which is written only when true. A
+        # key naming a group this window no longer has costs nothing: it
+        # is never asked about, and the layout changing under it is the
+        # ordinary case rather than an error.
+        self._rail_folded: "set[str]" = {
+            str(key) for key in (restore_rail_folded or ()) if str(key or "")
+        }
+        # The rail width a DRAG is currently showing, or None when the
+        # settings registry is the answer. A drag posts a width per mouse
+        # move and only the last of them is written to disk, so this is
+        # what keeps a refresh in between from snapping the rail back to
+        # the stored value mid-gesture.
+        self._sidebar_width_override: "int | None" = None
         # Whether the LAST attempt to open the rail was refused for width,
         # and what it said. Kept so on_resize can open it for free the
         # moment the terminal grows past the threshold, rather than making
@@ -2129,6 +2186,7 @@ class DoxaApp(App):
             tabsets_mod.save(
                 scope, tabs, active_id, groups=groups,
                 collections=self._collections,
+                rail_folded=tuple(self._rail_folded),
             )
         # The rail is a view of exactly this snapshot, so the one method
         # that runs on every tab lifecycle event is the one place it needs
@@ -2171,7 +2229,10 @@ class DoxaApp(App):
         return rail if rail.is_mounted else None
 
     def sidebar_width(self) -> int:
-        """The rail's configured width, clamped to what a rail can be."""
+        """The rail's width, clamped to what a rail can be: the width a
+        drag is showing right now, else the configured one."""
+        if self._sidebar_width_override is not None:
+            return layout_mod.clamp_sidebar_width(self._sidebar_width_override)
         return config_mod.sidebar_width()
 
     def _window_width(self) -> int:
@@ -2199,10 +2260,46 @@ class DoxaApp(App):
         ]
         return min(widths) if widths else 0
 
-    def sidebar_refusal(self) -> "str | None":
-        """Why the rail cannot open right now, or ``None``."""
+    def _narrowest_group_unrailed(self) -> int:
+        """The narrowest painted group as it would be with NO rail at all.
+
+        :func:`doxa.layout.sidebar_refusal` takes the tree's width before
+        the rail costs it anything -- which is what ``_narrowest_group``
+        measures when the rail is hidden, and is exactly what it does NOT
+        measure when the rail is already open. Opening asks the question
+        once, from the hidden state, so v1.0.0 never had to tell them
+        apart; RESIZING asks it from the shown state, and feeding an
+        already-shrunk number back in would price the rail's cost twice
+        and refuse a width that fits.
+
+        Undoing that shrink is the same proportion the refusal applies:
+        the tree got ``total - rail`` of ``total``."""
+        narrowest = self._narrowest_group()
+        rail = self.sidebar()
+        if narrowest <= 0 or rail is None or rail.styles.display == "none":
+            return narrowest
+        total = self._window_width()
+        tree = total - int(rail.outer_size.width or 0)
+        if tree <= 0 or total <= 0:
+            return narrowest
+        return narrowest * total // tree
+
+    def sidebar_refusal(self, width: "int | None" = None) -> "str | None":
+        """Why the rail cannot open -- or cannot be this WIDE -- right now,
+        or ``None``.
+
+        ``width`` is the candidate a drag or a key is proposing;
+        :meth:`sidebar_width` is the default, which is the question
+        ``F3`` asks. **One function answers both**, which is the whole
+        point: a drag that refused at a looser floor than opening does
+        would let the mouse build an arrangement the app will not create
+        interactively, and the arrangement would then be the one thing
+        neither ``F3`` nor a restart could reproduce."""
         return layout_mod.sidebar_refusal(
-            self._window_width(), self._narrowest_group(), self.sidebar_width()
+            self._window_width(),
+            self._narrowest_group_unrailed(),
+            self.sidebar_width() if width is None else
+            layout_mod.clamp_sidebar_width(width),
         )
 
     def sidebar_has_something_to_say(
@@ -2468,6 +2565,7 @@ class DoxaApp(App):
             lambda session_id: self._describe_session(session_id, surfaces),
             width=self.sidebar_width(),
             panes=self._sidebar_panes(),
+            collapsed_groups=tuple(self._rail_folded),
         )
 
     # -- painting -----------------------------------------------------
@@ -2643,6 +2741,143 @@ class DoxaApp(App):
     def _on_sidebar_revealed(self, event: "SessionSidebar.Revealed") -> None:
         event.stop()
         note = self.reveal_session(event.session_id)
+        if note:
+            self.notify_sidebar(note)
+
+    def focus_group_by_key(self, entry_key: str) -> bool:
+        """Put the keyboard in the group with that ``entry_key``, WITHOUT
+        touching which of its tabs is active. Returns whether there was
+        such a group.
+
+        The distinction is the whole of option C's heading gesture. A
+        group's heading summarises every tab it holds, including the ones
+        that are not on screen, so a click on it that ALSO switched the
+        active tab would be the rail changing what you are looking at as
+        a side effect of asking about it -- and there would then be no
+        gesture left that means "go there and leave it alone".
+
+        Focusing the group's ACTIVE tab is what "focus the group" means
+        since v0.97.0, and focusing a widget inside the tab that is
+        already active cannot activate a different one."""
+        for group in self.groups():
+            if group.entry_key != entry_key:
+                continue
+            surface = next(iter(group.surfaces()), None)
+            if surface is not None:
+                self._focus_tab(surface)
+            return True
+        return False
+
+    def toggle_group_expanded(self, entry_key: str) -> None:
+        """Fold or unfold one pane group's tab rows, and REMEMBER it.
+
+        Persisted in the tabset record beside the collapsed flag a
+        collection already has (:mod:`doxa.tabsets`), because a fold is a
+        statement about how the user wants to read this window and a
+        window that forgot it on every restart would be asking them to
+        make it again."""
+        if not entry_key:
+            return
+        if entry_key in self._rail_folded:
+            self._rail_folded.discard(entry_key)
+        else:
+            self._rail_folded.add(entry_key)
+        self.refresh_sidebar(force=True)
+        self._persist_tabset()
+
+    @on(SessionSidebar.GroupFocused)
+    def _on_sidebar_group_focused(
+        self, event: "SessionSidebar.GroupFocused"
+    ) -> None:
+        """A group heading was clicked. Focus the group -- or, when the
+        entry is not a live group at all, fall back to revealing the
+        session its state came from.
+
+        The fallback is not a safety net, it is the honest answer for the
+        entry :func:`doxa.triage.entries_for` invents: a detached or ended
+        session has no pane group, so "focus the group" has no group to
+        mean, and ``reveal_session`` already knows how to say ``/attach``
+        to a row there is nowhere to go to."""
+        event.stop()
+        if event.entry_key and self.focus_group_by_key(event.entry_key):
+            return
+        note = self.reveal_session(event.session_id)
+        if note:
+            self.notify_sidebar(note)
+
+    @on(SessionSidebar.GroupToggled)
+    def _on_sidebar_group_toggled(
+        self, event: "SessionSidebar.GroupToggled"
+    ) -> None:
+        event.stop()
+        self.toggle_group_expanded(event.entry_key)
+
+    @on(SessionSidebar.WidthDragged)
+    def _on_sidebar_width_dragged(
+        self, event: "SessionSidebar.WidthDragged"
+    ) -> None:
+        """The rail's right edge moved under the mouse.
+
+        A refused width is simply not taken -- the rail stops at the floor
+        and the pointer carries on -- rather than being reported: a drag
+        is a continuous gesture and a notification per cell crossed would
+        be the transcript filling up with a sentence the user is already
+        being shown by the edge not moving. The KEYS say it instead, once
+        per press (:meth:`action_sidebar_wider`)."""
+        event.stop()
+        self.resize_sidebar(event.width, persist=event.final)
+
+    def resize_sidebar(
+        self, width: int, *, persist: bool = True
+    ) -> "str | None":
+        """Set the rail's width. Returns the refusal, or ``None``.
+
+        **The same floor opening refuses at**, asked through the same
+        :meth:`sidebar_refusal` -- see that method. ``persist`` writes it
+        to the settings registry, which the drag defers to its last event
+        and the keys do on every press."""
+        want = layout_mod.clamp_sidebar_width(width)
+        note = self.sidebar_refusal(want)
+        if note:
+            return note
+        if persist:
+            self._sidebar_width_override = None
+            with contextlib.suppress(Exception):
+                config_mod.save({"sidebar_width": str(want)})
+            config_mod.invalidate()
+        else:
+            self._sidebar_width_override = want
+        rail = self.sidebar()
+        if rail is not None:
+            rail.set_width(want)
+        return None
+
+    def action_sidebar_wider(self) -> None:
+        self._nudge_sidebar(1)
+
+    def action_sidebar_narrower(self) -> None:
+        self._nudge_sidebar(-1)
+
+    def _nudge_sidebar(self, step: int) -> None:
+        """``Alt+Shift+←/→``: the rail divider from the KEYBOARD.
+
+        A mouse-only divider is unreachable for a keyboard user, and it is
+        also unreachable over an ssh session to a terminal with no mouse
+        reporting -- this project has ruled on that twice, and the two
+        dividers it already has (``Ctrl+↑/↓`` in-pane, ``Alt+arrow`` for a
+        leaf) are both keyboard gestures first.
+
+        Refusals are REPORTED here and swallowed in the drag: one press is
+        one statement, and a user who pressed a key and saw nothing happen
+        is owed the reason (the v0.39.0 rule about a documented key that
+        silently does nothing)."""
+        rail = self.sidebar()
+        if rail is None or rail.styles.display == "none":
+            self.notify_sidebar(
+                "the session sidebar is hidden — F3 or /sidebar opens it"
+            )
+            return
+        note = self.resize_sidebar(self.sidebar_width() + step)
         if note:
             self.notify_sidebar(note)
 

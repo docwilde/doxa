@@ -37,6 +37,7 @@ from doxa import tabsets as tabsets_mod
 from doxa import triage as triage_mod
 from doxa.app import DoxaApp
 from doxa.ui import labels as labels_mod
+from doxa.ui import sidebar as sidebar_mod
 from doxa.ui.sidebar import LOOSE_HEADING, NOT_OPEN, Row, SessionSidebar, SidebarLine, build_rows
 from doxa.ui.split import PaneGroup, SplitBox
 from tests.fakes import FakeEngine
@@ -215,27 +216,40 @@ def test_the_sidebar_width_thresholds_are_the_measured_ones():
         labels_mod.TAB_MODEL_MIN + len(" · ") + labels_mod.TAB_REPO_MIN
     )
     assert label_floor == 13
-    # 1 left pad + 2 collection indent + the state glyphs and their space
-    # + 1 right pad. The glyph budget is doxa.triage's, re-derived here so
-    # that spending another column moves this number rather than leaving a
-    # stale one documented as measured.
+    # 1 left pad + the DEEPEST indent + the state glyphs and their space
+    # + 1 right pad. The glyph budget is doxa.triage's and the indent is
+    # doxa.ui.sidebar's, both re-derived here so that spending another
+    # column moves this number rather than leaving a stale one documented
+    # as measured.
+    #
+    # Re-measured in v1.5.0 against option C's shape: the deepest row is a
+    # TAB row under a pane entry under a heading, at two levels of indent,
+    # and the entry's own row one level shallower carries the fold caret
+    # and its space instead. Both come to the same number, which is what
+    # makes it the floor rather than one of two.
     assert triage_mod.GLYPH_COLUMNS == 2
-    assert layout.SIDEBAR_CHROME == 1 + 2 + triage_mod.GLYPH_COLUMNS + 1 + 1 == 7
-    assert layout.SIDEBAR_MIN_WIDTH == layout.SIDEBAR_CHROME + label_floor == 20
+    assert sidebar_mod.INDENT_COLUMNS == 2 and sidebar_mod.MAX_INDENT == 2
+    deepest = sidebar_mod.INDENT_COLUMNS * sidebar_mod.MAX_INDENT
+    caret_row = sidebar_mod.INDENT_COLUMNS + sidebar_mod.FOLD_COLUMNS
+    assert deepest == caret_row == 4
+    assert layout.SIDEBAR_CHROME == (
+        1 + deepest + triage_mod.GLYPH_COLUMNS + 1 + 1
+    ) == 9
+    assert layout.SIDEBAR_MIN_WIDTH == layout.SIDEBAR_CHROME + label_floor == 22
     # The default: chrome plus HALF the cap the tab strip's own ellipsize
     # writes labels at.
     assert layout.SIDEBAR_WIDTH == (
         layout.SIDEBAR_CHROME + labels_mod.TAB_LABEL_MAX // 2
-    ) == 23
+    ) == 25
     # The ceiling: the width at which the whole capped label fits.
     assert layout.SIDEBAR_MAX_WIDTH == (
         layout.SIDEBAR_CHROME + labels_mod.TAB_LABEL_MAX
-    ) == 39
+    ) == 41
     # The absolute floor on TOTAL width: the narrowest rail plus the
     # narrowest pane DOXA will create.
     assert layout.SIDEBAR_MIN_COLS == (
         layout.SIDEBAR_MIN_WIDTH + layout.MIN_LEAF_WIDTH
-    ) == 54
+    ) == 56
     # The cross-check against reality: on the 100-column reference
     # terminal with one vertical split, the rail must not push either
     # group onto the compact tab-strip rung.
@@ -367,11 +381,14 @@ def test_the_ungrouped_heading_is_last_and_is_not_a_collection():
     rows = build_rows(items, ["a", "loose"], _describe({
         "a": ("alpha", (), True), "loose": ("stray", (), True),
     }))
+    # A COLLECTION member is a plain session row; a session no collection
+    # claims is a pane group of its own, so its row is that group's
+    # heading (v1.5.0, option C) -- one line either way.
     assert [(r.kind, r.text) for r in rows] == [
         (Row.HEADING, "ampiric"),
         (Row.SESSION, "alpha"),
         (Row.HEADING, LOOSE_HEADING),
-        (Row.SESSION, "stray"),
+        (Row.ENTRY, "stray"),
     ]
     # The implicit heading names no collection, so nothing can rename or
     # delete it and nothing writes it down.
@@ -385,7 +402,9 @@ def test_with_no_collections_the_rail_is_a_flat_list_with_no_heading():
     rows = build_rows((), ["a", "b"], _describe({
         "a": ("alpha", (), True), "b": ("beta", (), True),
     }))
-    assert [r.kind for r in rows] == [Row.SESSION, Row.SESSION]
+    assert [r.kind for r in rows] == [Row.ENTRY, Row.ENTRY]
+    # ...and each is one line, not a heading with a row repeating it.
+    assert [r.text for r in rows] == ["alpha", "beta"]
 
 
 def test_the_rail_can_show_a_session_that_is_not_mounted_in_any_group():
@@ -400,7 +419,7 @@ def test_the_rail_can_show_a_session_that_is_not_mounted_in_any_group():
         "live": ("alpha", (), True),
         "closed": ("beta", (), False),
     }))
-    sessions = [r for r in rows if r.kind == Row.SESSION]
+    sessions = [r for r in rows if r.kind in (Row.SESSION, Row.ENTRY)]
     assert [r.session_id for r in sessions] == ["live", "closed"]
     assert sessions[0].mounted is True
     assert sessions[1].mounted is False

@@ -377,6 +377,7 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
         # closed), which is the whole difference between a session index
         # and a second tab strip.
         restore_collections=resolved.collections,
+        restore_rail_folded=resolved.rail_folded,
     )
     app.run()
     _maybe_restart(app)

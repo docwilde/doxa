@@ -105,8 +105,36 @@ SessionSidebar > SidebarLine {
     color: #D8CDBB;
 }
 
+/* HOVER (v1.5.0). Reported live: "highlighting an entry by hovering over
+   it with the mouse is missing". Pure CSS, no Python and no focus -- the
+   rail's lines are deliberately `can_focus = False` (see SidebarLine) and
+   a focusable widget beside the prompt is the v0.85.0 AUTO_FOCUS defect
+   this project declined to re-open. Presentation only: the rail already
+   refreshes on every mark change, and hover state that cost a rebuild
+   would fight the list moving under the pointer.
+
+   `background-tint` and NOT `background`, which is the whole reason this
+   rule is one line instead of eight. A tint composites OVER whatever
+   background the row already has, so it works identically on a plain row,
+   on `-attention`'s red and on a heading whose background is a project
+   colour with a CONTRAST-COMPUTED text colour on top of it -- none of
+   which it can invalidate, because it moves luminance by a twelfth rather
+   than replacing it. A `background` rule would have had to beat, and
+   would therefore have had to restate, every one of those. */
+SessionSidebar > SidebarLine:hover {
+    background-tint: #FFFFFF 12%;
+}
+
+/* A heading's own COLOURS are not here: they are computed and written
+   inline by SidebarLine._write_heading_paint, because the text colour is
+   DERIVED (WCAG relative luminance of the background, black above the
+   pivot and white below) and a stylesheet cannot hold a derivation --
+   the same argument SessionSidebar.DEFAULT_CSS already makes for the
+   rail's width. The hexes those are computed from live in
+   doxa.triage.PALETTE_HEX, which the .-project- rules below are checked
+   against by tests/test_rail_interaction.py. What stays here is the paint
+   that is not derived from anything. */
 SessionSidebar > SidebarLine.-heading {
-    color: #8A8073;
     text-style: bold;
     margin-top: 1;
 }

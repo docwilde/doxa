@@ -158,7 +158,8 @@ REGISTRY: tuple[SlashCommand, ...] = (
         group="Panes & tabs",
         summary="Show or hide the session sidebar — every session in this "
                 "window, with the state marks the tab strips carry "
-                "(F3)",
+                "(F3); width sets how many columns it takes",
+        usage="/sidebar [on|off|width <n>|wider|narrower]",
         # DECLARED, because a command whose key is not written here is a
         # key /help and the startup key notice cannot see -- three
         # commands shipped without one in v0.92.0 and their bindings were

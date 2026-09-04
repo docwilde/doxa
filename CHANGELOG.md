@@ -4,6 +4,47 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.5.0 — 2026-09-04
+
+**The rail switches now.** An entry has been a pane GROUP since v1.2.0 and
+every group is on screen at once, so a click could only ever move focus.
+`docs/plans/rail-interaction.md`, option C.
+
+- **A group's row is its HEADING; the rows under it are its TABS.** A
+  click on a tab row switches that group's active tab and focuses it; a
+  click on the heading focuses the group and leaves the active tab alone.
+- **A single-tab group grows no child row**, and the fold caret appears
+  only where there is something to fold — `Row.entry_key`, `Row.expanded`,
+  `SidebarLine.fold_zone`.
+- **Folds persist per group** in a new top-level `rail_folded` key in the
+  tabset record. Absence of the key is the whole migration.
+
+**Heading contrast is computed, not chosen.**
+
+- **`triage.contrast_text`** picks black or white by WCAG relative
+  luminance against **`CONTRAST_PIVOT`** (`sqrt(0.0525) - 0.05` ≈ 0.1791),
+  where the two contrast equally — not the 0.5 that gets reached for.
+- **`triage.PALETTE_HEX`** now holds the six palette hexes;
+  **`heading_paint`** caches the (background, text) pair per palette NAME.
+- Every heading wears a background, the ungrouped one included
+  (`HEADING_HEX`); `doxa/theme.tcss` keeps the row-identity paint.
+
+**Hover, and a divider that moves.**
+
+- **`SidebarLine:hover` uses `background-tint`**, not `background`, so it
+  composites over `-attention`'s red and a heading's computed pair instead
+  of replacing them. No Python on the path, no focus, no rebuild.
+- **The rail's right edge drags**; **`Alt+Shift+←/→`** and **`/sidebar
+  width <n>|wider|narrower`** are the keyboard and always-works doors.
+- **A drag refuses at the floor opening refuses at.**
+  `DoxaApp.sidebar_refusal` takes a candidate width and un-shrinks the
+  narrowest group when the rail is already open — it double-counted before.
+
+**Breaking: the rail is two columns wider.** `SIDEBAR_CHROME` 7 → 9,
+re-measured against the three-level row v1.2.0 added and never priced;
+`sidebar_width` default 23 → 25, clamp 20–39 → 22–41, `SIDEBAR_MIN_COLS`
+54 → 56. **Not done**: the rail still cannot reorder or close a tab.
+
 ## 1.4.0 — 2026-09-04
 
 **A DOXA session can be driven by Codex.** The session seam has a name and a
