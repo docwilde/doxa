@@ -619,14 +619,30 @@ def test_isolation_marker_still_fits_the_glyph_plus_limit_budget():
 # -- the provider glyph -----------------------------------------------------
 
 
-def test_provider_glyphs_table_has_exactly_the_one_live_row():
-    """Multi-provider engines are planned, not shipped -- every model DOXA
-    drives today is Claude/Anthropic's, so the table has one row, and the
-    default lookup resolves to it without the caller naming a provider."""
+def test_provider_glyphs_table_has_exactly_the_live_rows():
+    """One row per provider DOXA can actually drive a session on, and the
+    default lookup still resolves to Claude without the caller naming a
+    provider.
+
+    v1.4.0 gave this table its FIRST second row. Through v1.3.0 it read
+    "multi-provider engines are planned, not shipped"; `doxa --engine
+    codex` is that plan shipping (doxa/engines.py), so the assertion is
+    still an exact table -- a glyph appearing here for a provider no
+    engine can reach would be the defect it was written to catch -- it
+    just has two rows to be exact about now."""
     from doxa.app import PROVIDER_GLYPHS, provider_glyph
 
-    assert PROVIDER_GLYPHS == {"claude": "✳"}
+    assert PROVIDER_GLYPHS == {"claude": "✳", "openai": "◇"}
     assert provider_glyph() == provider_glyph("claude")
+    # Each provider id in the table is one an EngineProvider publishes --
+    # no orphan rows.
+    from doxa import engines as engines_mod
+    from doxa import providers as providers_mod
+
+    assert set(PROVIDER_GLYPHS) == {
+        providers_mod.CLAUDE_PROVIDER_ID, providers_mod.CODEX_PROVIDER_ID,
+    }
+    assert engines_mod.available() == ("claude", "codex")
 
 
 def test_provider_glyph_is_anthropic_orange_via_markup():
