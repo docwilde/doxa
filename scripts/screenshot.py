@@ -132,11 +132,46 @@ def _activate(app: DoxaApp, pane) -> None:
 
     Both were re-verified by running this script, which is the only thing
     that regenerates the gallery and therefore the only thing that catches
-    a break in it."""
+    a break in it.
+
+    **And it says where the KEYBOARD goes, not just which tab shows.**
+    That is v0.38.0's rule -- whatever moves the user to a tab names the
+    pane the keyboard lands in -- and every caller inside doxa/app.py
+    obeys it: each of the eight ``_activate_tab`` sites is followed on the
+    next line by ``_focus_tab``, and each raw ``TabbedContent.active``
+    assignment (``_cycle_tab``, ``_switch_to_tab``, ``open_tab_at``) is
+    paired with ``_focus_tab``/``_focus_active_tab``. This helper was the
+    ONE writer in the tree that set ``active`` and said nothing about the
+    keyboard, and the cost of that omission was not cosmetic: it left the
+    keyboard inside a TabPane that had just been hidden, and DOXA and
+    Textual then fought over it FOREVER.
+
+    The loop, measured (v1.7.1, textual 5.3.0): hiding the pane the
+    keyboard is in makes Textual re-home focus with
+    ``Screen._reset_focus``, which picks another focusable widget INSIDE
+    that same just-hidden pane (its ``#block-list`` scroll); focusing a
+    widget inside a ``TabPane`` re-ACTIVATES it
+    (``TabbedContent._on_tab_pane_focused``), which hides the OTHER tab;
+    ``DoxaApp._on_tab_activated`` then moves the keyboard into the newly
+    active tab's prompt -- putting it back inside whichever pane is about
+    to be hidden next. Two writers, permanently one step out of phase,
+    ~90 focus moves per 40 idle message-pump turns with no input at all.
+    An app in that state never goes idle, so every later
+    ``pilot.pause``-polled wait in every scene is racing a pump that is
+    busy re-focusing: `split-panes` failed about half of all runs, the
+    full gallery could not complete, and `live-diff` intermittently saw
+    "no turn in flight". One line, one root cause, all three.
+
+    Deterministic, not inferred: with the focus move below removed, a
+    three-tab window livelocks 10 runs out of 10; with it, 0 out of 10.
+    tests/test_focus_ownership.py::
+    test_activating_a_tab_without_moving_the_keyboard_livelocks pins
+    exactly that, against the app rather than against this script."""
     tab_id = pane.tab_id or ""
     tabbed = app.tabbed_holding(tab_id)
     if tabbed is not None and tab_id:
         tabbed.active = tab_id
+        app._focus_tab(pane)
 
 
 # --------------------------------------------------------------------- #
@@ -783,17 +818,39 @@ async def _until(pilot, cond: Callable[[], bool], tries: int = 250) -> bool:
 async def _drive_split_panes(app: DoxaApp, pilot) -> None:
     await _fill_hero_conversation(app, pilot)
     left = app.active_pane
+    # Identity, not `active_pane`, decides that the split HAPPENED, and
+    # focus decides that it happened the way v0.91.0 says it does.
+    # `app.active_pane is not left` -- what this asserted through v1.7.1 --
+    # is weaker than the state it was standing in for, and passed while
+    # the keyboard was still in the pane the user split away from:
+    # `_focus_tab` records `self._last_group_id` SYNCHRONOUSLY, before it
+    # asks Textual for the focus, and `focused_group()` falls back to that
+    # id whenever the DOM has no answer -- so `active_pane` reports the
+    # move whether or not the keyboard ever arrives. Measured at v1.7.1:
+    # focus reached the new pane in 0 of 10 runs while this assertion
+    # passed in 10 of 10.
+    before = {id(pane) for pane in app.panes()}
     await pilot.press("ctrl+n")
-    assert await _until(pilot, lambda: app.active_pane is not left), (
+    assert await _until(pilot, lambda: len(app.panes()) > len(before)), (
         "ctrl+n did not create a second pane"
     )
-    right = app.active_pane
-    assert right is not None
+    right = next(p for p in app.panes() if id(p) not in before)
+    assert right is not left
     assert await _until(pilot, lambda: right.region.width > 0), (
         "the new pane never painted"
     )
     prompt = right.query_one("#prompt-input")
-    prompt.focus()
+    # The claim this scene is a picture of: "focus goes to the NEW pane,
+    # and it goes there explicitly" (DoxaApp.split_active_pane). Waited
+    # for rather than asserted outright because `Widget.focus()` is
+    # deferred in textual 5.3 (it schedules `screen.set_focus` with
+    # `call_later`), which is also why the old `prompt.focus()` on this
+    # line was an under-wait: it moved nothing before the `enter` below,
+    # so the keystroke went to whichever pane still held the keyboard.
+    assert await _until(pilot, lambda: app.focused is prompt), (
+        "ctrl+n created a pane but left the keyboard behind"
+    )
+    assert app.active_pane is right
     prompt.value = "which gallery scenes still need a capture at 0.94.0?"
     await pilot.press("enter")
     assert await _until(

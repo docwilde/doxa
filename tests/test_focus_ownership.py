@@ -391,3 +391,186 @@ async def test_a_restore_onto_an_archived_tab_still_activates_it(tmp_path):
         await pilot.pause()
         assert isinstance(_tabbed(app).active_pane, ArchivedSessionTab)
         assert app.active_pane is None
+
+
+# -- activation and the keyboard move TOGETHER (v1.7.2) -----------------
+#
+# The invariant every tab-moving site in doxa/app.py already keeps, stated
+# once so a ninth caller cannot quietly drop it: setting
+# `TabbedContent.active` without also saying where the keyboard goes does
+# not merely leave focus stale, it LIVELOCKS the window.
+#
+# The cycle, measured at v1.7.1 against textual 5.3.0: hiding the TabPane
+# the keyboard is in makes Textual re-home focus (`Screen._reset_focus`)
+# onto another focusable widget INSIDE that same just-hidden pane -- its
+# `#block-list` scroll; focusing a widget inside a TabPane re-ACTIVATES
+# that pane (`TabbedContent._on_tab_pane_focused`), which hides the other
+# tab; `DoxaApp._on_tab_activated` then moves the keyboard into the newly
+# active tab's prompt, i.e. back inside whichever pane is about to be
+# hidden next. Two writers, permanently one step out of phase, forever.
+#
+# Deterministic rather than statistical: it counts focus moves during
+# message-pump turns in which NOTHING is asked of the app. A settled
+# window makes none at all; the loop made ~90. The threshold below is far
+# from both.
+
+
+def _count_focus_moves(app: DoxaApp) -> "list[int]":
+    """Arm a counter on the screen's own focus setter. Returns the
+    single-element list it counts into (a list so the closure can be
+    installed once and read after)."""
+    seen = [0]
+    screen = app.screen
+    original = screen.set_focus
+
+    def counting(widget, scroll_visible=True, from_app_focus=False):
+        seen[0] += 1
+        return original(
+            widget, scroll_visible=scroll_visible, from_app_focus=from_app_focus,
+        )
+
+    screen.set_focus = counting  # type: ignore[method-assign]
+    return seen
+
+
+async def _idle_focus_moves(
+    app: DoxaApp, pilot, turns: int = 40, settle: int = 10,
+) -> int:
+    """How many times the keyboard moves across TURNS message-pump turns
+    in which the test asks the app for nothing.
+
+    SETTLE turns are burned first and not counted: `Widget.focus()` is
+    deferred in textual 5.3, so a switch's OWN focus move -- one, plus
+    `_on_tab_activated`'s no-op refocus behind it -- lands a turn or two
+    after the call that asked for it. Those are the gesture arriving, not
+    churn. A window that has genuinely settled makes none after them; the
+    loop this file pins makes them for as long as anyone watches, so no
+    finite settle can hide it."""
+    for _ in range(settle):
+        await pilot.pause(0.02)
+    seen = _count_focus_moves(app)
+    for _ in range(turns):
+        await pilot.pause(0.02)
+    return seen[0]
+
+
+@pytest.mark.asyncio
+async def test_a_settled_three_tab_window_moves_the_keyboard_never(tmp_path):
+    """The control for the test below: left alone, a three-tab window is
+    completely quiet. Without this, "the loop is gone" could just as well
+    mean "the counter is broken"."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.action_new_tab()
+        await pilot.pause()
+        await app.action_new_tab()
+        assert await _wait(pilot, lambda: len(app.panes()) == 3)
+        await pilot.pause()
+
+        assert await _idle_focus_moves(app, pilot) == 0
+
+
+@pytest.mark.asyncio
+async def test_activating_a_tab_without_moving_the_keyboard_livelocks(tmp_path):
+    """The defect itself, pinned as the reason the rule exists.
+
+    This deliberately does the WRONG thing -- switches the visible tab and
+    says nothing about the keyboard -- and asserts the window will not
+    settle. It is the only test here that asserts a failure mode rather
+    than a behaviour, and it earns that: `scripts/screenshot.py::_activate`
+    was written exactly this way, which cost the gallery about half of its
+    `split-panes` runs and every complete end-to-end pass, and nothing in
+    the tree said why that was forbidden."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.action_new_tab()
+        await pilot.pause()
+        await app.action_new_tab()
+        assert await _wait(pilot, lambda: len(app.panes()) == 3)
+        await pilot.pause()
+        first = app.panes()[0]
+        assert app.focused is not _prompt_of(first)
+
+        # Show the first tab; say NOTHING about the keyboard.
+        tab_id = first.tab_id or ""
+        tabbed = app.tabbed_holding(tab_id)
+        assert tabbed is not None
+        tabbed.active = tab_id
+
+        assert await _idle_focus_moves(app, pilot) > 10
+
+
+@pytest.mark.asyncio
+async def test_activating_a_tab_and_focusing_it_settles(tmp_path):
+    """The same switch done the way every caller in doxa/app.py does it:
+    activate, then name the pane the keyboard lands in. The window is
+    quiet, and the keyboard is where the switch said."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.action_new_tab()
+        await pilot.pause()
+        await app.action_new_tab()
+        assert await _wait(pilot, lambda: len(app.panes()) == 3)
+        await pilot.pause()
+        first = app.panes()[0]
+
+        tab_id = first.tab_id or ""
+        tabbed = app.tabbed_holding(tab_id)
+        assert tabbed is not None
+        tabbed.active = tab_id
+        app._focus_tab(first)
+
+        assert await _idle_focus_moves(app, pilot) == 0
+        assert app.focused is _prompt_of(first)
+        assert app.active_pane is first
+
+
+@pytest.mark.asyncio
+async def test_ctrl_n_puts_the_keyboard_in_the_new_pane(tmp_path):
+    """v0.91.0's stated rule, asserted about the KEYBOARD rather than
+    about `active_pane`.
+
+    `active_pane` is not a proxy for it: `_focus_tab` records
+    `_last_group_id` synchronously and `focused_group()` falls back to
+    that id, so `active_pane` reports the move whether or not focus ever
+    arrives. scripts/screenshot.py's `split-panes` scene asserted the
+    proxy and passed while the keyboard sat in the pane the user had just
+    split away from."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=(160, 48)) as pilot:
+        await pilot.pause()
+        left = app.active_pane
+        assert left is not None
+        before = {id(pane) for pane in app.panes()}
+
+        await pilot.press("ctrl+n")
+        assert await _wait(pilot, lambda: len(app.panes()) > len(before))
+        right = next(p for p in app.panes() if id(p) not in before)
+
+        assert await _wait(pilot, lambda: app.focused is _prompt_of(right))
+        assert app.active_pane is right
+        assert await _idle_focus_moves(app, pilot) == 0
+
+
+@pytest.mark.asyncio
+async def test_typing_after_ctrl_n_lands_in_the_new_pane(tmp_path):
+    """The same claim as a user meets it: split, type, and the text is in
+    the pane that just appeared -- not in the one it was split off."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=(160, 48)) as pilot:
+        await pilot.pause()
+        left = app.active_pane
+        assert left is not None
+        before = {id(pane) for pane in app.panes()}
+
+        await pilot.press("ctrl+n")
+        assert await _wait(pilot, lambda: len(app.panes()) > len(before))
+        right = next(p for p in app.panes() if id(p) not in before)
+        assert await _wait(pilot, lambda: app.focused is _prompt_of(right))
+
+        await pilot.press("h", "i")
+        assert _prompt_of(right).text == "hi"
+        assert _prompt_of(left).text == ""
