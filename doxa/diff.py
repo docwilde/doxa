@@ -1016,7 +1016,20 @@ def flush(
 # cost.
 
 #: Tools whose completion means the tree changed, by definition.
-TREE_TOOLS = frozenset({"Edit", "MultiEdit", "Write", "NotebookEdit"})
+TREE_TOOLS = frozenset({
+    "Edit", "MultiEdit", "Write", "NotebookEdit",
+    # v1.4.0, the Codex engine's OWN names for the same two acts. Not
+    # translated into the Claude names upstream (doxa.codex._tool_name:
+    # "a file_change is not an Edit", and a transcript is evidence) --
+    # so the predicate learned a second vocabulary instead. One
+    # predicate, two engines, no translation layer between them.
+    "file_change", "patch_apply",
+})
+
+#: Tool names whose INPUT is a shell command, and which therefore tick
+#: only when the command could have written (:func:`bash_touches_tree`).
+#: Claude calls it Bash; Codex calls it command_execution.
+SHELL_TOOLS = frozenset({"Bash", "command_execution"})
 
 #: Leading words of a shell command that cannot change a tracked file.
 #: Deliberately a SHORT ALLOW-list of read-only verbs rather than a
@@ -1088,7 +1101,7 @@ def is_tick(tool_name: str, tool_input: "dict | None" = None) -> bool:
     everything it did is on disk."""
     if tool_name in TREE_TOOLS or tool_name == "Task":
         return True
-    if tool_name != "Bash":
+    if tool_name not in SHELL_TOOLS:
         return False
     data = tool_input or {}
     return bash_touches_tree(str(data.get("command") or ""))
