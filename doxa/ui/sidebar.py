@@ -683,6 +683,31 @@ class SidebarLine(Static):
             return 0
         return INDENT_COLUMNS * min(self.row.indent, MAX_INDENT) + FOLD_COLUMNS
 
+    def staging(self) -> bool:
+        """Does a DOUBLE click on this line stage ``/attach``?
+
+        Exactly the rows that are drawn ``· closed``: an entry or a tab
+        row naming a session with no pane behind it. Three exclusions,
+        each of them a row that looks adjacent and is not:
+
+        * a HEADING is not a session at all;
+        * an ARCHIVED tab (``ArchivedSessionTab``) is MOUNTED, so it
+          reveals like any other row and there is nothing to attach to --
+          it is already here;
+        * a REAPED session (``/sessions kill``) has no row on the rail in
+          the first place (``DoxaApp._sidebar_order`` filters
+          ``_killed_this_run``), because reaping is the one gesture in
+          this app that means "forget this conversation". This method
+          could not reach one, and the exclusion is stated here so that
+          staying unreachable is a property somebody has written down."""
+        row = self.row
+        return bool(
+            row is not None
+            and row.kind != Row.HEADING
+            and not row.mounted
+            and row.session_id
+        )
+
     def on_click(self, event: events.Click) -> None:
         """Three gestures, told apart by what was clicked -- see this
         module's docstring for why they are three and not one.
@@ -704,6 +729,21 @@ class SidebarLine(Static):
         event.stop()
         row = self.row
         if row is None:
+            return
+        # The FOURTH gesture (v1.5.1), and the only one that reads
+        # ``event.chain``: a double click on a closed row stages
+        # ``/attach``. It is checked first and returns, so the second
+        # click of the pair does not ALSO repeat the first one's answer.
+        #
+        # The first click still lands, and still says "not open in this
+        # window -- /attach abc12345 brings it back": Textual delivers
+        # chain 1 and then chain 2, and swallowing the first would mean
+        # guessing, on a timer, whether a second is coming. So the two
+        # beats say the same thing in the two places it belongs -- the
+        # transcript names the command, the prompt holds it -- and a
+        # single click keeps exactly the behaviour it has always had.
+        if event.chain >= 2 and self.staging():
+            self.post_message(SessionSidebar.AttachStaged(row.session_id))
             return
         if row.kind == Row.HEADING:
             if row.collection:
@@ -775,6 +815,29 @@ class SessionSidebar(VerticalScroll):
             super().__init__()
             self.entry_key = entry_key
 
+    class AttachStaged(Message):
+        """A CLOSED row was double-clicked: put ``/attach <id>`` in the
+        prompt, unsent.
+
+        Only a closed row can send this -- a row whose session has no pane
+        behind it, which is the one row a click has never been able to do
+        anything with. :meth:`doxa.app.DoxaApp.reveal_session` answers it
+        by NAMING the command (``abc12345 is not open in this window --
+        /attach abc12345 brings it back in a new tab``); this hands the
+        user the same command typed out instead of asking them to copy it.
+
+        **Staged, never submitted**, which is the whole of the gesture.
+        ``/attach`` opens a tab against a live daemon; a double-click that
+        ran it would be a mouse gesture with a session-shaped consequence
+        and no step at which the user could read what it was about to do.
+        The prompt is where a command waits to be read -- see
+        :meth:`doxa.app.DoxaApp._cmd_prefill`, which ``Ctrl+R`` already
+        uses for the same reason."""
+
+        def __init__(self, session_id: str) -> None:
+            super().__init__()
+            self.session_id = session_id
+
     #: Width and the hidden default live HERE rather than in
     #: doxa/theme.tcss because both are DERIVED numbers
     #: (:data:`doxa.layout.SIDEBAR_WIDTH`) and a stylesheet cannot hold a
@@ -818,6 +881,20 @@ class SessionSidebar(VerticalScroll):
         #: Is the right edge being dragged right now? See
         #: :meth:`on_mouse_down`.
         self._dragging = False
+        #: Is the pointer ON the divider (or holding it)? Presentation
+        #: only -- see :meth:`_write_edge_paint`.
+        self._edge_hot = False
+        #: The divider's RESTING ``(edge type, colour)``, read off the
+        #: stylesheet the first time it is painted hot and kept, because
+        #: after that first write the inline rule is what reads back.
+        #: Cached for the same reason :func:`doxa.triage.heading_paint`
+        #: caches: this is a derivation, and re-deriving it per mouse-move
+        #: is the +22% the rail already measured once.
+        self._edge_rest: "tuple[str, str] | None" = None
+        #: The last width a drag actually POSTED. A drag that has not
+        #: crossed a column boundary has nothing to say -- see
+        #: :meth:`on_mouse_move`.
+        self._dragged_width: "int | None" = None
 
     # -- contents -----------------------------------------------------
 
@@ -971,27 +1048,182 @@ class SessionSidebar(VerticalScroll):
             self.width = int(width)
             self.final = bool(final)
 
+        def can_replace(self, message: Message) -> bool:
+            """A queued drag position may be dropped for a newer one.
+
+            Textual's own mechanism rather than a new one:
+            ``textual.events.Resize`` declares exactly this, for exactly
+            this reason (``textual/events.py:146``), and
+            ``MessagePump._process_messages_loop`` peeks the queue and
+            collapses a run of replaceable messages before dispatching
+            (``textual/message_pump.py:633``). A drag position with a
+            newer one already behind it names a rectangle nobody will ever
+            see -- by the time it could be painted the pointer has left
+            it.
+
+            **What this is worth, honestly** -- see
+            :meth:`SessionSidebar.on_mouse_move` for the measurement it
+            shares. It removes work the rail was asking for and did not
+            need. It does NOT make the drag visibly faster, because
+            Textual was already collapsing the repaints those extra
+            messages would have caused. The lag the owner reported is a
+            repaint cost, not a message cost, and it is not fixed here.
+
+            ``final`` is never dropped. It is the one message that WRITES
+            (``resize_sidebar(persist=True)``), and a drag whose last
+            event was swallowed would leave the width on screen and not on
+            disk -- the disagreement between the painted rail and
+            ``sidebar_width()`` that v1.5.0 already had to fix once."""
+            return isinstance(message, SessionSidebar.WidthDragged) and (
+                not self.final
+            )
+
     def _edge_grabbed(self, x: int) -> bool:
-        """Is this x on the divider rather than on a row?"""
+        """Is this x -- measured in THIS widget's own columns -- on the
+        divider rather than on a row?"""
         width = int(self.outer_size.width or 0)
         return width > 0 and x >= width - self.GRAB_COLUMNS
 
+    def _edge_under(self, event: "events.MouseEvent") -> bool:
+        """Is the POINTER on the divider?
+
+        Screen coordinates rebased onto this widget, not ``event.x``,
+        because a mouse event that started on a row arrives here by
+        BUBBLING and keeps the row's coordinates: a row is inset by the
+        rail's padding and never reaches the edge column, so reading
+        ``event.x`` would answer "not the divider" for a reason that has
+        nothing to do with where the pointer is. :meth:`_width_at` already
+        measures in screen columns for the neighbouring reason."""
+        width = int(self.outer_size.width or 0)
+        if width <= 0:
+            return False
+        return self._edge_grabbed(int(event.screen_x) - int(self.region.x))
+
+    def _write_edge_paint(self, hot: bool) -> None:
+        """Light the divider, or put it back.
+
+        **The affordance, and the whole of it in this terminal.** A GUI
+        would say "draggable" with the pointer -- a west-east resize
+        cursor over the edge -- and DOXA cannot: see this method's note in
+        docs/manual.md. So the edge says it itself, by inverting: at rest
+        it is the ground a heading wears, and under the pointer it is the
+        colour that ground computes as its own maximum contrast.
+
+        **Computed, never chosen**, and by the same function a heading's
+        text is (:func:`doxa.triage.contrast_text`). The resting colour is
+        read off the stylesheet rather than restated here, so re-hueing
+        the rail in doxa/theme.tcss moves the hot colour with it instead
+        of stranding a second hex that no longer contrasts against the
+        first -- v1.2.0's colours-by-name rule, applied to the one surface
+        that has no name to resolve.
+
+        Written INLINE for the reason :meth:`SidebarLine._write_heading_paint`
+        is: a stylesheet cannot hold a derivation. It is presentation and
+        nothing else -- no rebuild, no refresh, no row touched -- which is
+        the constraint docs/plans/rail-interaction.md names first about
+        hover, and it holds here for the same reason: the rail refreshes
+        on every mark change, and a list that rebuilt under the pointer
+        would fight the gesture."""
+        if hot == self._edge_hot:
+            return
+        self._edge_hot = hot
+        with contextlib.suppress(Exception):
+            if not hot:
+                self.styles.clear_rule("border_right")
+                return
+            if self._edge_rest is None:
+                edge, colour = self.styles.border_right
+                self._edge_rest = (edge or "solid", str(colour.hex))
+            edge, colour = self._edge_rest
+            self.styles.border_right = (edge, triage_mod.contrast_text(colour))
+
+    def edge_hot(self) -> bool:
+        """Is the divider currently lit? Presentation state, exposed
+        because it is what a test can read instead of a colour."""
+        return self._edge_hot
+
     def on_mouse_down(self, event: events.MouseDown) -> None:
-        if not self._edge_grabbed(event.x):
+        if not self._edge_under(event):
             return
         event.stop()
         self._dragging = True
+        self._dragged_width = None
+        self._write_edge_paint(True)
         # Capture, so the pointer can leave the rail -- which it must,
         # because dragging the edge RIGHT means the pointer is over the
         # panes for the whole gesture.
         with contextlib.suppress(Exception):
             self.capture_mouse()
 
+    def _post_width(self, width: int, *, final: bool = False) -> None:
+        """Ask for this width, and remember that we did."""
+        self._dragged_width = width
+        self.post_message(self.WidthDragged(width, final=final))
+
     def on_mouse_move(self, event: events.MouseMove) -> None:
+        """Track the pointer -- and ask for as little as tracking needs.
+
+        **The measurement behind everything below**, because the owner
+        reported *"also moving the divider is laggy"* and a fix without
+        one is not verified.
+
+        One APPLIED width change costs about 138 ms on the reference
+        window (160x48, seven panes, two groups): 2.1 full-screen layout
+        passes at ~45 ms each, measured over ten clean changes. A
+        cProfile of a twenty-move drag puts none of it in DOXA -- the top
+        forty-five frames by cumulative time are all Textual's compositor
+        (``render_update``, ``_render_chops``, ``Strip.divide``),
+        re-rendering all ~49 widgets because the window really did change
+        shape. Nothing in this file can make that cheaper.
+
+        What this file CAN do is stop asking for changes that change
+        nothing. A 125 Hz mouse reports about three times per column
+        crossed, because a hand moving right also moves up and down:
+        v1.5.0 posted all of them, and a twelve-column drag became 38
+        width changes -- 25 of them naming a width the rail already had,
+        each paying for a refusal check and a settings-registry decision
+        to arrive back where it started. It is 13 now (one per column,
+        plus the write), measured before and after on the same gesture.
+
+        **And the honest half**: end to end, on that same gesture, this
+        does not reduce wall-clock settle time. Textual coalesces its own
+        repaints, so the 25 messages that no longer happen were not
+        costing 25 repaints. The redundant work is gone; the ~138 ms per
+        genuine column crossing is not, and a drag across a wide rail on
+        a busy window will still trail the pointer. The only lever left
+        would be to stop resizing DURING the gesture -- draw a guide and
+        commit on release -- which trades away the live preview and the
+        floor refusal you can currently see happen, so it is the owner's
+        call and not a change this fix makes on its own."""
         if not self._dragging:
+            # Not a drag: the only question is whether the pointer is on
+            # the divider, and the answer is a colour.
+            self._write_edge_paint(self._edge_under(event))
             return
         event.stop()
-        self.post_message(self.WidthDragged(self._width_at(event)))
+        # A pointer position with a NEWER one already queued behind it is
+        # a position the pointer has left. Answering it costs a full
+        # re-layout of the window to draw a rectangle that is superseded
+        # before it reaches the screen -- and Textual's layout is
+        # synchronous, so the time spent drawing it is time in which the
+        # queue grows further. This is ``can_replace`` applied by hand,
+        # for the one message class that does not declare it:
+        # ``events.MouseMove`` inherits ``Message.can_replace`` -> False,
+        # so the pump has no licence to collapse a run of them and the
+        # rail has to notice for itself.
+        with contextlib.suppress(Exception):
+            if isinstance(self._peek_message(), events.MouseMove):
+                return
+        width = self._width_at(event)
+        # A drag that has not crossed a column boundary has NOTHING to
+        # say. A hand moving right also moves up and down, and a 125 Hz
+        # mouse reports about three times per column crossed, so two
+        # reports in three name a width the rail already has. Posting them
+        # anyway cost a message, a refusal check and a settings-registry
+        # decision per report, to arrive at the width already on screen.
+        if width == self._dragged_width:
+            return
+        self._post_width(width)
 
     def on_mouse_up(self, event: events.MouseUp) -> None:
         if not self._dragging:
@@ -1000,7 +1232,25 @@ class SessionSidebar(VerticalScroll):
         self._dragging = False
         with contextlib.suppress(Exception):
             self.release_mouse()
-        self.post_message(self.WidthDragged(self._width_at(event), final=True))
+        # Released, so the pointer decides again. After a widening drag it
+        # is standing on the edge it just placed, so the divider usually
+        # stays lit -- which is the right answer, not a leftover: the thing
+        # under the pointer really is the divider, and moving off it puts
+        # it out.
+        self._write_edge_paint(self._edge_under(event))
+        # Unconditional: this is the width the user CHOSE and the only one
+        # written to the settings registry, so it is posted whatever was
+        # dropped on the way here -- and ``WidthDragged.can_replace`` will
+        # not drop it either.
+        self._post_width(self._width_at(event), final=True)
+        self._dragged_width = None
+
+    def on_leave(self, event: events.Leave) -> None:
+        """The pointer left the rail. Put the divider back -- unless it is
+        being HELD, which is the one case where the pointer being outside
+        the rail is the gesture working rather than ending."""
+        if not self._dragging:
+            self._write_edge_paint(False)
 
     def _width_at(self, event: "events.MouseEvent") -> int:
         """The width the rail would have if its edge were under the

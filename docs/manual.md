@@ -400,8 +400,9 @@ None of them is rail-only. `ctrl+←/→` cycles the focused group's tabs,
 than taking anything away — so closing the rail with `f3` costs you no
 capability.
 
-**Hovering a row highlights it.** Presentation only: the rail is not
-focusable and hovering never rebuilds it.
+**Hovering a row highlights it** — every row, not only the headings.
+Presentation only: the rail is not focusable and hovering never rebuilds
+it.
 
 **Colour says which PROJECT, never which state.** Each repo gets one of
 six named colours — teal, sky, rose, clay, moss, mauve — assigned by a
@@ -439,6 +440,17 @@ remembered in `sidebar_width`. A drag **refuses at the same floor opening
 the rail refuses at** — it stops rather than squeezing a pane below its
 own minimum, so the mouse cannot build an arrangement DOXA will not
 create for you.
+
+The edge **lights up when the pointer is on it**, and stays lit for the
+whole drag. That is deliberately the only affordance it has: a GUI would
+say "draggable" by changing the mouse pointer to a resize arrow, and DOXA
+cannot. The sequence that would do it — `OSC 22` — is unimplemented in a
+large share of terminals including Warp, is write-only everywhere except
+kitty (so there is nothing to ask before writing it), and Textual 5.3
+offers no API for it. DOXA does not emit escape sequences it cannot
+verify a terminal accepted, so the highlight carries the whole message
+instead. If your pointer does not change shape over the divider, that is
+DOXA declining to guess, not a bug.
 
 | command | does |
 |---|---|
@@ -485,8 +497,13 @@ and come back with the window. A collection whose sessions are all gone
 does not; a member whose session is gone is dropped from it, the way a
 dead pane is dropped from a saved layout. A member whose **tab** is closed
 but whose session is still around keeps its row, marked `· closed` — the
-rail is a session index, not a second tab strip, and clicking such a row
-tells you `/attach` is how you get it back.
+rail is a session index, not a second tab strip. Clicking such a row tells
+you `/attach` is how you get it back; **double-clicking it types the
+command for you**, into the active pane's prompt, unsent. It waits there
+to be read and edited — nothing runs until you press enter. Rows that are
+open reveal on a double click exactly as they do on a single one, and a
+session you reaped with `/sessions kill` has no row at all: reaping means
+forget it, and it means it here too.
 
 ## The live diff
 

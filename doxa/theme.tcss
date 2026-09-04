@@ -88,21 +88,55 @@ Screen {
     width: 1fr;
 }
 
+/* The rail's ground, named because TWO rules need the SAME value and the
+   second one is not decoration -- see `SessionSidebar > SidebarLine`
+   below, where a row that does not state a background cannot be tinted at
+   all. Two literals would be a hover that silently stops working the
+   first time somebody re-hues the rail and moves only one of them. */
+$rail-ground: #1D1B17;
+
 /* The rail's own width and its hidden resting state are set per instance
    (SessionSidebar.DEFAULT_CSS + set_width) because both are DERIVED
    numbers -- doxa.layout.SIDEBAR_WIDTH, clamped -- and a stylesheet
-   cannot hold a derivation. What lives here is only the paint. */
+   cannot hold a derivation. What lives here is only the paint.
+
+   `border-right` is the DIVIDER (v1.5.0): one column, draggable, and the
+   colour it wears at rest. Its HOVER colour is not here for the same
+   reason a heading's text colour is not -- it is computed from this one
+   (doxa.triage.contrast_text) by SessionSidebar._write_edge_paint, and a
+   stylesheet cannot hold a derivation. */
 SessionSidebar {
-    background: #1D1B17;
+    background: $rail-ground;
     border-right: solid #3A3429;
     padding: 0 1;
     scrollbar-size-vertical: 1;
 }
 
+/* `background` is load-bearing and is the whole of v1.5.1's entry-hover
+   fix, so it is worth stating why a rule that repaints the ground in the
+   ground's own colour is not a no-op.
+
+   Textual composites a widget's `background-tint` ONLY over that widget's
+   own `background`, and only when the widget states one:
+   textual/widget.py:1148 reads the tint inside `if has_rule("background")`
+   and `Color.tint` carries the BASE colour's alpha through unchanged. A
+   row that stated no background inherited the rail's ground for painting
+   but held `transparent` as its own rule, so the tint below composited
+   over alpha 0 and vanished. The rows that DID highlight were the ones
+   that happen to state a background of their own -- a heading, painted
+   inline by SidebarLine._write_heading_paint, and `.-attention` -- which
+   is exactly the split the owner reported: "there is a highlight on hover
+   for group labels, but not for individual entries".
+
+   So every row states the ground it was already being painted on, and the
+   tint has something to composite over. Measured, not assumed:
+   tests/test_rail_interaction.py drives the pilot's mouse onto a row and
+   reads the colour back off the widget. */
 SessionSidebar > SidebarLine {
     height: 1;
     width: 1fr;
     color: #D8CDBB;
+    background: $rail-ground;
 }
 
 /* HOVER (v1.5.0). Reported live: "highlighting an entry by hovering over

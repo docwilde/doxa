@@ -2955,6 +2955,42 @@ class DoxaApp(App):
         event.stop()
         self.toggle_group_expanded(event.entry_key)
 
+    @on(SessionSidebar.AttachStaged)
+    def _on_sidebar_attach_staged(
+        self, event: "SessionSidebar.AttachStaged"
+    ) -> None:
+        """A closed row was double-clicked: type ``/attach`` for the user
+        and stop there.
+
+        **Staged, never run.** Through :meth:`_cmd_prefill`, which is the
+        same door ``Ctrl+R`` uses for ``/search `` -- so "the rail put
+        something in my prompt" is a thing this app already does, in one
+        place, and this is not a second way to do it.
+
+        Which prompt: ``active_pane``'s, i.e. the pane holding the
+        keyboard. That is what every other prefill in this file means by
+        "the prompt", and it is the box the user's next keystroke was
+        going to land in anyway. A window with no active pane -- one whose
+        only tab is an archive -- has no prompt to stage into, and gets
+        the sentence instead: :meth:`reveal_session`'s own, which names
+        the same command in the only surface such a window has.
+
+        The eight-character prefix and not the full id, because that is
+        the form DOXA already tells people to type (see
+        :meth:`reveal_session`) and ``/attach`` resolves it. A gesture
+        that staged a different string from the one the transcript names
+        would make the two read as two different commands."""
+        event.stop()
+        session_id = event.session_id
+        if not session_id:
+            return
+        if self.active_pane is None:
+            note = self.reveal_session(session_id)
+            if note:
+                self.notify_sidebar(note)
+            return
+        self._cmd_prefill(f"/attach {session_id[:8]}")
+
     @on(SessionSidebar.WidthDragged)
     def _on_sidebar_width_dragged(
         self, event: "SessionSidebar.WidthDragged"

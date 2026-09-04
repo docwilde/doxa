@@ -39,7 +39,7 @@ from doxa import tabsets as tabsets_mod
 from doxa import triage as triage_mod
 from doxa.app import DoxaApp
 from doxa.ui import sidebar as sidebar_mod
-from doxa.ui.sidebar import Row, SidebarLine, build_rows
+from doxa.ui.sidebar import Row, SessionSidebar, SidebarLine, build_rows
 from tests.fakes import FakeEngine
 
 
@@ -713,3 +713,471 @@ def test_the_slash_door_for_the_divider_is_registered(tmp_path):
     assert any(
         b.name == "/sidebar" for b in session_commands.PANE_COMMANDS
     )
+
+
+# -- v1.5.1: the three gaps the owner found in v1.5.0's own hover --------
+#
+# Reported live: *"i see there is a highlight on hover for group labels,
+# but not for individual entries and the mouse icon does not change or the
+# divider is not highlighted on mouse hover to indicate it can be moved"*.
+#
+# Item 1 was in the ORIGINAL request that produced v1.5.0 ("highlighting an
+# entry by hovering over it with the mouse is missing"), so these pin a
+# miss in shipped work rather than a new feature -- and they pin it by
+# DRIVING THE MOUSE and reading the colour back, not by asserting that a
+# rule exists in a file. ``test_hover_is_css_and_costs_the_rail_nothing``
+# above asserted exactly that and passed for a whole release while no
+# entry highlighted at all, which is the reason these are written the way
+# they are.
+
+
+def _bg(widget):
+    """The background this widget is ACTUALLY painted with, ancestors and
+    tint composited -- which is the only question a hover test is asking."""
+    return widget.visual_style.background
+
+
+@pytest.mark.asyncio
+async def test_a_tab_row_highlights_under_the_pointer(tmp_path):
+    """**The reported gap.** Every rail row lifts under the pointer, not
+    only the ones that happen to paint a background of their own.
+
+    Why it failed: Textual composites ``background-tint`` only over a
+    widget's OWN ``background`` and only when the widget states one
+    (``textual/widget.py:1148``), and ``Color.tint`` carries the base
+    colour's alpha through unchanged -- so a row that stated no background
+    tinted ``transparent``, which is still transparent. The rows that did
+    highlight were the two that state one: a heading (painted inline by
+    ``_write_heading_paint``) and ``.-attention``. Exactly the split the
+    report describes."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        await app.action_new_tab()
+        assert await _wait(pilot, lambda: len(app.panes()) == 2)
+        assert app.set_sidebar(True) is None
+        assert await _wait(pilot, lambda: len(_lines(app)) == 3)
+        row = next(
+            line for line in _lines(app) if line.row.kind == Row.SESSION
+        )
+        entry = next(
+            line for line in _lines(app) if line.row.kind == Row.ENTRY
+        )
+        # Somewhere the pointer is NOT, so nothing is hovered to start.
+        await pilot.hover(app.screen, offset=(BIG[0] - 2, BIG[1] - 2))
+        await pilot.pause()
+        for line in (row, entry):
+            rest = _bg(line)
+            await pilot.hover(line)
+            await pilot.pause()
+            assert "hover" in line.pseudo_classes
+            assert _bg(line) != rest, line.row.kind
+            # LIGHTER, which is what a 12% white tint means -- and the
+            # direction matters, because a rule that merely changed the
+            # colour could satisfy an inequality while looking wrong.
+            assert _bg(line).brightness > rest.brightness
+            await pilot.hover(app.screen, offset=(BIG[0] - 2, BIG[1] - 2))
+            await pilot.pause()
+            assert _bg(line) == rest
+
+
+def test_every_row_states_a_background_so_the_tint_has_one_to_composite():
+    """The stylesheet half of the fix, and the reason it is not a no-op.
+
+    Repainting the ground in the ground's own colour looks like a rule
+    that does nothing. It is the whole of the fix: the row now HAS a
+    background rule, which is the condition Textual checks before it
+    applies the tint at all."""
+    from pathlib import Path
+
+    import doxa
+
+    css = (Path(doxa.__file__).parent / "theme.tcss").read_text("utf-8")
+    block = css.split("SessionSidebar > SidebarLine {", 1)[1].split("}", 1)[0]
+    assert "background:" in block
+    # Through the VARIABLE and not a second literal: the rail's own
+    # `background` and its rows' must be the same colour, and two hexes
+    # would be a hover that silently stops working the first time somebody
+    # re-hues one of them.
+    assert "$rail-ground" in block
+    assert "$rail-ground:" in css
+    rail = css.split("SessionSidebar {", 1)[1].split("}", 1)[0]
+    assert "background: $rail-ground;" in rail
+
+
+@pytest.mark.asyncio
+async def test_the_divider_lights_under_the_pointer_and_goes_out_again(
+    tmp_path,
+):
+    """**The second reported gap**: nothing said the edge could be moved.
+
+    It already dragged (v1.5.0); this is affordance only. A GUI would say
+    it with the pointer and this cannot -- see
+    ``test_doxa_does_not_try_to_change_the_mouse_pointer`` -- so the edge
+    says it itself, by inverting."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        assert app.set_sidebar(True) is None
+        await pilot.pause()
+        rail = app.sidebar()
+        edge = rail.region.x + rail.outer_size.width - 1
+        assert rail.edge_hot() is False
+
+        await pilot.hover(app.screen, offset=(edge, 3))
+        assert await _wait(pilot, lambda: rail.edge_hot() is True)
+        # COMPUTED from the resting colour, by the same function a
+        # heading's text is -- never a second hex to strand.
+        rest_edge, rest_colour = rail._edge_rest
+        _kind, painted = rail.styles.border_right
+        assert painted.hex.upper() == triage_mod.contrast_text(rest_colour)
+        assert rest_colour.upper() != painted.hex.upper()
+
+        # A row is not the edge.
+        await pilot.hover(app.screen, offset=(rail.region.x + 1, 3))
+        assert await _wait(pilot, lambda: rail.edge_hot() is False)
+        # ...and the stylesheet's own colour is back, rather than a second
+        # inline one that happens to match.
+        assert rail.styles.border_right[1].hex.upper() == rest_colour.upper()
+
+
+@pytest.mark.asyncio
+async def test_the_divider_stays_lit_for_the_whole_drag(tmp_path):
+    """Dragging the edge RIGHT puts the pointer over the panes for the
+    whole gesture. An affordance that went out the moment the gesture
+    started would be lit only while it was not being used."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        assert app.set_sidebar(True) is None
+        await pilot.pause()
+        rail = app.sidebar()
+        start = app.sidebar_width()
+        await pilot.mouse_down(rail, offset=(rail.outer_size.width - 1, 1))
+        assert await _wait(pilot, lambda: rail._dragging is True)
+        assert rail.edge_hot() is True
+        # Out over the panes, which is where a widening drag lives.
+        await pilot.hover(app.screen, offset=(rail.region.x + start + 6, 1))
+        await pilot.pause()
+        assert rail.edge_hot() is True
+        await pilot.mouse_up(
+            app.screen, offset=(rail.region.x + start + 6, 1)
+        )
+        assert await _wait(pilot, lambda: rail._dragging is False)
+        # Released, and the pointer decides again -- which after a widening
+        # drag means it is standing on the edge it just placed, so the
+        # divider stays lit. That is the answer, not a leftover: move off
+        # it and it goes out.
+        assert rail.edge_hot() is True
+        await pilot.hover(app.screen, offset=(rail.region.x + 1, 3))
+        assert await _wait(pilot, lambda: rail.edge_hot() is False)
+
+
+@pytest.mark.asyncio
+async def test_the_edge_is_found_by_screen_column_not_by_a_bubbled_one(
+    tmp_path,
+):
+    """A mouse event that started on a ROW arrives at the rail by
+    bubbling and keeps the row's coordinates. A row is inset by the rail's
+    padding and never reaches the edge column, so reading ``event.x``
+    would answer "not the divider" for a reason that has nothing to do
+    with where the pointer is -- and the answer would be right by accident
+    on the way in and wrong on the way out."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        await app.action_new_tab()
+        assert await _wait(pilot, lambda: len(app.panes()) == 2)
+        assert app.set_sidebar(True) is None
+        assert await _wait(pilot, lambda: len(_lines(app)) == 3)
+        rail = app.sidebar()
+        line = _lines(app)[1]
+
+        class _Event:
+            screen_x = rail.region.x + rail.outer_size.width - 1
+
+        assert rail._edge_under(_Event()) is True
+        # The same column, expressed the way a bubbled event would have.
+        class _Bubbled:
+            screen_x = rail.region.x + 1
+
+        assert rail._edge_under(_Bubbled()) is False
+        assert line.region.x + line.outer_size.width <= _Event.screen_x
+
+
+def test_doxa_does_not_try_to_change_the_mouse_pointer():
+    """**The third reported gap, and the one DOXA declines to close.**
+
+    *"the mouse icon does not change"*. The sequence that would do it is
+    ``OSC 22 ; <shape> ST``, and three things settle it, in this order:
+
+    1. **It does not work on the terminal the report came from.** Warp
+       does not implement OSC 22 (warpdotdev/Warp#13383, open and
+       triaged), so on the reporter's own screen the pointer would not
+       change and the gap would still be there -- with escape bytes now
+       being written at it.
+    2. **There is nothing to ask.** OSC 22 is write-only in every terminal
+       but kitty, whose query form no other terminal answers. DOXA's rule
+       for exactly this situation is written down in doxa/keyboard.py:
+       ask the terminal, and never read silence as an answer. A capability
+       with no reply channel is one DOXA cannot claim, and this project
+       says where a gesture does not work rather than pretending.
+    3. **Textual 5.3.0 offers no API for it** -- verified below, not
+       assumed. (Textual 7.4.0 later added a ``pointer`` TCSS rule that
+       writes the same sequence; hand-rolling it here would collide with
+       that upgrade rather than anticipate it.)
+
+    So the hover highlight carries the whole affordance instead -- the
+    divider inverts, which is what the two tests above pin. This test is
+    the decision, written down where a later "we could just emit OSC 22"
+    will trip over it."""
+    from pathlib import Path
+
+    import doxa
+    import textual
+
+    root = Path(doxa.__file__).parent
+    for path in root.rglob("*.py"):
+        assert "]22;" not in path.read_text("utf-8"), path
+    assert "]22;" not in (root / "theme.tcss").read_text("utf-8")
+    # And the reason it is not simply delegated: there is nothing to
+    # delegate to on this pin.
+    assert textual.__version__.startswith("5.")
+    from textual.css import styles as textual_styles
+
+    assert not hasattr(textual_styles.StylesBase, "pointer")
+
+
+# -- v1.5.1: "also moving the divider is laggy" -------------------------
+
+
+def test_a_queued_drag_position_gives_way_to_a_newer_one():
+    """Textual's own coalescing, declared on the rail's own message.
+
+    ``MessagePump._process_messages_loop`` peeks the queue and drops a
+    message a pending one may supersede; ``events.Resize`` declares
+    exactly this for exactly this reason. A drag position with a newer one
+    behind it is a rectangle nobody will ever see."""
+    made = SessionSidebar.WidthDragged
+    assert made(30).can_replace(made(31)) is True
+    assert made(30).can_replace(made(31, final=True)) is True
+    # The FINAL one is never dropped: it is the only message that WRITES,
+    # and a drag whose last event was swallowed would leave the width on
+    # screen and not on disk -- the disagreement v1.5.0 already had to fix
+    # once (``a width write that failed must not leave the rail
+    # disagreeing with itself``).
+    assert made(30, final=True).can_replace(made(31)) is False
+    assert made(30, final=True).can_replace(made(31, final=True)) is False
+    # And it does not eat its neighbours.
+    assert made(30).can_replace(SessionSidebar.Revealed("x")) is False
+
+
+@pytest.mark.asyncio
+async def test_a_drag_asks_for_one_width_per_column_not_one_per_report(
+    tmp_path,
+):
+    """**The lag fix, measured rather than asserted.**
+
+    A 125 Hz mouse reports about three times per column crossed, because a
+    hand moving right also moves up and down. v1.5.0 posted every one of
+    them: 36 reports over twelve columns became 38 width changes, each
+    costing a refusal check, a settings-registry decision and -- for the
+    two in three that named a width the rail already had -- a full
+    re-layout of the window to arrive back where it started.
+
+    One per column crossed, plus the final write. Nothing is lost: the
+    dropped reports name a width that is already on screen."""
+    app, _engines = _app(tmp_path)
+    asked: "list[tuple[int, bool]]" = []
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        assert app.set_sidebar(True) is None
+        await pilot.pause()
+        rail = app.sidebar()
+        real = app.resize_sidebar
+
+        def spy(width, *, persist=True):
+            asked.append((int(width), bool(persist)))
+            return real(width, persist=persist)
+
+        app.resize_sidebar = spy
+        start = app.sidebar_width()
+        await pilot.mouse_down(rail, offset=(rail.outer_size.width - 1, 1))
+        assert await _wait(pilot, lambda: rail._dragging is True)
+        columns, reports = 6, 3
+        for step in range(columns):
+            for wobble in range(reports):
+                await pilot.hover(
+                    app.screen,
+                    offset=(rail.region.x + start + step, 1 + wobble),
+                )
+        await pilot.mouse_up(
+            app.screen, offset=(rail.region.x + start + columns - 1, 1)
+        )
+        assert await _wait(pilot, lambda: rail._dragging is False)
+        assert await _wait(pilot, lambda: any(p for _w, p in asked))
+
+    # One per column, and exactly one write -- against 19 and 1 before.
+    moves = [w for w, persist in asked if not persist]
+    assert len(moves) <= columns, moves
+    assert len(moves) < columns * reports
+    assert sorted(moves) == moves, moves  # monotonic: it tracked the hand
+    assert [w for w, persist in asked if persist] == [moves[-1]]
+
+
+# -- v1.5.1: a double click on a CLOSED row stages /attach --------------
+
+
+async def _closed_row(app, pilot):
+    """Detach a session so the rail holds a row with no pane behind it --
+    the one row a click has never been able to do anything with."""
+    await app.action_new_tab()
+    assert await _wait(pilot, lambda: len(app.panes()) == 2)
+    await pilot.pause()
+    doomed = app.panes()[1]
+    session_id = doomed._session_id
+    await app._close_pane(doomed, terminate=False)
+    assert await _wait(pilot, lambda: len(app.panes()) == 1)
+    assert session_id in app._detached_this_run
+    assert app.set_sidebar(True) is None
+
+    def row():
+        return next(
+            (
+                line for line in _lines(app)
+                if line.row.session_id == session_id and not line.row.mounted
+            ),
+            None,
+        )
+
+    # PAINTED, not merely modelled: a row whose rectangle is still zero
+    # cannot be clicked, and the pilot answers False rather than raising --
+    # the "invisible button" defect in its test form.
+    assert await _wait(
+        pilot,
+        lambda: row() is not None and row().region.width > 0,
+    )
+    return session_id, row()
+
+
+def _prompt(app):
+    from doxa.ui.prompt import PromptInput
+
+    return app.active_pane.query_one("#prompt-input", PromptInput)
+
+
+@pytest.mark.asyncio
+async def test_double_clicking_a_closed_row_stages_attach_unsent(tmp_path):
+    """**Staged, never run.** ``/attach`` opens a tab against a live
+    daemon; a double click that RAN it would be a mouse gesture with a
+    session-shaped consequence and no step at which the user could read
+    what it was about to do. The prompt is where a command waits to be
+    read -- the same door ``Ctrl+R`` uses for ``/search ``.
+
+    The eight-character prefix and not the full id, because that is the
+    form :meth:`doxa.app.DoxaApp.reveal_session` already tells people to
+    type: a gesture that staged a different string from the one the
+    transcript names would read as two different commands."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        session_id, line = await _closed_row(app, pilot)
+        assert _prompt(app).value == ""
+        before = len(app.panes())
+
+        await pilot.click(line, times=2)
+        assert await _wait(
+            pilot, lambda: _prompt(app).value == f"/attach {session_id[:8]}"
+        )
+        # UNSENT: nothing ran, no tab opened, the session is still closed.
+        await pilot.pause()
+        assert len(app.panes()) == before
+        assert session_id in app._detached_this_run
+        assert app.focused_pane() is not None
+
+
+@pytest.mark.asyncio
+async def test_a_single_click_on_a_closed_row_still_only_says_so(tmp_path):
+    """The gesture that was there before is untouched. Textual delivers
+    chain 1 and THEN chain 2, so swallowing the first would mean guessing
+    on a timer whether a second is coming -- and a single click that
+    silently typed into the prompt would be the rail writing in the user's
+    box for a gesture that has always just answered a question."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        session_id, line = await _closed_row(app, pilot)
+        await pilot.click(line)
+        await pilot.pause()
+        await pilot.pause()
+        assert _prompt(app).value == ""
+        note = app.reveal_session(session_id)
+        assert note is not None and "not open in this window" in note
+
+
+@pytest.mark.asyncio
+async def test_double_clicking_an_OPEN_row_still_just_reveals_it(tmp_path):
+    """An open row has somewhere to go, so it goes there -- twice, which
+    is the same place. Nothing is staged: there is nothing to attach to,
+    the session is already here."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        await app.action_new_tab()
+        assert await _wait(pilot, lambda: len(app.panes()) == 2)
+        assert app.set_sidebar(True) is None
+        assert await _wait(pilot, lambda: len(_lines(app)) == 3)
+        first = app.panes()[0]
+        group = app.groups()[0]
+        row = next(
+            line for line in _lines(app)
+            if line.row.kind == Row.SESSION
+            and line.row.session_id == first._session_id
+        )
+        assert row.staging() is False
+        await pilot.click(row, times=2)
+        assert await _wait(pilot, lambda: group.active_tab() is first.tab)
+        assert _prompt(app).value == ""
+
+
+def test_an_archived_tab_is_mounted_so_it_reveals_rather_than_attaches():
+    """The row that looks adjacent and is not. An archive is ON SCREEN --
+    it reveals like any other row -- so a double click on it must keep
+    revealing rather than offering to fetch a session that is already
+    here."""
+    archived = SidebarLine(Row(Row.SESSION, "old", session_id="a1", mounted=True))
+    assert archived.staging() is False
+    closed = SidebarLine(Row(Row.SESSION, "gone", session_id="a2", mounted=False))
+    assert closed.staging() is True
+    # A heading is not a session at all, whatever it is marked.
+    heading = SidebarLine(Row(Row.HEADING, "ampiric", collection="ampiric"))
+    assert heading.staging() is False
+    # ...and neither is a row with nothing to name.
+    assert SidebarLine(Row(Row.SESSION, "?", mounted=False)).staging() is False
+
+
+@pytest.mark.asyncio
+async def test_a_reaped_session_has_no_row_to_double_click(tmp_path):
+    """Reaping is the one gesture in this app that means "forget this
+    conversation", and it means it here too: the rail does not list a
+    killed session, so there is no row for the new gesture to reach. Pinned
+    because the gesture is new and the exclusion is one line of filtering
+    two files away."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        session_id, _line = await _closed_row(app, pilot)
+        assert await _wait(
+            pilot,
+            lambda: any(
+                line.row.session_id == session_id for line in _lines(app)
+            ),
+        )
+        app._killed_this_run.add(session_id)
+        app.refresh_sidebar(force=True)
+        assert await _wait(
+            pilot,
+            lambda: not any(
+                line.row.session_id == session_id for line in _lines(app)
+            ),
+        )
