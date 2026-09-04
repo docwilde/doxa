@@ -859,9 +859,16 @@ async def test_the_strip_appearing_does_not_cost_the_transcript_its_tail(tmp_pat
         block_list = pane.query_one("#block-list")
         for n in range(60):
             await pane._system(f"line {n}")
-        await pilot.pause()
-        assert block_list.max_scroll_y > 0, "there is a scroll to lose"
-        assert pane.transcript_at_end()
+        # A settle loop, not a bare pause -- SAME reason as the re-pin
+        # check below, and the same defect v1.3.1 fixed across
+        # test_tab_labels.py: sixty mounts plus the auto-scroll they
+        # trigger do not reliably land inside one frame under full-suite
+        # load, and this is SETUP -- it fails as "there is no tail to
+        # lose" long before the behaviour under test is exercised.
+        assert await _wait(pilot, lambda: block_list.max_scroll_y > 0), (
+            "there is a scroll to lose")
+        assert await _wait(pilot, lambda: pane.transcript_at_end()), (
+            "the transcript starts pinned to its tail")
 
         await app.action_new_tab()
         assert await _wait(pilot, lambda: len(group.tabs()) == 2)
