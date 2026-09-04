@@ -4,6 +4,28 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.3.1 — 2026-09-04
+
+**Fix `tests/test_tab_labels.py`, which failed 6 of 10 runs on main** with no
+change to the module. Eleven assertion points spent a bare
+`await pilot.pause()` — one frame — before reading the tab strip, so they
+passed only when the repaint happened to land in that frame.
+
+- **Measured on main before the fix**, at the same base commit:
+  `test_rename_command_is_the_keyboard_door` 5/10,
+  `test_the_label_follows_a_branch_switch_without_polling` 2/10,
+  `test_the_glyph_prepends_every_painted_tab_label` 2/10.
+- The module already owned the primitive: **`_settled`** polls the painted
+  label until it stops moving, 200 tries, and every setup point used it.
+  The assertion points now do too.
+- **The assertions are not weakened.** `_settled` returns falsy when a label
+  never settles and every call site asserts on it, so a label that stops
+  tracking still fails — for that reason rather than for scheduler timing.
+  Where a test checked a model-level fact first (`auto_label()`,
+  `generated_name`), that order is kept.
+- **10 runs, 10 green**, against the 6-of-10-failing baseline. No product
+  code changed.
+
 ## 1.3.0 — 2026-09-03
 
 **A session can spawn a session, and it is OFF by default.** The first
