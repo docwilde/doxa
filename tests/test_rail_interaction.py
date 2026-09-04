@@ -39,7 +39,7 @@ from doxa import tabsets as tabsets_mod
 from doxa import triage as triage_mod
 from doxa.app import DoxaApp
 from doxa.ui import sidebar as sidebar_mod
-from doxa.ui.sidebar import Row, SessionSidebar, SidebarLine, build_rows
+from doxa.ui.sidebar import Row, SidebarLine, build_rows
 from tests.fakes import FakeEngine
 
 
