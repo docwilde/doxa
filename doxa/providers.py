@@ -88,6 +88,19 @@ FALLBACK_MODEL_ALIASES: tuple[str, ...] = ("haiku", "sonnet", "opus", "fable")
 # true if the vocabulary has a place to live.
 CLAUDE_PROVIDER_ID = "claude"
 
+# The second provider id, and the first time this constant has had a
+# sibling. Same three readers as CLAUDE_PROVIDER_ID above -- the engine
+# publishes it as ``PeerInfo.provider``, ``doxa.ui.labels.PROVIDER_GLYPHS``
+# keys on it, and it names the vendor rather than the CLI (the CLI is
+# ``doxa.engines.CODEX_ENGINE_ID``; a provider and an engine are different
+# questions, which is precisely why PeerInfo carries both fields).
+#
+# No ``CodexProvider(ModelProvider)`` ships beside it: this module lists
+# MODELS, and enumerating Codex's catalog is a second measurement nobody
+# has made. The picker keeps saying what it can source; it does not learn
+# to guess for a second vendor.
+CODEX_PROVIDER_ID = "openai"
+
 
 @dataclass(frozen=True)
 class ModelInfo:
