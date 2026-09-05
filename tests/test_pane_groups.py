@@ -85,6 +85,69 @@ async def _wait(pilot, cond, tries=250):
     return cond()
 
 
+def _layout_state(app, pane, block_list) -> str:
+    """The state that decides a LAYOUT fact, for a settle loop that gave up.
+
+    **A settle loop on a layout fact cannot be too short**, which is the
+    thing three attempts at this test got wrong before it was measured.
+    ``Pilot.pause(delay)`` ends by calling
+    ``app.screen._on_timer_update()`` itself (textual 5.3
+    ``pilot.py``:521-533), and that call performs the pending layout
+    SYNCHRONOUSLY (``screen.py``:1131-1150) -- so a layout that is
+    possible at all lands on the FIRST cycle. Measured at v1.7.2, same
+    box: 1 cycle standing alone, 1 cycle behind 200 apps of build/teardown
+    churn in one process, and 1 cycle inside each of four full ~1950-test
+    suite runs (0.26-0.45s), including two run concurrently. The cost is
+    bimodal, not a slope: 1 cycle, or never.
+
+    So a run that spends all 250 of them was never waiting for a late
+    frame. It was waiting on a layout that had STOPPED, and only three
+    things stop one: ``App._batch_count`` non-zero (nothing lays out or
+    repaints -- textual raises it without a matching ``with`` only in the
+    two app-shutdown paths and in ``_delay_update``), the screen not being
+    current, or ``messages.Layout()`` never reaching the screen at all --
+    which a widget posts only from its OWN ``_on_idle``
+    (``widget.py``:4344-4375), so a pump that never idles never asks for
+    the layout that would tell it what it now contains.
+
+    In every one of those the widget keeps the ``size`` of the last frame
+    it WAS laid out in while ``virtual_size`` stays frozen -- verified by
+    forcing each state: ``_batch_count = 1`` reproduces this test's
+    reported failure exactly (``size.height`` 17, 62 blocks mounted,
+    ``max_scroll_y`` 0 for as long as you care to poll), a hidden
+    ``TabPane`` does not (``size`` goes to 0x0, which fails the HEIGHT
+    wait above instead), and an opaque modal on top does not freeze it at
+    all (the screen below stays a background screen and keeps laying out).
+
+    Hence: **do not raise ``tries`` here.** A bigger budget cannot make
+    any of those three true, and spending one would only hide a stopped
+    layout behind a slower green. Print the state instead, so the next
+    occurrence names its own cause instead of reporting the absence of a
+    scroll."""
+    facts: "list[str]" = []
+
+    def note(name, get) -> None:
+        try:
+            facts.append(f"{name}={get()}")
+        except Exception as exc:  # noqa: BLE001 -- a report, not a code path
+            facts.append(f"{name}=<unreadable: {exc!r}>")
+
+    note("size", lambda: block_list.size)
+    note("container_size", lambda: block_list.container_size)
+    note("virtual_size", lambda: block_list.virtual_size)
+    note("scroll_offset.y", lambda: block_list.scroll_offset.y)
+    note("max_scroll_y", lambda: block_list.max_scroll_y)
+    note("pane._tail_pending", lambda: pane._tail_pending)
+    note("blocks", lambda: len(block_list.children))
+    note("is_mounted", lambda: block_list.is_mounted)
+    note("app._batch_count", lambda: app._batch_count)
+    note("screen.is_current", lambda: block_list.screen.is_current)
+    note("screen._layout_required", lambda: block_list.screen._layout_required)
+    note("screens", lambda: [type(s).__name__ for s in app.screen_stack])
+    note("app._running", lambda: app._running)
+    return ", ".join(facts)
+
+
 #: Big enough that no split below is refused for size.
 BIG = (160, 48)
 
@@ -859,25 +922,40 @@ async def test_the_strip_appearing_does_not_cost_the_transcript_its_tail(tmp_pat
         block_list = pane.query_one("#block-list")
         for n in range(60):
             await pane._system(f"line {n}")
-        # A settle loop, not a bare pause -- SAME reason as the re-pin
-        # check below, and the same defect v1.3.1 fixed across
-        # test_tab_labels.py: sixty mounts plus the auto-scroll they
-        # trigger do not reliably land inside one frame under full-suite
-        # load, and this is SETUP -- it fails as "there is no tail to
-        # lose" long before the behaviour under test is exercised.
         # Two facts in order, because they fail differently: the list must
         # have a HEIGHT (it has none until laid out, and a zero-height
         # list reports max_scroll_y 0 no matter how much it contains),
         # and only then can it have a scroll to lose. Collapsing them
         # into one predicate reports "there is no scroll" for a list that
-        # simply has not been painted -- which is what the loaded run
-        # actually hit.
-        assert await _wait(pilot, lambda: block_list.size.height > 0), (
-            "the transcript never painted")
-        assert await _wait(pilot, lambda: block_list.max_scroll_y > 0), (
-            "there is a scroll to lose")
-        assert await _wait(pilot, lambda: pane.transcript_at_end()), (
-            "the transcript starts pinned to its tail")
+        # simply has not been painted.
+        #
+        # v1.7.0 replaced a bare pause with a settle loop here and v1.7.1
+        # split the predicate, both on the theory that sixty mounts do not
+        # reliably land inside one frame under full-suite load. MEASURED at
+        # v1.7.2, that theory is wrong: this wait costs ONE cycle standing
+        # alone, one behind 200 apps of churn, and one inside each of four
+        # full-suite runs (two of them concurrent) -- because pause() lays
+        # the screen out itself. See _layout_state for the measurements and
+        # for what a 250-cycle failure here therefore does mean. So a
+        # settle loop here can only ever be too WEAK, never too short, and
+        # each of the three below reports the deciding state rather than
+        # the absence it noticed.
+        if not await _wait(pilot, lambda: block_list.size.height > 0):
+            raise AssertionError(
+                "the transcript never painted: "
+                + _layout_state(app, pane, block_list)
+            )
+        if not await _wait(pilot, lambda: block_list.max_scroll_y > 0):
+            raise AssertionError(
+                "there is a scroll to lose -- the transcript's layout has "
+                "STOPPED rather than lagged, since one pause performs it: "
+                + _layout_state(app, pane, block_list)
+            )
+        if not await _wait(pilot, lambda: pane.transcript_at_end()):
+            raise AssertionError(
+                "the transcript starts pinned to its tail: "
+                + _layout_state(app, pane, block_list)
+            )
 
         await app.action_new_tab()
         assert await _wait(pilot, lambda: len(group.tabs()) == 2)
@@ -890,6 +968,104 @@ async def test_the_strip_appearing_does_not_cost_the_transcript_its_tail(tmp_pat
         app._focus_tab(pane)
         assert await _wait(pilot, lambda: pane.transcript_at_end()), (
             "still on its newest block"
+        )
+        assert block_list.scroll_offset.y == block_list.max_scroll_y
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_layout_says_so_instead_of_reporting_a_missing_scroll(
+    tmp_path,
+):
+    """The three-release lesson from the test above, executable.
+
+    v1.7.0 and v1.7.1 both read that test's setup failure -- "there is a
+    scroll to lose", only ever inside the full suite -- as a wait that was
+    too SHORT, and both fixed it that way (a settle loop; then the same
+    loop split in two). Neither worked, because the reading was wrong: a
+    ``Pilot.pause`` lays the screen out itself, so that predicate is true
+    on the first cycle or not at all (see :func:`_layout_state`).
+
+    What it actually reports is a layout that has STOPPED, and this pins
+    the cheapest state that stops one: while an update batch is open,
+    Textual lays nothing out and repaints nothing. Sixty blocks mount, the
+    transcript keeps the ``size`` of the last frame it WAS laid out in --
+    which is exactly why the failure reads as "no scroll" rather than "no
+    layout" -- and ``max_scroll_y`` stays 0 for as long as anything cares
+    to poll it. The claim here is not that a batch is what the suite hits;
+    it is that a settle loop's report has to name the state that decides
+    it, or the next reader spends another release on the budget."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        pane = app.active_pane
+        block_list = pane.query_one("#block-list")
+        painted = block_list.size.height
+        assert painted > 0, "the transcript painted before the batch opened"
+        app._begin_batch()
+        try:
+            for n in range(60):
+                await pane._system(f"line {n}")
+            assert len(block_list.children) >= 60, "the blocks are all there"
+            # The HEIGHT wait still passes: `size` is the last laid-out
+            # frame's, and a stopped layout never rewrites it.
+            assert await _wait(pilot, lambda: block_list.size.height > 0)
+            # The SCROLL wait cannot, however long it is given.
+            assert not await _wait(
+                pilot, lambda: block_list.max_scroll_y > 0, tries=25
+            )
+            assert block_list.virtual_size.height == block_list.container_size.height
+            report = _layout_state(app, pane, block_list)
+        finally:
+            app._end_batch()
+        assert "app._batch_count=1" in report, report
+        assert "virtual_size=" in report, report
+        assert "blocks=" in report, report
+        # And it is the state, not the budget: closing the batch lets the
+        # very next cycle produce the scroll the loop spent 25 waiting for.
+        assert await _wait(pilot, lambda: block_list.max_scroll_y > 0)
+
+
+@pytest.mark.asyncio
+async def test_a_tail_scroll_survives_a_layout_that_arrives_late(tmp_path):
+    """The defect behind this file's one full-suite-only flake, pinned.
+
+    ``scroll_end`` does not scroll: it defers its work one refresh so it
+    can read the ``max_scroll_y`` the append produced. A layout that takes
+    LONGER than that one refresh leaves that deferred read looking at the
+    old ``max_scroll_y`` -- so it scrolls to the old end and reports
+    success, and nothing re-issues it, because
+    ``scroll_transcript_to_end``'s guard asks whether there is a BOX and
+    there always was one.
+
+    Caught twice in full-suite runs of the test above, at
+    ``scroll_offset.y`` 0 against ``max_scroll_y`` 179 with all 62 blocks
+    mounted and the layout otherwise healthy; never once with that test
+    standing alone. A batch makes the same window deterministic -- while
+    one is open Textual lays nothing out -- so the sixty appends here all
+    scroll to a ``max_scroll_y`` of 0, exactly as the loaded runs did."""
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        pane = app.active_pane
+        block_list = pane.query_one("#block-list")
+        app._begin_batch()
+        for n in range(60):
+            await pane._system(f"line {n}")
+        # Two refreshes with no layout in them: scroll_end's own deferred
+        # read happens here, against a max_scroll_y that is still 0.
+        await pilot.pause(0.02)
+        await pilot.pause(0.02)
+        assert block_list.max_scroll_y == 0, "the layout has not run yet"
+        assert block_list.scroll_offset.y == 0, "so the scroll went nowhere"
+        app._end_batch()
+        assert await _wait(pilot, lambda: block_list.max_scroll_y > 0), (
+            "the layout catches up: " + _layout_state(app, pane, block_list)
+        )
+        # The scroll the appends asked for is honoured on the measurement
+        # it was short of, rather than being lost with the output kept.
+        assert await _wait(pilot, lambda: pane.transcript_at_end()), (
+            "the tail scroll survived the late layout: "
+            + _layout_state(app, pane, block_list)
         )
         assert block_list.scroll_offset.y == block_list.max_scroll_y
 

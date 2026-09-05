@@ -191,6 +191,23 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         # box on screen to do it in." Written only by
         # scroll_transcript_to_end, spent only by _flush_pending_tail.
         self._tail_pending = False
+        # "This transcript was put on its tail and has not been moved
+        # since" -- the standing half of the same intent, and the thing
+        # that lets a LATE measurement be honoured without ever dragging a
+        # reader who has scrolled away. See scroll_transcript_to_end.
+        self._tail_follow = False
+        # Where this pane's own last tail scroll actually left the
+        # transcript. A later measurement re-issues the scroll only while
+        # the transcript is still exactly there: anywhere else means the
+        # reader moved it, and their position wins.
+        self._tail_at: "int | None" = None
+        # Whether this pane has subscribed to its own transcript's
+        # virtual_size -- the reactive that changes exactly when the
+        # layout finally measures what the transcript now holds, which is
+        # the fact a late tail scroll was short of. Subscribed once,
+        # lazily, from scroll_transcript_to_end, because #block-list
+        # composes strictly later than this pane does.
+        self._tail_watching = False
         # Out-of-band turn rendering state (replayed history after reattach,
         # or a turn another attached client drives) -- see _peer_pump.
         self._oob_turn: TurnBlock | None = None
@@ -998,7 +1015,96 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
             self._tail_pending = True
             return
         self._tail_pending = False
+        # THE SECOND HALF OF THE SAME DEFECT (v1.7.3), and the reason the
+        # scroll is now REMEMBERED rather than merely issued.
+        #
+        # ``scroll_end`` does not scroll. It defers ``_lazily_scroll_end``
+        # by exactly one refresh so that it can read the ``max_scroll_y``
+        # this append produced (textual 5.3 widget.py:2836-2901). One
+        # refresh is enough when the layout runs inside it, and the guard
+        # above covers the case where there is no box to lay out in at
+        # all -- but neither covers a layout that is simply LATER than
+        # that one refresh. Then the deferred callback reads the OLD
+        # ``max_scroll_y``, scrolls there, and reports success, and
+        # nothing re-issues it: ``_tail_pending`` was never set, because
+        # there WAS a box the whole time. What was missing was never the
+        # box. It was ``virtual_size``.
+        #
+        # MEASURED, twice, in full ~1950-test suite runs of
+        # ``test_the_strip_appearing_does_not_cost_the_transcript_its_tail``
+        # (and never once with that test standing alone): sixty appends
+        # into a transcript whose layout had not caught up, every one of
+        # them scrolling to row 0 against a ``max_scroll_y`` that was
+        # still 0 and reporting success -- and the pane then sitting at
+        # ``scroll_offset.y`` 0 against ``max_scroll_y`` 179, with
+        # ``virtual_size`` 196, ``size`` 94x17 and all 62 blocks mounted,
+        # for good. That is this method's own defect ("the scroll lost,
+        # not the output") reached through the one door its box guard
+        # cannot see, and no settle loop can recover from it, because
+        # waiting never re-issues a scroll.
+        #
+        # So the intent STANDS after it is issued, and
+        # :meth:`_transcript_measured` re-issues it on the layout that
+        # finally supplies the measurement. It cannot drag a reader who
+        # scrolled away, because it only ever acts while the transcript is
+        # still exactly where this pane's own last scroll left it.
+        self._tail_follow = True
+        self._watch_transcript_size(block_list)
         block_list.scroll_end(animate=False)
+        # Queued on the block list's OWN pump, so it lands behind the
+        # ``_lazily_scroll_end`` that ``scroll_end`` just posted there
+        # rather than racing it.
+        block_list.call_after_refresh(self._note_tail_landed, block_list)
+
+    def _watch_transcript_size(self, block_list: "VerticalScroll") -> None:
+        """Subscribe once to the transcript's ``virtual_size``.
+
+        Lazily rather than from ``on_mount``: ``#block-list`` composes
+        strictly later than this pane does (v0.89.0), and the first
+        append is by definition a moment at which it exists."""
+        if self._tail_watching:
+            return
+        self._tail_watching = True
+        self.watch(block_list, "virtual_size", self._transcript_measured, init=False)
+
+    def _note_tail_landed(self, block_list: "VerticalScroll") -> None:
+        """Record where the scroll this pane just issued actually left the
+        transcript -- one refresh later, which is when ``scroll_end``'s own
+        deferred work has run."""
+        if not self._tail_follow or not block_list.is_mounted:
+            return
+        if block_list.size.height <= 0:
+            return  # no box: Show/Resize still owns this one, as before
+        self._tail_at = block_list.scroll_offset.y
+
+    def _transcript_measured(self) -> None:
+        """The transcript's ``virtual_size`` changed: the layout has just
+        measured what it now holds, which is the fact a tail scroll issued
+        before that layout was short of.
+
+        Re-issues that scroll ONLY while the transcript is still exactly
+        where this pane's own last one left it. A reader who has scrolled
+        anywhere themselves is somewhere else by definition, and their
+        position wins -- the same rule
+        :meth:`doxa.app.DoxaApp.refresh_strip_visibility` already follows,
+        and the one ``test_the_strip_does_not_drag_a_scrolled_up_pane_to_
+        the_bottom`` pins."""
+        if not self._tail_follow or self._tail_at is None:
+            return
+        try:
+            block_list = self.query_one("#block-list", VerticalScroll)
+        except NoMatches:
+            return
+        if not block_list.is_mounted or block_list.size.height <= 0:
+            return
+        if block_list.scroll_offset.y != self._tail_at:
+            self._tail_follow = False
+            self._tail_at = None
+            return
+        if block_list.scroll_offset.y >= block_list.max_scroll_y:
+            return  # already on the tail this measurement describes
+        block_list.scroll_end(animate=False)
+        block_list.call_after_refresh(self._note_tail_landed, block_list)
 
     def set_needs_input(self, value: bool) -> None:
         """The attention-blink mechanism. Nothing calls this with True yet
