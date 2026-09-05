@@ -4,6 +4,41 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.7.4 — 2026-09-05
+
+**Four ways one Codex turn could hang or lie**, found by a cross-family Codex
+review of `v1.0.1..HEAD` and fixed in `doxa/codex.py` — the engine shipped in
+1.4.0.
+
+- **`TURN_TIMEOUT_SECS` was dead code.** Defined at 3600.0 and referenced
+  nowhere, so a `codex exec` that started but neither exited nor closed stdout
+  held the turn and the UI worker forever behind a constant advertising a
+  protection that did not exist. `send()` now builds a wall-clock deadline
+  before the spawn, runs every await it owns against it, **kills the child** on
+  expiry and emits an `is_error` `turn_done` naming the limit.
+- **stderr deadlock.** `stderr=PIPE` was drained only after the stdout loop
+  finished, so ~64KiB of warnings filled the OS pipe buffer, the child blocked,
+  never closed stdout, and DOXA waited forever. **`_drain_stderr`** now runs as
+  its own task from before the first stdout read, keeping a bounded 64KiB tail.
+- **`STREAM_LIMIT_BYTES = 8 MiB`**, replacing asyncio's default 64KiB
+  StreamReader limit — one oversized JSONL event used to raise and kill the
+  turn. Deliberately NOT `peers.MAX_FRAME_BYTES`: that governs DOXA's own
+  protocol, where DOXA writes both ends and can reject; a Codex event is
+  written by an external CLI to no size contract. An overrun now ends the turn
+  with a readable error instead of a traceback.
+- **`turn.failed` kept yielding** after emitting `turn_done`, so consumers saw
+  events after terminal completion, and reported a pre-increment `num_turns`
+  (0 where success reported 1). Both fixed.
+- **A malformed stdout line was silently discarded** and a zero exit then
+  produced a successful `turn_done` — output vanished with no error. Such lines
+  are now counted and fail the turn with a scrubbed sample. The unknown-`type`
+  drop stays: that one is deliberate forward compatibility.
+- A sixth finding — concurrent `send()` calls sharing `_proc` — was
+  **rejected with evidence**: all three turn launchers use
+  `exclusive=True, group="turn"` on the same node, and the only other caller is
+  guarded by an explicit busy-check. The hazard is real at class level and has
+  no caller. 1961 passed.
+
 ## 1.7.3 — 2026-09-05
 
 **Fix a transcript that could stay scrolled to the top after a burst of
