@@ -754,13 +754,19 @@ class CodexEngine:
                 # Kill FIRST, then read: the tail cannot reach EOF while
                 # the child is still alive and still holds the pipe.
                 await self._kill_turn()
-            if not self._turn_closed:
-                # ...and only then. On a turn the STREAM closed
-                # (turn.failed) the child may still be alive and still
-                # writing, so waiting on its stderr to reach EOF would
-                # stall a turn that has already reported how it ended --
-                # an under-wait's mirror image, and it has no reader
-                # anyway: that path returns before `reason` is built.
+            if not self._turn_closed and (
+                code or timed_out or overran or self._bad_frames
+            ):
+                # ...and ONLY when something is going to read it. Two
+                # reasons, both of them "do not wait on a pipe nobody
+                # needs". A turn the STREAM closed (turn.failed) returns
+                # below before `reason` is built, and its child may still
+                # be alive and still writing. And stderr reaches EOF when
+                # the LAST holder of the write end closes it -- not when
+                # codex exits -- so a turn that leaves a dev server
+                # running behind it has a stderr that never ends, and
+                # collecting on the success path would put
+                # STDERR_COLLECT_SECS on every clean turn.
                 stderr_tail = await _collect_stderr()
         finally:
             if stderr_task is not None and not stderr_task.done():

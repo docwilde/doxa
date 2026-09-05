@@ -955,6 +955,49 @@ async def test_an_unreadable_stdout_line_fails_the_turn_instead_of_vanishing(tmp
     assert "confused" in error
 
 
+class _NeverClosingStderr:
+    """A stderr whose write end outlives the child.
+
+    Exactly what a turn that leaves a dev server (or any backgrounded
+    command) running produces: `codex exec` exits, the grandchild still
+    holds the inherited fd, and the pipe never reaches EOF."""
+
+    async def read(self, n: int = -1) -> bytes:
+        await asyncio.Event().wait()
+        return b""
+
+
+@pytest.mark.asyncio
+async def test_a_clean_turn_does_not_wait_on_a_stderr_that_never_ends(tmp_path):
+    """The drain runs for the whole turn -- but a SUCCESSFUL turn must not
+    then wait on it. EOF comes when the last holder of the write end
+    closes it, not when codex exits, so waiting unconditionally would put
+    STDERR_COLLECT_SECS onto every clean turn behind a backgrounded
+    command. Nothing reads the tail on that path; nothing waits for it."""
+
+    class _Proc(_FakeProc):
+        def __init__(self) -> None:
+            super().__init__(_script(
+                {"type": "item.completed",
+                 "item": {"id": "a", "type": "agent_message", "text": "ok"}},
+                {"type": "turn.completed", "usage": {}},
+            ))
+            self.stderr = _NeverClosingStderr()
+            self.returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+    async def make(*argv, **kwargs):
+        return _Proc()
+
+    engine = _engine(tmp_path, exec_factory=make)
+    # Well under STDERR_COLLECT_SECS: the point is that it does not wait.
+    events = await asyncio.wait_for(_collect(engine.send("go")), timeout=2)
+    assert [e.type for e in events] == ["turn_started", "text_delta", "turn_done"]
+    assert events[-1].data["is_error"] is False
+
+
 @pytest.mark.asyncio
 async def test_a_clean_turn_is_still_clean(tmp_path):
     """The control for the two tests above: no dropped lines, zero exit,
