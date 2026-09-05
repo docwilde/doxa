@@ -120,7 +120,49 @@ DEFAULT_SANDBOX = "workspace-write"
 #: How long a turn's process may run before it is killed. A turn that
 #: never ends would hold the pane's exclusive worker forever; the number
 #: is generous because a real coding turn is minutes, not seconds.
+#:
+#: v1.7.3: this was DEAD -- declared here and read nowhere, so the
+#: sentence above described an intention rather than the code. A ``codex
+#: exec`` that starts and then neither exits nor closes stdout held the
+#: turn worker and the pane forever. :meth:`CodexEngine.send` now runs
+#: every await it owns against a deadline built from this number, KILLS
+#: the child when the deadline passes, and ends the turn with an
+#: ``is_error`` ``turn_done`` that says so -- abandoning the read alone
+#: would have left the process behind, which is the failure this constant
+#: was named for.
 TURN_TIMEOUT_SECS = 3600.0
+
+#: The ``StreamReader`` high-water mark for the child's stdout and stderr.
+#:
+#: NOT :data:`doxa.peers.MAX_FRAME_BYTES` (64 KiB), and the difference is
+#: the whole reason this is its own number. That cap governs DOXA's OWN
+#: peer protocol, where DOXA writes both ends and a small frame is a
+#: policy it can enforce and reject against. A Codex JSONL event is
+#: written by an external CLI to no size contract at all: one line can be
+#: a whole ``agent_message`` or the whole captured stdout of a command
+#: the agent ran. On asyncio's 64 KiB default, ONE line over the mark
+#: makes ``readline()`` raise ``LimitOverrunError``/``ValueError``, which
+#: escapes ``send``, aborts the turn and kills Codex mid-run -- the cap
+#: is not a truncation here, it is a turn-ending crash. So the number has
+#: to sit far above any plausible frame rather than at the edge of one.
+#: 8 MiB is that, and it costs nothing to sit there: ``limit`` is a
+#: high-water mark for flow control, not an allocation, so an ordinary
+#: turn still buffers kilobytes.
+STREAM_LIMIT_BYTES = 8 * 1024 * 1024
+
+#: How much of the child's stderr is KEPT for the failure message. The
+#: pipe is drained in FULL regardless -- that is the deadlock fix, and a
+#: bounded read would reintroduce it -- but a child that writes megabytes
+#: to stderr must not cost megabytes of resident memory for a message
+#: that :func:`_truncate` cuts to ``RESULT_SUMMARY_MAX`` anyway.
+STDERR_TAIL_BYTES = 64 * 1024
+
+#: How long to wait for the stderr drain to reach EOF once the child is
+#: gone. Not a turn budget -- the child is already dead or reaped by the
+#: time this is awaited, so EOF is immediate; it exists only so that a
+#: stderr that somehow never closes cannot re-hang the turn at the very
+#: point the turn is trying to report a failure.
+STDERR_COLLECT_SECS = 5.0
 
 #: Result text kept per tool chip, matching what SessionEngine keeps for
 #: a Claude tool result (the chip shows a summary; the transcript holds
@@ -170,6 +212,73 @@ CODEX_CAPABILITIES = EngineCapabilities(
 def _truncate(text: str, limit: int = RESULT_SUMMARY_MAX) -> str:
     text = text.strip()
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+async def _drain_stderr(stream: Any, cap: int = STDERR_TAIL_BYTES) -> bytes:
+    """Read the child's stderr to EOF, keeping only the last ``cap`` bytes.
+
+    Run as its OWN task for the whole turn, and that is the point: reading
+    to EOF is what keeps the pipe from filling and blocking the child (see
+    the comment at its call site), while keeping only a tail is what stops
+    "drain all of it" from also meaning "hold all of it" -- the text ends
+    up cut to ``RESULT_SUMMARY_MAX`` either way, and a child in a loop can
+    write more stderr than this process should ever hold in memory."""
+    tail = b""
+    while True:
+        try:
+            chunk = await stream.read(65536)
+        except Exception:  # noqa: BLE001 -- a broken/closed stderr ends the
+            # drain and nothing else; CancelledError is a BaseException and
+            # still propagates, so a cancelled turn still tears this down.
+            break
+        if not chunk:
+            break
+        tail = (tail + chunk)[-cap:]
+    return tail
+
+
+def _turn_failure(
+    *,
+    timed_out: bool,
+    overran: bool,
+    code: "int | None",
+    stderr_tail: str,
+    bad_frames: int,
+    bad_sample: str,
+) -> "str | None":
+    """Why the turn failed, in the words the block will show -- or ``None``.
+
+    ONE function because there are two consumers that must not drift: the
+    ``text_delta`` that makes the failure READABLE in the transcript, and
+    the ``error`` on ``turn_done`` that makes it a marked block. Through
+    v1.7.2 those were two separate expressions at two call sites, which is
+    exactly the shape that leaves a newly added failure mode showing in
+    one surface and not the other."""
+    if timed_out:
+        return (
+            f"the turn ran past its {TURN_TIMEOUT_SECS:.0f}s limit and the "
+            "process was killed"
+            + (f" -- {stderr_tail}" if stderr_tail else "")
+        )
+    if overran:
+        return (
+            f"one stdout event exceeded the {STREAM_LIMIT_BYTES}-byte read "
+            "limit; the rest of the turn could not be read"
+        )
+    if code:
+        return stderr_tail or f"exec exited {code}"
+    if bad_frames:
+        # THE SILENT ONE (v1.7.3). A clean exit plus unreadable frames is
+        # output that VANISHED. DOXA cannot know what was in them, so the
+        # only honest report is a failed turn that says how many went
+        # missing -- a green turn_done here is the engine claiming it
+        # delivered everything Codex said.
+        said = "line was" if bad_frames == 1 else "lines were"
+        return (
+            f"{bad_frames} unreadable {said} dropped from codex stdout"
+            + (f" (first: {bad_sample})" if bad_sample else "")
+        )
+    return None
 
 
 def _tool_name(item: dict) -> str:
@@ -347,6 +456,11 @@ class CodexEngine:
         self._started = False
         self._proc: Any = None
         self._turn_closed = False
+        # Unreadable stdout lines seen during the CURRENT turn, and the
+        # first of them. Reset per turn by send(), which is also what
+        # surfaces them -- see _map_line.
+        self._bad_frames = 0
+        self._bad_sample = ""
         self._tool_started: "dict[str, float]" = {}
 
         transcript_dir = PROJECTS_DIR / self.slug
@@ -531,60 +645,145 @@ class CodexEngine:
                     pass
 
         self._persist_user_text(prompt_out)
+        # Claimed HERE, not after the stream closes. The count is read
+        # back inside the turn -- every turn_done carries it -- and the
+        # turn.failed branch of map_event used to read it one short,
+        # so an identical failing and succeeding turn reported different
+        # numbers for the same turn (v1.7.3). One increment, at the one
+        # moment the turn becomes a fact, and both paths agree.
+        self.num_turns += 1
         yield EngineEvent("turn_started", {
             "prompt": prompt, "peer_context": prompt_out is not prompt,
         })
 
         first = self.thread_id is None
         started = time.monotonic()
+        # The turn's whole budget, wall clock, counted from before the
+        # spawn. Every await below is measured against it rather than
+        # waited on unbounded -- see TURN_TIMEOUT_SECS.
+        deadline = started + TURN_TIMEOUT_SECS
         proc = await self._exec_factory(
             *self._argv(first),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self.cwd,
+            # Without this the reader is asyncio's 64 KiB default and one
+            # oversized event ENDS the turn. See STREAM_LIMIT_BYTES.
+            limit=STREAM_LIMIT_BYTES,
         )
         self._proc = proc
         self._turn_closed = False
+        self._bad_frames = 0
+        self._bad_sample = ""
         code: "int | None" = None
         stderr_tail = ""
+        timed_out = False
+        overran = False
+        # THE DEADLOCK FIX. stderr is an OS pipe with a kernel buffer of
+        # about 64 KiB; a child that fills it blocks in write(2), and a
+        # blocked child never closes stdout -- so the read loop below
+        # waits for a line that cannot come, forever. Draining stderr
+        # AFTER that loop (which is what this did through v1.7.2, and
+        # only when the exit code was non-zero) cannot help: the loop is
+        # the thing that never finishes. It has to be drained ALONGSIDE,
+        # which means its own task, started before the first read.
+        stderr_task = (
+            asyncio.ensure_future(_drain_stderr(proc.stderr))
+            if proc.stderr is not None else None
+        )
+
+        async def _collect_stderr() -> str:
+            """The tail, once the child is done writing it."""
+            if stderr_task is None:
+                return ""
+            try:
+                raw = await asyncio.wait_for(stderr_task, STDERR_COLLECT_SECS)
+            except Exception:  # noqa: BLE001 -- a stderr we cannot read is
+                # not a reason to lose the turn; the exit code still speaks.
+                stderr_task.cancel()
+                return ""
+            return _truncate(scrub_secrets(raw.decode("utf-8", "replace")))
+
         try:
             if proc.stdin is not None:
                 proc.stdin.write(prompt_out.encode("utf-8"))
                 await proc.stdin.drain()
                 proc.stdin.close()
             if proc.stdout is not None:
-                while True:
-                    line = await proc.stdout.readline()
+                # `not self._turn_closed`: the stream has already said how
+                # this turn ended and map_event has already emitted its
+                # turn_done. Reading on would yield frames BELONGING TO A
+                # TURN THE UI HAS CLOSED, into a block that is already
+                # marked done (v1.7.3).
+                while not self._turn_closed:
+                    budget = deadline - time.monotonic()
+                    if budget <= 0:
+                        timed_out = True
+                        break
+                    try:
+                        line = await asyncio.wait_for(
+                            proc.stdout.readline(), budget
+                        )
+                    except asyncio.TimeoutError:
+                        timed_out = True
+                        break
+                    except ValueError:
+                        # LimitOverrunError (a ValueError) -- a single line
+                        # over STREAM_LIMIT_BYTES. The buffered line is
+                        # unrecoverable and the reader's position is lost,
+                        # so the turn cannot be resynchronised; it ends,
+                        # loudly, rather than silently missing output.
+                        overran = True
+                        break
                     if not line:
                         break
                     for event in self._map_line(line):
                         yield event
-            code = await proc.wait()
-            if code and proc.stderr is not None:
-                stderr_tail = _truncate(
-                    scrub_secrets((await proc.stderr.read()).decode(
-                        "utf-8", "replace"
-                    ))
-                )
+            if not (timed_out or overran or self._turn_closed):
+                budget = deadline - time.monotonic()
+                if budget <= 0:
+                    timed_out = True
+                else:
+                    try:
+                        code = await asyncio.wait_for(proc.wait(), budget)
+                    except asyncio.TimeoutError:
+                        # stdout closed and the child still will not go.
+                        timed_out = True
+            if timed_out or overran:
+                # Kill FIRST, then read: the tail cannot reach EOF while
+                # the child is still alive and still holds the pipe.
+                await self._kill_turn()
+            if not self._turn_closed:
+                # ...and only then. On a turn the STREAM closed
+                # (turn.failed) the child may still be alive and still
+                # writing, so waiting on its stderr to reach EOF would
+                # stall a turn that has already reported how it ended --
+                # an under-wait's mirror image, and it has no reader
+                # anyway: that path returns before `reason` is built.
+                stderr_tail = await _collect_stderr()
         finally:
+            if stderr_task is not None and not stderr_task.done():
+                stderr_task.cancel()
             await self._kill_turn()
 
-        self.num_turns += 1
         if self._turn_closed:
             # The stream already said how the turn ended (turn.failed /
             # error, mapped to a turn_done with is_error). One turn, one
             # turn_done: a second would re-mark a block that is already
             # marked and double-count the turn in every status surface.
             return
-        failed = bool(code)
+        reason = _turn_failure(
+            timed_out=timed_out, overran=overran, code=code,
+            stderr_tail=stderr_tail, bad_frames=self._bad_frames,
+            bad_sample=self._bad_sample,
+        )
+        failed = reason is not None
         if failed:
             # Same reason as the turn.failed branch in map_event: an exit
             # code with a silent stream is how a missing login, a rejected
             # flag or a killed process arrives, and it has to be readable.
-            yield EngineEvent("text_delta", {
-                "text": f"codex: {stderr_tail or f'exec exited {code}'}",
-            })
+            yield EngineEvent("text_delta", {"text": f"codex: {reason}"})
         yield EngineEvent("turn_done", {
             "duration_ms": int((time.monotonic() - started) * 1000),
             # No dollars in this stream -- None, never 0.0, because a
@@ -598,8 +797,7 @@ class CodexEngine:
             # one reading that sends the operator looking in the wrong
             # place. The stderr tail is carried so the block can say it.
             "is_error": failed,
-            **({"error": stderr_tail or f"codex exec exited {code}"}
-               if failed else {}),
+            **({"error": reason} if failed else {}),
             # Three Nones, and they are the point: an unreported window is
             # unknown, and every surface downstream already says so.
             "ctx_percentage": None,
@@ -612,13 +810,35 @@ class CodexEngine:
 
         Split out of :meth:`send` so the whole mapping is testable without
         a subprocess, which is how every kind below was pinned."""
+        text = raw.decode("utf-8", "replace")
         try:
-            frame = json.loads(raw.decode("utf-8", "replace"))
-        except (ValueError, UnicodeDecodeError):
-            return []
+            frame = json.loads(text)
+        except ValueError:
+            return self._unreadable(text)
         if not isinstance(frame, dict):
-            return []
+            return self._unreadable(text)
         return self.map_event(frame)
+
+    def _unreadable(self, text: str) -> "list[EngineEvent]":
+        """A stdout line that is not a Codex event at all.
+
+        Still dropped -- there is nothing to map -- but COUNTED, and that
+        is the fix (v1.7.3): through v1.7.2 this returned an empty list
+        and said nothing, so a Codex build that wrote a warning, a
+        progress bar or a half-flushed line onto the JSONL stream lost
+        whatever else that line held into a turn that then exited zero
+        and rendered as a clean success. ``send`` reads the count back
+        (see :func:`_turn_failure`) and fails the turn.
+
+        Deliberately NOT the same as the unknown-``type`` drop at the
+        bottom of :meth:`map_event`: a well-formed frame this build has
+        never seen is forward compatibility, stated as policy in that
+        method's own comment. A line that is not a JSON object is the
+        protocol breaking."""
+        self._bad_frames += 1
+        if not self._bad_sample:
+            self._bad_sample = _truncate(scrub_secrets(text), 120)
+        return []
 
     def map_event(self, frame: dict) -> "list[EngineEvent]":
         """The mapping, and every judgement call in it.

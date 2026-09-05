@@ -20,13 +20,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 
 import pytest
 
 from doxa import diff as diff_mod
 from doxa import engines as engines_mod
+from doxa import codex as codex_mod
 from doxa.codex import (
     CODEX_CAPABILITIES,
+    STREAM_LIMIT_BYTES,
     CodexEngine,
     CodexEngineProvider,
     CodexUnavailable,
@@ -390,11 +393,17 @@ class _FakeStdin:
 
 
 class _FakeStderr:
+    """A stderr that is drained the way a real one is: chunked, to EOF."""
+
     def __init__(self, data: bytes) -> None:
         self._data = data
 
-    async def read(self) -> bytes:
-        return self._data
+    async def read(self, n: int = -1) -> bytes:
+        if n < 0:
+            chunk, self._data = self._data, b""
+            return chunk
+        chunk, self._data = self._data[:n], self._data[n:]
+        return chunk
 
 
 class _FakeProc:
@@ -687,3 +696,275 @@ async def test_a_nonzero_exit_with_a_silent_stream_is_an_error_turn(tmp_path):
     assert "unexpected argument" in events[1].data["text"]
     assert events[-1].data["is_error"] is True
     assert "unexpected argument" in events[-1].data["error"]
+
+
+# -- the four ways one turn used to be able to hang or lie -------------
+#
+# Every test below drives a FAKE `codex exec` through `exec_factory`, the
+# seam the engine has carried since v1.4.0 for exactly this. Three of them
+# would HANG on the code they were written against, so each one is bounded
+# by asyncio.wait_for and asserts that it COMPLETED -- a hang has to fail
+# as a failing test, not as a suite that never returns.
+
+
+class _CoupledStderr:
+    """Stderr as the OS actually gives it: a pipe with a finite buffer.
+
+    ``chunks`` are handed out on demand; once more than ``blocks_at``
+    bytes have been TAKEN, the child is unblocked. Until then it is stuck
+    in write(2) -- which is what ``_CoupledStdout`` models."""
+
+    def __init__(self, payload: bytes, unblocked: asyncio.Event,
+                 blocks_at: int = 64 * 1024) -> None:
+        self._payload = payload
+        self._unblocked = unblocked
+        self._blocks_at = blocks_at
+        self.taken = 0
+
+    async def read(self, n: int = -1) -> bytes:
+        size = len(self._payload) if n < 0 else n
+        chunk, self._payload = self._payload[:size], self._payload[size:]
+        self.taken += len(chunk)
+        if self.taken > self._blocks_at:
+            self._unblocked.set()
+        return chunk
+
+
+class _CoupledStdout:
+    """A child that cannot write stdout until its stderr has been read."""
+
+    def __init__(self, lines: "list[bytes]", unblocked: asyncio.Event) -> None:
+        self._lines = list(lines)
+        self._unblocked = unblocked
+
+    async def readline(self) -> bytes:
+        await self._unblocked.wait()
+        return self._lines.pop(0) if self._lines else b""
+
+
+class _CoupledProc:
+    """A `codex exec` whose stderr fills the pipe before its first event."""
+
+    def __init__(self, lines: "list[bytes]", stderr_bytes: bytes) -> None:
+        self.unblocked = asyncio.Event()
+        self.stdout = _CoupledStdout(lines, self.unblocked)
+        self.stderr = _CoupledStderr(stderr_bytes, self.unblocked)
+        self.stdin = _FakeStdin()
+        self.returncode = None
+        self.killed = False
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+        self.unblocked.set()
+
+    async def wait(self) -> int:
+        await self.unblocked.wait()
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+
+@pytest.mark.asyncio
+async def test_a_child_that_fills_the_stderr_pipe_does_not_hang_the_turn(tmp_path):
+    """The deadlock, as the kernel serves it (v1.7.3).
+
+    stderr's pipe buffer is about 64 KiB. A child past it blocks in
+    write(2), so it never writes stdout and never closes it -- and the
+    stdout read loop waits for a line that cannot come. Draining stderr
+    AFTER that loop (and only on a non-zero exit, which is what v1.7.2
+    did) cannot break it: the loop is the thing that never ends. This
+    test HANGS on that code; the concurrent drain is what completes it."""
+    noisy = b"warning: something\n" * 8000  # ~150 KiB, well past the pipe
+    procs: list = []
+
+    async def make(*argv, **kwargs):
+        proc = _CoupledProc(_script(
+            {"type": "item.completed",
+             "item": {"id": "a", "type": "agent_message", "text": "survived"}},
+            {"type": "turn.completed", "usage": {}},
+        ), noisy)
+        procs.append(proc)
+        return proc
+
+    engine = _engine(tmp_path, exec_factory=make)
+    events = await asyncio.wait_for(
+        _collect(engine.send("go")), timeout=10
+    )
+    assert [e.type for e in events] == ["turn_started", "text_delta", "turn_done"]
+    assert events[1].data["text"] == "survived"
+    assert events[-1].data["is_error"] is False
+    # And the pipe was actually emptied, not merely bypassed.
+    assert procs[0].stderr.taken == len(noisy)
+
+
+async def _collect(stream) -> list:
+    return [e async for e in stream]
+
+
+@pytest.mark.asyncio
+async def test_one_oversized_event_does_not_abort_the_turn(tmp_path):
+    """Finding 3, against a REAL StreamReader -- the only way to test it.
+
+    ``asyncio.create_subprocess_exec`` defaults to a 64 KiB reader limit,
+    and one JSONL line over it makes ``readline()`` raise
+    ``LimitOverrunError``, which escaped ``send``, ended the turn and
+    killed Codex. A fake stdout cannot show that: the limit lives in
+    asyncio's own reader. So this spawns a real process that prints one
+    oversized ``agent_message`` -- a python script standing in for
+    ``codex exec``, never the CLI itself."""
+    # Prose-shaped, and deliberately: `scrub_secrets` is quadratic in the
+    # length of an UNBROKEN alphanumeric run (measured: 64 KiB of one takes
+    # ~16 s), so a payload of `"y" * 300000` would be testing lore_core's
+    # regex, not this engine's reader. Spaces keep that path linear. See
+    # the branch report -- that blowup is real and it is not this fix's.
+    chunk = "the quick brown fox jumps over the lazy dog "
+    reply = chunk * (300 * 1024 // len(chunk))  # ~300 KiB, 4.6x the default
+    script = tmp_path / "fake_codex.py"
+    script.write_text(
+        "import json, sys\n"
+        "sys.stdin.read()\n"
+        "print(json.dumps({'type': 'item.completed', 'item': "
+        f"{{'id': 'a', 'type': 'agent_message', 'text': {chunk!r} * "
+        f"{300 * 1024 // len(chunk)}}}}}))\n"
+        "print(json.dumps({'type': 'turn.completed', 'usage': {}}))\n",
+        encoding="utf-8",
+    )
+
+    async def make(*argv, **kwargs):
+        return await asyncio.create_subprocess_exec(
+            sys.executable, str(script), **kwargs
+        )
+
+    engine = _engine(tmp_path, exec_factory=make)
+    events = await asyncio.wait_for(_collect(engine.send("go")), timeout=30)
+    assert [e.type for e in events] == ["turn_started", "text_delta", "turn_done"]
+    assert events[1].data["text"] == reply
+    assert len(reply) > 64 * 1024
+    assert events[-1].data["is_error"] is False
+
+
+def test_the_stream_limit_is_not_the_socket_frame_cap():
+    """The number is its own decision, and it has to stay one.
+
+    ``doxa.peers.MAX_FRAME_BYTES`` caps DOXA's own peer protocol, where
+    DOXA writes both ends. A Codex event is written by an external CLI to
+    no size contract, and here the cap is not a truncation but a
+    turn-ending crash -- so it sits far above any plausible frame."""
+    from doxa.peers import MAX_FRAME_BYTES
+
+    assert STREAM_LIMIT_BYTES > MAX_FRAME_BYTES
+    assert STREAM_LIMIT_BYTES > 64 * 1024
+
+
+class _SilentProc(_FakeProc):
+    """A child that starts, says nothing, and never exits or closes."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.stderr = None
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_never_ends_is_killed_and_reported(monkeypatch, tmp_path):
+    """TURN_TIMEOUT_SECS was declared and read NOWHERE through v1.7.2.
+
+    A `codex exec` that neither exits nor closes stdout held the pane's
+    exclusive turn worker forever. The budget now has to do both halves
+    of what its docstring claims: KILL the child, and end the turn with a
+    readable error -- abandoning the read alone would leave the process
+    running."""
+    monkeypatch.setattr(codex_mod, "TURN_TIMEOUT_SECS", 0.3)
+    procs: list = []
+
+    async def make(*argv, **kwargs):
+        proc = _SilentProc()
+
+        async def readline() -> bytes:
+            await asyncio.Event().wait()
+            return b""
+
+        proc.stdout.readline = readline  # type: ignore[method-assign]
+        procs.append(proc)
+        return proc
+
+    engine = _engine(tmp_path, exec_factory=make)
+    events = await asyncio.wait_for(_collect(engine.send("go")), timeout=10)
+    assert [e.type for e in events] == ["turn_started", "text_delta", "turn_done"]
+    assert procs[0].killed is True          # the child, not just the read
+    assert engine._proc is None
+    assert events[-1].data["is_error"] is True
+    assert "limit" in events[-1].data["error"]
+    assert "killed" in events[-1].data["error"]
+
+
+@pytest.mark.asyncio
+async def test_turn_failed_stops_the_stream_and_counts_the_turn_once(tmp_path):
+    """Finding 5. ``turn.failed`` closes the turn -- so nothing after it
+    may still be yielded into a block the UI has already marked done, and
+    the count it reports has to be the same count a SUCCEEDING turn would
+    report for the same turn (it was one short)."""
+    calls: list = []
+    lines = [_script(
+        {"type": "item.completed",
+         "item": {"id": "a", "type": "agent_message", "text": "before"}},
+        {"type": "turn.failed", "message": "boom"},
+        {"type": "item.completed",
+         "item": {"id": "b", "type": "agent_message", "text": "AFTER"}},
+        {"type": "turn.completed", "usage": {}},
+    )]
+    engine = _engine(tmp_path, exec_factory=_factory(calls, lines))
+    events = await asyncio.wait_for(_collect(engine.send("go")), timeout=10)
+    kinds = [e.type for e in events]
+    assert kinds == ["turn_started", "text_delta", "text_delta", "turn_done"]
+    assert kinds.count("turn_done") == 1
+    assert not any("AFTER" in str(e.data.get("text", "")) for e in events)
+    assert events[-1].data["is_error"] is True
+    assert events[-1].data["num_turns"] == 1 == engine.num_turns
+
+
+@pytest.mark.asyncio
+async def test_a_succeeding_turn_reports_the_same_count_as_a_failing_one(tmp_path):
+    """The other half of the num_turns fix: the two paths must agree."""
+    calls: list = []
+    engine = _engine(tmp_path, exec_factory=_factory(calls, [_script(
+        {"type": "turn.completed", "usage": {}},
+    )]))
+    events = await asyncio.wait_for(_collect(engine.send("go")), timeout=10)
+    assert events[-1].data["num_turns"] == 1 == engine.num_turns
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_stdout_line_fails_the_turn_instead_of_vanishing(tmp_path):
+    """Finding 6. A line that is not a Codex event is still dropped --
+    there is nothing to map -- but a clean exit afterwards used to render
+    it as a green, successful turn. DOXA does not know what was in that
+    line, so the honest report is a failed turn that says one went
+    missing."""
+    calls: list = []
+    lines = [[
+        b"warning: codex is a bit confused today\n",
+        json.dumps({"type": "turn.completed", "usage": {}}).encode() + b"\n",
+    ]]
+    engine = _engine(tmp_path, exec_factory=_factory(calls, lines))
+    events = await asyncio.wait_for(_collect(engine.send("go")), timeout=10)
+    assert [e.type for e in events] == ["turn_started", "text_delta", "turn_done"]
+    assert events[-1].data["is_error"] is True
+    error = events[-1].data["error"]
+    assert "1 unreadable line" in error
+    assert "confused" in error
+
+
+@pytest.mark.asyncio
+async def test_a_clean_turn_is_still_clean(tmp_path):
+    """The control for the two tests above: no dropped lines, zero exit,
+    no error -- the fixes must not paint a failure onto a good turn."""
+    calls: list = []
+    engine = _engine(tmp_path, exec_factory=_factory(calls, [_script(
+        {"type": "item.completed",
+         "item": {"id": "a", "type": "agent_message", "text": "fine"}},
+        {"type": "turn.completed", "usage": {}},
+    )]))
+    events = await asyncio.wait_for(_collect(engine.send("go")), timeout=10)
+    assert events[-1].data["is_error"] is False
+    assert "error" not in events[-1].data
