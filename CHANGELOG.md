@@ -4,6 +4,38 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.7.3 — 2026-09-05
+
+**Fix a transcript that could stay scrolled to the top after a burst of
+output.** Diagnosed from a test that failed 2 of 11 full-suite runs; the defect
+is in the pane, not the test.
+
+- Textual's **`scroll_end`** defers its work by exactly one refresh so it can
+  read the `max_scroll_y` the append produced. When the layout lands LATER than
+  that refresh, the deferred read sees the OLD `max_scroll_y`, scrolls to row
+  0, and reports success — and nothing re-issues it. `_tail_pending` was never
+  set, because there WAS a box the whole time: what was missing was never the
+  box, it was `virtual_size`.
+- Caught live twice, identical state both times: `scroll_offset.y=0`,
+  `max_scroll_y=179`, `virtual_size=92x196`, `blocks=62`,
+  `_tail_pending=False`. Sixty appends each scrolled to row 0 against a
+  `max_scroll_y` still 0; the layout then landed and the transcript sat at the
+  top permanently, self-correcting only on the next append.
+- **The tail intent now stands until it is met.** The pane watches its
+  transcript's `virtual_size` — the reactive that changes exactly when the
+  layout measures what the transcript holds — and re-issues the scroll on the
+  measurement it was short of. It cannot drag a reader who scrolled away: it
+  acts only while the transcript is still where this pane's own last scroll
+  left it (`_tail_at`), and any other offset means the reader moved it and
+  their position wins. The no-box path and its Show/Resize flush are untouched.
+- **v1.7.0 and v1.7.1's fixes to this test could not have worked.**
+  `Pilot.pause()` performs the pending layout SYNCHRONOUSLY, so a layout that
+  can happen at all lands on the FIRST cycle — measured at 1 cycle alone, 1
+  behind 200 app teardowns, and 1 inside four full-suite runs. The cost is
+  bimodal: one cycle or never. No budget could help, and the setup waits now
+  say so and report the deciding state instead of the absence they noticed.
+- 2 failures in 11 runs before; 3 runs clean after. **1952 passed.**
+
 ## 1.7.2 — 2026-09-05
 
 **The screenshot gallery regenerates again.** It had stopped completing at all
