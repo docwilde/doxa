@@ -497,9 +497,39 @@ async def test_activating_a_tab_without_moving_the_keyboard_livelocks(tmp_path):
         tab_id = first.tab_id or ""
         tabbed = app.tabbed_holding(tab_id)
         assert tabbed is not None
-        tabbed.active = tab_id
+        others = [p.tab_id for p in app.panes()[1:] if p.tab_id]
+        assert others
 
-        assert await _idle_focus_moves(app, pilot) > 10
+        # The loop is a SCHEDULING RACE, and the gesture is repeated
+        # because of it. One activation either establishes the ping-pong
+        # -- two or three focus moves EVERY turn, for as long as anyone
+        # watches -- or never starts it: one move, then silence, forever.
+        # The two outcomes are bimodal, not a spectrum, and the state
+        # going in is identical either way (same focused widget, same
+        # active tab, same target), so there is nothing the test can set
+        # up to force it. Measured in isolation: about 85% of activations
+        # livelock.
+        #
+        # Until v1.7.5 that 15% never showed, because EVERY app mount in
+        # this suite was dragging a `git fetch` behind it
+        # (DoxaApp.on_mount -> check_for_update, off a worker but real);
+        # that background load moved the race to a reliable 10 out of 10.
+        # Removing those fetches removed the crutch, and this test was the
+        # one place it was load-bearing. Nothing about the defect changed.
+        #
+        # So the claim is existential -- doing the wrong thing CAN hang
+        # the pump -- and it is asserted by trying the wrong thing until
+        # it does, never by watching one attempt for longer. Watching
+        # longer cannot work: a quiet activation stays quiet forever.
+        moves = 0
+        for attempt in range(6):
+            tabbed.active = tab_id
+            moves = await _idle_focus_moves(app, pilot)
+            if moves > 10:
+                break
+            tabbed.active = others[attempt % len(others)]
+            await pilot.pause()
+        assert moves > 10
 
 
 @pytest.mark.asyncio
