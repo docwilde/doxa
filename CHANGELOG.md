@@ -4,6 +4,53 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.7.5 — 2026-09-07
+
+**A desktop banner no longer freezes the interface that sent it**, and the boot
+update-check stops fetching from origin on every app mount. Full suite
+**27:22 → 15:31**.
+
+- **`notify()` ran `subprocess.run(..., timeout=10)` on the event loop** from
+  FOUR call sites — `_check_for_update`, `PaneRuntime._open_needs_input`,
+  `PaneRuntime._announce_staged`, and `SessionDaemon._peer_pump`. `notify-send`
+  is a D-Bus client that WAITS rather than failing fast when nothing answers the
+  bus, so the worst case was the full 10s of frozen pump: no repaint, no keys,
+  no timers. It now dispatches to a throwaway daemon thread when a loop is
+  running, inline when not — deliberately a plain `threading.Thread` and not
+  `to_thread`, whose default executor is joined at
+  `loop.shutdown_default_executor` and would move the freeze to exit rather than
+  remove it. No timer, nothing idle: the thread exists only while a banner is in
+  flight.
+- **The timeout's own exception was escaping.** `subprocess.TimeoutExpired` is a
+  `SubprocessError`, NOT an `OSError`, so `except OSError` — under a docstring
+  promising this "must never be the thing that takes a session down" — caught
+  everything EXCEPT the failure the timeout exists to produce. On `_peer_pump`
+  that ended the `async for` and stopped fanning peer events to every attached
+  client for the rest of the process.
+- **`DOXA_SKIP_UPDATE_CHECK`**, on the same discipline as `DOXA_SKIP_FIRST_RUN`
+  and `LORE_DISABLE_REVIEW`, set suite-wide. Measured on `tests/test_app.py`:
+  **12 live `git fetch` calls for 13 tests, 17.5s of a 24.4s module**, landing in
+  each test's teardown because asyncio joins its default executor at loop close.
+  The boot probe also ran on `GIT_TIMEOUT_SECS` (120s — `/update`'s own PULL
+  budget) and now has `CHECK_TIMEOUT_SECS = 10.0`. User behaviour is unchanged.
+- **`run=_run` as a default argument was never a seam**: defaults bind at `def`
+  time, so `monkeypatch.setattr(update_mod, "_run", …)` silently did nothing and
+  a test could pass green while a real fetch ran under it. Resolved at call time
+  now.
+- **`on_mount` was NOT on the event loop** — it already goes through
+  `run_worker` → `asyncio.to_thread`. Reported as a freeze, measured, rejected.
+- **Known intermittent, not fixed, stated rather than buried**:
+  `test_a_tab_that_persists_nothing_still_moves_the_strip` failed **1 of 3** full
+  runs on this branch and passes **10/10** in isolation. It performs
+  `group.tabbed.active = "bare-tab"` — a raw activation with no `_focus_tab`,
+  which is the documented focus/activation livelock gesture (`2dac09b` fixed the
+  screenshot DRIVER, never the pump; ~85% of such activations livelock in
+  isolation). Removing ~500 stray fetches per run changed the suite's timing
+  profile, and the same effect in the other direction is why
+  `test_activating_a_tab_without_moving_the_keyboard_livelocks` had been
+  reproducing 10/10 — that load was load-bearing for it, and its claim is now
+  made existentially (six attempts) instead of depending on a fetch.
+
 ## 1.7.4 — 2026-09-05
 
 **Four ways one Codex turn could hang or lie**, found by a cross-family Codex
