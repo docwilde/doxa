@@ -9,16 +9,35 @@ whether the dependencies moved under it.
 
 Git is mocked at the single injected `run` seam, so every branch is
 exercised without a network or a second repository.
+
+DOXA_SKIP_UPDATE_CHECK is cleared for every test in this module. conftest.py
+sets it suite-wide (v1.7.5) so that no DoxaApp mount anywhere opens a real
+`git fetch`, but check_for_update honors it BEFORE it looks at anything --
+including a scripted `run` -- so leaving it set here would turn every
+"silent when ..." test below green for the wrong reason: they all assert
+False, and a function that declines to look also returns False. The two
+tests that are ABOUT the switch set it themselves.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 import pytest
 
 from doxa import update as update_mod
 from doxa import version as version_mod
+
+SUITE_WIDE_SKIP = os.environ.get("DOXA_SKIP_UPDATE_CHECK", "")
+"""Whatever conftest.py set at import time, captured before the fixture
+below clears it -- so one test can still pin that the suite-wide default
+is armed."""
+
+
+@pytest.fixture(autouse=True)
+def _boot_check_kill_switch_cleared(monkeypatch):
+    monkeypatch.delenv("DOXA_SKIP_UPDATE_CHECK", raising=False)
 
 
 class FakeGit:
@@ -262,6 +281,101 @@ def test_check_for_update_silent_when_git_itself_is_unavailable(tmp_path):
         raise FileNotFoundError("git: command not found")
 
     assert update_mod.check_for_update(root=tmp_path, run=boom) is False
+
+
+# -- the boot check must not touch the network in the suite (v1.7.5) --------
+#
+# DoxaApp.on_mount runs check_for_update off a worker, and on a checkout
+# -- which is what the suite runs from -- that opened a real `git fetch`
+# against origin on EVERY mount. Measured before the fix on
+# tests/test_app.py alone: 12 fetches for 13 tests, 17.5s of subprocess
+# time inside a 24.4s module.
+#
+# What is asserted is that no git subprocess is REACHED, never that the
+# mount was quick.
+
+
+def test_check_for_update_declines_to_look_when_the_kill_switch_is_set(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("DOXA_SKIP_UPDATE_CHECK", "1")
+    (tmp_path / ".git").mkdir()
+    git = FakeGit({"git fetch": ("", 0), "git rev-list": ("3\n", 0)})
+    # Upstream IS ahead; the point is that nothing goes and looks.
+    assert update_mod.check_for_update(root=tmp_path, run=git) is False
+    assert git.calls == []
+
+
+def test_check_for_update_still_looks_when_the_kill_switch_is_clear(tmp_path):
+    """The switch removes the suite's network traffic, not the feature."""
+    (tmp_path / ".git").mkdir()
+    git = FakeGit({"git fetch": ("", 0), "git rev-list": ("3\n", 0)})
+    assert update_mod.check_for_update(root=tmp_path, run=git) is True
+    assert [c[:2] for c in git.calls] == [["git", "fetch"], ["git", "rev-list"]]
+
+
+def test_the_boot_check_runs_on_its_own_short_timeout(tmp_path):
+    """An advisory probe nobody asked for may not hold a worker thread and
+    a live git child for the two minutes /update's own pull is allowed."""
+    (tmp_path / ".git").mkdir()
+    timeouts: "list[float]" = []
+
+    def record(cmd, cwd, timeout):
+        timeouts.append(timeout)
+        return subprocess.CompletedProcess(cmd, 0, stdout="0\n", stderr="")
+
+    update_mod.check_for_update(root=tmp_path, run=record)
+    assert timeouts == [
+        update_mod.CHECK_TIMEOUT_SECS, update_mod.CHECK_TIMEOUT_SECS
+    ]
+    assert update_mod.CHECK_TIMEOUT_SECS < update_mod.GIT_TIMEOUT_SECS
+
+
+@pytest.mark.asyncio
+async def test_mounting_the_app_opens_no_git_subprocess(monkeypatch, tmp_path):
+    """conftest.py sets DOXA_SKIP_UPDATE_CHECK suite-wide (re-set here,
+    because this module's autouse fixture clears it); this pins that the
+    app actually honors it end to end.
+
+    The wait predicate is `update_available is not None` -- the very last
+    thing _check_for_update writes -- rather than a pause of some length,
+    so the assertion runs strictly AFTER the worker has finished deciding.
+    A weaker predicate would pass before the check had run at all, which
+    is the same green for the wrong reason."""
+    from doxa.app import DoxaApp
+    from tests.fakes import FakeEngine
+
+    monkeypatch.setenv("DOXA_SKIP_UPDATE_CHECK", "1")
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    calls: "list[list[str]]" = []
+    monkeypatch.setattr(
+        update_mod, "_run",
+        lambda cmd, cwd, timeout: calls.append(list(cmd))
+        or subprocess.CompletedProcess(cmd, 0, stdout="0\n", stderr=""),
+    )
+    engine = FakeEngine([])
+    app = DoxaApp(
+        cwd=str(tmp_path), engine_factory=lambda: engine,
+        new_session_factory=lambda: engine,
+    )
+    async with app.run_test() as pilot:
+        for _ in range(200):
+            if app.update_available is not None:
+                break
+            await pilot.pause(0.02)
+        assert app.update_available is not None, "the boot check never ran"
+    assert calls == []
+
+
+def test_the_suite_arms_the_kill_switch_for_every_other_module(tmp_path):
+    """Everything above clears the switch on purpose. Nothing else in the
+    suite does, and this is the assertion that says so -- without it, a
+    conftest.py line quietly deleted would cost several hundred live `git
+    fetch` calls per run and nothing would go red."""
+    assert SUITE_WIDE_SKIP.strip(), (
+        "tests/conftest.py must set DOXA_SKIP_UPDATE_CHECK -- without it "
+        "every DoxaApp mount in this suite opens a real network git fetch"
+    )
 
 
 # -- boot-time update check (app-worker level) -------------------------------

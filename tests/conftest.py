@@ -78,6 +78,21 @@ os.environ["XDG_CONFIG_HOME"] = str(_tmp / "xdg")
 # exercise the auto-trigger itself clear this var first (test_setup.py).
 os.environ["DOXA_SKIP_FIRST_RUN"] = "1"
 
+# Boot update-check kill switch: DoxaApp.on_mount runs
+# doxa.update.check_for_update off a worker, and that opens a REAL
+# network `git fetch` against origin whenever DOXA is running from a
+# checkout -- which is exactly what the suite is. Measured before v1.7.5
+# on tests/test_app.py alone: 12 fetches for 13 tests, 17.5s of
+# subprocess time inside a 24.4s module, and each one lands in its
+# test's teardown because asyncio joins its default executor when the
+# loop closes. Several hundred `run_test()` mounts do that across a full
+# run. No test may depend on this machine having a network, a reachable
+# origin, or credentials for it, and none of them assert on the check
+# anyway -- the ones that DO exercise it inject their own `run` callable
+# or monkeypatch check_for_update outright, both of which sail straight
+# past this var.
+os.environ["DOXA_SKIP_UPDATE_CHECK"] = "1"
+
 
 # -- v0.56.0: the suite must not become a place errors hide -----------
 #

@@ -27,6 +27,7 @@ the uv-sync path) without a network or a second repository.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +38,22 @@ from . import version as version_mod
 DEPENDENCY_FILES = ("pyproject.toml", "uv.lock")
 
 GIT_TIMEOUT_SECS = 120.0
+"""Ceiling for ``/update``'s OWN git work -- the fetch-and-fast-forward a
+user explicitly asked for and is watching. Two minutes is generous
+because that pull is the whole point of the command; abandoning it early
+would be the worse failure."""
+
+CHECK_TIMEOUT_SECS = 10.0
+"""Ceiling for the boot-time :func:`check_for_update` probe, which nobody
+asked for and nobody is watching. It ran on ``GIT_TIMEOUT_SECS`` through
+v1.7.4, which meant a checkout whose remote was unreachable (a VPN not up
+yet, DNS still settling, a laptop that woke on a captive portal) held a
+worker thread and a live ``git`` child for two minutes past launch -- and,
+because ``asyncio``'s default executor is joined at loop shutdown, could
+push app exit out by the same amount. An advisory "there is something to
+pull" that has not answered in ten seconds has already missed the moment
+it was for."""
+
 SYNC_TIMEOUT_SECS = 600.0
 
 
@@ -92,7 +109,7 @@ def _run(cmd: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProce
     )
 
 
-def check_for_update(root: "Path | None" = None, run=_run) -> bool:
+def check_for_update(root: "Path | None" = None, run=None) -> bool:
     """True when the checkout DOXA is running from has commits upstream it
     has not pulled yet -- the boot-time check behind the "DOXA update
     available" notification, deliberately read-only (a ``git fetch``
@@ -102,18 +119,43 @@ def check_for_update(root: "Path | None" = None, run=_run) -> bool:
     upstream configured for the current branch, git missing -- reads as
     "nothing to report" rather than raising, because this runs from a
     background worker at boot and must never be the thing that makes
-    startup noisy or slow over a flaky connection."""
+    startup noisy or slow over a flaky connection.
+
+    ``DOXA_SKIP_UPDATE_CHECK`` is a kill switch on the same discipline as
+    ``DOXA_SKIP_FIRST_RUN`` / ``LORE_DISABLE_REVIEW`` / ``DOXA_IMAGE_MODE``
+    (set suite-wide by tests/conftest.py, honored explicitly here rather
+    than sniffed for anywhere): the suite runs FROM a checkout, so before
+    v1.7.5 every one of its several hundred ``DoxaApp`` mounts opened a
+    real network ``git fetch`` against origin. Measured on
+    tests/test_app.py: 12 live fetches for 13 tests, 17.5s of subprocess
+    time inside a 24.4s module. That is a suite whose wall clock is set by
+    somebody's network, and a suite that fails differently offline. It
+    reads as "nothing to report", the same as every other reason this
+    function declines to answer -- a checkout with the var set is not
+    claiming to be current, it is declining to look.
+
+    ``run`` resolves to :func:`_run` at CALL time rather than defaulting to
+    it in the signature, which is not a style preference: a default
+    argument is bound once when the ``def`` executes, so
+    ``monkeypatch.setattr(update_mod, "_run", ...)`` -- the seam every
+    test in this module believes it has -- silently did nothing, and a
+    test asserting "no git subprocess was reached" passed while a real
+    ``git fetch`` ran underneath it. Resolving here makes the module
+    attribute the seam it reads as."""
+    if os.environ.get("DOXA_SKIP_UPDATE_CHECK", "").strip():
+        return False
+    run = run or _run
     root = root or version_mod.source_root()
     if root is None or not (Path(root) / ".git").exists():
         return False
     root = Path(root)
     try:
-        fetched = run(["git", "fetch", "--quiet"], root, GIT_TIMEOUT_SECS)
+        fetched = run(["git", "fetch", "--quiet"], root, CHECK_TIMEOUT_SECS)
         if fetched.returncode != 0:
             return False
         counted = run(
             ["git", "rev-list", "--count", "HEAD..@{upstream}"],
-            root, GIT_TIMEOUT_SECS,
+            root, CHECK_TIMEOUT_SECS,
         )
         if counted.returncode != 0:
             return False
