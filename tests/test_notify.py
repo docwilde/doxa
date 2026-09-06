@@ -11,6 +11,7 @@ notification, on this machine or CI's.
 from __future__ import annotations
 
 import subprocess
+import threading
 
 import pytest
 
@@ -162,6 +163,89 @@ def test_notify_carries_the_icon_flag_when_one_resolves(monkeypatch):
     )
     notify_mod.notify("t", "b")
     assert "-i" in calls[0] and "dialog-information" in calls[0]
+
+
+# -- off the event loop (v1.7.5) ---------------------------------------
+#
+# `notify-send` is a D-Bus client that can WAIT -- for up to
+# NOTIFY_TIMEOUT_SECS -- and every call site that reaches notify() sits on
+# an event loop (DoxaApp._check_for_update, PaneRuntime._open_needs_input,
+# PaneRuntime._announce_staged, SessionDaemon._peer_pump). A blocking
+# subprocess on any of them freezes everything that loop owns.
+#
+# What is asserted is WHICH THREAD the send happened on, never how long it
+# took: a timing assertion would pass on a fast machine with the bug still
+# in place, and rot the first time CI is loaded.
+
+
+@pytest.mark.asyncio
+async def test_notify_send_never_runs_on_the_event_loop(monkeypatch):
+    monkeypatch.setattr(notify_mod.shutil, "which", lambda name: "/usr/bin/notify-send")
+    threads: "list[int]" = []
+
+    def fake_run(argv, **kwargs):
+        threads.append(threading.get_ident())
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(notify_mod.subprocess, "run", fake_run)
+
+    loop_thread = threading.get_ident()
+    notify_mod.notify("hello", "world")
+    notify_mod.drain_pending()
+
+    assert len(threads) == 1                 # it really was sent
+    assert threads[0] != loop_thread         # just not from here
+
+
+@pytest.mark.asyncio
+async def test_a_gated_trigger_reaches_notify_send_off_the_loop_too(monkeypatch):
+    """The product never calls notify() bare -- it goes through notify_if,
+    and the whole point is that the gate is the only thing that runs on the
+    loop."""
+    config.save({"notify": "always"})
+    monkeypatch.setattr(notify_mod.shutil, "which", lambda name: "/usr/bin/notify-send")
+    threads: "list[int]" = []
+    monkeypatch.setattr(
+        notify_mod.subprocess, "run",
+        lambda argv, **k: threads.append(threading.get_ident())
+        or subprocess.CompletedProcess(argv, 0),
+    )
+
+    loop_thread = threading.get_ident()
+    notify_mod.notify_update_available(app_has_focus=False)
+    notify_mod.drain_pending()
+
+    assert len(threads) == 1
+    assert threads[0] != loop_thread
+
+
+def test_notify_stays_inline_when_no_loop_is_running(monkeypatch):
+    """No loop, nothing to protect: the send happens on the calling thread,
+    which is what keeps every other test in this module able to assert on
+    it the moment it returns."""
+    monkeypatch.setattr(notify_mod.shutil, "which", lambda name: "/usr/bin/notify-send")
+    threads: "list[int]" = []
+    monkeypatch.setattr(
+        notify_mod.subprocess, "run",
+        lambda argv, **k: threads.append(threading.get_ident())
+        or subprocess.CompletedProcess(argv, 0),
+    )
+    notify_mod.notify("t", "b")
+    assert threads == [threading.get_ident()]
+
+
+def test_notify_never_raises_when_notify_send_hangs_past_its_timeout(monkeypatch):
+    """The timeout's own exception is a SubprocessError, NOT an OSError --
+    so the `except OSError` this module carried through v1.7.4 let the one
+    failure the timeout exists to contain escape into the caller. On
+    SessionDaemon._peer_pump that would have ended the fan-out loop."""
+    monkeypatch.setattr(notify_mod.shutil, "which", lambda name: "/usr/bin/notify-send")
+
+    def hang(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, notify_mod.NOTIFY_TIMEOUT_SECS)
+
+    monkeypatch.setattr(notify_mod.subprocess, "run", hang)
+    notify_mod.notify("title", "body")  # must not raise
 
 
 # -- the wired triggers -------------------------------------------------

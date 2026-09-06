@@ -35,6 +35,17 @@ they start off) -- ``_trigger_default`` below reads that straight off
 ``config.SETTINGS`` (``kind="bool_on"`` -> default on, anything else ->
 default off) rather than this module hardcoding a second copy of it.
 
+SINCE v1.7.5 the send itself is also OFF THE EVENT LOOP. Every call site
+that reaches :func:`notify` sits on one, ``notify-send`` is a D-Bus client
+that can wait, and a blocking ``subprocess.run`` on a Textual loop is a
+frozen interface -- no repaint, no keystroke, no timer, and no
+``asyncio.wait_for`` anywhere able to expire -- for as long as it waits.
+:func:`notify` therefore hands the send to a throwaway daemon thread
+whenever a loop is running in the calling thread, and runs it inline when
+there is not. No timer, no pool, nothing idle: a thread exists only while a
+banner is in flight, which is the right side of v0.78.0's no-always-on-timer
+rule.
+
 Focus is tracked by DoxaApp (``events.AppFocus``/``events.AppBlur`` ->
 ``self.app_has_focus``, init True) and passed in by every call site here --
 this module has no window handle of its own. Note the same caveat DoxaApp's
@@ -46,14 +57,33 @@ for exactly that terminal.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 from . import config as config_mod
 
 APP_NAME = "doxa"
+
+NOTIFY_TIMEOUT_SECS = 10.0
+"""Ceiling on one ``notify-send``. It is a D-Bus client: with no
+notification daemon answering (a session whose daemon died, a
+half-configured desktop) it does not fail fast, it waits. Ten seconds is
+the ceiling on that wait -- and, before v1.7.5, was also the ceiling on
+how long DOXA's event loop could be frozen by a courtesy banner. See
+:func:`notify`."""
+
+_inflight: "set[threading.Thread]" = set()
+"""Strong references to notification threads still running, so a
+fire-and-forget banner cannot be collected mid-flight, and so
+:func:`drain_pending` has something to join. Guarded by
+``_inflight_lock`` -- entries are added from whatever loop thread
+notified and removed from the notifying thread itself."""
+
+_inflight_lock = threading.Lock()
 
 
 def _bool(env_name: str, default: bool) -> bool:
@@ -84,12 +114,26 @@ def notify_icon() -> "str | None":
     return override if "/" not in override or Path(override).is_file() else None
 
 
-def notify(title: str, body: str) -> None:
-    """Desktop notification, unconditionally -- no gating here, that is
-    :func:`should_fire`'s job. ``notify-send`` missing (headless, no
-    desktop, an unsupported platform) is a silent no-op, and any spawn
-    failure is swallowed the same way: this must never be the thing that
-    takes a session down."""
+def _send(title: str, body: str) -> None:
+    """The ``notify-send`` call itself -- BLOCKING, up to
+    :data:`NOTIFY_TIMEOUT_SECS`. Never called directly from a coroutine;
+    :func:`notify` owns which thread this runs on.
+
+    ``notify-send`` missing (headless, no desktop, an unsupported
+    platform) is a silent no-op, and every spawn failure is swallowed the
+    same way: this must never be the thing that takes a session down.
+
+    ``except Exception``, not ``except OSError``, and that widening is a
+    FIX rather than sloppiness. A ``notify-send`` that hangs raises
+    ``subprocess.TimeoutExpired``, which is a ``SubprocessError`` and NOT
+    an ``OSError`` -- so through v1.7.4 the one failure this timeout
+    exists to contain was the one failure that escaped, straight into
+    whatever called it. Two of the four call sites could not survive
+    that: ``PaneRuntime._open_needs_input`` would turn a hung banner into
+    an error block, and ``SessionDaemon._peer_pump`` would lose its
+    ``async for`` and stop fanning events out to every attached client
+    for the rest of the process. The docstring above already promised
+    this; now it is true."""
     cmd = shutil.which("notify-send")
     if not cmd:
         return
@@ -99,10 +143,85 @@ def notify(title: str, body: str) -> None:
         argv += ["-i", icon]
     try:
         subprocess.run(
-            argv + [title, body], timeout=10, check=False, capture_output=True
+            argv + [title, body],
+            timeout=NOTIFY_TIMEOUT_SECS,
+            check=False,
+            capture_output=True,
         )
-    except OSError:
+    except Exception:  # noqa: BLE001 -- see the docstring: a courtesy
+        # banner may never be the thing that takes a session down, and
+        # that includes its own timeout expiring.
         pass
+
+
+def notify(title: str, body: str) -> None:
+    """Desktop notification, unconditionally -- no gating here, that is
+    :func:`should_fire`'s job -- and NEVER on the event loop.
+
+    Every one of the four call sites that reach here sits on an event
+    loop: ``DoxaApp._check_for_update`` (a worker coroutine -- the
+    ``git fetch`` under it is already offloaded with
+    ``asyncio.to_thread``, but the notification that follows was not),
+    ``PaneRuntime._open_needs_input`` (a message handler),
+    ``PaneRuntime._announce_staged`` (a coroutine) and
+    ``SessionDaemon._peer_pump`` (the daemon's own fan-out loop). A
+    blocking ``subprocess.run`` on any of them freezes everything that
+    loop owns for as long as it takes: in a TUI that is no repaint, no
+    keystroke handled, no timer fired and no ``asyncio.wait_for``
+    anywhere able to expire -- for up to :data:`NOTIFY_TIMEOUT_SECS`.
+
+    So: if a loop is running in this thread, the send goes to a throwaway
+    daemon thread and this returns immediately. With no loop running
+    (``doxa.daemon`` before it starts serving, a direct call, the tests
+    below) there is nothing to protect and the send happens inline, which
+    keeps the simple case observable.
+
+    A plain ``threading.Thread``, deliberately, and not
+    ``loop.run_in_executor`` / ``asyncio.to_thread``: work handed to the
+    default executor is JOINED when the loop shuts down
+    (``loop.shutdown_default_executor``), so a hung banner would move the
+    freeze from mid-session to exit rather than removing it. A daemon
+    thread owes the interpreter nothing on the way out.
+
+    Fire-and-forget, so nothing here reports an error and nothing waits
+    -- ordering between two banners racing is not meaningful, they are
+    independent desktop toasts. :func:`drain_pending` is how a test
+    observes the path anyway."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        _send(title, body)  # no loop in this thread; nothing to protect
+        return
+
+    thread: "threading.Thread | None" = None
+
+    def _run() -> None:
+        try:
+            _send(title, body)
+        finally:
+            with _inflight_lock:
+                _inflight.discard(thread)
+
+    thread = threading.Thread(target=_run, name="doxa-notify", daemon=True)
+    with _inflight_lock:
+        _inflight.add(thread)
+    thread.start()
+
+
+def drain_pending(timeout: float = 5.0) -> None:
+    """Join every notification thread still in flight.
+
+    Test-facing and called from nowhere in the product: :func:`notify`
+    is fire-and-forget by design, and a caller that waited for it would
+    be re-introducing exactly the block this module just removed. A test
+    that wants to assert WHAT was sent (or which thread sent it) needs a
+    deterministic point after the send, and this is it -- an assertion
+    that instead slept for a moment would be a timing assertion, and this
+    codebase has enough of those to know how they end."""
+    with _inflight_lock:
+        threads = list(_inflight)
+    for thread in threads:
+        thread.join(timeout)
 
 
 def _mode() -> str:
