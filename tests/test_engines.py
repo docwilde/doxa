@@ -45,6 +45,21 @@ from doxa.events import EngineEvent
 from doxa.session.runtime import EVENT_RENDERERS
 
 
+def _protocol_attrs(proto) -> set:
+    """The members a Protocol declares, on every supported Python.
+
+    ``Protocol.__protocol_attrs__`` exists only from 3.12. Through 1.7.5 these
+    tests read it directly, so the py3.11 CI leg failed on every run since
+    1.4.0 -- unseen because the check was not required. The private
+    ``typing._get_protocol_attrs`` is what 3.12 builds the public attribute
+    from and is present on 3.8-3.13; it is the same set."""
+    attrs = getattr(proto, "__protocol_attrs__", None)
+    if attrs is not None:
+        return set(attrs)
+    import typing
+    return set(typing._get_protocol_attrs(proto))
+
+
 # Every event type the TUI can render or route out-of-band. A second
 # engine that needs a type outside this set is a FINDING, not a field --
 # see docs/plans/engine-providers.md. This tuple is that rule, enforced.
@@ -66,7 +81,7 @@ def test_engine_client_satisfies_the_protocol_unchanged():
 
     client = EngineClient("/nonexistent/doxa-test.sock")
     assert isinstance(client, Engine)
-    missing = [n for n in Engine.__protocol_attrs__ if not hasattr(client, n)]
+    missing = [n for n in _protocol_attrs(Engine) if not hasattr(client, n)]
     assert missing == []
 
 
@@ -89,7 +104,7 @@ def test_stop_is_not_in_the_protocol():
     from doxa.client import EngineClient
     from doxa.engine import SessionEngine
 
-    assert "stop" not in Engine.__protocol_attrs__
+    assert "stop" not in _protocol_attrs(Engine)
     assert hasattr(EngineClient, "stop")
     assert not hasattr(SessionEngine, "stop")
 
@@ -98,7 +113,7 @@ def test_the_two_async_divergent_methods_stayed_out():
     """lore_write_state/belief_action_state are sync on SessionEngine and
     async on EngineClient. One signature cannot be honest about both."""
     for name in ("lore_write_state", "belief_action_state"):
-        assert name not in Engine.__protocol_attrs__
+        assert name not in _protocol_attrs(Engine)
 
 
 # -- the registry ------------------------------------------------------
