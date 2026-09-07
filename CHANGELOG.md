@@ -6,350 +6,156 @@ not written from memory.
 
 ## 1.7.5 — 2026-09-07
 
-**A desktop banner no longer freezes the interface that sent it**, and the boot
-update-check stops fetching from origin on every app mount. Full suite
-**27:22 → 15:31**.
+**A desktop banner no longer freezes the interface, and the suite halves.**
 
-- **`notify()` ran `subprocess.run(..., timeout=10)` on the event loop** from
-  FOUR call sites — `_check_for_update`, `PaneRuntime._open_needs_input`,
-  `PaneRuntime._announce_staged`, and `SessionDaemon._peer_pump`. `notify-send`
-  is a D-Bus client that WAITS rather than failing fast when nothing answers the
-  bus, so the worst case was the full 10s of frozen pump: no repaint, no keys,
-  no timers. It now dispatches to a throwaway daemon thread when a loop is
-  running, inline when not — deliberately a plain `threading.Thread` and not
-  `to_thread`, whose default executor is joined at
-  `loop.shutdown_default_executor` and would move the freeze to exit rather than
-  remove it. No timer, nothing idle: the thread exists only while a banner is in
-  flight.
-- **The timeout's own exception was escaping.** `subprocess.TimeoutExpired` is a
-  `SubprocessError`, NOT an `OSError`, so `except OSError` — under a docstring
-  promising this "must never be the thing that takes a session down" — caught
-  everything EXCEPT the failure the timeout exists to produce. On `_peer_pump`
-  that ended the `async for` and stopped fanning peer events to every attached
-  client for the rest of the process.
-- **`DOXA_SKIP_UPDATE_CHECK`**, on the same discipline as `DOXA_SKIP_FIRST_RUN`
-  and `LORE_DISABLE_REVIEW`, set suite-wide. Measured on `tests/test_app.py`:
-  **12 live `git fetch` calls for 13 tests, 17.5s of a 24.4s module**, landing in
-  each test's teardown because asyncio joins its default executor at loop close.
-  The boot probe also ran on `GIT_TIMEOUT_SECS` (120s — `/update`'s own PULL
-  budget) and now has `CHECK_TIMEOUT_SECS = 10.0`. User behaviour is unchanged.
-- **`run=_run` as a default argument was never a seam**: defaults bind at `def`
-  time, so `monkeypatch.setattr(update_mod, "_run", …)` silently did nothing and
-  a test could pass green while a real fetch ran under it. Resolved at call time
-  now.
-- **`on_mount` was NOT on the event loop** — it already goes through
-  `run_worker` → `asyncio.to_thread`. Reported as a freeze, measured, rejected.
-- **Known intermittent, not fixed, stated rather than buried**:
-  `test_a_tab_that_persists_nothing_still_moves_the_strip` failed **1 of 3** full
-  runs on this branch and passes **10/10** in isolation. It performs
-  `group.tabbed.active = "bare-tab"` — a raw activation with no `_focus_tab`,
-  which is the documented focus/activation livelock gesture (`2dac09b` fixed the
-  screenshot DRIVER, never the pump; ~85% of such activations livelock in
-  isolation). Removing ~500 stray fetches per run changed the suite's timing
-  profile, and the same effect in the other direction is why
-  `test_activating_a_tab_without_moving_the_keyboard_livelocks` had been
-  reproducing 10/10 — that load was load-bearing for it, and its claim is now
-  made existentially (six attempts) instead of depending on a fetch.
+- **`notify()`** ran `subprocess.run(..., timeout=10)` on the event loop from four
+  call sites; it now dispatches to a daemon thread. Worst case was a 10s freeze.
+- Its `except OSError` never caught `subprocess.TimeoutExpired`; on `_peer_pump`
+  that ended peer fan-out for the process. Now `except Exception`.
+- **`DOXA_SKIP_UPDATE_CHECK`** removes the boot `git fetch` from every test mount
+  (12 fetches per 13 tests measured). Full suite **27:22 → 15:31**.
+- `update.run` is resolved at call time — the `run=_run` default was never a seam.
+- `on_mount` is NOT on the loop (already `to_thread`): reported, measured, rejected.
+- Known intermittent, unfixed: `test_a_tab_that_persists_nothing_still_moves_the_strip`
+  failed 1 of 3 full runs, 10/10 isolated. The activation livelock remains.
 
 ## 1.7.4 — 2026-09-05
 
-**Four ways one Codex turn could hang or lie**, found by a cross-family Codex
-review of `v1.0.1..HEAD` and fixed in `doxa/codex.py` — the engine shipped in
-1.4.0.
+**Four ways one Codex turn could hang or lie**, from a cross-family Codex review.
 
-- **`TURN_TIMEOUT_SECS` was dead code.** Defined at 3600.0 and referenced
-  nowhere, so a `codex exec` that started but neither exited nor closed stdout
-  held the turn and the UI worker forever behind a constant advertising a
-  protection that did not exist. `send()` now builds a wall-clock deadline
-  before the spawn, runs every await it owns against it, **kills the child** on
-  expiry and emits an `is_error` `turn_done` naming the limit.
-- **stderr deadlock.** `stderr=PIPE` was drained only after the stdout loop
-  finished, so ~64KiB of warnings filled the OS pipe buffer, the child blocked,
-  never closed stdout, and DOXA waited forever. **`_drain_stderr`** now runs as
-  its own task from before the first stdout read, keeping a bounded 64KiB tail.
-- **`STREAM_LIMIT_BYTES = 8 MiB`**, replacing asyncio's default 64KiB
-  StreamReader limit — one oversized JSONL event used to raise and kill the
-  turn. Deliberately NOT `peers.MAX_FRAME_BYTES`: that governs DOXA's own
-  protocol, where DOXA writes both ends and can reject; a Codex event is
-  written by an external CLI to no size contract. An overrun now ends the turn
-  with a readable error instead of a traceback.
-- **`turn.failed` kept yielding** after emitting `turn_done`, so consumers saw
-  events after terminal completion, and reported a pre-increment `num_turns`
-  (0 where success reported 1). Both fixed.
-- **A malformed stdout line was silently discarded** and a zero exit then
-  produced a successful `turn_done` — output vanished with no error. Such lines
-  are now counted and fail the turn with a scrubbed sample. The unknown-`type`
-  drop stays: that one is deliberate forward compatibility.
-- A sixth finding — concurrent `send()` calls sharing `_proc` — was
-  **rejected with evidence**: all three turn launchers use
-  `exclusive=True, group="turn"` on the same node, and the only other caller is
-  guarded by an explicit busy-check. The hazard is real at class level and has
-  no caller. 1961 passed.
+- **`TURN_TIMEOUT_SECS`** was defined and never used. Now enforced: expiry kills
+  the child and emits an `is_error` `turn_done`.
+- stderr was drained only after stdout closed, so ~64KiB of it deadlocked the
+  turn. **`_drain_stderr`** now runs concurrently, keeping a 64KiB tail.
+- **`STREAM_LIMIT_BYTES = 8 MiB`** replaces asyncio's 64KiB reader limit; an
+  overrun ends the turn with a readable error, not a traceback.
+- `turn.failed` no longer yields after `turn_done`; `num_turns` is claimed at
+  turn start (was one behind on failure).
+- A malformed stdout line now fails the turn with a scrubbed sample instead of
+  vanishing behind a clean exit.
+- Concurrent `send()` reviewed and rejected: every launcher is
+  `exclusive=True, group="turn"`. 1961 passed.
 
 ## 1.7.3 — 2026-09-05
 
-**Fix a transcript that could stay scrolled to the top after a burst of
-output.** Diagnosed from a test that failed 2 of 11 full-suite runs; the defect
-is in the pane, not the test.
+**Fix a transcript that could stay scrolled to the top after a burst of output.**
 
-- Textual's **`scroll_end`** defers its work by exactly one refresh so it can
-  read the `max_scroll_y` the append produced. When the layout lands LATER than
-  that refresh, the deferred read sees the OLD `max_scroll_y`, scrolls to row
-  0, and reports success — and nothing re-issues it. `_tail_pending` was never
-  set, because there WAS a box the whole time: what was missing was never the
-  box, it was `virtual_size`.
-- Caught live twice, identical state both times: `scroll_offset.y=0`,
-  `max_scroll_y=179`, `virtual_size=92x196`, `blocks=62`,
-  `_tail_pending=False`. Sixty appends each scrolled to row 0 against a
-  `max_scroll_y` still 0; the layout then landed and the transcript sat at the
-  top permanently, self-correcting only on the next append.
-- **The tail intent now stands until it is met.** The pane watches its
-  transcript's `virtual_size` — the reactive that changes exactly when the
-  layout measures what the transcript holds — and re-issues the scroll on the
-  measurement it was short of. It cannot drag a reader who scrolled away: it
-  acts only while the transcript is still where this pane's own last scroll
-  left it (`_tail_at`), and any other offset means the reader moved it and
-  their position wins. The no-box path and its Show/Resize flush are untouched.
-- **v1.7.0 and v1.7.1's fixes to this test could not have worked.**
-  `Pilot.pause()` performs the pending layout SYNCHRONOUSLY, so a layout that
-  can happen at all lands on the FIRST cycle — measured at 1 cycle alone, 1
-  behind 200 app teardowns, and 1 inside four full-suite runs. The cost is
-  bimodal: one cycle or never. No budget could help, and the setup waits now
-  say so and report the deciding state instead of the absence they noticed.
-- 2 failures in 11 runs before; 3 runs clean after. **1952 passed.**
+- **`scroll_end`** defers one refresh to read `max_scroll_y`; when layout landed
+  later, it scrolled to row 0 and nothing re-issued it.
+- The pane now watches the transcript's `virtual_size` and re-issues the scroll,
+  only while the offset is where its own last scroll left it (`_tail_at`).
+- `Pilot.pause()` runs pending layout synchronously, so a layout that can happen
+  lands on the first cycle: v1.7.0/v1.7.1's wider waits could not have helped.
+- 2 failures in 11 runs before; 3 clean after. **1952 passed.**
 
 ## 1.7.2 — 2026-09-05
 
-**The screenshot gallery regenerates again.** It had stopped completing at all
-— two runs died at different scenes — and the cause was a focus/activation
-**livelock in the drivers, not in DOXA**: no product code changed here.
+**The screenshot gallery regenerates again.** The cause was in the drivers, not
+DOXA — no product code changed.
 
-- **`scripts/screenshot.py`'s `_activate`** set `TabbedContent.active` and said
-  nothing about the keyboard. It was the ONE writer in the tree doing that —
-  all eight `_activate_tab` sites in `doxa/app.py` pair it with **`_focus_tab`**
-  on the next line, as v0.38.0 requires. `scripts/record_gif.py:534` carried
-  its own copy of the same omission.
-- **The loop, measured** (textual 5.3.0): hiding the TabPane holding focus makes
-  Textual re-home focus with `Screen._reset_focus` to a widget INSIDE that same
-  hidden pane; focusing a widget in a `TabPane` re-activates it
-  (`TabbedContent._on_tab_pane_focused`); `_on_tab_activated` then moves the
-  keyboard into the newly active tab — back inside whichever pane is hidden
-  next. **~90 focus moves per 40 idle pump turns, with no input.** An app in
-  that state never goes idle, so every later `pilot.pause`-polled wait raced a
-  busy pump. One line, three symptoms: `split-panes` failing ~half of runs,
-  `live-diff`'s "no turn in flight", and the gallery never finishing.
-- **The split itself was never broken.** `ctrl+n` puts the keyboard in the new
-  pane **40/40**; `ctrl+n` then `ctrl+1` lands correctly 12/12. The old
-  assertion `app.active_pane is not left` passed **10/10 while focus arrived
-  0/10** — `_focus_tab` records `_last_group_id` synchronously, before asking
-  Textual for focus, so `active_pane` reports a move that may not have
-  happened. The scene now asserts on identity AND focus.
-- **`tests/test_screenshot_driver.py`** (new) fails 3/3 without the fix and
-  passes 3/3 with it, counting focus moves during idle pump turns rather than
-  timing anything; `tests/test_focus_ownership.py` gains 5, naming the livelock.
-  1950 passed.
-- **Every asset regenerated**: 16 stills, 13 GIFs, 16 PNGs re-exported from the
-  fresh SVGs (the README embeds PNGs). The committed `split-panes` shot had
-  been rendered from a run with the keyboard in the wrong pane — a picture of
-  the bug. Expect content shifts from v1.6.0 (no strip row on single-tab
-  groups) and v1.7.0 (the rail's hover ground).
+- `scripts/screenshot.py`'s **`_activate`** set `TabbedContent.active` without
+  moving the keyboard; `scripts/record_gif.py:534` had the same line.
+- That livelocks: Textual re-homes focus into the hidden pane, which re-activates
+  it — ~90 focus moves per 40 idle pump turns, so no wait could settle.
+- The split was never broken: `ctrl+n` focuses the new pane 40/40. The old
+  assertion passed 10/10 while focus arrived 0/10; it now checks focus.
+- **`tests/test_screenshot_driver.py`** (new) fails 3/3 without the fix. 1950 passed.
+- Every asset regenerated: 16 stills, 13 GIFs, 16 PNGs. The committed
+  `split-panes` shot had been a picture of the bug.
 
 ## 1.7.1 — 2026-09-04
 
 **Fix Ctrl+Q on a BUSY session, which detached instead of finalizing.**
-Reported twice. The idle path was never broken, which is why an earlier pass
-found nothing.
 
-- A turn in flight opens **`CloseWithTurnRunning`**, and its Enter default was
-  **detach**, labelled `[ detach · enter ]`. That default was chosen for
-  **Ctrl+W** — its docstring still opened *"Ctrl+W with a turn still
-  running"* — and went stale in **v0.58.0**, when `action_close_tab` stopped
-  asking and went straight to `_close_pane(terminate=False)`. Ctrl+Q has been
-  the dialog's only caller ever since, inheriting a default meaning the
-  opposite of what the key means. **The default is now TERMINATE.**
-- The tell was the toast: the reported wording is `_close_pane`'s own
-  "detached — still running in the background", printed on the detach branch.
-- **The dialog still asks** — only its default moved. Ctrl+W still detaches and
-  leaves the daemon running.
-- Measured against real daemons: on `main` the process was `S`/alive at t+30s
-  with its presence file intact and the session still attachable; now it exits
-  by t+10s (a running turn is cancelled first; idle sessions still exit in
-  ~1s).
-- **`PaneRuntimeMixin.stop` no longer swallows a failing finalize.**
-  `contextlib.suppress(Exception)` hid it; the failure now travels back through
-  the `note` channel `_close_pane` already toasts, naming `doxa stop <id>`. It
-  still closes the tab: the handle is cleared and the socket closed by then, so
-  refusing would strand a dead window.
-- The new tests own a real child process rather than mocking the engine — a
-  mock proving a coroutine was awaited is what let this ship twice. 1943
-  passed.
+- **`CloseWithTurnRunning`**'s Enter default was `detach`, chosen for Ctrl+W,
+  which stopped asking in v0.58.0. Default is now TERMINATE; the dialog still asks.
+- Measured against real daemons: process alive at t+30s before, exited by t+10s
+  after. Ctrl+W still detaches and leaves the daemon running.
+- **`PaneRuntimeMixin.stop`** no longer swallows a failing finalize; the failure
+  travels through the `note` toast, naming `doxa stop <id>`.
+- The new tests own a real child process rather than a mock. 1943 passed.
 
 ## 1.7.0 — 2026-09-04
 
 **Every rail row highlights on hover, the divider says it moves, and a closed
-row hands you `/attach`.** Reported: hover worked on group labels only, the
-divider gave no sign it was draggable, and the pointer never changed.
+row hands you `/attach`.**
 
-- **Hover was shipped in v1.5.0 and never worked.** Textual applies
-  **`background-tint`** only over a widget's own `background`, and only when it
-  states one (`widget.py:1148`) — a row stating none tinted `transparent`,
-  which is still transparent. The rows that DID light up were the two that
-  state a background: a heading and `.-attention`. Every row now states the
-  ground it was already painted on, via one `$rail-ground` variable the rail's
-  own `background` reads.
-- The guarding test asserted the CSS rule was **in the file**. The new ones
-  drive the pilot's mouse and read the composited colour back (`#1d1b17 →
-  `#383632`).
-- **The divider** inverts under the pointer and stays lit for the whole drag.
-  Its hot colour is computed by **`triage.contrast_text`** from the resting
-  colour read off the stylesheet, so re-hueing the rail moves both. Edge
-  detection now rebases on screen columns: a mouse event starting on a row
-  reached the rail by bubbling and carried the row's coordinates.
-- **The mouse pointer is deliberately NOT changed.** `OSC 22` is unimplemented
-  in Warp (warpdotdev/Warp#13383), is write-only everywhere but kitty so DOXA
-  could never verify it, and Textual 5.3.0 has no API for it. The divider
-  highlight carries the affordance; `test_doxa_does_not_try_to_change_the_
-  mouse_pointer` pins the decision.
-- **Divider drag: 38 width messages → 13** for a 12-column gesture (25 named a
-  width the rail already had), via `WidthDragged.can_replace` and a hand-rolled
-  equivalent for `MouseMove`. **This does not measurably reduce settle time** —
-  one applied width change costs ~138 ms in Textual's compositor, and no DOXA
-  frame appears in a drag profile's top 45. The redundant work is gone; the
-  138 ms is not.
-- **Double-clicking a CLOSED row stages `/attach <8-char-prefix>`** in the
-  active pane's prompt — staged, never submitted. Single click is untouched, an
-  archived tab still reveals, and a reaped session still has no row at all.
-- Two test under-waits fixed in passing, same class as v1.3.1: the strip
-  transition's setup (60 mounts, one frame) and `_open_diff`, which waited for
-  the diff to have a WIDTH rather than for the split to be APPLIED — it failed
-  as `assert 0 >= (0 + 160)`. 1940 passed.
+- Hover shipped in v1.5.0 and never worked: `background-tint` only applies over
+  a stated `background`. Every row now states `$rail-ground`.
+- The guarding test asserted the CSS rule existed; the new ones drive the mouse
+  and read the composited colour back.
+- The divider inverts under the pointer; its hot colour comes from
+  **`triage.contrast_text`** on the resting colour.
+- The pointer is NOT changed: `OSC 22` is unimplemented in Warp and unverifiable
+  everywhere but kitty. The highlight carries the affordance.
+- Drag: 38 width messages → 13 per 12 columns. Settle time unchanged (~138ms per
+  applied width, all Textual compositor).
+- Double-clicking a CLOSED row stages `/attach <prefix>`; never submits.
+- Two setup under-waits fixed (`test_pane_groups.py`, `_open_diff`). 1940 passed.
 
 ## 1.6.0 — 2026-09-04
 
-**A group's tab strip hides itself at one tab.** Reported: *"only show the tab
-top bar when another tab is actually opened, otherwise it just eats space."*
-One row back for every unsplit window.
+**A group's tab strip hides itself at one tab.** One row back for every unsplit
+window.
 
-- **`PaneGroup.strip_should_hide`** is the whole condition — narrow **or** ≤1
-  tab, one OR in one place. `-strip-compact` stays purely width-driven, so a
-  second tab arriving in a narrow group gets the right strip with nothing to
-  untangle. `_strip_width` remembers the last measured width, because the tab
-  count moves on a DOM event that can arrive with no geometry.
-- **No attention signal is lost.** `SessionPane` has painted `-done-unseen` /
-  `-attention` / `-staged` on the pane itself since v0.91.0, with a
-  `border-left` rule added in v0.89.0 for exactly the visible-but-unfocused
-  case; `StatusBar` carries `⚑ needs input` and the staged chip; v1.5.0's rail
-  wears all four marks per tab. Three surfaces, none of them the strip.
-- **The transition re-pins the tail.** Showing the strip takes a row and left a
-  pinned transcript one row short of its end (measured). `refresh_strip_
-  visibility` asks which transcripts were at the tail BEFORE anything moves,
-  re-pins only those, only when a strip actually moved, and only on the next
-  frame — issuing it inline reads geometry the pane is about to lose. A pane
-  scrolled up on purpose is left alone.
-- **Two hooks, because one is not enough**: `_persist_tabset` covers every
-  restorable tab, `TabbedContent.TabActivated` covers a subagent transcript
-  tab, which opens and closes without persisting anything and is still a
-  second tab.
-- No new record field — the tab count implies it. 1927 passed.
+- **`PaneGroup.strip_should_hide`** is the whole condition: narrow OR ≤1 tab.
+  `-strip-compact` stays width-only.
+- No attention signal is lost: the pane, `StatusBar` and the rail already carry
+  `-done-unseen` / `-attention` / `-staged`.
+- Showing the strip takes a row; **`refresh_strip_visibility`** re-pins only
+  transcripts that were at the tail, on the next frame. A scrolled-up pane is left.
+- `TabbedContent.TabActivated` covers subagent transcript tabs, which persist
+  nothing. No new record field. 1927 passed.
 
 ## 1.5.0 — 2026-09-04
 
-**The rail switches now.** An entry has been a pane GROUP since v1.2.0 and
-every group is on screen at once, so a click could only move focus.
-`docs/plans/rail-interaction.md`, option C.
+**The rail switches now.** A row under a heading is that group's TAB and
+switches it; the heading only focuses. `docs/plans/rail-interaction.md`, option C.
 
-- **A group's row is its HEADING; the rows under it are its TABS.** A tab
-  row switches that group's active tab; the heading only focuses.
-- **A single-tab group grows no child row**, and only a foldable heading
-  wears a caret — `Row.entry_key`, `Row.expanded`, `SidebarLine.fold_zone`.
-- **Folds persist per group** in a new top-level `rail_folded` key in the
-  tabset record; absence of the key is the whole migration.
-
-**Heading contrast is computed, not chosen.**
-
-- **`triage.contrast_text`** picks black or white by WCAG luminance against
-  **`CONTRAST_PIVOT`** (`sqrt(0.0525) - 0.05` ≈ 0.1791), never 0.5.
-- **`triage.PALETTE_HEX`** now holds the six palette hexes;
-  **`heading_paint`** caches the (background, text) pair per palette NAME.
-- Every heading wears a background, the ungrouped one included
-  (`HEADING_HEX`); `doxa/theme.tcss` keeps the row-identity paint.
-
-**Hover, and a divider that moves.**
-
-- **`SidebarLine:hover` uses `background-tint`**, so it composites over
-  `-attention`'s red and a heading's pair. No Python, no focus, no rebuild.
-- **The rail's right edge drags**; **`Alt+Shift+←/→`** and **`/sidebar
-  width <n>|wider|narrower`** are the keyboard and always-works doors.
-- **A drag refuses where opening refuses.** `DoxaApp.sidebar_refusal` takes
-  a candidate width and stops double-counting the open rail's own columns.
-
-**Breaking: the rail is two columns wider.** `SIDEBAR_CHROME` 7 → 9,
-re-measured against the three-level row v1.2.0 added and never priced;
-`sidebar_width` default 23 → 25, clamp 20–39 → 22–41, `SIDEBAR_MIN_COLS`
-54 → 56. **Not done**: the rail still cannot reorder or close a tab.
+- A single-tab group grows no child row; only a foldable heading wears a caret
+  (`Row.entry_key`, `Row.expanded`, `SidebarLine.fold_zone`).
+- Folds persist per group in a new top-level `rail_folded` tabset key; absence
+  of the key is the migration.
+- **`triage.contrast_text`** picks heading text by WCAG luminance against
+  **`CONTRAST_PIVOT`** (≈0.1791, never 0.5); **`heading_paint`** caches per palette.
+- Every heading wears a background, the ungrouped one included (`HEADING_HEX`).
+- **`SidebarLine:hover`** uses `background-tint` — no Python, no focus, no rebuild.
+- The rail's right edge drags; **`Alt+Shift+←/→`** and
+  **`/sidebar width <n>|wider|narrower`** are the keyboard and always-works doors.
+- A drag refuses where opening refuses: **`DoxaApp.sidebar_refusal`** takes a
+  candidate width without double-counting the open rail's own columns.
+- **Breaking: the rail is two columns wider.** `SIDEBAR_CHROME` 7 → 9;
+  `sidebar_width` default 23 → 25, clamp 22–41; `SIDEBAR_MIN_COLS` 54 → 56.
+- **Not done**: the rail still cannot reorder or close a tab.
 
 ## 1.4.0 — 2026-09-04
 
-**A DOXA session can be driven by Codex.** The session seam has a name and a
-second engine behind it. `docs/plans/engine-providers.md`.
+**A DOXA session can be driven by Codex.** `docs/plans/engine-providers.md`.
 
-- New **`doxa/engines.py`** — the `Engine`/`EngineProvider` Protocols and an
-  explicit registry. `doxa --engine codex`, or the `engine` setting.
-- New **`doxa/codex.py`** — `codex exec --json` mapped onto `EngineEvent`.
-  One process per turn, resuming its own thread; the prompt rides stdin.
-- **The check the spec owed itself passed**: `EngineClient` satisfies
-  `Engine` unchanged, and so does `SessionEngine`.
-
-**The Protocol is the measured intersection, not a wish.**
-
-- **`stop` is not on both sides** — `SessionEngine` never had it. It is the
-  daemon's verb, and the pane already reaches it through `getattr`.
-- **`lore_write_state`/`belief_action_state`** are sync on one side and
-  async on the other; no one signature is honest about both.
-- **The belief PICKERS** are lore_core queries that merely live on
-  `SessionEngine`. Reported as `lore_pickers`, not faked with empty lists.
-
-**`supports()` is honest and every surface obeys it.** Codex reports tokens
-and no window, so:
-
-- **the ctx chip is absent, not `ctx —`** — that paint means "not measured
-  yet"; here the truth is "never". `/context` says so, `/usage` keeps tokens.
-- **the cost chip is absent** — `$0.0000` is the claim a session was free,
-  and nothing in the stream made it. `/usage` prints "not reported".
-- **no permission-mode chip or picker** — Codex's posture is a sandbox
-  policy. `/mode` names the reason rather than listing six dead rows.
-
-**`codex mcp add` works — and DOXA still cannot use it.** Verified live: the
-tool was offered and called, with `default_tools_approval_mode = "approve"`
-(the default auto-cancels). But a server carrying DOXA's operators is a
-process outside `ToolGate` — no refusal, no two-strikes, no `tool_disabled`
-— so `mcp_tools` is False and the session says so.
-
-**Not covered**: cross-engine spawn, a Codex daemon (a Codex session runs
-in-process, so Ctrl+Q ends it), and the LORE review at finalize.
+- New **`doxa/engines.py`**: `Engine`/`EngineProvider` Protocols and a registry.
+  `doxa --engine codex`, or the `engine` setting.
+- New **`doxa/codex.py`**: `codex exec --json` mapped onto `EngineEvent`, one
+  process per turn resuming its own thread, prompt on stdin.
+- `EngineClient` and `SessionEngine` both satisfy `Engine` unchanged.
+- The Protocol is the measured intersection: `stop` is daemon-only (reached via
+  `getattr`); `lore_write_state`/`belief_action_state` differ in sync-ness.
+- Belief pickers are lore_core queries, reported as `lore_pickers`, not faked.
+- **`supports()`** is honest: Codex reports tokens and no window, so the ctx and
+  cost chips are absent (not `ctx —` / `$0.0000`) and `/mode` names the reason.
+- `codex mcp add` works live, but a server outside `ToolGate` has no refusal or
+  two-strikes, so `mcp_tools` is False and the session says so.
+- **Not covered**: cross-engine spawn, a Codex daemon (a Codex session runs
+  in-process, so Ctrl+Q ends it), and the LORE review at finalize.
 
 ## 1.3.1 — 2026-09-04
 
-**Fix `tests/test_tab_labels.py`, which failed 6 of 10 runs on main** with no
-change to the module. Eleven assertion points spent a bare
-`await pilot.pause()` — one frame — before reading the tab strip, so they
-passed only when the repaint happened to land in that frame.
+**Fix `tests/test_tab_labels.py`, which failed 6 of 10 runs on main.**
 
-- **Measured on main before the fix**, at the same base commit:
-  `test_rename_command_is_the_keyboard_door` 5/10,
-  `test_the_label_follows_a_branch_switch_without_polling` 2/10,
-  `test_the_glyph_prepends_every_painted_tab_label` 2/10.
-- The module already owned the primitive: **`_settled`** polls the painted
-  label until it stops moving, 200 tries, and every setup point used it.
-  The assertion points now do too.
-- **The assertions are not weakened.** `_settled` returns falsy when a label
-  never settles and every call site asserts on it, so a label that stops
-  tracking still fails — for that reason rather than for scheduler timing.
-  Where a test checked a model-level fact first (`auto_label()`,
-  `generated_name`), that order is kept.
-- **10 runs, 10 green**, against the 6-of-10-failing baseline. No product
-  code changed.
-
+- Eleven assertion points spent a bare `pilot.pause()` before reading the tab
+  strip; they now use the module's own **`_settled`** loop.
+- Assertions are not weakened: `_settled` returns falsy when a label never
+  settles, and every call site asserts on it.
+- 10 runs, 10 green, against the 6-of-10 baseline. No product code changed.
 
 ## 1.3.0 — 2026-09-03
 
