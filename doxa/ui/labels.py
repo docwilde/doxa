@@ -2741,6 +2741,83 @@ def remote_driver_chip(identity: "str | None") -> "tuple[str, str] | None":
     )
 
 
+#: The glyph :func:`sync_chip` leads with -- U+21C5, two arrows passing.
+#: Checked against every other chip on this row (⌁ session/peers, ⧉
+#: subagents, ⚑ needs input, ⊘ disabled, ⎇ branch, ◎ remote driver) and
+#: used by none of them, the same clearance :data:`REMOTE_DRIVER_GLYPH`
+#: was given. It reads as "these two machines exchange", which is the
+#: whole claim -- not a cloud, which would say where, and not a padlock,
+#: which would overclaim what the transport guarantees.
+SYNC_GLYPH = "⇅"
+
+
+def sync_chip(state: "Any") -> "tuple[str, str] | None":
+    """(chip text, hint) for LORE sync state, or None to omit the chip.
+
+    ``LORE/docs/plans/sync.md``'s "## DOXA" item 3: sync state beside the
+    worktree and branch, under "the same *say what is happening* rule
+    DOXA's remote spec sets for a remote driver". The thing that rule is
+    actually about is the failure it prevents -- ``remote.md``'s "a silent
+    second driver is the thing a user cannot detect and cannot consent
+    to". Sync has the same shape: something is writing curated memory,
+    beliefs and skills into this machine from elsewhere, and a pull that
+    last succeeded a week ago looks exactly like one that succeeded a
+    minute ago if nothing on screen says which.
+
+    ``None`` -- never a zero, never an error -- whenever ``state`` is None,
+    which :func:`doxa.lore_sync.read_state` returns for all of: sync off
+    (the default), a ``lore_core`` with no op log, a store older than the
+    ``sync_*`` tables, a store that cannot be opened. The status bar has no
+    overflow behaviour, so a chip reading ``sync 0`` on every DOXA that
+    never opted in would be spending the most contended row in the
+    interface to say nothing, and pushing a real chip off the end to do it.
+
+    Hide-at-zero applies WITHIN the chip too, per segment: the arrow and
+    the warning appear only at a real count. What never hides is the age --
+    once sync is on, "how stale is what I am looking at" is the question
+    the chip exists to answer, and ``never`` is an answer to it rather than
+    an absence of one."""
+    if state is None:
+        return None
+    age = state.last_pull_age_s
+    # "never" and "0s" are different claims and must not render alike: one
+    # says no pull has ever landed, the other says one just did. This is
+    # the same distinction doxa.diff draws between a measured zero and an
+    # unmeasurable base, and it is the one users read wrong when a UI
+    # collapses it.
+    age_text = "never" if age is None else _fmt_age(age)
+    text = f"{SYNC_GLYPH} sync {age_text}"
+    if state.unpushed:
+        text += f" ↑{state.unpushed}"
+    flagged = state.conflicts + state.unverified
+    if flagged:
+        text += f" ⚠{flagged}"
+    pulled = (
+        "no pull has ever landed here"
+        if age is None else f"last pull {_fmt_age(age)} ago"
+    )
+    hint = f"LORE sync -- {pulled}"
+    if state.unpushed:
+        hint += (
+            f"; {state.unpushed} local op(s) not yet acknowledged by any peer"
+        )
+    if state.conflicts:
+        # Named as the user's to resolve, because it is: sync.md's merge
+        # rule 1 keeps BOTH entries in the file and lists the pair until a
+        # human deletes one. There is no command to run, which is exactly
+        # why the chip has to say so.
+        hint += (
+            f"; {state.conflicts} conflict(s) -- both versions were kept in "
+            "the file, delete the one you do not want"
+        )
+    if state.unverified:
+        hint += (
+            f"; {state.unverified} op(s) failed their integrity check and "
+            "were staged, never applied -- review them in /pending"
+        )
+    return (text, hint)
+
+
 def proposal_group_label(item: "dict | str") -> str:
     """Which fold a staged proposal falls under in the proposals picker.
 

@@ -30,6 +30,7 @@ from .. import banner as banner_mod
 from .. import diff as diff_mod
 from .. import identity as identity_mod
 from .. import keyboard as keyboard_mod
+from .. import lore_sync as lore_sync_mod
 from .. import naming as naming_mod
 from .. import notify as notify_mod
 from ..events import EngineEvent
@@ -240,6 +241,15 @@ class PaneRuntimeMixin:
         # next edit would be spelling "nothing changed" for a tree that
         # has plenty. One `git diff --numstat` per boot, on a thread.
         self.schedule_diff_counts()
+        # The sync chip's first and only reading (sync.md's "## DOXA" item
+        # 3). Boot, for the same reason the diff chip reads at boot: it is
+        # an EVENT, not a timer. Unlike the diff chip there is no tick to
+        # follow it -- nothing DOXA does can change a pull age or an
+        # unpushed count, because the transport that would is sync.md's PR
+        # 5 and has not landed. When it does, this is the call site that
+        # grows a second trigger; until then a per-turn refresh would be
+        # SQLite reads paid on every turn to be told the same number.
+        self.schedule_sync_state()
         # Initial identity block: who/where this session actually is --
         # only fields the CLI/config really reported, never guesses.
         #
@@ -842,6 +852,50 @@ class PaneRuntimeMixin:
                 status=diff_mod.STATUS_ERROR, detail=str(exc)
             )
         self._diff_counts = result
+        self._refresh_status()
+
+    # -- the sync chip (sync.md's "## DOXA" item 3) -------------------
+
+    def schedule_sync_state(self) -> None:
+        """Read LORE's sync state off the loop, at most one in flight.
+
+        Refused outright when sync is off -- which is the default, and the
+        answer on every machine that never configured a hub. That check is
+        a couple of environment reads (:func:`doxa.lore_sync.enabled`) and
+        it is what keeps this whole feature free for everyone else: no
+        worker is spawned, no thread is taken, no database is opened, and
+        the chip is absent because :attr:`_sync_state` stays None.
+
+        ``exclusive=True`` on its own worker group is the same debounce
+        :meth:`schedule_diff_counts` relies on, kept here so a pane that
+        boots twice (an attach, a ``switch_engine``) cannot stack two
+        readings."""
+        if not lore_sync_mod.enabled():
+            return
+        if not self.is_mounted:
+            return
+        self.run_worker(
+            self._refresh_sync_state(), exclusive=True, group="sync-state",
+        )
+
+    async def _refresh_sync_state(self) -> None:
+        """Read the state and repaint the bar.
+
+        ``asyncio.to_thread`` for the reason every other store read in this
+        app gives: these are SQLite reads against a file the LORE plugin,
+        the dreamer and this app's own daemon all write to, they wait on a
+        30 s busy timeout when one of those holds the write lock
+        (``lore_core.store.db_connect``), and a keystroke must never be
+        behind that.
+
+        Never raises, and never reports: this runs from a worker with no
+        caller of ours to catch it, and :func:`doxa.lore_sync.read_state`
+        already turns every failure it can have into None. A sync chip that
+        could not be read is a chip that is not shown -- which is exactly
+        what an operator with no sync configured sees anyway, so there is
+        nothing here worth spending an error block on."""
+        state = await asyncio.to_thread(lore_sync_mod.read_state)
+        self._sync_state = state
         self._refresh_status()
 
     def _maybe_auto_open_diff(self) -> None:
