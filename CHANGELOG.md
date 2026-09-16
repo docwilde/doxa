@@ -4,6 +4,15 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.9.1 — 2026-09-16
+
+**The pinned LORE moves from 0.52.0 to 0.53.0.**
+
+- **`lore-core`** pin `v0.52.0` → `v0.53.0`. A bare install and CI now embed the same LORE the plugin checkout has run since this morning.
+- Inherited: `lore approve` refuses a skill proposal whose name is not one lowercase, hyphen-separated component, checked at stage and again at apply. A name such as `../x` could write outside the skills directory.
+- Inherited: **`archive()`** writes a temp copy, fsyncs, renames, then unlinks; a failed copy leaves the proposal pending and raises, and a corrupt source is quarantined.
+- No DOXA code changes. **`approve_pending`** and **`reject_pending`** already turn a raised archive failure into a sentence for the user rather than a crash.
+
 ## 1.9.0 — 2026-09-16
 
 **Typing while a turn runs no longer hangs it: the prompt is queued and starts next.**
