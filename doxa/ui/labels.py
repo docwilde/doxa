@@ -2699,6 +2699,48 @@ def staged_chip(count: "int | None") -> "tuple[str, str] | None":
     )
 
 
+#: The glyph :func:`remote_driver_chip` prepends -- U+25CE BULLSEYE,
+#: unused by any other chip on this row (⌁ session/peers, ⧉ subagents,
+#: ⚑ needs input, ⊘ disabled, ⎇ branch -- checked against
+#: :mod:`doxa.session.chips`._status_chips). Read as "something else is
+#: aiming at this session" -- close enough to the fact without
+#: borrowing a padlock or a phone glyph that would overclaim exactly
+#: what kind of remote control this is.
+REMOTE_DRIVER_GLYPH = "◎"
+
+
+def remote_driver_chip(identity: "str | None") -> "tuple[str, str] | None":
+    """(chip text, hint) for a connected remote driver, or None to omit.
+
+    HIDDEN AT ZERO -- i.e. nothing paints while nobody is driving this
+    session remotely -- the same convention :func:`staged_chip` and the
+    peers/subagent chips in :mod:`doxa.session.chips` already follow.
+    There is deliberately no companion "local" chip for the ordinary
+    case: the ABSENCE of this chip already says that, the same way the
+    peers chip's absence says "solo session" rather than "0 peers".
+
+    This is the surface docs/plans/remote.md's "say who is connected"
+    rule asks for: "a session driven from elsewhere should show that in
+    the status bar, the way the worktree and branch are shown. A silent
+    second driver is the thing a user cannot detect and cannot consent
+    to." No bridge exists yet (that is a later track) to ever pass a
+    real identity here -- this function, and the ``remote_driver``
+    attribute it reads off the engine, are the wiring that track lands
+    on, not a promise that anything is listening today."""
+    identity = (identity or "").strip()
+    if not identity:
+        return None
+    return (
+        f"{REMOTE_DRIVER_GLYPH} remote:{identity}",
+        f"{identity} is driving this session remotely, verified on the "
+        "loopback listener DOXA trusts (doxa.remote_policy) -- the "
+        "reduced remote surface: reading the transcript and status, "
+        "sending prompts, and approving or denying a pending tool call. "
+        "It cannot run ! shell commands or raise the permission mode to "
+        "bypassPermissions unless a separate opt-in setting is on",
+    )
+
+
 def proposal_group_label(item: "dict | str") -> str:
     """Which fold a staged proposal falls under in the proposals picker.
 

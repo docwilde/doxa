@@ -51,6 +51,7 @@ from ..ui.labels import (
     proposal_supersedes,
     proposal_text,
     proposal_verdict,
+    remote_driver_chip,
     staged_chip,
     staged_count,
     belief_evidence_rows,
@@ -525,6 +526,21 @@ class PaneChipsMixin:
                 f"[@click=open_mode_picker]{mode_chip(mode, short=cramped)}[/]",
                 ((mode_plain, mode_tooltip(mode, chip_armed)),),
             ))
+        # Remote driver (R1, docs/plans/remote.md): "a session driven from
+        # elsewhere should show that in the status bar, the way the
+        # worktree and branch are shown." Placed second, right after the
+        # mode chip, for the same structural reason that chip documents
+        # above: the row has no overflow behaviour, so position IS the
+        # guarantee, and this is the one chip that answers "is somebody
+        # else steering this session right now" -- exactly the fact a
+        # silent second driver would otherwise hide. Plain, not clickable:
+        # there is nothing to open yet (no bridge exists in this track),
+        # only a fact to state. Hidden at zero, same as the peers chip
+        # below -- see remote_driver_chip's own docstring for why there is
+        # no companion "local" chip.
+        remote = remote_driver_chip(getattr(engine, "remote_driver", None))
+        if remote is not None:
+            chips.append(StatusChip.plain(*remote))
         model = engine.model or "default"
         chips.append(StatusChip.clickable(
             model,

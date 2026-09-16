@@ -119,6 +119,7 @@ class FakeEngine:
         cwd: str = "",
         permission_mode: str = "default",
         bypass_armed: bool = False,
+        remote_driver: "str | None" = None,
     ) -> None:
         self._script = script
         self.model = model
@@ -151,6 +152,11 @@ class FakeEngine:
         # the shipped default, so every pre-existing test exercises the
         # UNARMED session -- which is the one a user actually gets.
         self.bypass_armed = bypass_armed
+        # Engine parity (R1, docs/plans/remote.md): the identity of a
+        # remote driver, or None. Default None so every pre-existing test
+        # exercises the ordinary solo session -- same posture bypass_armed
+        # takes just above.
+        self.remote_driver = remote_driver
         self.permission_mode_switches: list[str] = []
         # Set to an exception to make set_permission_mode refuse, the same
         # way the real engine refuses an unknown mode or a disconnected

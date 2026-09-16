@@ -1626,3 +1626,36 @@ async def test_a_truncated_claim_says_so_in_the_detail_view(monkeypatch, tmp_pat
         assert await _show_belief(pilot, app, picker, "belief:9")
         assert "the beginning of a huge claim" in _system_texts(app)[-1]
         assert "truncated" in _system_texts(app)[-1]
+
+
+# =======================================================================
+# remote driver indicator (R1, docs/plans/remote.md): "a session driven
+# from elsewhere should show that in the status bar, the way the worktree
+# and branch are shown" -- wired through the real status bar, not just
+# doxa.ui.labels.remote_driver_chip in isolation (tests/test_remote_policy.py
+# covers that function directly).
+# =======================================================================
+
+
+@pytest.mark.asyncio
+async def test_no_remote_chip_paints_for_an_ordinary_solo_session(
+    monkeypatch, tmp_path
+):
+    fake = FakeEngine([], model="claude-haiku-4-5")
+    assert fake.remote_driver is None
+    app, _engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test() as pilot:
+        assert await _wait_status(pilot, app, "claude-haiku-4-5")
+        assert "remote:" not in _status_plain(app)
+
+
+@pytest.mark.asyncio
+async def test_the_remote_chip_names_the_driving_identity(monkeypatch, tmp_path):
+    """Companion proof: the SAME status bar, with only remote_driver set
+    on the engine, now paints the identity -- proving the chip's absence
+    above is the hide-at-zero branch and not a wiring gap that would
+    never paint the chip at all."""
+    fake = FakeEngine([], model="claude-haiku-4-5", remote_driver="alice@example.com")
+    app, _engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test() as pilot:
+        assert await _wait_status(pilot, app, "remote:alice@example.com")
