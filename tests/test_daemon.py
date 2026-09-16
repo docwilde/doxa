@@ -219,6 +219,65 @@ async def test_reattach_within_linger_cancels_finalize(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cancelling_the_linger_task_before_the_sleep_expires_still_cancels_cleanly(
+    tmp_path, monkeypatch,
+):
+    """The ordinary case _cancel_linger exists for -- a reattach well
+    before _linger_then_stop's sleep ever returns -- keeps working exactly
+    as it did before the shutdown-stranding fix: the task ends on the
+    plain CancelledError its own `except asyncio.CancelledError: return`
+    already expects, _stopping is untouched, and the daemon keeps
+    running."""
+    async with running_daemon(tmp_path, monkeypatch, linger=30.0) as (
+        daemon, created, serve_task,
+    ):
+        task = daemon._linger_task  # armed by serve() itself, nobody attached
+        assert task is not None
+        daemon._cancel_linger()
+        assert daemon._linger_task is None
+        # _linger_then_stop's own `except asyncio.CancelledError: return`
+        # swallows the cancellation and returns normally -- the task ends
+        # up done, not cancelled, and that is the existing contract this
+        # test guards, not a side effect of the shutdown-stranding fix.
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(task, 1)
+        assert task.done()
+        assert not task.cancelled()
+        assert daemon._stopping is False
+        assert not daemon._done.is_set()
+        assert not serve_task.done()
+        assert created[0].exited is False
+
+
+@pytest.mark.asyncio
+async def test_stopping_never_remains_true_with_done_unset_on_the_exception_path(
+    tmp_path, monkeypatch,
+):
+    """Even a genuinely unexpected exception out of engine.finalize() --
+    including a bare CancelledError, which the surrounding
+    ``suppress(Exception)`` does NOT catch since it is a BaseException --
+    must not leave ``_stopping`` True forever with ``_done`` unset. That
+    exact combination is a stranded daemon: the re-entry guard refuses
+    every later shutdown attempt, and serve()'s ``await
+    self._done.wait()`` would never return."""
+    async with running_daemon(tmp_path, monkeypatch, linger=30.0) as (
+        daemon, created, serve_task,
+    ):
+        async def raising_finalize():
+            raise asyncio.CancelledError("simulated external cancellation")
+
+        daemon.engine.finalize = raising_finalize
+
+        with pytest.raises(asyncio.CancelledError, match="simulated"):
+            await daemon._shutdown("exception path test")
+
+        assert daemon._stopping is True
+        assert daemon._done.is_set()
+        # _done is shared with serve()'s own wait -- it unwinds on its own.
+        await asyncio.wait_for(serve_task, 5)
+
+
+@pytest.mark.asyncio
 async def test_explicit_stop_finalizes_immediately(tmp_path, monkeypatch):
     async with running_daemon(tmp_path, monkeypatch, linger=600.0) as (
         daemon, created, serve_task,
@@ -572,6 +631,69 @@ async def test_detach_leaves_the_worktree_intact(tmp_path, monkeypatch):
         assert Path(worktree_path).exists()
 
 
+@pytest.mark.asyncio
+async def test_attaching_while_shutdown_is_in_progress_does_not_abort_it(
+    tmp_path, monkeypatch,
+):
+    """Regression for the daemon-stranding defect: a client that attaches
+    the instant the linger sleep ends -- while _linger_then_stop is
+    already inside _shutdown, blocked on engine.finalize() -- calls
+    _cancel_linger() exactly as every attach does. That must not reach
+    the shutdown in progress: finalize completes, the worktree finalizer
+    runs, and _done is set, all despite the mid-shutdown attach."""
+    repo = _git_repo(tmp_path / "repo")
+    async with running_daemon_at(repo, tmp_path, monkeypatch, linger=0.05) as (
+        daemon, created, serve_task,
+    ):
+        worktree_path = daemon.cwd
+        real_finalize = daemon.engine.finalize
+        finalize_entered = asyncio.Event()
+        release_finalize = asyncio.Event()
+
+        async def gated_finalize():
+            finalize_entered.set()
+            await release_finalize.wait()
+            return await real_finalize()
+
+        daemon.engine.finalize = gated_finalize
+
+        # A client has to have attached at least once first: before that,
+        # _arm_linger uses INITIAL_CLAIM_SECS (the generous unclaimed-spawn
+        # window), not linger_secs, so an unattached daemon would never
+        # reach _shutdown on this test's timescale. Attach and detach --
+        # the SUBSEQUENT re-arm (on this drop) is the short linger_secs one.
+        first = EngineClient(str(daemon.socket_path))
+        await first.start()
+        await first.finalize()
+
+        # Nobody is attached now: the (short) linger expires and
+        # _linger_then_stop moves past its sleep into _shutdown, now
+        # parked inside the gated engine.finalize() -- exactly the window
+        # the defect lived in.
+        await asyncio.wait_for(finalize_entered.wait(), 5)
+        assert daemon._stopping is True
+        assert not daemon._done.is_set()
+
+        # A client attaches NOW, mid-shutdown; its attach handler calls
+        # _cancel_linger() same as always. Before the fix this would
+        # cancel the very task blocked above, delivering CancelledError
+        # into engine.finalize() and stranding the daemon.
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        await client.finalize()
+
+        # Shutdown is still exactly where it was -- not aborted.
+        assert not daemon._done.is_set()
+        assert created[0].exited is False
+
+        release_finalize.set()
+        await asyncio.wait_for(serve_task, 5)
+
+        assert daemon._done.is_set()
+        assert created[0].exited is True  # finalize ran to completion
+        assert not Path(worktree_path).exists()  # worktree finalizer ran
+
+
 # -- queue item 5: needs_input over the daemon split -----------------------
 
 
@@ -900,6 +1022,56 @@ def test_fit_belief_page_never_stalls_on_one_oversize_belief():
     )) <= peers.MAX_FRAME_BYTES
 
 
+def _seed_oversize_belief(claim_bytes=None):
+    """ONE active belief whose claim ALONE exceeds the byte budget -- the
+    shape defect 2's report described (as opposed to
+    :func:`_seed_big_belief_store`'s many moderate rows summing past the
+    cap). Returns (conn, subject, belief_id); the caller drops it with
+    :func:`_drop_big_belief_store`, which deletes by subject regardless of
+    how the rows were seeded."""
+    from lore_core import beliefs as beliefs_mod
+    from lore_core import store as lore_store
+
+    subject = "project:oversize-belief"
+    conn = lore_store.db_connect()
+    beliefs_mod.belief_insert(
+        conn, subject, "z" * (claim_bytes or peers.MAX_FRAME_BYTES * 2),
+        0.9, None, None, None,
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT id FROM beliefs WHERE subject = ?", (subject,),
+    ).fetchone()
+    return conn, subject, row[0]
+
+
+@pytest.mark.asyncio
+async def test_a_belief_page_whose_first_row_exceeds_the_byte_budget_advances_past_it(
+    tmp_path, monkeypatch,
+):
+    """End to end, over a real socket: the `beliefs` RPC's own guard on
+    _fit_belief_page's result (``if next_offset is None and len(beliefs)
+    == fetch: next_offset = offset + len(page)``) must never regress the
+    advance _fit_belief_page already made -- and EngineClient.list_beliefs'
+    paging loop, which would otherwise spin forever on a non-advancing
+    offset, has to actually terminate with the oversize row present
+    (marked ``claim_truncated``) rather than an empty result. The
+    wait_for is the termination proof: a reintroduced stall times out
+    the test instead of hanging the suite."""
+    conn, subject, _belief_id = _seed_oversize_belief()
+    try:
+        async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+            client = EngineClient(str(daemon.socket_path))
+            await client.start()
+            result = await asyncio.wait_for(client.list_beliefs(), 5)
+            mine = [b for b in result if b["subject"] == subject]
+            assert len(mine) == 1
+            assert mine[0]["claim_truncated"] is True
+            await client.finalize()
+    finally:
+        _drop_big_belief_store(conn, subject)
+
+
 @pytest.mark.asyncio
 async def test_beliefs_call_survives_a_store_bigger_than_one_frame(
     tmp_path, monkeypatch,
@@ -1066,6 +1238,29 @@ def test_fit_pending_page_never_stalls_on_one_oversize_proposal():
     assert len(daemon_mod.encode_frame(
         {"type": "reply", "id": 1, "ok": True, "pending": page}
     )) <= peers.MAX_FRAME_BYTES
+
+
+@pytest.mark.asyncio
+async def test_a_pending_page_whose_first_row_exceeds_the_byte_budget_advances_past_it(
+    tmp_path, monkeypatch,
+):
+    """End to end twin of the beliefs test above, for the `pending` RPC --
+    the identical outer guard, over the identical shared _fit_page rule
+    (:func:`_fit_pending_page`), fed a real RECORD the way item V's staged
+    proposals actually arrive (not the bare-string legacy shape the unit
+    test above uses). EngineClient.list_pending's paging loop has to
+    terminate with the row present (marked ``text_truncated``); the
+    wait_for is what turns a reintroduced stall into a test failure
+    instead of a hung suite."""
+    huge = _staged_record(0, "z" * (peers.MAX_FRAME_BYTES * 2))
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+        monkeypatch.setattr(daemon.engine, "_pending_records", lambda: [huge])
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        result = await asyncio.wait_for(client.list_pending(), 5)
+        assert len(result) == 1
+        assert result[0]["text_truncated"] is True
+        await client.finalize()
 
 
 @pytest.mark.asyncio
