@@ -4,6 +4,17 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.8.0 — 2026-09-16
+
+**A remote driver is refused by default, and named when one is present.**
+
+- New **`doxa/remote_policy.py`**: pure decisions for whether remote listening is on, whether an identity is allowed, and whether a request kind is permitted. Every refusal carries a reason, never a bare false.
+- Four **Remote** settings, all off or empty by default: remote listening, the allow-list of Tailscale logins, and separate opt-ins for `!` shell and for raising the mode to bypassPermissions.
+- An **empty allow-list refuses everyone**, not everyone through. The identity header counts only when the request arrived on the loopback listener.
+- A remote driver may read, send prompts and answer tool calls. Shell and bypassPermissions stay refused unless their own opt-in is set.
+- A status chip names the connected identity, and paints nothing when nobody else is driving.
+- No network code yet: `evaluate()` is the seam the bridge process will call. Tests: `tests/test_remote_policy.py` (new). Suite 2004 passed.
+
 ## 1.7.6 — 2026-09-16
 
 **The pinned LORE moves to 0.49.0.**
