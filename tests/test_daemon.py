@@ -1022,6 +1022,56 @@ def test_fit_belief_page_never_stalls_on_one_oversize_belief():
     )) <= peers.MAX_FRAME_BYTES
 
 
+def _seed_oversize_belief(claim_bytes=None):
+    """ONE active belief whose claim ALONE exceeds the byte budget -- the
+    shape defect 2's report described (as opposed to
+    :func:`_seed_big_belief_store`'s many moderate rows summing past the
+    cap). Returns (conn, subject, belief_id); the caller drops it with
+    :func:`_drop_big_belief_store`, which deletes by subject regardless of
+    how the rows were seeded."""
+    from lore_core import beliefs as beliefs_mod
+    from lore_core import store as lore_store
+
+    subject = "project:oversize-belief"
+    conn = lore_store.db_connect()
+    beliefs_mod.belief_insert(
+        conn, subject, "z" * (claim_bytes or peers.MAX_FRAME_BYTES * 2),
+        0.9, None, None, None,
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT id FROM beliefs WHERE subject = ?", (subject,),
+    ).fetchone()
+    return conn, subject, row[0]
+
+
+@pytest.mark.asyncio
+async def test_a_belief_page_whose_first_row_exceeds_the_byte_budget_advances_past_it(
+    tmp_path, monkeypatch,
+):
+    """End to end, over a real socket: the `beliefs` RPC's own guard on
+    _fit_belief_page's result (``if next_offset is None and len(beliefs)
+    == fetch: next_offset = offset + len(page)``) must never regress the
+    advance _fit_belief_page already made -- and EngineClient.list_beliefs'
+    paging loop, which would otherwise spin forever on a non-advancing
+    offset, has to actually terminate with the oversize row present
+    (marked ``claim_truncated``) rather than an empty result. The
+    wait_for is the termination proof: a reintroduced stall times out
+    the test instead of hanging the suite."""
+    conn, subject, _belief_id = _seed_oversize_belief()
+    try:
+        async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+            client = EngineClient(str(daemon.socket_path))
+            await client.start()
+            result = await asyncio.wait_for(client.list_beliefs(), 5)
+            mine = [b for b in result if b["subject"] == subject]
+            assert len(mine) == 1
+            assert mine[0]["claim_truncated"] is True
+            await client.finalize()
+    finally:
+        _drop_big_belief_store(conn, subject)
+
+
 @pytest.mark.asyncio
 async def test_beliefs_call_survives_a_store_bigger_than_one_frame(
     tmp_path, monkeypatch,
@@ -1188,6 +1238,29 @@ def test_fit_pending_page_never_stalls_on_one_oversize_proposal():
     assert len(daemon_mod.encode_frame(
         {"type": "reply", "id": 1, "ok": True, "pending": page}
     )) <= peers.MAX_FRAME_BYTES
+
+
+@pytest.mark.asyncio
+async def test_a_pending_page_whose_first_row_exceeds_the_byte_budget_advances_past_it(
+    tmp_path, monkeypatch,
+):
+    """End to end twin of the beliefs test above, for the `pending` RPC --
+    the identical outer guard, over the identical shared _fit_page rule
+    (:func:`_fit_pending_page`), fed a real RECORD the way item V's staged
+    proposals actually arrive (not the bare-string legacy shape the unit
+    test above uses). EngineClient.list_pending's paging loop has to
+    terminate with the row present (marked ``text_truncated``); the
+    wait_for is what turns a reintroduced stall into a test failure
+    instead of a hung suite."""
+    huge = _staged_record(0, "z" * (peers.MAX_FRAME_BYTES * 2))
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+        monkeypatch.setattr(daemon.engine, "_pending_records", lambda: [huge])
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        result = await asyncio.wait_for(client.list_pending(), 5)
+        assert len(result) == 1
+        assert result[0]["text_truncated"] is True
+        await client.finalize()
 
 
 @pytest.mark.asyncio
