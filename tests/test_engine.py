@@ -828,9 +828,9 @@ async def test_a_prompt_sent_to_a_busy_engine_is_queued_not_raised(tmp_path):
     """The regression this feature exists for, at the in-process engine
     layer: a second send() call while the first is still running used to
     have no guard at all (a silent race against the SDK client). Now it
-    is queued -- acknowledged by yielding nothing and raising nothing --
-    the FIRST turn finishes untouched, and the queued prompt starts on
-    its own the moment the first one ends."""
+    is queued -- acknowledged by yielding exactly one prompt_queued
+    event, never raising -- the FIRST turn finishes untouched, and the
+    queued prompt starts on its own the moment the first one ends."""
     gate = asyncio.Event()
     factory = _paced_client_factory(gate)
     engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
@@ -840,13 +840,13 @@ async def test_a_prompt_sent_to_a_busy_engine_is_queued_not_raised(tmp_path):
     await _wait_for_turn_task(engine)
 
     second_events = [ev async for ev in engine.send("second")]
-    assert second_events == []  # queued, not started -- nothing to render
-
-    queued = await asyncio.wait_for(
-        _collect_oob_until(engine, "prompt_queued"), 5,
-    )
-    assert queued[-1].data["position"] == 1
-    assert queued[-1].data["text"] == "second"
+    # Queued, not started: yielded DIRECTLY to this caller (there is
+    # only ever one caller of send() in-process), not over
+    # peer_events() -- see send()'s own docstring for why a second copy
+    # on that stream would just be this same pane rendering it twice.
+    assert [ev.type for ev in second_events] == ["prompt_queued"]
+    assert second_events[0].data["position"] == 1
+    assert second_events[0].data["text"] == "second"
 
     gate.set()
     first_events = await asyncio.wait_for(task_first, 5)
@@ -871,15 +871,11 @@ async def test_several_prompts_queued_on_a_busy_engine_start_in_fifo_order(tmp_p
     task_first = asyncio.create_task(_collect(engine.send("first")))
     await _wait_for_turn_task(engine)
 
-    for text in ("second", "third", "fourth"):
-        assert [ev async for ev in engine.send(text)] == []
-
     positions = []
-    for _ in range(3):
-        drained = await asyncio.wait_for(
-            _collect_oob_until(engine, "prompt_queued"), 5,
-        )
-        positions.append(drained[-1].data["position"])
+    for text in ("second", "third", "fourth"):
+        events = [ev async for ev in engine.send(text)]
+        assert [ev.type for ev in events] == ["prompt_queued"]
+        positions.append(events[0].data["position"])
     assert positions == [1, 2, 3]
 
     gate.set()
@@ -908,7 +904,8 @@ async def test_the_in_process_queue_bound_is_enforced_with_a_clear_reply(tmp_pat
     await _wait_for_turn_task(engine)
 
     for i in range(PROMPT_QUEUE_MAXLEN):
-        assert [ev async for ev in engine.send(f"queued-{i}")] == []
+        events = [ev async for ev in engine.send(f"queued-{i}")]
+        assert [ev.type for ev in events] == ["prompt_queued"]
 
     with pytest.raises(PromptQueueFull, match="queue is full"):
         async for _ in engine.send("one too many"):
@@ -928,11 +925,9 @@ async def test_cancelling_a_queued_prompt_on_the_in_process_engine(tmp_path):
     task_first = asyncio.create_task(_collect(engine.send("first")))
     await _wait_for_turn_task(engine)
 
-    assert [ev async for ev in engine.send("cancel me")] == []
-    queued = await asyncio.wait_for(
-        _collect_oob_until(engine, "prompt_queued"), 5,
-    )
-    item_id = queued[-1].data["id"]
+    queued_events = [ev async for ev in engine.send("cancel me")]
+    assert [ev.type for ev in queued_events] == ["prompt_queued"]
+    item_id = queued_events[0].data["id"]
 
     assert await engine.cancel_queued("no-such-id") is False
 
@@ -966,8 +961,8 @@ async def test_queued_prompts_are_discarded_at_finalize_and_the_discard_is_visib
 
     task_running = asyncio.create_task(_collect(engine.send("running")))
     await _wait_for_turn_task(engine)
-    assert [ev async for ev in engine.send("discard me")] == []
-    await asyncio.wait_for(_collect_oob_until(engine, "prompt_queued"), 5)
+    queued_events = [ev async for ev in engine.send("discard me")]
+    assert [ev.type for ev in queued_events] == ["prompt_queued"]
 
     finalize_task = asyncio.create_task(engine.finalize())
     discarded = await asyncio.wait_for(

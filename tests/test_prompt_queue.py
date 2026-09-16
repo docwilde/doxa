@@ -64,9 +64,14 @@ class PacedQueueEngine(FakeEngine):
         if self._busy:
             item = self._queue.enqueue(prompt)  # may raise PromptQueueFull
             position = self._queue.position(item.id) or len(self._queue)
-            self.push_peer_event(EngineEvent("prompt_queued", {
+            # Yielded directly to THIS caller -- matches the real
+            # engines' contract (see doxa.engine.SessionEngine.send's
+            # docstring): _run_turn peeks at the first event and treats
+            # "prompt_queued" as the whole answer, never mounting a
+            # turn block for it.
+            yield EngineEvent("prompt_queued", {
                 "id": item.id, "text": prompt, "position": position,
-            }))
+            })
             return
         self._busy = True
         try:

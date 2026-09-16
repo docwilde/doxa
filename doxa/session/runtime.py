@@ -403,14 +403,19 @@ class PaneRuntimeMixin:
                 "prompt_queued", "prompt_dequeued", "prompt_cancelled",
                 "prompt_discarded",
             ):
-                # Mid-turn prompt queue (design points 2/3/5/6): ALWAYS
-                # out-of-band, whether this pane's own worker submitted
-                # the prompt or another attached client did -- the "every
+                # Mid-turn prompt queue (design points 2/3/5/6): reached
+                # here for prompt_dequeued/prompt_cancelled/
+                # prompt_discarded always (nothing is synchronously
+                # waiting on send() when any of those three happen), and
+                # for prompt_queued only when this pane did NOT submit
+                # the prompt itself -- the client that DID gets its own
+                # prompt_queued directly from _run_turn's peek at
+                # engine.send()'s first event (see that method's own
+                # comment) and is excluded from this broadcast (see
+                # doxa.daemon.SessionDaemon._publish's docstring) so it
+                # is never rendered twice. Either way, the "every
                 # attached client learns it" rule model_changed already
-                # follows. Rendered here and nowhere else: _run_turn's own
-                # engine.send() call yields nothing at all for a QUEUED
-                # prompt (see its docstring), so this is the only place
-                # any of the four ever reaches the transcript.
+                # follows is what lands it here.
                 await self._render_prompt_queue_event(ev)
             elif ev.type == "turn_started":
                 block_list = self.query_one("#block-list", VerticalScroll)
@@ -488,62 +493,78 @@ class PaneRuntimeMixin:
         if self.engine is None:
             return
 
-        # `block` stays None until the engine actually YIELDS an event --
-        # never set up front. This is the defect fix (see on_prompt_
-        # submitted's own comment): ``engine.send()`` decides, on its
-        # first step, whether `prompt` starts a turn or gets QUEUED
-        # behind one already running (doxa.promptqueue). A queued prompt
-        # yields NOTHING AT ALL and returns (see
-        # doxa.client.EngineClient.send / doxa.engine.SessionEngine.send's
-        # own docstrings) -- its acknowledgement is rendered entirely
-        # out-of-band, by _peer_pump's prompt_queued case, because every
-        # attached client (not just this worker) has to see it the same
-        # way. Only once a REAL event arrives is this a turn: the block,
-        # the elapsed-time ticker and turn_in_flight all wait for that,
-        # so a queued prompt never flips turn_in_flight, spins a tab that
-        # never started anything, or leaves either stuck -- the exact
-        # hang this queue exists to prevent.
-        block: "TurnBlock | None" = None
         block_list = self.query_one("#block-list", VerticalScroll)
         chips: dict[str, ToolChip] = {}
+        agen = self.engine.send(prompt)
+
+        # PEEK the first event before deciding anything -- this is the
+        # defect fix (see on_prompt_submitted's own comment).
+        # engine.send() decides, on its first step, whether `prompt`
+        # starts a turn or gets QUEUED behind one already running
+        # (doxa.promptqueue): a queued prompt's ONLY event is
+        # "prompt_queued" (see doxa.client.EngineClient.send /
+        # doxa.engine.SessionEngine.send's own docstrings), unambiguous
+        # and never the first event of a real turn (which always starts
+        # with "turn_started"). Checking the TYPE of the first event,
+        # rather than inferring "queued" from "nothing was yielded",
+        # matters: an engine that legitimately produces a turn with no
+        # events at all (an edge case some test doubles exercise) is not
+        # a queued prompt, and must still get the block a real turn
+        # always got before this feature existed.
+        try:
+            first = await agen.__anext__()
+        except StopAsyncIteration:
+            first = None
+        except Exception as exc:  # noqa: BLE001 -- refused before starting
+            # (e.g. the mid-turn queue's own bound was already full) must
+            # not take the shell down. No turn block exists yet, so this
+            # is its own system line rather than a turn's.
+            await block_list.mount(SystemBlock(f"prompt failed: {exc}"))
+            self.scroll_transcript_to_end(block_list)
+            return
+
+        if first is not None and first.type == "prompt_queued":
+            # QUEUED, not started: rendered right here from the reply
+            # this worker already has in hand (this pane's own
+            # acknowledgement) -- every OTHER attached client learns it
+            # from the daemon's separate broadcast to THEM (see
+            # doxa.daemon.SessionDaemon._publish's own docstring for why
+            # this one connection is excluded from that broadcast).
+            # Nothing to mark in-flight: no turn started.
+            await self._render_prompt_queue_event(first)
+            return
+
+        # A real turn, mounted UNCONDITIONALLY from here -- exactly as
+        # before this feature existed, whether or not `first` turns out
+        # to be the only event (an engine that produced no events at all
+        # still gets an empty, correctly-cleared block).
+        self.turn_in_flight = True
+        self._set_tab_class("-working", True)
+        # A fresh turn starting is itself "seen" -- clear any stale
+        # done-unseen dot from a PREVIOUS turn the user has not looked at
+        # yet, rather than letting it sit there through a whole new one.
+        self._set_tab_class("-done-unseen", False)
+        block = TurnBlock(prompt)
+        await block_list.mount(block)
+        # The turn genuinely begins here -- arms the per-second elapsed
+        # ticker (ThinkingMarker.start's own docstring has the full
+        # argument); block.mark_done (both below and on the error path)
+        # is what stops it, on every way this turn can end.
+        block.thinking.start()
+        self.scroll_transcript_to_end(block_list)
 
         try:
-            async for ev in self.engine.send(prompt):
-                if block is None:
-                    self.turn_in_flight = True
-                    self._set_tab_class("-working", True)
-                    # A fresh turn starting is itself "seen" -- clear any
-                    # stale done-unseen dot from a PREVIOUS turn the user
-                    # has not looked at yet, rather than letting it sit
-                    # there through a whole new one.
-                    self._set_tab_class("-done-unseen", False)
-                    block = TurnBlock(prompt)
-                    await block_list.mount(block)
-                    # The turn genuinely begins here -- arms the
-                    # per-second elapsed ticker (ThinkingMarker.start's
-                    # own docstring has the full argument); block.
-                    # mark_done (both below and on the error path) is
-                    # what stops it, on every way this turn can end.
-                    block.thinking.start()
-                    self.scroll_transcript_to_end(block_list)
+            if first is not None:
+                await self._handle_event(first, block, chips)
+                self.scroll_transcript_to_end(block_list)
+            async for ev in agen:
                 await self._handle_event(ev, block, chips)
                 self.scroll_transcript_to_end(block_list)
-        except Exception as exc:  # noqa: BLE001 -- a refused/broken turn must
-            # not take the shell down (e.g. the mid-turn queue's own bound
-            # was already full, or the connection dropped mid-stream).
-            if block is None:
-                # Failed before ever starting: no turn block exists to
-                # mark done, so this is its own system line instead.
-                await block_list.mount(SystemBlock(f"prompt failed: {exc}"))
-            else:
-                await block.mark_done(None, None, True)
-                await block_list.mount(SystemBlock(f"turn failed: {exc}"))
+        except Exception as exc:  # noqa: BLE001 -- a broken turn must not
+            # take the shell down (e.g. the connection dropped mid-stream).
+            await block.mark_done(None, None, True)
+            await block_list.mount(SystemBlock(f"turn failed: {exc}"))
             self.scroll_transcript_to_end(block_list)
-
-        if block is None:
-            # QUEUED, not started -- nothing left for this worker to draw
-            # (see the docstring above) and no turn to mark in-flight.
-            return
 
         self.turn_in_flight = False
         self._set_tab_class("-working", False)
@@ -586,13 +607,13 @@ class PaneRuntimeMixin:
 
     async def _render_prompt_queue_event(self, ev: EngineEvent) -> None:
         """One of prompt_queued/prompt_dequeued/prompt_cancelled/
-        prompt_discarded, always out-of-band (see the call site in
-        _peer_pump for why). Keeps :attr:`_queued_prompts` -- the
-        best-effort mirror `/queue` reads -- in step with the broadcast,
-        and mounts ONE clearly-labelled system line per event so a
-        mid-turn prompt's whole life (queued, started, cancelled, or
-        thrown away at finalize) is visible in the transcript, never
-        silent."""
+        prompt_discarded -- called from _run_turn directly (this pane's
+        own prompt_queued acknowledgement) or from _peer_pump (every
+        other case, see that call site). Keeps :attr:`_queued_prompts`
+        -- the best-effort mirror `/queue` reads -- in step, and mounts
+        ONE clearly-labelled system line per event so a mid-turn
+        prompt's whole life (queued, started, cancelled, or thrown away
+        at finalize) is visible in the transcript, never silent."""
         item_id = str(ev.data.get("id") or "")
         text = _escape_markup(str(ev.data.get("text") or ""))[:120]
         if ev.type == "prompt_queued":

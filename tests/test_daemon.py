@@ -372,25 +372,24 @@ async def test_a_prompt_submitted_mid_turn_is_queued_not_refused(tmp_path, monke
                 break
             await asyncio.sleep(0.01)
 
-        # Two attached clients both observe the queue events: collect
-        # prompt_queued from BOTH out-of-band streams -- A is mid-turn
-        # ("slow one" is tagged to A's own _active_turn, so it never
-        # lands on A's oob queue) and never asked to see the OTHER
-        # client's queued prompt either, and both learning it anyway,
-        # symmetrically, is the point.
+        # Two attached clients both observe the queue events, by two
+        # different routes: B (the one that submitted "me too") learns
+        # it from its OWN send() yield -- the daemon deliberately does
+        # NOT also broadcast this one to B (see
+        # SessionDaemon._publish's own docstring) -- and A (the OTHER
+        # attached client, who asked for nothing) learns it purely from
+        # that broadcast, over its out-of-band stream.
         oob_a_queued = asyncio.ensure_future(_drain_oob(a, "prompt_queued"))
-        oob_b_queued = asyncio.ensure_future(_drain_oob(b, "prompt_queued"))
         events_b = [ev async for ev in b.send("me too")]
-        # Queued, not refused: NO exception, and nothing yielded (there is
-        # no turn for "me too" yet -- see EngineClient.send's own
-        # docstring for why a queued prompt's generator yields nothing).
-        assert events_b == []
+        # Queued, not refused: NO exception, and exactly the one
+        # acknowledgement event -- no turn for "me too" yet.
+        assert [ev.type for ev in events_b] == ["prompt_queued"]
+        assert events_b[0].data["position"] == 1
+        assert events_b[0].data["text"] == "me too"
         queued_a = await asyncio.wait_for(oob_a_queued, 5)
-        queued_b = await asyncio.wait_for(oob_b_queued, 5)
-        for queued in (queued_a, queued_b):
-            assert queued[-1].type == "prompt_queued"
-            assert queued[-1].data["position"] == 1
-            assert queued[-1].data["text"] == "me too"
+        assert queued_a[-1].type == "prompt_queued"
+        assert queued_a[-1].data["position"] == 1
+        assert queued_a[-1].data["text"] == "me too"
 
         # The FIRST turn is untouched: it still runs to its own
         # turn_done, exactly as if nothing else had been typed.
@@ -448,16 +447,16 @@ async def test_several_queued_prompts_start_in_fifo_order(tmp_path, monkeypatch)
                 break
             await asyncio.sleep(0.01)
 
+        # One connection submitting all four: the daemon excludes THIS
+        # writer from its prompt_queued broadcast every time (it is the
+        # requester for "second"/"third"/"fourth" too, same as "me too"
+        # in the mid-turn-queue test above), so each ack comes back on
+        # the send() call itself, not over peer_events().
+        positions = []
         for text in ("second", "third", "fourth"):
             events = [ev async for ev in client.send(text)]
-            assert events == []
-        # _drain_oob stops at the FIRST match, so one call per submitted
-        # prompt drains exactly its own prompt_queued frame, in the same
-        # FIFO order the daemon published them.
-        positions = []
-        for _ in range(3):
-            drained = await asyncio.wait_for(_drain_oob(client, "prompt_queued"), 5)
-            positions.append(drained[-1].data["position"])
+            assert [ev.type for ev in events] == ["prompt_queued"]
+            positions.append(events[0].data["position"])
         assert positions == [1, 2, 3]
 
         gate.set()  # release "first"; the daemon's slow client stays
@@ -512,7 +511,8 @@ async def test_the_queue_bound_is_enforced_with_a_clear_reply(tmp_path, monkeypa
             await asyncio.sleep(0.01)
 
         for i in range(PROMPT_QUEUE_MAXLEN):
-            assert [ev async for ev in client.send(f"queued-{i}")] == []
+            events = [ev async for ev in client.send(f"queued-{i}")]
+            assert [ev.type for ev in events] == ["prompt_queued"]
 
         with pytest.raises(EngineClientError, match="queue is full"):
             async for _ in client.send("one too many"):
@@ -556,9 +556,9 @@ async def test_cancelling_a_queued_prompt_is_visible_to_every_client(tmp_path, m
                 break
             await asyncio.sleep(0.01)
 
-        assert [ev async for ev in a.send("cancel me")] == []
-        queued = await asyncio.wait_for(_drain_oob(a, "prompt_queued"), 5)
-        item_id = queued[-1].data["id"]
+        queued_events = [ev async for ev in a.send("cancel me")]
+        assert [ev.type for ev in queued_events] == ["prompt_queued"]
+        item_id = queued_events[0].data["id"]
 
         oob_b = asyncio.ensure_future(_drain_oob(b, "prompt_cancelled"))
         ok = await b.cancel_queued(item_id)

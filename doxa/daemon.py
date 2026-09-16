@@ -679,10 +679,30 @@ class SessionDaemon:
             return "question"
         return str(data.get("input_summary") or data.get("tool_name") or "")
 
-    def _publish(self, turn_id: str | None, event: EngineEvent) -> None:
+    def _publish(
+        self, turn_id: str | None, event: EngineEvent,
+        exclude: "asyncio.StreamWriter | None" = None,
+    ) -> None:
+        """Fan out to every attached client except `exclude`, still
+        recording the frame in the ring for everyone (including
+        `exclude`) to replay later.
+
+        `exclude` exists for exactly one caller: _handle_prompt's
+        prompt_queued broadcast. The requesting connection already
+        learns it was queued from its OWN reply (EngineClient.send
+        yields a prompt_queued event built from that reply, so the
+        caller can render it without waiting on this stream) --
+        publishing it here too would additionally land it on that same
+        client's peer_events() (_handle_event routes anything with no
+        matching "turn" tag there), which _peer_pump reads
+        unconditionally and would render a second time. Every OTHER
+        attached client has no such reply to read and depends entirely
+        on this broadcast, so it is never skipped for them."""
         frame = self.ring.append(turn_id, event)
         payload = encode_frame(frame)
         for writer in list(self._clients):
+            if writer is exclude:
+                continue
             try:
                 writer.write(payload)
             except Exception:
@@ -794,13 +814,16 @@ class SessionDaemon:
                 await self._reply(writer, req_id, ok=False, error=str(exc))
                 return
             position = self._prompt_queue.position(item.id) or len(self._prompt_queue)
-            # Every attached client learns this, not just the one that
-            # asked -- the same "everyone learns it" rule model_changed
-            # already follows: a second tab on this daemon must not
-            # disagree about what is queued.
+            # Every OTHER attached client learns this the same
+            # "everyone learns it" way model_changed already does -- a
+            # second tab on this daemon must not disagree about what is
+            # queued. `writer` itself is excluded: it learns the SAME
+            # fact from the reply below, which EngineClient.send turns
+            # into its own prompt_queued event -- see _publish's own
+            # docstring for why publishing it here too would double it.
             self._publish(None, EngineEvent("prompt_queued", {
                 "id": item.id, "text": text, "position": position,
-            }))
+            }), exclude=writer)
             await self._reply(
                 writer, req_id, ok=True, queued=True,
                 position=position, queue_id=item.id,

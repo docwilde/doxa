@@ -364,13 +364,17 @@ class EngineClient:
             # Mid-turn prompt queue (design point 3): accepted, not
             # started -- a turn was already running, so the daemon
             # enqueued this one instead of refusing it or racing the SDK
-            # client. Its own prompt_queued broadcast (every attached
-            # client, this one included -- see _handle_event's "turn"
-            # tag check, which routes it to _oob_queue since this frame
-            # carries none) is what renders the acknowledgement, and the
-            # eventual real turn -- once THIS daemon dequeues it -- rides
-            # the same out-of-band stream a peer-driven turn already
-            # does. Nothing left for this generator to do.
+            # client. Yielded directly (built from this reply) rather
+            # than read off peer_events(): the daemon deliberately does
+            # NOT also broadcast this one to THIS connection (see
+            # SessionDaemon._publish's own docstring) -- every OTHER
+            # attached client learns it from that broadcast instead. The
+            # eventual real turn, once THIS daemon dequeues it, rides
+            # the out-of-band stream a peer-driven turn already does.
+            yield EngineEvent("prompt_queued", {
+                "id": reply.get("queue_id"), "text": prompt,
+                "position": reply.get("position"),
+            })
             return
         while True:
             ev = await self._turn_queue.get()

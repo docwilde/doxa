@@ -2601,9 +2601,17 @@ class SessionEngine:
         if self._turn_running:
             item = self._prompt_queue.enqueue(prompt)  # may raise PromptQueueFull
             position = self._prompt_queue.position(item.id) or len(self._prompt_queue)
-            self._peer_queue.put_nowait(EngineEvent("prompt_queued", {
+            # Yielded directly to THIS caller, unlike prompt_dequeued/
+            # prompt_cancelled/prompt_discarded below (which go out over
+            # peer_events() because nothing is synchronously waiting on
+            # send() when THOSE happen). In-process there is only ever
+            # one caller of send() -- putting this on _peer_queue too
+            # would just have _peer_pump render the same acknowledgement
+            # a second time (see doxa.daemon.SessionDaemon._publish's
+            # docstring for the socket path's version of this).
+            yield EngineEvent("prompt_queued", {
                 "id": item.id, "text": prompt, "position": position,
-            }))
+            })
             return
         self._turn_running = True
         try:
