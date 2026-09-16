@@ -103,6 +103,7 @@ from .engine import (
     SessionEngine,
 )
 from .peers import MAX_FRAME_BYTES, registry_dir, runtime_dir
+from .promptqueue import PromptQueue, PromptQueueFull
 
 from .events import PROTOCOL_VERSION  # noqa: F401 -- re-exported
 DEFAULT_LINGER_SECS = 120.0
@@ -377,6 +378,11 @@ class SessionDaemon:
         self._clients: set[asyncio.StreamWriter] = set()
         self._had_client = False
         self._turn_task: asyncio.Task | None = None
+        # Mid-turn prompt queue (see doxa.promptqueue): ONE FIFO per
+        # session, shared by every attached client -- the daemon is the
+        # single source of truth a second tab must agree with, so this
+        # lives here rather than on any one connection.
+        self._prompt_queue = PromptQueue()
         self._linger_task: asyncio.Task | None = None
         # Set only by _linger_then_stop once it hands shutdown off to its
         # own task (see that method's comment) -- _cancel_linger never
@@ -764,9 +770,28 @@ class SessionDaemon:
             await self._reply(writer, req_id, ok=False, error="empty prompt")
             return
         if self._turn_task is not None and not self._turn_task.done():
+            # A turn is running: NEVER refuse and NEVER let it hang (the
+            # two defects the old "a turn is already running" error used
+            # to cause together -- see doxa.promptqueue's module
+            # docstring). Enqueue instead, bounded (PromptQueueFull is the
+            # one case that DOES refuse, with a clear reason, never a
+            # silent drop), and acknowledge immediately.
+            try:
+                item = self._prompt_queue.enqueue(text)
+            except PromptQueueFull as exc:
+                await self._reply(writer, req_id, ok=False, error=str(exc))
+                return
+            position = self._prompt_queue.position(item.id) or len(self._prompt_queue)
+            # Every attached client learns this, not just the one that
+            # asked -- the same "everyone learns it" rule model_changed
+            # already follows: a second tab on this daemon must not
+            # disagree about what is queued.
+            self._publish(None, EngineEvent("prompt_queued", {
+                "id": item.id, "text": text, "position": position,
+            }))
             await self._reply(
-                writer, req_id, ok=False,
-                error="a turn is already running in this session",
+                writer, req_id, ok=True, queued=True,
+                position=position, queue_id=item.id,
             )
             return
         turn_id = uuid.uuid4().hex[:12]
@@ -785,6 +810,13 @@ class SessionDaemon:
             async for ev in self.engine.send(text):
                 self._publish(turn_id, ev)
         except asyncio.CancelledError:
+            # Cancelled from outside (_shutdown/_teardown, both of which
+            # own this task's lifetime and are off limits here): the
+            # queue must NOT advance -- starting another turn on an
+            # engine that is on its way down would fight the shutdown
+            # this cancellation is part of. _advance_queue is therefore
+            # unreachable below, exactly like SessionEngine.send()'s own
+            # except clause for the in-process path.
             raise
         except Exception as exc:  # noqa: BLE001 -- a turn failure must reach the client
             self._publish(turn_id, EngineEvent("turn_done", {
@@ -792,6 +824,23 @@ class SessionDaemon:
                 "error": f"{type(exc).__name__}: {exc}",
                 "session_cost_usd": self.engine.total_cost_usd,
             }))
+        self._advance_queue()
+
+    def _advance_queue(self) -> None:
+        """The moment a turn reaches turn_done (success or a handled
+        per-turn error -- never reached on cancellation, see _run_turn's
+        except clause above), the next queued prompt, if any, becomes the
+        next turn automatically. Every attached client learns which
+        prompt just started the same way it learned it was queued."""
+        item = self._prompt_queue.pop_next()
+        if item is None:
+            self._turn_task = None
+            return
+        self._publish(None, EngineEvent("prompt_dequeued", {
+            "id": item.id, "text": item.text,
+        }))
+        next_turn_id = uuid.uuid4().hex[:12]
+        self._turn_task = asyncio.create_task(self._run_turn(next_turn_id, item.text))
 
     async def _handle_call(self, frame: dict, writer: asyncio.StreamWriter) -> None:
         assert self.engine is not None

@@ -91,6 +91,7 @@ from . import gate as gate_mod
 from . import images as images_mod
 from . import operators as operators_mod
 from . import peers as peers_mod
+from .promptqueue import PromptQueue
 # Imported for ONE constant (CLAUDE_PROVIDER_ID, published as
 # PeerInfo.provider at connect) -- doxa.providers costs nothing at import
 # (os + dataclasses + typing; the `anthropic` tier is lazy inside a try),
@@ -1518,6 +1519,16 @@ class SessionEngine:
         self._peer_queue: asyncio.Queue[EngineEvent] = asyncio.Queue()
         self._pending_peer_frames: list[dict] = []
 
+        # Mid-turn prompt queue (see doxa.promptqueue): whether a turn is
+        # actually running right now, and the bounded FIFO a prompt typed
+        # while it is goes through instead of racing self._client. Checked
+        # and committed with no ``await`` in between (see send()'s own
+        # docstring) -- the same no-await discipline
+        # doxa.daemon.SessionDaemon._handle_prompt documents for the
+        # socket path.
+        self._turn_running = False
+        self._prompt_queue = PromptQueue()
+
         # Containment gate (doxa/gate.py): session-scoped state -- allowed
         # set, two-strikes tracker, OperatorContext sidecar. Built here (not
         # in _build_options) because its state must span the whole session,
@@ -2546,9 +2557,132 @@ class SessionEngine:
         return peer
 
     async def send(self, prompt: str) -> AsyncIterator[EngineEvent]:
+        """Public entry point for a typed prompt: start a turn, or --
+        when one is already running -- enqueue `prompt` behind it
+        (bounded FIFO, see doxa.promptqueue.PromptQueue) instead of
+        raising or racing the SDK client.
+
+        Investigated and rejected: delivering `prompt` to the SDK WHILE
+        the current turn's ``receive_response()`` is still iterating --
+        true mid-turn steering, the way Claude Code's own "type while it
+        works" behaves. Read directly off the installed SDK
+        (claude_agent_sdk 0.2.144, ``.venv/lib/python3.12/site-packages/
+        claude_agent_sdk/``):
+
+        * ``ClaudeSDKClient.query()`` (client.py) only writes a ``user``
+          frame to the transport; nothing about the call is scoped to a
+          particular in-flight turn.
+        * ``Query._read_messages()``/``receive_messages()``
+          (_internal/query.py) route EVERY regular SDK message
+          (assistant/result/...) through ONE shared ``anyio`` memory
+          stream, with no per-query correlation id on a ``result`` frame.
+        * ``ClaudeSDKClient.receive_response()`` (client.py) terminates on
+          the FIRST ``ResultMessage`` it sees on that shared stream --
+          not one keyed back to the ``query()`` call that started this
+          particular iteration.
+
+        A second ``query()`` issued before the first ``receive_response()``
+        has seen its ``ResultMessage`` therefore risks that call's
+        iterator consuming the OTHER turn's result -- there is no
+        supported way to keep the two turns' events apart. ``interrupt()``
+        is the SDK's only mid-turn control primitive, and it ABORTS the
+        current turn rather than steering it. This is also why
+        :meth:`_on_peer_frame` above already holds a peer message for the
+        NEXT turn instead of injecting it mid-flight ("a peer message
+        never interrupts a running turn and never starts one"). Queueing
+        is therefore the fallback the design permits, and it is what
+        actually runs here.
+
+        No ``await`` runs between the busy check and either branch's
+        commit below -- the same discipline
+        ``doxa.daemon.SessionDaemon._handle_prompt`` documents for the
+        socket path -- so a second concurrent call to this method cannot
+        race the first's decision."""
+        if self._turn_running:
+            item = self._prompt_queue.enqueue(prompt)  # may raise PromptQueueFull
+            position = self._prompt_queue.position(item.id) or len(self._prompt_queue)
+            self._peer_queue.put_nowait(EngineEvent("prompt_queued", {
+                "id": item.id, "text": prompt, "position": position,
+            }))
+            return
+        self._turn_running = True
+        try:
+            async for ev in self._send_turn(prompt):
+                yield ev
+        except (GeneratorExit, asyncio.CancelledError):
+            # Cancelled from outside (pane teardown, app shutdown): the
+            # queue must NOT advance here -- starting another turn on an
+            # engine that is on its way down is worse than the bug this
+            # queue exists to fix. See _advance_queue's own docstring.
+            self._turn_running = False
+            raise
+        self._turn_running = False
+        self._advance_queue()
+
+    def _advance_queue(self) -> None:
+        """The moment a turn ends NORMALLY (never on cancellation -- see
+        send()'s except clause above, which returns before reaching this
+        call), the next queued prompt, if any, becomes the next turn --
+        automatically, no client action required.
+
+        Fired as a background task, not awaited here: send() has already
+        returned control to whoever called it for THIS turn, and the
+        queued turn's events have nobody directly awaiting them. They
+        reach the SAME out-of-band stream a queued acknowledgement (and a
+        peer-driven turn) already use, so the pane's existing
+        peer_events() renderer draws it with no changes of its own."""
+        item = self._prompt_queue.pop_next()
+        if item is None:
+            return
+        self._peer_queue.put_nowait(EngineEvent("prompt_dequeued", {
+            "id": item.id, "text": item.text,
+        }))
+        asyncio.ensure_future(self._run_queued_turn(item.text))
+
+    async def _run_queued_turn(self, prompt: str) -> None:
+        """One dequeued prompt's turn, run and published exactly like
+        _advance_queue's docstring describes -- the SAME shape send()
+        itself takes, minus the direct caller send() has and this does
+        not."""
+        self._turn_running = True
+        try:
+            async for ev in self._send_turn(prompt):
+                self._peer_queue.put_nowait(ev)
+        except (GeneratorExit, asyncio.CancelledError):
+            self._turn_running = False
+            raise
+        self._turn_running = False
+        self._advance_queue()
+
+    async def list_queue(self) -> "list[dict[str, str]]":
+        """Engine parity for :meth:`doxa.client.EngineClient.list_queue`
+        -- /queue's bare listing. Async here too, even though nothing
+        below awaits anything, so the pane can call either engine through
+        the same ``await``."""
+        return self._prompt_queue.snapshot()
+
+    async def cancel_queued(self, item_id: str) -> bool:
+        """Engine parity for
+        :meth:`doxa.client.EngineClient.cancel_queued` -- /queue's cancel.
+        False (never an exception) for an id already started, cancelled,
+        or discarded -- the same "stale id is not an error" answer
+        :meth:`answer_needs_input` already gives."""
+        item = self._prompt_queue.cancel(item_id)
+        if item is None:
+            return False
+        self._peer_queue.put_nowait(EngineEvent("prompt_cancelled", {
+            "id": item.id, "text": item.text,
+        }))
+        return True
+
+    async def _send_turn(self, prompt: str) -> AsyncIterator[EngineEvent]:
         """One turn: send `prompt`, stream back typed events until the
         ResultMessage. Every transcript-derived string is scrubbed before
-        persistence (see module docstring)."""
+        persistence (see module docstring). Never called directly --
+        :meth:`send` is the public entry point; this is the part of it
+        that actually talks to the SDK client, factored out so send()'s
+        queue-or-start decision reads as one method rather than being
+        buried in the middle of this one."""
         if not self._connected:
             raise RuntimeError("SessionEngine.start() must run before send()")
 
@@ -3392,6 +3526,19 @@ class SessionEngine:
         if self._finalized:
             return EngineEvent("session_done", {"already_finalized": True})
         self._finalized = True
+
+        # Design point 6 (prompt queue): finalize is the ONE moment a
+        # queued prompt is deliberately thrown away rather than carried
+        # forward -- a mere detach leaves it queued for whoever
+        # reattaches (nothing on that path touches self._prompt_queue),
+        # but the session itself is ending here, so anything still
+        # waiting in line never gets its turn. Published before anything
+        # else below so the discard is visible in the transcript even if
+        # a later finalize step fails.
+        for item in self._prompt_queue.clear():
+            self._peer_queue.put_nowait(EngineEvent("prompt_discarded", {
+                "id": item.id, "text": item.text,
+            }))
 
         # Streaming-deriver guard, finalize side: an in-flight derive holds
         # _review_lock; wait it out (its executor job cannot be cancelled
