@@ -219,6 +219,65 @@ async def test_reattach_within_linger_cancels_finalize(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cancelling_the_linger_task_before_the_sleep_expires_still_cancels_cleanly(
+    tmp_path, monkeypatch,
+):
+    """The ordinary case _cancel_linger exists for -- a reattach well
+    before _linger_then_stop's sleep ever returns -- keeps working exactly
+    as it did before the shutdown-stranding fix: the task ends on the
+    plain CancelledError its own `except asyncio.CancelledError: return`
+    already expects, _stopping is untouched, and the daemon keeps
+    running."""
+    async with running_daemon(tmp_path, monkeypatch, linger=30.0) as (
+        daemon, created, serve_task,
+    ):
+        task = daemon._linger_task  # armed by serve() itself, nobody attached
+        assert task is not None
+        daemon._cancel_linger()
+        assert daemon._linger_task is None
+        # _linger_then_stop's own `except asyncio.CancelledError: return`
+        # swallows the cancellation and returns normally -- the task ends
+        # up done, not cancelled, and that is the existing contract this
+        # test guards, not a side effect of the shutdown-stranding fix.
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(task, 1)
+        assert task.done()
+        assert not task.cancelled()
+        assert daemon._stopping is False
+        assert not daemon._done.is_set()
+        assert not serve_task.done()
+        assert created[0].exited is False
+
+
+@pytest.mark.asyncio
+async def test_stopping_never_remains_true_with_done_unset_on_the_exception_path(
+    tmp_path, monkeypatch,
+):
+    """Even a genuinely unexpected exception out of engine.finalize() --
+    including a bare CancelledError, which the surrounding
+    ``suppress(Exception)`` does NOT catch since it is a BaseException --
+    must not leave ``_stopping`` True forever with ``_done`` unset. That
+    exact combination is a stranded daemon: the re-entry guard refuses
+    every later shutdown attempt, and serve()'s ``await
+    self._done.wait()`` would never return."""
+    async with running_daemon(tmp_path, monkeypatch, linger=30.0) as (
+        daemon, created, serve_task,
+    ):
+        async def raising_finalize():
+            raise asyncio.CancelledError("simulated external cancellation")
+
+        daemon.engine.finalize = raising_finalize
+
+        with pytest.raises(asyncio.CancelledError, match="simulated"):
+            await daemon._shutdown("exception path test")
+
+        assert daemon._stopping is True
+        assert daemon._done.is_set()
+        # _done is shared with serve()'s own wait -- it unwinds on its own.
+        await asyncio.wait_for(serve_task, 5)
+
+
+@pytest.mark.asyncio
 async def test_explicit_stop_finalizes_immediately(tmp_path, monkeypatch):
     async with running_daemon(tmp_path, monkeypatch, linger=600.0) as (
         daemon, created, serve_task,
@@ -570,6 +629,69 @@ async def test_detach_leaves_the_worktree_intact(tmp_path, monkeypatch):
         await asyncio.sleep(0.1)
         assert not serve_task.done()  # daemon still lingering
         assert Path(worktree_path).exists()
+
+
+@pytest.mark.asyncio
+async def test_attaching_while_shutdown_is_in_progress_does_not_abort_it(
+    tmp_path, monkeypatch,
+):
+    """Regression for the daemon-stranding defect: a client that attaches
+    the instant the linger sleep ends -- while _linger_then_stop is
+    already inside _shutdown, blocked on engine.finalize() -- calls
+    _cancel_linger() exactly as every attach does. That must not reach
+    the shutdown in progress: finalize completes, the worktree finalizer
+    runs, and _done is set, all despite the mid-shutdown attach."""
+    repo = _git_repo(tmp_path / "repo")
+    async with running_daemon_at(repo, tmp_path, monkeypatch, linger=0.05) as (
+        daemon, created, serve_task,
+    ):
+        worktree_path = daemon.cwd
+        real_finalize = daemon.engine.finalize
+        finalize_entered = asyncio.Event()
+        release_finalize = asyncio.Event()
+
+        async def gated_finalize():
+            finalize_entered.set()
+            await release_finalize.wait()
+            return await real_finalize()
+
+        daemon.engine.finalize = gated_finalize
+
+        # A client has to have attached at least once first: before that,
+        # _arm_linger uses INITIAL_CLAIM_SECS (the generous unclaimed-spawn
+        # window), not linger_secs, so an unattached daemon would never
+        # reach _shutdown on this test's timescale. Attach and detach --
+        # the SUBSEQUENT re-arm (on this drop) is the short linger_secs one.
+        first = EngineClient(str(daemon.socket_path))
+        await first.start()
+        await first.finalize()
+
+        # Nobody is attached now: the (short) linger expires and
+        # _linger_then_stop moves past its sleep into _shutdown, now
+        # parked inside the gated engine.finalize() -- exactly the window
+        # the defect lived in.
+        await asyncio.wait_for(finalize_entered.wait(), 5)
+        assert daemon._stopping is True
+        assert not daemon._done.is_set()
+
+        # A client attaches NOW, mid-shutdown; its attach handler calls
+        # _cancel_linger() same as always. Before the fix this would
+        # cancel the very task blocked above, delivering CancelledError
+        # into engine.finalize() and stranding the daemon.
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        await client.finalize()
+
+        # Shutdown is still exactly where it was -- not aborted.
+        assert not daemon._done.is_set()
+        assert created[0].exited is False
+
+        release_finalize.set()
+        await asyncio.wait_for(serve_task, 5)
+
+        assert daemon._done.is_set()
+        assert created[0].exited is True  # finalize ran to completion
+        assert not Path(worktree_path).exists()  # worktree finalizer ran
 
 
 # -- queue item 5: needs_input over the daemon split -----------------------

@@ -378,6 +378,10 @@ class SessionDaemon:
         self._had_client = False
         self._turn_task: asyncio.Task | None = None
         self._linger_task: asyncio.Task | None = None
+        # Set only by _linger_then_stop once it hands shutdown off to its
+        # own task (see that method's comment) -- _cancel_linger never
+        # touches this one, which is the whole point of it existing.
+        self._shutdown_task: asyncio.Task | None = None
         self._pump_task: asyncio.Task | None = None
         self._stopping = False
         # Worktree-per-session (#3, doxa.worktrees): computed once, before
@@ -527,20 +531,38 @@ class SessionDaemon:
     async def _shutdown(self, reason: str) -> None:
         """Finalize exactly once (LORE review + index run inside the
         engine's own finalize, worktree remove-or-keep run inside
-        _finalize_worktree), then let serve() unwind."""
+        _finalize_worktree), then let serve() unwind.
+
+        The body runs under try/finally so ``_done`` is set on EVERY way
+        out, including an exception one. ``_stopping`` was already set
+        True above (the re-entry guard just before it), and ``_stopping``
+        True with ``_done`` never set is exactly how a daemon gets
+        stranded: it refuses every future shutdown attempt while never
+        finishing this one. ``_linger_then_stop`` protects the common way
+        that happens -- a client's ``_cancel_linger`` racing this call,
+        landing a CancelledError on whichever await below is in flight,
+        which the ``suppress(Exception)`` around finalize does NOT catch
+        (CancelledError is a BaseException) -- by handing shutdown to its
+        own task once armed, so nothing outside this method can cancel it
+        again. This ``finally`` is the second, unconditional layer: even a
+        future caller that reintroduces that race, or a genuinely
+        unexpected exception, still leaves ``_done`` set and ``serve()``
+        able to unwind."""
         if self._stopping:
             return
         self._stopping = True
-        if self._turn_task is not None and not self._turn_task.done():
-            self._turn_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._turn_task
-        if self.engine is not None:
-            with contextlib.suppress(Exception):
-                await self.engine.finalize()
-        self._finalize_worktree()  # cached: a no-op if the stop RPC below
-        # already ran it to embed the "kept" note in its reply.
-        self._done.set()
+        try:
+            if self._turn_task is not None and not self._turn_task.done():
+                self._turn_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await self._turn_task
+            if self.engine is not None:
+                with contextlib.suppress(Exception):
+                    await self.engine.finalize()
+            self._finalize_worktree()  # cached: a no-op if the stop RPC
+            # below already ran it to embed the "kept" note in its reply.
+        finally:
+            self._done.set()
 
     # -- linger ------------------------------------------------------
 
@@ -579,7 +601,22 @@ class SessionDaemon:
             self._linger_task = None
             self._arm_linger()
             return
-        await self._shutdown("linger expired with no client attached")
+        # Past this point shutdown MUST run to completion no matter who
+        # calls _cancel_linger next: a client can attach the instant the
+        # sleep above returns, and _cancel_linger cancels self._linger_task
+        # unconditionally with no idea that this coroutine has moved past
+        # the sleep and into _shutdown. Cancelling THIS task at that point
+        # would deliver CancelledError to whatever _shutdown is awaiting
+        # (_turn_task, engine.finalize()) -- see _shutdown's docstring for
+        # why that strands the daemon. Clearing _linger_task before
+        # spawning the shutdown task (no `await` runs between the two, so
+        # nothing can interleave and see the old task reference) means
+        # _cancel_linger has nothing left to touch: shutdown runs as its
+        # own task, one this method's caller never holds a handle to again.
+        self._linger_task = None
+        self._shutdown_task = asyncio.create_task(
+            self._shutdown("linger expired with no client attached")
+        )
 
     # -- event fan-out -----------------------------------------------
 
