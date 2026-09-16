@@ -253,6 +253,103 @@ SETTINGS: tuple[Setting, ...] = (
              "CLI's were still two different id spaces) falls back to "
              "read-only either way, and the tab says so.",
     ),
+    # -- remote authorization (R1, docs/plans/remote.md) -----------------
+    #
+    # No transport ships yet -- these four rows are the allow/deny
+    # decision a future bridge process will ask doxa.remote_policy to
+    # make, given exactly the same "OFF and empty until told otherwise"
+    # posture allow_bypass above already established for the local
+    # cycler. Read together, not each in isolation:
+    #
+    #   remote_enabled          is a remote listener allowed to exist AT
+    #                           ALL. Off means the other three rows are
+    #                           moot -- there is nothing for them to gate.
+    #   remote_allowed_logins   DOXA's OWN allow-list, defence in depth
+    #                           on top of the tailnet's. Deliberately NOT
+    #                           a default-allow when remote_enabled is on
+    #                           and this is empty: an empty list refuses
+    #                           EVERYONE, the same direction every other
+    #                           allow-list in security software fails in.
+    #   remote_allow_shell      the `!` shell escape (v0.36.0), OFF over
+    #                           the remote surface unless this says so --
+    #                           see doxa.shell's own "only a keystroke
+    #                           reaches this" invariant, which a network
+    #                           request is not.
+    #   remote_allow_bypass     may a REMOTE request raise the permission
+    #                           mode to bypassPermissions. Independent of,
+    #                           and narrower than, allow_bypass above:
+    #                           that row decides whether the mode is
+    #                           reachable from THIS keyboard at all; this
+    #                           one decides whether a request arriving
+    #                           over the network may ask for it. Both
+    #                           must be on for a remote bypass request to
+    #                           succeed -- doxa.remote_policy checks only
+    #                           its own row, and doxa.engine's own arming
+    #                           check still applies on top of it.
+    Setting(
+        key="remote_enabled", env="DOXA_REMOTE_ENABLED",
+        label="remote listening", category="Remote",
+        kind="bool", default="",
+        help="Allow a remote bridge to attach to this daemon at all "
+             "(doxa.remote_policy.remote_enabled)",
+        note="OFF by default, and loopback-only stays the behavior when "
+             "it is off -- this row does not by itself open a socket, it "
+             "is the gate a future bridge process (docs/plans/remote.md, "
+             "track R2) checks before it does. Turning it on grants "
+             "nothing by itself: remote_allowed_logins below still "
+             "refuses every identity while it is empty.",
+    ),
+    Setting(
+        key="remote_allowed_logins", env="DOXA_REMOTE_ALLOWED_LOGINS",
+        label="remote allowed logins", category="Remote",
+        kind="str", default="",
+        help="Comma-separated Tailscale logins (the Tailscale-User-Login "
+             "header a `tailscale serve` loopback listener attaches) "
+             "allowed to drive this session remotely "
+             "(doxa.remote_policy.allowed_logins)",
+        note="Empty means what an empty allow-list means everywhere else "
+             "in DOXA: refuse everyone, not allow everyone -- turning "
+             "remote_enabled on with this row still empty leaves the "
+             "surface enabled and unreachable by anybody. This is DOXA's "
+             "OWN list, kept even though the tailnet already answers "
+             "identity, because a security boundary that trusts a single "
+             "layer is one misconfiguration away from trusting nobody's "
+             "check at all (docs/plans/remote.md's defence-in-depth "
+             "rule). Compared case-insensitively; entries are matched "
+             "verbatim otherwise, so a typo'd login is a silent refusal, "
+             "same as an absent one.",
+    ),
+    Setting(
+        key="remote_allow_shell", env="DOXA_REMOTE_ALLOW_SHELL",
+        label="remote allow shell", category="Remote",
+        kind="bool", default="",
+        help="Let a remote driver run `!` shell commands "
+             "(doxa.remote_policy.remote_allow_shell)",
+        note="OFF by default. doxa.shell's own security section is built "
+             "on exactly one guarantee -- 'the only thing that can reach "
+             "it is a keystroke the user typed into the prompt' -- and a "
+             "request arriving over a network, however authenticated, is "
+             "not that. This row is the explicit, opt-in exception "
+             "docs/plans/remote.md calls for, not a default DOXA chose "
+             "for you.",
+    ),
+    Setting(
+        key="remote_allow_bypass", env="DOXA_REMOTE_ALLOW_BYPASS",
+        label="remote allow bypass", category="Remote",
+        kind="bool", default="",
+        help="Let a remote driver raise the permission mode to "
+             "bypassPermissions (doxa.remote_policy.remote_allow_bypass)",
+        note="OFF by default, and independent of allow_bypass above: "
+             "that row arms THIS session's CLI to reach bypassPermissions "
+             "at all (a launch-time flag); this one decides whether a "
+             "request that arrived over the network may ask for it. Both "
+             "gates must be open for a remote bypass request to succeed. "
+             "A mode that stops asking, requested from a phone that might "
+             "be unlocked on a table, is a different risk from the same "
+             "mode requested at the keyboard, and the conservative "
+             "reading -- refuse unless told otherwise -- is the one this "
+             "row encodes.",
+    ),
     Setting(
         key="derive_secs", env="DOXA_DERIVE_SECS", label="derive secs",
         category="Memory", kind="number", default="900",

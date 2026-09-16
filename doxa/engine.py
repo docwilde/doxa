@@ -1443,6 +1443,17 @@ class SessionEngine:
         # the setting later cannot retrofit a running session's argv, and
         # this attribute is what stops DOXA pretending otherwise.
         self.bypass_armed: bool = bypass_arming_enabled()
+        # The identity of a REMOTE driver currently attached to this
+        # session, or None while nobody but the keyboard in front of it is
+        # driving (R1, docs/plans/remote.md). No bridge process exists yet
+        # to ever set this to anything but None -- this attribute, and
+        # doxa.ui.labels.remote_driver_chip which paints it, are the
+        # wiring a later track lands its `attach`/`detach` calls on. A
+        # single identity, not a set: the spec is explicit that DOXA is
+        # "not multi-user... one user, several devices", so at most one
+        # remote identity is ever the answer to "who else is driving
+        # this", and the chip is written for exactly that shape.
+        self.remote_driver: "str | None" = None
         # Exact SIZE, in characters, of the LORE snapshot this session
         # appended to its system prompt at connect (_build_options). The
         # CLI's own context breakdown counts those tokens inside its
