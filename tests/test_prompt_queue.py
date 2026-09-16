@@ -116,6 +116,20 @@ class PacedQueueEngine(FakeEngine):
         self._busy = False
         self._advance()
 
+    # -- /queue's engine-parity surface --------------------------------
+
+    async def list_queue(self) -> "list[dict[str, str]]":
+        return self._queue.snapshot()
+
+    async def cancel_queued(self, item_id: str) -> bool:
+        item = self._queue.cancel(item_id)
+        if item is None:
+            return False
+        self.push_peer_event(EngineEvent("prompt_cancelled", {
+            "id": item.id, "text": item.text,
+        }))
+        return True
+
 
 def _app(tmp_path):
     engines: "list[PacedQueueEngine]" = []
@@ -311,3 +325,34 @@ async def test_the_bound_is_enforced_with_a_clear_message_not_a_silent_drop(tmp_
             ),
             tries=400,
         )
+
+
+@pytest.mark.asyncio
+async def test_the_queue_command_lists_and_cancels_a_queued_prompt(tmp_path):
+    """The visibility/cancel surface (design point 3): /queue bare lists
+    what is waiting, and /queue <position> cancels it -- visibly, and it
+    then never starts."""
+    app, engines = _app(tmp_path)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert await _wait(pilot, lambda: engines and engines[0].started)
+        pane = app.panes()[0]
+        engine = engines[0]
+
+        await _submit(pilot, pane, "first")
+        assert await _wait(pilot, lambda: engine.opened.is_set())
+        await _submit(pilot, pane, "second")
+        assert await _wait(pilot, lambda: "queued" in _painted(app))
+
+        await _submit(pilot, pane, "/queue")
+        assert await _wait(pilot, lambda: "second" in _painted(app) and "1." in _painted(app))
+
+        await _submit(pilot, pane, "/queue 1")
+        assert await _wait(pilot, lambda: "cancelled" in _painted(app))
+        assert await _wait(pilot, lambda: pane._queued_prompts == [])
+
+        engine.release.set()
+        assert await _wait(pilot, lambda: "first" in engine.completed_prompts)
+        await pilot.pause(0.2)
+        # Cancelled means it never starts: nothing but "first" ever ran.
+        assert engine.completed_prompts == ["first"]
