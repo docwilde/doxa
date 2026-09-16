@@ -4,6 +4,15 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.8.3 — 2026-09-16
+
+**A daemon can no longer be stranded by a client attaching mid-shutdown.**
+
+- **`_linger_then_stop`** hands shutdown to its own task, **`_shutdown_task`**, the moment the linger expires. `_cancel_linger` never sees that task, so an attach racing the shutdown cannot land a `CancelledError` inside it.
+- **`_shutdown`** runs under `try/finally`, so `_done` is set on every exit. Before, `_stopping` stayed True with `_done` unset: the daemon refused every later shutdown, and its memory review and worktree cleanup never ran.
+- Verified not a defect: both external reviewers and the maintainer read the pagers as able to stall on one oversize row. Measured, they emit that row alone, trimmed and flagged, and advance by one. Two socket-level tests lock that in.
+- Found by the panel review, both external families independently. Tests: `tests/test_daemon.py` (+5).
+
 ## 1.8.2 — 2026-09-16
 
 **A settings save no longer destroys a table, and refuses to overwrite a file it cannot read.**
