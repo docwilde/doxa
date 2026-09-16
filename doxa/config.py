@@ -18,13 +18,19 @@ consumer growing settings logic of its own.
 
 Nothing here is a credential store: the settings are model names, seconds,
 thresholds and display toggles. Values are written back as TOML by a
-deliberately small writer (str/float/int/bool only) rather than a
-dependency, because the file has to stay hand-editable and boring.
+deliberately small writer -- scalars, arrays of scalars, and tables (a
+flat key of one nested level, ``[projects]`` being the one DOXA writes
+today) -- rather than a dependency, because the file has to stay
+hand-editable and boring. It is not a general TOML serializer: a shape it
+does not recognize is refused loudly (see :func:`_toml_value`) rather than
+flattened into a string nothing can read back, which is how a hand-edited
+table used to be destroyed by an unrelated settings-modal save.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -963,14 +969,83 @@ def sidebar_width() -> int:
 # -- writing ---------------------------------------------------------------
 
 
+_BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
+
+# TOML basic strings escape these two-character sequences; every OTHER
+# control character (0x00-0x1F, 0x7F) that has no short form falls
+# through to \\uXXXX below. Escaping only backslash and quote -- the
+# previous behaviour -- writes a LITERAL newline or tab into the file: the
+# next tomllib.load raises on it, turning one settings-modal save into a
+# config the reader can no longer parse.
+_STRING_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+    "\b": "\\b",
+    "\f": "\\f",
+}
+
+
+def _toml_string(text: str) -> str:
+    """``text`` as a quoted, escaped TOML basic string."""
+    out: list[str] = []
+    for ch in text:
+        escape = _STRING_ESCAPES.get(ch)
+        if escape is not None:
+            out.append(escape)
+        elif ch < " " or ch == "\x7f":  # other control chars: no short form
+            out.append(f"\\u{ord(ch):04x}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
+def _toml_key(key: str) -> str:
+    """A TOML key, bare when that is legal and quoted otherwise.
+
+    ``[projects]`` is keyed by filesystem paths, which contain ``/`` and
+    start with it -- never a bare key -- so those always come back quoted.
+    """
+    if key and _BARE_KEY.fullmatch(key):
+        return key
+    return _toml_string(key)
+
+
 def _toml_value(value: Any) -> str:
+    """``value`` as a TOML literal: a scalar, an array of scalars, or an
+    inline table (``{ k = v, ... }`` -- TOML's syntax for a table that is
+    someone else's VALUE rather than its own ``[section]``; see
+    :func:`_write_stored` for the top-level case). Recurses, so a table
+    entry may itself hold a nested table, e.g. the ``customer`` extension
+    a ``[projects]`` entry can carry alongside ``colour``.
+
+    Raises :class:`ValueError` for a shape DOXA does not store today (a
+    TOML datetime, an array of tables). The previous version of this
+    function had no such shape it refused: its ``str(value)`` fallback
+    silently wrote *any* value as a quoted string, which is exactly how a
+    ``[projects]`` table came back unparseable after one unrelated save.
+    Refusing loudly here is the same trade :func:`save` now makes for a
+    malformed FILE -- lose the write, never the data.
+    """
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
         return repr(value)
-    text = str(value)
-    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+    if isinstance(value, str):
+        return _toml_string(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        if not value:
+            return "{}"
+        body = ", ".join(f"{_toml_key(k)} = {_toml_value(v)}" for k, v in value.items())
+        return "{ " + body + " }"
+    raise ValueError(
+        f"config: cannot write a {type(value).__name__} value ({value!r}) "
+        "to config.toml -- unsupported TOML shape"
+    )
 
 
 def _coerce(setting: Setting, value: str) -> "Any | None":
@@ -1021,7 +1096,14 @@ def _coerce(setting: Setting, value: str) -> "Any | None":
 def _write_stored(stored: dict[str, Any]) -> Path:
     """The shared tail of every writer: render ``stored`` as TOML and
     replace the file atomically, clamped to 0600 -- it is user
-    configuration, not something a shared machine reads."""
+    configuration, not something a shared machine reads.
+
+    A top-level value that is itself a table (``[projects]`` is the one
+    DOXA writes) gets its own ``[section]`` block, emitted AFTER the flat
+    keys, rather than being squeezed onto a ``key = value`` line the way
+    every scalar and array is -- that squeeze is what used to turn a
+    dict into ``projects = "{...}"``, a string the next load could not
+    read back as a table at all."""
     lines = [
         "# DOXA settings. Precedence: environment > this file > default.",
         "# Written by the settings modal (Ctrl+, or /settings); safe to edit.",
@@ -1031,9 +1113,21 @@ def _write_stored(stored: dict[str, Any]) -> Path:
         if setting.key and setting.key in stored:
             lines.append(f"{setting.key} = {_toml_value(stored[setting.key])}")
     # Keys DOXA no longer knows about are preserved verbatim rather than
-    # dropped: a config written by a newer version must survive an older one.
-    for key in sorted(k for k in stored if k not in SETTINGS_BY_KEY):
-        lines.append(f"{key} = {_toml_value(stored[key])}")
+    # dropped: a config written by a newer version must survive an older
+    # one. Split flat values from table values now so every scalar/array
+    # line lands before any [section] block, matching the layout a human
+    # would hand-write.
+    unknown = sorted(k for k in stored if k not in SETTINGS_BY_KEY)
+    table_keys = [k for k in unknown if isinstance(stored[k], dict)]
+    for key in unknown:
+        if key not in table_keys:
+            lines.append(f"{_toml_key(key)} = {_toml_value(stored[key])}")
+    for key in table_keys:
+        table = stored[key]
+        lines.append("")
+        lines.append(f"[{_toml_key(key)}]")
+        for subkey in sorted(table):
+            lines.append(f"{_toml_key(subkey)} = {_toml_value(table[subkey])}")
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)  # DOXA's state home is the user's alone
@@ -1045,6 +1139,49 @@ def _write_stored(stored: dict[str, Any]) -> Path:
     return path
 
 
+class ConfigSaveRefused(RuntimeError):
+    """A writer raised this instead of writing: ``config.toml`` exists but
+    does not parse (or could not be read), and seeding the write from
+    :func:`load`'s tolerant ``{}`` would silently delete every setting the
+    file held, not just the ones this call is changing. ``load()`` keeps
+    its "a broken config costs the user's customizations, never their
+    session" contract for READERS; a writer cannot make that same trade,
+    because a save that starts from nothing and replaces the file has
+    every other setting left to lose. Fix or remove the file, then save
+    again."""
+
+
+def _seed_for_write() -> dict[str, Any]:
+    """What :func:`save` and :func:`save_lore_root` copy their changes
+    onto: the current file's contents, or ``{}`` when there is genuinely
+    no file yet -- that case is fine, it is what a first save always
+    sees. Raises :class:`ConfigSaveRefused` when the file EXISTS but a
+    read or a parse failed, instead of returning ``{}`` and letting the
+    caller silently full-replace it; see that class's docstring for why
+    that distinction is the whole fix."""
+    path = config_path()
+    try:
+        exists = path.exists()
+    except OSError:
+        exists = False
+    if not exists:
+        return {}
+    try:
+        with path.open("rb") as fh:
+            data = tomllib.load(fh)
+    except OSError as exc:
+        raise ConfigSaveRefused(
+            f"{path} exists but could not be read ({exc}) -- fix its "
+            "permissions or remove the file, then save again."
+        ) from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigSaveRefused(
+            f"{path} exists but does not parse as TOML ({exc}) -- fix or "
+            "remove the file, then save again."
+        ) from exc
+    return data if isinstance(data, dict) else {}
+
+
 def save(values: dict[str, str]) -> Path:
     """Write the settings file from ``{key: string}`` (the modal's fields).
 
@@ -1054,8 +1191,12 @@ def save(values: dict[str, str]) -> Path:
     the modal must never be the thing that writes a row it renders with no
     field (see :func:`save_lore_root` for the one row that DOES get
     written outside the modal).
+
+    Raises :class:`ConfigSaveRefused` when the existing file is present
+    but unreadable or malformed -- a missing file is NOT that case, and
+    seeds an empty, fresh save exactly as before.
     """
-    stored = dict(load())
+    stored = _seed_for_write()
     for setting in SETTINGS:
         if not setting.key or setting.read_only or setting.key not in values:
             continue
@@ -1073,7 +1214,11 @@ def save_lore_root(path: str) -> Path:
     read-only gate on the ``lore_root`` row -- that gate exists to keep
     this row OUT of the settings modal's editable fields (it is /setup's
     to decide, once, not a field to fat-finger), not to make it
-    unwritable altogether."""
-    stored = dict(load())
+    unwritable altogether.
+
+    Shares :func:`save`'s refusal on a present-but-broken file (see
+    :class:`ConfigSaveRefused`) -- this writer amplifies a malformed file
+    into total data loss exactly the same way :func:`save` used to."""
+    stored = _seed_for_write()
     stored["lore_root"] = path
     return _write_stored(stored)
