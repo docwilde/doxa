@@ -980,3 +980,146 @@ async def test_restore_report_lands_on_the_single_fallback_tab(tmp_path):
 
         assert await _wait(pilot, _report_blocks)
         assert any("skipped 2 sessions" in text for text in _report_blocks())
+
+
+# -- the sync scope key (LORE/docs/plans/sync.md, "## DOXA" item 1) --------
+#
+# The record gains project_key and machine_id with sync ON, and resolve()
+# restores only a record whose machine_id is this machine's. With sync OFF
+# nothing about restore changes -- everything above this line is the
+# regression bar for that, and the first test here states it directly
+# against the bytes on disk rather than trusting the behaviour tests alone.
+#
+# doxa.lore_sync is monkeypatched rather than a real op log stood up: DOXA
+# does not own the op log, and a test that needed one would pass or fail on
+# which lore_core doxa._lore_bootstrap happened to resolve.
+
+
+def _raw_record(scope: str) -> dict:
+    return json.loads(tabsets._file_for(scope).read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def _sync_on(monkeypatch):
+    """The tabsets class opted in, with a fixed machine id and project
+    key -- what doxa.tabsets.save asks before it stamps a record."""
+    from doxa import lore_sync as lore_sync_mod
+
+    monkeypatch.setattr(lore_sync_mod, "tabsets_enabled", lambda: True)
+    monkeypatch.setattr(lore_sync_mod, "machine_id", lambda **_kw: "machine-here")
+    monkeypatch.setattr(lore_sync_mod, "project_key", lambda _cwd: "github.com/d/doxa")
+    return "machine-here"
+
+
+def _claim_machine(monkeypatch, value):
+    """Make this machine's identity read as ``value`` (None = unreadable)."""
+    from doxa import lore_sync as lore_sync_mod
+
+    monkeypatch.setattr(lore_sync_mod, "machine_id", lambda **_kw: value)
+
+
+def test_record_carries_no_sync_keys_with_sync_off(tmp_path):
+    """THE regression bar for item 1, asserted on the bytes: sync off
+    writes the payload 1.9.2 wrote, with no project_key and no machine_id
+    anywhere in it."""
+    scope = str(tmp_path / "repo")
+    tabsets.save(scope, [tabsets.TabRecord("sid-1", "alpha")], "sid-1")
+    raw = _raw_record(scope)
+    assert "machine_id" not in raw
+    assert "project_key" not in raw
+    record = tabsets.load(scope)
+    assert record.machine_id is None
+    assert record.project_key is None
+
+
+def test_record_carries_project_key_and_machine_id_with_sync_on(tmp_path, _sync_on):
+    scope = str(tmp_path / "repo")
+    tabsets.save(scope, [tabsets.TabRecord("sid-1", "alpha")], "sid-1")
+    raw = _raw_record(scope)
+    assert raw["machine_id"] == _sync_on
+    assert raw["project_key"] == "github.com/d/doxa"
+    # Beside scope_key, never instead of it: the record is still found by
+    # the scope path, and still legible to a reader who knows the old shape.
+    assert raw["scope_key"] == scope
+    assert [t["session_id"] for t in raw["tabs"]] == ["sid-1"]
+    record = tabsets.load(scope)
+    assert record.machine_id == _sync_on
+    assert record.project_key == "github.com/d/doxa"
+
+
+def test_resolve_refuses_a_tab_set_recorded_on_another_machine(tmp_path, monkeypatch):
+    """sync.md item 1: "tabsets.resolve restores only a record whose
+    machine_id is this machine's."
+
+    The session ids in a foreign record name daemons on the OTHER machine.
+    Reattaching is impossible and restoring them as archived tabs would be
+    inventing history this machine never had."""
+    scope = str(tmp_path / "repo")
+    _claim_machine(monkeypatch, "workstation-id")
+    tabsets.save(scope, [tabsets.TabRecord("sid-a")], "sid-a")
+    # Written by the workstation, read on this laptop.
+    raw = _raw_record(scope)
+    raw["machine_id"] = "workstation-id"
+    tabsets._file_for(scope).write_text(json.dumps(raw), encoding="utf-8")
+    _claim_machine(monkeypatch, "laptop-id")
+    _daemon_entry("sid-a", scope)  # live HERE, and still not ours to restore
+    assert tabsets.resolve(scope) is None
+
+
+def test_resolve_restores_this_machines_own_record_with_sync_on(
+    tmp_path, monkeypatch, _sync_on
+):
+    """The refusal above must not be vacuous: the same record with a
+    MATCHING machine id restores exactly as it always did."""
+    scope = str(tmp_path / "repo")
+    tabsets.save(scope, [tabsets.TabRecord("sid-a", "alpha")], "sid-a")
+    _claim_machine(monkeypatch, _sync_on)
+    _daemon_entry("sid-a", scope)
+    resolved = tabsets.resolve(scope)
+    assert resolved is not None
+    assert [t.session_id for t, _ in resolved.tabs] == ["sid-a"]
+    assert resolved.active_session_id == "sid-a"
+
+
+def test_resolve_ignores_the_machine_check_for_a_record_without_one(
+    tmp_path, monkeypatch
+):
+    """With sync off a record carries no machine_id, and restore must not
+    consult lore_core at all -- a machine id that happens to be readable
+    cannot be allowed to start filtering records that predate the field."""
+    scope = str(tmp_path / "repo")
+    tabsets.save(scope, [tabsets.TabRecord("sid-a")], "sid-a")
+    assert "machine_id" not in _raw_record(scope)
+    asked: list[str] = []
+
+    from doxa import lore_sync as lore_sync_mod
+
+    def _should_not_be_asked(**_kw):
+        asked.append("called")
+        return "some-other-machine"
+
+    monkeypatch.setattr(lore_sync_mod, "machine_id", _should_not_be_asked)
+    _daemon_entry("sid-a", scope)
+    resolved = tabsets.resolve(scope)
+    assert resolved is not None
+    assert [t.session_id for t, _ in resolved.tabs] == ["sid-a"]
+    assert asked == []
+
+
+def test_resolve_keeps_a_foreign_record_when_this_machine_has_no_identity(
+    tmp_path, monkeypatch
+):
+    """Unprovable means KEEP, the same default a missing worktree sidecar
+    gets. Losing a user's whole tab set to a lore_core that failed to
+    import is much the worse of the two errors."""
+    scope = str(tmp_path / "repo")
+    _claim_machine(monkeypatch, "workstation-id")
+    tabsets.save(scope, [tabsets.TabRecord("sid-a")], "sid-a")
+    raw = _raw_record(scope)
+    raw["machine_id"] = "workstation-id"
+    tabsets._file_for(scope).write_text(json.dumps(raw), encoding="utf-8")
+    _claim_machine(monkeypatch, None)  # no op log, no sync tables, no id
+    _daemon_entry("sid-a", scope)
+    resolved = tabsets.resolve(scope)
+    assert resolved is not None
+    assert [t.session_id for t, _ in resolved.tabs] == ["sid-a"]

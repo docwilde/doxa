@@ -205,6 +205,7 @@ from typing import Any
 from . import collections as collections_mod
 from . import config as config_mod
 from . import layout as layout_mod
+from . import lore_sync as lore_sync_mod
 from . import peers as peers_mod
 from . import transcript as transcript_mod
 
@@ -285,6 +286,16 @@ class TabSetRecord:
     #: migration, and a key naming a group this window no longer has is
     #: simply never asked about.
     rail_folded: "tuple[str, ...]" = ()
+    #: The machine that WROTE this record, and the project identity that
+    #: survives the machine (LORE/docs/plans/sync.md's "## DOXA" item 1).
+    #: Both ``None`` on every record written with sync off -- which is
+    #: every record any DOXA up to 1.9.2 ever wrote -- and the absence of
+    #: the keys is once again the whole migration, for the sixth time in
+    #: this file. ``machine_id`` is what :func:`resolve` refuses on; see
+    #: there for why the refusal is keyed on the RECORD and never on the
+    #: current configuration.
+    machine_id: "str | None" = None
+    project_key: "str | None" = None
 
 
 @dataclass(frozen=True)
@@ -459,6 +470,28 @@ def save(
         "tabs": rows,
         "layout": layout,
     }
+    if lore_sync_mod.tabsets_enabled():
+        # sync.md item 1: "with sync on, the record carries project_key and
+        # machine_id alongside scope_key". TWO top-level keys, written only
+        # when the opt-in ``tabsets`` class is switched on -- with sync off
+        # this branch does not run, no key is added, and the payload is
+        # byte-identical to the one 1.9.2 wrote. That is the hard line, and
+        # tests/test_tabsets.py is what proves it holds.
+        #
+        # ``create=True``: this is a write path that has ALREADY proved the
+        # class is on, so minting a machine identity here is the user's own
+        # opt-in taking effect rather than a read leaving a trace in a store
+        # nobody asked it to touch (see doxa.lore_sync.machine_id).
+        mine = lore_sync_mod.machine_id(create=True)
+        if mine:
+            payload["machine_id"] = mine
+        key = lore_sync_mod.project_key(scope_key)
+        if key:
+            # Carried but NOT used to find the record: _file_for still hashes
+            # the scope path, so this is the identity travelling with the
+            # record, not yet the key it is filed under. See resolve() for
+            # what that means today and what it does not mean yet.
+            payload["project_key"] = key
     if collections:
         # v1.0.0: a TOP-LEVEL key, beside ``tabs`` and ``layout`` and
         # deliberately not inside the layout node. A collection is not
@@ -758,6 +791,15 @@ def load(scope_key: str) -> "TabSetRecord | None":
             [t.session_id for t in tabs],
         ),
         rail_folded=_rail_folded(data),
+        # Read UNCONDITIONALLY, with no reference to whether sync is on
+        # right now. A record on disk that names a machine keeps naming it
+        # after the user switches sync off, and a reader that stopped
+        # noticing would quietly start restoring another machine's tabs --
+        # which is the one outcome item 1 exists to prevent. Absent on
+        # every record written with sync off, where both read as None and
+        # nothing downstream asks again.
+        machine_id=str(data.get("machine_id") or "") or None,
+        project_key=str(data.get("project_key") or "") or None,
     )
 
 
@@ -797,6 +839,32 @@ def resolve(scope_key: str) -> "ResolvedRestore | None":
     record = load(scope_key)
     if record is None:
         return None
+    if record.machine_id:
+        # sync.md item 1: "tabsets.resolve restores only a record whose
+        # machine_id is this machine's." Asked of the RECORD, never of the
+        # configuration -- a tab set that arrived from the workstation does
+        # not become this laptop's tabs because sync was switched off
+        # afterwards, and the guard has to outlive the switch to be worth
+        # anything. A record with no machine_id at all (every record any
+        # DOXA wrote with sync off) never enters this branch, so restore on
+        # such a machine costs exactly what it cost in 1.9.2: nothing, not
+        # even a store read.
+        #
+        # ``None`` rather than an empty ResolvedRestore, and the difference
+        # is a claim about what happened: skipped=N means "N sessions you
+        # had are gone", which the caller reports to the user. These
+        # sessions are not gone, they are on another machine and their
+        # daemons are alive over there -- nothing was lost here, so the
+        # honest answer is the same one "no saved record" gives.
+        mine = lore_sync_mod.machine_id()
+        if mine is not None and record.machine_id != mine:
+            return None
+        # mine is None -- no op log, no sync tables, no identity ever
+        # minted -- means this machine cannot PROVE the record is foreign.
+        # Unprovable has meant "keep" everywhere else in this codebase
+        # (doxa.worktrees.finalize's missing-sidecar case is the same
+        # judgement), and losing a user's tab set to a lore_core that
+        # failed to import is the worse of the two errors by far.
     live_by_id = {p.session_id: p for p in peers_mod.list_daemons(scope_key=scope_key)}
     live: "list[tuple[TabRecord, peers_mod.PeerInfo]]" = []
     archived: "list[TabRecord]" = []
