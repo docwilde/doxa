@@ -869,7 +869,15 @@ class SessionDaemon:
         prompt just started the same way it learned it was queued."""
         item = self._prompt_queue.pop_next()
         if item is None:
-            self._turn_task = None
+            # Leave _turn_task pointing at the turn that just finished.
+            # Every busy check in this class asks `is not None and not
+            # .done()`, so a finished task is never mistaken for a running
+            # one -- and the reference is a CONTRACT: a spawned session's
+            # first turn can finish within the one loop tick between
+            # serve() setting `ready` and a waiter observing it, and
+            # test_session_spawn awaits `_turn_task` to prove the turn ran
+            # at all. Clearing it here made that turn look like it never
+            # started.
             return
         self._publish(None, EngineEvent("prompt_dequeued", {
             "id": item.id, "text": item.text,
