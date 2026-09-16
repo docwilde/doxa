@@ -4,6 +4,20 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.9.0 — 2026-09-16
+
+**Typing while a turn runs no longer hangs it: the prompt is queued and starts next.**
+
+- Fix **`on_prompt_submitted`**: `exclusive=True` in the `"turn"` worker group cancelled the first turn's renderer when a second prompt arrived; its block ticked forever while the daemon kept working unseen.
+- The same `exclusive=True` sat on the `/compact` confirm in `doxa/session/chips.py` and on hunk-rejection replies in `doxa/ui/diffview.py`; both fixed alike.
+- Fix **`SessionEngine.send`**: a turn whose client raised left `_turn_running` set, so every later prompt queued behind a ghost turn. Cleared on every exit; a failed queued turn publishes an error `turn_done`.
+
+**One bounded prompt queue, shared by daemon and in-process engine, with `/queue` to see and cancel.**
+
+- New **`doxa/promptqueue.py`**: FIFO of at most **`PROMPT_QUEUE_MAXLEN`** = 8. A mid-turn prompt is acknowledged with its position, starts on `turn_done`, survives detach, and is discarded visibly only at finalize.
+- New **`/queue`**: bare lists what waits, by position and id; an argument cancels one. Every attached client sees each queue event. Tests: `tests/test_prompt_queue.py` (new), `test_daemon.py`, `test_engine.py`.
+- Steering is not possible on `claude-agent-sdk` 0.2.144: `query()` is not turn-scoped, `receive_response()` ends at the first `ResultMessage` on one shared stream, and `interrupt()` aborts. Recorded in `SessionEngine.send`.
+
 ## 1.8.3 — 2026-09-16
 
 **A daemon can no longer be stranded by a client attaching mid-shutdown.**

@@ -1096,7 +1096,11 @@ class PaneChipsMixin:
         if not accepted:
             return  # Esc / decline: no compaction, no turn sent, status
             # bar unchanged -- exactly item 1's own contract.
-        self.run_worker(self._run_turn("/compact"), exclusive=True, group="turn")
+        # NOT exclusive -- same reason as on_prompt_submitted's own
+        # run_worker call (doxa/session/pane.py): a turn already running
+        # in this group must never be cancelled by starting another one.
+        # _run_turn queues "/compact" behind it instead when that happens.
+        self.run_worker(self._run_turn("/compact"), group="turn")
 
     def copy_session_handle(self) -> None:
         """The clipboard capability the session-handle chip's click used to

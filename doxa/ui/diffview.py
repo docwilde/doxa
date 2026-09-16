@@ -791,9 +791,14 @@ class DiffPane(Vertical):
         if pane is None:
             return
         text = diff_mod.reject_message(file_diff, hunk, reason)
-        pane.run_worker(
-            pane._run_turn(text), exclusive=True, group="turn"
-        )
+        # NOT exclusive -- same reason as on_prompt_submitted's own
+        # run_worker call (doxa/session/pane.py): this fires only after
+        # the turn that owned flush_pending's call has already ended
+        # (see that method's own docstring), but a turn started by the
+        # user directly in the meantime must not be cancelled by this one
+        # starting. _run_turn queues this text behind it instead, same
+        # as any other prompt.
+        pane.run_worker(pane._run_turn(text), group="turn")
 
     async def _tell_user(self, text: str) -> None:
         pane = self.session_pane()

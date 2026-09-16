@@ -306,22 +306,25 @@ async def test_registry_entry_carries_daemon_marker(tmp_path, monkeypatch):
         assert peers.list_daemons(self_id=daemon.session_id) == []
 
 
-@pytest.mark.asyncio
-async def test_second_prompt_while_turn_runs_is_refused(tmp_path, monkeypatch):
-    """One turn at a time, daemon-enforced: the second client gets a
-    graceful refusal (surfaced as an ordinary error), never interleaved
-    events."""
-    gate = asyncio.Event()
+def _slow_script_client_factory(gate: asyncio.Event):
+    """A FakeClient-shaped stand-in whose receive_response() blocks on
+    `gate` until the test releases it -- shared by every mid-turn-queue
+    daemon test below, so a second prompt can be submitted while the
+    first is provably still running."""
 
     class SlowScriptClient:
         def __init__(self, options):
             self.options = options
+
         async def __aenter__(self):
             return self
+
         async def __aexit__(self, *a):
             return False
+
         async def query(self, prompt, session_id="default"):
             pass
+
         async def receive_response(self):
             await gate.wait()
             yield ResultMessage(
@@ -329,11 +332,25 @@ async def test_second_prompt_while_turn_runs_is_refused(tmp_path, monkeypatch):
                 is_error=False, num_turns=1, session_id="s", total_cost_usd=0.0,
             )
 
+    return SlowScriptClient
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_submitted_mid_turn_is_queued_not_refused(tmp_path, monkeypatch):
+    """The bug this whole feature replaces: typing a prompt while a turn
+    is running used to error (`"a turn is already running"`) AND leave
+    the running turn's own generator undrained. Now it is acknowledged
+    immediately as queued (never refused), the FIRST turn still runs to
+    turn_done untouched, EVERY attached client (not just whichever one
+    submitted the second prompt) learns it was queued, and it starts
+    automatically -- its own turn_started/turn_done -- the instant the
+    first turn ends."""
+    gate = asyncio.Event()
     monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     daemon = SessionDaemon(
         cwd=str(tmp_path), linger_secs=30.0,
         engine_factory=lambda cwd, sid, dsock: SessionEngine(
-            cwd=cwd, session_id=sid, client_factory=SlowScriptClient,
+            cwd=cwd, session_id=sid, client_factory=_slow_script_client_factory(gate),
             daemon_socket=dsock,
         ),
     )
@@ -355,13 +372,43 @@ async def test_second_prompt_while_turn_runs_is_refused(tmp_path, monkeypatch):
                 break
             await asyncio.sleep(0.01)
 
-        with pytest.raises(EngineClientError, match="already running"):
-            async for _ in b.send("me too"):
-                pass
+        # Two attached clients both observe the queue events, by two
+        # different routes: B (the one that submitted "me too") learns
+        # it from its OWN send() yield -- the daemon deliberately does
+        # NOT also broadcast this one to B (see
+        # SessionDaemon._publish's own docstring) -- and A (the OTHER
+        # attached client, who asked for nothing) learns it purely from
+        # that broadcast, over its out-of-band stream.
+        oob_a_queued = asyncio.ensure_future(_drain_oob(a, "prompt_queued"))
+        events_b = [ev async for ev in b.send("me too")]
+        # Queued, not refused: NO exception, and exactly the one
+        # acknowledgement event -- no turn for "me too" yet.
+        assert [ev.type for ev in events_b] == ["prompt_queued"]
+        assert events_b[0].data["position"] == 1
+        assert events_b[0].data["text"] == "me too"
+        queued_a = await asyncio.wait_for(oob_a_queued, 5)
+        assert queued_a[-1].type == "prompt_queued"
+        assert queued_a[-1].data["position"] == 1
+        assert queued_a[-1].data["text"] == "me too"
 
+        # The FIRST turn is untouched: it still runs to its own
+        # turn_done, exactly as if nothing else had been typed.
         gate.set()
         events_a = await asyncio.wait_for(task_a, 5)
         assert events_a[-1].type == "turn_done"
+
+        # The queued prompt starts automatically once the first turn
+        # ends -- nobody had to resubmit it. Collect A's out-of-band
+        # stream, not B's: "slow one" is foreign to B too (B never sent
+        # it), so B's oob ALSO carries slow one's own turn_done and would
+        # stop there instead -- A's oob is clean of that (matched A's own
+        # _active_turn, so it went to A's turn_queue) and, already
+        # drained of its own prompt_queued above, holds only what
+        # "me too" publishes once dequeued.
+        oob_after = await asyncio.wait_for(_drain_oob(a, "turn_done"), 5)
+        assert [ev.type for ev in oob_after][:2] == ["prompt_dequeued", "turn_started"]
+        assert oob_after[-1].type == "turn_done"
+
         await a.finalize()
         await b.finalize()
     finally:
@@ -369,6 +416,177 @@ async def test_second_prompt_while_turn_runs_is_refused(tmp_path, monkeypatch):
             with contextlib.suppress(Exception):
                 await daemon._shutdown("test teardown")
                 await asyncio.wait_for(serve_task, 5)
+
+
+@pytest.mark.asyncio
+async def test_several_queued_prompts_start_in_fifo_order(tmp_path, monkeypatch):
+    """Three prompts typed in a row while the first turn runs: all three
+    are queued (never refused), and each starts -- and finishes -- in
+    the order it was typed, one at a time, with no interleaving."""
+    gate = asyncio.Event()
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    daemon = SessionDaemon(
+        cwd=str(tmp_path), linger_secs=30.0,
+        engine_factory=lambda cwd, sid, dsock: SessionEngine(
+            cwd=cwd, session_id=sid, client_factory=_slow_script_client_factory(gate),
+            daemon_socket=dsock,
+        ),
+    )
+    serve_task = asyncio.create_task(daemon.serve())
+    await asyncio.wait_for(daemon.ready.wait(), 10)
+    try:
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+
+        async def run_first():
+            return [ev async for ev in client.send("first")]
+
+        task_first = asyncio.create_task(run_first())
+        for _ in range(100):
+            if daemon._turn_task is not None:
+                break
+            await asyncio.sleep(0.01)
+
+        # One connection submitting all four: the daemon excludes THIS
+        # writer from its prompt_queued broadcast every time (it is the
+        # requester for "second"/"third"/"fourth" too, same as "me too"
+        # in the mid-turn-queue test above), so each ack comes back on
+        # the send() call itself, not over peer_events().
+        positions = []
+        for text in ("second", "third", "fourth"):
+            events = [ev async for ev in client.send(text)]
+            assert [ev.type for ev in events] == ["prompt_queued"]
+            positions.append(events[0].data["position"])
+        assert positions == [1, 2, 3]
+
+        gate.set()  # release "first"; the daemon's slow client stays
+        # released for every turn hereafter, so each queued prompt runs
+        # to completion as soon as it starts.
+        await asyncio.wait_for(task_first, 5)
+
+        order: list[str] = []
+        for _ in range(3):
+            dequeued = await asyncio.wait_for(
+                _drain_oob(client, "turn_done"), 5,
+            )
+            started = next(ev for ev in dequeued if ev.type == "prompt_dequeued")
+            order.append(str(started.data["text"]))
+        assert order == ["second", "third", "fourth"]
+
+        await client.finalize()
+    finally:
+        if not serve_task.done():
+            with contextlib.suppress(Exception):
+                await daemon._shutdown("test teardown")
+                await asyncio.wait_for(serve_task, 5)
+
+
+@pytest.mark.asyncio
+async def test_the_queue_bound_is_enforced_with_a_clear_reply(tmp_path, monkeypatch):
+    """PROMPT_QUEUE_MAXLEN prompts queue cleanly; the next one is refused
+    with a clear, specific reason -- never silently dropped."""
+    from doxa.promptqueue import PROMPT_QUEUE_MAXLEN
+
+    gate = asyncio.Event()
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    daemon = SessionDaemon(
+        cwd=str(tmp_path), linger_secs=30.0,
+        engine_factory=lambda cwd, sid, dsock: SessionEngine(
+            cwd=cwd, session_id=sid, client_factory=_slow_script_client_factory(gate),
+            daemon_socket=dsock,
+        ),
+    )
+    serve_task = asyncio.create_task(daemon.serve())
+    await asyncio.wait_for(daemon.ready.wait(), 10)
+    try:
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+
+        task_first = asyncio.create_task(
+            _collect(client.send("first"))
+        )
+        for _ in range(100):
+            if daemon._turn_task is not None:
+                break
+            await asyncio.sleep(0.01)
+
+        for i in range(PROMPT_QUEUE_MAXLEN):
+            events = [ev async for ev in client.send(f"queued-{i}")]
+            assert [ev.type for ev in events] == ["prompt_queued"]
+
+        with pytest.raises(EngineClientError, match="queue is full"):
+            async for _ in client.send("one too many"):
+                pass
+
+        gate.set()
+        await asyncio.wait_for(task_first, 5)
+        await client.finalize()
+    finally:
+        if not serve_task.done():
+            with contextlib.suppress(Exception):
+                await daemon._shutdown("test teardown")
+                await asyncio.wait_for(serve_task, 5)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_queued_prompt_is_visible_to_every_client(tmp_path, monkeypatch):
+    """/queue's cancel: the SDK-facing daemon call removes the queued
+    prompt (it never starts), and the cancellation is broadcast -- every
+    attached client, not just whichever one asked, sees it."""
+    gate = asyncio.Event()
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    daemon = SessionDaemon(
+        cwd=str(tmp_path), linger_secs=30.0,
+        engine_factory=lambda cwd, sid, dsock: SessionEngine(
+            cwd=cwd, session_id=sid, client_factory=_slow_script_client_factory(gate),
+            daemon_socket=dsock,
+        ),
+    )
+    serve_task = asyncio.create_task(daemon.serve())
+    await asyncio.wait_for(daemon.ready.wait(), 10)
+    try:
+        a = EngineClient(str(daemon.socket_path))
+        b = EngineClient(str(daemon.socket_path))
+        await a.start()
+        await b.start()
+
+        task_first = asyncio.create_task(_collect(a.send("first")))
+        for _ in range(100):
+            if daemon._turn_task is not None:
+                break
+            await asyncio.sleep(0.01)
+
+        queued_events = [ev async for ev in a.send("cancel me")]
+        assert [ev.type for ev in queued_events] == ["prompt_queued"]
+        item_id = queued_events[0].data["id"]
+
+        oob_b = asyncio.ensure_future(_drain_oob(b, "prompt_cancelled"))
+        ok = await b.cancel_queued(item_id)
+        assert ok
+        cancelled = await asyncio.wait_for(oob_b, 5)
+        assert cancelled[-1].data["id"] == item_id
+        assert cancelled[-1].data["text"] == "cancel me"
+
+        # It never starts: releasing the gate only lets "first" finish,
+        # and the daemon returns to idle -- no second turn follows.
+        gate.set()
+        await asyncio.wait_for(task_first, 5)
+        assert daemon._turn_task is None or daemon._turn_task.done()
+        await asyncio.sleep(0.05)  # give a wrongly-started turn a chance
+        listing = await a.list_queue()
+        assert listing == []
+
+        await a.finalize()
+        await b.finalize()
+    finally:
+        if not serve_task.done():
+            with contextlib.suppress(Exception):
+                await daemon._shutdown("test teardown")
+                await asyncio.wait_for(serve_task, 5)
+
+
+async def _collect(agen):
+    return [ev async for ev in agen]
 
 
 @pytest.mark.asyncio

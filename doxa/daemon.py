@@ -103,6 +103,7 @@ from .engine import (
     SessionEngine,
 )
 from .peers import MAX_FRAME_BYTES, registry_dir, runtime_dir
+from .promptqueue import PromptQueue, PromptQueueFull
 
 from .events import PROTOCOL_VERSION  # noqa: F401 -- re-exported
 DEFAULT_LINGER_SECS = 120.0
@@ -377,6 +378,11 @@ class SessionDaemon:
         self._clients: set[asyncio.StreamWriter] = set()
         self._had_client = False
         self._turn_task: asyncio.Task | None = None
+        # Mid-turn prompt queue (see doxa.promptqueue): ONE FIFO per
+        # session, shared by every attached client -- the daemon is the
+        # single source of truth a second tab must agree with, so this
+        # lives here rather than on any one connection.
+        self._prompt_queue = PromptQueue()
         self._linger_task: asyncio.Task | None = None
         # Set only by _linger_then_stop once it hands shutdown off to its
         # own task (see that method's comment) -- _cancel_linger never
@@ -513,6 +519,18 @@ class SessionDaemon:
         )
 
     async def _teardown(self) -> None:
+        # Design point 6 (prompt queue): _teardown runs exactly once, only
+        # once _shutdown has set self._done -- i.e. only at a genuine
+        # finalize (linger expiry, explicit stop, or SIGTERM; see the
+        # module docstring's Lifecycle section), never at a mere detach.
+        # That makes this the one place a queued prompt is deliberately
+        # thrown away rather than carried forward. Published BEFORE
+        # clients are dropped below so whichever is still attached sees
+        # why the queue it was watching just emptied.
+        for item in self._prompt_queue.clear():
+            self._publish(None, EngineEvent("prompt_discarded", {
+                "id": item.id, "text": item.text,
+            }))
         for task in (self._pump_task, self._linger_task, self._turn_task):
             if task is not None:
                 task.cancel()
@@ -661,10 +679,30 @@ class SessionDaemon:
             return "question"
         return str(data.get("input_summary") or data.get("tool_name") or "")
 
-    def _publish(self, turn_id: str | None, event: EngineEvent) -> None:
+    def _publish(
+        self, turn_id: str | None, event: EngineEvent,
+        exclude: "asyncio.StreamWriter | None" = None,
+    ) -> None:
+        """Fan out to every attached client except `exclude`, still
+        recording the frame in the ring for everyone (including
+        `exclude`) to replay later.
+
+        `exclude` exists for exactly one caller: _handle_prompt's
+        prompt_queued broadcast. The requesting connection already
+        learns it was queued from its OWN reply (EngineClient.send
+        yields a prompt_queued event built from that reply, so the
+        caller can render it without waiting on this stream) --
+        publishing it here too would additionally land it on that same
+        client's peer_events() (_handle_event routes anything with no
+        matching "turn" tag there), which _peer_pump reads
+        unconditionally and would render a second time. Every OTHER
+        attached client has no such reply to read and depends entirely
+        on this broadcast, so it is never skipped for them."""
         frame = self.ring.append(turn_id, event)
         payload = encode_frame(frame)
         for writer in list(self._clients):
+            if writer is exclude:
+                continue
             try:
                 writer.write(payload)
             except Exception:
@@ -764,9 +802,31 @@ class SessionDaemon:
             await self._reply(writer, req_id, ok=False, error="empty prompt")
             return
         if self._turn_task is not None and not self._turn_task.done():
+            # A turn is running: NEVER refuse and NEVER let it hang (the
+            # two defects the old "a turn is already running" error used
+            # to cause together -- see doxa.promptqueue's module
+            # docstring). Enqueue instead, bounded (PromptQueueFull is the
+            # one case that DOES refuse, with a clear reason, never a
+            # silent drop), and acknowledge immediately.
+            try:
+                item = self._prompt_queue.enqueue(text)
+            except PromptQueueFull as exc:
+                await self._reply(writer, req_id, ok=False, error=str(exc))
+                return
+            position = self._prompt_queue.position(item.id) or len(self._prompt_queue)
+            # Every OTHER attached client learns this the same
+            # "everyone learns it" way model_changed already does -- a
+            # second tab on this daemon must not disagree about what is
+            # queued. `writer` itself is excluded: it learns the SAME
+            # fact from the reply below, which EngineClient.send turns
+            # into its own prompt_queued event -- see _publish's own
+            # docstring for why publishing it here too would double it.
+            self._publish(None, EngineEvent("prompt_queued", {
+                "id": item.id, "text": text, "position": position,
+            }), exclude=writer)
             await self._reply(
-                writer, req_id, ok=False,
-                error="a turn is already running in this session",
+                writer, req_id, ok=True, queued=True,
+                position=position, queue_id=item.id,
             )
             return
         turn_id = uuid.uuid4().hex[:12]
@@ -785,6 +845,13 @@ class SessionDaemon:
             async for ev in self.engine.send(text):
                 self._publish(turn_id, ev)
         except asyncio.CancelledError:
+            # Cancelled from outside (_shutdown/_teardown, both of which
+            # own this task's lifetime and are off limits here): the
+            # queue must NOT advance -- starting another turn on an
+            # engine that is on its way down would fight the shutdown
+            # this cancellation is part of. _advance_queue is therefore
+            # unreachable below, exactly like SessionEngine.send()'s own
+            # except clause for the in-process path.
             raise
         except Exception as exc:  # noqa: BLE001 -- a turn failure must reach the client
             self._publish(turn_id, EngineEvent("turn_done", {
@@ -792,6 +859,31 @@ class SessionDaemon:
                 "error": f"{type(exc).__name__}: {exc}",
                 "session_cost_usd": self.engine.total_cost_usd,
             }))
+        self._advance_queue()
+
+    def _advance_queue(self) -> None:
+        """The moment a turn reaches turn_done (success or a handled
+        per-turn error -- never reached on cancellation, see _run_turn's
+        except clause above), the next queued prompt, if any, becomes the
+        next turn automatically. Every attached client learns which
+        prompt just started the same way it learned it was queued."""
+        item = self._prompt_queue.pop_next()
+        if item is None:
+            # Leave _turn_task pointing at the turn that just finished.
+            # Every busy check in this class asks `is not None and not
+            # .done()`, so a finished task is never mistaken for a running
+            # one -- and the reference is a CONTRACT: a spawned session's
+            # first turn can finish within the one loop tick between
+            # serve() setting `ready` and a waiter observing it, and
+            # test_session_spawn awaits `_turn_task` to prove the turn ran
+            # at all. Clearing it here made that turn look like it never
+            # started.
+            return
+        self._publish(None, EngineEvent("prompt_dequeued", {
+            "id": item.id, "text": item.text,
+        }))
+        next_turn_id = uuid.uuid4().hex[:12]
+        self._turn_task = asyncio.create_task(self._run_turn(next_turn_id, item.text))
 
     async def _handle_call(self, frame: dict, writer: asyncio.StreamWriter) -> None:
         assert self.engine is not None
@@ -1044,6 +1136,30 @@ class SessionDaemon:
                 str(params.get("id") or ""), dict(params.get("answer") or {}),
             )
             await self._reply(writer, req_id, ok=ok)
+        elif method == "queue":
+            # `/queue`'s bare listing -- everything still waiting, FIFO
+            # order. Small and bounded (PROMPT_QUEUE_MAXLEN), unlike the
+            # beliefs/pending pagers just above, so it needs none of
+            # their paging.
+            await self._reply(
+                writer, req_id, ok=True, queue=self._prompt_queue.snapshot(),
+            )
+        elif method == "cancel_queued":
+            # `/queue`'s cancel half. The SAME "everyone learns it" rule
+            # prompt_queued above follows: every attached client sees the
+            # cancellation, not just whichever one asked for it.
+            item = self._prompt_queue.cancel(str(params.get("id") or ""))
+            if item is None:
+                await self._reply(
+                    writer, req_id, ok=False,
+                    error="no such queued prompt (already started, "
+                          "cancelled, or discarded)",
+                )
+                return
+            self._publish(None, EngineEvent("prompt_cancelled", {
+                "id": item.id, "text": item.text,
+            }))
+            await self._reply(writer, req_id, ok=True)
         elif method == "stop":
             # Worktree cleanup runs BEFORE the ack (fast, git-only) so a
             # "kept" note can ride in the SAME reply -- unlike

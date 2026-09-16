@@ -360,12 +360,45 @@ class EngineClient:
         reply = await self._prompt(prompt)
         if not reply.get("ok"):
             raise EngineClientError(reply.get("error") or "prompt refused")
+        if reply.get("queued"):
+            # Mid-turn prompt queue (design point 3): accepted, not
+            # started -- a turn was already running, so the daemon
+            # enqueued this one instead of refusing it or racing the SDK
+            # client. Yielded directly (built from this reply) rather
+            # than read off peer_events(): the daemon deliberately does
+            # NOT also broadcast this one to THIS connection (see
+            # SessionDaemon._publish's own docstring) -- every OTHER
+            # attached client learns it from that broadcast instead. The
+            # eventual real turn, once THIS daemon dequeues it, rides
+            # the out-of-band stream a peer-driven turn already does.
+            yield EngineEvent("prompt_queued", {
+                "id": reply.get("queue_id"), "text": prompt,
+                "position": reply.get("position"),
+            })
+            return
         while True:
             ev = await self._turn_queue.get()
             yield ev
             if ev.type == "turn_done":
                 break
         await self._refresh_status_quietly()
+
+    async def list_queue(self) -> list[dict]:
+        """Engine parity for :meth:`doxa.engine.SessionEngine.list_queue`
+        -- `/queue`'s bare listing over the socket."""
+        reply = await self._call("queue")
+        if not reply.get("ok"):
+            raise EngineClientError(reply.get("error") or "queue call failed")
+        return [dict(item) for item in reply.get("queue") or []]
+
+    async def cancel_queued(self, item_id: str) -> bool:
+        """Engine parity for
+        :meth:`doxa.engine.SessionEngine.cancel_queued` -- `/queue`'s
+        cancel over the socket. False (never an exception) for an id
+        already started, cancelled, or discarded -- the same shape
+        :meth:`answer_needs_input` already answers a stale id with."""
+        reply = await self._call("cancel_queued", id=item_id)
+        return bool(reply.get("ok"))
 
     async def _prompt(self, text: str) -> dict:
         req_id = next(self._req_ids)
