@@ -1528,6 +1528,11 @@ class SessionEngine:
         # socket path.
         self._turn_running = False
         self._prompt_queue = PromptQueue()
+        # The queued turn currently running in the background, if any.
+        # Held here because the event loop keeps only a weak reference to
+        # a task: one that gets collected mid-turn is a turn that simply
+        # stops, with no event to say so.
+        self._queued_turn_task: asyncio.Task | None = None
 
         # Containment gate (doxa/gate.py): session-scoped state -- allowed
         # set, two-strikes tracker, OperatorContext sidecar. Built here (not
@@ -2614,18 +2619,28 @@ class SessionEngine:
             })
             return
         self._turn_running = True
+        cancelled = False
         try:
             async for ev in self._send_turn(prompt):
                 yield ev
         except (GeneratorExit, asyncio.CancelledError):
             # Cancelled from outside (pane teardown, app shutdown): the
-            # queue must NOT advance here -- starting another turn on an
+            # queue must NOT advance -- starting another turn on an
             # engine that is on its way down is worse than the bug this
             # queue exists to fix. See _advance_queue's own docstring.
-            self._turn_running = False
+            cancelled = True
             raise
-        self._turn_running = False
-        self._advance_queue()
+        finally:
+            # Cleared on EVERY exit, a raising turn included (a dropped
+            # connection, a refused query). Leaving it set would make
+            # every later prompt queue behind a turn that no longer
+            # exists and never advance -- the same "hangs forever" this
+            # queue was built to end. A failed turn still advances the
+            # queue, exactly as SessionDaemon._run_turn does after
+            # publishing its error.
+            self._turn_running = False
+            if not cancelled:
+                self._advance_queue()
 
     def _advance_queue(self) -> None:
         """The moment a turn ends NORMALLY (never on cancellation -- see
@@ -2645,7 +2660,9 @@ class SessionEngine:
         self._peer_queue.put_nowait(EngineEvent("prompt_dequeued", {
             "id": item.id, "text": item.text,
         }))
-        asyncio.ensure_future(self._run_queued_turn(item.text))
+        self._queued_turn_task = asyncio.ensure_future(
+            self._run_queued_turn(item.text)
+        )
 
     async def _run_queued_turn(self, prompt: str) -> None:
         """One dequeued prompt's turn, run and published exactly like
@@ -2656,9 +2673,20 @@ class SessionEngine:
         try:
             async for ev in self._send_turn(prompt):
                 self._peer_queue.put_nowait(ev)
-        except (GeneratorExit, asyncio.CancelledError):
+        except asyncio.CancelledError:
             self._turn_running = False
             raise
+        except Exception as exc:  # noqa: BLE001 -- a background turn's failure must reach the pane
+            # Nobody awaits this task, so an exception escaping here
+            # would surface only as "Task exception was never retrieved"
+            # at interpreter exit -- and the pane's block would tick
+            # forever. Published as the same turn_done
+            # SessionDaemon._run_turn emits for a failed turn.
+            self._peer_queue.put_nowait(EngineEvent("turn_done", {
+                "is_error": True,
+                "error": f"{type(exc).__name__}: {exc}",
+                "session_cost_usd": self.total_cost_usd,
+            }))
         self._turn_running = False
         self._advance_queue()
 

@@ -978,3 +978,77 @@ async def test_queued_prompts_are_discarded_at_finalize_and_the_discard_is_visib
 
 async def _collect(agen):
     return [ev async for ev in agen]
+
+
+def _flaky_client_factory(gate: "asyncio.Event", fail_first: int):
+    """_paced_client_factory's shape, except that the first `fail_first`
+    receive_response() calls raise once `gate` opens -- a dropped
+    connection mid-stream -- and every later one succeeds."""
+
+    class FlakyClient:
+        calls = 0
+
+        def __init__(self, options: Any) -> None:
+            self.options = options
+
+        async def __aenter__(self) -> "FlakyClient":
+            return self
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+        async def query(self, prompt: str, session_id: str = "default") -> None:
+            pass
+
+        async def receive_response(self):
+            await gate.wait()
+            FlakyClient.calls += 1
+            if FlakyClient.calls <= fail_first:
+                raise RuntimeError("connection dropped mid-stream")
+            yield ResultMessage(
+                subtype="success", duration_ms=1, duration_api_ms=1,
+                is_error=False, num_turns=1, session_id="s", total_cost_usd=0.0,
+            )
+
+    return FlakyClient
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_raises_does_not_leave_the_engine_busy_forever(tmp_path):
+    """A turn whose client raises (the connection dropped, the query was
+    refused) used to leave _turn_running set: every later prompt was
+    then queued behind a turn that no longer existed and nothing ever
+    advanced the queue -- the same indefinite hang, one layer down. Now
+    the flag is cleared on every exit, the queue still advances after a
+    failed turn (as the daemon's _run_turn already did), a queued turn's
+    own failure is published as an error turn_done rather than dying as
+    an unretrieved task exception, and the next prompt runs directly."""
+    gate = asyncio.Event()
+    factory = _flaky_client_factory(gate, fail_first=2)
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+    await engine.start()
+
+    task_first = asyncio.create_task(_collect(engine.send("first")))
+    await _wait_for_turn_task(engine)
+    queued = [ev async for ev in engine.send("second")]
+    assert [ev.type for ev in queued] == ["prompt_queued"]
+
+    # The first turn raises out of send() -- and the engine is no longer busy.
+    gate.set()
+    with pytest.raises(RuntimeError, match=r"connection dropped mid-stream"):
+        await asyncio.wait_for(task_first, 5)
+
+    # The queued prompt still started, and ITS failure (the second raising
+    # call) reached the out-of-band stream as an error turn_done.
+    auto = await asyncio.wait_for(_collect_oob_until(engine, "turn_done"), 5)
+    assert [ev.type for ev in auto] == ["prompt_dequeued", "turn_started", "turn_done"]
+    assert auto[-1].data["is_error"] is True
+    assert "connection dropped mid-stream" in auto[-1].data["error"]
+    assert engine._turn_running is False
+    assert len(engine._prompt_queue) == 0
+
+    # A prompt typed now runs directly -- it is not queued behind a ghost.
+    third = [ev async for ev in engine.send("third")]
+    assert third[0].type == "turn_started"
+    assert third[-1].type == "turn_done"
+    assert not third[-1].data.get("is_error")
