@@ -4,6 +4,15 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.9.2 — 2026-09-16
+
+**The pinned LORE moves from 0.53.0 to 0.54.0.**
+
+- **`lore-core`** pin `v0.53.0` → `v0.54.0`. A bare install and CI now embed the same LORE the plugin checkout has run since this afternoon.
+- Inherited: new **`lore_core/sync_apply.py`**, the apply engine. A pulled op applies, waits for a dependency it has not seen, or is contained. Order is lamport, then machine, then sequence, never a wall clock.
+- Inherited: an op whose `mac` is missing or wrong is staged `unverified` and never applied, as is every op on a receiver holding no key. Nothing syncs yet; there is still no transport.
+- No DOXA code changes.
+
 ## 1.9.1 — 2026-09-16
 
 **The pinned LORE moves from 0.52.0 to 0.53.0.**
