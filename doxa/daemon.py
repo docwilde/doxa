@@ -617,6 +617,19 @@ class SessionDaemon:
         self._shutdown_task = asyncio.create_task(
             self._shutdown("linger expired with no client attached")
         )
+        # Await it, so whoever awaited THIS coroutine sees the stop as done
+        # when it returns (the contract test_session_spawn pins: an idle
+        # unclaimed session has stopped by the time _linger_then_stop
+        # returns, not one loop tick later). This does not reopen the race
+        # above: cancelling a task that is awaiting another Task cancels
+        # only the wait -- the awaited Task keeps running to completion --
+        # and _linger_task is already None, so _cancel_linger cannot reach
+        # this coroutine anyway. Swallowing the CancelledError matches the
+        # sleep branch: a cancelled waiter has nothing left to do.
+        try:
+            await self._shutdown_task
+        except asyncio.CancelledError:
+            return
 
     # -- event fan-out -----------------------------------------------
 
