@@ -7,6 +7,7 @@ applied before anything touches disk, and finalize() running exactly once.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -758,3 +759,227 @@ async def test_finalize_runs_once_and_disconnects_client(tmp_path):
 
     second = await engine.finalize()
     assert second.data.get("already_finalized") is True
+
+
+# -- mid-turn prompt queue (in-process path) --------------------------
+
+def _paced_client_factory(gate: "asyncio.Event"):
+    """A FakeClient-shaped stand-in whose receive_response() blocks on
+    `gate` until the test releases it -- the in-process equivalent of
+    tests/test_daemon.py's _slow_script_client_factory, needed because
+    tests.fakes.FakeClient replays its whole script in one loop turn,
+    which cannot reproduce "a second prompt arrives while the first is
+    still running"."""
+
+    class PacedClient:
+        def __init__(self, options: Any) -> None:
+            self.options = options
+            self.queried: list[tuple[str, str]] = []
+
+        async def __aenter__(self) -> "PacedClient":
+            return self
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+        async def query(self, prompt: str, session_id: str = "default") -> None:
+            self.queried.append((prompt, session_id))
+
+        async def receive_response(self):
+            await gate.wait()
+            yield ResultMessage(
+                subtype="success", duration_ms=1, duration_api_ms=1,
+                is_error=False, num_turns=1, session_id="s", total_cost_usd=0.0,
+            )
+
+    return PacedClient
+
+
+async def _collect_oob_until(engine: SessionEngine, until_type: str, timeout=5.0):
+    """Drain engine.peer_events() until (and including) `until_type` --
+    the in-process mirror of test_daemon.py's _drain_oob."""
+    events = []
+    agen = engine.peer_events()
+
+    async def collect():
+        async for ev in agen:
+            events.append(ev)
+            if ev.type == until_type:
+                return
+
+    await asyncio.wait_for(collect(), timeout)
+    await agen.aclose()
+    return events
+
+
+async def _wait_for_turn_task(engine: SessionEngine, timeout=5.0) -> None:
+    """Poll until the busy engine has actually claimed _turn_running --
+    the in-process equivalent of test_daemon.py's `daemon._turn_task is
+    not None` poll loop."""
+    for _ in range(int(timeout / 0.01)):
+        if engine._turn_running:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("engine never became busy")
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_sent_to_a_busy_engine_is_queued_not_raised(tmp_path):
+    """The regression this feature exists for, at the in-process engine
+    layer: a second send() call while the first is still running used to
+    have no guard at all (a silent race against the SDK client). Now it
+    is queued -- acknowledged by yielding nothing and raising nothing --
+    the FIRST turn finishes untouched, and the queued prompt starts on
+    its own the moment the first one ends."""
+    gate = asyncio.Event()
+    factory = _paced_client_factory(gate)
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+    await engine.start()
+
+    task_first = asyncio.create_task(_collect(engine.send("first")))
+    await _wait_for_turn_task(engine)
+
+    second_events = [ev async for ev in engine.send("second")]
+    assert second_events == []  # queued, not started -- nothing to render
+
+    queued = await asyncio.wait_for(
+        _collect_oob_until(engine, "prompt_queued"), 5,
+    )
+    assert queued[-1].data["position"] == 1
+    assert queued[-1].data["text"] == "second"
+
+    gate.set()
+    first_events = await asyncio.wait_for(task_first, 5)
+    assert first_events[-1].type == "turn_done"
+
+    auto_started = await asyncio.wait_for(
+        _collect_oob_until(engine, "turn_done"), 5,
+    )
+    assert [ev.type for ev in auto_started] == [
+        "prompt_dequeued", "turn_started", "turn_done",
+    ]
+    assert auto_started[0].data["text"] == "second"
+
+
+@pytest.mark.asyncio
+async def test_several_prompts_queued_on_a_busy_engine_start_in_fifo_order(tmp_path):
+    gate = asyncio.Event()
+    factory = _paced_client_factory(gate)
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+    await engine.start()
+
+    task_first = asyncio.create_task(_collect(engine.send("first")))
+    await _wait_for_turn_task(engine)
+
+    for text in ("second", "third", "fourth"):
+        assert [ev async for ev in engine.send(text)] == []
+
+    positions = []
+    for _ in range(3):
+        drained = await asyncio.wait_for(
+            _collect_oob_until(engine, "prompt_queued"), 5,
+        )
+        positions.append(drained[-1].data["position"])
+    assert positions == [1, 2, 3]
+
+    gate.set()
+    await asyncio.wait_for(task_first, 5)
+
+    order = []
+    for _ in range(3):
+        drained = await asyncio.wait_for(
+            _collect_oob_until(engine, "turn_done"), 5,
+        )
+        dequeued = next(ev for ev in drained if ev.type == "prompt_dequeued")
+        order.append(str(dequeued.data["text"]))
+    assert order == ["second", "third", "fourth"]
+
+
+@pytest.mark.asyncio
+async def test_the_in_process_queue_bound_is_enforced_with_a_clear_reply(tmp_path):
+    from doxa.promptqueue import PROMPT_QUEUE_MAXLEN, PromptQueueFull
+
+    gate = asyncio.Event()
+    factory = _paced_client_factory(gate)
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+    await engine.start()
+
+    task_first = asyncio.create_task(_collect(engine.send("first")))
+    await _wait_for_turn_task(engine)
+
+    for i in range(PROMPT_QUEUE_MAXLEN):
+        assert [ev async for ev in engine.send(f"queued-{i}")] == []
+
+    with pytest.raises(PromptQueueFull, match="queue is full"):
+        async for _ in engine.send("one too many"):
+            pass
+
+    gate.set()
+    await asyncio.wait_for(task_first, 5)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_queued_prompt_on_the_in_process_engine(tmp_path):
+    gate = asyncio.Event()
+    factory = _paced_client_factory(gate)
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+    await engine.start()
+
+    task_first = asyncio.create_task(_collect(engine.send("first")))
+    await _wait_for_turn_task(engine)
+
+    assert [ev async for ev in engine.send("cancel me")] == []
+    queued = await asyncio.wait_for(
+        _collect_oob_until(engine, "prompt_queued"), 5,
+    )
+    item_id = queued[-1].data["id"]
+
+    assert await engine.cancel_queued("no-such-id") is False
+
+    ok = await engine.cancel_queued(item_id)
+    assert ok
+    cancelled = await asyncio.wait_for(
+        _collect_oob_until(engine, "prompt_cancelled"), 5,
+    )
+    assert cancelled[-1].data["id"] == item_id
+    assert cancelled[-1].data["text"] == "cancel me"
+    assert await engine.list_queue() == []
+
+    gate.set()
+    await asyncio.wait_for(task_first, 5)
+    # It never starts: no second turn follows the cancelled one.
+    assert engine._turn_running is False
+
+
+@pytest.mark.asyncio
+async def test_queued_prompts_are_discarded_at_finalize_and_the_discard_is_visible(
+    tmp_path,
+):
+    """Design point 6: a queued prompt survives a mere detach (nothing on
+    that path touches the queue), but finalize is the one moment it is
+    deliberately thrown away -- and the throwaway is announced, not
+    silent."""
+    gate = asyncio.Event()
+    factory = _paced_client_factory(gate)
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+    await engine.start()
+
+    task_running = asyncio.create_task(_collect(engine.send("running")))
+    await _wait_for_turn_task(engine)
+    assert [ev async for ev in engine.send("discard me")] == []
+    await asyncio.wait_for(_collect_oob_until(engine, "prompt_queued"), 5)
+
+    finalize_task = asyncio.create_task(engine.finalize())
+    discarded = await asyncio.wait_for(
+        _collect_oob_until(engine, "prompt_discarded"), 5,
+    )
+    assert discarded[-1].data["text"] == "discard me"
+    assert await engine.list_queue() == []
+
+    gate.set()
+    await asyncio.wait_for(task_running, 5)
+    await asyncio.wait_for(finalize_task, 5)
+
+
+async def _collect(agen):
+    return [ev async for ev in agen]
