@@ -18,13 +18,14 @@ consumer growing settings logic of its own.
 
 Nothing here is a credential store: the settings are model names, seconds,
 thresholds and display toggles. Values are written back as TOML by a
-deliberately small writer -- scalars, arrays of scalars, and tables (a
-flat key of one nested level, ``[projects]`` being the one DOXA writes
+deliberately small writer -- scalars, arrays, and tables, nested as
+deeply as the value requires (``[projects]`` is the one DOXA writes
 today) -- rather than a dependency, because the file has to stay
 hand-editable and boring. It is not a general TOML serializer: a shape it
-does not recognize is refused loudly (see :func:`_toml_value`) rather than
-flattened into a string nothing can read back, which is how a hand-edited
-table used to be destroyed by an unrelated settings-modal save.
+does not recognize (a TOML date/time is the one real gap) is refused
+loudly (see :func:`_toml_value`) rather than flattened into a string
+nothing can read back, which is how a hand-edited table used to be
+destroyed by an unrelated settings-modal save.
 """
 
 from __future__ import annotations
@@ -1014,20 +1015,22 @@ def _toml_key(key: str) -> str:
 
 
 def _toml_value(value: Any) -> str:
-    """``value`` as a TOML literal: a scalar, an array of scalars, or an
-    inline table (``{ k = v, ... }`` -- TOML's syntax for a table that is
-    someone else's VALUE rather than its own ``[section]``; see
-    :func:`_write_stored` for the top-level case). Recurses, so a table
-    entry may itself hold a nested table, e.g. the ``customer`` extension
-    a ``[projects]`` entry can carry alongside ``colour``.
+    """``value`` as a TOML literal: a scalar, an array, or an inline table
+    (``{ k = v, ... }`` -- TOML's syntax for a table that is someone
+    else's VALUE rather than its own ``[section]``; see
+    :func:`_write_stored` for the top-level case). Recurses through
+    lists and dicts, so an array may hold tables and a table entry may
+    hold a nested table -- e.g. the ``customer`` extension a
+    ``[projects]`` entry can carry alongside ``colour``.
 
     Raises :class:`ValueError` for a shape DOXA does not store today (a
-    TOML datetime, an array of tables). The previous version of this
-    function had no such shape it refused: its ``str(value)`` fallback
-    silently wrote *any* value as a quoted string, which is exactly how a
-    ``[projects]`` table came back unparseable after one unrelated save.
-    Refusing loudly here is the same trade :func:`save` now makes for a
-    malformed FILE -- lose the write, never the data.
+    TOML date/time, decoded by ``tomllib`` into ``datetime.date`` et al.,
+    is the one real gap). The previous version of this function had no
+    such shape it refused: its ``str(value)`` fallback silently wrote
+    *any* value as a quoted string, which is exactly how a ``[projects]``
+    table came back unparseable after one unrelated save. Refusing
+    loudly here is the same trade :func:`save` now makes for a malformed
+    FILE -- lose the write, never the data.
     """
     if isinstance(value, bool):
         return "true" if value else "false"

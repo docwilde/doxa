@@ -121,12 +121,24 @@ def test_a_string_containing_a_quote_and_a_backslash_round_trips():
     assert config.load()["tricky"] == 'she said "hi"\\then left'
 
 
+def test_a_table_nested_inside_an_array_still_survives_a_save():
+    """Recursion, not just one level: TOML allows an array of inline
+    tables (``exotic = [{ a = 1 }]``), and the emitter must round-trip
+    that too, not only the flat [projects]-style shape."""
+    stored = {"exotic": [{"a": 1}, {"b": "x"}]}
+    config._write_stored(stored)
+    config.invalidate()
+    assert config.load()["exotic"] == [{"a": 1}, {"b": "x"}]
+
+
 def test_an_unsupported_value_shape_is_refused_rather_than_stringified():
-    """A shape outside scalars/arrays-of-scalars/tables (an array of
-    tables here) must raise rather than silently fall back to str() --
-    that fallback is the root cause of defect 1, so the writer refuses
-    instead of repeating it for a shape nobody asked it to support."""
-    stored = {"exotic": [{"a": 1}]}
+    """A TOML date/time -- the one shape tomllib can hand load() that this
+    writer has no literal for -- must raise rather than silently fall
+    back to str(), which is the root cause of defect 1: that fallback is
+    exactly how a table got flattened into a string nothing can parse."""
+    import datetime
+
+    stored = {"exotic": datetime.date(2026, 1, 1)}
     with pytest.raises(ValueError, match=r"unsupported TOML shape"):
         config._write_stored(stored)
 
