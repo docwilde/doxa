@@ -4,6 +4,16 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.8.2 — 2026-09-16
+
+**A settings save no longer destroys a table, and refuses to overwrite a file it cannot read.**
+
+- **`_toml_value`** is a real TOML emitter: strings fully escaped (backslash, quote, newline, tab, other control characters as `\uXXXX`), booleans, numbers, arrays and tables of any depth, inline tables.
+- Its old fallback, `str(value)` in quotes, turned a `[projects]` colour map into one quoted string on the next save from the settings modal. Reproduced, and gone: **`_write_stored`** emits an unknown table as its own `[section]`.
+- **`save()`** and **`save_lore_root()`** seed from **`_seed_for_write()`**, which returns `{}` only when no file exists. A present but malformed file raises **`ConfigSaveRefused`** naming the parse error, and nothing is written.
+- `load()` keeps its tolerant contract for readers. One shape is refused rather than written: a native TOML date, which `tomllib` decodes to a `datetime` and nothing in DOXA stores.
+- Found by the panel review, both external families independently. Tests: `tests/test_config_roundtrip.py` (new).
+
 ## 1.8.1 — 2026-09-16
 
 **The pinned LORE moves from 0.49.0 to 0.52.0, three releases at once.**
