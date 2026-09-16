@@ -4,6 +4,16 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.8.1 — 2026-09-16
+
+**The pinned LORE moves from 0.49.0 to 0.52.0, three releases at once.**
+
+- **`lore-core`** pin `v0.49.0` → `v0.52.0`. A bare install and CI now embed the same LORE the plugin checkout has run since this morning.
+- Inherited from 0.50.0: every belief and outcome row carries a wire-safe **`uid`**, backfilled once on the next store open.
+- Inherited from 0.51.0: a project's identity on the wire, **`project_key`**, derived from its origin remote, so two checkouts of one repository agree.
+- Inherited from 0.52.0: every synced write DOXA makes through `lore_core` now appends an op to the local **`sync_ops`** log in the same transaction. Nothing syncs yet; `lore sync status` shows the unpushed count.
+- No DOXA code changes.
+
 ## 1.8.0 — 2026-09-16
 
 **A remote driver is refused by default, and named when one is present.**
