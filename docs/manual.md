@@ -135,6 +135,24 @@ collapsible red-ruled block inside the transcript, one line collapsed,
 its traceback and origin one keystroke away — rather than taking the app
 down.
 
+### Typing while a turn runs
+
+A prompt submitted while a turn is still running is **queued, never refused**,
+and the running turn is not touched. The transcript acknowledges it with its
+position; it starts on its own the moment the current turn ends, and every
+attached tab of the same session sees the same queue. At most eight prompts
+wait; the ninth is refused with a reason. `/queue` lists what is waiting,
+`/queue 2` (or an id such as `q3`) cancels one before it starts. A queued
+prompt survives detaching and is discarded, visibly, only when the session
+finalizes.
+
+The prompt is not delivered mid-turn. `claude-agent-sdk` 0.2.144 has no
+turn-scoped delivery: `query()` writes a frame with no turn, one shared
+stream carries every result, and `receive_response()` ends at the first one
+it sees, so a second `query()` in flight could consume the other turn's
+result. `interrupt()` is the only mid-turn primitive and it aborts. Queueing
+is what runs; the evidence is in `SessionEngine.send`'s docstring.
+
 ## Tabs
 
 Since v0.97.0 tabs belong to a **pane group**, not to the window — one
@@ -1105,6 +1123,7 @@ palette, the `/` autocomplete and `/help` from that single registry.
 | `/clear` | Fresh session in this tab: finalize, rotate transcript, reset |
 | `/sessions [kill <prefix> \| kill-detached]` | Every live session: name, age, attached — and how to kill one |
 | `/resume [session-id]` | Reopen a past conversation in a new tab |
+| `/queue [position-or-id]` | Prompts waiting behind the running turn, by position and id; an argument cancels one |
 
 **Memory**
 
