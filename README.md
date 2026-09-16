@@ -1,6 +1,7 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/status-beta-f59f00" alt="beta: config keys and the socket protocol can still change">
   <a href="https://github.com/docwilde/doxa/releases"><img src="https://img.shields.io/github/v/release/docwilde/doxa?label=release&color=e8590c" alt="latest release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/ci.yml?branch=main&label=tests" alt="CI status on main"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
@@ -9,8 +10,10 @@
 </p>
 
 > [!WARNING]
-> **Alpha.** DOXA is `0.x` and moves daily: interfaces, keybindings, config
-> keys and on-disk formats change between releases with no migration path.
+> **Beta.** DOXA reached `1.0` and still moves fast: 109 releases took it from
+> `0.1.0` to `1.9.1` between 23 August and 16 September 2026. Config keys, the
+> socket protocol and on-disk formats can still change between minor versions,
+> with no migration path.
 > It runs an agent that edits your files and a shell with your privileges.
 > The suite gates every release, but the project has one author and most
 > defects so far were found by using it, not by the tests. Read
@@ -60,6 +63,9 @@ spend, fake account numbers. See
 - **[A live diff you can reject one hunk of.](docs/manual.md#the-live-diff)**
   `f2` opens it beside the session, live. A rejected hunk reverts and the
   agent is told why.
+- **[Type while it works.](docs/manual.md#typing-while-a-turn-runs)** A
+  prompt submitted mid-turn is queued, never refused, and starts when the
+  running turn ends. `/queue` lists what waits and cancels one.
 - **[Memory stays inert until it earns influence.](docs/manual.md#lore-integration)**
   `lore_core` runs in-process; nothing new reaches the model until a human
   approves a staged row.
@@ -212,8 +218,8 @@ and key — marking any your terminal cannot send.
 
 ## Status
 
-A working daily driver for its author, not a finished product. Everything
-in [What you get](#what-you-get) and in the [manual](docs/manual.md) has
+Beta, and a working daily driver for its author. Everything in
+[What you get](#what-you-get) and in the [manual](docs/manual.md) has
 shipped and behaves as described; [CHANGELOG.md](CHANGELOG.md) has the
 history. Config keys, socket protocol and command names can still change
 between minor versions.
@@ -221,7 +227,10 @@ between minor versions.
 **Specified, not built.** Six documents in [`docs/plans/`](docs/plans/)
 are designs with nothing behind them, each saying so in its opening lines:
 `plugin-api` (no loader exists — v0.34.0 shipped only the seams one could
-bind to), `remote`, `mermaid`, `code-graph`, `sandbox`, `model-registry`.
+bind to), `mermaid`, `code-graph`, `sandbox`, `model-registry`. `remote` is
+now part-built: v1.8.0 shipped `doxa/remote_policy.py`, the decision layer
+that refuses by default, but no transport and no second renderer — nothing
+listens on a network.
 Five left that list by shipping: `split-panes` (v0.91.0), `live-diff`
 (v0.92.0), `pane-groups` (v0.97.0, which inverted the first),
 `session-sidebar` (v1.0.0) and `peer-publishing` (v1.0.2). `plugins.md` shipped in v0.74.0 and
