@@ -4,6 +4,13 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.7.6 — 2026-09-16
+
+**The pinned LORE moves to 0.49.0.**
+
+- **`lore-core`** pin `v0.48.5` → `v0.49.0`, which adds `lore project move`: a project's beliefs, evidence, session index, staged proposals, `MEMORY.md` and file map re-file when a checkout moves.
+- No DOXA code changes. A machine with the LORE Claude Code plugin still runs that checkout, not this pin (`doxa/_lore_bootstrap.py`); the pin is what a bare install and CI get.
+
 ## 1.7.5 — 2026-09-07
 
 **A desktop banner no longer freezes the interface, and the suite halves.**
