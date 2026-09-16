@@ -237,6 +237,16 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         self._naming_done = False
         # Is a turn running right now? Ctrl+W asks before killing one.
         self.turn_in_flight = False
+        # Mid-turn prompt queue (design point 3): a best-effort MIRROR of
+        # what the engine/daemon actually holds, kept in sync purely by
+        # watching prompt_queued/prompt_dequeued/prompt_cancelled/
+        # prompt_discarded arrive on the event stream (see
+        # PaneRuntimeMixin._render_prompt_queue_event) -- the SAME
+        # "everyone learns it from the broadcast, nobody keeps their own
+        # authoritative copy" rule model_changed already follows. /queue
+        # reads this list to display; a cancel still asks the engine,
+        # never edits this directly.
+        self._queued_prompts: "list[dict[str, str]]" = []
         # Did the USER detach this session on purpose? Then it is no longer
         # this window's to terminate -- quit-stop leaves it alone, and
         # /sessions' kill-all-detached is the only thing that comes for it.
@@ -1372,7 +1382,17 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
             if message is not None:
                 self.run_worker(self._run_unreachable(message), group="command")
                 return
-        self.run_worker(self._run_turn(prompt), exclusive=True, group="turn")
+        # NOT exclusive (defect fix: a prompt typed while a turn is
+        # running used to CANCEL that turn's own rendering worker here --
+        # Textual's exclusive=True cancels whatever else is busy in this
+        # group on this node before starting the new one, and the
+        # cancelled _run_turn had no try/finally to recover in, so
+        # turn_in_flight stuck True and the block's spinner froze
+        # forever). _run_turn itself now asks the engine whether a
+        # prompt starts a turn or gets queued (doxa.promptqueue) and
+        # renders whichever answer it gets -- see its own docstring --
+        # so nothing here needs to know which one this will be.
+        self.run_worker(self._run_turn(prompt), group="turn")
 
     @on(PromptInput.ClipboardImageNotice)
     async def on_clipboard_image_notice(

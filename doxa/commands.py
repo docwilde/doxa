@@ -308,6 +308,18 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette="Context breakdown",
     ),
     SlashCommand(
+        name="/queue",
+        group="Session",
+        # Design point 3: a prompt typed while a turn is running is
+        # queued, never refused -- this is how the user sees what is
+        # waiting and cancels one before it starts. Bare lists; an
+        # argument (position number or the queued id's own prefix)
+        # cancels.
+        usage="/queue [position-or-id]",
+        summary="See prompts queued behind the running turn, or cancel one",
+        palette="Prompt queue",
+    ),
+    SlashCommand(
         name="/clear",
         group="Session",
         summary="Fresh session in THIS tab: finalize, rotate transcript, reset",

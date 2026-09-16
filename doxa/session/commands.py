@@ -105,6 +105,7 @@ PANE_COMMANDS: "tuple[CommandBinding, ...]" = (
     CommandBinding("/effort", "_cmd_effort"),
     CommandBinding("/usage", "_cmd_usage"),
     CommandBinding("/context", "_cmd_context"),
+    CommandBinding("/queue", "_cmd_queue"),
     CommandBinding("/clear", "_cmd_clear"),
     CommandBinding("/split", "_cmd_split"),
     CommandBinding("/vsplit", "_cmd_vsplit"),
@@ -687,6 +688,69 @@ class PaneCommandsMixin:
         block_list = self.query_one("#block-list", VerticalScroll)
         await block_list.mount(ContextBlock(breakdown))
         self.scroll_transcript_to_end(block_list)
+
+    async def _cmd_queue(self, args: str) -> None:
+        """``/queue`` -- design point 3's visibility and cancel surface
+        for the mid-turn prompt queue (see doxa.promptqueue).
+
+        Bare: lists everything still waiting, FIFO order, 1-based
+        position -- read from :attr:`_queued_prompts`, the mirror
+        :meth:`PaneRuntimeMixin._render_prompt_queue_event` keeps in step
+        with the daemon's (or, in-process, the engine's) own broadcasts,
+        exactly the same "the broadcast is truth, nobody keeps a second
+        copy that could disagree" rule model_changed already follows.
+
+        With an argument -- a position number or a queued id's own
+        prefix -- cancels that one. The engine/daemon is the SOURCE OF
+        TRUTH for the cancel itself (this only ever asks it and reports
+        what came back); :attr:`_queued_prompts` updates when the
+        resulting ``prompt_cancelled`` broadcast arrives, not here,
+        same as /pending's approve/reject never edit their own list
+        directly either."""
+        target = args.strip()
+        if not target:
+            if not self._queued_prompts:
+                await self._system("queue: empty — nothing is waiting")
+                return
+            lines = ["queue (starts automatically, FIFO):"]
+            lines += [
+                f"  {i + 1}. {item['text'][:60]!r}  (id {item['id']})"
+                for i, item in enumerate(self._queued_prompts)
+            ]
+            await self._system("\n".join(lines))
+            return
+        item = self._resolve_queued(target)
+        if item is None:
+            await self._system(f"queue: no queued prompt matches {target!r}")
+            return
+        canceller = getattr(self.engine, "cancel_queued", None)
+        if canceller is None:
+            await self._system("queue: this session cannot cancel queued prompts")
+            return
+        ok = await canceller(item["id"])
+        if not ok:
+            await self._system(
+                f"queue: {item['id']} was already gone (started, cancelled, "
+                "or discarded)"
+            )
+        # ok=True prints nothing extra here -- the daemon/engine's own
+        # prompt_cancelled broadcast (every attached client, this one
+        # included) is what announces it, exactly like a successful
+        # /mode or /model switch.
+
+    def _resolve_queued(self, target: str) -> "dict[str, str] | None":
+        """``target`` as either a 1-based position in :attr:`_queued_prompts`
+        or a prefix of a queued id -- whichever the user typed at
+        ``/queue``."""
+        if target.isdigit():
+            index = int(target) - 1
+            if 0 <= index < len(self._queued_prompts):
+                return self._queued_prompts[index]
+            return None
+        for item in self._queued_prompts:
+            if item["id"].startswith(target):
+                return item
+        return None
 
     def _usage_text(self) -> str:
         """/usage: the session's REAL numbers, and the account's real

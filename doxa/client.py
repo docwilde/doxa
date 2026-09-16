@@ -360,12 +360,41 @@ class EngineClient:
         reply = await self._prompt(prompt)
         if not reply.get("ok"):
             raise EngineClientError(reply.get("error") or "prompt refused")
+        if reply.get("queued"):
+            # Mid-turn prompt queue (design point 3): accepted, not
+            # started -- a turn was already running, so the daemon
+            # enqueued this one instead of refusing it or racing the SDK
+            # client. Its own prompt_queued broadcast (every attached
+            # client, this one included -- see _handle_event's "turn"
+            # tag check, which routes it to _oob_queue since this frame
+            # carries none) is what renders the acknowledgement, and the
+            # eventual real turn -- once THIS daemon dequeues it -- rides
+            # the same out-of-band stream a peer-driven turn already
+            # does. Nothing left for this generator to do.
+            return
         while True:
             ev = await self._turn_queue.get()
             yield ev
             if ev.type == "turn_done":
                 break
         await self._refresh_status_quietly()
+
+    async def list_queue(self) -> list[dict]:
+        """Engine parity for :meth:`doxa.engine.SessionEngine.list_queue`
+        -- `/queue`'s bare listing over the socket."""
+        reply = await self._call("queue")
+        if not reply.get("ok"):
+            raise EngineClientError(reply.get("error") or "queue call failed")
+        return [dict(item) for item in reply.get("queue") or []]
+
+    async def cancel_queued(self, item_id: str) -> bool:
+        """Engine parity for
+        :meth:`doxa.engine.SessionEngine.cancel_queued` -- `/queue`'s
+        cancel over the socket. False (never an exception) for an id
+        already started, cancelled, or discarded -- the same shape
+        :meth:`answer_needs_input` already answers a stale id with."""
+        reply = await self._call("cancel_queued", id=item_id)
+        return bool(reply.get("ok"))
 
     async def _prompt(self, text: str) -> dict:
         req_id = next(self._req_ids)

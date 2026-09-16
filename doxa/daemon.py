@@ -519,6 +519,18 @@ class SessionDaemon:
         )
 
     async def _teardown(self) -> None:
+        # Design point 6 (prompt queue): _teardown runs exactly once, only
+        # once _shutdown has set self._done -- i.e. only at a genuine
+        # finalize (linger expiry, explicit stop, or SIGTERM; see the
+        # module docstring's Lifecycle section), never at a mere detach.
+        # That makes this the one place a queued prompt is deliberately
+        # thrown away rather than carried forward. Published BEFORE
+        # clients are dropped below so whichever is still attached sees
+        # why the queue it was watching just emptied.
+        for item in self._prompt_queue.clear():
+            self._publish(None, EngineEvent("prompt_discarded", {
+                "id": item.id, "text": item.text,
+            }))
         for task in (self._pump_task, self._linger_task, self._turn_task):
             if task is not None:
                 task.cancel()
@@ -1093,6 +1105,30 @@ class SessionDaemon:
                 str(params.get("id") or ""), dict(params.get("answer") or {}),
             )
             await self._reply(writer, req_id, ok=ok)
+        elif method == "queue":
+            # `/queue`'s bare listing -- everything still waiting, FIFO
+            # order. Small and bounded (PROMPT_QUEUE_MAXLEN), unlike the
+            # beliefs/pending pagers just above, so it needs none of
+            # their paging.
+            await self._reply(
+                writer, req_id, ok=True, queue=self._prompt_queue.snapshot(),
+            )
+        elif method == "cancel_queued":
+            # `/queue`'s cancel half. The SAME "everyone learns it" rule
+            # prompt_queued above follows: every attached client sees the
+            # cancellation, not just whichever one asked for it.
+            item = self._prompt_queue.cancel(str(params.get("id") or ""))
+            if item is None:
+                await self._reply(
+                    writer, req_id, ok=False,
+                    error="no such queued prompt (already started, "
+                          "cancelled, or discarded)",
+                )
+                return
+            self._publish(None, EngineEvent("prompt_cancelled", {
+                "id": item.id, "text": item.text,
+            }))
+            await self._reply(writer, req_id, ok=True)
         elif method == "stop":
             # Worktree cleanup runs BEFORE the ack (fast, git-only) so a
             # "kept" note can ride in the SAME reply -- unlike
