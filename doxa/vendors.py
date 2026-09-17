@@ -637,7 +637,14 @@ class HttpStreamTransport:
                     # still a failure with a status, and the status is the
                     # part the caller needs.
                     detail = ""
-                push(VendorApiError(exc.code, detail, extract_error_code(detail)))
+                # The CODE is read from the raw body (scrubbing could in
+                # principle touch it), then the body is pattern-scrubbed
+                # before it is carried any further -- so even an
+                # unhandled traceback cannot print an error body verbatim.
+                # The by-VALUE key redaction is a second layer, applied
+                # where the key is known (_vendor_failure).
+                code = extract_error_code(detail)
+                push(VendorApiError(exc.code, scrub_secrets(detail), code))
                 push(done)
                 return
             except Exception as exc:  # noqa: BLE001 -- DNS, TLS, timeout,
