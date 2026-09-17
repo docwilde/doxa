@@ -520,6 +520,24 @@ def test_a_batch_of_only_bad_lines_still_advances_the_cursor(ledger):
     assert [r["body"] for r in more] == ["after the garbage"]
 
 
+def test_an_absurdly_long_line_is_skipped_without_buffering_it(server, ledger):
+    """Bodies are full and unbounded by design -- the emergence plan
+    requires it, because the content is the measurement. A single line
+    past a megabyte is nevertheless a corrupt file or a hostile one, and
+    the reader should step over it rather than hand the browser a
+    megabyte of one record. The records around it must survive."""
+    append(ledger, record(body="before the giant"))
+    append_raw(ledger, json.dumps(record(body="x" * (meshgraph.MAX_LINE_BYTES + 10))))
+    append(ledger, record(body="after the giant"))
+
+    data = get_json(server, "ledger")
+    assert [r["body"] for r in data["records"]] == [
+        "before the giant", "after the giant"]
+    # The cursor stepped over it, so it is not re-read forever.
+    more, _ = meshgraph.read_records(ledger, data["offset"])
+    assert more == []
+
+
 def test_an_absent_ledger_is_an_empty_graph_not_an_error(server, tmp_path):
     """The ledger does not exist until a session sends something. Opening
     the view on a quiet fleet must show an empty graph, not a stack
