@@ -768,7 +768,9 @@ async def test_live_smoke(tmp_path, spec):
     eng = ChatApiEngine(cwd=str(tmp_path), spec=spec, model=spec.default_model)
     await eng.start()
     try:
-        events = await run_turn(eng, "Reply with the single word OK and nothing else.")
+        events = await run_turn(
+            eng, "What is 17 times 23? Answer with the number and the word OK."
+        )
     finally:
         await eng.finalize()
 
@@ -778,7 +780,25 @@ async def test_live_smoke(tmp_path, spec):
     # Every capability this engine declares True, observed live.
     assert eng.resolved_model, "resolved_model=True but no model was reported"
     assert eng.usage_totals.get("input_tokens"), "token_usage=True but no usage arrived"
-    assert of_type(events, "reasoning_delta"), "reasoning=True but no reasoning arrived"
+
+    # reasoning=True, asserted against WHAT THE VENDOR ACTUALLY DID rather
+    # than against what it says it does -- and that distinction is a live
+    # finding, not caution. GLM refuses to have thinking turned off at all
+    # (HTTP 400 code 1210: "This model always engages in thinking and
+    # cannot be disabled"), and yet it measurably returns
+    # `reasoning_tokens: 0` with no reasoning_content on some turns --
+    # observed on a trivial prompt and on a tool-calling turn, on the same
+    # model, minutes apart. Asserting "reasoning always arrives" would
+    # therefore be a FLAKY test pinned to a vendor claim that is not true.
+    # What IS invariant, and what the capability actually promises, is that
+    # reasoning the vendor BILLED reaches the transcript.
+    billed = eng.usage_totals.get("reasoning_output_tokens", 0)
+    if billed:
+        assert of_type(events, "reasoning_delta"), (
+            f"{spec.engine_id} billed {billed} reasoning tokens and none of "
+            "them reached the transcript -- reasoning=True is not honoured"
+        )
+
     # ...and every one it declares False, still absent.
     assert await eng.context_usage() is None
     assert eng.total_cost_usd == 0.0

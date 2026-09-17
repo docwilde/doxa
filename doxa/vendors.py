@@ -33,7 +33,10 @@ part worth more than a clean report.
   the FINAL chunk -- the same chunk that carries ``finish_reason``, not a
   separate trailing one. Hence ``token_usage=True``.
 * Reasoning reaches the client as ``delta.reasoning_content`` (streamed)
-  or ``message.reasoning_content`` (not). Hence ``reasoning=True``.
+  or ``message.reasoning_content`` (not). Hence ``reasoning=True`` -- but
+  see the GLM contradiction below for what that field does and does not
+  promise: it is "reasoning the vendor produced reaches the transcript",
+  not "every turn reasons".
 * Assistant prose reaches the client as ``delta.content`` fragments.
   Hence ``streaming_text=True``.
 * Function calling works, in the OpenAI ``tools`` / ``tool_calls`` shape,
@@ -60,12 +63,20 @@ part worth more than a clean report.
   difference is not enforced -- but whether the nested value is honoured
   by GLM is unobservable from the response, so each vendor is sent its
   own documented shape and :class:`VendorSpec` carries which.
-* **GLM cannot turn thinking off.** ``thinking: {"type": "disabled"}``
-  and ``reasoning_effort: "none"`` are BOTH refused with HTTP 400 code
-  ``1210`` ("This model always engages in thinking and cannot be
-  disabled; please use low, high, or max"). DeepSeek accepts
-  ``{"type": "disabled"}`` and answers without reasoning. So GLM's effort
-  allow-list is three values and DeepSeek's is four.
+* **GLM says thinking cannot be disabled, and then sometimes does not
+  think.** ``thinking: {"type": "disabled"}`` and ``reasoning_effort:
+  "none"`` are both refused with HTTP 400 code ``1210`` ("This model
+  always engages in thinking and cannot be disabled") -- and the same
+  model, minutes later, answered a trivial prompt and a tool-calling turn
+  with ``completion_tokens_details.reasoning_tokens: 0`` and no
+  ``reasoning_content`` at all. Both observations are live. So
+  ``reasoning=True`` means the engine surfaces reasoning the vendor
+  produced, and a test that asserted reasoning on every turn would be
+  flaky against a vendor claim that is not true.
+* **GLM's effort allow-list is therefore three values, not four.** The
+  1210 refusal names them: "please use low, high, or max". DeepSeek
+  accepts ``{"type": "disabled"}`` and answers without reasoning, so its
+  list carries a fourth value, ``"none"``.
 * **DeepSeek silently substitutes a legacy model name.** Asking for
   ``deepseek-chat`` -- the name every older integration uses, including
   this repo's sibling ``panel`` project -- returns HTTP 200 answered by
