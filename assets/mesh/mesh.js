@@ -371,6 +371,28 @@ function step() {
     moved += d * scale;
   }
 
+  // A hard separation pass, after the forces have had their say. FR's
+  // repulsion is a force, so it can be out-argued: two nodes both pulled
+  // hard toward the same hub settle on top of each other, and two
+  // overlapping discs are one unreadable node with two labels fighting
+  // over the same pixels. This just refuses the overlap outright.
+  for (let i = 0; i < n; i++) {
+    const a = list[i];
+    const ra = nodeRadius(a);
+    for (let j = i + 1; j < n; j++) {
+      const b = list[j];
+      const minD = ra + nodeRadius(b) + 10;
+      let ex = a.x - b.x, ey = a.y - b.y;
+      let d = Math.hypot(ex, ey);
+      if (d >= minD) continue;
+      if (d < 0.01) { ex = (i - j) * 0.01; ey = 0.01; d = Math.hypot(ex, ey); }
+      const push = (minD - d) / 2;
+      const ux = (ex / d) * push, uy = (ey / d) * push;
+      if (!a.pinned) { a.x += ux; a.y += uy; }
+      if (!b.pinned) { b.x -= ux; b.y -= uy; }
+    }
+  }
+
   temperature = Math.max(SIM.minTemp, temperature * SIM.cooling);
   energy = moved / n;
 }
