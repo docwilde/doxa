@@ -1056,3 +1056,30 @@ def test_a_provider_cannot_be_talked_into_the_other_vendors_spec(tmp_path):
     it DeepSeek."""
     session = engines_mod.get("deepseek").new_session(cwd=str(tmp_path), spec=GLM)
     assert session.spec is DEEPSEEK
+
+
+def test_the_effort_knob_is_the_one_doxa_already_has(tmp_path, monkeypatch):
+    """One command drives both arms of a mixed fleet. `/effort` writes
+    DOXA_EFFORT, and its choice list is Claude's -- "medium" and "xhigh"
+    have no vendor equivalent and fall back VISIBLY, since self.effort is
+    what the effort chip reads."""
+    monkeypatch.setenv("DOXA_EFFORT", "max")
+    assert engine(tmp_path).effort == "max"
+
+    monkeypatch.setenv("DOXA_EFFORT", "medium")          # Claude-only
+    assert engine(tmp_path).effort == vendors_mod.DEFAULT_EFFORT
+
+    # The vendor-only override wins, for pinning one arm of an experiment
+    # without moving the other.
+    monkeypatch.setenv("DOXA_EFFORT", "medium")
+    monkeypatch.setenv("DOXA_VENDOR_EFFORT", "high")
+    assert engine(tmp_path).effort == "high"
+
+
+async def test_the_configured_effort_reaches_the_request_body(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOXA_EFFORT", "high")
+    transport = StubTransport(prose_script())
+    eng = engine(tmp_path, transport=transport)
+    await eng.start()
+    await run_turn(eng)
+    assert transport.last_body["thinking"]["reasoning_effort"] == "high"

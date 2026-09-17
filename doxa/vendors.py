@@ -157,8 +157,20 @@ ERROR_BODY_MAX = 800
 #: unrecognised value falls back HERE rather than reaching the API.
 DEFAULT_EFFORT = "low"
 
-#: The env var that overrides :data:`DEFAULT_EFFORT` for every vendor.
-EFFORT_ENV = "DOXA_VENDOR_EFFORT"
+#: The knob DOXA ALREADY has (``/effort``, the settings modal,
+#: ``DOXA_EFFORT``), read first so one command drives both arms of a mixed
+#: fleet rather than two that can drift apart. Its choice list is Claude's
+#: -- ``low``/``high``/``max`` overlap with the vendors, ``medium`` and
+#: ``xhigh`` have no equivalent -- and a value with no vendor meaning
+#: falls back to :data:`DEFAULT_EFFORT`, VISIBLY: ``self.effort`` is what
+#: the effort chip reads, so the session shows what it actually asserted
+#: rather than what was asked for.
+EFFORT_ENV = "DOXA_EFFORT"
+
+#: The vendor-only override, for the case the shared knob cannot express:
+#: pinning the vendor arm of an experiment without moving the Claude arm.
+#: Checked BEFORE :data:`EFFORT_ENV`, and unset by default.
+VENDOR_EFFORT_ENV = "DOXA_VENDOR_EFFORT"
 
 #: Sampling temperature. One number for both vendors, on purpose: a
 #: capability-parity experiment must not have one arm sampled differently
@@ -825,7 +837,7 @@ class ChatApiEngine:
         # dropped when it returns, and the suite proves it by looking.
         self._transport: StreamTransport = transport or HttpStreamTransport()
 
-        wanted = str(effort or os.environ.get(EFFORT_ENV, "") or "").strip().lower()
+        wanted = str(effort or _configured_effort() or "").strip().lower()
         # An ALLOW-list, not a passthrough: an unrecognised effort reaching
         # the API is a 400 in the middle of a turn, and GLM refuses "none"
         # outright (error 1210). Falling back HERE is what keeps that a
@@ -1567,6 +1579,27 @@ def _tool_summary(result: Any) -> "tuple[str, bool]":
     except (TypeError, ValueError):
         text = str(result)
     return (_truncate(_scrub(text)), False)
+
+
+def _configured_effort() -> str:
+    """The reasoning effort this install asks for, or ``""``.
+
+    ``doxa.config.raw`` rather than ``os.environ.get`` so the CONFIG FILE
+    layer is real -- that is the single substitution ``raw``'s own
+    docstring exists for, and reading the environment directly here would
+    make ``/effort`` and the settings modal silently not apply to these
+    engines. Imported at the point of use to keep this module's import
+    free of everything ``doxa.config`` drags in."""
+    try:
+        from . import config as config_mod
+
+        return (
+            config_mod.raw(VENDOR_EFFORT_ENV).strip()
+            or config_mod.raw(EFFORT_ENV).strip()
+        )
+    except Exception:  # noqa: BLE001 -- an unreadable config is a default,
+        # never a session that will not start.
+        return ""
 
 
 def _load_messages(path: Path) -> "list[dict]":
