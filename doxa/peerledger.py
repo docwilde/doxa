@@ -96,6 +96,20 @@ lock, so N sessions appending at once serialise on it. From async code use
 :meth:`PeerLedger.append_async`, which is exactly
 ``asyncio.to_thread(self.append, ...)`` and exists so that nobody has to
 remember to write that.
+
+COST, measured here on 2026-09-17 and worth knowing before a body of
+arbitrary size is handed to :meth:`PeerLedger.append`: ``scrub_secrets`` is
+quadratic in the length of an unbroken base64-alphabet run. 1 KB of such a
+run costs 5 ms, 5 KB costs 110 ms, 20 KB costs 1.6 s, 100 KB costs 39 s --
+while 100 KB of PROSE costs 16 ms, because the run is what backtracks. A
+peer message quoting a minified bundle, a base64 attachment or a long digest
+therefore stalls the SENDING session for as long as that takes;
+:meth:`append_async` keeps it off the event loop but does not make it
+cheaper. The fix belongs in ``lore_core.scrub`` (the pattern, not this
+caller). Until it lands, a multi-kilobyte blob in a peer body is a known
+stall rather than a mystery -- and note what it does to the record: the
+scrubber replaces the whole run with a redaction token, so "stored in full"
+means the full SCRUBBED body, which for a blob is short.
 """
 
 from __future__ import annotations
@@ -955,6 +969,11 @@ class SendDecision:
     reset_at: "datetime | None" = None
     retry_after_secs: "float | None" = None
     reason: "str | None" = None
+    never_fits: bool = False
+    """The fan-out alone exceeds the whole budget: no amount of waiting
+    helps, and a reset time here would be a lie. Separate from
+    ``reset_at is None`` because a per-turn refusal has no clock time
+    either, and those two must not read the same to a caller."""
 
     def reset_description(self) -> str:
         """When the refusing scope frees up, in words.
@@ -964,13 +983,13 @@ class SendDecision:
         naming the event -- so it names the event."""
         if self.allowed:
             return "not refused"
+        if self.never_fits:
+            return "never, at this fan-out"
         if self.reset_at is not None:
             after = "" if self.retry_after_secs is None else f" (in {self.retry_after_secs:.1f} s)"
             return f"at {format_ts(self.reset_at)}{after}"
-        if self.scope == "turn":
-            turn = self.turn_id or "the current turn"
-            return f"when turn {turn} ends"
-        return "never, at this fan-out"
+        turn = self.turn_id or "the current turn"
+        return f"when turn {turn} ends"
 
     def raise_if_refused(self) -> "SendDecision":
         if not self.allowed:
@@ -1055,7 +1074,7 @@ def decide_send(
             )
         return SendDecision(
             allowed=False, scope="turn", reset_at=None, retry_after_secs=None,
-            reason=reason, **common,
+            never_fits=never, reason=reason, **common,
         )
 
     if window_used + fanout > limits.per_window:
@@ -1067,7 +1086,7 @@ def decide_send(
             )
             return SendDecision(
                 allowed=False, scope="window", reset_at=None,
-                retry_after_secs=None, reason=reason, **common,
+                retry_after_secs=None, never_fits=True, reason=reason, **common,
             )
         reset_at = _window_reset(
             in_window, window_used + fanout - limits.per_window, limits.window_secs, now

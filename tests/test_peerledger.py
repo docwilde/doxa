@@ -35,6 +35,14 @@ FAKE_KV_SECRET = "api_key=supersecretvalue123"
 FIXED = datetime(2026, 9, 17, 19, 32, 0, 123456, tzinfo=timezone.utc)
 
 
+def _prose(length):
+    """A long body that is not a credential shape. An unbroken run of
+    base64-alphabet characters ("x" * 100_000) is one, so a test built on
+    one measures lore_core.scrub's redaction (and its quadratic cost on
+    runs -- 39 s at 100 KB, measured) rather than the ledger."""
+    return ("the quick brown fox jumps over the lazy dog " * (length // 43 + 1))[:length]
+
+
 def _sender(session="s-alpha", **kwargs):
     return pl.Sender(
         session=session,
@@ -109,12 +117,28 @@ def test_a_body_is_stored_in_full_and_never_truncated(tmp_path):
     """The content IS the measurement -- a coordination message and a status
     ping are distinguished by nothing else."""
     ledger = _ledger(tmp_path)
-    body = "x" * 200_000
+    body = _prose(200_000)
 
     message = ledger.append(sender=_sender(), to=["s-beta"], body=body)
 
-    assert len(message.body) == 200_000
-    assert len(ledger.recent(1)[0].body) == 200_000
+    assert message.body == body
+    assert ledger.recent(1)[0].body == body
+
+
+def test_a_blob_body_is_redacted_which_is_what_stored_in_full_means(tmp_path):
+    """"Stored in full" means the full SCRUBBED body, and for a long
+    base64-alphabet run the scrubber's answer is a short token -- it cannot
+    tell a minified bundle from a key. Recorded here so the experiment reads
+    a redacted blob as scrubbing rather than as truncation."""
+    ledger = _ledger(tmp_path)
+    blob = "QWxpY2VCb2JDaGFybGll" * 50  # 1 KB of base64 alphabet, no spaces
+
+    message = ledger.append(sender=_sender(), to=["s-beta"], body=blob)
+
+    assert "[REDACTED" in message.body and len(message.body) < 100
+    # The hash is still of what was actually sent, so an agent repeating the
+    # same blob is still detectable as a repeat.
+    assert message.body_sha256 == hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def test_an_identifier_is_never_mangled_by_the_scrubber(tmp_path):
@@ -326,13 +350,15 @@ def test_a_reader_polling_mid_write_sees_the_record_whole_or_not_at_all(
         real_write_all(fd, data[len(data) // 2:])
 
     monkeypatch.setattr(pl, "_write_all", split_write)
-    second = _append(ledger, body="y" * 100_000)
+    body = _prose(100_000)
+    second = _append(ledger, body=body)
 
     assert observed, "the split write never ran -- this test proved nothing"
     for view in observed:
         assert [m.body for m in view] == ["first"]
-    assert [m.id for m in ledger.snapshot()] == [ledger.snapshot()[0].id, second.id]
-    assert ledger.snapshot()[-1].body == "y" * 100_000
+    final = ledger.snapshot()
+    assert [m.id for m in final][-1] == second.id
+    assert final[-1].body == body and len(final) == 2
 
 
 def test_concurrent_writers_never_interleave_their_bytes(tmp_path):
@@ -345,7 +371,7 @@ def test_concurrent_writers_never_interleave_their_bytes(tmp_path):
     def writer(index):
         barrier.wait()
         for n in range(20):
-            _append(ledger, body=f"{index}-{n}-" + "z" * 5_000)
+            _append(ledger, body=f"{index}-{n}-" + _prose(5_000))
 
     threads = [threading.Thread(target=writer, args=(i,)) for i in range(5)]
     for thread in threads:
@@ -370,11 +396,12 @@ def test_the_ceiling_refuses_and_says_so_rather_than_rotating(tmp_path):
     discards its oldest half destroys the beginning of the runaway that
     would explain it."""
     ledger = _ledger(tmp_path, ceiling_bytes=1_200)
-    kept = [_append(ledger, body="a" * 100) for _ in range(3)]
-    size_before = ledger.path.stat().st_size
-
+    kept = []
     with pytest.raises(pl.LedgerFull, match=r"REFUSED and nothing was rotated") as caught:
-        _append(ledger, body="a" * 100)
+        for n in range(50):  # bounded: the ceiling must stop this, not the range
+            kept.append(_append(ledger, body=f"record {n}"))
+            size_before = ledger.path.stat().st_size
+    assert 1 < len(kept) < 50
 
     error = caught.value
     assert error.path == ledger.path
