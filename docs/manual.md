@@ -1034,8 +1034,11 @@ which copy loads — `package` is how to reproduce a bug against exactly the
 pinned dependency without moving the plugin checkout aside.
 
 **Curated memory** (user- and project-scoped) is hard-capped by character
-count (4500 user / 8800 project by default, in `lore_core` itself); the
-status bar's `mem u%p%` chip reports fill against those same caps.
+count — **9000 user, 8800 project** on `lore_core` 0.55.0, overridable
+with `LORE_USER_CAP` / `LORE_MEMORY_CAP`. The caps live in `lore_core`,
+not in DOXA, so a LORE pin bump can move them; the status bar's
+`mem u%p%` chip reads `memory_cap(scope)` rather than a number of its own,
+which is why it cannot disagree with `lore status`.
 
 **Beliefs** are an uncapped store with an FTS index and evidence trails.
 At act time, one FTS pass over the prompt may attach a single belief as a
