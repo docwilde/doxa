@@ -155,11 +155,14 @@ ERROR_BODY_MAX = 800
 #: docs/plans/emergent-organization.md is quota-bound rather than
 #: quality-bound. Overridable per session (``DOXA_VENDOR_EFFORT``), and an
 #: unrecognised value falls back HERE rather than reaching the API.
+#: Overridable by :data:`EFFORT_ENV` / :data:`VENDOR_EFFORT_ENV`, or per
+#: session by the ``effort`` constructor argument.
 DEFAULT_EFFORT = "low"
 
 #: The knob DOXA ALREADY has (``/effort``, the settings modal,
-#: ``DOXA_EFFORT``), read first so one command drives both arms of a mixed
-#: fleet rather than two that can drift apart. Its choice list is Claude's
+#: ``DOXA_EFFORT``), read unless the vendor-only override below is set, so
+#: one command drives both arms of a mixed fleet rather than two that can
+#: drift apart. Its choice list is Claude's
 #: -- ``low``/``high``/``max`` overlap with the vendors, ``medium`` and
 #: ``xhigh`` have no equivalent -- and a value with no vendor meaning
 #: falls back to :data:`DEFAULT_EFFORT`, VISIBLY: ``self.effort`` is what
