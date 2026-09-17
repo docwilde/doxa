@@ -1186,6 +1186,11 @@ class ChatApiEngine:
                 yield EngineEvent("tool_call", {
                     "id": call.id, "name": call.name, "input": call.parsed(),
                 })
+                # Timed here rather than tracked across events the way
+                # CodexEngine has to: a call is named, run and answered
+                # inside this one block, so the elapsed time is a real
+                # measurement and not a guess stitched across frames.
+                began = time.monotonic()
                 result = await self._run_tool(call)
                 summary, is_error = _tool_summary(result)
                 yield EngineEvent("tool_result", {
@@ -1193,7 +1198,7 @@ class ChatApiEngine:
                     "name": call.name,
                     "result_summary": summary,
                     "is_error": is_error,
-                    "duration_ms": None,
+                    "duration_ms": int((time.monotonic() - began) * 1000),
                 })
                 self.messages.append({
                     "role": "tool",

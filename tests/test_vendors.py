@@ -432,7 +432,11 @@ async def test_a_tool_call_is_assembled_executed_and_fed_back(tmp_path, spec, sc
     assert len(calls) == 1
     assert calls[0].data["name"] == "lore_belief_search"
     assert calls[0].data["input"] == {"query": "deploys"}   # fragments rejoined
-    assert len(of_type(events, "tool_result")) == 1
+    results = of_type(events, "tool_result")
+    assert len(results) == 1
+    # A real measurement, not a None: the call is named, run and answered
+    # inside one block, so there is nothing to stitch across frames.
+    assert isinstance(results[0].data["duration_ms"], int)
 
     # The result was fed back, so a second request happened and it carries
     # the assistant's tool_calls plus a tool message answering them.
