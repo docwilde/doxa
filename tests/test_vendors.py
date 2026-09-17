@@ -932,3 +932,46 @@ async def test_the_http_transport_reports_a_connection_failure_as_status_zero():
             pass
     assert excinfo.value.status == 0
     assert "OSError" in excinfo.value.detail
+
+
+# -- the peer layer, which is what the experiment actually rides on -----
+
+
+async def test_a_peer_message_reaches_the_next_turn_and_is_marked_untrusted(tmp_path):
+    """``peer_messaging=True`` is the field the mixed-vendor experiment
+    depends on most: an agent that cannot hear its peers cannot
+    self-organise with them. A frame delivered out-of-band rides the NEXT
+    prompt, wrapped in doxa.peers' own untrusted-peer marker -- the same
+    rendering a Claude session gets, so the two arms read identical text."""
+    from doxa import peers as peers_mod
+
+    transport = StubTransport(prose_script())
+    eng = engine(tmp_path, transport=transport)
+    await eng.start()
+    eng._on_peer_frame({
+        "from_title": "peer-two", "from_id": "abcdef0123",
+        "sent_at": "2026-09-17T00:00:00Z", "body": "take the parser, I have the lexer",
+    })
+
+    # Out-of-band first: the rail learns immediately, without waiting for
+    # a turn generator's yield point.
+    assert eng._peer_queue.get_nowait().type == "peer_message"
+
+    events = await run_turn(eng, "what now?")
+    sent = transport.last_body["messages"][-1]["content"]
+    assert peers_mod.PEER_UNTRUSTED_INTRO in sent
+    assert "take the parser, I have the lexer" in sent
+    assert sent.endswith("what now?")
+    assert of_type(events, "turn_started")[0].data["peer_context"] is True
+    # ...and it is consumed, not replayed onto every later turn.
+    assert eng._pending_peer_frames == []
+
+
+async def test_send_peer_message_refuses_clearly_when_the_layer_is_down(tmp_path):
+    from doxa import peers as peers_mod
+
+    eng = engine(tmp_path)
+    with pytest.raises(peers_mod.PeerSendError, match=r"peer layer is not running"):
+        await eng.send_peer_message("abc", "hello")
+    assert eng.list_peers() == []
+    assert eng.peer_count() == 0
