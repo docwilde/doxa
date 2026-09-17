@@ -774,15 +774,25 @@ declares an allowed set, a call outside it is denied there and the model
 is told why. DOXA-native operators are re-checked a second time in
 `execute()` — defence in depth at a choke point, never one layer.
 
-**Two strikes.** A *hard* failure is an unknown tool name, a `TypeError`
-from the backend, or any exception the operator raised: the gate returns
-it as an ordinary `{"error": ...}` result the model can read and retry.
-The **second** hard failure of the same tool disables it for the rest of
-the session, and the disabled names collect in the status bar's `⊘` chip.
-A refused-but-known tool counts too, because a repeatedly-refused call is
-the strongest "stop calling this" signal available. Bad arguments are
-*not* hard — a recoverable mistake must stay retryable. Nothing here is
-persisted: the next session starts with a clean slate.
+**Two strikes.** Every failure comes back as an ordinary
+`{"error": ...}` result the model can read and retry; what differs is
+whether the gate *counts* it. `is_hard_failure` counts exactly two
+shapes: a result whose error says the tool is `not configured`, and one
+that opens `<name> failed:` — which is what any exception an operator
+raised turns into, sync or async. A known tool refused by the session's
+allowed set is counted directly, at the hook and again in the executor,
+because a repeatedly-refused call is the strongest "stop calling this"
+signal available. The **second** hard failure of the same tool disables
+it for the rest of the session, and the disabled names collect in the
+status bar's `⊘` chip.
+
+Two things that look like failures and are deliberately **not** counted:
+bad arguments (a `TypeError` from the backend comes back as
+`bad arguments for <name>: …`) and an unknown tool name, which returns
+the list of names that do exist. Both are recoverable mistakes and must
+stay retryable. Every `spawn_session` cap refusal is soft for the same
+reason. Nothing here is persisted: `ToolGate`'s whole state is two
+in-memory fields built fresh per session.
 
 **Nothing auto-denies silently.** A headless SDK run with no callback
 auto-denies an `AskUserQuestion` and a permission request without telling
@@ -811,17 +821,24 @@ not read. While it is off, the tool is not offered at all: the model
 never learns the name exists.
 
 Turning it on costs real machine and real money per spawn — another
-`claude` process (~294 MB), another worktree (~18 MB for a repo this
-size), and a second token bill additive to this session's. DOXA does not
-aggregate cost across a fleet.
+`claude` process (~294 MB RSS, measured once by the suite's own
+leaked-process reaper and recorded as prose, not computed anywhere),
+another worktree (18 MB, which *is* a constant:
+`WORKTREE_CHECKOUT_BYTES`), and a second token bill additive to this
+session's. DOXA does not aggregate cost across a fleet.
 
 Every call **stops and asks you**, showing the exact task text the child
 will be given, in every permission mode except `bypassPermissions` —
 including `auto`, which is the one deliberate exception to that mode
-handing tool decisions to a classifier. Under `plan` nothing runs at all.
+handing tool decisions to a classifier. Under `plan` no tool runs at all,
+which is the `claude` CLI's own behaviour rather than a block DOXA
+enforces: nothing in `doxa/session_ops.py` tests for that mode.
 Independently of the mode, three caps are enforced inside DOXA before any
-process starts: spawn **depth 2**, **3 live sessions** per repo, and **1
-spawn per 60 seconds**, plus a free-disk preflight. A cap saying no is a
+process starts: spawn **depth 2** (`MAX_SPAWN_DEPTH`), **3 live
+sessions** per repo (`MAX_LIVE_SESSIONS`), and **1 spawn per 60 seconds**
+(`MAX_SPAWNS_PER_WINDOW`), plus a preflight refusing to start below
+**425 MB** free — 18 MB for the worktree and 407 MB for the session it
+will build. Disk it cannot measure is not a refusal. A cap saying no is a
 soft refusal the model can read; it never counts toward the two-strikes
 disable above.
 
@@ -834,29 +851,34 @@ succeeded. The design, including what is deliberately not built, is
 
 ## The status bar
 
-Chips are built in paint order by `doxa/session/chips.py`; a chip whose
+**Eighteen chips** are built in paint order by
+`doxa/session/chips.py`, and a row never shows all of them: a chip whose
 number is zero, or whose state was never asserted, is omitted rather than
-shown empty. Every chip carries a tooltip on hover, including the plain
-(non-clickable) ones.
+shown empty, and a chip whose engine cannot report the thing it names is
+not painted at all rather than painted blank (see
+[Engines](#engines)). Every chip carries a tooltip on hover, including
+the plain, non-clickable ones and the git chip's inert `@sha` span.
 
 | chip | shows | clickable |
 |---|---|---|
-| `mode:` | permission mode (see above); hidden only when it would show `default` on a cramped row | yes — mode picker |
+| `mode:` | permission mode (see above); hidden when the engine has no permission modes, and when it would show `default` on a row under 110 columns — every other mode is painted at every width | yes — mode picker |
+| `◎ remote:<id>` | a remote driver is attached to this session. Hidden at zero, and there is no companion "local" chip: the absence says it (see [Remote drivers](#remote-drivers--a-policy-and-no-transport)) | no |
 | model | the model handling this session's turns | yes — model picker, takes effect next turn |
 | `⚑ needs input` | a question or permission request is waiting on this pane | no |
 | `effort:` | reasoning effort asserted at connect (hidden when none was) | yes — effort picker, affects future sessions only |
-| repo/branch/sha | the git chip: repo name, the worktree's session branch, sha | yes — repo and branch halves each open their own picker |
+| repo/branch/sha | the git chip: repo name, the worktree's session branch, sha | yes — repo and branch halves each open their own picker; `@sha` is inert but tooltipped |
 | `dir NAME` | the folder chip, shown **instead of** the git chip when this session is not in a git repository at all (see [Where a session is](#where-a-session-is)) | yes — the same repo/directory picker |
-| `sub:<tier> (≈$…)` or `$…` | subscription tier with a list-price what-if, or the real API spend on API-key auth | no |
-| `s:N% w:N%` | subscription session (5h) and weekly utilization, cached by the `claude` CLI itself | no |
-| `ctx N%` | context window usage, amber at 70%, red at 90%; `ctx_absolute` adds `24k/200k` inline | yes — confirms, then `/compact` |
-| `N beliefs` | active LORE beliefs for this session | yes — grouped belief list |
+| `diff N files +A −B` | uncommitted work in this session's worktree, recomputed on the edit that ticks the pane; `vs HEAD` when no base was recorded, `⚠ no base` / `⚠ unreadable` for the two states that are not "nothing", and a short `diff Nf +A −B` under 110 columns (see [The live diff](#the-live-diff)) | yes — the same toggle `f2` is |
+| `sub:<tier> (≈$…)` or `$…` | subscription tier with a list-price what-if, or the real API spend on API-key auth. Both hidden on an engine that reports no cost | no |
+| `s:N% w:N%` | subscription session (5h) and weekly utilization, cached by the `claude` CLI itself; a third scoped segment appears when one is published, and a trailing `~` means the reading is stale | no |
+| `ctx N%` | context window usage, amber at 70%, red at 90%; hidden outright on an engine that never reports a window size. `ctx_absolute` adds `24k/200k` inline, and that segment needs 100 columns of its own | yes — confirms, then `/compact` |
+| `N beliefs` | active LORE beliefs for this session; painted at zero too, because zero beliefs is a fact | yes on an engine carrying the belief pickers, plain on one that is not |
 | `mem u%p%` | curated-memory fill, user and project, as two separate percentages | no |
 | `N proposals` | staged LORE proposals awaiting review (hidden at zero) | yes — pending-proposals picker |
 | `⧉ N agents` | Task-spawned subagents currently running (hidden at zero) | no (see subagent row below) |
 | `⌁ session <id>` | this session's reattach handle (only while attached to a daemon) | yes — sessions picker |
 | `peers N (k⌁)` | other DOXA sessions on this repo; `k⌁` is how many are detached | yes — peers picker: each row is the peer, the beginning of its transcript, and tokens consumed so far (self-reported, up to one heartbeat stale) |
-| `⊘ <tool>` | a tool disabled after two failures this session | no |
+| `⊘ <tool>` | every tool disabled after two failures this session, space-joined into one chip | no |
 
 A `⧉ N agents` chip is accompanied by a second row under the status bar
 with one clickable entry per running subagent; clicking one opens a
@@ -902,10 +924,12 @@ status bar's `mem u%p%` chip reports fill against those same caps.
 At act time, one FTS pass over the prompt may attach a single belief as a
 citation (`consult_floor`, default relevance floor 1.0; 0 disables it) —
 labelled CITE-ONLY, never injected as fact. The model's entire memory tool
-surface is five operators: four read-only (`lore_belief_search`,
-`lore_belief_show`, `lore_memory_list`, `lore_session_search`) and one
-write, `lore_remember`, which only **stages a proposal** — it never writes
-directly into memory.
+surface is six operators (`doxa/operators.py`): five read-only —
+`lore_belief_search`, `lore_belief_show`, `lore_belief_neighbours`,
+`lore_memory_list`, `lore_session_search` — and one write,
+`lore_remember`, which only **stages a proposal** into
+`$LORE_ROOT/pending/` — it never writes directly into memory. They reach
+the model as `mcp__doxa__<name>`.
 
 **The review gate.** The only write path into curated memory or the
 belief store is a human approving a proposal, one row at a time. Through
@@ -1014,9 +1038,12 @@ own tooltip.
 between turns — at most once every `derive_secs`, **900 seconds by
 default** since v0.98.0 — and stages whatever it judges worth remembering,
 behind the same approval gate as everything else. It never blocks a turn:
-it is scheduled on turn-done, refuses to start while one is already in
-flight or while the session is finalizing, so a quiet session pays nothing
-and a busy one pays at most four reviews an hour.
+its one trigger is turn-done, it refuses to start while **another review**
+is still running or while the session is finalizing, and `finalize()`
+waits for an in-flight review rather than racing it. So a quiet session
+pays nothing and a busy one pays at most four reviews an hour. It does
+not check whether a turn is running, because it is only ever scheduled
+when one has just ended.
 
 Each review shells out to a headless `claude -p`, so it is a real cost.
 `derive_secs = 0` (or `off`) turns it off and leaves review where it was
