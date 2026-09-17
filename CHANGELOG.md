@@ -4,6 +4,15 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.9.3 — 2026-09-17
+
+**The pinned LORE moves from 0.54.0 to 0.55.0.**
+
+- **`lore-core`** pin `v0.54.0` → `v0.55.0`, which adds the hub client: `lore sync push`, `pull`, `bootstrap`, `login` and `classes`, on stdlib `urllib`.
+- Inherited fix: **`peer_state`** never committed, so sqlite3 held the transaction open and later reads missed ops other connections had written. A caller could push an empty log and report success.
+- Inherited fix: **`gate`** imports `db_connect` at module level, so two `lore_core` instances in one process no longer cross-write staging ops.
+- No DOXA code changes. Nothing syncs unless a hub, token and key are configured; with no key every incoming op stages unverified.
+
 ## 1.9.2 — 2026-09-16
 
 **The pinned LORE moves from 0.53.0 to 0.54.0.**
