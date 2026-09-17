@@ -154,14 +154,38 @@ def parse_record(line: str) -> "dict[str, Any] | None":
     The shape written by ``doxa.peerledger``::
 
         {"v": 1, "id": "<uuid4 hex>", "ts": "2026-09-17T19:32:00.123456Z",
-         "from": {"session": "<id>", "title": "...", "repo": "/abs/path",
-                  "model": "claude-opus-5", "engine": "claude"},
+         "from": {"session": "<id>", "title": str|null, "repo": str|null,
+                  "model": str|null, "engine": str|null},
          "to": ["<session id>", ...],
          "kind": "direct" | "broadcast",
          "in_reply_to": "<message id>" | null,
          "body": "<scrubbed text>", "body_sha256": "<hex>",
          "latency_ms": <int> | null,
          "turn": {"id": "<turn id>" | null, "state": "idle" | "running"}}
+
+    FOUR PROPERTIES OF THAT RECORD THAT THE VIEW MUST NOT MISREAD, each
+    confirmed with the writer rather than assumed:
+
+    * **The sender writes it, exactly once; a receiver never appends.**
+      That is what makes one ``from`` and N ``to`` coherent, and it is
+      why this module only ever reads. Anything that appended on receipt
+      would double every message and put out-degree -- the experiment's
+      first measure -- out by a factor of two.
+    * **It is written after the send succeeded, and ``to`` names the
+      peers actually reached.** A per-peer failure means that peer is
+      simply absent. So an edge on this graph means delivery *happened*,
+      not that it was attempted, and the view must never suggest
+      otherwise.
+    * **``turn`` and ``latency_ms`` are both SENDER-side.** One record
+      with N recipients cannot carry N receiver states, so ``turn`` is
+      what the sender was doing; ``latency_ms`` is the wall time the
+      sender took to compose this message, measured from the message in
+      ``in_reply_to``, and is ``null`` whenever there is no reference
+      point -- which is common. Null is not zero and is not rendered.
+    * **Every identity field except ``session`` may be null.** A session
+      outside a repository has no root, and an older build reports no
+      model. The page falls back to the short session id rather than
+      showing the word "null".
 
     **None rather than a raise, for every kind of bad line**, and that is
     the load-bearing decision here rather than laziness about validation.
@@ -192,20 +216,41 @@ def parse_record(line: str) -> "dict[str, Any] | None":
     # `to` is normalized to a list of non-empty strings here rather than
     # trusted: the page indexes nodes by these values, and a null or a
     # nested object in the list would become a node labelled "undefined"
-    # that no session corresponds to.
+    # that no session corresponds to. The writer already de-duplicates and
+    # preserves order; doing it again costs nothing and means a repeated
+    # id can never silently double an edge's weight.
     raw_to = record.get("to")
-    recipients = [t for t in raw_to if isinstance(t, str) and t] if isinstance(raw_to, list) else []
+    recipients: "list[str]" = []
+    if isinstance(raw_to, list):
+        for target in raw_to:
+            if isinstance(target, str) and target and target not in recipients:
+                recipients.append(target)
 
+    # KIND IS READ, NEVER INFERRED FROM len(to). It is tempting to treat
+    # one recipient as "direct", and it is wrong: a broadcast to a
+    # two-session fleet reaches exactly one peer and is still a
+    # broadcast. Since broadcast-vs-pairwise is the emergence plan's
+    # primary manipulation, guessing it from shape would fabricate the
+    # experiment's independent variable out of its dependent one.
+    #
+    # So a record whose kind is missing or unrecognised becomes
+    # "unknown" -- drawn in neutral grey, counted as neither. That keeps
+    # the traffic visible (it is still real) without inventing a fact
+    # about it, and it stays honest when the writer adds a third kind
+    # this build has never heard of.
     kind = record.get("kind")
     if kind not in ("direct", "broadcast"):
-        # Not a reason to drop the record -- the fan-out is still real and
-        # still worth drawing. Infer from shape, which is what the kind
-        # field summarises anyway.
-        kind = "broadcast" if len(recipients) > 1 else "direct"
+        kind = "unknown"
 
     turn = record.get("turn")
     if not isinstance(turn, dict):
         turn = {}
+
+    # bool is an int in Python, and a float is a plausible thing for a
+    # writer to emit for milliseconds. Accept a real number, reject True.
+    latency = record.get("latency_ms")
+    if isinstance(latency, bool) or not isinstance(latency, (int, float)):
+        latency = None
 
     return {
         "id": record.get("id") if isinstance(record.get("id"), str) else "",
@@ -221,8 +266,10 @@ def parse_record(line: str) -> "dict[str, Any] | None":
             record.get("in_reply_to") if isinstance(record.get("in_reply_to"), str) else None
         ),
         "body": record.get("body") if isinstance(record.get("body"), str) else "",
-        "latency_ms": record.get("latency_ms") if isinstance(record.get("latency_ms"), int) else None,
-        "turn_state": turn.get("state") if isinstance(turn.get("state"), str) else "",
+        # Both of these are the SENDER's, never the recipients' -- see the
+        # contract notes above. The names say so on the wire.
+        "sender_latency_ms": latency,
+        "sender_turn_state": turn.get("state") if isinstance(turn.get("state"), str) else "",
         "edges": edges_for(session, recipients, kind),
     }
 

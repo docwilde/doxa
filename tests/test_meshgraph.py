@@ -332,6 +332,20 @@ def test_the_page_script_never_uses_an_html_sink(server):
     assert "textContent" in source
 
 
+def test_the_page_assets_are_text_and_hold_no_control_characters(server):
+    """A NUL byte in the source makes the file binary to git, to grep and
+    to every diff tool -- which is how a page asset stops being reviewable
+    without anyone noticing it happened. Caught for real: writing a map
+    key as ``\\u0000`` put four literal NULs into mesh.js, which ran
+    perfectly and turned the file into ``data``."""
+    for name in ("index.html", "mesh.js", "mesh.css"):
+        raw = (ASSETS / name).read_bytes()
+        assert b"\x00" not in raw, f"{name} contains a NUL byte"
+        text = raw.decode("utf-8")  # must not raise
+        stray = {c for c in text if ord(c) < 32 and c not in "\n\t"}
+        assert not stray, f"{name} holds control characters: {stray!r}"
+
+
 def test_the_page_carries_a_policy_that_blocks_injected_script(server):
     """Defence in depth behind the escaping: even a body that somehow
     reached the DOM as markup could not fetch or execute anything, and
@@ -575,16 +589,95 @@ def test_a_direct_message_produces_exactly_one_edge(server, ledger):
     assert edges == [{"from": "sess-alpha", "to": "sess-beta", "kind": "direct"}]
 
 
-def test_the_kind_is_inferred_when_a_record_omits_it(ledger):
-    """A record whose ``kind`` is missing or unrecognised is still real
-    traffic and still worth drawing. The fan-out is what the field
-    summarises, so it is recovered from shape rather than dropped."""
-    many = meshgraph.parse_record(
-        json.dumps(record(kind="nonsense", to=["b", "c", "d"]))
+def test_a_broadcast_to_a_single_peer_is_still_a_broadcast(server, ledger):
+    """``kind`` is read, never derived from ``len(to)``.
+
+    In a two-session fleet a broadcast reaches exactly one peer. Deriving
+    the kind from the recipient count would file that as a direct
+    message -- and since broadcast-vs-pairwise is the emergence plan's
+    primary manipulation, that is fabricating the experiment's
+    independent variable out of its dependent one, in the exact
+    condition (small N) where it is hardest to notice."""
+    append(ledger, record(to=["sess-beta"], kind="broadcast"))
+    data = get_json(server, "ledger")
+    assert data["records"][0]["kind"] == "broadcast"
+    assert data["records"][0]["edges"] == [
+        {"from": "sess-alpha", "to": "sess-beta", "kind": "broadcast"}
+    ]
+
+
+def test_a_record_with_no_usable_kind_claims_neither(ledger):
+    """The other half of the same rule. A missing or unrecognised kind is
+    still real traffic and still worth drawing, but the view may not
+    guess which sort it was -- so it is marked ``unknown``, drawn in a
+    neutral grey, and counted as neither. That also keeps the reader
+    honest when the writer adds a third kind this build has never seen."""
+    for bad in ("nonsense", None, 7, ""):
+        parsed = meshgraph.parse_record(json.dumps(record(kind=bad, to=["b", "c"])))
+        assert parsed["kind"] == "unknown", bad
+        assert {e["kind"] for e in parsed["edges"]} == {"unknown"}
+
+
+def test_a_repeated_recipient_cannot_double_an_edges_weight(ledger):
+    """``to`` is de-duplicated by the writer, order preserved. Doing it
+    again here costs nothing and means a repeat could never inflate a
+    pair's message count -- which is edge thickness on the canvas, and
+    degree in the analysis."""
+    parsed = meshgraph.parse_record(
+        json.dumps(record(to=["b", "c", "b"], kind="broadcast"))
     )
-    assert many["kind"] == "broadcast"
-    one = meshgraph.parse_record(json.dumps(record(to=["b"], kind=None)))
-    assert one["kind"] == "direct"
+    assert parsed["to"] == ["b", "c"]
+    assert [e["to"] for e in parsed["edges"]] == ["b", "c"]
+
+
+def test_null_identity_fields_never_reach_the_page_as_the_word_null(ledger):
+    """Every field but ``session`` is nullable: a session outside a
+    repository has no root, and an older build reports no model. A node
+    labelled "null" is worse than one labelled by its short id."""
+    parsed = meshgraph.parse_record(
+        json.dumps(
+            record(
+                **{
+                    "from": {
+                        "session": "s1", "title": None, "repo": None,
+                        "model": None, "engine": None,
+                    }
+                }
+            )
+        )
+    )
+    assert parsed["title"] == "" and parsed["repo"] == ""
+    assert parsed["model"] == "" and parsed["engine"] == ""
+    assert "null" not in json.dumps(
+        [parsed["title"], parsed["repo"], parsed["model"], parsed["engine"]]
+    )
+
+
+def test_a_null_latency_is_not_reported_as_zero(ledger):
+    """``latency_ms`` is sender-side compose time measured from
+    ``in_reply_to``, and is null whenever there is no reference point --
+    which is common. Zero would be a claim that the sender answered
+    instantly, which is a different and false statement."""
+    assert meshgraph.parse_record(json.dumps(record(latency_ms=None)))[
+        "sender_latency_ms"] is None
+    # bool is an int in Python; True must not survive as a latency of 1.
+    assert meshgraph.parse_record(json.dumps(record(latency_ms=True)))[
+        "sender_latency_ms"] is None
+    assert meshgraph.parse_record(json.dumps(record(latency_ms=412)))[
+        "sender_latency_ms"] == 412
+
+
+def test_the_sender_side_fields_are_named_for_whose_they_are(ledger):
+    """``turn`` and ``latency_ms`` describe the SENDER. One record with N
+    recipients cannot carry N receiver states, so a name that did not say
+    so would invite the page to render either as a fact about a
+    recipient."""
+    parsed = meshgraph.parse_record(json.dumps(record()))
+    assert "sender_turn_state" in parsed and "sender_latency_ms" in parsed
+    assert "turn_state" not in parsed and "latency_ms" not in parsed
+
+    source = strip_comments((ASSETS / "mesh.js").read_text(encoding="utf-8"))
+    assert "sender_turn_state" in source and "sender_latency_ms" in source
 
 
 # -- the reader seam -------------------------------------------------------

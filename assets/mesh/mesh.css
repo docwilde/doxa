@@ -272,6 +272,11 @@ h2#sel-title {
  * colour: the arrow glyph says direction, the "broadcast" tag says kind. */
 .msg.is-direct { border-left-color: var(--direct); }
 .msg.is-broadcast { border-left-color: var(--broadcast); }
+/* A record whose `kind` the ledger did not state. Grey claims nothing --
+ * it is deliberately not one of the two meaningful accents, because
+ * guessing which would fabricate the experiment's primary variable. */
+.msg.is-unknown { border-left-color: var(--text-dim); }
+.msg.is-unknown .msg-tag { color: var(--text-dim); }
 
 .msg-head {
   display: flex;
