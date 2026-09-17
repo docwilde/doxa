@@ -739,6 +739,34 @@ def test_another_turns_deliveries_do_not_spend_this_turns_budget(tmp_path):
     assert limiter.used_in_window(FIXED) == 18
 
 
+def test_a_turn_that_outlives_the_window_keeps_the_budget_it_spent(tmp_path):
+    """A long turn (a slow model, a long tool call) can run past the rolling
+    window. If the window's pruning dropped its deliveries, the per-turn
+    budget would silently refill halfway through the turn -- and an
+    out-of-turn check is enough to trigger it, which is why pruning is keyed
+    on the live turn rather than on whichever turn is being asked about."""
+    limiter = pl.RateLimiter(pl.SendLimits(per_turn=10, per_window=500, window_secs=60))
+    limiter.charge(recipients=[f"s-{n}" for n in range(9)], turn_id="t-long", now=FIXED)
+    later = FIXED + timedelta(seconds=120)
+
+    # ...something asks a question outside the turn while it is still running
+    limiter.check(recipients=["s-a"], turn_id=None, now=later)
+
+    assert limiter.used_in_turn("t-long") == 9
+    assert not limiter.charge(recipients=["s-a", "s-b"], turn_id="t-long", now=later).allowed
+
+
+def test_a_finished_turns_deliveries_age_out_of_the_history(tmp_path):
+    """The other half of that rule: only the LIVE turn is exempt from the
+    window, or a session's history grows for as long as it runs."""
+    limiter = pl.RateLimiter(pl.SendLimits(per_turn=10, per_window=500, window_secs=60))
+    limiter.charge(recipients=[f"s-{n}" for n in range(9)], turn_id="t-old", now=FIXED)
+
+    limiter.check(recipients=["s-a"], turn_id="t-new", now=FIXED + timedelta(seconds=120))
+
+    assert limiter.history() == []
+
+
 def test_a_send_outside_any_turn_is_still_bounded_by_the_window(tmp_path):
     """A None turn bucket would never reset -- it would refuse every
     out-of-turn send forever while naming a reset that never comes. The

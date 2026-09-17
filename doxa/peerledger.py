@@ -1139,6 +1139,7 @@ class RateLimiter:
         self.limits = limits if limits is not None else SendLimits()
         self._now = now or _utc_now
         self._history: "deque[Delivery]" = deque()
+        self._turn_id: "str | None" = None
 
     def check(
         self,
@@ -1149,7 +1150,9 @@ class RateLimiter:
     ) -> SendDecision:
         """Would this send be allowed? Records nothing."""
         moment = now or self._now()
-        self._prune(moment, turn_id)
+        if turn_id is not None:
+            self._turn_id = turn_id
+        self._prune(moment)
         return decide_send(
             self.limits, list(self._history),
             turn_id=turn_id, fanout=_fanout(recipients), now=moment,
@@ -1195,18 +1198,29 @@ class RateLimiter:
 
     def reset(self) -> None:
         self._history.clear()
+        self._turn_id = None
 
-    def _prune(self, now: datetime, turn_id: "str | None") -> None:
+    def _prune(self, now: datetime) -> None:
         """Forget deliveries that can no longer refuse anything.
 
         A delivery survives if it is inside the window OR belongs to the
-        turn being asked about -- a turn can outlive the window, and
-        dropping its deliveries would hand back per-turn budget that was
-        already spent."""
+        LIVE turn -- the most recent turn id this limiter has been asked
+        about. A turn can outlive the window (a long tool call, a slow
+        model), and dropping its deliveries would hand back per-turn budget
+        that was already spent.
+
+        Keyed on the live turn rather than on the turn being asked about
+        right now, because those differ: a check made outside any turn
+        (``turn_id=None``) would otherwise prune the running turn's
+        deliveries and silently refill its budget. One session runs one
+        turn at a time, so "most recent" is "live", and the rule stays
+        bounded -- deliveries from turns that have ended age out
+        normally."""
         cutoff = now - timedelta(seconds=self.limits.window_secs)
         while self._history:
             oldest = self._history[0]
-            if oldest.at > cutoff or (turn_id is not None and oldest.turn_id == turn_id):
+            live_turn = self._turn_id is not None and oldest.turn_id == self._turn_id
+            if oldest.at > cutoff or live_turn:
                 break
             self._history.popleft()
 
