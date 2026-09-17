@@ -975,3 +975,25 @@ async def test_send_peer_message_refuses_clearly_when_the_layer_is_down(tmp_path
         await eng.send_peer_message("abc", "hello")
     assert eng.list_peers() == []
     assert eng.peer_count() == 0
+
+
+def test_neither_the_module_nor_the_registry_pulls_the_sdk():
+    """doxa.engines' own rule, held: a module whose job is to run a session
+    on something OTHER than Claude must not force claude_agent_sdk's
+    404 ms to load. The operator projection imports it at the point of
+    use, inside start(), and nowhere else -- so listing the engines (which
+    `doxa --engine ...` does on every launch) stays free.
+
+    A subprocess, because sys.modules in this one is already populated by
+    the rest of the suite."""
+    import subprocess
+    import sys
+
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import sys, doxa.vendors, doxa.engines;"
+         "doxa.engines.available();"
+         "print('YES' if 'claude_agent_sdk' in sys.modules else 'NO')"],
+        capture_output=True, text=True, check=True,
+    )
+    assert out.stdout.strip() == "NO", out.stdout + out.stderr
