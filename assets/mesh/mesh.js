@@ -857,7 +857,12 @@ function resize() {
 
 function wire() {
   canvas.addEventListener("pointerdown", (ev) => {
-    canvas.setPointerCapture(ev.pointerId);
+    // Pointer capture keeps drag events coming when the pointer leaves
+    // the canvas -- a convenience, not a requirement. It throws for a
+    // pointer id that is not active, and an exception here would abort
+    // the handler before anything is selected, so selection would fail
+    // for a reason that has nothing to do with selection.
+    try { canvas.setPointerCapture(ev.pointerId); } catch (err) { /* not fatal */ }
     const hit = nodeAt(ev.clientX, ev.clientY);
     if (hit) {
       dragging = hit;
