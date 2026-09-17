@@ -778,3 +778,21 @@ async def test_live_smoke(tmp_path, spec):
     # ...and every one it declares False, still absent.
     assert await eng.context_usage() is None
     assert eng.total_cost_usd == 0.0
+
+
+async def test_an_answer_truncated_before_any_text_says_so(tmp_path):
+    """The measured trap, guarded from the other side. request_body never
+    sends max_tokens -- but a vendor-side default can still truncate, and
+    on a reasoning model the whole budget goes to hidden reasoning and
+    `content` comes back EMPTY. Rendering that as "the model said nothing"
+    is the reading that sends an operator looking in the wrong place."""
+    script = [
+        _chunk("deepseek-flash", {"reasoning_content": "thinking hard"}),
+        _chunk("deepseek-flash", {"content": ""}, finish="length", usage=USAGE),
+    ]
+    eng = engine(tmp_path, transport=StubTransport(script))
+    await eng.start()
+    events = await run_turn(eng)
+    done = of_type(events, "turn_done")[0].data
+    assert done["is_error"] is True
+    assert "cut off" in done["error"]

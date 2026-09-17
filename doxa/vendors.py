@@ -1153,6 +1153,20 @@ class ChatApiEngine:
                 self._persist_assistant_text(completion.text)
 
             if not completion.tool_calls:
+                if completion.finish_reason == "length" and not completion.text:
+                    # THE MEASURED TRAP, guarded from the other side.
+                    # request_body never sends max_tokens, but a vendor-side
+                    # default can still truncate -- and when it does on a
+                    # reasoning model the whole budget goes to hidden
+                    # reasoning and `content` comes back EMPTY. A turn that
+                    # rendered that as "the model said nothing" is the one
+                    # reading that sends an operator looking in the wrong
+                    # place, so it is named instead.
+                    failure = (
+                        "the answer was cut off at the model's output limit "
+                        "before any text was produced -- the whole budget "
+                        "went to reasoning"
+                    )
                 break
 
             for call in completion.tool_calls:
