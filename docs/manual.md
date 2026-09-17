@@ -1,10 +1,11 @@
 # DOXA manual
 
 Reference for what DOXA does today. Everything here is true of the current
-code — verified against source, not transcribed from release notes. For
-the pitch and the install instructions, see [README.md](../README.md). For
-designs that are **not** built yet, see [docs/plans/](plans/) — this manual
-never documents a plan as if it were shipped.
+code — verified against source, not transcribed from release notes; this
+document was last read against **1.9.2** end to end. For the pitch and the
+install instructions, see [README.md](../README.md). For designs that are
+**not** built yet, see [docs/plans/](plans/) — this manual never documents
+a plan as if it were shipped.
 
 ## Contents
 
@@ -19,7 +20,7 @@ never documents a plan as if it were shipped.
 - [Worktrees and finalize](#worktrees-and-finalize)
 - [Where a session is](#where-a-session-is)
 - [Permission modes](#permission-modes)
-- [Containment](#containment) — and [remote drivers](#remote-drivers--a-policy-and-no-transport)
+- [Containment](#containment) — [session spawn](#session-spawn--off-unless-you-turn-it-on) and [remote drivers](#remote-drivers--a-policy-and-no-transport)
 - [The status bar](#the-status-bar)
 - [LORE integration](#lore-integration)
 - [Shell escape](#shell-escape)
@@ -983,7 +984,7 @@ the plain, non-clickable ones and the git chip's inert `@sha` span.
 | `diff N files +A −B` | uncommitted work in this session's worktree, recomputed on the edit that ticks the pane; `vs HEAD` when no base was recorded, `⚠ no base` / `⚠ unreadable` for the two states that are not "nothing", and a short `diff Nf +A −B` under 110 columns (see [The live diff](#the-live-diff)) | yes — the same toggle `f2` is |
 | `sub:<tier> (≈$…)` or `$…` | subscription tier with a list-price what-if, or the real API spend on API-key auth. Both hidden on an engine that reports no cost | no |
 | `s:N% w:N%` | subscription session (5h) and weekly utilization, cached by the `claude` CLI itself; a third scoped segment appears when one is published, and a trailing `~` means the reading is stale | no |
-| `ctx N%` | context window usage, amber at 70%, red at 90%; hidden outright on an engine that never reports a window size. `ctx_absolute` adds `24k/200k` inline, and that segment needs 100 columns of its own | yes — confirms, then `/compact` |
+| `ctx N%` | context window usage, amber at 70%, red at 90%; `ctx —` while an engine that *can* report one has not yet, and hidden outright on an engine that never will. `ctx_absolute` adds `24k/200k` inline, and that segment needs 100 columns of its own | yes — confirms, then `/compact` |
 | `N beliefs` | active LORE beliefs for this session; painted at zero too, because zero beliefs is a fact | yes on an engine carrying the belief pickers, plain on one that is not |
 | `mem u%p%` | curated-memory fill, user and project, as two separate percentages | no |
 | `N proposals` | staged LORE proposals awaiting review (hidden at zero) | yes — pending-proposals picker |
@@ -1438,11 +1439,18 @@ headlessly from the real app by
 [`scripts/screenshot.py`](../scripts/screenshot.py) and
 [`scripts/record_gif.py`](../scripts/record_gif.py) — a scripted session,
 no spend, fake account numbers — and each still keeps its source SVG
-committed beside its PNG. The [README](../README.md#gallery) captions ten
-of them. The rest, catalogued here so that **no rendered asset is left
-unnamed by any document**: that is the exact condition
+committed beside its PNG. **Twenty-nine images, each named exactly once**
+— the [README](../README.md#gallery) captions eleven of them, counting the
+hero, and the other eighteen are catalogued below so that **no rendered
+asset is left unnamed by any document**. That is the exact condition
 `beliefs-browser.png` needed to sit wrong for eighteen releases before
-v0.87.0 deleted it.
+v0.87.0 deleted it. All twenty-nine are 3068x1734.
+
+Every scene renders the app inside **the checkout the script runs from**,
+so the identity block, the tab labels and the `repo ⎇ branch` chip carry
+that checkout's own branch and path. Capture from `main`, on a clean tree,
+or a working branch name ends up baked into fourteen of the sixteen
+stills.
 
 | asset | shows |
 |---|---|
@@ -1457,10 +1465,10 @@ v0.87.0 deleted it.
 | [`settings.png`](../assets/shots/settings.png) | the settings modal, each row's effective value and its source |
 | [`reasoning.gif`](../assets/shots/reasoning.gif) | the reasoning fold ticking, then the phase flipping to `generating` |
 | [`sessions.png`](../assets/shots/sessions.png) | `/sessions`, attached and detached |
-| [`clock.png`](../assets/shots/clock.png) | the clock |
+| [`clock.png`](../assets/shots/clock.png) | the upper-right clock |
 | [`palette.gif`](../assets/shots/palette.gif) | the `ctrl+p` command palette |
 | [`rename.gif`](../assets/shots/rename.gif) | renaming a tab by double-clicking its header |
 | [`attention-blink.gif`](../assets/shots/attention-blink.gif) | a tab blinking for attention |
-| [`image-support.png`](../assets/shots/image-support.png) | `/img` naming the image tier this terminal got |
-| [`banner-blocks.png`](../assets/shots/banner-blocks.png) | the boot banner |
+| [`image-support.png`](../assets/shots/image-support.png) | `/img`'s tier table — the rung in use, and every rung it could not measure labelled as such rather than guessed |
+| [`banner-blocks.png`](../assets/shots/banner-blocks.png) | the boot banner, drawn in block characters on every terminal alike |
 | [`transparent.png`](../assets/shots/transparent.png) | the transparent-background setting |
