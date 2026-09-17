@@ -838,3 +838,97 @@ def test_one_engine_that_cannot_import_leaves_the_others_registered(monkeypatch)
     assert engines_mod.available() == ("claude", "deepseek", "glm")
     with pytest.raises(KeyError, match=r"unknown engine 'codex'"):
         engines_mod.get("codex")
+
+
+# -- the production transport, without a socket ------------------------
+
+
+class _FakeResponse:
+    """What urllib hands back: an iterable of raw lines, and a close()."""
+
+    def __init__(self, lines) -> None:
+        self._lines = list(lines)
+        self.closed = False
+
+    def __iter__(self):
+        return iter(self._lines)
+
+    def close(self):
+        self.closed = True
+
+
+async def test_the_http_transport_parses_sse_and_stops_at_done():
+    """The real transport, driven through an injected opener rather than a
+    socket. Covers the three things only it does: the ``data:`` prefix, the
+    ``[DONE]`` sentinel, and the SSE comment lines a keep-alive sends."""
+    from doxa.vendors import HttpStreamTransport
+
+    seen = {}
+
+    def opener(request, timeout=None):
+        seen["url"] = request.full_url
+        seen["body"] = json.loads(request.data.decode())
+        seen["timeout"] = timeout
+        return _FakeResponse([
+            b": keep-alive\n",
+            b'data: {"a": 1}\n',
+            b"\n",
+            b'data: {"b": 2}\n',
+            b"data: [DONE]\n",
+            b'data: {"never": "read"}\n',
+        ])
+
+    transport = HttpStreamTransport(opener=opener)
+    payloads = [
+        p async for p in transport.stream(
+            "https://example.invalid/chat", {"model": "m"}, {"Authorization": "Bearer x"}, 12.0
+        )
+    ]
+    assert payloads == ['{"a": 1}', '{"b": 2}']
+    assert seen["url"] == "https://example.invalid/chat"
+    assert seen["body"] == {"model": "m"}
+    assert seen["timeout"] == 12.0
+
+
+async def test_the_http_transport_turns_an_http_error_into_a_vendor_error():
+    """MEASURED shapes: DeepSeek's 401 body and Z.ai's coded 429. The
+    error CODE is read from the body, never from the status line -- 1302
+    (transient) and 1113 (permanent) arrive as the same HTTP 429 and are
+    otherwise indistinguishable."""
+    import urllib.error
+    import io
+
+    from doxa.vendors import HttpStreamTransport
+
+    body = b'{"error":{"code":"1113","message":"Insufficient balance"}}'
+
+    def opener(request, timeout=None):
+        raise urllib.error.HTTPError(
+            request.full_url, 429, "Too Many Requests", {}, io.BytesIO(body)
+        )
+
+    transport = HttpStreamTransport(opener=opener)
+    with pytest.raises(VendorApiError) as excinfo:
+        async for _ in transport.stream("https://example.invalid/chat", {}, {}, 1.0):
+            pass
+    assert excinfo.value.status == 429
+    assert excinfo.value.code == "1113"
+    assert "Insufficient balance" in excinfo.value.detail
+
+
+async def test_the_http_transport_reports_a_connection_failure_as_status_zero():
+    """DNS, TLS, timeout, reset: every one of them is "the request did not
+    happen", and the turn reports it rather than raising out of a
+    generator the pane is iterating."""
+    from doxa.vendors import HttpStreamTransport
+
+    def opener(request, timeout=None):
+        raise OSError("name or service not known")
+
+    with pytest.raises(VendorApiError) as excinfo:
+        async for _ in HttpStreamTransport(opener=opener).stream(
+            "https://example.invalid/chat", {}, {}, 1.0
+        ):
+            pass
+    assert excinfo.value.status == 0
+    assert "OSError" in excinfo.value.detail
