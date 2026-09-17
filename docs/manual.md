@@ -63,12 +63,23 @@ resolve. With `worktree_per_session` off, `--branch` refuses by default
 (it would move the real checkout, not an isolated worktree); `--checkout`
 allows that explicitly, and only on a clean tree.
 
-Quit semantics inside the TUI: `ctrl+c` (and the palette's "Quit: detach")
-detaches every tab, leaving each daemon running — pressing it twice stops
-the sessions instead. `ctrl+q` ends the current tab's session for real
-(finalizes and stops its daemon); on a read-only (archived) tab it just
-closes the tab. `ctrl+w` / `/detach` close a tab but leave its session
-running.
+Quit semantics inside the TUI are **tab-scoped on the keys and
+window-scoped on the palette**. `ctrl+q` ends the current tab's session for
+real (finalizes and stops its daemon); on a read-only (archived) tab it
+just closes the tab. `ctrl+w` / `/detach` close a tab but leave its session
+running. Ending the whole window is the palette's job: **Quit: detach**
+detaches every tab and leaves each daemon running, **Quit: stop session**
+finalizes every session now — except a tab you detached on purpose, which
+stays up, because detaching is the explicit "keep this running" gesture and
+a later quit must not quietly undo it.
+
+**`ctrl+c` is bound to nothing**, and since v0.85.0 Textual's own default
+binding for it is popped out of the resolved set at startup rather than
+rebound to a no-op (`doxa/app.py`). Through v0.84.0 DOXA did claim it — one
+press quit-detached every tab, two quit-stopped them — and a report from
+live use asked for it back: a terminal emulator only treats `ctrl+c` as a
+copy gesture over a selection if no foreground app has claimed it. Quitting
+never needed the key, so the key went.
 
 ## The spawned CLI
 
@@ -266,9 +277,6 @@ and no migration step — **the absence of a key is the migration**:
 | v0.91.0 – v0.95.0 | `trees`, one per tab | the active tab's tree, one single-tab **group per leaf**; the other saved tabs become tabs of the group holding the active session |
 | v0.97.0 | `groups`, the window's one tree | itself |
 
-`/split` (or `ctrl+o`) puts a second session **stacked below** this one;
-`/vsplit` (or `ctrl+n`) puts one **side by side** with it. That is vim's
-
 It goes the other way too. The flat `tabs` list stays authoritative and
 complete, and a v0.97.0 record still writes the older `trees` shape
 alongside — one tree per group, each region's leaf being that group's
@@ -291,8 +299,8 @@ holding the keyboard and leaves every other group alone — three sessions
 cycling on the left while a fourth stays pinned on the right is the thing
 the old model could not express.
 
-`/split` (or `alt+s`) puts a second group **stacked below** this one;
-`/vsplit` (or `alt+d`) puts one **side by side** with it. That is vim's
+`/split` (or `ctrl+o`) puts a second group **stacked below** this one;
+`/vsplit` (or `ctrl+n`) puts one **side by side** with it. That is vim's
 sense of the two words and the opposite of tmux's `split-window -h`, so
 every description spells the direction out rather than trusting the
 letter — the letters are not mnemonic and are not trying to be.
@@ -322,14 +330,9 @@ survive until the keyboard actually arrives there.
 
 | key | does |
 |---|---|
-| `ctrl+o` / `ctrl+n` | split stacked below / side by side (`alt+s` / `alt+d` on a kitty-protocol terminal) |
-| `ctrl+shift+←/→/↑/↓` | move the keyboard to the pane in that direction — geometric, never "next pane" |
-| `alt+←/→/↑/↓` | move the divider between this pane and its neighbour that way |
-| `ctrl+↑` / `ctrl+↓` | move the **in-pane** divider (the status bar): up grows the transcript, down grows the prompt — and this works in a tab with no splits at all |
-
+| `ctrl+o` / `ctrl+n` | split into a second group, stacked below / side by side (`alt+s` / `alt+d` on a kitty-protocol terminal) |
 | `ctrl+←/→` | cycle the tabs of **this group** — every other group stays put |
 | `ctrl+1` … `ctrl+9` | jump to a group by position — **numbered left to right, then top to bottom**, so in a 2×2 it is upper-left, upper-right, lower-left, lower-right |
-| `alt+s` / `alt+d` | split into a second group, stacked below / side by side |
 | `ctrl+shift+←/→/↑/↓` | move the keyboard to the group in that direction — geometric, never "next group" |
 | `alt+←/→/↑/↓` | move the divider between this group and its neighbour that way |
 | `ctrl+↑` / `ctrl+↓` | move the **in-pane** divider (the status bar): up grows the transcript, down grows the prompt — and this works in a window with no splits at all |
@@ -358,23 +361,35 @@ session lives in the daemon and never in the widget. It is refused, with
 nothing changed, when the tab is the last one in its group: that would be
 a close and a move at once, and the two have different undo stories.
 
-Two split refusals, each printed as a block in the group it is about and
-changing nothing: a group may be split **twice** (`SPLIT_SLOTS`), which
-is what gives the 2×2 the design is written around — each new group is
-born with its own fresh allowance, so there is no fixed ceiling on
-groups, only on how deep one lineage goes — and a split that would leave
-either side under **34 columns or 9 rows** is refused with the number it
+Two split refusals, each changing nothing: a group may be split **twice**
+(`SPLIT_SLOTS`), which is what gives the 2×2 the design is written around
+— each new group is born with its own fresh allowance, so there is no
+fixed ceiling on groups, only on how deep one lineage goes — and a split
+that would leave either side too small is refused with the number it
 actually has. A refusal that performed a sliver would be worse than the
-refusal.
+refusal. The size test is **per axis**, not both at once
+(`layout.split_refusal`): a side-by-side split checks only that half the
+width clears `MIN_LEAF_WIDTH` (**34 columns**), a stacked one only that
+half the height clears `MIN_LEAF_HEIGHT` (**9 rows**). A stacked split
+never consults the width, and a side-by-side one never consults the
+height.
+
+Where the refusal is *printed* depends on which door you used. `/split`
+and `/vsplit` put it in the transcript as a block in the group it is
+about; `ctrl+o` and `ctrl+n` raise it as an eight-second toast, because a
+key press has no transcript line to attach to.
 
 **A narrow group hides its own tab strip.** Two strips is more chrome
-than one, so below **34 columns** a group draws its labels compactly and
-below **17 columns** it draws no strip at all. Both numbers are the same
-measurement: a tab header costs its label floor (`4 + " · " + 6` from the
-model/repo minimums) plus the provider glyph and Textual's own one-column
-padding each side — 17 columns for one header, 34 for the two a strip is
-actually *for*. The narrowest group DOXA will create is 34 columns, so it
-sits exactly on that boundary.
+than one, so below **34 columns** (`GROUP_STRIP_COMPACT_COLS`) a group
+draws its labels compactly and below **17 columns**
+(`GROUP_STRIP_MIN_COLS`) it draws no strip at all. Both numbers are the
+same measurement: a tab header costs its label floor (`4 + " · " + 6`
+from the model/repo minimums) plus the provider glyph and Textual's own
+one-column padding each side — 17 columns for one header, 34 for the two
+a strip is actually *for*. The narrowest group DOXA will create is 34
+columns, so it sits exactly on that boundary. Width is not the only rule:
+**a group holding one tab draws no strip at any width**, because a strip
+of one is a label for something already unambiguous.
 
 `ctrl+w` closes the **active tab** of the focused group, detaching its
 session as it always has. Closing a tab closes **one** session — through
@@ -1133,7 +1148,11 @@ nothing on a kitty-protocol terminal or one never measured, and
 ## Commands
 
 Every command below is defined once in `doxa/commands.py` and reaches the
-palette, the `/` autocomplete and `/help` from that single registry.
+palette, the `/` autocomplete and `/help` from that single registry, in the
+six groups that registry declares. Five of them are below; the sixth,
+**Plugins**, is built at runtime from whatever adopted Claude Code plugin
+commands this session carries, and is omitted entirely when there are none
+(see [The spawned CLI](#the-spawned-cli)).
 
 **Session**
 
@@ -1142,12 +1161,13 @@ palette, the `/` autocomplete and `/help` from that single registry.
 | `/model [name]` | Switch the model for the rest of this session (no reconnect) |
 | `/branch [name]` | List local branches (current base marked), or switch this session's base |
 | `/mode [name]` | Permission mode; bare lists all six with what each does |
-| `/effort [level]` | Effort level for new sessions only (connect-time) |
+| `/effort [low\|medium\|high\|xhigh\|max]` | Effort level for new sessions only (connect-time); prompt-only, with no palette entry |
 | `/usage` | Session tokens, turns, cost, subscription headroom |
 | `/context` | What is occupying the context window right now, by component |
 | `/clear` | Fresh session in this tab: finalize, rotate transcript, reset |
 | `/sessions [kill <prefix> \| kill-detached]` | Every live session: name, age, attached — and how to kill one |
 | `/resume [session-id]` | Reopen a past conversation in a new tab |
+| `/dir` | This session's own working directory — where its tool calls actually run |
 | `/queue [position-or-id]` | Prompts waiting behind the running turn, by position and id; an argument cancels one |
 
 **Memory**
@@ -1164,16 +1184,11 @@ palette, the `/` autocomplete and `/help` from that single registry.
 |---|---|
 | `/split` | A second session **stacked below** this pane (`ctrl+o`) |
 | `/vsplit` | A second session **side by side** with this pane (`ctrl+n`) |
-| `/diff` | This session's live worktree diff in the pane beside it, or close it (`f2`) |
-
-| `/split` | A second pane group **stacked below** this one (`alt+s`) |
-| `/vsplit` | A second pane group **side by side** with this one (`alt+d`) |
+| `/diff` | This session's live worktree diff in the group beside it, or close it (`f2`) |
 | `/pane [n]` | Jump to pane group `n`, numbered left to right then top to bottom (`ctrl+1`…`ctrl+9`); with no number, flash them |
 | `/movepane <n>` | Move this group's active tab into group `n` — the session keeps running |
 | `/sidebar [on\|off\|width <n>\|wider\|narrower]` | Show or hide the session sidebar (`f3`), or move its right edge (`alt+shift+←/→`) |
 | `/collection …` | `new` / `rename` / `delete` / `add` / `remove` — group sessions in the sidebar under a name you choose |
-| `/diff` | This session's live worktree diff in the group beside it, or close it (`alt+g`) |
-| `/dir` | Where this session actually is |
 | `/cd <path>` | Open that path in a **new** tab; this session stays where it is |
 | `/peers` | Live sessions in this project right now |
 | `/msg <session_prefix> <text>` | Send a message to one same-project peer session |
