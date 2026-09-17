@@ -77,7 +77,7 @@ import secrets
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator  # noqa: F401 -- annotations
+from typing import Any, Iterable
 
 __all__ = [
     "LEDGER_ENV",
