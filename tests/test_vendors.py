@@ -814,3 +814,27 @@ async def test_a_failed_turn_leaves_its_prompt_in_the_conversation(tmp_path):
     assert of_type(second, "turn_done")[0].data["is_error"] is False
     replayed = [m["role"] for m in transport.requests[-1]["body"]["messages"]]
     assert replayed == ["system", "user", "user"]
+
+
+def test_one_engine_that_cannot_import_leaves_the_others_registered(monkeypatch):
+    """Each lazy provider is imported in its OWN try. A broken engine is
+    absent -- which is the honest outcome, and what get() then says -- but
+    it must not take the rest of the non-Claude half of the registry down
+    with it."""
+    import importlib
+
+    real = importlib.import_module
+
+    def broken(name, package=None):
+        if name == ".codex":
+            raise ImportError("pretend the codex module is broken")
+        return real(name, package)
+
+    monkeypatch.setattr(engines_mod, "_REGISTRY", {})
+    monkeypatch.setattr(engines_mod, "_builtins_registered", False)
+    monkeypatch.setattr(importlib, "import_module", broken)
+    engines_mod.register(engines_mod.ClaudeEngineProvider())
+
+    assert engines_mod.available() == ("claude", "deepseek", "glm")
+    with pytest.raises(KeyError, match=r"unknown engine 'codex'"):
+        engines_mod.get("codex")
