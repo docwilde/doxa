@@ -57,6 +57,25 @@ from doxa.vendors import (
 FAKE_ENV = {"DEEPSEEK_API_KEY": "ds-test-key-0001", "ZAI_API_KEY": "zai-test-key-0002"}
 
 
+@pytest.fixture(autouse=True)
+def fake_keys(monkeypatch, request):
+    """Both vendors' keys, in the process environment, for every test here
+    except the live one.
+
+    monkeypatch rather than an injectable `env` argument on the engine, and
+    that is the point rather than a convenience: an env dict the engine
+    held would BE a credential stored on the handle, reachable from
+    vars(), a repr or a pickle. The engine reads os.environ at request
+    time and keeps nothing, so the test path and the production path are
+    the same path -- and test_the_credential_is_never_an_attribute_of_the
+    _engine below can prove it by looking."""
+    if "live_smoke" in request.node.name:
+        return
+    for name, value in FAKE_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("DOXA_VENDOR_EFFORT", raising=False)
+
+
 # -- the stub transport ------------------------------------------------
 
 
@@ -152,8 +171,7 @@ def glm_tool_script(name="lore_belief_search", args='{"query": "deploys"}'):
 
 def engine(tmp_path, spec=DEEPSEEK, transport=None, **kwargs) -> ChatApiEngine:
     return ChatApiEngine(
-        cwd=str(tmp_path), spec=spec, transport=transport or StubTransport(),
-        env=dict(FAKE_ENV), **kwargs,
+        cwd=str(tmp_path), spec=spec, transport=transport or StubTransport(), **kwargs,
     )
 
 
@@ -241,11 +259,14 @@ def test_a_missing_credential_names_the_variable_and_not_its_value():
         credential(GLM, {"ZAI_API_KEY": "   "})
 
 
-async def test_a_missing_credential_fails_the_session_at_start_not_mid_turn(tmp_path):
+async def test_a_missing_credential_fails_the_session_at_start_not_mid_turn(
+    tmp_path, monkeypatch
+):
     """A key that is absent has to fail as a session that could not start,
     naming the variable -- not as a 401 three minutes into the first
     turn."""
-    eng = ChatApiEngine(cwd=str(tmp_path), spec=DEEPSEEK, transport=StubTransport(), env={})
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    eng = ChatApiEngine(cwd=str(tmp_path), spec=DEEPSEEK, transport=StubTransport())
     with pytest.raises(MissingCredential, match=r"\$DEEPSEEK_API_KEY"):
         await eng.start()
 
@@ -258,7 +279,7 @@ async def test_the_credential_is_never_an_attribute_of_the_engine(tmp_path):
     eng = engine(tmp_path, transport=StubTransport(prose_script()))
     await eng.start()
     await run_turn(eng)
-    blob = repr(eng) + repr(vars(eng))
+    blob = repr(eng) + repr(vars(eng)) + repr(vars(eng.spec))
     for secret in FAKE_ENV.values():
         assert secret not in blob
 
@@ -366,10 +387,14 @@ async def test_mcp_tools_is_true_because_the_operators_reach_the_model(tmp_path)
     await eng.start()
     await run_turn(eng)
     offered = {t["function"]["name"] for t in transport.last_body["tools"]}
-    from doxa.operators import OPERATORS
+    from doxa.operators import OPERATORS, WRITE_OPERATORS
 
-    assert offered == set(OPERATORS)
+    # The SAME surface a Claude session gets, including the write path --
+    # lore_remember only STAGES a proposal for the review gate. A narrower
+    # surface would be a capability difference the map does not record.
+    assert offered == set(OPERATORS) | set(WRITE_OPERATORS)
     assert "lore_belief_search" in offered
+    assert "lore_remember" in offered
     assert transport.last_body["tool_choice"] == "auto"
     assert VENDOR_CAPABILITIES.mcp_tools is True
 

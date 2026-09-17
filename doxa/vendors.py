@@ -507,17 +507,26 @@ def operator_tools(ctx: "dict | None" = None) -> "list[dict]":
 
     The projection is trivial because ``Operator.parameters`` is ALREADY a
     JSON Schema -- the same object ``doxa.operators.to_sdk_tools`` hands
-    the SDK. Only the read-only registry is offered, which is exactly the
-    default projection a Claude session gets (``include_write=False``), so
-    the two engines present the same tool surface rather than a wider or
-    narrower one.
+    the SDK. What matters is that the SURFACE matches: the same
+    registries, the same ``include_write=True`` (``lore_remember`` only
+    STAGES a proposal, so the review gate is what keeps the write path
+    safe, not its absence), the same configuredness filter and the same
+    rendered descriptions a Claude session offers. A narrower surface
+    would be a capability difference the map does not record, which is the
+    one failure mode ``mcp_tools=True`` must not hide.
+
+    ``doxa.session_ops.SESSION_OPERATORS`` is the DELIBERATE exception and
+    the map does record it: ``spawn_session`` shells out to a command line
+    that threads no engine id, so a spawn from here would start a Claude
+    child under a DeepSeek parent's name. It is not offered, and
+    ``spawn_sessions=False`` says so.
 
     ``doxa.operators`` is imported HERE rather than at module scope for
     the reason ``doxa.engines``' docstring states: it pulls
     ``claude_agent_sdk`` and its 404 ms, and a module whose job is to run
     a session on something other than Claude must not force that load on
     every import."""
-    from .operators import OPERATORS, configured_names
+    from .operators import OPERATORS, WRITE_OPERATORS, configured_names
 
     allowed = configured_names(ctx) if ctx is not None else None
     return [
@@ -525,11 +534,12 @@ def operator_tools(ctx: "dict | None" = None) -> "list[dict]":
             "type": "function",
             "function": {
                 "name": op.name,
-                "description": f"{op.description} [cost: {op.cost}]",
+                "description": f"{op.description} [cost: {op.cost}]"
+                + ("" if op.read_only else f" [write: {op.write_note}]"),
                 "parameters": op.parameters,
             },
         }
-        for op in OPERATORS.values()
+        for op in list(OPERATORS.values()) + list(WRITE_OPERATORS.values())
         if allowed is None or op.name in allowed
     ]
 
@@ -787,7 +797,6 @@ class ChatApiEngine:
         parent_session_id: "str | None" = None,
         transport: "StreamTransport | None" = None,
         effort: "str | None" = None,
-        env: "dict[str, str] | None" = None,
         **_ignored: Any,
     ) -> None:
         # **_ignored, deliberately, for the reason CodexEngine states:
@@ -804,12 +813,14 @@ class ChatApiEngine:
         self.spawn_depth = max(0, int(spawn_depth or 0))
         self.parent_session_id = parent_session_id or None
         self.slug = project_slug(self.cwd)
-        self._env = env
+        # NO environment is captured here, and that is the guarantee, not
+        # an omission: an injectable env dict would be a credential stored
+        # on the handle, reachable from vars(), a repr or a pickle. The
+        # key is read from os.environ at the moment a request is built and
+        # dropped when it returns, and the suite proves it by looking.
         self._transport: StreamTransport = transport or HttpStreamTransport()
 
-        wanted = str(
-            effort or (env or os.environ).get(EFFORT_ENV, "") or ""
-        ).strip().lower()
+        wanted = str(effort or os.environ.get(EFFORT_ENV, "") or "").strip().lower()
         # An ALLOW-list, not a passthrough: an unrecognised effort reaching
         # the API is a 400 in the middle of a turn, and GLM refuses "none"
         # outright (error 1210). Falling back HERE is what keeps that a
@@ -919,8 +930,8 @@ class ChatApiEngine:
         start, naming the variable, rather than as a 401 three minutes
         into the first turn. The value is discarded immediately -- it is
         read again, from the environment, when a request is built."""
-        credential(self.spec, self._env)  # raises MissingCredential, and
-        # nothing here keeps what it returns.
+        credential(self.spec)  # raises MissingCredential, and nothing here
+        # keeps what it returns.
         self._started = True
 
         # The tool surface. Imported lazily (it pulls claude_agent_sdk),
@@ -945,7 +956,14 @@ class ChatApiEngine:
                 ),
                 on_disable=self._on_tool_disabled,
             )
-            self._tools = operator_tools({"lore_root": self.lore_root})
+            # The same ctx SessionEngine passes, naming the seams this
+            # engine actually wired -- an operator whose is_configured says
+            # no is simply not projected, and a tool the model cannot see
+            # is a tool the model cannot call.
+            self._tools = operator_tools({
+                "belief_store": lore_store.db_connect,
+                "lore_root": self.lore_root,
+            })
         except Exception as exc:  # noqa: BLE001 -- an absent tool surface is
             # a narrower session, not a failed one, and it SAYS it is
             # narrower instead of offering tools that cannot run.
@@ -1190,7 +1208,7 @@ class ChatApiEngine:
         key is fetched here and dropped at the end of the expression; it
         is never stored on the engine."""
         try:
-            key = credential(self.spec, self._env)
+            key = credential(self.spec)
         except MissingCredential:
             key = None
         detail = _truncate(_scrub(exc.detail, key), ERROR_BODY_MAX)
@@ -1218,7 +1236,7 @@ class ChatApiEngine:
         arrive, and a generator's return value is not reachable from an
         ``async for``. ``out`` is constructed by the caller one line
         above, so the indirection stays local."""
-        key = credential(self.spec, self._env)
+        key = credential(self.spec)
         body = request_body(
             self.spec,
             [self._system_message()] + self.messages,
