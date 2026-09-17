@@ -963,8 +963,11 @@ refusal nobody can act on:
   and approving or denying a pending tool call are granted; running a `!`
   shell line and raising the permission mode to `bypassPermissions` are
   refused unless `remote_allow_shell` / `remote_allow_bypass` say
-  otherwise, each of them off by default and `remote_allow_bypass`
-  independent of the local `allow_bypass`.
+  otherwise, both off by default. `remote_allow_bypass` is a **separate**
+  gate from the local `allow_bypass`, not the same one: that one arms this
+  session's CLI to reach the mode at all, this one decides whether a
+  request that arrived over the network may ask for it. Both have to be
+  open.
 
 The one surface a user sees today is the status bar's `◎ remote:<id>`
 chip, hidden until something is driving the session. That is the spec's
