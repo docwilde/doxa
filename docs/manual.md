@@ -149,11 +149,14 @@ release", not "it cannot". And **the LORE review is not wired for this
 engine**: the transcript is still indexed at session end, and the
 `session_done` event says `review: skipped` rather than implying one ran.
 
-The belief *count* is real on both engines (it is one `SELECT`); the
-belief and proposal *pickers* live on `SessionEngine`, so `/beliefs` and
-`/pending` are absent on a Codex session and the `N beliefs` chip is plain
-rather than clickable. The peer layer has no model in it, so the rail,
-`/msg` and the registry work identically.
+The belief *count* is real on both engines — it is one `SELECT` against a
+store neither engine owns. The belief and proposal *pickers* are not: they
+live on `SessionEngine` because that is where they were written, which is
+a fact about the code's shape rather than about the engine. So the
+`N beliefs` chip is plain rather than clickable here, and `/beliefs` stays
+in the command list and answers `beliefs: this session's handle cannot
+list beliefs` rather than opening an empty picker. The peer layer has no
+model in it, so the rail, `/msg` and the registry work identically.
 
 ## The spawned CLI
 
