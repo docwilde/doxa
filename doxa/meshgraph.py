@@ -85,6 +85,7 @@ __all__ = [
     "edges_for",
     "ledger_path",
     "parse_record",
+    "read_batch",
     "read_records",
     "require_loopback",
     "serve",
@@ -247,45 +248,53 @@ def edges_for(sender: str, recipients: "Iterable[str]", kind: str) -> "list[dict
     ]
 
 
-def read_records(path: Path, offset: int = 0) -> "tuple[list[dict[str, Any]], int]":
-    """Records appended after byte ``offset``, and the offset to resume at.
+def read_batch(
+    path: Path, offset: int = 0
+) -> "tuple[list[tuple[dict[str, Any], int]], int]":
+    """``([(record, offset_after_it), ...], offset_consumed_to)``.
 
-    **Only whole lines are consumed, and the returned offset never passes
-    the last newline seen.** This is the entire correctness argument for
+    Two different offsets, and the distinction is the point:
+
+    * the **per-record** one tags each SSE frame as its event id, so a
+      browser that drops the connection reconnects with ``Last-Event-ID``
+      naming the last record it actually dispatched -- not the end of the
+      batch it was halfway through, which would silently skip the rest.
+    * the **consumed** one is how far the reader got regardless of what
+      it yielded. It has to be separate, because a line that is skipped
+      still has to be stepped over: a batch of nothing but malformed
+      lines would otherwise leave the cursor where it was and re-read the
+      same garbage on every poll, forever.
+
+    **Only whole lines are consumed, and neither offset ever passes the
+    last newline seen.** This is the entire correctness argument for
     tailing a file another process is appending to: read at any instant
     and the tail may be half a line, because a write is not atomic.
-    Advancing the cursor past a partial line would drop the record it
-    belongs to permanently -- it would never be re-read, because the
-    cursor only moves forward. Stopping at the last newline means the
-    partial line is simply read again, complete, on the next poll.
+    Advancing past a partial line would drop the record it belongs to
+    permanently -- the cursor only moves forward, so it would never be
+    re-read. Stopping at the last newline means the partial line is read
+    again, complete, on the next poll.
 
-    A missing file is ``([], offset)``, not an error: the ledger does not
+    A missing file is an empty batch, not an error: the ledger does not
     exist until a session sends something, and an empty graph is the
     honest picture of a fleet that has not spoken."""
     try:
         with open(path, "rb") as handle:
             handle.seek(offset)
             chunk = handle.read()
-    except FileNotFoundError:
-        return [], offset
     except OSError:
         return [], offset
 
-    if not chunk:
-        return [], offset
-
-    # Keep only through the final newline; the remainder is a partial
+    # Keep only through the final newline; anything after it is a partial
     # line, re-read on the next poll once its writer has finished it.
-    cut = chunk.rfind(b"\n")
+    cut = chunk.rfind(b"\n") if chunk else -1
     if cut < 0:
         return [], offset
-    complete, consumed = chunk[: cut + 1], cut + 1
 
-    records: "list[dict[str, Any]]" = []
-    for raw in complete.split(b"\n"):
-        if not raw.strip():
-            continue
-        if len(raw) > MAX_LINE_BYTES:
+    found: "list[tuple[dict[str, Any], int]]" = []
+    position = offset
+    for raw in chunk[: cut + 1].split(b"\n")[:-1]:
+        position += len(raw) + 1  # the line, plus the newline it ended on
+        if not raw.strip() or len(raw) > MAX_LINE_BYTES:
             continue
         try:
             text = raw.decode("utf-8")
@@ -294,8 +303,20 @@ def read_records(path: Path, offset: int = 0) -> "tuple[list[dict[str, Any]], in
             continue
         record = parse_record(text)
         if record is not None:
-            records.append(record)
-    return records, offset + consumed
+            found.append((record, position))
+    return found, position
+
+
+def read_records(path: Path, offset: int = 0) -> "tuple[list[dict[str, Any]], int]":
+    """Every record after ``offset``, and the offset to resume at -- the
+    plain form of :func:`read_batch`, and what ``/ledger`` serves.
+
+    The returned offset is how far the reader consumed rather than the
+    file's size, so a record half-written at the instant of the snapshot
+    is left for the stream to deliver whole instead of falling into the
+    gap between the two requests."""
+    found, position = read_batch(path, offset)
+    return [record for record, _ in found], position
 
 
 # -- the loopback boundary ------------------------------------------------
@@ -369,13 +390,15 @@ def assets_dir() -> Path:
 #: What may be served out of :func:`assets_dir`, by exact name and with
 #: its content type. An allow-list rather than a directory walk: this
 #: server sits next to a file of message bodies, and "serve whatever is
-#: in that folder" is how a stray file becomes a route. Nothing here is
-#: user-supplied, so there is no path to traverse.
+#: in that folder" is how a stray file becomes a route. The key is the
+#: path segment AFTER the token; nothing in it is user-supplied and no
+#: filesystem path is ever built from the request, so there is nothing
+#: here to traverse.
 STATIC_FILES = {
-    "/": ("index.html", "text/html; charset=utf-8"),
-    "/index.html": ("index.html", "text/html; charset=utf-8"),
-    "/mesh.js": ("mesh.js", "text/javascript; charset=utf-8"),
-    "/mesh.css": ("mesh.css", "text/css; charset=utf-8"),
+    "": ("index.html", "text/html; charset=utf-8"),
+    "index.html": ("index.html", "text/html; charset=utf-8"),
+    "mesh.js": ("mesh.js", "text/javascript; charset=utf-8"),
+    "mesh.css": ("mesh.css", "text/css; charset=utf-8"),
 }
 
 
@@ -432,8 +455,25 @@ class MeshServer:
 
     @property
     def url(self) -> str:
-        """The one URL worth handing a browser: the page, with the token."""
-        return f"http://{self.host}:{self.port}/?k={self.token}"
+        """The one URL worth handing a browser: the page, under the token.
+
+        **The token is a PATH segment, not a query parameter**, and that
+        differs deliberately from ``doxa.beliefgraph``, which puts its
+        own in ``?k=`` so that file resolution stays
+        ``SimpleHTTPRequestHandler``'s unmodified -- path traversal is
+        not something to reimplement. That reasoning does not apply here
+        and the opposite one does: this handler resolves no filesystem
+        path from a request at all (:data:`STATIC_FILES` is an exact-name
+        allow-list), while the page has to load ``mesh.js``, ``mesh.css``,
+        ``ledger`` and ``events`` as RELATIVE urls. Relative to a query
+        token they resolve to ``/mesh.js`` and lose it; relative to a
+        path token they stay inside ``/<token>/`` and carry it for free.
+
+        The alternative was a cookie, and it is worse: cookies are scoped
+        by host and NOT by port, so a cookie minted here would be
+        attached to requests to any other local server the browser
+        happens to visit on 127.0.0.1."""
+        return f"http://{self.host}:{self.port}/{self.token}/"
 
     def stop(self) -> None:
         """Shut down and release the port. Idempotent.
@@ -469,7 +509,10 @@ class MeshServer:
             def do_GET(self) -> None:  # noqa: N802 -- BaseHTTPRequestHandler's name
                 parsed = urlparse(self.path)
                 query = parse_qs(parsed.query)
-                supplied = query.get("k", [""])[0]
+
+                # "/<token>/<route>", split once so a route may never
+                # smuggle a second segment past the check.
+                supplied, _, route = parsed.path.lstrip("/").partition("/")
 
                 # 404 rather than 401/403, and before the route is even
                 # looked at: a probe of the port learns neither that this
@@ -481,12 +524,23 @@ class MeshServer:
                     self.send_error(404)
                     return
 
-                route = parsed.path
+                # "/<token>" without the trailing slash would serve the
+                # page against a base path of "/", so every relative url
+                # in it would resolve to "/mesh.js" -- outside the token
+                # and therefore 404. The page would load and stay blank.
+                # Redirect instead of guessing.
+                if not route and not parsed.path.endswith("/"):
+                    self.send_response(301)
+                    self.send_header("Location", f"/{supplied}/")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+
                 if route in STATIC_FILES:
                     mesh._serve_static(self, route)
-                elif route == "/ledger":
+                elif route == "ledger":
                     mesh._serve_ledger(self, query)
-                elif route == "/events":
+                elif route == "events":
                     mesh._serve_events(self, query)
                 else:
                     self.send_error(404)
@@ -551,8 +605,21 @@ class MeshServer:
         page has already fetched history from ``/ledger``, and a stream
         that re-sent it would double every edge on the canvas.
         ``?from=0`` is still available and means "replay everything",
-        which is what a reader who opened the page mid-run wants."""
-        offset = _int_param(query, "from", _file_size(self.path))
+        which is what a reader who opened the page mid-run wants.
+
+        ``Last-Event-ID`` WINS OVER ``?from=``, because it has to.
+        ``EventSource`` reconnects to the URL it was constructed with --
+        the page cannot rewrite it -- so a dropped connection would
+        otherwise resume at the page's ORIGINAL cursor and replay every
+        record since. The browser sends this header with the id of the
+        last event it dispatched, which is exactly the right place to
+        resume, and honouring it is what makes a reconnect free of both
+        gaps and duplicates."""
+        resumed = handler.headers.get("Last-Event-ID", "")
+        if resumed.strip().isdigit():
+            offset = max(0, int(resumed.strip()))
+        else:
+            offset = _int_param(query, "from", _file_size(self.path))
 
         handler.send_response(200)
         handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -572,12 +639,14 @@ class MeshServer:
             handler.wfile.write(b": open\n\n")
             handler.wfile.flush()
             while not self._stopping.is_set():
-                records, offset = read_records(self.path, offset)
-                for record in records:
+                found, offset = read_batch(self.path, offset)
+                for record, position in found:
                     payload = json.dumps(record, ensure_ascii=False)
-                    frame = f"id: {offset}\ndata: {payload}\n\n".encode("utf-8")
+                    # The id is THIS record's end offset, not the batch's
+                    # -- see read_batch on why a reconnect depends on it.
+                    frame = f"id: {position}\ndata: {payload}\n\n".encode("utf-8")
                     handler.wfile.write(frame)
-                if records:
+                if found:
                     handler.wfile.flush()
                     last_beat = time.monotonic()
                 elif time.monotonic() - last_beat >= HEARTBEAT_SECS:
