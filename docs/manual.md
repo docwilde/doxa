@@ -42,8 +42,9 @@ session (LORE review + index) once every attached client has been gone for
 stop`.
 
 Every published event carries a monotonically increasing `seq` into a
-bounded in-memory ring; a client that reattaches sends the cursor it last
-saw and the daemon replays from there, then the live tail follows. Nothing
+bounded in-memory ring (`RING_CAPACITY`, 512 events); a client that
+reattaches sends the cursor it last saw and the daemon replays from there,
+then the live tail follows. Nothing
 in the ring persists — persisted state is the transcript file plus
 whatever passes through LORE's scrub choke point.
 
