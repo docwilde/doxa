@@ -1,14 +1,16 @@
 # DOXA manual
 
 Reference for what DOXA does today. Everything here is true of the current
-code — verified against source, not transcribed from release notes. For
-the pitch and the install instructions, see [README.md](../README.md). For
-designs that are **not** built yet, see [docs/plans/](plans/) — this manual
-never documents a plan as if it were shipped.
+code — verified against source, not transcribed from release notes; this
+document was last read against **1.9.3** end to end. For the pitch and the
+install instructions, see [README.md](../README.md). For designs that are
+**not** built yet, see [docs/plans/](plans/) — this manual never documents
+a plan as if it were shipped.
 
 ## Contents
 
 - [Sessions and the daemon](#sessions-and-the-daemon)
+- [Engines](#engines) — and [a Codex session](#a-codex-session)
 - [The spawned CLI](#the-spawned-cli)
 - [The transcript](#the-transcript)
 - [Tabs](#tabs) — and [restoring them](#restoring-tabs)
@@ -18,7 +20,7 @@ never documents a plan as if it were shipped.
 - [Worktrees and finalize](#worktrees-and-finalize)
 - [Where a session is](#where-a-session-is)
 - [Permission modes](#permission-modes)
-- [Containment](#containment)
+- [Containment](#containment) — [session spawn](#session-spawn--off-unless-you-turn-it-on) and [remote drivers](#remote-drivers--a-policy-and-no-transport)
 - [The status bar](#the-status-bar)
 - [LORE integration](#lore-integration)
 - [Shell escape](#shell-escape)
@@ -40,8 +42,9 @@ session (LORE review + index) once every attached client has been gone for
 stop`.
 
 Every published event carries a monotonically increasing `seq` into a
-bounded in-memory ring; a client that reattaches sends the cursor it last
-saw and the daemon replays from there, then the live tail follows. Nothing
+bounded in-memory ring (`RING_CAPACITY`, 512 events); a client that
+reattaches sends the cursor it last saw and the daemon replays from there,
+then the live tail follows. Nothing
 in the ring persists — persisted state is the transcript file plus
 whatever passes through LORE's scrub choke point.
 
@@ -63,17 +66,104 @@ resolve. With `worktree_per_session` off, `--branch` refuses by default
 (it would move the real checkout, not an isolated worktree); `--checkout`
 allows that explicitly, and only on a clean tree.
 
-Quit semantics inside the TUI: `ctrl+c` (and the palette's "Quit: detach")
-detaches every tab, leaving each daemon running — pressing it twice stops
-the sessions instead. `ctrl+q` ends the current tab's session for real
-(finalizes and stops its daemon); on a read-only (archived) tab it just
-closes the tab. `ctrl+w` / `/detach` close a tab but leave its session
-running.
+Quit semantics inside the TUI are **tab-scoped on the keys and
+window-scoped on the palette**. `ctrl+q` ends the current tab's session for
+real (finalizes and stops its daemon); on a read-only (archived) tab it
+just closes the tab. `ctrl+w` / `/detach` close a tab but leave its session
+running. Ending the whole window is the palette's job: **Quit: detach**
+detaches every tab and leaves each daemon running, **Quit: stop session**
+finalizes every session now — except a tab you detached on purpose, which
+stays up, because detaching is the explicit "keep this running" gesture and
+a later quit must not quietly undo it.
+
+**`ctrl+c` is bound to nothing**, and since v0.85.0 Textual's own default
+binding for it is popped out of the resolved set at startup rather than
+rebound to a no-op (`doxa/app.py`). Through v0.84.0 DOXA did claim it — one
+press quit-detached every tab, two quit-stopped them — and a report from
+live use asked for it back: a terminal emulator only treats `ctrl+c` as a
+copy gesture over a selection if no foreground app has claimed it. Quitting
+never needed the key, so the key went.
+
+## Engines
+
+An **engine** is whatever actually runs a turn. `doxa/engines.py` is the
+seam between it and the rest of DOXA: one `Engine` Protocol — the 24
+public names the in-process `SessionEngine` and the daemon-fronting
+`EngineClient` already shared before the Protocol was written — plus a
+registry mapping an engine id to a provider. Two ids ship, `claude`
+(the default) and `codex`, and the registry is an explicit dict with
+explicit registration calls: nothing is discovered from the path.
+
+Pick one per session with `--engine <id>`, `DOXA_ENGINE`, or the `engine`
+setting, in that precedence. An unknown id fails as one line of usage
+before anything is built, rather than as a traceback out of a half-started
+app.
+
+**Capability is not uniform, and pretending otherwise is the trap.** Each
+provider declares an `EngineCapabilities` — seventeen flat booleans naming
+the surfaces it actually has, every one defaulting to `False` so a
+provider that forgets something under-promises instead of over-promising.
+`doxa.engines.get("codex").supports()` is the whole map for that engine.
+The rule every caller follows is that a `False` **hides** the surface
+rather than painting it inert: an engine that never reports a context
+window gets no `ctx` chip at all, because `ctx —` reads as "not yet" when
+the truth is "never", and `/context` says it cannot be asked rather than
+inventing a breakdown.
+
+### A Codex session
+
+`--engine codex` runs a DOXA session on the Codex CLI, end to end: its own
+tab, transcript, turns, status bar, peer rail and `/msg`. It is not the
+`codex:rescue` subagent plugin — that is a tool a Claude session calls;
+this is a session.
+
+The structural difference is the process model. `ClaudeSDKClient` is one
+long-lived process for the whole session; a Codex session is **one `codex
+exec --json` process per turn**, the first starting a thread and every
+later one running `codex exec resume <id>`. The prompt goes in on stdin
+rather than argv, because a pasted prompt can be megabytes and `ARG_MAX`
+is not. Because no daemon hosts it, a Codex session lives in the TUI
+process: there is nothing to detach from, the `⌁ session` chip is absent,
+and `ctrl+q` ends the session rather than detaching it.
+
+What Codex does not report, DOXA does not paint. Measured against
+codex-cli 0.144.4:
+
+| absent | what DOXA does |
+|---|---|
+| any window size (`turn.completed.usage` counts tokens and nothing else) | no `ctx` chip; `/context` says it cannot be asked; `/usage` still prints the real token counts |
+| any cost field | no cost chip — `$0.0000` would read as "free", which is a different claim from "nobody said" |
+| content deltas (`agent_message` arrives whole) | still one `text_delta`, just one per message |
+| reasoning content | no reasoning fold; the usage block counts reasoning tokens but the stream carries none |
+| permission modes | no `mode:` chip, nothing on Shift+Tab |
+| a hook surface | the LORE snapshot cannot be injected mid-session, so it rides the first prompt instead |
+| the model it actually resolved | `self.model` is what was *asked for*; an unasked-for default publishes as absent, never guessed |
+
+Two consequences worth stating plainly. **A Codex session does not carry
+DOXA's LORE tools** — reaching them would need a stdio MCP server process
+built from `doxa/operators.py`, and a process outside DOXA is a process
+outside `ToolGate`: no `can_use_tool` refusal, no two-strikes disable, for
+exactly the engine that has no tool gate of its own. A live probe
+confirmed `codex mcp add` genuinely works, so this is "not through this
+release", not "it cannot". And **the LORE review is not wired for this
+engine**: the transcript is still indexed at session end, and the
+`session_done` event says `review: skipped` rather than implying one ran.
+
+The belief *count* is real on both engines — it is one `SELECT` against a
+store neither engine owns. The belief and proposal *pickers* are not: they
+live on `SessionEngine` because that is where they were written, which is
+a fact about the code's shape rather than about the engine. So the
+`N beliefs` chip is plain rather than clickable here, and `/beliefs` stays
+in the command list and answers `beliefs: this session's handle cannot
+list beliefs` rather than opening an empty picker. The peer layer has no
+model in it, so the rail, `/msg` and the registry work identically.
 
 ## The spawned CLI
 
-The engine behind a session spawns a `claude` CLI process, and that
-process gets a **config directory of its own**. `CLAUDE_CONFIG_DIR` is
+The Claude engine behind a session spawns a `claude` CLI process, and that
+process gets a **config directory of its own**. (Everything in this
+section is that engine's; a Codex session spawns `codex exec` instead and
+has no plugin surface at all — see [Engines](#engines).) `CLAUDE_CONFIG_DIR` is
 set on the child's environment only (`ClaudeAgentOptions.env` —
 DOXA's own environment is never touched), pointing at a directory DOXA
 writes and owns: a `settings.json` with no `hooks`, no `enabledPlugins`
@@ -146,12 +236,41 @@ wait; the ninth is refused with a reason. `/queue` lists what is waiting,
 prompt survives detaching and is discarded, visibly, only when the session
 finalizes.
 
-The prompt is not delivered mid-turn. `claude-agent-sdk` 0.2.144 has no
-turn-scoped delivery: `query()` writes a frame with no turn, one shared
-stream carries every result, and `receive_response()` ends at the first one
-it sees, so a second `query()` in flight could consume the other turn's
-result. `interrupt()` is the only mid-turn primitive and it aborts. Queueing
-is what runs; the evidence is in `SessionEngine.send`'s docstring.
+**Why it queues, and what that is not.** Mid-turn delivery is not
+impossible in general. Claude Code does it: its CLI holds a message queue
+of its own and folds what is waiting into the **running** turn as a
+`queued_command` attachment delivered alongside the next tool result. The
+CLI's internals name the mechanism outright —
+`messageQueue.consume(..., {reason: "absorbed_mid_turn"})`,
+`isMidTurnFoldSuspended()`. Absorption, not a second turn.
+
+That machinery is **not reachable through the stdin protocol the Agent SDK
+speaks**, and this is measured rather than inferred. Spawn the CLI in
+stream-json mode, start a turn that makes three sequential `Bash` calls,
+and write a second user frame to its stdin six seconds in, while the first
+turn is inside a tool call. The frame never appears in the output stream at
+all. The turn completes all three steps unaffected, emits its result, and
+no second turn ever starts — the frame is neither absorbed into the running
+turn nor deferred into a following one. It is **dropped, silently**. Two
+runs, identical: the first under `-p`, the second without it, because the
+SDK does not pass `--print` — it spawns with `--output-format stream-json
+--verbose --input-format stream-json`. The same outcome on the SDK's own
+spawn shape is what makes this a fact about DOXA's conditions rather than a
+print-mode artefact. Measured on `claude-agent-sdk` 0.2.144 and Claude Code
+2.1.273.
+
+So a bounded FIFO on DOXA's side is not a second-best reading of the SDK —
+it is the only thing that does not lose the prompt. `interrupt()` is the
+one mid-turn primitive the SDK exposes and it aborts rather than steers,
+and a second `query()` is no way round it either: `receive_response()` ends
+at the first `ResultMessage` on one shared stream, with no per-query
+correlation id on a `result` frame, so two turns in flight risk one
+iterator eating the other's result.
+
+> **Note:** `SessionEngine.send`'s docstring argues the same conclusion
+> from the SDK's read side alone. The conclusion holds; the reason recorded
+> there is not the operative one, which is that the write never arrives.
+> The docstring has not been corrected.
 
 ## Tabs
 
@@ -241,9 +360,6 @@ and no migration step — **the absence of a key is the migration**:
 | v0.91.0 – v0.95.0 | `trees`, one per tab | the active tab's tree, one single-tab **group per leaf**; the other saved tabs become tabs of the group holding the active session |
 | v0.97.0 | `groups`, the window's one tree | itself |
 
-`/split` (or `ctrl+o`) puts a second session **stacked below** this one;
-`/vsplit` (or `ctrl+n`) puts one **side by side** with it. That is vim's
-
 It goes the other way too. The flat `tabs` list stays authoritative and
 complete, and a v0.97.0 record still writes the older `trees` shape
 alongside — one tree per group, each region's leaf being that group's
@@ -266,8 +382,8 @@ holding the keyboard and leaves every other group alone — three sessions
 cycling on the left while a fourth stays pinned on the right is the thing
 the old model could not express.
 
-`/split` (or `alt+s`) puts a second group **stacked below** this one;
-`/vsplit` (or `alt+d`) puts one **side by side** with it. That is vim's
+`/split` (or `ctrl+o`) puts a second group **stacked below** this one;
+`/vsplit` (or `ctrl+n`) puts one **side by side** with it. That is vim's
 sense of the two words and the opposite of tmux's `split-window -h`, so
 every description spells the direction out rather than trusting the
 letter — the letters are not mnemonic and are not trying to be.
@@ -297,14 +413,9 @@ survive until the keyboard actually arrives there.
 
 | key | does |
 |---|---|
-| `ctrl+o` / `ctrl+n` | split stacked below / side by side (`alt+s` / `alt+d` on a kitty-protocol terminal) |
-| `ctrl+shift+←/→/↑/↓` | move the keyboard to the pane in that direction — geometric, never "next pane" |
-| `alt+←/→/↑/↓` | move the divider between this pane and its neighbour that way |
-| `ctrl+↑` / `ctrl+↓` | move the **in-pane** divider (the status bar): up grows the transcript, down grows the prompt — and this works in a tab with no splits at all |
-
+| `ctrl+o` / `ctrl+n` | split into a second group, stacked below / side by side (`alt+s` / `alt+d` on a kitty-protocol terminal) |
 | `ctrl+←/→` | cycle the tabs of **this group** — every other group stays put |
 | `ctrl+1` … `ctrl+9` | jump to a group by position — **numbered left to right, then top to bottom**, so in a 2×2 it is upper-left, upper-right, lower-left, lower-right |
-| `alt+s` / `alt+d` | split into a second group, stacked below / side by side |
 | `ctrl+shift+←/→/↑/↓` | move the keyboard to the group in that direction — geometric, never "next group" |
 | `alt+←/→/↑/↓` | move the divider between this group and its neighbour that way |
 | `ctrl+↑` / `ctrl+↓` | move the **in-pane** divider (the status bar): up grows the transcript, down grows the prompt — and this works in a window with no splits at all |
@@ -333,23 +444,35 @@ session lives in the daemon and never in the widget. It is refused, with
 nothing changed, when the tab is the last one in its group: that would be
 a close and a move at once, and the two have different undo stories.
 
-Two split refusals, each printed as a block in the group it is about and
-changing nothing: a group may be split **twice** (`SPLIT_SLOTS`), which
-is what gives the 2×2 the design is written around — each new group is
-born with its own fresh allowance, so there is no fixed ceiling on
-groups, only on how deep one lineage goes — and a split that would leave
-either side under **34 columns or 9 rows** is refused with the number it
+Two split refusals, each changing nothing: a group may be split **twice**
+(`SPLIT_SLOTS`), which is what gives the 2×2 the design is written around
+— each new group is born with its own fresh allowance, so there is no
+fixed ceiling on groups, only on how deep one lineage goes — and a split
+that would leave either side too small is refused with the number it
 actually has. A refusal that performed a sliver would be worse than the
-refusal.
+refusal. The size test is **per axis**, not both at once
+(`layout.split_refusal`): a side-by-side split checks only that half the
+width clears `MIN_LEAF_WIDTH` (**34 columns**), a stacked one only that
+half the height clears `MIN_LEAF_HEIGHT` (**9 rows**). A stacked split
+never consults the width, and a side-by-side one never consults the
+height.
+
+Where the refusal is *printed* depends on which door you used. `/split`
+and `/vsplit` put it in the transcript as a block in the group it is
+about; `ctrl+o` and `ctrl+n` raise it as an eight-second toast, because a
+key press has no transcript line to attach to.
 
 **A narrow group hides its own tab strip.** Two strips is more chrome
-than one, so below **34 columns** a group draws its labels compactly and
-below **17 columns** it draws no strip at all. Both numbers are the same
-measurement: a tab header costs its label floor (`4 + " · " + 6` from the
-model/repo minimums) plus the provider glyph and Textual's own one-column
-padding each side — 17 columns for one header, 34 for the two a strip is
-actually *for*. The narrowest group DOXA will create is 34 columns, so it
-sits exactly on that boundary.
+than one, so below **34 columns** (`GROUP_STRIP_COMPACT_COLS`) a group
+draws its labels compactly and below **17 columns**
+(`GROUP_STRIP_MIN_COLS`) it draws no strip at all. Both numbers are the
+same measurement: a tab header costs its label floor (`4 + " · " + 6`
+from the model/repo minimums) plus the provider glyph and Textual's own
+one-column padding each side — 17 columns for one header, 34 for the two
+a strip is actually *for*. The narrowest group DOXA will create is 34
+columns, so it sits exactly on that boundary. Width is not the only rule:
+**a group holding one tab draws no strip at any width**, because a strip
+of one is a label for something already unambiguous.
 
 `ctrl+w` closes the **active tab** of the focused group, detaching its
 session as it always has. Closing a tab closes **one** session — through
@@ -537,9 +660,11 @@ the pane beside the session — `git diff` against the branch the worktree
 was cut from, recomputed every time an edit lands and never on a timer.
 Files are collapsed by default with their changed-line counts; binary and
 very large files are named rather than rendered; a diff that hit a cap
-says so. Side-by-side turns on above 100 columns and unified is the
-default below it, because at 80 columns a half-width pane is 40 and two
-20-column sides are unreadable.
+says so, and the caps are 2000 hunk lines per file, 200 files, 20,000
+lines in total and 50 untracked paths. Side-by-side turns on at **100
+columns** (`SIDE_BY_SIDE_MIN_COLS`) and unified is the default below it,
+because at 80 columns a half-width pane is 40 and two 20-column sides are
+unreadable.
 
 Changed lines are drawn with a **background**, not just a coloured
 foreground — removed rows red, added rows green — and each row carries
@@ -734,15 +859,25 @@ declares an allowed set, a call outside it is denied there and the model
 is told why. DOXA-native operators are re-checked a second time in
 `execute()` — defence in depth at a choke point, never one layer.
 
-**Two strikes.** A *hard* failure is an unknown tool name, a `TypeError`
-from the backend, or any exception the operator raised: the gate returns
-it as an ordinary `{"error": ...}` result the model can read and retry.
-The **second** hard failure of the same tool disables it for the rest of
-the session, and the disabled names collect in the status bar's `⊘` chip.
-A refused-but-known tool counts too, because a repeatedly-refused call is
-the strongest "stop calling this" signal available. Bad arguments are
-*not* hard — a recoverable mistake must stay retryable. Nothing here is
-persisted: the next session starts with a clean slate.
+**Two strikes.** Every failure comes back as an ordinary
+`{"error": ...}` result the model can read and retry; what differs is
+whether the gate *counts* it. `is_hard_failure` counts exactly two
+shapes: a result whose error says the tool is `not configured`, and one
+that opens `<name> failed:` — which is what any exception an operator
+raised turns into, sync or async. A known tool refused by the session's
+allowed set is counted directly, at the hook and again in the executor,
+because a repeatedly-refused call is the strongest "stop calling this"
+signal available. The **second** hard failure of the same tool disables
+it for the rest of the session, and the disabled names collect in the
+status bar's `⊘` chip.
+
+Two things that look like failures and are deliberately **not** counted:
+bad arguments (a `TypeError` from the backend comes back as
+`bad arguments for <name>: …`) and an unknown tool name, which returns
+the list of names that do exist. Both are recoverable mistakes and must
+stay retryable. Every `spawn_session` cap refusal is soft for the same
+reason. Nothing here is persisted: `ToolGate`'s whole state is two
+in-memory fields built fresh per session.
 
 **Nothing auto-denies silently.** A headless SDK run with no callback
 auto-denies an `AskUserQuestion` and a permission request without telling
@@ -771,17 +906,24 @@ not read. While it is off, the tool is not offered at all: the model
 never learns the name exists.
 
 Turning it on costs real machine and real money per spawn — another
-`claude` process (~294 MB), another worktree (~18 MB for a repo this
-size), and a second token bill additive to this session's. DOXA does not
-aggregate cost across a fleet.
+`claude` process (~294 MB RSS, measured once by the suite's own
+leaked-process reaper and recorded as prose, not computed anywhere),
+another worktree (18 MB, which *is* a constant:
+`WORKTREE_CHECKOUT_BYTES`), and a second token bill additive to this
+session's. DOXA does not aggregate cost across a fleet.
 
 Every call **stops and asks you**, showing the exact task text the child
 will be given, in every permission mode except `bypassPermissions` —
 including `auto`, which is the one deliberate exception to that mode
-handing tool decisions to a classifier. Under `plan` nothing runs at all.
+handing tool decisions to a classifier. Under `plan` no tool runs at all,
+which is the `claude` CLI's own behaviour rather than a block DOXA
+enforces: nothing in `doxa/session_ops.py` tests for that mode.
 Independently of the mode, three caps are enforced inside DOXA before any
-process starts: spawn **depth 2**, **3 live sessions** per repo, and **1
-spawn per 60 seconds**, plus a free-disk preflight. A cap saying no is a
+process starts: spawn **depth 2** (`MAX_SPAWN_DEPTH`), **3 live
+sessions** per repo (`MAX_LIVE_SESSIONS`), and **1 spawn per 60 seconds**
+(`MAX_SPAWNS_PER_WINDOW`), plus a preflight refusing to start below
+**425 MB** free — 18 MB for the worktree and 407 MB for the session it
+will build. Disk it cannot measure is not a refusal. A cap saying no is a
 soft refusal the model can read; it never counts toward the two-strikes
 disable above.
 
@@ -792,31 +934,77 @@ And `peer_left` tells you a delegate is *gone*, never whether it
 succeeded. The design, including what is deliberately not built, is
 [docs/plans/spawn-session.md](plans/spawn-session.md).
 
+### Remote drivers — a policy, and no transport
+
+Nothing listens on a network. `doxa/remote_policy.py` (v1.8.0) is the
+**authorization decision** a future bridge process will ask, shipped
+ahead of the bridge on purpose: a reachable daemon socket is remote code
+execution with your privileges, so the answer is decided once, in one
+module a security review can read start to finish, rather than
+re-derived at each call site a bridge would grow. There is no socket, no
+TLS and no header parsing in it, and there is no second renderer
+anywhere.
+
+Three independent questions, and every answer is a `Decision` carrying a
+reason — never a bare bool, because a refusal that cannot say why is a
+refusal nobody can act on:
+
+- **May a listener exist at all?** `remote_enabled` is off by default.
+- **Is this identity one DOXA trusts?** `identity_decision` refuses
+  outright unless the request arrived on the loopback listener
+  `tailscale serve` forwards to, whatever login the caller claims. DOXA
+  then keeps its **own** allow-list on top of the tailnet's, and an
+  **empty allow-list refuses everyone** — it does not fall back to
+  permitting everyone, which is the direction allow-list bugs usually
+  fail in.
+- **Is this kind of request on the remote surface at all?**
+  `request_kind_decision`. The remote surface is deliberately **smaller**
+  than the local one: reading the transcript and status, sending prompts,
+  and approving or denying a pending tool call are granted; running a `!`
+  shell line and raising the permission mode to `bypassPermissions` are
+  refused unless `remote_allow_shell` / `remote_allow_bypass` say
+  otherwise, both off by default. `remote_allow_bypass` is a **separate**
+  gate from the local `allow_bypass`, not the same one: that one arms this
+  session's CLI to reach the mode at all, this one decides whether a
+  request that arrived over the network may ask for it. Both have to be
+  open.
+
+The one surface a user sees today is the status bar's `◎ remote:<id>`
+chip, hidden until something is driving the session. That is the spec's
+"say who is connected" rule: a silent second driver is the thing a user
+cannot detect and cannot consent to. Nothing can set it yet, because no
+bridge exists to pass an identity in.
+
 ## The status bar
 
-Chips are built in paint order by `doxa/session/chips.py`; a chip whose
+**Eighteen chips** are built in paint order by
+`doxa/session/chips.py`, and a row never shows all of them: a chip whose
 number is zero, or whose state was never asserted, is omitted rather than
-shown empty. Every chip carries a tooltip on hover, including the plain
-(non-clickable) ones.
+shown empty, and a chip whose engine cannot report the thing it names is
+not painted at all rather than painted blank (see
+[Engines](#engines)). Every chip carries a tooltip on hover, including
+the plain, non-clickable ones and the git chip's inert `@sha` span.
 
 | chip | shows | clickable |
 |---|---|---|
-| `mode:` | permission mode (see above); hidden only when it would show `default` on a cramped row | yes — mode picker |
+| `mode:` | permission mode (see above); hidden when the engine has no permission modes, and when it would show `default` on a row under 110 columns — every other mode is painted at every width | yes — mode picker |
+| `◎ remote:<id>` | a remote driver is attached to this session. Hidden at zero, and there is no companion "local" chip: the absence says it (see [Remote drivers](#remote-drivers--a-policy-and-no-transport)) | no |
 | model | the model handling this session's turns | yes — model picker, takes effect next turn |
 | `⚑ needs input` | a question or permission request is waiting on this pane | no |
 | `effort:` | reasoning effort asserted at connect (hidden when none was) | yes — effort picker, affects future sessions only |
-| repo/branch/sha | the git chip: repo name, the worktree's session branch, sha | yes — repo and branch halves each open their own picker |
+| repo/branch/sha | the git chip: repo name, the worktree's session branch, sha | yes — repo and branch halves each open their own picker; `@sha` is inert but tooltipped |
 | `dir NAME` | the folder chip, shown **instead of** the git chip when this session is not in a git repository at all (see [Where a session is](#where-a-session-is)) | yes — the same repo/directory picker |
-| `sub:<tier> (≈$…)` or `$…` | subscription tier with a list-price what-if, or the real API spend on API-key auth | no |
-| `s:N% w:N%` | subscription session (5h) and weekly utilization, cached by the `claude` CLI itself | no |
-| `ctx N%` | context window usage, amber at 70%, red at 90%; `ctx_absolute` adds `24k/200k` inline | yes — confirms, then `/compact` |
-| `N beliefs` | active LORE beliefs for this session | yes — grouped belief list |
+| `diff N files +A −B` | uncommitted work in this session's worktree, recomputed on the edit that ticks the pane; `vs HEAD` when no base was recorded, `⚠ no base` / `⚠ unreadable` for the two states that are not "nothing", and a short `diff Nf +A −B` under 110 columns (see [The live diff](#the-live-diff)) | yes — the same toggle `f2` is |
+| `sub:<tier> (≈$…)` or `$…` | subscription tier with a list-price what-if, or the real API spend on API-key auth. Both hidden on an engine that reports no cost | no |
+| `s:N% w:N%` | subscription session (5h) and weekly utilization, cached by the `claude` CLI itself; a third scoped segment appears when one is published, and a trailing `~` means the reading is stale | no |
+| `ctx N%` | context window usage, amber at 70%, red at 90%; `ctx —` while an engine that *can* report one has not yet, and hidden outright on an engine that never will. `ctx_absolute` adds `24k/200k` inline, and that segment needs 100 columns of its own | yes — confirms, then `/compact` |
+| `N beliefs` | active LORE beliefs for this session; painted at zero too, because zero beliefs is a fact | yes on an engine carrying the belief pickers, plain on one that is not |
 | `mem u%p%` | curated-memory fill, user and project, as two separate percentages | no |
 | `N proposals` | staged LORE proposals awaiting review (hidden at zero) | yes — pending-proposals picker |
 | `⧉ N agents` | Task-spawned subagents currently running (hidden at zero) | no (see subagent row below) |
 | `⌁ session <id>` | this session's reattach handle (only while attached to a daemon) | yes — sessions picker |
 | `peers N (k⌁)` | other DOXA sessions on this repo; `k⌁` is how many are detached | yes — peers picker: each row is the peer, the beginning of its transcript, and tokens consumed so far (self-reported, up to one heartbeat stale) |
-| `⊘ <tool>` | a tool disabled after two failures this session | no |
+| `⊘ <tool>` | every tool disabled after two failures this session, space-joined into one chip | no |
 
 A `⧉ N agents` chip is accompanied by a second row under the status bar
 with one clickable entry per running subagent; clicking one opens a
@@ -855,17 +1043,22 @@ which copy loads — `package` is how to reproduce a bug against exactly the
 pinned dependency without moving the plugin checkout aside.
 
 **Curated memory** (user- and project-scoped) is hard-capped by character
-count (4500 user / 8800 project by default, in `lore_core` itself); the
-status bar's `mem u%p%` chip reports fill against those same caps.
+count — **9000 user, 8800 project** on `lore_core` 0.55.0, overridable
+with `LORE_USER_CAP` / `LORE_MEMORY_CAP`. The caps live in `lore_core`,
+not in DOXA, so a LORE pin bump can move them; the status bar's
+`mem u%p%` chip reads `memory_cap(scope)` rather than a number of its own,
+which is why it cannot disagree with `lore status`.
 
 **Beliefs** are an uncapped store with an FTS index and evidence trails.
 At act time, one FTS pass over the prompt may attach a single belief as a
 citation (`consult_floor`, default relevance floor 1.0; 0 disables it) —
 labelled CITE-ONLY, never injected as fact. The model's entire memory tool
-surface is five operators: four read-only (`lore_belief_search`,
-`lore_belief_show`, `lore_memory_list`, `lore_session_search`) and one
-write, `lore_remember`, which only **stages a proposal** — it never writes
-directly into memory.
+surface is six operators (`doxa/operators.py`): five read-only —
+`lore_belief_search`, `lore_belief_show`, `lore_belief_neighbours`,
+`lore_memory_list`, `lore_session_search` — and one write,
+`lore_remember`, which only **stages a proposal** into
+`$LORE_ROOT/pending/` — it never writes directly into memory. They reach
+the model as `mcp__doxa__<name>`.
 
 **The review gate.** The only write path into curated memory or the
 belief store is a human approving a proposal, one row at a time. Through
@@ -974,9 +1167,12 @@ own tooltip.
 between turns — at most once every `derive_secs`, **900 seconds by
 default** since v0.98.0 — and stages whatever it judges worth remembering,
 behind the same approval gate as everything else. It never blocks a turn:
-it is scheduled on turn-done, refuses to start while one is already in
-flight or while the session is finalizing, so a quiet session pays nothing
-and a busy one pays at most four reviews an hour.
+its one trigger is turn-done, it refuses to start while **another review**
+is still running or while the session is finalizing, and `finalize()`
+waits for an in-flight review rather than racing it. So a quiet session
+pays nothing and a busy one pays at most four reviews an hour. It does
+not check whether a turn is running, because it is only ever scheduled
+when one has just ended.
 
 Each review shells out to a headless `claude -p`, so it is a real cost.
 `derive_secs = 0` (or `off`) turns it off and leaves review where it was
@@ -1108,7 +1304,11 @@ nothing on a kitty-protocol terminal or one never measured, and
 ## Commands
 
 Every command below is defined once in `doxa/commands.py` and reaches the
-palette, the `/` autocomplete and `/help` from that single registry.
+palette, the `/` autocomplete and `/help` from that single registry, in the
+six groups that registry declares. Five of them are below; the sixth,
+**Plugins**, is built at runtime from whatever adopted Claude Code plugin
+commands this session carries, and is omitted entirely when there are none
+(see [The spawned CLI](#the-spawned-cli)).
 
 **Session**
 
@@ -1117,12 +1317,13 @@ palette, the `/` autocomplete and `/help` from that single registry.
 | `/model [name]` | Switch the model for the rest of this session (no reconnect) |
 | `/branch [name]` | List local branches (current base marked), or switch this session's base |
 | `/mode [name]` | Permission mode; bare lists all six with what each does |
-| `/effort [level]` | Effort level for new sessions only (connect-time) |
+| `/effort [low\|medium\|high\|xhigh\|max]` | Effort level for new sessions only (connect-time); prompt-only, with no palette entry |
 | `/usage` | Session tokens, turns, cost, subscription headroom |
 | `/context` | What is occupying the context window right now, by component |
 | `/clear` | Fresh session in this tab: finalize, rotate transcript, reset |
 | `/sessions [kill <prefix> \| kill-detached]` | Every live session: name, age, attached — and how to kill one |
 | `/resume [session-id]` | Reopen a past conversation in a new tab |
+| `/dir` | This session's own working directory — where its tool calls actually run |
 | `/queue [position-or-id]` | Prompts waiting behind the running turn, by position and id; an argument cancels one |
 
 **Memory**
@@ -1139,16 +1340,11 @@ palette, the `/` autocomplete and `/help` from that single registry.
 |---|---|
 | `/split` | A second session **stacked below** this pane (`ctrl+o`) |
 | `/vsplit` | A second session **side by side** with this pane (`ctrl+n`) |
-| `/diff` | This session's live worktree diff in the pane beside it, or close it (`f2`) |
-
-| `/split` | A second pane group **stacked below** this one (`alt+s`) |
-| `/vsplit` | A second pane group **side by side** with this one (`alt+d`) |
+| `/diff` | This session's live worktree diff in the group beside it, or close it (`f2`) |
 | `/pane [n]` | Jump to pane group `n`, numbered left to right then top to bottom (`ctrl+1`…`ctrl+9`); with no number, flash them |
 | `/movepane <n>` | Move this group's active tab into group `n` — the session keeps running |
 | `/sidebar [on\|off\|width <n>\|wider\|narrower]` | Show or hide the session sidebar (`f3`), or move its right edge (`alt+shift+←/→`) |
 | `/collection …` | `new` / `rename` / `delete` / `add` / `remove` — group sessions in the sidebar under a name you choose |
-| `/diff` | This session's live worktree diff in the group beside it, or close it (`alt+g`) |
-| `/dir` | Where this session actually is |
 | `/cd <path>` | Open that path in a **new** tab; this session stays where it is |
 | `/peers` | Live sessions in this project right now |
 | `/msg <session_prefix> <text>` | Send a message to one same-project peer session |
@@ -1180,18 +1376,25 @@ palette, the `/` autocomplete and `/help` from that single registry.
 
 ## Settings
 
-Precedence everywhere: **environment > `~/.doxa/config.toml` > default.**
-The file is plain TOML, `0600`. The settings modal (`ctrl+,` / `/settings`,
-grouped into Session · Memory · Appearance · Notifications · Paths ·
-About) shows each row's effective value and where it came from; a row the
-environment is winning is read-only in the modal.
+Precedence everywhere: **environment > `~/.doxa/config.toml` > default**,
+resolved in one place (`config.raw()`). The file is plain TOML, written
+`0600` inside a directory clamped to `0700`. The settings modal (`ctrl+,`
+/ `/settings`, seven category tabs — Session · Memory · Appearance ·
+Notifications · Remote · Paths · About, walked with `shift+←/→`) shows
+each row's effective value and where it came from. A row the environment
+is winning is not merely marked: it gets **no input field at all**, and
+says `(set by env — editing here would be shadowed; unset DOXA_X to use
+the config file)`. A save against a config file that exists but will not
+parse is refused rather than clobbering it.
 
 | setting | env | default | what it controls |
 |---|---|---|---|
-| `model` | `DOXA_MODEL` | CLI default | model for new turns |
+| `engine` | `DOXA_ENGINE` | `claude` | which engine drives NEW sessions — `claude` or `codex` (see [Engines](#engines)) |
+| `model` | `DOXA_MODEL` | CLI default | model for new sessions; `/model` switches the live one and writes this row |
 | `effort` | `DOXA_EFFORT` | CLI default | reasoning effort, new sessions only |
 | `allow_bypass` | `DOXA_ALLOW_BYPASS` | off | let new sessions reach `bypassPermissions` at all |
 | `adopt_plugins` | `DOXA_ADOPT_PLUGINS` | off | load commands/skills/agents from your OWN installed Claude Code plugins into new sessions — never their hooks or MCP servers, never LORE (see [docs/plans/plugins.md](plans/plugins.md)) |
+| `auto_diff` | `DOXA_AUTO_DIFF` | off | open the live diff by itself the first time a session edits its worktree — once per session (see [The live diff](#the-live-diff)) |
 | `spawn_sessions` | `DOXA_SPAWN_SESSIONS` | off | offer the model `spawn_session`, which starts a second session in this repo and gives it a task (see [Session spawn](#session-spawn--off-unless-you-turn-it-on)) — read from this file and the environment only, never from a repository |
 | `permission_mode` | `DOXA_PERMISSION_MODE` | `default` | mode new sessions connect in; accepts `default`/`acceptEdits`/`plan` only |
 | `linger_secs` | `DOXA_LINGER_SECS` | 120 | seconds a daemon outlives its last detached client |
@@ -1200,6 +1403,7 @@ environment is winning is read-only in the modal.
 | `resume_restored` | `DOXA_RESUME_RESTORED` | on | a restored tab whose session ended comes back live, continuing the conversation |
 | `derive_secs` | `DOXA_DERIVE_SECS` | `900` | streaming-deriver interval, seconds; `0`/`off` disables it and leaves review to PreCompact and session end |
 | `consult_floor` | `DOXA_CONSULT_FLOOR` | 1.0 | act-time belief-consult relevance floor; 0 disables it |
+| `graph_context` | `DOXA_GRAPH_CONTEXT` | off | attach a graph-context block to every turn. Recurring per-turn token cost once on, which is why it is off |
 | `graph_view` | `DOXA_GRAPH_VIEW` | `browser` | how the beliefs picker's `g` shows one belief's neighbourhood: `browser` (mermaid page under `~/.doxa/graphs`) or `ascii` (LORE's edge block, in the TUI) |
 | `lore_root` | `LORE_ROOT` | `~/.claude/lore` | where the belief store and session index live; sticky, set by `/setup` |
 | `nerd_font` | `DOXA_NERD_FONT` | off | use a Nerd Font glyph for the branch chip |
@@ -1224,6 +1428,10 @@ environment is winning is read-only in the modal.
 | `notify_needs_input` | `DOXA_NOTIFY_NEEDS_INPUT` | **off** | notify when a session is waiting on you (a turn merely finishing never notifies); a fully detached session always notifies once this is on |
 | `notify_update` | `DOXA_NOTIFY_UPDATE` | on | notify when `/update` has something to pull |
 | `notify_lore` | `DOXA_NOTIFY_LORE` | on | `lore_core`'s own review banner; held silent while `notify_staged` is on |
+| `remote_enabled` | `DOXA_REMOTE_ENABLED` | off | allow a remote bridge to attach to this daemon at all. On by itself grants nothing — the allow-list below still has to name someone (see [Remote drivers](#remote-drivers--a-policy-and-no-transport)) |
+| `remote_allowed_logins` | `DOXA_REMOTE_ALLOWED_LOGINS` | empty | DOXA's own allow-list of logins, on top of the tailnet's. **Empty refuses everyone**, never everyone-allowed |
+| `remote_allow_shell` | `DOXA_REMOTE_ALLOW_SHELL` | off | let a remote driver run `!` shell lines — refused on the reduced remote surface without it |
+| `remote_allow_bypass` | `DOXA_REMOTE_ALLOW_BYPASS` | off | let a remote driver raise the permission mode to `bypassPermissions`; independent of `allow_bypass`, and both must be on |
 | *doxa home* | `DOXA_HOME` | `~/.doxa` | durable state: this config, tab sets, names |
 | *runtime dir* | `DOXA_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/doxa` → `~/.local/share/doxa` | ephemeral daemon sockets and the peer registry |
 
@@ -1247,11 +1455,18 @@ headlessly from the real app by
 [`scripts/screenshot.py`](../scripts/screenshot.py) and
 [`scripts/record_gif.py`](../scripts/record_gif.py) — a scripted session,
 no spend, fake account numbers — and each still keeps its source SVG
-committed beside its PNG. The [README](../README.md#gallery) captions ten
-of them. The rest, catalogued here so that **no rendered asset is left
-unnamed by any document**: that is the exact condition
+committed beside its PNG. **Twenty-nine images, each named exactly once**
+— the [README](../README.md#gallery) captions eleven of them, counting the
+hero, and the other eighteen are catalogued below so that **no rendered
+asset is left unnamed by any document**. That is the exact condition
 `beliefs-browser.png` needed to sit wrong for eighteen releases before
-v0.87.0 deleted it.
+v0.87.0 deleted it. All twenty-nine are 3068x1734.
+
+Every scene renders the app inside **the checkout the script runs from**,
+so the identity block, the tab labels and the `repo ⎇ branch` chip carry
+that checkout's own branch and path. Capture from `main`, on a clean tree,
+or a working branch name ends up baked into fourteen of the sixteen
+stills.
 
 | asset | shows |
 |---|---|
@@ -1266,10 +1481,10 @@ v0.87.0 deleted it.
 | [`settings.png`](../assets/shots/settings.png) | the settings modal, each row's effective value and its source |
 | [`reasoning.gif`](../assets/shots/reasoning.gif) | the reasoning fold ticking, then the phase flipping to `generating` |
 | [`sessions.png`](../assets/shots/sessions.png) | `/sessions`, attached and detached |
-| [`clock.png`](../assets/shots/clock.png) | the clock |
+| [`clock.png`](../assets/shots/clock.png) | the upper-right clock |
 | [`palette.gif`](../assets/shots/palette.gif) | the `ctrl+p` command palette |
 | [`rename.gif`](../assets/shots/rename.gif) | renaming a tab by double-clicking its header |
 | [`attention-blink.gif`](../assets/shots/attention-blink.gif) | a tab blinking for attention |
-| [`image-support.png`](../assets/shots/image-support.png) | `/img` naming the image tier this terminal got |
-| [`banner-blocks.png`](../assets/shots/banner-blocks.png) | the boot banner |
+| [`image-support.png`](../assets/shots/image-support.png) | `/img`'s tier table — the rung in use, and every rung it could not measure labelled as such rather than guessed |
+| [`banner-blocks.png`](../assets/shots/banner-blocks.png) | the boot banner, drawn in block characters on every terminal alike |
 | [`transparent.png`](../assets/shots/transparent.png) | the transparent-background setting |

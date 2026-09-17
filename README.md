@@ -10,8 +10,8 @@
 </p>
 
 > [!WARNING]
-> **Beta.** DOXA reached `1.0` and still moves fast: 109 releases took it from
-> `0.1.0` to `1.9.1` between 23 August and 16 September 2026. Config keys, the
+> **Beta.** DOXA reached `1.0` and still moves fast: 111 releases took it from
+> `0.1.0` to `1.9.3` between 23 August and 17 September 2026. Config keys, the
 > socket protocol and on-disk formats can still change between minor versions,
 > with no migration path.
 > It runs an agent that edits your files and a shell with your privileges.
@@ -81,9 +81,10 @@ spend, fake account numbers. See
 - **[A tool gate that counts strikes.](docs/manual.md#containment)** Every
   call passes `PreToolUse`; a tool failing hard twice is disabled for the
   session.
-- **[Numbers that were measured.](docs/manual.md#the-status-bar)** Fifteen
-  tooltipped chips — `dir NAME` outside a repo — and a `/context` the CLI
-  itself counted.
+- **[Numbers that were measured.](docs/manual.md#the-status-bar)** Eighteen
+  tooltipped chips — `dir NAME` outside a repo, `diff 3 files +42 −7` when
+  the worktree has work in it — and a `/context` the CLI itself counted. A
+  chip an engine cannot answer for is hidden, never painted blank.
 - **[Pictures, or a straight answer why not.](docs/manual.md#images)**
   kitty graphics → sixel → half-block → text, settled by one probe.
 - **[Sessions talk to each other.](docs/manual.md#search-resume-and-peers)**
@@ -110,7 +111,7 @@ binding yours cannot send.
 
 ![One tab split into two panes, each its own session: same identity block, different models, separate transcripts, a status bar apiece](assets/shots/split-panes.png)
 
-*A split spawns a **second session**, not a second view of the first. Shot at v0.94.0; since v0.97.0 each region has its own tab strip.*
+*A split spawns a **second session**, not a second view of the first. Each group owns its own tab strip since v0.97.0 — the left group has three tabs and draws one; the right holds a single tab, and a strip of one is chrome, so it draws none.*
 
 ![A turn's tool-call count ticking 1 to 3 as chips land, the marker counting 5s, 9s, 14s through the silent wait](assets/shots/tool-calls.gif)
 
@@ -162,8 +163,8 @@ DOXA authenticates through that CLI's OAuth session and never reads
 `ANTHROPIC_API_KEY` — then runs `uv tool install
 git+https://github.com/docwilde/doxa`. DOXA is not on PyPI. Re-running is
 safe and never touches an existing `~/.doxa/config.toml`. Add `sh -s --
-v0.39.0` for a tag. Read it first if you would rather not pipe a
-stranger's script into `sh`.
+v1.9.2` to pin a tag instead of tracking `main`. Read it first if you
+would rather not pipe a stranger's script into `sh`.
 
 Or run from a checkout:
 
@@ -192,14 +193,14 @@ uv run doxa launcher install      # XDG start-menu entry + icons
 uv run doxa --engine codex        # drive the session with Codex instead
 ```
 
-**A second engine (v1.4.0).** `--engine codex` (or the `engine` setting)
-runs a DOXA session on the Codex CLI: its own tab, transcript, turns,
-status bar, peer rail and `/msg`. What Codex does not report, DOXA does
-not paint — no ctx chip (it counts tokens but never reports a window
-size), no cost chip, no permission-mode chip — and it does not carry
-DOXA's LORE tools. A Codex session runs inside the TUI, so `ctrl+q` ends
-it instead of detaching. `doxa.engines.get("codex").supports()` is the
-whole map.
+**[A second engine](docs/manual.md#engines) (v1.4.0).** `--engine codex`
+(or the `engine` setting) runs a DOXA session on the Codex CLI: its own
+tab, transcript, turns, status bar, peer rail and `/msg`. What Codex does
+not report, DOXA does not paint — no ctx chip (it counts tokens but never
+reports a window size), no cost chip, no permission-mode chip — and it
+does not carry DOXA's LORE tools. A Codex session runs inside the TUI, so
+`ctrl+q` ends it instead of detaching. `doxa.engines.get("codex").supports()`
+is the whole map.
 
 `launcher install` points at **the DOXA you ran it from**, by absolute
 path, and prints that path and version — so a shortcut that would start
@@ -224,19 +225,25 @@ shipped and behaves as described; [CHANGELOG.md](CHANGELOG.md) has the
 history. Config keys, socket protocol and command names can still change
 between minor versions.
 
-**Specified, not built.** Six documents in [`docs/plans/`](docs/plans/)
-are designs with nothing behind them, each saying so in its opening lines:
-`plugin-api` (no loader exists — v0.34.0 shipped only the seams one could
-bind to), `mermaid`, `code-graph`, `sandbox`, `model-registry`. `remote` is
-now part-built: v1.8.0 shipped `doxa/remote_policy.py`, the decision layer
-that refuses by default, but no transport and no second renderer — nothing
-listens on a network.
-Five left that list by shipping: `split-panes` (v0.91.0), `live-diff`
-(v0.92.0), `pane-groups` (v0.97.0, which inverted the first),
-`session-sidebar` (v1.0.0) and `peer-publishing` (v1.0.2). `plugins.md` shipped in v0.74.0 and
-is a different system — it adopts *your own* Claude Code plugins
-(commands, skills, agents; never hooks or MCP servers) into the spawned
-CLI.
+**Specified, not built.** Sixteen documents sit in
+[`docs/plans/`](docs/plans/) and each states its own status in its opening
+lines. **Five have nothing behind them:** `plugin-api` (no loader exists —
+v0.34.0 shipped only the seams one could bind to), `mermaid`, `code-graph`,
+`sandbox`, `model-registry`. **One is part-built:** v1.8.0 shipped
+`doxa/remote_policy.py`, the decision layer that refuses by default, but no
+transport and no second renderer — nothing listens on a network, and
+`remote.md`'s own header still reads "Nothing implemented", which is now a
+release behind the code.
+
+**Ten left that list by shipping:** `plugins` (v0.74.0), `split-panes`
+(v0.91.0), `live-diff` (v0.92.0), `pane-groups` (v0.97.0, which inverted
+the first), `session-sidebar` (v1.0.0), `peer-publishing` (v1.0.2),
+`spawn-session` (v1.1.0), `collection-triage` (parts 0, 1 and 1b in v1.2.0;
+parts 2 and 3 deliberately not), `engine-providers` (v1.4.0, the second
+engine) and `rail-interaction` (v1.5.0). `plugins` is a different system
+from `plugin-api` and is easy to confuse with it — it adopts *your own*
+Claude Code plugins (commands, skills, agents; never hooks or MCP servers)
+into the spawned CLI.
 
 **Not built, not specified.** No orchestration in any form: nothing
 schedules sessions, assigns work between them or supervises a fleet.
@@ -254,8 +261,11 @@ Run the suite with `uv run pytest`.
 
 Provider-agnostic model routing — the point is subscription auth, not a
 router. Replacing the LORE Claude Code plugin, which keeps shipping the
-same core. General Claude Code plugin compatibility — DOXA does not load
-third-party plugins today.
+same core. A plugin API of DOXA's own — `docs/plans/plugin-api.md` is a
+design with no loader behind it. Full Claude Code plugin compatibility:
+`adopt_plugins` carries in commands, skills and agents from the plugins
+you already have, and refuses their hooks and MCP servers unconditionally
+— that refusal is the design, not a gap waiting to be filled.
 
 ## License
 
