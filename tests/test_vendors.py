@@ -1020,3 +1020,39 @@ async def test_a_usage_only_chunk_with_no_choices_is_absorbed_not_misread(tmp_pa
     assert [e.data["text"] for e in of_type(events, "text_delta")] == ["hi"]
     assert eng.usage_totals["input_tokens"] == 33
     assert of_type(events, "turn_done")[0].data["is_error"] is False
+
+
+@pytest.mark.parametrize(
+    "engine_id,spec", [("deepseek", DEEPSEEK), ("glm", GLM)], ids=["deepseek", "glm"]
+)
+def test_new_session_takes_exactly_the_kwargs_the_cli_passes(tmp_path, engine_id, spec):
+    """The reachability guarantee for ``doxa --engine <id>``: the four
+    factories doxa.cli builds for a non-default engine are these exact
+    calls, and a provider ignores what its engine has no use for rather
+    than making every caller branch on which engine it is talking to."""
+    provider = engines_mod.get(engine_id)
+
+    fresh = provider.new_session(cwd=str(tmp_path), model=None)
+    assert isinstance(fresh, ChatApiEngine)
+    assert fresh.spec is spec
+    assert fresh.model == spec.default_model    # None means the vendor's own
+
+    resumed = provider.new_session(
+        cwd=str(tmp_path), model=None, session_id="s-1", resume="s-1",
+    )
+    assert resumed.session_id == "s-1"
+    assert resumed.resume == "s-1"
+
+    # Vocabulary this engine has no use for is ignored, not refused.
+    assert provider.new_session(
+        cwd=str(tmp_path), model=None, daemon_socket="/nope.sock",
+        allowed_tools=["Bash"], client_factory=object(),
+    ).spec is spec
+
+
+def test_a_provider_cannot_be_talked_into_the_other_vendors_spec(tmp_path):
+    """The one mix-up a randomised fleet would never notice: a session
+    running GLM while the registry, the peer rail and the ledger all call
+    it DeepSeek."""
+    session = engines_mod.get("deepseek").new_session(cwd=str(tmp_path), spec=GLM)
+    assert session.spec is DEEPSEEK
