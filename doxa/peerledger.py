@@ -105,19 +105,27 @@ lock, so N sessions appending at once serialise on it. From async code use
 ``asyncio.to_thread(self.append, ...)`` and exists so that nobody has to
 remember to write that.
 
-COST, measured here on 2026-09-17 and worth knowing before a body of
-arbitrary size is handed to :meth:`PeerLedger.append`: ``scrub_secrets`` is
-quadratic in the length of an unbroken base64-alphabet run. 1 KB of such a
-run costs 5 ms, 5 KB costs 110 ms, 20 KB costs 1.6 s, 100 KB costs 39 s --
-while 100 KB of PROSE costs 16 ms, because the run is what backtracks. A
-peer message quoting a minified bundle, a base64 attachment or a long digest
-therefore stalls the SENDING session for as long as that takes;
-:meth:`append_async` keeps it off the event loop but does not make it
-cheaper. The fix belongs in ``lore_core.scrub`` (the pattern, not this
-caller). Until it lands, a multi-kilobyte blob in a peer body is a known
-stall rather than a mystery -- and note what it does to the record: the
-scrubber replaces the whole run with a redaction token, so "stored in full"
-means the full SCRUBBED body, which for a blob is short.
+COST of ``scrub_secrets``, re-measured on 2026-09-17 against lore_core
+0.55.0, resolving the same copy this module imports. It is LINEAR, not
+quadratic, and cheap:
+
+    real base64 of random bytes, chars -> wall
+      6,668   ->   7 ms
+     26,668   ->  25 ms
+    133,336   -> 109 ms
+
+An earlier revision of this docstring claimed 5 KB cost 110 ms and 100 KB
+cost 39 s. Those numbers did not reproduce and are withdrawn; whatever was
+measured, it was not this function. :meth:`append_async` still exists and is
+still the right shape for a write on an event loop, but it is not solving a
+performance problem that exists.
+
+What IS true, and matters more: the scrubber replaces an entire base64 run
+with a redaction token. 133,336 characters of blob come back as 17. So
+"stored in full" means the full SCRUBBED body, and for a blob-bearing
+message the content -- which the experiment treats as the measurement -- is
+gone. ``body_sha256`` is taken PRE-scrub, so loop detection is unaffected;
+content analysis of such a message is not possible.
 """
 
 from __future__ import annotations
