@@ -58,6 +58,14 @@ that ``turn`` is the SENDER's turn context (the turn the send was made in,
 milliseconds since the message named in ``in_reply_to``, or None when the
 sender has no such reference point.
 
+WHEN TO APPEND: after the send has succeeded, with ``to`` naming the peers
+it ACTUALLY reached. ``doxa.peers.send_to`` can fail per peer (a dead
+socket, an oversize frame), and a record written before the attempt counts
+a delivery that never happened -- which inflates out-degree, the first of
+the measures the experiment reports. One append per send, not one per
+recipient: the record is the message, and a partial broadcast is a record
+whose ``to`` is short.
+
 TRUST. Bodies pass ``lore_core.scrub.scrub_secrets`` before they reach disk,
 the same choke point ``doxa.peers`` applies to received frames and
 ``doxa.transcript`` applies to transcripts. The sender's own free-text
