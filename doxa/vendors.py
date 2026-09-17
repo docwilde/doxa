@@ -1085,6 +1085,14 @@ class ChatApiEngine:
                 pass
 
         self._persist_user_text(prompt_out)
+        # Appended BEFORE the model is asked, and left in place even when
+        # the turn then fails: the operator did say it, and dropping it
+        # would make the next turn's context differ from the transcript.
+        # MEASURED that this is safe -- a failed turn leaves two user
+        # messages in a row, and both vendors answer that with HTTP 200
+        # (some OpenAI-compatible servers refuse it, which is why it was
+        # checked rather than assumed). No synthetic assistant message is
+        # invented to restore alternation: the model never said one.
         self.messages.append({"role": "user", "content": prompt_out})
         # Claimed HERE, at the one moment the turn becomes a fact, so a
         # failing and a succeeding turn report the same number -- the

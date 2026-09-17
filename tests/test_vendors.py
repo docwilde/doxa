@@ -796,3 +796,21 @@ async def test_an_answer_truncated_before_any_text_says_so(tmp_path):
     done = of_type(events, "turn_done")[0].data
     assert done["is_error"] is True
     assert "cut off" in done["error"]
+
+
+async def test_a_failed_turn_leaves_its_prompt_in_the_conversation(tmp_path):
+    """A turn that failed still happened. The prompt stays -- dropping it
+    would make the next turn's context differ from the transcript, and
+    inventing an assistant reply to restore alternation would put words in
+    the model's mouth. MEASURED that both vendors answer two consecutive
+    user messages with HTTP 200; some OpenAI-compatible servers refuse
+    it, which is why the next turn is driven here rather than assumed."""
+    transport = StubTransport(VendorApiError(500, "boom"), prose_script(text=("ok",)))
+    eng = engine(tmp_path, transport=transport)
+    await eng.start()
+    await run_turn(eng, "the one that failed")
+    second = await run_turn(eng, "the one after it")
+
+    assert of_type(second, "turn_done")[0].data["is_error"] is False
+    replayed = [m["role"] for m in transport.requests[-1]["body"]["messages"]]
+    assert replayed == ["system", "user", "user"]
