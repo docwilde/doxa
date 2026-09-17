@@ -1,0 +1,755 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+"""The third-party chat-completions engines: DeepSeek and GLM.
+
+THE CHECK THIS FILE OWES. ``docs/plans/emergent-organization.md`` reads
+``EngineCapabilities`` to assert that the agents in its mixed-vendor arms
+differed in model and in nothing else. A capability map that lies would
+not fail a run -- it would silently invalidate a study. So every test
+below that touches a capability field tests the FIELD AGAINST THE
+BEHAVIOUR, in both directions: a True field must be demonstrated by the
+engine actually doing the thing through its transport, and a False field
+must be demonstrated by the surface saying so rather than faking it.
+
+NO NETWORK, NO CREDENTIALS. Every test here drives
+``ChatApiEngine(transport=...)`` with a scripted SSE stream and an
+injected environment, the same discipline ``SessionEngine(client_factory=
+...)`` and ``CodexEngine(exec_factory=...)`` established. The one live
+test at the bottom skips cleanly when the keys are absent.
+
+THE SCRIPTS ARE THE MEASURED SHAPES. Every chunk builder below is a
+transcription of what the live API actually sent on 2026-09-17 -- notably
+the two DIFFERENT tool-call shapes (DeepSeek fragments a call across many
+deltas; GLM sends one whole), and DeepSeek answering a request for
+``deepseek-chat`` with ``deepseek-flash`` in the response's own ``model``
+field. Scripting the documented shape instead of the measured one would
+make this suite two readings of one doc that agree with each other.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+
+import pytest
+
+from doxa import engines as engines_mod
+from doxa import vendors as vendors_mod
+from doxa.engines import (
+    DEEPSEEK_ENGINE_ID,
+    GLM_ENGINE_ID,
+    Engine,
+    EngineCapabilities,
+    capabilities_of,
+)
+from doxa.vendors import (
+    DEEPSEEK,
+    GLM,
+    VENDOR_CAPABILITIES,
+    ChatApiEngine,
+    DeepSeekEngineProvider,
+    GLMEngineProvider,
+    MissingCredential,
+    VendorApiError,
+    credential,
+    request_body,
+)
+
+FAKE_ENV = {"DEEPSEEK_API_KEY": "ds-test-key-0001", "ZAI_API_KEY": "zai-test-key-0002"}
+
+
+# -- the stub transport ------------------------------------------------
+
+
+class StubTransport:
+    """Replays scripted SSE payloads and records what was sent.
+
+    One script per model call, popped in order, so a tool-using turn (two
+    calls: the one that names the tool, the one that reads its result) is
+    written as two scripts. A script may be an exception instead of a list
+    of chunks, which is how a vendor failure is driven."""
+
+    def __init__(self, *scripts) -> None:
+        self.scripts = list(scripts)
+        self.requests: list[dict] = []
+
+    async def stream(self, url, body, headers, timeout):
+        self.requests.append(
+            {"url": url, "body": body, "headers": headers, "timeout": timeout}
+        )
+        script = self.scripts.pop(0) if self.scripts else []
+        if isinstance(script, BaseException):
+            raise script
+        for chunk in script:
+            yield json.dumps(chunk)
+
+    @property
+    def last_body(self) -> dict:
+        return self.requests[-1]["body"]
+
+
+def _chunk(model: str, delta: dict, finish=None, usage=None) -> dict:
+    out: dict = {
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+    }
+    if usage is not None:
+        out["usage"] = usage
+    return out
+
+
+USAGE = {
+    "prompt_tokens": 33,
+    "completion_tokens": 29,
+    "total_tokens": 62,
+    "prompt_tokens_details": {"cached_tokens": 4},
+    "completion_tokens_details": {"reasoning_tokens": 26},
+}
+
+
+def prose_script(model="deepseek-flash", text=("Hel", "lo"), reasoning=("think",)):
+    """The measured shape of an ordinary answer: role first, then
+    reasoning_content deltas, then content deltas, then a final chunk
+    carrying finish_reason AND usage on the same chunk."""
+    script = [_chunk(model, {"role": "assistant", "content": None, "reasoning_content": ""})]
+    script += [_chunk(model, {"reasoning_content": r}) for r in reasoning]
+    script += [_chunk(model, {"content": t}) for t in text]
+    script.append(_chunk(model, {"content": ""}, finish="stop", usage=USAGE))
+    return script
+
+
+def deepseek_tool_script(name="lore_belief_search", args='{"query": "deploys"}'):
+    """DeepSeek's measured tool shape: the first delta carries id/type/name
+    with EMPTY arguments, and every delta after it carries one more
+    fragment of the arguments JSON and nothing else."""
+    model = "deepseek-flash"
+    script = [_chunk(model, {"role": "assistant", "content": None})]
+    script.append(_chunk(model, {"tool_calls": [{
+        "index": 0, "id": "call_00_abc", "type": "function",
+        "function": {"name": name, "arguments": ""},
+    }]}))
+    script += [
+        _chunk(model, {"tool_calls": [{"index": 0, "function": {"arguments": piece}}]})
+        for piece in args
+    ]
+    script.append(_chunk(model, {"content": ""}, finish="tool_calls", usage=USAGE))
+    return script
+
+
+def glm_tool_script(name="lore_belief_search", args='{"query": "deploys"}'):
+    """GLM's measured tool shape: ONE delta carrying id, name and the
+    complete arguments JSON."""
+    model = "glm-5.3-flash"
+    return [
+        _chunk(model, {"tool_calls": [{
+            "index": 0, "id": "call_47a5", "type": "function",
+            "function": {"name": name, "arguments": args},
+        }]}),
+        _chunk(model, {"role": "assistant", "content": ""},
+               finish="tool_calls", usage=USAGE),
+    ]
+
+
+def engine(tmp_path, spec=DEEPSEEK, transport=None, **kwargs) -> ChatApiEngine:
+    return ChatApiEngine(
+        cwd=str(tmp_path), spec=spec, transport=transport or StubTransport(),
+        env=dict(FAKE_ENV), **kwargs,
+    )
+
+
+async def run_turn(eng: ChatApiEngine, prompt: str = "hi") -> list:
+    return [event async for event in eng.send(prompt)]
+
+
+def of_type(events, kind) -> list:
+    return [e for e in events if e.type == kind]
+
+
+# -- the registry ------------------------------------------------------
+
+
+def test_both_vendors_are_registered_under_the_ids_the_flag_takes():
+    assert engines_mod.is_known("deepseek")
+    assert engines_mod.is_known("glm")
+    assert engines_mod.get("deepseek").engine_id() == DEEPSEEK_ENGINE_ID
+    assert engines_mod.get("GLM").engine_id() == GLM_ENGINE_ID
+
+
+def test_an_unknown_engine_is_refused_the_way_get_codex_refuses():
+    """Same refusal, same message shape: the id that was asked for, and
+    the list of the ones that exist. Silently falling back to Claude would
+    start a session on an engine nobody asked for -- and in a randomised
+    fleet, one that the ledger would then record as the wrong vendor."""
+    with pytest.raises(KeyError) as excinfo:
+        engines_mod.get("deepsek")
+    message = excinfo.value.args[0]
+    assert "deepsek" in message
+    for known in ("claude", "codex", "deepseek", "glm"):
+        assert known in message
+
+
+def test_the_two_providers_return_the_same_map_object():
+    """Capability parity, made structural. Two hand-maintained maps could
+    drift; one shared object cannot, and the experiment's control depends
+    on it not drifting."""
+    assert DeepSeekEngineProvider().supports() is GLMEngineProvider().supports()
+    assert DeepSeekEngineProvider().supports() is VENDOR_CAPABILITIES
+
+
+def test_a_provider_that_declares_nothing_gets_a_fully_false_map():
+    """The conservative default, which is what makes an honest map
+    possible at all: forgetting a field under-promises."""
+    bare = EngineCapabilities()
+    assert not any(
+        getattr(bare, name) for name in EngineCapabilities.__dataclass_fields__
+    )
+
+    class Undeclared:
+        """A provider that declares nothing at all."""
+
+        def engine_id(self):
+            return "undeclared"
+
+        def engine_display_name(self):
+            return "Undeclared"
+
+        def supports(self):
+            return EngineCapabilities()
+
+        def new_session(self, **kwargs):
+            raise NotImplementedError
+
+    assert Undeclared().supports() == bare
+
+
+def test_both_engines_satisfy_the_protocol(tmp_path):
+    assert isinstance(engine(tmp_path, DEEPSEEK), Engine)
+    assert isinstance(engine(tmp_path, GLM), Engine)
+
+
+def test_a_handle_is_believed_about_itself(tmp_path):
+    assert capabilities_of(engine(tmp_path)) is VENDOR_CAPABILITIES
+
+
+# -- credentials -------------------------------------------------------
+
+
+def test_a_missing_credential_names_the_variable_and_not_its_value():
+    with pytest.raises(MissingCredential, match=r"DEEPSEEK_API_KEY"):
+        credential(DEEPSEEK, {})
+    with pytest.raises(MissingCredential, match=r"ZAI_API_KEY"):
+        credential(GLM, {"ZAI_API_KEY": "   "})
+
+
+async def test_a_missing_credential_fails_the_session_at_start_not_mid_turn(tmp_path):
+    """A key that is absent has to fail as a session that could not start,
+    naming the variable -- not as a 401 three minutes into the first
+    turn."""
+    eng = ChatApiEngine(cwd=str(tmp_path), spec=DEEPSEEK, transport=StubTransport(), env={})
+    with pytest.raises(MissingCredential, match=r"\$DEEPSEEK_API_KEY"):
+        await eng.start()
+
+
+async def test_the_credential_is_never_an_attribute_of_the_engine(tmp_path):
+    """The strongest guarantee available: the key is read from the
+    environment when a request is built and dropped when it returns, so
+    there is nothing for a repr, a pickle or a surviving traceback frame
+    to leak."""
+    eng = engine(tmp_path, transport=StubTransport(prose_script()))
+    await eng.start()
+    await run_turn(eng)
+    blob = repr(eng) + repr(vars(eng))
+    for secret in FAKE_ENV.values():
+        assert secret not in blob
+
+
+async def test_a_vendor_error_body_quoting_the_key_is_scrubbed(tmp_path):
+    """MEASURED, not hypothetical: DeepSeek's real 401 body reads
+    "Authentication Fails, Your api key: ****nope is invalid". A failure
+    message that passed a vendor body through verbatim would put key
+    material into the transcript and the block."""
+    key = FAKE_ENV["DEEPSEEK_API_KEY"]
+    detail = json.dumps({"error": {
+        "message": f"Authentication Fails, Your api key: {key} is invalid",
+        "code": "invalid_request_error",
+    }})
+    transport = StubTransport(VendorApiError(401, detail, "invalid_request_error"))
+    eng = engine(tmp_path, transport=transport)
+    await eng.start()
+    events = await run_turn(eng)
+    blob = json.dumps([[e.type, e.data] for e in events])
+    assert key not in blob
+    assert "DEEPSEEK_API_KEY" in blob  # it says WHICH variable to fix
+    assert of_type(events, "turn_done")[0].data["is_error"] is True
+
+
+# -- the True fields, each demonstrated through the transport ----------
+
+
+async def test_streaming_text_is_true_because_content_arrives_in_pieces(tmp_path):
+    transport = StubTransport(prose_script(text=("Hel", "lo", " there")))
+    eng = engine(tmp_path, transport=transport)
+    await eng.start()
+    events = await run_turn(eng)
+    deltas = of_type(events, "text_delta")
+    assert [e.data["text"] for e in deltas] == ["Hel", "lo", " there"]
+    assert VENDOR_CAPABILITIES.streaming_text is True
+    # And the request actually asked for a stream -- a True field that
+    # came from a non-streaming body would be a claim about nothing.
+    assert transport.last_body["stream"] is True
+
+
+async def test_reasoning_is_true_because_reasoning_content_arrives(tmp_path):
+    transport = StubTransport(prose_script(reasoning=("We ", "need")))
+    eng = engine(tmp_path, transport=transport)
+    await eng.start()
+    events = await run_turn(eng)
+    assert [e.data["text"] for e in of_type(events, "reasoning_delta")] == ["We ", "need"]
+    assert VENDOR_CAPABILITIES.reasoning is True
+
+
+async def test_token_usage_is_true_and_the_body_asked_for_it(tmp_path):
+    """Both halves. Without stream_options.include_usage the final chunk
+    carries no usage at all, so the capability would be a claim the
+    request itself made impossible to honour."""
+    transport = StubTransport(prose_script())
+    eng = engine(tmp_path, transport=transport)
+    await eng.start()
+    await run_turn(eng)
+    assert transport.last_body["stream_options"] == {"include_usage": True}
+    assert eng.usage_totals == {
+        "input_tokens": 33,
+        "output_tokens": 29,
+        "cache_read_input_tokens": 4,
+        "reasoning_output_tokens": 26,
+    }
+    assert VENDOR_CAPABILITIES.token_usage is True
+
+
+async def test_resolved_model_is_true_and_is_not_what_was_asked_for(tmp_path):
+    """THE MEASURED CASE, replayed. DeepSeek answers a request for the
+    legacy name `deepseek-chat` with `deepseek-flash`, HTTP 200, and the
+    response's own `model` field is the only place that truth appears. An
+    experiment that assigned models randomly and then recorded the
+    REQUESTED name would be recording a model that did not answer."""
+    transport = StubTransport(prose_script(model="deepseek-flash"))
+    eng = engine(tmp_path, transport=transport, model="deepseek-chat")
+    await eng.start()
+    events = await run_turn(eng)
+    assert transport.last_body["model"] == "deepseek-chat"   # what was asked
+    assert eng.resolved_model == "deepseek-flash"            # what answered
+    assert eng.model == "deepseek-chat"                      # kept distinct
+    assert of_type(events, "turn_done")[0].data["model"] == "deepseek-flash"
+    assert eng.usage_summary()["resolved_model"] == "deepseek-flash"
+    assert VENDOR_CAPABILITIES.resolved_model is True
+
+
+async def test_live_model_switch_is_true_and_takes_the_next_request(tmp_path):
+    transport = StubTransport(prose_script(), prose_script(model="deepseek-v4-pro"))
+    eng = engine(tmp_path, transport=transport)
+    await eng.start()
+    await run_turn(eng)
+    assert await eng.set_model("deepseek-v4-pro") == "deepseek-v4-pro (from the next turn)"
+    # The resolved model does NOT survive the switch: it belongs to the
+    # answer that produced it, and the next answer may be something else.
+    assert eng.resolved_model is None
+    await run_turn(eng, "again")
+    assert transport.requests[-1]["body"]["model"] == "deepseek-v4-pro"
+    assert VENDOR_CAPABILITIES.live_model_switch is True
+
+
+async def test_mcp_tools_is_true_because_the_operators_reach_the_model(tmp_path):
+    """DOXA's LORE operators are offered as OpenAI function tools, and
+    their schema is the SAME object to_sdk_tools hands the SDK."""
+    transport = StubTransport(prose_script())
+    eng = engine(tmp_path, transport=transport)
+    await eng.start()
+    await run_turn(eng)
+    offered = {t["function"]["name"] for t in transport.last_body["tools"]}
+    from doxa.operators import OPERATORS
+
+    assert offered == set(OPERATORS)
+    assert "lore_belief_search" in offered
+    assert transport.last_body["tool_choice"] == "auto"
+    assert VENDOR_CAPABILITIES.mcp_tools is True
+
+
+async def test_spawn_session_is_not_offered_because_spawn_sessions_is_false(tmp_path):
+    """The other direction of the same check. A tool the model cannot see
+    is a tool the model cannot call, and offering one that would silently
+    start a CLAUDE child from a DeepSeek parent is the mislabelled agent a
+    randomised fleet would never notice."""
+    transport = StubTransport(prose_script())
+    eng = engine(tmp_path, transport=transport)
+    await eng.start()
+    await run_turn(eng)
+    offered = {t["function"]["name"] for t in transport.last_body["tools"]}
+    assert "spawn_session" not in offered
+    assert VENDOR_CAPABILITIES.spawn_sessions is False
+
+
+@pytest.mark.parametrize(
+    "spec,script",
+    [(DEEPSEEK, deepseek_tool_script()), (GLM, glm_tool_script())],
+    ids=["deepseek-fragmented", "glm-whole"],
+)
+async def test_a_tool_call_is_assembled_executed_and_fed_back(tmp_path, spec, script):
+    """BOTH measured wire shapes, through one accumulator: DeepSeek
+    fragments a call across many deltas, GLM sends one whole. A shape that
+    only handled the fragmented case would work on one vendor and silently
+    call nothing on the other."""
+    transport = StubTransport(script, prose_script(text=("done",)))
+    eng = engine(tmp_path, spec=spec, transport=transport)
+    await eng.start()
+    events = await run_turn(eng, "search please")
+
+    calls = of_type(events, "tool_call")
+    assert len(calls) == 1
+    assert calls[0].data["name"] == "lore_belief_search"
+    assert calls[0].data["input"] == {"query": "deploys"}   # fragments rejoined
+    assert len(of_type(events, "tool_result")) == 1
+
+    # The result was fed back, so a second request happened and it carries
+    # the assistant's tool_calls plus a tool message answering them.
+    assert len(transport.requests) == 2
+    replayed = transport.requests[1]["body"]["messages"]
+    assistant = [m for m in replayed if m.get("role") == "assistant"][-1]
+    assert assistant["tool_calls"][0]["function"]["name"] == "lore_belief_search"
+    tool_msg = [m for m in replayed if m.get("role") == "tool"][-1]
+    assert tool_msg["tool_call_id"] == assistant["tool_calls"][0]["id"]
+
+
+async def test_tool_gate_is_true_because_an_unknown_tool_degrades_gracefully(tmp_path):
+    """ToolGate's contract, reached through this engine: an unknown name
+    is an ordinary error result the model reads and recovers from, never
+    an exception that ends the turn."""
+    transport = StubTransport(
+        deepseek_tool_script(name="not_a_real_tool"), prose_script(text=("ok",)),
+    )
+    eng = engine(tmp_path, transport=transport)
+    await eng.start()
+    events = await run_turn(eng)
+    result = of_type(events, "tool_result")[0]
+    assert result.data["is_error"] is True
+    assert "unknown tool" in result.data["result_summary"]
+    assert of_type(events, "turn_done")[0].data["is_error"] is False
+    assert VENDOR_CAPABILITIES.tool_gate is True
+
+
+async def test_the_two_strikes_tracker_really_disables_a_tool(tmp_path):
+    """The rest of tool_gate=True: a SECOND hard failure removes the tool
+    for the session and fires the tool_disabled event. Driven through a
+    real ToolGate, with the operator itself made to fail, rather than by
+    poking the gate's own state."""
+    transport = StubTransport(
+        deepseek_tool_script(), prose_script(text=("a",)),
+        deepseek_tool_script(), prose_script(text=("b",)),
+        prose_script(text=("c",)),
+    )
+    eng = engine(tmp_path, transport=transport)
+    await eng.start()
+
+    def explode(**_kwargs):
+        raise RuntimeError("backend is down")
+
+    from doxa.operators import OPERATORS
+
+    original = OPERATORS["lore_belief_search"].fn
+    object.__setattr__(OPERATORS["lore_belief_search"], "fn", explode)
+    try:
+        await run_turn(eng, "one")
+        await run_turn(eng, "two")
+    finally:
+        object.__setattr__(OPERATORS["lore_belief_search"], "fn", original)
+
+    assert eng.disabled_tools() == ["lore_belief_search"]
+    disabled = [e for e in [eng._peer_queue.get_nowait() for _ in range(
+        eng._peer_queue.qsize())] if e.type == "tool_disabled"]
+    assert [e.data["name"] for e in disabled] == ["lore_belief_search"]
+
+
+async def test_resume_is_true_and_replays_the_conversation_exactly(tmp_path):
+    """Not a reconstruction from prose: the saved file IS the messages
+    array the API takes, so a resumed session replays tool calls and tool
+    results too."""
+    transport = StubTransport(deepseek_tool_script(), prose_script(text=("first",)))
+    first = engine(tmp_path, transport=transport)
+    await first.start()
+    await run_turn(first, "remember this")
+    await first.finalize()
+
+    resumed = engine(
+        tmp_path, transport=StubTransport(prose_script(text=("second",))),
+        session_id="fresh-id", resume=first.session_id,
+    )
+    assert [m["role"] for m in resumed.messages] == ["user", "assistant", "tool", "assistant"]
+    assert resumed.messages[0]["content"] == "remember this"
+    assert VENDOR_CAPABILITIES.resume is True
+
+
+async def test_a_resume_with_no_saved_conversation_starts_empty(tmp_path):
+    """An honest empty history, not a failure: the session id still names
+    the transcript, the registry row and the /search result."""
+    assert engine(tmp_path, resume="never-existed").messages == []
+
+
+def test_peer_messaging_is_true_and_has_no_model_in_it():
+    assert VENDOR_CAPABILITIES.peer_messaging is True
+
+
+# -- the False fields, each demonstrated as a surface that says so ------
+
+
+async def test_context_window_is_false_and_nothing_invents_a_percentage(tmp_path):
+    """The window SIZE is unreported by both vendors, and prompt_tokens is
+    a resident count, not a percentage. The surfaces say so rather than
+    dividing by a number DOXA made up -- the substituted 200000
+    doxa.ui.labels.ctx_absolute_text already refused once."""
+    eng = engine(tmp_path, transport=StubTransport(prose_script()))
+    await eng.start()
+    events = await run_turn(eng)
+    assert await eng.context_usage() is None
+    assert eng.last_ctx_percentage is None
+    assert eng.last_ctx_tokens is None
+    done = of_type(events, "turn_done")[0].data
+    assert done["ctx_percentage"] is None
+    assert done["ctx_tokens"] is None
+    assert done["ctx_max_tokens"] is None
+    # ...and the token counts DID arrive, so this is a refusal to guess
+    # rather than an absence of data.
+    assert eng.usage_totals["input_tokens"] == 33
+    assert VENDOR_CAPABILITIES.context_window is False
+
+
+async def test_cost_is_false_and_nothing_paints_a_zero_dollar_figure(tmp_path):
+    """No response field from either vendor carries dollars. 0.0 would
+    read as "this session is free", which is a different claim from
+    "nobody said" -- so the chip is omitted and the turn reports None."""
+    eng = engine(tmp_path, transport=StubTransport(prose_script()))
+    await eng.start()
+    events = await run_turn(eng)
+    assert eng.total_cost_usd == 0.0          # the attribute the chip reads
+    assert eng.usage_summary()["total_cost_usd"] is None
+    assert of_type(events, "turn_done")[0].data["cost_usd"] is None
+    assert VENDOR_CAPABILITIES.cost is False
+
+
+async def test_permission_modes_is_false_and_the_setter_refuses_by_name(tmp_path):
+    eng = engine(tmp_path)
+    with pytest.raises(NotImplementedError, match=r"no permission modes"):
+        await eng.set_permission_mode("acceptEdits")
+    assert VENDOR_CAPABILITIES.permission_modes is False
+
+
+async def test_detachable_is_false_on_the_handle_as_well_as_the_map(tmp_path):
+    """The attach chip reads the attribute, not the map, so both have to
+    agree -- no daemon hosts this engine."""
+    assert engine(tmp_path).detachable is False
+    assert VENDOR_CAPABILITIES.detachable is False
+
+
+def test_lore_pickers_is_false_and_the_methods_are_genuinely_absent(tmp_path):
+    """Reported rather than papered over with empty lists: the pickers are
+    lore_core queries that happen to live on SessionEngine, and every call
+    site already reaches them through getattr."""
+    eng = engine(tmp_path)
+    for name in ("list_beliefs", "list_pending", "approve_pending", "retract_belief"):
+        assert not hasattr(eng, name)
+    assert VENDOR_CAPABILITIES.lore_pickers is False
+
+
+def test_plugins_and_hooks_are_false_because_neither_surface_exists():
+    """`--plugin-dir` is a CLI flag and the three hook events are Claude
+    Code's dispatcher. A JSON request body has neither."""
+    assert VENDOR_CAPABILITIES.plugins is False
+    assert VENDOR_CAPABILITIES.hooks is False
+
+
+async def test_the_lore_snapshot_still_reaches_every_turn_without_hooks(tmp_path):
+    """What hooks=False costs, and what it does NOT. The UserPromptSubmit
+    surface is absent, so the field is False -- but the thing DOXA used it
+    for is done by rebuilding the system message every turn, which is
+    strictly fresher than the throttled refresh the hook performs."""
+    transport = StubTransport(prose_script(), prose_script())
+    eng = engine(tmp_path, transport=transport)
+    await eng.start()
+    await run_turn(eng, "one")
+    await run_turn(eng, "two")
+    for request in transport.requests:
+        assert request["body"]["messages"][0]["role"] == "system"
+    assert eng.lore_snapshot_chars is not None
+
+
+async def test_needs_input_is_answered_false_rather_than_raising(tmp_path):
+    """Nothing in this protocol ever asks, so nothing is ever answered --
+    but a stale dialog from another engine's session must not explode."""
+    assert await engine(tmp_path).answer_needs_input("req-1", {"decision": "allow"}) is False
+
+
+# -- the request body --------------------------------------------------
+
+
+@pytest.mark.parametrize("spec", [DEEPSEEK, GLM], ids=["deepseek", "glm"])
+def test_max_tokens_is_never_in_a_request_body(spec):
+    """MEASURED: a reasoning model spends a token cap on its hidden
+    reasoning first. `max_tokens: 24` returned content "" with
+    finish_reason "length" and all 24 tokens counted as reasoning, on BOTH
+    vendors. There is no parameter to set it through, deliberately."""
+    body = request_body(spec, [{"role": "user", "content": "x"}], "m", "low")
+    assert "max_tokens" not in body
+    assert "max_completion_tokens" not in body
+
+
+def test_deepseek_nests_the_effort_and_glm_puts_it_at_the_root():
+    """The mirror-image shapes, each vendor sent its own. Measured
+    surprise: each also ACCEPTS the other's placement, but whether GLM
+    HONOURS a nested value is unobservable from the response, so neither
+    is sent the other's."""
+    ds = request_body(DEEPSEEK, [], "deepseek-flash", "high")
+    assert ds["thinking"] == {"type": "enabled", "reasoning_effort": "high"}
+    assert "reasoning_effort" not in ds
+
+    glm = request_body(GLM, [], "glm-5.3-flash", "high")
+    assert glm["thinking"] == {"type": "enabled"}
+    assert glm["reasoning_effort"] == "high"
+
+
+def test_glm_is_never_sent_a_disabled_thinking_block():
+    """MEASURED: GLM answers {"type": "disabled"} AND
+    reasoning_effort "none" with HTTP 400 code 1210 ("This model always
+    engages in thinking and cannot be disabled"). So "none" is not in its
+    allow-list at all, and even if it were forced through, the body stays
+    enabled."""
+    assert "none" not in GLM.efforts
+    assert "none" in DEEPSEEK.efforts
+    assert request_body(GLM, [], "glm-5.3-flash", "none")["thinking"] == {"type": "enabled"}
+    assert request_body(DEEPSEEK, [], "deepseek-flash", "none")["thinking"] == {"type": "disabled"}
+
+
+def test_an_unrecognised_effort_falls_back_instead_of_reaching_the_api(tmp_path):
+    """An allow-list, not a passthrough: an unknown effort reaching the
+    API is a 400 in the middle of a turn."""
+    assert engine(tmp_path, spec=GLM, effort="none").effort == vendors_mod.DEFAULT_EFFORT
+    assert engine(tmp_path, spec=GLM, effort="max").effort == "max"
+    assert engine(tmp_path, spec=DEEPSEEK, effort="none").effort == "none"
+    assert engine(tmp_path, spec=DEEPSEEK, effort="nonsense").effort == vendors_mod.DEFAULT_EFFORT
+
+
+def test_both_vendors_are_sampled_at_the_same_temperature():
+    """A capability-parity experiment must not have one arm sampled
+    differently from the other."""
+    ds = request_body(DEEPSEEK, [], "deepseek-flash", "low")
+    glm = request_body(GLM, [], "glm-5.3-flash", "low")
+    assert ds["temperature"] == glm["temperature"] == vendors_mod.TEMPERATURE
+
+
+# -- failure paths -----------------------------------------------------
+
+
+async def test_a_turn_that_never_stops_calling_tools_is_stopped_and_says_so(tmp_path):
+    """A model that calls a tool, reads the result and calls it again is
+    working; one that does that forever is a turn that never ends."""
+    transport = StubTransport(*[deepseek_tool_script() for _ in range(40)])
+    eng = engine(tmp_path, transport=transport)
+    await eng.start()
+    events = await run_turn(eng)
+    done = of_type(events, "turn_done")[0].data
+    assert done["is_error"] is True
+    assert "tool round trips" in done["error"]
+    assert len(transport.requests) == vendors_mod.MAX_TOOL_STEPS
+
+
+async def test_a_vendor_failure_ends_the_turn_readably_and_marked(tmp_path):
+    """Both surfaces, together: is_error alone paints an error beside a
+    turn with no text in it, which sends an operator looking in the wrong
+    place."""
+    transport = StubTransport(VendorApiError(429, '{"error":{"code":"1302"}}', "1302"))
+    eng = engine(tmp_path, spec=GLM, transport=transport)
+    await eng.start()
+    events = await run_turn(eng)
+    assert "429" in of_type(events, "text_delta")[-1].data["text"]
+    assert of_type(events, "turn_done")[0].data["is_error"] is True
+
+
+async def test_a_terminal_vendor_code_says_retrying_will_not_help(tmp_path):
+    """1113 ("insufficient balance or no resource package") arrives as the
+    same HTTP 429 a transient rate limit does, and only error.code tells
+    them apart."""
+    transport = StubTransport(VendorApiError(429, '{"error":{"code":"1113"}}', "1113"))
+    eng = engine(tmp_path, spec=GLM, transport=transport)
+    await eng.start()
+    events = await run_turn(eng)
+    assert "retrying will not help" in of_type(events, "turn_done")[0].data["error"]
+
+
+async def test_the_turn_counter_agrees_between_a_failing_and_a_passing_turn(tmp_path):
+    transport = StubTransport(prose_script(), VendorApiError(500, "boom"))
+    eng = engine(tmp_path, transport=transport)
+    await eng.start()
+    first = await run_turn(eng)
+    second = await run_turn(eng)
+    assert of_type(first, "turn_done")[0].data["num_turns"] == 1
+    assert of_type(second, "turn_done")[0].data["num_turns"] == 2
+
+
+async def test_an_unparseable_stream_line_is_dropped_not_fatal(tmp_path):
+    class Garbled(StubTransport):
+        async def stream(self, url, body, headers, timeout):
+            self.requests.append({"url": url, "body": body, "headers": headers,
+                                  "timeout": timeout})
+            yield "not json at all"
+            for chunk in prose_script(text=("ok",)):
+                yield json.dumps(chunk)
+
+    eng = engine(tmp_path, transport=Garbled())
+    await eng.start()
+    events = await run_turn(eng)
+    assert [e.data["text"] for e in of_type(events, "text_delta")] == ["ok"]
+    assert of_type(events, "turn_done")[0].data["is_error"] is False
+
+
+# -- the live smoke test, skipped without keys -------------------------
+
+
+def _live_key(name: str) -> "str | None":
+    return (os.environ.get(name) or "").strip() or None
+
+
+@pytest.mark.parametrize(
+    "spec", [DEEPSEEK, GLM], ids=["deepseek", "glm"],
+)
+async def test_live_smoke(tmp_path, spec):
+    """The contract half: the same shapes the stub asserts, run against
+    the real API.
+
+    SKIPPED, NOT FAILED, WITHOUT A KEY -- the whole suite must pass with
+    no network and no credentials, and a suite that fails on a missing
+    optional service trains people to ignore red. Enable with:
+
+        DEEPSEEK_API_KEY=... ZAI_API_KEY=... uv run pytest -q \\
+            tests/test_vendors.py -k live_smoke
+
+    The stub is written from the measured shapes by the same hand as the
+    engine; two readings of one measurement that agree prove the reading
+    is self-consistent, not that the API still behaves that way. This is
+    the only place a vendor changing its stream can show up as red."""
+    if not _live_key(spec.env_var):
+        pytest.skip(f"no {spec.env_var} in the environment")
+
+    eng = ChatApiEngine(cwd=str(tmp_path), spec=spec, model=spec.default_model)
+    await eng.start()
+    try:
+        events = await run_turn(eng, "Reply with the single word OK and nothing else.")
+    finally:
+        await eng.finalize()
+
+    done = of_type(events, "turn_done")[0].data
+    assert done["is_error"] is False, done.get("error")
+    assert "OK" in "".join(e.data["text"] for e in of_type(events, "text_delta"))
+    # Every capability this engine declares True, observed live.
+    assert eng.resolved_model, "resolved_model=True but no model was reported"
+    assert eng.usage_totals.get("input_tokens"), "token_usage=True but no usage arrived"
+    assert of_type(events, "reasoning_delta"), "reasoning=True but no reasoning arrived"
+    # ...and every one it declares False, still absent.
+    assert await eng.context_usage() is None
+    assert eng.total_cost_usd == 0.0
