@@ -146,12 +146,37 @@ wait; the ninth is refused with a reason. `/queue` lists what is waiting,
 prompt survives detaching and is discarded, visibly, only when the session
 finalizes.
 
-The prompt is not delivered mid-turn. `claude-agent-sdk` 0.2.144 has no
-turn-scoped delivery: `query()` writes a frame with no turn, one shared
-stream carries every result, and `receive_response()` ends at the first one
-it sees, so a second `query()` in flight could consume the other turn's
-result. `interrupt()` is the only mid-turn primitive and it aborts. Queueing
-is what runs; the evidence is in `SessionEngine.send`'s docstring.
+**Why it queues, and what that is not.** DOXA queues because the Agent SDK
+exposes no way to hand a prompt to a turn already in flight — not because
+mid-turn delivery is impossible. Claude Code does it, one layer below where
+an SDK client can reach. Its CLI holds a message queue of its own and folds
+what is waiting into the **running** turn as a `queued_command` attachment,
+delivered alongside the next tool result; the CLI's internals name the
+mechanism outright (`messageQueue.consume(..., {reason:
+"absorbed_mid_turn"})`, `isMidTurnFoldSuspended()`). Absorption, not a
+second turn.
+
+What `claude-agent-sdk` 0.2.144 offers is the outside of that CLI, and it
+has no door into that queue. `query()` writes a `user` frame scoped to
+nothing in particular; `Query._read_messages()` routes every message
+through one shared stream with no per-query correlation id on a `result`
+frame; `receive_response()` ends at the first `ResultMessage` it sees on
+that stream, not at one keyed back to the `query()` call that started the
+iteration — so a second `query()` issued mid-turn risks one iterator eating
+the other turn's result. `interrupt()` is the only mid-turn primitive the
+SDK does expose, and it aborts rather than steers. A bounded FIFO is what
+DOXA can build on that surface, so a bounded FIFO is what it ships.
+
+**What has not been established.** Whether a raw user frame written to the
+CLI's stdin during an in-flight turn is absorbed by that queue or starts a
+new turn is unresolved, and untested here. No claim either way belongs in
+this document, and nothing in DOXA is waiting on the answer.
+
+> **Note:** `SessionEngine.send`'s docstring records the same SDK reading
+> and then concludes that mid-turn delivery cannot be done at all. That
+> conclusion is wider than its own evidence — the evidence is about the
+> SDK, and the capability sits under it. The docstring has not been
+> corrected.
 
 ## Tabs
 
