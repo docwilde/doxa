@@ -198,6 +198,7 @@ import contextlib
 import hashlib
 import json
 import os
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -367,14 +368,70 @@ def tabsets_dir() -> Path:
     return d
 
 
+def _machine_tag() -> str:
+    """A short, stable identifier for THIS machine, for the record filename.
+
+    Deliberately DOXA's own, minted once in ``DOXA_HOME``, and NOT the op
+    log's machine id. The filename must resolve to the same path on every
+    start, and the op log's id is not always answerable -- an older
+    ``lore_core``, a store predating sync, a failed import. Keying a
+    filename on something that can become unavailable means a record that
+    silently cannot be found, which reads to the user as "my tabs are
+    gone". The op log's id still travels INSIDE the record, where sync
+    needs it; only the name uses this.
+
+    Minted in DOXA_HOME rather than the memory store, so a machine that
+    never opted into sync is never written to on its behalf.
+    """
+    path = config_mod.doxa_home() / "machine-id"
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        raw = ""
+    if not raw:
+        raw = uuid.uuid4().hex
+        with contextlib.suppress(OSError):
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(raw, encoding="utf-8")
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _legacy_file_for(scope_key: str) -> Path:
+    """The pre-1.10 name: scope digest only, no machine component. Read for
+    ADOPTION (see :func:`_file_for`), never written."""
+    digest = hashlib.sha256(scope_key.encode("utf-8")).hexdigest()[:24]
+    return tabsets_dir() / f"{digest}.json"
+
+
 def _file_for(scope_key: str) -> Path:
     """A scope key is a filesystem path (a repo root, or a bare cwd
     outside a repo) -- not a safe filename on its own (slashes, length,
     platform quirks). A truncated sha256 sidesteps all of that; the
     record's own ``scope_key`` field keeps the mapping legible for anyone
-    reading the directory by hand."""
-    digest = hashlib.sha256(scope_key.encode("utf-8")).hexdigest()[:24]
-    return tabsets_dir() / f"{digest}.json"
+    reading the directory by hand.
+
+    The name also carries a MACHINE component, because two machines opening
+    the same repository hash the same path: with sync carrying tab sets,
+    one name would mean one file and the second writer would silently
+    overwrite the first. The guard in :func:`resolve` stops a foreign
+    record being RESTORED; only a distinct name stops it being clobbered.
+
+    A record written before this change has the legacy name, and it was
+    necessarily written by this machine (nothing synced them before). It is
+    therefore ADOPTED on first use: renamed to this machine's name, once.
+    Adoption is best-effort -- a failure leaves the legacy file untouched
+    and simply reads as "nothing saved", which is what the caller already
+    handles."""
+    scope_digest = hashlib.sha256(scope_key.encode("utf-8")).hexdigest()[:24]
+    path = tabsets_dir() / f"{scope_digest}-{_machine_tag()}.json"
+    if not path.exists():
+        legacy = _legacy_file_for(scope_key)
+        if legacy.exists():
+            with contextlib.suppress(OSError):
+                os.replace(legacy, path)
+    return path
 
 
 def _trees_from_groups(groups: "Any") -> "list":
@@ -913,3 +970,8 @@ def clear(scope_key: str) -> None:
         return
     with contextlib.suppress(OSError):
         _file_for(scope_key).unlink()
+    # A legacy record that was never adopted (this scope was never opened
+    # since the rename landed) would otherwise survive a clear and come
+    # back on the next open.
+    with contextlib.suppress(OSError):
+        _legacy_file_for(scope_key).unlink()
