@@ -1134,3 +1134,57 @@ def test_the_scrubber_survives_a_missing_key_and_empty_text():
 
     assert _scrub("", None) == ""
     assert _scrub("plain text", None) == "plain text"
+
+
+# -- the things a DOXA session owes regardless of engine ---------------
+
+
+async def test_the_turn_is_written_to_a_lore_shaped_transcript(tmp_path):
+    """/search and the session index see a vendor session like any other,
+    because the transcript is LORE's shape and not a second one."""
+    eng = engine(tmp_path, transport=StubTransport(prose_script(text=("hello",))))
+    await eng.start()
+    await run_turn(eng, "say hello")
+
+    lines = [
+        json.loads(line)
+        for line in eng.transcript_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [row["type"] for row in lines] == ["user", "assistant"]
+    assert lines[0]["message"]["content"] == "say hello"
+    assert lines[0]["sessionId"] == eng.session_id
+    assert lines[1]["message"]["content"][0]["text"] == "hello"
+
+
+async def test_finalize_is_idempotent_and_reports_what_it_indexed(tmp_path):
+    eng = engine(tmp_path, transport=StubTransport(prose_script()))
+    await eng.start()
+    await run_turn(eng)
+
+    first = await eng.finalize()
+    assert first.type == "session_done"
+    assert isinstance(first.data["indexed"], int)
+    assert isinstance(first.data["belief_count"], int)
+    assert "review" in first.data          # the declared gap, stated
+
+    second = await eng.finalize()
+    assert second.data == {"already_finalized": True}
+
+
+async def test_a_turn_that_outruns_its_wall_clock_budget_is_stopped(tmp_path, monkeypatch):
+    """The other half of the "a turn must end" guarantee. MAX_TOOL_STEPS
+    bounds the round trips; this bounds the clock, so a single request
+    that never returns cannot hold the pane's exclusive worker forever."""
+    monkeypatch.setattr(vendors_mod, "TURN_TIMEOUT_SECS", -1.0)
+    eng = engine(tmp_path, transport=StubTransport(prose_script()))
+    await eng.start()
+    events = await run_turn(eng)
+    done = of_type(events, "turn_done")[0].data
+    assert done["is_error"] is True
+    assert "limit" in done["error"]
+
+
+async def test_switch_branch_refuses_because_this_engine_owns_no_worktree(tmp_path):
+    with pytest.raises(NotImplementedError, match=r"does not manage its own worktree"):
+        await engine(tmp_path).switch_branch("main")
