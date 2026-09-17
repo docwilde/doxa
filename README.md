@@ -10,8 +10,8 @@
 </p>
 
 > [!WARNING]
-> **Beta.** DOXA reached `1.0` and still moves fast: 110 releases took it from
-> `0.1.0` to `1.9.2` between 23 August and 16 September 2026. Config keys, the
+> **Beta.** DOXA reached `1.0` and still moves fast: 111 releases took it from
+> `0.1.0` to `1.9.3` between 23 August and 17 September 2026. Config keys, the
 > socket protocol and on-disk formats can still change between minor versions,
 > with no migration path.
 > It runs an agent that edits your files and a shell with your privileges.

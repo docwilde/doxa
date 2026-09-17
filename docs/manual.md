@@ -2,7 +2,7 @@
 
 Reference for what DOXA does today. Everything here is true of the current
 code — verified against source, not transcribed from release notes; this
-document was last read against **1.9.2** end to end. For the pitch and the
+document was last read against **1.9.3** end to end. For the pitch and the
 install instructions, see [README.md](../README.md). For designs that are
 **not** built yet, see [docs/plans/](plans/) — this manual never documents
 a plan as if it were shipped.
