@@ -660,9 +660,11 @@ the pane beside the session — `git diff` against the branch the worktree
 was cut from, recomputed every time an edit lands and never on a timer.
 Files are collapsed by default with their changed-line counts; binary and
 very large files are named rather than rendered; a diff that hit a cap
-says so. Side-by-side turns on above 100 columns and unified is the
-default below it, because at 80 columns a half-width pane is 40 and two
-20-column sides are unreadable.
+says so, and the caps are 2000 hunk lines per file, 200 files, 20,000
+lines in total and 50 untracked paths. Side-by-side turns on at **100
+columns** (`SIDE_BY_SIDE_MIN_COLS`) and unified is the default below it,
+because at 80 columns a half-width pane is 40 and two 20-column sides are
+unreadable.
 
 Changed lines are drawn with a **background**, not just a coloured
 foreground — removed rows red, added rows green — and each row carries
