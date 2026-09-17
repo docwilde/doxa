@@ -1001,3 +1001,22 @@ def test_neither_the_module_nor_the_registry_pulls_the_sdk():
         capture_output=True, text=True, check=True,
     )
     assert out.stdout.strip() == "NO", out.stdout + out.stderr
+
+
+async def test_a_usage_only_chunk_with_no_choices_is_absorbed_not_misread(tmp_path):
+    """Measured, both vendors put usage on a chunk that ALSO carries a
+    choice -- but an OpenAI-compatible server is allowed to send a
+    usage-only chunk with ``choices: []``, and one that does must not be
+    read as an empty delta. Tolerated here so a vendor changing that
+    detail costs nothing."""
+    script = [
+        _chunk("deepseek-flash", {"content": "hi"}),
+        {"object": "chat.completion.chunk", "model": "deepseek-flash",
+         "choices": [], "usage": USAGE},
+    ]
+    eng = engine(tmp_path, transport=StubTransport(script))
+    await eng.start()
+    events = await run_turn(eng)
+    assert [e.data["text"] for e in of_type(events, "text_delta")] == ["hi"]
+    assert eng.usage_totals["input_tokens"] == 33
+    assert of_type(events, "turn_done")[0].data["is_error"] is False
