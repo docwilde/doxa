@@ -9,6 +9,7 @@ never documents a plan as if it were shipped.
 ## Contents
 
 - [Sessions and the daemon](#sessions-and-the-daemon)
+- [Engines](#engines) — and [a Codex session](#a-codex-session)
 - [The spawned CLI](#the-spawned-cli)
 - [The transcript](#the-transcript)
 - [Tabs](#tabs) — and [restoring them](#restoring-tabs)
@@ -18,7 +19,7 @@ never documents a plan as if it were shipped.
 - [Worktrees and finalize](#worktrees-and-finalize)
 - [Where a session is](#where-a-session-is)
 - [Permission modes](#permission-modes)
-- [Containment](#containment)
+- [Containment](#containment) — and [remote drivers](#remote-drivers--a-policy-and-no-transport)
 - [The status bar](#the-status-bar)
 - [LORE integration](#lore-integration)
 - [Shell escape](#shell-escape)
@@ -81,10 +82,83 @@ live use asked for it back: a terminal emulator only treats `ctrl+c` as a
 copy gesture over a selection if no foreground app has claimed it. Quitting
 never needed the key, so the key went.
 
+## Engines
+
+An **engine** is whatever actually runs a turn. `doxa/engines.py` is the
+seam between it and the rest of DOXA: one `Engine` Protocol — the 24
+public names the in-process `SessionEngine` and the daemon-fronting
+`EngineClient` already shared before the Protocol was written — plus a
+registry mapping an engine id to a provider. Two ids ship, `claude`
+(the default) and `codex`, and the registry is an explicit dict with
+explicit registration calls: nothing is discovered from the path.
+
+Pick one per session with `--engine <id>`, `DOXA_ENGINE`, or the `engine`
+setting, in that precedence. An unknown id fails as one line of usage
+before anything is built, rather than as a traceback out of a half-started
+app.
+
+**Capability is not uniform, and pretending otherwise is the trap.** Each
+provider declares an `EngineCapabilities` — seventeen flat booleans naming
+the surfaces it actually has, every one defaulting to `False` so a
+provider that forgets something under-promises instead of over-promising.
+`doxa.engines.get("codex").supports()` is the whole map for that engine.
+The rule every caller follows is that a `False` **hides** the surface
+rather than painting it inert: an engine that never reports a context
+window gets no `ctx` chip at all, because `ctx —` reads as "not yet" when
+the truth is "never", and `/context` says it cannot be asked rather than
+inventing a breakdown.
+
+### A Codex session
+
+`--engine codex` runs a DOXA session on the Codex CLI, end to end: its own
+tab, transcript, turns, status bar, peer rail and `/msg`. It is not the
+`codex:rescue` subagent plugin — that is a tool a Claude session calls;
+this is a session.
+
+The structural difference is the process model. `ClaudeSDKClient` is one
+long-lived process for the whole session; a Codex session is **one `codex
+exec --json` process per turn**, the first starting a thread and every
+later one running `codex exec resume <id>`. The prompt goes in on stdin
+rather than argv, because a pasted prompt can be megabytes and `ARG_MAX`
+is not. Because no daemon hosts it, a Codex session lives in the TUI
+process: there is nothing to detach from, the `⌁ session` chip is absent,
+and `ctrl+q` ends the session rather than detaching it.
+
+What Codex does not report, DOXA does not paint. Measured against
+codex-cli 0.144.4:
+
+| absent | what DOXA does |
+|---|---|
+| any window size (`turn.completed.usage` counts tokens and nothing else) | no `ctx` chip; `/context` says it cannot be asked; `/usage` still prints the real token counts |
+| any cost field | no cost chip — `$0.0000` would read as "free", which is a different claim from "nobody said" |
+| content deltas (`agent_message` arrives whole) | still one `text_delta`, just one per message |
+| reasoning content | no reasoning fold; the usage block counts reasoning tokens but the stream carries none |
+| permission modes | no `mode:` chip, nothing on Shift+Tab |
+| a hook surface | the LORE snapshot cannot be injected mid-session, so it rides the first prompt instead |
+| the model it actually resolved | `self.model` is what was *asked for*; an unasked-for default publishes as absent, never guessed |
+
+Two consequences worth stating plainly. **A Codex session does not carry
+DOXA's LORE tools** — reaching them would need a stdio MCP server process
+built from `doxa/operators.py`, and a process outside DOXA is a process
+outside `ToolGate`: no `can_use_tool` refusal, no two-strikes disable, for
+exactly the engine that has no tool gate of its own. A live probe
+confirmed `codex mcp add` genuinely works, so this is "not through this
+release", not "it cannot". And **the LORE review is not wired for this
+engine**: the transcript is still indexed at session end, and the
+`session_done` event says `review: skipped` rather than implying one ran.
+
+The belief *count* is real on both engines (it is one `SELECT`); the
+belief and proposal *pickers* live on `SessionEngine`, so `/beliefs` and
+`/pending` are absent on a Codex session and the `N beliefs` chip is plain
+rather than clickable. The peer layer has no model in it, so the rail,
+`/msg` and the registry work identically.
+
 ## The spawned CLI
 
-The engine behind a session spawns a `claude` CLI process, and that
-process gets a **config directory of its own**. `CLAUDE_CONFIG_DIR` is
+The Claude engine behind a session spawns a `claude` CLI process, and that
+process gets a **config directory of its own**. (Everything in this
+section is that engine's; a Codex session spawns `codex exec` instead and
+has no plugin surface at all — see [Engines](#engines).) `CLAUDE_CONFIG_DIR` is
 set on the child's environment only (`ClaudeAgentOptions.env` —
 DOXA's own environment is never touched), pointing at a directory DOXA
 writes and owns: a `settings.json` with no `hooks`, no `enabledPlugins`
@@ -849,6 +923,44 @@ And `peer_left` tells you a delegate is *gone*, never whether it
 succeeded. The design, including what is deliberately not built, is
 [docs/plans/spawn-session.md](plans/spawn-session.md).
 
+### Remote drivers — a policy, and no transport
+
+Nothing listens on a network. `doxa/remote_policy.py` (v1.8.0) is the
+**authorization decision** a future bridge process will ask, shipped
+ahead of the bridge on purpose: a reachable daemon socket is remote code
+execution with your privileges, so the answer is decided once, in one
+module a security review can read start to finish, rather than
+re-derived at each call site a bridge would grow. There is no socket, no
+TLS and no header parsing in it, and there is no second renderer
+anywhere.
+
+Three independent questions, and every answer is a `Decision` carrying a
+reason — never a bare bool, because a refusal that cannot say why is a
+refusal nobody can act on:
+
+- **May a listener exist at all?** `remote_enabled` is off by default.
+- **Is this identity one DOXA trusts?** `identity_decision` refuses
+  outright unless the request arrived on the loopback listener
+  `tailscale serve` forwards to, whatever login the caller claims. DOXA
+  then keeps its **own** allow-list on top of the tailnet's, and an
+  **empty allow-list refuses everyone** — it does not fall back to
+  permitting everyone, which is the direction allow-list bugs usually
+  fail in.
+- **Is this kind of request on the remote surface at all?**
+  `request_kind_decision`. The remote surface is deliberately **smaller**
+  than the local one: reading the transcript and status, sending prompts,
+  and approving or denying a pending tool call are granted; running a `!`
+  shell line and raising the permission mode to `bypassPermissions` are
+  refused unless `remote_allow_shell` / `remote_allow_bypass` say
+  otherwise, each of them off by default and `remote_allow_bypass`
+  independent of the local `allow_bypass`.
+
+The one surface a user sees today is the status bar's `◎ remote:<id>`
+chip, hidden until something is driving the session. That is the spec's
+"say who is connected" rule: a silent second driver is the thing a user
+cannot detect and cannot consent to. Nothing can set it yet, because no
+bridge exists to pass an identity in.
+
 ## The status bar
 
 **Eighteen chips** are built in paint order by
@@ -1247,18 +1359,25 @@ commands this session carries, and is omitted entirely when there are none
 
 ## Settings
 
-Precedence everywhere: **environment > `~/.doxa/config.toml` > default.**
-The file is plain TOML, `0600`. The settings modal (`ctrl+,` / `/settings`,
-grouped into Session · Memory · Appearance · Notifications · Paths ·
-About) shows each row's effective value and where it came from; a row the
-environment is winning is read-only in the modal.
+Precedence everywhere: **environment > `~/.doxa/config.toml` > default**,
+resolved in one place (`config.raw()`). The file is plain TOML, written
+`0600` inside a directory clamped to `0700`. The settings modal (`ctrl+,`
+/ `/settings`, seven category tabs — Session · Memory · Appearance ·
+Notifications · Remote · Paths · About, walked with `shift+←/→`) shows
+each row's effective value and where it came from. A row the environment
+is winning is not merely marked: it gets **no input field at all**, and
+says `(set by env — editing here would be shadowed; unset DOXA_X to use
+the config file)`. A save against a config file that exists but will not
+parse is refused rather than clobbering it.
 
 | setting | env | default | what it controls |
 |---|---|---|---|
-| `model` | `DOXA_MODEL` | CLI default | model for new turns |
+| `engine` | `DOXA_ENGINE` | `claude` | which engine drives NEW sessions — `claude` or `codex` (see [Engines](#engines)) |
+| `model` | `DOXA_MODEL` | CLI default | model for new sessions; `/model` switches the live one and writes this row |
 | `effort` | `DOXA_EFFORT` | CLI default | reasoning effort, new sessions only |
 | `allow_bypass` | `DOXA_ALLOW_BYPASS` | off | let new sessions reach `bypassPermissions` at all |
 | `adopt_plugins` | `DOXA_ADOPT_PLUGINS` | off | load commands/skills/agents from your OWN installed Claude Code plugins into new sessions — never their hooks or MCP servers, never LORE (see [docs/plans/plugins.md](plans/plugins.md)) |
+| `auto_diff` | `DOXA_AUTO_DIFF` | off | open the live diff by itself the first time a session edits its worktree — once per session (see [The live diff](#the-live-diff)) |
 | `spawn_sessions` | `DOXA_SPAWN_SESSIONS` | off | offer the model `spawn_session`, which starts a second session in this repo and gives it a task (see [Session spawn](#session-spawn--off-unless-you-turn-it-on)) — read from this file and the environment only, never from a repository |
 | `permission_mode` | `DOXA_PERMISSION_MODE` | `default` | mode new sessions connect in; accepts `default`/`acceptEdits`/`plan` only |
 | `linger_secs` | `DOXA_LINGER_SECS` | 120 | seconds a daemon outlives its last detached client |
@@ -1267,6 +1386,7 @@ environment is winning is read-only in the modal.
 | `resume_restored` | `DOXA_RESUME_RESTORED` | on | a restored tab whose session ended comes back live, continuing the conversation |
 | `derive_secs` | `DOXA_DERIVE_SECS` | `900` | streaming-deriver interval, seconds; `0`/`off` disables it and leaves review to PreCompact and session end |
 | `consult_floor` | `DOXA_CONSULT_FLOOR` | 1.0 | act-time belief-consult relevance floor; 0 disables it |
+| `graph_context` | `DOXA_GRAPH_CONTEXT` | off | attach a graph-context block to every turn. Recurring per-turn token cost once on, which is why it is off |
 | `graph_view` | `DOXA_GRAPH_VIEW` | `browser` | how the beliefs picker's `g` shows one belief's neighbourhood: `browser` (mermaid page under `~/.doxa/graphs`) or `ascii` (LORE's edge block, in the TUI) |
 | `lore_root` | `LORE_ROOT` | `~/.claude/lore` | where the belief store and session index live; sticky, set by `/setup` |
 | `nerd_font` | `DOXA_NERD_FONT` | off | use a Nerd Font glyph for the branch chip |
@@ -1291,6 +1411,10 @@ environment is winning is read-only in the modal.
 | `notify_needs_input` | `DOXA_NOTIFY_NEEDS_INPUT` | **off** | notify when a session is waiting on you (a turn merely finishing never notifies); a fully detached session always notifies once this is on |
 | `notify_update` | `DOXA_NOTIFY_UPDATE` | on | notify when `/update` has something to pull |
 | `notify_lore` | `DOXA_NOTIFY_LORE` | on | `lore_core`'s own review banner; held silent while `notify_staged` is on |
+| `remote_enabled` | `DOXA_REMOTE_ENABLED` | off | allow a remote bridge to attach to this daemon at all. On by itself grants nothing — the allow-list below still has to name someone (see [Remote drivers](#remote-drivers--a-policy-and-no-transport)) |
+| `remote_allowed_logins` | `DOXA_REMOTE_ALLOWED_LOGINS` | empty | DOXA's own allow-list of logins, on top of the tailnet's. **Empty refuses everyone**, never everyone-allowed |
+| `remote_allow_shell` | `DOXA_REMOTE_ALLOW_SHELL` | off | let a remote driver run `!` shell lines — refused on the reduced remote surface without it |
+| `remote_allow_bypass` | `DOXA_REMOTE_ALLOW_BYPASS` | off | let a remote driver raise the permission mode to `bypassPermissions`; independent of `allow_bypass`, and both must be on |
 | *doxa home* | `DOXA_HOME` | `~/.doxa` | durable state: this config, tab sets, names |
 | *runtime dir* | `DOXA_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/doxa` → `~/.local/share/doxa` | ephemeral daemon sockets and the peer registry |
 
