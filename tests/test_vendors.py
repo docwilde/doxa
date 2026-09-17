@@ -1103,3 +1103,34 @@ async def test_the_configured_effort_reaches_the_request_body(tmp_path, monkeypa
     await eng.start()
     await run_turn(eng)
     assert transport.last_body["thinking"]["reasoning_effort"] == "high"
+
+
+# -- the scrubber, which is the last thing between a key and a log -----
+
+
+def test_the_scrubber_removes_the_key_by_value_and_by_measured_echo():
+    """Two layers, and the second one is measured rather than defensive.
+    DeepSeek's real 401 body quotes a MASKED tail of the key it rejected
+    ("your api key: ****nope is invalid"), which no pattern-based redactor
+    can be expected to recognise as key material -- so the tail is removed
+    where the key is known, by value."""
+    from doxa.vendors import _scrub
+
+    key = "sk-1234567890abcdefnope"
+    assert key not in _scrub(f"Authentication Fails, Your api key: {key} is invalid", key)
+    # The measured masked form, which contains no substring of the key
+    # long enough for a pattern to catch.
+    masked = _scrub("Authentication Fails, Your api key: ****nope is invalid", key)
+    assert "****nope" not in masked
+    assert "****" in masked              # the shape survives; the tail does not
+    # A four-character sequence that is NOT the masked echo is ordinary
+    # prose and stays: over-scrubbing an error message is its own way of
+    # hiding what went wrong.
+    assert "nope" in _scrub("the branch named nope does not exist", key)
+
+
+def test_the_scrubber_survives_a_missing_key_and_empty_text():
+    from doxa.vendors import _scrub
+
+    assert _scrub("", None) == ""
+    assert _scrub("plain text", None) == "plain text"
