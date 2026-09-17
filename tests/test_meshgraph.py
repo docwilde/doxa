@@ -160,6 +160,31 @@ def collect(stream, seconds=3.0, want=None):
 ASSETS = Path(__file__).resolve().parent.parent / "assets" / "mesh"
 
 
+def strip_comments(source: str) -> str:
+    """JavaScript with ``//`` and ``/* */`` comments removed.
+
+    Crude -- it does not know about ``//`` inside a string literal -- and
+    that is fine for what it is used for: the point is to scan CODE for
+    forbidden sinks without the file's own prose about those sinks
+    counting as a use. Erring toward removing too much would only make
+    the scan more permissive in a way the surrounding assertions would
+    catch, and mesh.js has no string containing a comment marker."""
+    out = []
+    i, n = 0, len(source)
+    while i < n:
+        if source.startswith("//", i):
+            i = source.find("\n", i)
+            if i < 0:
+                break
+        elif source.startswith("/*", i):
+            end = source.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+        else:
+            out.append(source[i])
+            i += 1
+    return "".join(out)
+
+
 # -- 1. the bind address ---------------------------------------------------
 
 
@@ -242,13 +267,15 @@ def test_a_body_containing_markup_is_never_rendered_as_markup(server, ledger):
     data = get_json(server, "ledger")
     assert data["records"][0]["body"] == HOSTILE, "the body must survive as data"
 
-    # The transport is JSON, so the dangerous characters are carried as
-    # an escaped string rather than as markup -- the raw tag never appears
-    # as a bare token in the response.
+    # And the bytes on the wire contain no markup-looking sequence at
+    # all: `<`, `>` and `&` are escaped to \uXXXX, which is still valid
+    # JSON decoding to the identical string. Belt and braces behind the
+    # structural argument, and the cheapest possible way to satisfy
+    # "assume a body contains a script tag and make that harmless".
     status, raw = get(server, "ledger")
     assert status == 200
-    assert "<script>" not in raw
-    assert "\\u003cscript\\u003e" in raw or '"<script>' not in raw
+    assert "<" not in raw and ">" not in raw
+    assert "\\u003cscript\\u003e" in raw
 
     # And the page itself is inert: no record, no body, no templating.
     status, page = get(server, "")
@@ -283,8 +310,13 @@ def test_the_page_script_never_uses_an_html_sink(server):
     Every sink below parses a string as markup. The renderer has no need
     of any of them -- the graph is canvas ``fillText`` and the panel is
     ``textContent`` -- so their absence is checkable, and checking it is
-    worth more than a comment asking the next author to be careful."""
-    source = (ASSETS / "mesh.js").read_text(encoding="utf-8")
+    worth more than a comment asking the next author to be careful.
+
+    Comments are stripped before the scan: the file's own header names
+    these sinks in order to say it does not use them, and a test that
+    cannot tell an explanation from a call is a test that punishes
+    writing the explanation down."""
+    source = strip_comments((ASSETS / "mesh.js").read_text(encoding="utf-8"))
     for sink in (
         "innerHTML",
         "outerHTML",

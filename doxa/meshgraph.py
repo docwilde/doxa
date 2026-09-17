@@ -83,6 +83,7 @@ __all__ = [
     "LEDGER_ENV",
     "MeshServer",
     "edges_for",
+    "json_bytes",
     "ledger_path",
     "parse_record",
     "read_batch",
@@ -586,9 +587,7 @@ class MeshServer:
         nothing already in this response can arrive twice."""
         offset = _int_param(query, "from", 0)
         records, next_offset = read_records(self.path, offset)
-        body = json.dumps(
-            {"records": records, "offset": next_offset}, ensure_ascii=False
-        ).encode("utf-8")
+        body = json_bytes({"records": records, "offset": next_offset})
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json; charset=utf-8")
         handler.send_header("Content-Length", str(len(body)))
@@ -641,7 +640,7 @@ class MeshServer:
             while not self._stopping.is_set():
                 found, offset = read_batch(self.path, offset)
                 for record, position in found:
-                    payload = json.dumps(record, ensure_ascii=False)
+                    payload = json_bytes(record).decode("utf-8")
                     # The id is THIS record's end offset, not the batch's
                     # -- see read_batch on why a reconnect depends on it.
                     frame = f"id: {position}\ndata: {payload}\n\n".encode("utf-8")
@@ -658,6 +657,33 @@ class MeshServer:
             # The reader closed the tab. Not an error, and above all not a
             # traceback on the terminal DOXA is drawing on.
             return
+
+
+def json_bytes(payload: Any) -> bytes:
+    """JSON with ``<``, ``>`` and ``&`` escaped to their ``\\uXXXX`` form.
+
+    Those three are not JSON syntax -- they can only ever occur inside a
+    string value -- so replacing them wholesale is safe, and a parser
+    decodes the result to the identical string. What it buys is that the
+    bytes this server emits **never contain a markup-looking sequence at
+    all**, whatever a message body holds.
+
+    Strictly, this is belt and braces: the response is
+    ``application/json`` with ``nosniff``, the page is static, and every
+    body reaches the screen through ``textContent`` or canvas
+    ``fillText``. But the instruction this view is built to satisfy is to
+    assume a body contains a script tag and make that harmless, and the
+    cheapest way to be sure is for the dangerous characters never to
+    survive serialization in the first place. It costs one string pass
+    and removes a whole class of "what if this JSON is ever rendered
+    somewhere else" from consideration."""
+    return (
+        json.dumps(payload, ensure_ascii=False)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .encode("utf-8")
+    )
 
 
 def _file_size(path: Path) -> int:
