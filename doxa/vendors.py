@@ -242,11 +242,16 @@ VENDOR_CAPABILITIES = EngineCapabilities(
     detachable=False,
     # TRUE. DOXA's own layer, with no model in it.
     peer_messaging=True,
-    # FALSE. doxa.session_ops.spawn_session shells out to a `doxa` command
-    # line that does not thread an engine id to the child, so a spawn from
-    # here would silently start a CLAUDE child -- which is both a
-    # cross-engine spawn (out of scope per docs/plans/engine-providers.md)
-    # and a lie about what was spawned. The operator is not offered.
+    # FALSE, and MEASURED rather than assumed: doxa.daemon.spawn_daemon
+    # builds `python -m doxa.daemon --cwd ... --session-id ...` and there
+    # is no --engine among the flags it appends, while doxa.daemon hosts a
+    # SessionEngine specifically. So a spawn_session from here would
+    # silently start a CLAUDE child under a DeepSeek parent's name -- both
+    # a cross-engine spawn (out of scope per
+    # docs/plans/engine-providers.md) and a mislabelled agent, which in a
+    # randomised fleet is the one mistake nobody would notice. The
+    # operator is not offered at all: a tool the model cannot see is a
+    # tool the model cannot call.
     spawn_sessions=False,
     # FALSE, same as Codex and for the same reason: the belief/pending
     # PICKERS are lore_core queries that happen to live on SessionEngine.
