@@ -90,14 +90,24 @@ An **engine** is whatever actually runs a turn. `doxa/engines.py` is the
 seam between it and the rest of DOXA: one `Engine` Protocol — the 24
 public names the in-process `SessionEngine` and the daemon-fronting
 `EngineClient` already shared before the Protocol was written — plus a
-registry mapping an engine id to a provider. Two ids ship, `claude`
-(the default) and `codex`, and the registry is an explicit dict with
-explicit registration calls: nothing is discovered from the path.
+registry mapping an engine id to a provider. Four ids ship — `claude`
+(the default), `codex`, `deepseek` and `glm` — and the registry is an
+explicit dict with explicit registration calls: nothing is discovered from
+the path.
 
-Pick one per session with `--engine <id>`, `DOXA_ENGINE`, or the `engine`
-setting, in that precedence. An unknown id fails as one line of usage
-before anything is built, rather than as a traceback out of a half-started
-app.
+Pick one per session with `--engine <id>`, `DOXA_ENGINE`, the `engine`
+setting, or `/engine <id>`, in that precedence. An unknown id fails as one
+line of usage before anything is built, rather than as a traceback out of
+a half-started app — and the list it fails with, the settings row's
+choices and `/engine`'s listing are all `doxa.engines.available()`, so an
+engine that is registered is selectable everywhere and one that is not is
+offered nowhere.
+
+`/engine` with no argument prints every registered engine with its
+capability count and the fields it does *not* have, read off
+`EngineCapabilities` itself. Selection is a **connect-time** choice: it
+reaches new sessions and tabs and never the running one, and the command
+says so rather than letting you find out by watching it do nothing.
 
 **Capability is not uniform, and pretending otherwise is the trap.** Each
 provider declares an `EngineCapabilities` — seventeen flat booleans naming
@@ -1395,7 +1405,8 @@ commands this session carries, and is omitted entirely when there are none
 
 | command | does |
 |---|---|
-| `/model [name]` | Switch the model for the rest of this session (no reconnect) |
+| `/model [name]` | Switch the model for the rest of this session (no reconnect); bare lists this engine's own catalogue |
+| `/engine [id]` | Engine for NEW sessions and tabs, with what each one can do — never the running session |
 | `/branch [name]` | List local branches (current base marked), or switch this session's base |
 | `/mode [name]` | Permission mode; bare lists all six with what each does |
 | `/effort [low\|medium\|high\|xhigh\|max]` | Effort level for new sessions only (connect-time); prompt-only, with no palette entry |
@@ -1470,7 +1481,7 @@ parse is refused rather than clobbering it.
 
 | setting | env | default | what it controls |
 |---|---|---|---|
-| `engine` | `DOXA_ENGINE` | `claude` | which engine drives NEW sessions — `claude` or `codex` (see [Engines](#engines)) |
+| `engine` | `DOXA_ENGINE` | `claude` | which engine drives NEW sessions; the row's choices are the registry itself, so every registered engine is offered (see [Engines](#engines)) |
 | `model` | `DOXA_MODEL` | CLI default | model for new sessions; `/model` switches the live one and writes this row |
 | `effort` | `DOXA_EFFORT` | CLI default | reasoning effort, new sessions only |
 | `allow_bypass` | `DOXA_ALLOW_BYPASS` | off | let new sessions reach `bypassPermissions` at all |
