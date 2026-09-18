@@ -1347,6 +1347,23 @@ def _permission_summary(tool_name: str, tool_input: dict) -> str:
     return f"{tool_name} {raw}" if raw not in ("{}", "") else tool_name
 
 
+def _peer_origin_line(prompt: str) -> "str | None":
+    """The ``--- peer message ... ---`` header out of a peer-started
+    turn's prompt, or None when there is not one.
+
+    ``peers.frame_for_model`` writes exactly one such line per frame and a
+    peer-started turn carries exactly one frame, so the first match is the
+    answer. None rather than a guess if the shape ever changes: an
+    unlabelled peer turn still SAYS it is a peer turn (the prompt's own
+    first paragraph does that, and the TUI has the boolean), it just
+    cannot name the sender -- which is a smaller failure than naming the
+    wrong one."""
+    for line in prompt.splitlines():
+        if line.startswith("--- peer message"):
+            return line.strip("- ").strip()
+    return None
+
+
 class SessionEngine:
     """One session, one Claude Agent SDK client, one LORE-compatible
     transcript. ``client_factory`` is injectable so the test suite can hand
@@ -1548,11 +1565,6 @@ class SessionEngine:
         # engine's turn and exists on both. Two ids for two different
         # things, neither pretending to be the other.
         self._turn_id: "str | None" = None
-
-        # Set for the life of a turn that an arriving peer message
-        # started, so the transcript, the turn_started event and the
-        # ledger can all name the same cause. See _peer_started_prompt.
-        self._turn_peer_origin: "dict | None" = None
 
         # Mid-turn prompt queue (see doxa.promptqueue): whether a turn is
         # actually running right now, and the bounded FIFO a prompt typed
@@ -3119,6 +3131,7 @@ class SessionEngine:
         # for from turns that arrived.
         peer_started = prompt.startswith(peers_mod.PEER_TURN_INTRO)
         self._turn_id = ("peer-" if peer_started else "") + uuid.uuid4().hex[:12]
+        peer_origin = _peer_origin_line(prompt) if peer_started else None
 
         self._persist_user_text(outbound)
         yield EngineEvent("turn_started", {
@@ -3127,6 +3140,13 @@ class SessionEngine:
             # block from this; the sentence the MODEL read is the first
             # line of the prompt either way, so the two cannot disagree.
             "peer_started": peer_started,
+            # The one header line naming who woke this session, lifted out
+            # of the prompt rather than carried beside it: a label derived
+            # from the text the model read cannot drift from it, and the
+            # turn may have waited in the prompt queue for minutes before
+            # getting here, where a field set at arrival time could have
+            # been overwritten by a second message.
+            "peer_origin": peer_origin,
             "turn_id": self._turn_id,
         })
 

@@ -319,6 +319,18 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         # second line both read, arrival order (plain dict insertion order)
         # is all either needs, and no wall clock is kept anywhere.
         self._subagents: dict[str, ToolChip] = {}
+        # The two modem lights (PaneChipsMixin._note_peer_traffic): when
+        # a peer message last left and last arrived, on the MONOTONIC
+        # clock, plus how many of each this session has seen. Monotonic
+        # because the only question ever asked of these is "how long
+        # ago", and a wall clock that steps during a suspend would answer
+        # it with a lamp stuck on or a lamp that never lit. None means
+        # "never", which is what hides the pair entirely -- a session
+        # with no peer traffic carries neither lamp nor its width.
+        self._peer_tx_at: "float | None" = None
+        self._peer_rx_at: "float | None" = None
+        self._peer_tx_count = 0
+        self._peer_rx_count = 0
         # Open transcript tabs for THIS pane's subagents, call_id -> tab.
         # Outlives the matching _subagents entry (a finished subagent's tab
         # stays open, marked done, until the user closes it) but never
