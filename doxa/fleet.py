@@ -751,31 +751,71 @@ def _registry_pid(runtime: Path, session_id: str) -> "int | None":
         return None
 
 
+def _gone(pid: "int | None") -> bool:
+    """Is this process REALLY gone -- zombies included?
+
+    MEASURED, and it cost a whole scale run to find. ``os.kill(pid, 0)``
+    reports a zombie as alive, and every session a fleet spawns is this
+    process's own child: ``subprocess.Popen(..., start_new_session=True)``
+    starts a new SESSION, not a new parent, and neither ``spawn_daemon``
+    nor this module keeps the ``Popen`` object to wait on. So a daemon that
+    accepted ``stop``, finalized and exited perfectly cleanly stays "alive"
+    to the liveness check until somebody reaps it. At N=4, all four clean
+    shutdowns were reported as leaks -- a harness crying wolf about the
+    exact property it exists to verify, which is worse than not checking.
+
+    Three answers, in the order that costs least: reap it if it is our
+    child and has exited; ask the OS if the pid exists at all; and failing
+    both, read ``/proc`` for the zombie state directly -- needed because
+    another thread's ``waitpid`` may have got there first, or the process
+    may be a child of something else entirely (a daemon that outlived the
+    run that spawned it, and was found again from the registry)."""
+    if not pid:
+        return True
+    pid = int(pid)
+    with contextlib.suppress(ChildProcessError, OSError, ValueError):
+        if os.waitpid(pid, os.WNOHANG)[0] == pid:
+            return True
+    if not peers_mod._pid_alive(pid):
+        return True
+    return _is_zombie(pid)
+
+
+def _is_zombie(pid: int) -> bool:
+    """``/proc/<pid>/stat`` field 3 is the process state; ``Z`` is a
+    process that has exited and is waiting to be reaped. Linux-only and a
+    miss is silent -- a platform without /proc gets the ``os.kill`` answer,
+    which is the answer this module had before."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return True  # it vanished between the two checks: gone
+    return stat.rpartition(")")[2].strip().startswith("Z")
+
+
 def _kill_pid(pid: "int | None", grace_s: float = 5.0) -> bool:
     """SIGTERM, wait, SIGKILL. True when nothing is left.
 
     The teardown's floor. A daemon that ignored ``stop`` is a daemon whose
     engine is wedged inside an SDK call, and no amount of further asking
     over the socket it is not reading will change that."""
-    if not pid:
-        return True
-    if not peers_mod._pid_alive(int(pid)):
+    if _gone(pid):
         return True
     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
         os.kill(int(pid), signal.SIGTERM)
     deadline = time.monotonic() + grace_s
     while time.monotonic() < deadline:
-        if not peers_mod._pid_alive(int(pid)):
+        if _gone(pid):
             return True
         time.sleep(0.05)
     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
         os.kill(int(pid), signal.SIGKILL)
     deadline = time.monotonic() + grace_s
     while time.monotonic() < deadline:
-        if not peers_mod._pid_alive(int(pid)):
+        if _gone(pid):
             return True
         time.sleep(0.05)
-    return not peers_mod._pid_alive(int(pid))
+    return _gone(pid)
 
 
 # -- the report -------------------------------------------------------
@@ -1128,12 +1168,12 @@ class FleetRun:
         deadline = time.monotonic() + max(self.spec.kill_grace_s, 1.0)
         pending = [s for s in self.slots if s.pid and s.phase == PHASE_STOPPED]
         while pending and time.monotonic() < deadline:
-            pending = [s for s in pending if peers_mod._pid_alive(int(s.pid))]
+            pending = [s for s in pending if not _gone(s.pid)]
             if pending:
                 await asyncio.sleep(0.1)
         leaked: "list[int]" = []
         for slot in self.slots:
-            if slot.pid and peers_mod._pid_alive(int(slot.pid)):
+            if slot.pid and not _gone(slot.pid):
                 with contextlib.suppress(Exception):
                     if await self.backend.kill(slot):
                         slot.phase = PHASE_KILLED
