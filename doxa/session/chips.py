@@ -54,6 +54,7 @@ from ..ui.labels import (
     remote_driver_chip,
     staged_chip,
     staged_count,
+    sync_chip,
     belief_evidence_rows,
     CLICKABLE_CHIP_ACCENT,
     CTX_ABSOLUTE_MIN_COLS,
@@ -648,6 +649,47 @@ class PaneChipsMixin:
                 f"[@click=open_diff][{CLICKABLE_CHIP_ACCENT}]{body}[/][/]",
                 (("".join(parts), counts.chip_hint()),),
             ))
+        # LORE sync state (sync.md's "## DOXA" item 3), immediately after
+        # the diff chip and for the same reason that chip gives for sitting
+        # immediately after the git one: it qualifies what the git chip
+        # names. `repo ⎇ main` says where this session is, the diff says
+        # what it has done there, and this says whether what it is working
+        # from is CURRENT -- which is the adjacency item 3 asks for by
+        # name, "beside the worktree and branch". Ahead of the money and
+        # LORE chips because the row has no overflow behaviour, so position
+        # IS the guarantee (see the mode chip at the top of this method).
+        #
+        # ABSENT -- not a zero, not an error -- when sync is off or the
+        # store has no sync tables: _sync_state stays None there and
+        # sync_chip returns None for it. Sync is off by default on every
+        # machine, so this is the overwhelmingly common path and it costs
+        # one attribute read.
+        #
+        # This NEVER opens a database. It reads the record
+        # _refresh_sync_state wrote off a worker thread, the same
+        # no-timer, no-per-frame rule _diff_counts and _usage_chip follow.
+        sync_state = getattr(self, "_sync_state", None)
+        sync = sync_chip(sync_state)
+        if sync is not None:
+            sync_text, sync_hint = sync
+            if getattr(sync_state, "needs_attention", False):
+                # A conflict or an unverified op is waiting on the USER --
+                # not on the transport -- so it wears the same amber the
+                # ctx chip wears under pressure instead of sitting in the
+                # row as ordinary text. Built here rather than through
+                # StatusChip.plain for the reason the ctx and diff chips
+                # give at their own: the KEY stays the PLAIN string,
+                # because StatusBar._tooltip_for_x looks each chip up
+                # inside the bar's markup-STRIPPED text, and a key still
+                # carrying `[#E8A33D]…[/]` matches nothing at exactly the
+                # tier whose tooltip matters most (v0.35.0's ctx defect).
+                chips.append(StatusChip.raw(
+                    sync_text,
+                    f"[{CTX_AMBER}]{_escape_markup(sync_text)}[/]",
+                    ((sync_text, sync_hint),),
+                ))
+            else:
+                chips.append(StatusChip.plain(sync_text, sync_hint))
         # Subscription-aware cost: on subscription auth the session costs
         # no dollars, so a bare $ figure is misleading -- show the tier,
         # with the (already-computed) list-price figure demoted to an

@@ -980,3 +980,236 @@ async def test_restore_report_lands_on_the_single_fallback_tab(tmp_path):
 
         assert await _wait(pilot, _report_blocks)
         assert any("skipped 2 sessions" in text for text in _report_blocks())
+
+
+# -- the sync scope key (LORE/docs/plans/sync.md, "## DOXA" item 1) --------
+#
+# The record gains project_key and machine_id with sync ON, and resolve()
+# restores only a record whose machine_id is this machine's. With sync OFF
+# nothing about restore changes -- everything above this line is the
+# regression bar for that, and the first test here states it directly
+# against the bytes on disk rather than trusting the behaviour tests alone.
+#
+# doxa.lore_sync is monkeypatched rather than a real op log stood up: DOXA
+# does not own the op log, and a test that needed one would pass or fail on
+# which lore_core doxa._lore_bootstrap happened to resolve.
+
+
+def _raw_record(scope: str) -> dict:
+    return json.loads(tabsets._file_for(scope).read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def _sync_on(monkeypatch):
+    """The tabsets class opted in, with a fixed machine id and project
+    key -- what doxa.tabsets.save asks before it stamps a record."""
+    from doxa import lore_sync as lore_sync_mod
+
+    monkeypatch.setattr(lore_sync_mod, "tabsets_enabled", lambda: True)
+    monkeypatch.setattr(lore_sync_mod, "machine_id", lambda **_kw: "machine-here")
+    monkeypatch.setattr(lore_sync_mod, "project_key", lambda _cwd: "github.com/d/doxa")
+    return "machine-here"
+
+
+def _claim_machine(monkeypatch, value):
+    """Make this machine's identity read as ``value`` (None = unreadable)."""
+    from doxa import lore_sync as lore_sync_mod
+
+    monkeypatch.setattr(lore_sync_mod, "machine_id", lambda **_kw: value)
+
+
+def test_record_carries_no_sync_keys_with_sync_off(tmp_path):
+    """THE regression bar for item 1, asserted on the bytes: sync off
+    writes the payload 1.9.2 wrote, with no project_key and no machine_id
+    anywhere in it."""
+    scope = str(tmp_path / "repo")
+    tabsets.save(scope, [tabsets.TabRecord("sid-1", "alpha")], "sid-1")
+    raw = _raw_record(scope)
+    assert "machine_id" not in raw
+    assert "project_key" not in raw
+    record = tabsets.load(scope)
+    assert record.machine_id is None
+    assert record.project_key is None
+
+
+def test_record_carries_project_key_and_machine_id_with_sync_on(tmp_path, _sync_on):
+    scope = str(tmp_path / "repo")
+    tabsets.save(scope, [tabsets.TabRecord("sid-1", "alpha")], "sid-1")
+    raw = _raw_record(scope)
+    assert raw["machine_id"] == _sync_on
+    assert raw["project_key"] == "github.com/d/doxa"
+    # Beside scope_key, never instead of it: the record is still found by
+    # the scope path, and still legible to a reader who knows the old shape.
+    assert raw["scope_key"] == scope
+    assert [t["session_id"] for t in raw["tabs"]] == ["sid-1"]
+    record = tabsets.load(scope)
+    assert record.machine_id == _sync_on
+    assert record.project_key == "github.com/d/doxa"
+
+
+def test_resolve_refuses_a_tab_set_recorded_on_another_machine(tmp_path, monkeypatch):
+    """sync.md item 1: "tabsets.resolve restores only a record whose
+    machine_id is this machine's."
+
+    The session ids in a foreign record name daemons on the OTHER machine.
+    Reattaching is impossible and restoring them as archived tabs would be
+    inventing history this machine never had."""
+    scope = str(tmp_path / "repo")
+    _claim_machine(monkeypatch, "workstation-id")
+    tabsets.save(scope, [tabsets.TabRecord("sid-a")], "sid-a")
+    # Written by the workstation, read on this laptop.
+    raw = _raw_record(scope)
+    raw["machine_id"] = "workstation-id"
+    tabsets._file_for(scope).write_text(json.dumps(raw), encoding="utf-8")
+    _claim_machine(monkeypatch, "laptop-id")
+    _daemon_entry("sid-a", scope)  # live HERE, and still not ours to restore
+    assert tabsets.resolve(scope) is None
+
+
+def test_resolve_restores_this_machines_own_record_with_sync_on(
+    tmp_path, monkeypatch, _sync_on
+):
+    """The refusal above must not be vacuous: the same record with a
+    MATCHING machine id restores exactly as it always did."""
+    scope = str(tmp_path / "repo")
+    tabsets.save(scope, [tabsets.TabRecord("sid-a", "alpha")], "sid-a")
+    _claim_machine(monkeypatch, _sync_on)
+    _daemon_entry("sid-a", scope)
+    resolved = tabsets.resolve(scope)
+    assert resolved is not None
+    assert [t.session_id for t, _ in resolved.tabs] == ["sid-a"]
+    assert resolved.active_session_id == "sid-a"
+
+
+def test_resolve_ignores_the_machine_check_for_a_record_without_one(
+    tmp_path, monkeypatch
+):
+    """With sync off a record carries no machine_id, and restore must not
+    consult lore_core at all -- a machine id that happens to be readable
+    cannot be allowed to start filtering records that predate the field."""
+    scope = str(tmp_path / "repo")
+    tabsets.save(scope, [tabsets.TabRecord("sid-a")], "sid-a")
+    assert "machine_id" not in _raw_record(scope)
+    asked: list[str] = []
+
+    from doxa import lore_sync as lore_sync_mod
+
+    def _should_not_be_asked(**_kw):
+        asked.append("called")
+        return "some-other-machine"
+
+    monkeypatch.setattr(lore_sync_mod, "machine_id", _should_not_be_asked)
+    _daemon_entry("sid-a", scope)
+    resolved = tabsets.resolve(scope)
+    assert resolved is not None
+    assert [t.session_id for t, _ in resolved.tabs] == ["sid-a"]
+    assert asked == []
+
+
+def test_resolve_keeps_a_foreign_record_when_this_machine_has_no_identity(
+    tmp_path, monkeypatch
+):
+    """Unprovable means KEEP, the same default a missing worktree sidecar
+    gets. Losing a user's whole tab set to a lore_core that failed to
+    import is much the worse of the two errors."""
+    scope = str(tmp_path / "repo")
+    _claim_machine(monkeypatch, "workstation-id")
+    tabsets.save(scope, [tabsets.TabRecord("sid-a")], "sid-a")
+    raw = _raw_record(scope)
+    raw["machine_id"] = "workstation-id"
+    tabsets._file_for(scope).write_text(json.dumps(raw), encoding="utf-8")
+    _claim_machine(monkeypatch, None)  # no op log, no sync tables, no id
+    _daemon_entry("sid-a", scope)
+    resolved = tabsets.resolve(scope)
+    assert resolved is not None
+    assert [t.session_id for t, _ in resolved.tabs] == ["sid-a"]
+
+
+# -- the filename carries a machine, and a legacy record is adopted once ----
+
+def _tabsets_files(home):
+    d = home / "tabsets"
+    return sorted(p.name for p in d.iterdir() if p.suffix == ".json") if d.exists() else []
+
+
+def test_two_machines_do_not_share_one_filename_for_one_repo(tmp_path, monkeypatch):
+    """The defect the re-key exists for: laptop and workstation open the
+    same repository, hash the same path, and before this landed wrote the
+    same file -- so the second writer silently destroyed the first's tabs.
+    The restore guard never saw it; it only refuses to RESTORE a foreign
+    record, which is too late once the bytes are gone."""
+    monkeypatch.setattr(config_mod, "doxa_home", lambda: tmp_path)
+    scope = "/repo/shared"
+
+    monkeypatch.setattr(tabsets, "_machine_tag", lambda: "aaaaaaaaaaaa")
+    a = tabsets._file_for(scope)
+    monkeypatch.setattr(tabsets, "_machine_tag", lambda: "bbbbbbbbbbbb")
+    b = tabsets._file_for(scope)
+
+    assert a != b, "one repo on two machines must not resolve to one file"
+    assert a.name.startswith(b.name.split("-")[0]), "same scope digest, different machine"
+
+
+def test_a_legacy_record_is_adopted_once_and_its_tabs_survive(tmp_path, monkeypatch):
+    """A record written before the re-key has no machine in its name. It was
+    necessarily written by THIS machine, so it is renamed rather than
+    orphaned -- otherwise upgrading silently loses every saved tab set."""
+    monkeypatch.setattr(config_mod, "doxa_home", lambda: tmp_path)
+    monkeypatch.setattr(tabsets, "_machine_tag", lambda: "aaaaaaaaaaaa")
+    scope = "/repo/legacy"
+
+    legacy = tabsets._legacy_file_for(scope)
+    legacy.write_text('{"scope_key": "/repo/legacy", "marker": "old"}', encoding="utf-8")
+    assert _tabsets_files(tmp_path) == [legacy.name]
+
+    resolved = tabsets._file_for(scope)
+    assert resolved.name != legacy.name
+    assert not legacy.exists(), "the legacy name must not survive adoption"
+    assert json.loads(resolved.read_text())["marker"] == "old", "content carried over"
+
+    # Idempotent: asking again neither re-adopts nor disturbs the record.
+    again = tabsets._file_for(scope)
+    assert again == resolved
+    assert json.loads(again.read_text())["marker"] == "old"
+    assert _tabsets_files(tmp_path) == [resolved.name]
+
+
+def test_adoption_does_not_steal_a_record_when_this_machine_already_has_one(
+    tmp_path, monkeypatch
+):
+    """If this machine already wrote a record under the new name, a legacy
+    file left by something else must NOT overwrite it."""
+    monkeypatch.setattr(config_mod, "doxa_home", lambda: tmp_path)
+    monkeypatch.setattr(tabsets, "_machine_tag", lambda: "aaaaaaaaaaaa")
+    scope = "/repo/both"
+
+    mine = tabsets._file_for(scope)
+    mine.write_text('{"marker": "mine"}', encoding="utf-8")
+    tabsets._legacy_file_for(scope).write_text('{"marker": "legacy"}', encoding="utf-8")
+
+    assert json.loads(tabsets._file_for(scope).read_text())["marker"] == "mine"
+
+
+def test_a_machine_with_no_op_log_still_gets_a_stable_name(tmp_path, monkeypatch):
+    """The identity is minted once in DOXA_HOME and must be the SAME on
+    every call and every restart -- a name that varies loses the tabs it
+    named. Never written to the memory store."""
+    monkeypatch.setattr(config_mod, "doxa_home", lambda: tmp_path)
+    
+    scope = "/repo/nosync"
+
+    first = tabsets._file_for(scope)
+    second = tabsets._file_for(scope)
+    assert first == second, "the fallback identity must be stable across calls"
+    assert (tmp_path / "machine-id").exists(), "minted locally, not in the memory store"
+
+
+def test_clear_removes_an_unadopted_legacy_record_too(tmp_path, monkeypatch):
+    """Otherwise a cleared scope comes back on the next open."""
+    monkeypatch.setattr(config_mod, "doxa_home", lambda: tmp_path)
+    monkeypatch.setattr(tabsets, "_machine_tag", lambda: "aaaaaaaaaaaa")
+    scope = "/repo/cleared"
+
+    tabsets._legacy_file_for(scope).write_text('{"marker": "old"}', encoding="utf-8")
+    tabsets.clear(scope)
+    assert _tabsets_files(tmp_path) == []

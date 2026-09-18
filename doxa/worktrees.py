@@ -59,6 +59,7 @@ import subprocess
 from pathlib import Path
 
 from . import config as config_mod
+from . import lore_sync as lore_sync_mod
 from . import peers as peers_mod
 
 
@@ -124,6 +125,42 @@ def meta_file_path(worktree_path: str) -> Path:
     the same way it already guards HEAD/ref reads, without re-deriving the
     sidecar path itself."""
     return _meta_path(Path(worktree_path))
+
+
+def record_machine(meta: "dict | None") -> "str | None":
+    """The machine a sidecar NAMES, or None when it names none.
+
+    None is not "unknown machine", it is "this record predates the
+    question" -- every sidecar written with sync off, which is all of them
+    on a machine that never opted in."""
+    if not isinstance(meta, dict):
+        return None
+    return str(meta.get("machine_id") or "") or None
+
+
+def is_own_record(meta: "dict | None") -> bool:
+    """Is this sidecar THIS machine's to act on? (sync.md's "## DOXA" item 2.)
+
+    True in every case a 1.9.2 DOXA ever saw, and that is the point rather
+    than an oversight: a sidecar with no ``machine_id`` is one written with
+    sync off, answering False there would make :func:`finalize` stop
+    cleaning up every worktree on every machine in the world, and
+    ``tests/test_worktrees.py`` would say so immediately.
+
+    False ONLY when the record names a machine AND this machine can prove
+    it is a different one. A store with no op log, no ``sync_machine``
+    table or no identity ever minted returns None from
+    :func:`doxa.lore_sync.machine_id`, and unprovable reads as OURS --
+    "keep" is the safe default here exactly as it is for a missing or
+    unreadable sidecar (see :func:`finalize`'s meta-is-None case), because
+    the cost of the two mistakes is not symmetric: wrongly keeping a
+    worktree leaves a directory on disk, wrongly disowning one abandons a
+    branch nobody will come back for."""
+    named = record_machine(meta)
+    if named is None:
+        return True
+    mine = lore_sync_mod.machine_id()
+    return mine is None or named == mine
 
 
 def _drop_meta(target: Path) -> None:
@@ -305,10 +342,25 @@ def create(
         # once more before reporting failure.
         return _existing_worktree_path(main_root, branch)
 
-    _write_meta(
-        target, main_root=main_root, branch=branch, base_ref=base,
-        session_id=str(session_name),
-    )
+    fields = {
+        "main_root": main_root, "branch": branch, "base_ref": base,
+        "session_id": str(session_name),
+    }
+    if lore_sync_mod.worktrees_enabled():
+        # sync.md item 2: "the .meta sidecar gains machine_id". Written only
+        # with the opt-in ``worktrees`` class switched on, so a 1.9.2 sidecar
+        # and a sync-off sidecar written today are the same four fields --
+        # the regression bar tests/test_worktrees.py holds. ``create=True``
+        # for the reason doxa.tabsets.save gives at its own call: this is a
+        # write path that has already proved the class is on.
+        #
+        # It rides along through update_base's whole-dict round trip for
+        # free, and that is precisely why _write_meta stayed generic
+        # (``**fields``) rather than growing a named parameter per key.
+        mine = lore_sync_mod.machine_id(create=True)
+        if mine:
+            fields["machine_id"] = mine
+    _write_meta(target, **fields)
     return str(target)
 
 
@@ -537,6 +589,16 @@ def finalize(worktree_path: str) -> "str | None":
     meta = read_meta(worktree_path)
     if meta is None:
         return None
+    if not is_own_record(meta):
+        # sync.md item 2: "finalize ignores records that are not its own."
+        # Another machine's worktree is not on this disk -- the directory
+        # its sidecar names lives over there -- so every git call below
+        # would either fail outright or, far worse, act on an unrelated
+        # directory of the same name that happens to exist here, and
+        # ``git branch -D`` is not an operation to run on a guess. Left
+        # completely alone with nothing reported, the same answer a
+        # directory that was never a doxa worktree already gets.
+        return None
     target = Path(worktree_path)
     if not target.is_dir():
         _drop_meta(target)
@@ -586,6 +648,15 @@ def list_orphans() -> list[dict]:
             continue
         if not isinstance(data, dict):
             continue
+        if not is_own_record(data):
+            # sync.md item 2: another machine's record is not an orphan
+            # HERE, and -- the load-bearing half -- it is not a PATH here
+            # either. It is reported by :func:`list_remote` instead, which
+            # hands back no path at all. Filtered before the is_dir() test
+            # below on purpose: a foreign record whose name collides with a
+            # local directory would otherwise pass that test and be
+            # reported as an openable orphan of this machine's.
+            continue
         wt_path = root / meta_path.stem
         if not wt_path.is_dir():
             continue
@@ -598,3 +669,47 @@ def list_orphans() -> list[dict]:
             "session_id": session_id,
         })
     return orphans
+
+
+def list_remote() -> list[dict]:
+    """Every worktree record here that belongs to ANOTHER machine.
+
+    sync.md item 2: "the sidebar may list a worktree belonging to another
+    machine as *remote*, and must never offer it as a path to open." The
+    second half is enforced STRUCTURALLY rather than by a rule a caller has
+    to remember: these dicts carry no ``path`` key at all. A caller cannot
+    offer what it was never handed, so a future picker row built from this
+    cannot quietly become an open action in the hands of someone wiring it
+    up without reading this docstring -- which is the same reasoning
+    :func:`doxa.remote_policy.identity_decision` applies to an empty
+    allow-list, and the opposite of the direction such things usually fail.
+
+    The omission is not squeamishness, it is correctness: the directory the
+    record names is on the other machine's disk. A path string here would
+    be a path into THIS filesystem, which either does not exist or -- much
+    worse, since the name is ``<repo>-<short>`` and both machines check out
+    the same repos -- is an unrelated local directory of the same name.
+
+    ``name`` is the sidecar's own stem, which is what the record is called
+    on both machines; ``machine`` is the id to render the row as "on
+    <machine>". Empty on every machine with sync off, because nothing
+    writes a foreign record there -- so this costs a 1.9.2 DOXA exactly
+    what the rest of this feature costs it, which is nothing."""
+    meta_dir = _meta_dir()
+    if not meta_dir.is_dir():
+        return []
+    remote: list[dict] = []
+    for meta_path in sorted(meta_dir.glob("*.json")):
+        try:
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or is_own_record(data):
+            continue
+        remote.append({
+            "name": meta_path.stem,
+            "branch": str(data.get("branch") or ""),
+            "machine": record_machine(data) or "",
+            "session_id": str(data.get("session_id") or ""),
+        })
+    return remote

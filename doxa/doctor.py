@@ -368,6 +368,20 @@ def _worktrees_check() -> Check:
         listing = ", ".join(Path(o["path"]).name for o in orphans)
         detail += f", {len(orphans)} worktree(s) with no live session: {listing}"
         fix = "git worktree prune (from the repo) to clean up finished ones"
+    # Another machine's worktrees (sync.md's "## DOXA" item 2), reported as
+    # REMOTE and never as something to prune: the directories are on that
+    # machine's disk, `git worktree prune` here would say nothing about
+    # them, and the fix line above must not appear to be offering to. Named
+    # by their record name only -- worktrees.list_remote deliberately hands
+    # back no path, so this cannot print one even by mistake. Adds nothing
+    # at all when there are none, which keeps the sync-off detail string
+    # byte-identical (tests/test_doctor.py asserts it exactly).
+    remote = worktrees_mod.list_remote()
+    if remote:
+        elsewhere = ", ".join(
+            f"{r['name']} (on {r['machine'][:8]})" for r in remote
+        )
+        detail += f", {len(remote)} on another machine: {elsewhere}"
     return Check(
         id="worktrees", title="worktree per session", status=STATUS_PASS,
         detail=detail, fix=fix,

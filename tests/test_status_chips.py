@@ -1659,3 +1659,77 @@ async def test_the_remote_chip_names_the_driving_identity(monkeypatch, tmp_path)
     app, _engines = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test() as pilot:
         assert await _wait_status(pilot, app, "remote:alice@example.com")
+
+
+# -- LORE sync: the chip that must NOT be there (sync.md "## DOXA" item 3) --
+#
+# Both tests anchor on the ⇅ glyph rather than the word "sync". This file's
+# own _chip_offset docstring records why: pytest names tmp_path after the
+# running test, so a bare substring check can match the folder chip's own
+# directory text -- and the first test's name contains "sync" three times.
+# The glyph is unique to this chip, which is the clearance it was given.
+
+
+@pytest.mark.asyncio
+async def test_no_sync_chip_when_sync_is_off(monkeypatch, tmp_path):
+    """Sync off -- the default, and what every other test in this file
+    already runs under -- paints NO sync chip. Not a zero, not a greyed-out
+    one: this row has no overflow behaviour, so a chip that says nothing
+    pushes a chip that says something off the end.
+
+    Asserted on the RENDERED bar, not on sync_chip() alone, because the
+    WIRING is the half that regresses on its own: schedule_sync_state
+    returns early when sync is off, so _sync_state stays None and the chip
+    is never built. A change that opened the store at boot regardless would
+    leave every unit test in tests/test_lore_sync.py green and still put a
+    chip here."""
+    from doxa import lore_sync as lore_sync_mod
+
+    lore_sync_mod.invalidate()
+    monkeypatch.delenv("LORE_SYNC_URL", raising=False)
+    monkeypatch.delenv("LORE_SYNC_PEER", raising=False)
+    repo = _repo(tmp_path)
+    app, _engines = await _app(monkeypatch, repo)
+    async with app.run_test() as pilot:
+        pane = app.active_pane
+        assert await _settled(pilot, pane)
+        # The branch chip is up, so the bar has painted the worktree/branch
+        # half -- exactly where a sync chip would sit if one were built.
+        assert await _wait_status(pilot, app, "trunk")
+        assert "⇅" not in _status_plain(app)
+        assert pane._sync_state is None
+    lore_sync_mod.invalidate()
+
+
+@pytest.mark.asyncio
+async def test_no_sync_chip_when_the_store_has_no_sync_tables(monkeypatch, tmp_path):
+    """The other absence item 3 requires: sync CONFIGURED, but the store
+    predates the sync_* tables. That is not hypothetical -- doxa._lore_bootstrap
+    prefers a plugin checkout over the pinned wheel, so a machine whose
+    checked-out LORE is older than the op log lands here.
+
+    Unlike the test above this one really does run the worker: sync is on,
+    so schedule_sync_state spawns _refresh_sync_state, which opens the store
+    off a thread and gets nothing back. The chip degrades to ABSENT rather
+    than to an error block -- and the autouse _errors_must_be_claimed
+    fixture is what would fail this test if it ever became one."""
+    import sqlite3
+
+    import lore_core.store as store_mod
+
+    from doxa import lore_sync as lore_sync_mod
+
+    lore_sync_mod.invalidate()
+    monkeypatch.setenv("LORE_SYNC_URL", "https://hub.example/lore")
+    monkeypatch.delenv("LORE_DISABLE_SYNC", raising=False)
+    monkeypatch.setattr(store_mod, "db_connect", lambda: sqlite3.connect(":memory:"))
+    repo = _repo(tmp_path)
+    app, _engines = await _app(monkeypatch, repo)
+    async with app.run_test() as pilot:
+        pane = app.active_pane
+        assert await _settled(pilot, pane)
+        assert await _wait_status(pilot, app, "trunk")
+        await pilot.pause(0.05)
+        assert "⇅" not in _status_plain(app)
+        assert pane._sync_state is None
+    lore_sync_mod.invalidate()

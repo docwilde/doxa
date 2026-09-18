@@ -564,3 +564,163 @@ def test_finalize_keeps_a_sidecar_that_records_its_own_branch_as_base(tmp_path):
     subprocess.run(["git", "-C", path, "commit", "-qm", "real work"], check=True)
     assert worktrees_mod.finalize(path) == f"kept {own} — merge when ready"
     assert own in _branches(repo)
+
+
+# -- machine identity (LORE/docs/plans/sync.md, "## DOXA" item 2) ----------
+#
+# Real git and real sidecars throughout, same discipline as the rest of
+# this file: what lands on disk IS the feature. :mod:`doxa.lore_sync` is
+# monkeypatched rather than a real op log stood up -- DOXA does not own the
+# op log, and a test that needed one would pass or fail on which lore_core
+# doxa._lore_bootstrap happened to resolve.
+#
+# The first test is the regression bar the whole feature is measured
+# against, and it is deliberately first: with sync off, a sidecar is the
+# same four fields it has been since v0.17.
+
+
+def _sync_off_sidecar_fields():
+    return {"main_root", "branch", "base_ref", "session_id"}
+
+
+@pytest.fixture
+def _sync_on(monkeypatch):
+    """The worktrees class opted in, with a fixed machine id -- the two
+    things doxa.worktrees asks before it stamps a sidecar."""
+    from doxa import lore_sync as lore_sync_mod
+
+    monkeypatch.setattr(lore_sync_mod, "worktrees_enabled", lambda: True)
+    monkeypatch.setattr(lore_sync_mod, "machine_id", lambda **_kw: "machine-here")
+    return "machine-here"
+
+
+def _claim_machine(monkeypatch, value):
+    """Make this machine's identity read as ``value`` (None = unreadable)."""
+    from doxa import lore_sync as lore_sync_mod
+
+    monkeypatch.setattr(lore_sync_mod, "machine_id", lambda **_kw: value)
+
+
+def test_sidecar_carries_no_machine_id_with_sync_off(tmp_path):
+    """THE regression bar for item 2: sync off writes exactly what 1.9.2
+    wrote, no extra key, so nothing downstream can start behaving
+    differently on a machine that never opted in."""
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "syncoff1")
+    assert path is not None
+    meta = worktrees_mod.read_meta(path)
+    assert set(meta) == _sync_off_sidecar_fields()
+    assert worktrees_mod.is_own_record(meta) is True
+
+
+def test_sidecar_carries_this_machine_with_sync_on(tmp_path, _sync_on):
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "syncon01")
+    assert path is not None
+    meta = worktrees_mod.read_meta(path)
+    assert meta["machine_id"] == _sync_on
+    # The four original fields are untouched beside it -- the key is added,
+    # never a rewrite of the record.
+    assert _sync_off_sidecar_fields() <= set(meta)
+    assert worktrees_mod.is_own_record(meta) is True
+
+
+def test_finalize_leaves_another_machines_worktree_alone(tmp_path, monkeypatch, _sync_on):
+    """sync.md item 2: "finalize ignores records that are not its own."
+
+    The directory a foreign sidecar names is on the OTHER machine's disk,
+    so acting on it here means running `git branch -D` against whatever
+    local directory happens to share the name. Clean and zero-ahead --
+    i.e. the one state finalize would otherwise remove without a trace --
+    so a regression here deletes the branch rather than merely reporting
+    oddly."""
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "elsewhr1")
+    assert path is not None
+    _claim_machine(monkeypatch, "some-other-machine")
+    assert worktrees_mod.finalize(path) is None
+    assert Path(path).exists()
+    assert "doxa/elsewhr1" in _branches(repo)
+    # And the sidecar is still there: finalize did not even clean up after
+    # a record it does not own.
+    assert worktrees_mod.read_meta(path) is not None
+
+
+def test_finalize_still_removes_this_machines_clean_worktree_with_sync_on(
+    tmp_path, _sync_on
+):
+    """The refusal above must not be vacuous: the SAME code path with a
+    matching machine id still removes a clean, zero-ahead worktree."""
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "ownclean")
+    assert path is not None
+    assert worktrees_mod.finalize(path) is None
+    assert not Path(path).exists()
+    assert "doxa/ownclean" not in _branches(repo)
+
+
+def test_list_orphans_never_offers_another_machines_worktree_as_a_path(
+    tmp_path, monkeypatch, _sync_on
+):
+    """A foreign record is not an orphan HERE, and -- the half that
+    matters -- it is never handed out as a path to open."""
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "farawy01")
+    assert path is not None
+    _claim_machine(monkeypatch, "some-other-machine")
+    assert worktrees_mod.list_orphans() == []
+
+
+def test_list_remote_names_another_machines_worktree_and_carries_no_path(
+    tmp_path, monkeypatch, _sync_on
+):
+    """sync.md item 2: listed as REMOTE, never as a path to open. The
+    guarantee is structural -- there is no path key to offer -- so this
+    asserts the absence, not just that nobody currently reads it."""
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "farawy02")
+    assert path is not None
+    _claim_machine(monkeypatch, "workstation-id")
+    remote = worktrees_mod.list_remote()
+    assert len(remote) == 1
+    assert remote[0]["branch"] == "doxa/farawy02"
+    assert remote[0]["machine"] == "machine-here"
+    assert "path" not in remote[0]
+
+
+def test_list_remote_is_empty_for_this_machines_own_worktrees(tmp_path, _sync_on):
+    """Not vacuous in the other direction either: our own records never
+    show up as remote."""
+    repo = _repo(tmp_path)
+    assert worktrees_mod.create(str(repo), "mineonly") is not None
+    assert worktrees_mod.list_remote() == []
+    assert len(worktrees_mod.list_orphans()) == 1
+
+
+def test_a_sidecar_is_kept_when_this_machines_identity_cannot_be_read(
+    tmp_path, monkeypatch, _sync_on
+):
+    """Unprovable has always meant KEEP here (finalize's meta-is-None case
+    is the same judgement). A lore_core that failed to import must not
+    make DOXA disown -- and then delete -- the user's worktrees."""
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "noident1")
+    assert path is not None
+    _claim_machine(monkeypatch, None)
+    meta = worktrees_mod.read_meta(path)
+    assert worktrees_mod.is_own_record(meta) is True
+    assert worktrees_mod.list_remote() == []
+
+
+def test_update_base_preserves_the_machine_id(tmp_path, _sync_on):
+    """/branch rewrites the sidecar through a whole-dict round trip; the
+    machine id has to survive it, or one branch switch silently disowns
+    the worktree."""
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "switch01")
+    assert path is not None
+    subprocess.run(["git", "-C", str(repo), "branch", "other"], check=True)
+    assert worktrees_mod.update_base(path, "other") is True
+    meta = worktrees_mod.read_meta(path)
+    assert meta["base_ref"] == "other"
+    assert meta["machine_id"] == _sync_on

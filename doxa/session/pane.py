@@ -265,6 +265,17 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         # never per frame -- _refresh_status reads this cached record and
         # never runs git itself, the same rule _usage_chip above follows.
         self._diff_counts: Any = None
+        # LORE sync state for the status chip (sync.md's "## DOXA" item 3).
+        # None means NO CHIP, and it is the answer for every machine that
+        # never turned sync on -- which is the default, and has to stay
+        # invisible rather than paint a zero. Written only by
+        # _refresh_sync_state, off a worker thread, from the one event that
+        # can change it today (this pane's boot): with no transport wired
+        # yet nothing can move these numbers mid-session, so a second
+        # refresh site would be a cost with no reading behind it. Same rule
+        # _diff_counts and _usage_chip above already follow -- _refresh_status
+        # reads this cached record and never opens a database itself.
+        self._sync_state: Any = None
         # Has the `auto_diff` setting already spent its ONE open for this
         # session? Here, on the SESSION pane, and not on the diff pane it
         # opens -- which is the whole point: a user who closes the diff
