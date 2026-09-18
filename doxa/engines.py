@@ -72,6 +72,15 @@ from .events import EngineEvent
 # a lookup of anything else is an error, not a guess.
 CLAUDE_ENGINE_ID = "claude"
 CODEX_ENGINE_ID = "codex"
+# v1.10.0: two third-party chat-completions APIs, both driven by ONE
+# engine class (doxa.vendors.ChatApiEngine) sharing ONE capability map.
+# They exist for docs/plans/emergent-organization.md, whose central
+# control is that N copies of one model are not N independent agents --
+# mixed vendors is what breaks that correlated prior, and the map below is
+# what lets the study assert the agents differed in model and in nothing
+# else.
+DEEPSEEK_ENGINE_ID = "deepseek"
+GLM_ENGINE_ID = "glm"
 
 DEFAULT_ENGINE_ID = CLAUDE_ENGINE_ID
 
@@ -357,29 +366,47 @@ def is_known(engine_id: "str | None") -> bool:
 
 register(ClaudeEngineProvider())
 
-_codex_registered = False
+#: The engines registered on first LOOKUP rather than at import, as
+#: ``(module, provider attribute)``. Explicit, in one tuple, for the
+#: reason the comment above ``_REGISTRY`` states: nothing is discovered,
+#: and adding an engine is a reviewed edit to a list somebody can read.
+_LAZY_PROVIDERS: "tuple[tuple[str, str], ...]" = (
+    ("codex", "CodexEngineProvider"),
+    ("vendors", "DeepSeekEngineProvider"),
+    ("vendors", "GLMEngineProvider"),
+)
+
+_builtins_registered = False
 
 
 def _ensure_builtins() -> None:
-    """Register Codex on first LOOKUP, not at import.
+    """Register the non-Claude engines on first LOOKUP, not at import.
 
-    ``doxa.codex`` imports this module for the Protocol and the capability
-    dataclass, so registering it at the bottom of this one is a cycle. It
-    is also the wrong time: nothing that merely imports ``doxa.engines``
-    (the ctx chip asking a handle what it supports, for one) needs Codex's
-    module loaded. Every registry reader below calls this first, so the
-    laziness is invisible from the outside -- ``available()`` lists both
-    engines on a cold import."""
-    global _codex_registered
-    if _codex_registered:
+    ``doxa.codex`` and ``doxa.vendors`` both import this module for the
+    Protocol and the capability dataclass, so registering them at the
+    bottom of this one is a cycle. It is also the wrong time: nothing that
+    merely imports ``doxa.engines`` (the ctx chip asking a handle what it
+    supports, for one) needs either module loaded. Every registry reader
+    below calls this first, so the laziness is invisible from the outside
+    -- ``available()`` lists every engine on a cold import.
+
+    Each entry is imported in its OWN try, so one engine that cannot
+    import (a missing optional dependency, a syntax error mid-edit) leaves
+    the others registered instead of taking the whole non-Claude half of
+    the registry down with it. An engine that is absent is the honest
+    outcome: ``get("glm")`` then raises with the list of engines that DO
+    exist."""
+    global _builtins_registered
+    if _builtins_registered:
         return
-    # Set BEFORE the import: a failure here must not make every later
-    # lookup retry a broken import, and Codex missing from the registry is
-    # already the honest outcome (``get("codex")`` then raises with the
-    # list of engines that DO exist).
-    _codex_registered = True
-    try:
-        from .codex import CodexEngineProvider
-    except Exception:  # noqa: BLE001 -- an engine that cannot import is absent
-        return
-    register(CodexEngineProvider())
+    # Set BEFORE the imports: a failure below must not make every later
+    # lookup retry a broken import.
+    _builtins_registered = True
+    from importlib import import_module
+
+    for module_name, attr in _LAZY_PROVIDERS:
+        try:
+            module = import_module(f".{module_name}", __package__)
+            register(getattr(module, attr)())
+        except Exception:  # noqa: BLE001 -- an engine that cannot import is absent
+            continue

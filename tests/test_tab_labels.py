@@ -642,7 +642,12 @@ def test_provider_glyphs_table_has_exactly_the_live_rows():
     assert set(PROVIDER_GLYPHS) == {
         providers_mod.CLAUDE_PROVIDER_ID, providers_mod.CODEX_PROVIDER_ID,
     }
-    assert engines_mod.available() == ("claude", "codex")
+    # v1.10.0 added two more ENGINES (deepseek, glm) without adding a
+    # provider glyph: they publish their own provider ids, and the table
+    # above is still exactly the set of ids that HAVE a glyph. The
+    # invariant this test defends is "no orphan glyph", not "one glyph per
+    # engine" -- a vendor with no row falls back to the default rendering.
+    assert engines_mod.available() == ("claude", "codex", "deepseek", "glm")
 
 
 def test_provider_glyph_is_anthropic_orange_via_markup():

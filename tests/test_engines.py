@@ -121,7 +121,11 @@ def test_the_two_async_divergent_methods_stayed_out():
 
 def test_registry_closure():
     """Every engine, listed literally -- adding one is a reviewed act."""
-    assert engines_mod.available() == (CLAUDE_ENGINE_ID, CODEX_ENGINE_ID)
+    from doxa.engines import DEEPSEEK_ENGINE_ID, GLM_ENGINE_ID
+
+    assert engines_mod.available() == (
+        CLAUDE_ENGINE_ID, CODEX_ENGINE_ID, DEEPSEEK_ENGINE_ID, GLM_ENGINE_ID,
+    )
 
 
 def test_unknown_engine_raises_and_lists_the_real_ones():
@@ -130,6 +134,7 @@ def test_unknown_engine_raises_and_lists_the_real_ones():
     message = excinfo.value.args[0]
     assert "gpt-9" in message
     assert "claude" in message and "codex" in message
+    assert "deepseek" in message and "glm" in message
 
 
 def test_empty_engine_id_means_the_default():
