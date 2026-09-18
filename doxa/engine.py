@@ -90,8 +90,9 @@ from . import config as config_mod
 from . import gate as gate_mod
 from . import images as images_mod
 from . import operators as operators_mod
+from . import peerledger as peerledger_mod
 from . import peers as peers_mod
-from .promptqueue import PromptQueue
+from .promptqueue import PromptQueue, PromptQueueFull
 # Imported for ONE constant (CLAUDE_PROVIDER_ID, published as
 # PeerInfo.provider at connect) -- doxa.providers costs nothing at import
 # (os + dataclasses + typing; the `anthropic` tier is lazy inside a try),
@@ -1519,6 +1520,40 @@ class SessionEngine:
         self._peer_queue: asyncio.Queue[EngineEvent] = asyncio.Queue()
         self._pending_peer_frames: list[dict] = []
 
+        # The ledger (doxa/peerledger.py) and the send-side limit that
+        # bounds what enters it. Both live on the ENGINE because the engine
+        # owns the PeerHost, which is the one object every outbound peer
+        # message already passes: a limiter anywhere else would be a
+        # limiter something could route around.
+        #
+        # The limiter is per-session and in memory, which is what its own
+        # module says it is. That is not a gap in enforcement, it is what
+        # the bound MEANS: "what ONE session may send", so one session
+        # restarting really does get a fresh budget, and a second session
+        # really does get its own. A fleet-wide bound is a different
+        # quantity and would need a different mechanism.
+        self._peer_ledger = peerledger_mod.ledger()
+        self._peer_limiter = peerledger_mod.RateLimiter()
+
+        # The turn this session is running right now, or None between
+        # turns. The ledger records the SENDER's turn context on every
+        # message (peerledger.TurnRef), and the rate limit's per-turn
+        # bucket is keyed on exactly this -- so a send made outside any
+        # turn is honestly recorded as idle rather than attributed to
+        # whichever turn happened to run last.
+        #
+        # Minted here rather than taken from doxa.daemon (which mints its
+        # own id per socket request): the daemon's id names a REQUEST and
+        # exists on one of the two hosting paths, while this one names the
+        # engine's turn and exists on both. Two ids for two different
+        # things, neither pretending to be the other.
+        self._turn_id: "str | None" = None
+
+        # Set for the life of a turn that an arriving peer message
+        # started, so the transcript, the turn_started event and the
+        # ledger can all name the same cause. See _peer_started_prompt.
+        self._turn_peer_origin: "dict | None" = None
+
         # Mid-turn prompt queue (see doxa.promptqueue): whether a turn is
         # actually running right now, and the bounded FIFO a prompt typed
         # while it is goes through instead of racing self._client. Checked
@@ -1554,6 +1589,16 @@ class SessionEngine:
                 # from the args namespace.
                 spawn_depth=self.spawn_depth,
                 spawn_confirm=self._confirm_spawn,
+                # The one seam peer_send needs. Everything else the peer
+                # tools read -- the registry, the ledger -- is a file this
+                # process can open for itself, but SENDING needs this
+                # session's socket, its title, its repo, its turn context
+                # and its rate limiter, all of which live on the engine.
+                # A seam rather than an engine import for the reason
+                # belief_store and spawn_confirm are seams: an operator
+                # must not import the engine, and a test must be able to
+                # answer without one.
+                peer_send=self._tool_peer_send,
             ),
             on_disable=self._on_tool_disabled,
         )
@@ -2515,12 +2560,86 @@ class SessionEngine:
 
     def _on_peer_frame(self, frame: dict) -> None:
         """A received peer frame (already scrubbed by PeerHost's receive
-        path). Queued twice, deliberately: once for the TUI (peer_message
-        event, rendered immediately) and once for the model, which only
-        ever sees it prepended to the NEXT user turn -- a peer message
-        never interrupts a running turn and never starts one."""
-        self._pending_peer_frames.append(dict(frame))
+        path). The TUI is told immediately and unconditionally; what
+        happens to the MODEL's copy is the decision this method makes.
+
+        Three outcomes, and the rule that picks between them changed in
+        this release. It used to be one sentence -- "a peer message never
+        interrupts a running turn and never starts one" -- and the first
+        half of it is still true and still enforced by the SDK evidence
+        :meth:`send` sets out. The second half is now a setting:
+
+        * **starts a turn** when inbound turn-starting is armed
+          (:func:`peers.peer_inbound_turns_enabled`), the message is
+          direct, and no turn is running. The prompt carries
+          :data:`peers.PEER_TURN_INTRO`, so the transcript and the ledger
+          both say what woke this session.
+        * **queues** when the same conditions hold but a turn IS running
+          -- through :class:`doxa.promptqueue.PromptQueue`, the same
+          bounded FIFO a mid-turn typed prompt uses. A peer is a SECOND
+          producer into that one queue, never a parallel one: two queues
+          would disagree about order the first time both had something
+          waiting, and the bound would stop being a bound.
+        * **waits for the next user turn** -- the pre-existing behaviour,
+          unchanged -- when the switch is off, when the message is a
+          BROADCAST (never, at any setting: at N=32 one broadcast that
+          started turns would wake the whole fleet in a single step), or
+          when the queue is already full.
+
+        Never raises. A frame that cannot be turned into a turn falls
+        back to the pending list, which is the behaviour that existed
+        before any of this and loses nothing."""
         self._peer_queue.put_nowait(EngineEvent("peer_message", dict(frame)))
+
+        if not self._peer_frame_may_start_a_turn(frame):
+            self._pending_peer_frames.append(dict(frame))
+            return
+
+        prompt = peers_mod.PEER_TURN_INTRO + "\n\n" + peers_mod.frame_for_model([frame])
+
+        if self._turn_running:
+            try:
+                item = self._prompt_queue.enqueue(prompt)
+            except PromptQueueFull:
+                # The bound is the bound. A message that cannot be queued
+                # is not dropped -- it falls back to riding the next user
+                # turn, which is where it would have gone anyway with the
+                # switch off.
+                self._pending_peer_frames.append(dict(frame))
+                return
+            self._peer_queue.put_nowait(EngineEvent("prompt_queued", {
+                "id": item.id, "text": prompt,
+                "position": self._prompt_queue.position(item.id) or len(self._prompt_queue),
+                "peer_started": True,
+            }))
+            return
+
+        # Idle: start now. _turn_running is set HERE, synchronously,
+        # rather than inside the task -- between creating a task and its
+        # first step the loop can run send(), and two turns that each
+        # thought they were the only one is the exact race the flag
+        # exists to prevent.
+        self._turn_running = True
+        self._queued_turn_task = asyncio.ensure_future(
+            self._run_queued_turn(prompt)
+        )
+
+    def _peer_frame_may_start_a_turn(self, frame: dict) -> bool:
+        """May this frame wake the session? See :meth:`_on_peer_frame`.
+
+        The broadcast check reads a field the SENDER wrote, which is
+        untrusted like every other field in a frame. The honest account
+        of what it buys is in :func:`peers.send_message`: a sender that
+        lied and called a broadcast "direct" gains nothing it could not
+        get by sending N direct messages instead, so the field is not a
+        defence against a hostile peer -- it is how DOXA's own broadcast
+        avoids waking the fleet. The defence against a hostile peer is
+        the switch below, which is this session's own."""
+        if self.peer_host is None:
+            return False
+        if not peers_mod.peer_inbound_turns_enabled():
+            return False
+        return frame.get("kind") != "broadcast"
 
     def _on_peer_joined(self, info: peers_mod.PeerInfo) -> None:
         self._peer_queue.put_nowait(EngineEvent("peer_joined", {
@@ -2545,21 +2664,253 @@ class SessionEngine:
     def peer_count(self) -> int:
         return len(self.list_peers())
 
-    async def send_peer_message(self, target_prefix: str, text: str) -> peers_mod.PeerInfo:
-        """Explicit outbound message to one same-scope peer, resolved by
-        prefix on session_id or title. Raises peers.PeerSendError on no
-        match, ambiguity, or transport failure -- always the sender's
-        problem to see, never the receiver's."""
+    # -- the ONE outbound path ---------------------------------------
+    #
+    # Everything that sends a peer message goes through
+    # :meth:`deliver_peer_message` -- a human typing ``/msg``, the model
+    # calling ``peer_send``, and a broadcast. That is not tidiness: the
+    # rate limit, the ledger record and the status-bar send light are
+    # three things that must happen for EVERY send, and three call sites
+    # each remembering to do all three is three chances to ship a send
+    # nobody can see.
+
+    def addressable_peers(self) -> "list[peers_mod.PeerInfo]":
+        """Every live session this one may address, across every repo.
+
+        Deliberately NOT :func:`peers.list_peers`, which filters to this
+        session's own scope. The owner's decision is that addressing
+        crosses repositories, and docs/plans/peer-publishing.md already
+        named the prerequisite for that: a widened discovery surface is
+        its own decision with a larger blast radius than same-repo
+        discovery, because it can see work in every project the user has
+        open. This is that surface, and it is why the sender's repo now
+        travels with the message and is displayed on arrival -- a reader
+        who cannot tell which project a message is about cannot weigh it.
+
+        ``/peers`` and the peers status chip keep the scoped view: those
+        answer "who is working on THIS with me", which is a different
+        question from "whom could I address"."""
+        return [
+            peer for peer in peers_mod.read_registry(probe=True)
+            if peer.session_id != self.session_id
+        ]
+
+    def _ledger_sender(self) -> peerledger_mod.Sender:
+        """Who this session says it is, for the ``from`` block of a
+        record. Every field but ``session`` is self-description and the
+        ledger treats it as such."""
+        host = self.peer_host
+        return peerledger_mod.Sender(
+            session=self.session_id,
+            title=host.title if host is not None else None,
+            repo=host.scope_key if host is not None else None,
+            model=self.model,
+            engine=ENGINE_ID,
+        )
+
+    def _turn_ref(self) -> peerledger_mod.TurnRef:
+        """This send's turn context. ``idle`` when no turn is running, and
+        that is a measurement rather than bookkeeping: a message sent
+        while the sender is idle is unprompted, and an unprompted message
+        is the shape a coordinator has (peerledger.TurnRef)."""
+        if self._turn_id is None:
+            return peerledger_mod.IDLE_TURN
+        return peerledger_mod.TurnRef(id=self._turn_id, state="running")
+
+    async def deliver_peer_message(
+        self,
+        targets: "Sequence[peers_mod.PeerInfo]",
+        text: str,
+        *,
+        kind: str = "direct",
+        in_reply_to: "str | None" = None,
+    ) -> dict:
+        """Send one message to ``targets``, record it, and light the lamp.
+
+        Order is load-bearing and each step's position is argued in a
+        module this one only calls:
+
+        1. **Charge the limit first.** It is a SEND-side limit, priced in
+           DELIVERIES -- a broadcast to 31 peers costs 31, which is the
+           difference between a limit and a decoration at this fan-out
+           (peerledger.decide_send). A refusal raises
+           :class:`peerledger.SendRefused`, whose decision carries the
+           reason AND the reset; the caller surfaces both verbatim,
+           because an agent told why it was refused can reason about it
+           and one silently throttled just retries.
+        2. **Send, per peer, tolerating per-peer failure.** A dead socket
+           or an oversize frame fails one delivery, not the call.
+        3. **Append AFTER, naming only the peers actually reached.** A
+           record written before the attempt counts a delivery that never
+           happened, which inflates out-degree -- the first measure the
+           experiment reports. One append per send, never one per
+           recipient: the record IS the message, and a partial broadcast
+           is a record whose ``to`` is short.
+        4. **Emit ``peer_sent``** so the status bar's send light flashes
+           for a send this pane did not type.
+
+        Raises :class:`peers.PeerSendError` when nothing could be
+        delivered, so a total failure is never mistaken for a quiet
+        success. A partial one returns, with ``failed`` naming who missed
+        out -- the record already says the same thing by omission."""
         if self.peer_host is None:
             raise peers_mod.PeerSendError("peer layer is not running in this session")
-        peer = peers_mod.resolve_peer(self.peer_host.list_peers(), target_prefix)
-        await peers_mod.send_message(
-            peer.socket_path,
-            from_id=self.session_id,
-            from_title=self.peer_host.title,
-            body=text,
+        if not targets:
+            raise peers_mod.PeerSendError("no addressable peer")
+        body = str(text or "")
+        if not body.strip():
+            raise peers_mod.PeerSendError("refusing to send an empty message")
+
+        # 1. the limit, before a byte moves
+        decision = self._peer_limiter.charge(
+            recipients=[peer.session_id for peer in targets],
+            turn_id=self._turn_id,
         )
+        decision.raise_if_refused()
+
+        # 2. the sends
+        delivered: "list[peers_mod.PeerInfo]" = []
+        failed: "list[tuple[peers_mod.PeerInfo, str]]" = []
+        for peer in targets:
+            try:
+                await peers_mod.send_message(
+                    peer.socket_path,
+                    from_id=self.session_id,
+                    from_title=self.peer_host.title,
+                    body=body,
+                    from_repo=self.peer_host.scope_key,
+                    kind=kind,
+                )
+            except peers_mod.PeerSendError as exc:
+                failed.append((peer, str(exc)))
+            else:
+                delivered.append(peer)
+
+        if not delivered:
+            reasons = "; ".join(f"{p.session_id[:8]}: {why}" for p, why in failed)
+            raise peers_mod.PeerSendError(f"nothing was delivered -- {reasons}")
+
+        # 3. the record -- off the event loop, because appending takes a
+        # cross-process lock that N other sessions can be holding.
+        record: "peerledger_mod.Message | None" = None
+        ledger_error: "str | None" = None
+        try:
+            record = await self._peer_ledger.append_async(
+                sender=self._ledger_sender(),
+                to=[peer.session_id for peer in delivered],
+                body=body,
+                kind=kind,
+                in_reply_to=in_reply_to,
+                turn=self._turn_ref(),
+            )
+        except Exception as exc:  # noqa: BLE001 -- a full ledger must not eat a delivered message
+            # The message HAS been delivered; refusing to return now would
+            # tell the sender it failed when it did not. The failure is
+            # reported instead of swallowed -- an unrecorded send is a
+            # measurement that cannot be taken again, and the one thing
+            # worse than losing it is losing it quietly.
+            ledger_error = f"{type(exc).__name__}: {exc}"
+
+        # 4. the send light
+        self._peer_queue.put_nowait(EngineEvent("peer_sent", {
+            "to": [peer.session_id for peer in delivered],
+            "kind": kind,
+            "message_id": record.id if record is not None else None,
+        }))
+
+        out: dict = {
+            "delivered_to": [
+                {"session_id": peer.session_id, "title": peer.title,
+                 "repo": peer.scope_key}
+                for peer in delivered
+            ],
+            "kind": kind,
+            "message_id": record.id if record is not None else None,
+            "deliveries_charged": decision.fanout,
+            "turn_deliveries_used": decision.turn_used + decision.fanout,
+            "turn_delivery_limit": decision.turn_limit,
+            "window_deliveries_used": decision.window_used + decision.fanout,
+            "window_delivery_limit": decision.window_limit,
+        }
+        if failed:
+            out["failed"] = [
+                {"session_id": peer.session_id, "error": why} for peer, why in failed
+            ]
+        if ledger_error is not None:
+            out["ledger_error"] = (
+                f"delivered, but NOT recorded in the peer ledger ({ledger_error}) "
+                "-- this send is missing from the mesh graph"
+            )
+        return out
+
+    async def send_peer_message(self, target_prefix: str, text: str) -> peers_mod.PeerInfo:
+        """Explicit outbound message to ONE peer, resolved by full session
+        id or by a prefix matching exactly one. Raises peers.PeerSendError
+        on no match, ambiguity, a refusing rate limit, or transport failure
+        -- always the sender's problem to see, never the receiver's.
+
+        This is ``/msg``'s path, and since the ledger exists it goes
+        through :meth:`deliver_peer_message` like every other send. A
+        human-typed message that did not appear in the mesh graph would
+        make the graph a picture of the model's traffic rather than of
+        the fleet's."""
+        if self.peer_host is None:
+            raise peers_mod.PeerSendError("peer layer is not running in this session")
+        peer = peers_mod.resolve_peer(self.addressable_peers(), target_prefix)
+        try:
+            await self.deliver_peer_message([peer], text)
+        except peerledger_mod.SendRefused as exc:
+            # The limiter's refusal is already a sentence naming the reason
+            # and the reset. Re-raised as the error type every caller of
+            # this method already handles, with that sentence intact rather
+            # than replaced by a shorter one that says less.
+            raise peers_mod.PeerSendError(str(exc)) from exc
         return peer
+
+    async def _tool_peer_send(self, request: dict) -> dict:
+        """The ``peer_send`` seam the tool gate's OperatorContext carries.
+
+        Takes an already-validated request from doxa.operators (a target
+        prefix or the broadcast marker, the body, an optional in_reply_to)
+        and returns an ordinary result dict -- including for a refusal,
+        which is a soft error the model reads and recovers from, never an
+        exception that would cost it a strike on the two-strikes tracker
+        for a limit doing its job."""
+        body = str(request.get("body") or "")
+        in_reply_to = request.get("in_reply_to") or None
+        broadcast = bool(request.get("broadcast"))
+        target = str(request.get("to") or "").strip()
+
+        if self.peer_host is None:
+            return {"error": "peer_send: the peer layer is not running in this session"}
+        candidates = self.addressable_peers()
+        if broadcast:
+            if not candidates:
+                return {"error": "peer_send: no other session is running -- nothing to broadcast to"}
+            targets, kind = candidates, "broadcast"
+        else:
+            try:
+                targets, kind = [peers_mod.resolve_peer(candidates, target)], "direct"
+            except peers_mod.PeerSendError as exc:
+                # Ambiguity and no-match both land here, and the message
+                # already names the candidates. A soft error: the model
+                # can fix it by naming a full session id.
+                return {"error": f"peer_send: {exc}"}
+
+        try:
+            return await self.deliver_peer_message(
+                targets, body, kind=kind, in_reply_to=in_reply_to,
+            )
+        except peerledger_mod.SendRefused as exc:
+            decision = exc.decision
+            return {
+                "error": f"peer_send: {decision.reason}",
+                "refused_by": decision.scope,
+                "resets": decision.reset_description(),
+                "deliveries_requested": decision.fanout,
+            }
+        except peers_mod.PeerSendError as exc:
+            return {"error": f"peer_send: {exc}"}
 
     async def send(self, prompt: str) -> AsyncIterator[EngineEvent]:
         """Public entry point for a typed prompt: start a turn, or --
@@ -2639,6 +2990,11 @@ class SessionEngine:
             # queue, exactly as SessionDaemon._run_turn does after
             # publishing its error.
             self._turn_running = False
+            # Cleared with the running flag, never separately: a turn id
+            # that outlived its turn would attribute the next idle send
+            # to a turn that has ended, in the ledger and in the rate
+            # limit's per-turn bucket alike.
+            self._turn_id = None
             if not cancelled:
                 self._advance_queue()
 
@@ -2675,6 +3031,11 @@ class SessionEngine:
                 self._peer_queue.put_nowait(ev)
         except asyncio.CancelledError:
             self._turn_running = False
+            # Cleared with the running flag, never separately: a turn id
+            # that outlived its turn would attribute the next idle send
+            # to a turn that has ended, in the ledger and in the rate
+            # limit's per-turn bucket alike.
+            self._turn_id = None
             raise
         except Exception as exc:  # noqa: BLE001 -- a background turn's failure must reach the pane
             # Nobody awaits this task, so an exception escaping here
@@ -2688,6 +3049,11 @@ class SessionEngine:
                 "session_cost_usd": self.total_cost_usd,
             }))
         self._turn_running = False
+        # Cleared with the running flag, never separately: a turn id
+        # that outlived its turn would attribute the next idle send
+        # to a turn that has ended, in the ledger and in the rate
+        # limit's per-turn bucket alike.
+        self._turn_id = None
         self._advance_queue()
 
     async def list_queue(self) -> "list[dict[str, str]]":
@@ -2735,16 +3101,33 @@ class SessionEngine:
 
         outbound = prompt
         if self._pending_peer_frames:
-            # Model visibility for peer messages happens HERE and only here:
-            # pending frames (scrubbed on receive) attach to the next user
-            # turn behind the untrusted-peer marker -- never mid-turn, never
-            # as a turn of their own.
+            # Model visibility for a peer message that did NOT start a turn
+            # of its own happens HERE: pending frames (scrubbed on receive)
+            # attach to the next user turn behind the untrusted-peer
+            # marker -- never mid-turn. A frame that DID start a turn never
+            # reaches this list; see _on_peer_frame.
             frames, self._pending_peer_frames = self._pending_peer_frames, []
             outbound = peers_mod.frame_for_model(frames) + "\n\n" + prompt
+
+        # Whose turn this is, and what it is called. The id is minted per
+        # turn and read by two things that must agree: the rate limit's
+        # per-turn bucket and every ledger record a send in this turn
+        # writes. A peer-started turn gets a "peer-" prefix, which is the
+        # whole of its ledger attribution -- no new record type, no field
+        # a receiver would have to write into a file only senders write
+        # to, and a reader counting spend can separate turns a human asked
+        # for from turns that arrived.
+        peer_started = prompt.startswith(peers_mod.PEER_TURN_INTRO)
+        self._turn_id = ("peer-" if peer_started else "") + uuid.uuid4().hex[:12]
 
         self._persist_user_text(outbound)
         yield EngineEvent("turn_started", {
             "prompt": prompt, "peer_context": outbound is not prompt,
+            # The transcript's half of the attribution. The TUI labels the
+            # block from this; the sentence the MODEL read is the first
+            # line of the prompt either way, so the two cannot disagree.
+            "peer_started": peer_started,
+            "turn_id": self._turn_id,
         })
 
         await self._client.query(outbound, session_id=self.session_id)
