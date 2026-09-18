@@ -100,6 +100,7 @@ PANE_COMMANDS: "tuple[CommandBinding, ...]" = (
     CommandBinding("/plugins", "_cmd_plugins"),
     CommandBinding("/reload-plugins", "_cmd_reload_plugins"),
     CommandBinding("/model", "_cmd_model"),
+    CommandBinding("/engine", "_cmd_engine"),
     CommandBinding("/branch", "_cmd_branch"),
     CommandBinding("/mode", "_cmd_mode"),
     CommandBinding("/effort", "_cmd_effort"),
@@ -418,6 +419,94 @@ class PaneCommandsMixin:
         await self._system(
             f"model: {current} → {resolved}  ·  transcript and session kept "
             "(SDK control request, no reconnect)"
+        )
+
+    async def _cmd_engine(self, args: str) -> None:
+        """/engine -- which engine drives NEW sessions, and what each one
+        can actually do.
+
+        THE SIBLING OF /effort, NOT OF /model, and the docstring says so
+        because the two look identical from the prompt. ``set_model`` is a
+        live control request, so ``/model`` genuinely moves the running
+        session. An engine is chosen at CONNECT -- ``doxa.cli`` resolves
+        the provider before the app is built and hands the pane a session
+        factory -- and there is no request that swaps a connected session's
+        engine underneath it. So this writes the setting NEW sessions read
+        and says, in both the listing and the confirmation, that the
+        running session keeps its own. Silently doing nothing to the
+        current session is the failure mode this wording exists to prevent.
+
+        Bare, it lists every registered engine with its capability count
+        and the fields it does NOT have, read off
+        :class:`doxa.engines.EngineCapabilities` rather than described in
+        prose here: the four engines differ sharply (17 of 17 fields for
+        claude, 4 for codex, 9 for each vendor), a picker that listed them
+        as interchangeable would be lying, and prose describing the
+        difference is a second copy of that dataclass that drifts the next
+        time a field is added or a measurement corrected.
+
+        With an argument it selects. An unknown id is refused by
+        :func:`doxa.engines.get` itself -- the SAME refusal, with the SAME
+        list, that ``doxa --engine`` prints -- rather than by a second
+        check here that would either duplicate the list or diverge from
+        it."""
+        import textwrap
+
+        from .. import engines as engines_mod
+
+        configured = config_mod.engine()
+        running = engines_mod.engine_id_of(self.engine)
+        total = engines_mod.EngineCapabilities.field_count()
+
+        if not args:
+            lines = [
+                f"engine: {running} — this session, fixed at connect",
+                f"new sessions: {configured}",
+                "",
+            ]
+            for engine_id in engines_mod.available():
+                provider = engines_mod.get(engine_id)
+                caps = provider.supports()
+                mark = "▸" if engine_id == configured else " "
+                here = "  (this session)" if engine_id == running else ""
+                lines.append(
+                    f" {mark} {engine_id:<9} {provider.engine_display_name()}"
+                    f"  ·  {len(caps.enabled())}/{total} capabilities{here}"
+                )
+                absent = caps.missing()
+                lines.append(
+                    textwrap.fill(
+                        "without: " + ", ".join(absent),
+                        width=76, initial_indent=" " * 5,
+                        subsequent_indent=" " * 14,
+                    )
+                    if absent
+                    else " " * 5 + "everything DOXA has a surface for"
+                )
+            lines.append("")
+            lines.append("usage: /engine <id>")
+            lines.append(
+                "an engine is chosen at CONNECT — a change applies to NEW "
+                "sessions (/clear, a new tab, the next doxa), never to this "
+                "one, which keeps the engine it started on"
+            )
+            await self._system("\n".join(lines))
+            return
+
+        wanted = args.split()[0]
+        try:
+            provider = engines_mod.get(wanted)
+        except KeyError as exc:
+            await self._system(f"engine: {exc.args[0]}")
+            return
+        chosen = provider.engine_id()
+        config_mod.save({"engine": chosen})
+        await self._system(
+            f"engine: new sessions will use {chosen} "
+            f"({provider.engine_display_name()}) — this session keeps "
+            f"{running}, because an engine is chosen at connect and nothing "
+            "can hand a running session a different one. Open a new tab "
+            "(ctrl+t) or /clear this one to start on it."
         )
 
     async def _cmd_branch(self, args: str) -> None:

@@ -256,6 +256,22 @@ REGISTRY: tuple[SlashCommand, ...] = (
         palette="Model: switch",
     ),
     SlashCommand(
+        name="/engine",
+        group="Session",
+        # The summary says "NEW sessions" for the same reason /effort's
+        # does, and it is the whole difference between this row and the
+        # /model row directly above: a model is a control request the
+        # running session accepts, an ENGINE is what the session was
+        # CONNECTED with and nothing can hand a live one a different one.
+        # A user who learns that by watching /engine do nothing has been
+        # lied to by a one-line summary, which is the one thing a
+        # registry of one-line summaries must not do.
+        summary="Engine for NEW sessions and tabs, with what each one can "
+                "do — never the running session",
+        usage="/engine [id]",
+        palette="Engine: switch",
+    ),
+    SlashCommand(
         name="/branch",
         group="Session",
         summary="List local branches (current base marked), or switch this session's base",
