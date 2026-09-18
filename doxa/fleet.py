@@ -1193,3 +1193,130 @@ async def run_fleet(
 ) -> RunReport:
     """One run, start to finish. The function a script calls."""
     return await FleetRun(spec, backend, force=force).run()
+
+
+# -- the command line -------------------------------------------------
+
+
+def _parse_pool(spec: str) -> "tuple[ModelSlot, ...]":
+    """``claude:sonnet@8,claude:opus@1,deepseek:deepseek-chat@4``.
+
+    Weight after ``@``, defaulting to 1. No default POOL exists anywhere:
+    the assignment is the run's primary covariate, and a covariate nobody
+    chose is a covariate nobody can defend."""
+    out: "list[ModelSlot]" = []
+    for entry in spec.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        body, _, weight = entry.partition("@")
+        engine, _, model = body.partition(":")
+        out.append(
+            ModelSlot(
+                engine=engine.strip(),
+                model=model.strip() or None,
+                weight=float(weight) if weight.strip() else 1.0,
+            )
+        )
+    return tuple(out)
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    """``python -m doxa.fleet`` -- one run, from the shell.
+
+    Prints the capacity arithmetic BEFORE spawning anything, because that
+    is the moment an operator can still change their mind about N, and
+    prints the manifest path after, because the manifest is the run."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="doxa-fleet",
+        description=(
+            "Spawn N DOXA sessions, hand them one identical prompt at one "
+            "instant, wait for quiescence, collect the ledger, tear down "
+            "(docs/plans/emergent-organization.md)."
+        ),
+    )
+    parser.add_argument("--prompt", required=True,
+                        help="the task text, byte-identical for every "
+                             "session. Never formatted per session: a "
+                             "number is a position and a position is a "
+                             "privilege")
+    parser.add_argument("--prompt-file", default=None,
+                        help="read the prompt from this file instead "
+                             "(--prompt then names the file's role only)")
+    parser.add_argument("-n", type=int, default=DEFAULT_N,
+                        help=f"sessions (default %(default)s). The "
+                             f"experiment wants 32, which is about "
+                             f"{32 * SESSION_RESIDENT_MB / 1024:.0f} GB "
+                             "resident -- see --dry-run for the arithmetic "
+                             "on THIS machine")
+    parser.add_argument("--pool", required=True,
+                        help="engine:model@weight, comma-separated, e.g. "
+                             "'claude:sonnet@8,claude:opus@1'. Required: "
+                             "the model assignment is the run's primary "
+                             "covariate and there is no default for it")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="the run seed. The model assignment and the "
+                             "dispatch order are both drawn from it, so a "
+                             "run reproduces from its manifest")
+    parser.add_argument("--cwd", default=None, help="repo the fleet works in")
+    parser.add_argument("--root", default=None,
+                        help="where run directories go (default "
+                             "$DOXA_HOME/fleet). Keep it SHORT -- a Unix "
+                             "socket lives under it and AF_UNIX gives 108 "
+                             "bytes")
+    parser.add_argument("--run-id", default=None)
+    parser.add_argument("--memory-off", type=int, default=0,
+                        help="how many agents run with memory off "
+                             "(doxa.daemon --no-lore). A shared LORE store "
+                             "is a coordination channel the message ledger "
+                             "cannot see, so this is a variable rather "
+                             "than a switch")
+    parser.add_argument("--quiescence-timeout", type=float, default=1800.0)
+    parser.add_argument("--quiet-dwell", type=float, default=20.0)
+    parser.add_argument("--force", action="store_true",
+                        help="start even when the memory arithmetic says N "
+                             "does not fit. Recorded in the manifest")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print the capacity arithmetic and the model "
+                             "assignment this seed would deal, and spawn "
+                             "nothing")
+    args = parser.parse_args(argv)
+
+    prompt = args.prompt
+    if args.prompt_file:
+        prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+
+    spec = FleetSpec(
+        prompt=prompt,
+        cwd=args.cwd or os.getcwd(),
+        n=args.n,
+        pool=_parse_pool(args.pool),
+        seed=args.seed,
+        memory=MemoryPolicy(off_count=args.memory_off or None),
+        root=Path(args.root) if args.root else None,
+        run_id=args.run_id or "",
+        quiescence_timeout_s=args.quiescence_timeout,
+        quiet_dwell_s=args.quiet_dwell,
+    )
+
+    print(capacity_note(spec.n))
+    if args.dry_run:
+        for a in assign(spec.n, list(spec.pool), seed=spec.seed, memory=spec.memory):
+            print(f"  slot {a.index:>3}  {a.label:<28} memory={'on' if a.lore else 'OFF'}")
+        return 0
+
+    try:
+        report = asyncio.run(run_fleet(spec, force=args.force))
+    except CapacityRefused as exc:
+        print(str(exc))
+        return 2
+    print(report.summary())
+    print(f"manifest {spec.manifest_path}")
+    print(f"ledger   {spec.ledger_path}")
+    return 0 if not report.leaked_pids else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
