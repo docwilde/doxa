@@ -478,6 +478,38 @@ class PeerInfo:
     survives an ancestor's entry being reaped, which a chain-walk through
     this field would not."""
 
+    origin: "str | None" = None
+    """WHICH MACHINE this peer is on -- None for this one, and the label of
+    the remote endpoint it was fetched from otherwise (doxa.peernet).
+
+    docs/plans/remote.md's "say who is connected", applied to a peer rather
+    than to a driver: "A silent second driver is the thing a user cannot
+    detect and cannot consent to." A roster row that looks exactly like the
+    session in the next terminal and is in fact a session on a machine in
+    another building is the same failure -- a human deciding whether to
+    message a peer, and a model deciding whether a peer's claim is
+    plausible, both need to know which side of a network the answer came
+    from.
+
+    NEVER read off the wire. :func:`doxa.peernet.fetch_roster` overwrites
+    it with the endpoint it actually dialled, so a remote machine cannot
+    return rows claiming to be local. It is the one field in this dataclass
+    the reader establishes rather than the writer -- everything else here
+    is a claim (see the self-description block above), and this is not.
+
+    None means local, which is also what an older build's entry and every
+    registry file on disk mean, since nothing ever writes this key to the
+    registry: a build that has never heard of remote peers reads every row
+    it can see as local, which is exactly right."""
+
+    @property
+    def is_remote(self) -> bool:
+        """True when this peer is on another machine. A property rather
+        than callers testing ``origin is not None`` themselves, because
+        that comparison written out at four display sites is four chances
+        to get the polarity backwards."""
+        return bool(self.origin)
+
     @property
     def scope_key(self) -> str:
         return self.repo_root or self.cwd

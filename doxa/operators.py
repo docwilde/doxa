@@ -749,6 +749,14 @@ def _peer_list(limit: int = 25, op_ctx: "OperatorContext | None" = None) -> dict
             "provider": p.provider,
             "age_secs": round(peers_mod.age_secs(p.started_at)),
             "attached_clients": p.clients,
+            # Which machine, in the model's copy of the roster as well as
+            # the human's. None means this one; a label means another
+            # (doxa.peernet). Unlike every other string in this row it is
+            # NOT self-reported -- the reader stamps it from the endpoint
+            # it dialled -- and the two adjacent keys say which is which so
+            # a model weighing a peer's claim can tell them apart.
+            "origin": p.origin,
+            "is_remote": p.is_remote,
         }
         for p in bounded
     ]

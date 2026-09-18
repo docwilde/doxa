@@ -368,6 +368,51 @@ SETTINGS: tuple[Setting, ...] = (
              "same as an absent one.",
     ),
     Setting(
+        key="remote_peers", env="DOXA_REMOTE_PEERS",
+        label="remote peers", category="Remote",
+        kind="str", default="",
+        help="Other machines' peer bridges, comma-separated as "
+             "label=host[:port] -- e.g. "
+             "workstation=ws.tail1234.ts.net:47600 "
+             "(doxa.peernet.endpoints)",
+        note="EMPTY by default: DOXA looks for peers on this machine only, "
+             "through the 0700 registry directory, exactly as it always "
+             "has. An entry here is a hostname and a name to show -- it "
+             "is NOT a credential and there is nowhere in DOXA to put "
+             "one (docs/plans/remote.md: 'no new credential store'). What "
+             "makes a listed endpoint trustworthy is the private network "
+             "it is on. A peer fetched from one is marked with the label "
+             "you gave it everywhere a local peer would appear, and the "
+             "label is stamped from the endpoint DOXA dialled, never from "
+             "anything the other machine claimed about itself.",
+    ),
+    Setting(
+        key="remote_bind", env="DOXA_REMOTE_BIND",
+        label="remote bind address", category="Remote",
+        kind="str", default="127.0.0.1",
+        help="Address the cross-machine peer bridge binds when remote "
+             "listening is on (doxa.peernet.bind_host)",
+        note="LOOPBACK, and it should stay loopback: the design is "
+             "`tailscale serve` terminating TLS and forwarding here, "
+             "which is what makes the Tailscale-User-Login header mean "
+             "anything. DOXA believes that header ONLY on a loopback "
+             "connection, so moving this to 0.0.0.0 does not widen "
+             "access -- it produces a listener that refuses every "
+             "request for lack of a trustworthy identity.",
+    ),
+    Setting(
+        key="remote_port", env="DOXA_REMOTE_PORT",
+        label="remote bind port", category="Remote",
+        kind="number", default="47600",
+        help="Port the cross-machine peer bridge listens on "
+             "(doxa.peernet.bind_port)",
+        note="Fixed rather than ephemeral because the `tailscale serve` "
+             "rule on the other side has to name it, and a port that "
+             "moves per launch is a forwarding rule that breaks per "
+             "launch. Nothing listens at all until remote listening is "
+             "turned on above.",
+    ),
+    Setting(
         key="remote_allow_shell", env="DOXA_REMOTE_ALLOW_SHELL",
         label="remote allow shell", category="Remote",
         kind="bool", default="",

@@ -220,6 +220,36 @@ def peer_self_report(
     )
 
 
+#: What a LOCAL peer's origin reads as. A word rather than an empty
+#: string: a roster where remote rows say "remote:ws" and local rows say
+#: nothing at all is a roster where the reader has to know that absence
+#: means local, and docs/plans/remote.md's whole "say who is connected"
+#: rule is about not making a reader infer the important case from silence.
+LOCAL_ORIGIN = "local"
+
+#: The glyph a remote peer's origin leads with -- U+2384, "composition
+#: symbol", read here as "this came in over a wire". Checked against every
+#: other glyph this module and doxa.session.chips paint (⌁ session/peers,
+#: ⧉ subagents, ⚑ needs input, ⊘ disabled, ⎇ branch, ◎ remote driver,
+#: ⇅ sync) and used by none of them.
+REMOTE_ORIGIN_GLYPH = "⎗"
+
+
+def peer_origin(origin: "str | None") -> str:
+    """Which machine a peer is on, as one short phrase.
+
+    ``None`` -> ``local``; anything else -> ``⎗ remote:<label>``. The
+    label is the endpoint name the operator chose in
+    ``remote_peers`` (doxa.peernet.Endpoint), never a hostname the remote
+    machine reported about itself -- see
+    :attr:`doxa.peers.PeerInfo.origin` for why that distinction is the
+    whole point of the field."""
+    origin = (origin or "").strip()
+    if not origin:
+        return LOCAL_ORIGIN
+    return f"{REMOTE_ORIGIN_GLYPH} remote:{origin}"
+
+
 def _shrink(text: str, width: int) -> str:
     """`Sonnet` -> `Son…` at width 4. Never returns more than ``width``."""
     if width <= 0:
