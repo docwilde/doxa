@@ -666,11 +666,19 @@ class PaneRuntimeMixin:
                 "id": item_id, "text": str(ev.data.get("text") or ""),
             })
             position = ev.data.get("position")
-            message = (
-                f"queued (position {position}): {text!r} -- starts "
-                "automatically once the current turn ends; /queue to "
-                "see or cancel it"
-            )
+            if ev.data.get("peer_started"):
+                origin = _escape_markup(str(ev.data.get("peer_origin") or "a peer"))
+                message = (
+                    f"✉ queued (position {position}): a peer message — "
+                    f"{origin} — starts a turn automatically once the "
+                    "current one ends; /queue to see or cancel it"
+                )
+            else:
+                message = (
+                    f"queued (position {position}): {text!r} -- starts "
+                    "automatically once the current turn ends; /queue to "
+                    "see or cancel it"
+                )
         elif ev.type == "prompt_dequeued":
             self._drop_queued(item_id)
             message = f"queue: starting next -- {text!r}"

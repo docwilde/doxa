@@ -380,6 +380,17 @@ async def test_an_incoming_message_queues_when_a_turn_is_already_running(
             "a queued message must not ALSO ride the next turn -- that is "
             "the same message delivered twice"
         )
+        queued_event = [
+            ev for ev in _drain(engine._peer_queue) if ev.type == "prompt_queued"
+        ]
+        assert queued_event, "nothing told the user a peer message is waiting"
+        assert queued_event[0].data["peer_started"] is True
+        assert "patient" in str(queued_event[0].data["peer_origin"]), (
+            "the queue line is the only thing shown between arrival and the "
+            "turn starting, and the prompt's first 120 characters are "
+            "boilerplate identical on every one of these -- so the sender "
+            "has to be on the event"
+        )
     finally:
         engine._turn_running = False
         await engine.finalize()

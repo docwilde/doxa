@@ -2622,7 +2622,15 @@ class SessionEngine:
             self._peer_queue.put_nowait(EngineEvent("prompt_queued", {
                 "id": item.id, "text": prompt,
                 "position": self._prompt_queue.position(item.id) or len(self._prompt_queue),
+                # Both, because the queue line is the ONLY thing the user
+                # sees between the message arriving and the turn starting,
+                # and the prompt's first 120 characters -- all a queue line
+                # shows -- are PEER_TURN_INTRO's boilerplate, identical on
+                # every one of these. A line saying "a prompt is queued"
+                # and nothing about whose it is would be the weakest point
+                # in a feature whose whole condition is visibility.
                 "peer_started": True,
+                "peer_origin": _peer_origin_line(prompt),
             }))
             return
 
