@@ -11,7 +11,7 @@
 
 > [!WARNING]
 > **Beta.** DOXA reached `1.0` and still moves fast: 112 releases took it from
-> `0.1.0` to `1.10.0` between 23 August and 18 September 2026. Config keys, the
+> `0.1.0` to `1.11.1` between 23 August and 18 September 2026. Config keys, the
 > socket protocol and on-disk formats can still change between minor versions,
 > with no migration path.
 > It runs an agent that edits your files and a shell with your privileges.
@@ -109,9 +109,9 @@ spend, fake account numbers. See
   remote driver would, and can reach no question that layer does not
   already have an answer for.
 - **[Memory is a setting, not a premise.](docs/manual.md#lore-integration)**
-  `lore` is on by default; turned off, a session gets no snapshot and
-  writes nothing, and the `lore_*` tools are absent from the model's list
-  rather than present and refusing. The fleet harness flips the same
+  `lore` is on by default; turned off (`doxa --no-lore`, or `lore = false`),
+  a session gets no snapshot and writes nothing, and the `lore_*` tools are
+  absent from the model's list rather than present and refusing. The fleet harness flips the same
   switch per agent, so a run can ask whether a shared store is doing the
   coordinating. When [LORE](https://github.com/docwilde/LORE) sync is
   configured, a `⇅ sync` chip says how stale this machine's copy is, how
@@ -205,7 +205,7 @@ catalogue in the picker when a key happens to be in the environment —
 then runs `uv tool install
 git+https://github.com/docwilde/doxa`. DOXA is not on PyPI. Re-running is
 safe and never touches an existing `~/.doxa/config.toml`. Add `sh -s --
-v1.10.0` to pin a tag instead of tracking `main`. Read it first if you
+v1.11.1` to pin a tag instead of tracking `main`. Read it first if you
 would rather not pipe a stranger's script into `sh`.
 
 Or run from a checkout:
@@ -281,10 +281,9 @@ and key — marking any your terminal cannot send.
 Beta, and a working daily driver for its author. Everything in
 [What you get](#what-you-get) and in the [manual](docs/manual.md) is on
 `main` and behaves as described; [CHANGELOG.md](CHANGELOG.md) has the
-history. `main` is what the install script tracks by default, and it is
-currently ahead of the newest tag: the model's send tool, the
-cross-machine peer bridge and the fleet harness are merged but not in
-`v1.10.0`, so a pinned install does not have them. Config keys, socket
+history. `main` is what the install script tracks by default, and `v1.11.1`
+names it: the model's send tool, the cross-machine peer bridge and the
+fleet harness are all in the newest tag, so a pinned install has them. Config keys, socket
 protocol and command names can still change between minor versions.
 
 **Specified, not built.** Seventeen documents sit in
@@ -332,10 +331,14 @@ sessions.
 **`/msg` is no longer the only way a message is sent — this README said
 otherwise until now.** A human typing `/msg` was the whole mechanism, and
 a test asserted the operator registry never mentioned peers at all. That
-sentence is retired: `peer_send` is a model-callable tool that reaches one
+sentence is retired: `peer_list` enumerates the sessions a model may
+address — across repositories, not only this one — `peer_history` shows it
+its own traffic so it can notice a loop, and `peer_send` reaches one
 session or broadcasts to every one of them, and an arriving message can
 start a turn in a session sitting idle. Both are off unless armed
-(`agent_peer_send`, `peer_inbound_turns`), and both are read from your
+(`agent_peer_send`, `peer_inbound_turns`) — though discovery is not, so a
+model can enumerate your open sessions in other repositories with nothing
+switched on — and both are read from your
 environment or `~/.doxa/config.toml` — never from a file in the repository
 a session happens to have open. The test was replaced rather than deleted:
 it now pins the peer tool list to exactly three names, so a fourth fails
