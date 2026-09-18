@@ -529,6 +529,25 @@ async def test_engine_says_plainly_that_it_affects_new_sessions(
     assert engines_mod.engine_id_of(fake) == "claude"
 
 
+async def test_engine_says_so_when_the_environment_will_shadow_the_row(
+    monkeypatch, tmp_path
+):
+    """The silent no-op the settings modal already refuses by giving an
+    env-won row no input field at all. ``/engine`` has no field to
+    withhold, so it says it instead: the value was written and nothing
+    will read it."""
+    monkeypatch.setenv("DOXA_ENGINE", "claude")
+    config_mod.invalidate()
+    app, _fake = await _app(monkeypatch, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        text = await _run(app, pilot, "/engine glm")
+    assert "DOXA_ENGINE" in text
+    config_mod.invalidate()
+    assert config_mod.load()["engine"] == "glm"  # written...
+    assert config_mod.engine() == "claude"  # ...and shadowed, as it said
+
+
 async def test_engine_selection_becomes_the_settings_row(monkeypatch, tmp_path):
     """One source of truth: ``/engine`` and the settings modal's engine
     row are the same state, the way ``/model`` and its row already are."""

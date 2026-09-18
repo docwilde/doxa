@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import textwrap
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Callable
@@ -373,6 +374,7 @@ class PaneCommandsMixin:
         which meant a DeepSeek session was offered haiku/sonnet/opus/fable
         and a Codex session the same: four names neither vendor has ever
         answered to."""
+        from .. import engines as engines_mod
         from .. import providers as providers_mod
 
         engine = self.engine
@@ -380,8 +382,6 @@ class PaneCommandsMixin:
         if not args:
             provider = self.model_catalog()
             if provider is None:
-                from .. import engines as engines_mod
-
                 await self._system(
                     f"model: {current}\n\n"
                     + providers_mod.no_catalog_text(
@@ -501,13 +501,24 @@ class PaneCommandsMixin:
             return
         chosen = provider.engine_id()
         config_mod.save({"engine": chosen})
-        await self._system(
+        lines = [
             f"engine: new sessions will use {chosen} "
             f"({provider.engine_display_name()}) — this session keeps "
             f"{running}, because an engine is chosen at connect and nothing "
             "can hand a running session a different one. Open a new tab "
             "(ctrl+t) or /clear this one to start on it."
-        )
+        ]
+        if config_mod.overridden_by_env("DOXA_ENGINE"):
+            # The same silent no-op the settings modal refuses by giving an
+            # env-won row no input field at all: the value WAS written, and
+            # nothing will read it while the variable is set.
+            lines.append(
+                f"…except that $DOXA_ENGINE is set and beats the config "
+                f"file, so new sessions will keep using "
+                f"{config_mod.engine()} until you unset it. The row was "
+                f"written; nothing will read it."
+            )
+        await self._system("\n".join(lines))
 
     async def _cmd_branch(self, args: str) -> None:
         """/branch -- no argument lists local branches (current base
