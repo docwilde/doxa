@@ -225,6 +225,33 @@ def test_a_provider_passed_where_a_handle_belongs_is_not_read_as_an_id():
     assert engines_mod.engine_id_of(engines_mod.get("codex")) == "claude"
 
 
+def test_every_engines_OWN_handle_reports_that_engines_id(tmp_path):
+    """The gap ``engine_id_of`` would otherwise leave open, closed.
+
+    It reads a duck-typed attribute, so a new engine whose handle simply
+    forgets to declare one is read as claude and quietly serves Claude's
+    catalogue to its model picker -- exactly the defect this whole change
+    exists to remove, arriving through the back door. This walks the
+    registry, builds each provider's own handle and asks it who it is.
+    Nothing is started: ``new_session`` constructs, it does not connect."""
+    for engine_id in engines_mod.available():
+        engine = engines_mod.get(engine_id).new_session(cwd=str(tmp_path))
+        assert engines_mod.engine_id_of(engine) == engine_id, (
+            f"a {engine_id} session's handle does not report {engine_id!r}, "
+            "so its model picker would list another engine's catalogue"
+        )
+
+
+def test_the_default_engine_is_one_string_not_three():
+    """``config.engine()``'s fallback, the settings row's ``default`` and
+    ``engines.DEFAULT_ENGINE_ID`` are the same claim written in three
+    places; this is what stops them disagreeing."""
+    config_mod.invalidate()
+    assert config_mod.engine() == engines_mod.DEFAULT_ENGINE_ID
+    assert config_mod.SETTINGS_BY_KEY["engine"].default == engines_mod.DEFAULT_ENGINE_ID
+    assert engines_mod.DEFAULT_ENGINE_ID in engines_mod.available()
+
+
 def test_a_vendor_handle_declares_which_vendor_it_is():
     """One ChatApiEngine class serves both vendors, so a handle that read
     its id off the class would send GLM sessions to DeepSeek's catalogue."""
