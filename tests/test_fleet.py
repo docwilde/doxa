@@ -700,3 +700,31 @@ async def test_a_session_is_not_quiet_while_a_prompt_is_still_queued(short_root)
     assert await backend.is_quiet(slot) is False   # running
     assert await backend.is_quiet(slot) is False   # queued behind a peer turn
     assert await backend.is_quiet(slot) is True    # genuinely idle
+
+
+async def test_a_daemon_that_dies_mid_read_does_not_leave_an_unretrieved_exception():
+    """MEASURED at N=128: every session's teardown raised a
+    ``BrokenPipeError`` out of ``EngineClient._read_loop``, unretrieved --
+    128 asyncio tracebacks on stderr, which is how a run's log stops being
+    readable exactly when something real goes wrong in it.
+
+    The read loop's own ``finally`` always did the right thing (unblock a
+    waiting send, close out like a detach); it was the exception ESCAPING
+    the task afterwards that was the defect."""
+    from doxa.client import EngineClient
+
+    client = EngineClient("/nonexistent.sock")
+
+    class _DyingReader:
+        async def readline(self):
+            raise BrokenPipeError(32, "Broken pipe")
+
+    client._reader = _DyingReader()
+    task = asyncio.create_task(client._read_loop())
+    await task
+
+    assert task.exception() is None, (
+        "the read loop let an OSError escape its task -- an unretrieved "
+        "task exception per session is the noise this test exists to stop"
+    )
+    assert client._closed is True, "the finally must still close out"

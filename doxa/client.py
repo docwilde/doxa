@@ -275,6 +275,21 @@ class EngineClient:
                     self._handle_event(frame)
         except asyncio.CancelledError:
             return
+        except OSError:
+            # The daemon went away mid-read -- a BrokenPipeError raised out
+            # of the transport while this task was parked in `readline`.
+            # MEASURED at N=128: every session's teardown produced one of
+            # these as an UNRETRIEVED task exception, and 128 asyncio
+            # tracebacks on stderr is how a run's log stops being readable
+            # exactly when something real goes wrong in it.
+            #
+            # Swallowed rather than handled, because the `finally` below
+            # already does the handling: it unblocks a waiting send() with
+            # an error turn_done and closes out the same way a local detach
+            # would. "The socket died" and "the daemon stopped" reach this
+            # method by different routes and have always had the same
+            # answer; this is the route that was missing one.
+            return
         finally:
             if not self._closed:
                 # Daemon went away underneath us (stop from another client,

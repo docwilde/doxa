@@ -213,13 +213,34 @@ SDK client in place of the Claude CLI — so it measures the *harness's* ceiling
 (spawn concurrency, fd pressure, AF_UNIX budget, registry churn, ledger
 contention, teardown) rather than the fleet's, which is arithmetic.
 
-On a 16-core / 30 GB laptop with ~11 GB already resident:
+On a 16-core / 30 GB laptop with ~11 GB already resident (and another test
+suite running beside it, which is part of why 128 went the way it did):
 
-| N | wall | dispatch spread | ledger | leaked |
+| N | wall | dispatch spread | ledger | teardown |
 |---|---|---|---|---|
-| 4 | 5.0 s | 3 ms | — | 0 |
-| 8 | 5.7 s | 1 ms | 8 | 0 |
-| 16 | 7.5 s | 8 ms | — | 0 |
-| 32 | 12.0 s | 1 ms | 32 | 0 |
+| 4 | 5.0 s | 3 ms | — | 4 stopped cleanly |
+| 8 | 5.7 s | 1 ms | 8 | 8 stopped cleanly |
+| 16 | 7.5 s | 8 ms | — | 16 stopped cleanly |
+| 32 | 12.0 s | 1 ms | 32 | 32 stopped cleanly |
+| 64 | 19.7 s | 2 ms | 64 | 64 stopped cleanly |
+| **128** | **475 s** | 2 ms | 128 | **62 needed SIGTERM/SIGKILL** |
 
-See the report in the pull request for what broke first while scaling.
+**The harness ceiling on this box is between 64 and 128, and what broke first
+was not what you would guess.** The dispatch barrier held at 2 ms even at 128,
+and the ledger's cross-process `flock` delivered all 128 records with none
+lost. What failed was the back half: sessions stopped answering their status
+calls inside the poll window, the run rode its 180 s quiescence deadline to
+the end, and 62 of 128 then failed to `stop` in time and had to be killed.
+
+That is the harness working as designed -- the run still ended, the ledger was
+still collected, the manifest still named every session, and nothing was left
+running -- but it is the point past which a run's own timings stop being
+measurements of anything. Two real defects were found by getting there, both
+now fixed and both now tested: a zombie child reading as a leaked session, and
+a quiescence check that asked the wrong question when a peer message had
+queued the prompt behind it.
+
+Note the memory column the table does not have. A stub session is ~57 MB
+resident, so 128 of them is ~7 GB. A hundred and twenty-eight REAL sessions
+would be ~75 GB and would not have run at all. The harness ceiling and the
+fleet ceiling are different numbers and only one of them is arithmetic.
