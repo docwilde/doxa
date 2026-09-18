@@ -977,7 +977,7 @@ bridge exists to pass an identity in.
 
 ## The status bar
 
-**Eighteen chips** are built in paint order by
+**Twenty-one chips** are built in paint order by
 `doxa/session/chips.py`, and a row never shows all of them: a chip whose
 number is zero, or whose state was never asserted, is omitted rather than
 shown empty, and a chip whose engine cannot report the thing it names is
@@ -995,6 +995,7 @@ the plain, non-clickable ones and the git chip's inert `@sha` span.
 | repo/branch/sha | the git chip: repo name, the worktree's session branch, sha | yes — repo and branch halves each open their own picker; `@sha` is inert but tooltipped |
 | `dir NAME` | the folder chip, shown **instead of** the git chip when this session is not in a git repository at all (see [Where a session is](#where-a-session-is)) | yes — the same repo/directory picker |
 | `diff N files +A −B` | uncommitted work in this session's worktree, recomputed on the edit that ticks the pane; `vs HEAD` when no base was recorded, `⚠ no base` / `⚠ unreadable` for the two states that are not "nothing", and a short `diff Nf +A −B` under 110 columns (see [The live diff](#the-live-diff)) | yes — the same toggle `f2` is |
+| `⇅ sync <age>` | LORE sync: how long since a pull landed here, `↑N` local ops not yet acknowledged, `⚠N` conflicts plus ops that failed their integrity check and were staged. Amber when that last number is non-zero, because it is the one waiting on a person. Absent — not a zero, not an error — when sync is off, when `lore_core` has no op log, or when the store predates the `sync_*` tables. LORE owns the transport and the merge rules; DOXA owns this chip and the two record types it keys by machine (see [LORE integration](#lore-integration)) | no |
 | `sub:<tier> (≈$…)` or `$…` | subscription tier with a list-price what-if, or the real API spend on API-key auth. Both hidden on an engine that reports no cost | no |
 | `s:N% w:N%` | subscription session (5h) and weekly utilization, cached by the `claude` CLI itself; a third scoped segment appears when one is published, and a trailing `~` means the reading is stale | no |
 | `ctx N%` | context window usage, amber at 70%, red at 90%; `ctx —` while an engine that *can* report one has not yet, and hidden outright on an engine that never will. `ctx_absolute` adds `24k/200k` inline, and that segment needs 100 columns of its own | yes — confirms, then `/compact` |
@@ -1004,6 +1005,7 @@ the plain, non-clickable ones and the git chip's inert `@sha` span.
 | `⧉ N agents` | Task-spawned subagents currently running (hidden at zero) | no (see subagent row below) |
 | `⌁ session <id>` | this session's reattach handle (only while attached to a daemon) | yes — sessions picker |
 | `peers N (k⌁)` | other DOXA sessions on this repo; `k⌁` is how many are detached | yes — peers picker: each row is the peer, the beginning of its transcript, and tokens consumed so far (self-reported, up to one heartbeat stale) |
+| `↑●` and `↓◌` | **two chips**, the modem lights: one for peer messages sent, one for received. Filled for four seconds after the traffic that lit it, hollow after. They appear as a pair once anything has crossed in either direction and never one at a time, so arriving traffic cannot shift the row sideways as you read it; a session that has never touched a peer carries neither. Counts and the time since are on hover | no |
 | `⊘ <tool>` | every tool disabled after two failures this session, space-joined into one chip | no |
 
 A `⧉ N agents` chip is accompanied by a second row under the status bar
@@ -1500,18 +1502,24 @@ headlessly from the real app by
 [`scripts/screenshot.py`](../scripts/screenshot.py) and
 [`scripts/record_gif.py`](../scripts/record_gif.py) — a scripted session,
 no spend, fake account numbers — and each still keeps its source SVG
-committed beside its PNG. **Twenty-nine images, each named exactly once**
-— the [README](../README.md#gallery) captions eleven of them, counting the
-hero, and the other eighteen are catalogued below so that **no rendered
-asset is left unnamed by any document**. That is the exact condition
-`beliefs-browser.png` needed to sit wrong for eighteen releases before
-v0.87.0 deleted it. All twenty-nine are 3068x1734.
+committed beside its PNG. **Thirty-two images, each named exactly once**
+— the [README](../README.md#gallery) captions fourteen of them, counting
+the hero, and the other eighteen are catalogued below so that **no
+rendered asset is left unnamed by any document**. That is the exact
+condition `beliefs-browser.png` needed to sit wrong for eighteen releases
+before v0.87.0 deleted it. All thirty-two are 3068x1734, but they are not
+all from one pass: an image that still matches the feature it shows is
+left alone rather than re-rendered, so the gallery sits at mixed versions
+by design.
 
 Every scene renders the app inside **the checkout the script runs from**,
 so the identity block, the tab labels and the `repo ⎇ branch` chip carry
-that checkout's own branch and path. Capture from `main`, on a clean tree,
-or a working branch name ends up baked into fourteen of the sixteen
-stills.
+that checkout's own branch and path. Capture from `main`, on a clean tree
+— a throwaway clone is the reliable way to have both — or a working branch
+name ends up baked into eighteen of the nineteen stills, and an
+uncommitted edit paints a `diff` chip that belongs to the capture, not to
+the feature. `folder-chip` is the one still that carries neither, because
+its whole subject is a session that is not in a repository.
 
 | asset | shows |
 |---|---|

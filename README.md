@@ -10,8 +10,8 @@
 </p>
 
 > [!WARNING]
-> **Beta.** DOXA reached `1.0` and still moves fast: 111 releases took it from
-> `0.1.0` to `1.9.3` between 23 August and 17 September 2026. Config keys, the
+> **Beta.** DOXA reached `1.0` and still moves fast: 112 releases took it from
+> `0.1.0` to `1.10.0` between 23 August and 18 September 2026. Config keys, the
 > socket protocol and on-disk formats can still change between minor versions,
 > with no migration path.
 > It runs an agent that edits your files and a shell with your privileges.
@@ -24,7 +24,9 @@
 and Textual and billed through your Claude subscription rather than an API
 key. Each session runs in a **daemon** of its own: close the terminal,
 `doxa attach` an hour later, and the transcript picks up where it stopped.
-No tmux involved.
+No tmux involved. Three other engines are reachable through `--engine`
+and are billed on their own API keys instead — see
+[Quickstart](#quickstart).
 
 Start DOXA inside a repository and the session already knows the project.
 Durable facts about that codebase — conventions, past workarounds,
@@ -81,10 +83,11 @@ spend, fake account numbers. See
 - **[A tool gate that counts strikes.](docs/manual.md#containment)** Every
   call passes `PreToolUse`; a tool failing hard twice is disabled for the
   session.
-- **[Numbers that were measured.](docs/manual.md#the-status-bar)** Eighteen
-  tooltipped chips — `dir NAME` outside a repo, `diff 3 files +42 −7` when
-  the worktree has work in it — and a `/context` the CLI itself counted. A
-  chip an engine cannot answer for is hidden, never painted blank.
+- **[Numbers that were measured.](docs/manual.md#the-status-bar)**
+  Twenty-one tooltipped chips — `dir NAME` outside a repo, `diff 3 files
+  +42 −7` when the worktree has work in it — and a `/context` the CLI
+  itself counted. A chip an engine cannot answer for is hidden, never
+  painted blank.
 - **[Pictures, or a straight answer why not.](docs/manual.md#images)**
   kitty graphics → sixel → half-block → text, settled by one probe.
 - **[Sessions talk to each other.](docs/manual.md#search-resume-and-peers)**
@@ -93,10 +96,28 @@ spend, fake account numbers. See
   another session can reach a context you did not open it in. Turned on,
   nothing about it is quiet: every message is rate limited by how many
   sessions it reaches, appended with its full body to a ledger, and
-  flashed on the status bar in both directions. Each session publishes
-  what it is — provider, model, engine, tokens spent — and none of it is
-  believed: a peer's self-description is displayed, never verified, and
-  never decides anything.
+  flashed on the status bar in both directions. Letting an arriving
+  message *start* a turn is a second switch, also off, and a broadcast
+  never starts one at any setting. Each session publishes what it is —
+  provider, model, engine, tokens spent — and none of it is believed: a
+  peer's self-description is displayed, never verified, and never decides
+  anything.
+- **[Peers on another machine, once you say so.](docs/fleet.md)** A tailnet
+  bridge puts sessions on a second box into the same roster, behind
+  `tailscale serve`, bound to loopback and refused until `remote_enabled`
+  is on and an allow-list names you. It asks the same policy layer a
+  remote driver would, and can reach no question that layer does not
+  already have an answer for.
+- **[Memory is a setting, not a premise.](docs/manual.md#lore-integration)**
+  `lore` is on by default; turned off, a session gets no snapshot and
+  writes nothing, and the `lore_*` tools are absent from the model's list
+  rather than present and refusing. The fleet harness flips the same
+  switch per agent, so a run can ask whether a shared store is doing the
+  coordinating. When [LORE](https://github.com/docwilde/LORE) sync is
+  configured, a `⇅ sync` chip says how stale this machine's copy is, how
+  much has not gone out, and how many conflicts and failed integrity
+  checks are waiting on you — and the chip is absent entirely, never a
+  zero, when sync is off.
 - **[An isolated CLI config.](docs/manual.md#the-spawned-cli)** Spawned
   `claude` processes use a config directory DOXA owns, not your
   `~/.claude`; your plugins load only if you opt in.
@@ -141,6 +162,14 @@ binding yours cannot send.
 
 *Who else is on this repo, what each says it is running, and tokens spent — self-reported on each peer's 15-second heartbeat, except a model change, which publishes at once because a stale model id is a wrong answer rather than an old number. A peer mid-first-turn reads as unknown, never zero.*
 
+![A peer message block above a system line reading 'a peer message started this turn', and the turn it started, whose fold header carries the sender where a typed prompt would be](assets/shots/peer-turn.png)
+
+*A turn nobody in this window asked for says so three times before it has finished costing anything: the message as it arrived, a line naming who started it, and a turn header carrying that sender instead of a prompt. The model reads the same attribution, as the first paragraph of the prompt itself rather than a flag beside it.*
+
+![The right end of the status bar: 'peers 2 (1⌁)', then an up arrow with a filled lamp and a down arrow with a hollow one](assets/shots/peer-lights.png)
+
+*Two lamps beside the peer count, one per direction. Filled is traffic in the last four seconds, hollow is a channel that exists and is quiet — a filled glyph beside an outlined one, because a colour change alone survives neither peripheral vision nor a screenshot. They appear as a pair or not at all, so neither arrives by shifting the row sideways at the moment traffic does.*
+
 ![The permission-mode chip cycling: grey 'default', teal 'plan', amber 'auto', red 'bypassPermissions'](assets/shots/permission-mode.gif)
 
 *The chip leads the bar at every width — `auto` amber, `bypassPermissions` and `dontAsk` red, the modes where nothing stops to ask.*
@@ -149,10 +178,17 @@ binding yours cannot send.
 
 *Outside a repo the chip is a different shape, not the same one with a hole in it. `/cd` opens the target in a new tab and says the session stayed put.*
 
-Eighteen more scenes come from the same pass; the
-[manual](docs/manual.md#screenshots) catalogues every one. An asset named
-nowhere is how `beliefs-browser.png` rotted for eighteen releases before
-v0.87.0 deleted it.
+![An amber '⇅ sync 2m ↑3 ⚠1' chip in the status bar, between the branch chip and the subscription chip](assets/shots/sync-chip.png)
+
+*With [LORE](https://github.com/docwilde/LORE) sync configured: how long since a pull landed here, how much this machine has not sent yet, and how many ops failed their integrity check and were staged rather than applied. Amber because that last number is waiting on a person. Sync is off by default, and then the chip is absent — never a zero, never an error.*
+
+Eighteen more scenes are catalogued in the
+[manual](docs/manual.md#screenshots); between the two documents every
+rendered asset is named exactly once. An asset named nowhere is how
+`beliefs-browser.png` rotted for eighteen releases before v0.87.0 deleted
+it. The gallery is at mixed versions and always has been — a stale
+picture of a feature that still looks like that is fine; a caption that
+describes something else is not.
 
 ## Install
 
@@ -163,11 +199,13 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 It checks Python 3.11+, [`uv`](https://docs.astral.sh/uv/) (offering to
 install it), `git`, and the
 [`claude` CLI](https://docs.claude.com/en/docs/claude-code) signed in —
-DOXA authenticates through that CLI's OAuth session and never reads
-`ANTHROPIC_API_KEY` — then runs `uv tool install
+DOXA authenticates through that CLI's OAuth session, never through
+`ANTHROPIC_API_KEY`, which it reads for one thing only: listing the model
+catalogue in the picker when a key happens to be in the environment —
+then runs `uv tool install
 git+https://github.com/docwilde/doxa`. DOXA is not on PyPI. Re-running is
 safe and never touches an existing `~/.doxa/config.toml`. Add `sh -s --
-v1.9.2` to pin a tag instead of tracking `main`. Read it first if you
+v1.10.0` to pin a tag instead of tracking `main`. Read it first if you
 would rather not pipe a stranger's script into `sh`.
 
 Or run from a checkout:
@@ -195,16 +233,33 @@ uv run doxa stop     # finalize now (LORE review + index), daemon exits
 uv run doxa doctor   # read-only health checks, no TUI: pass/fail + fix per check
 uv run doxa launcher install      # XDG start-menu entry + icons
 uv run doxa --engine codex        # drive the session with Codex instead
+uv run doxa --engine deepseek     # or DeepSeek, on DEEPSEEK_API_KEY
+uv run doxa --engine glm          # or GLM (Z.ai), on ZAI_API_KEY
 ```
 
-**[A second engine](docs/manual.md#engines) (v1.4.0).** `--engine codex`
-(or the `engine` setting) runs a DOXA session on the Codex CLI: its own
-tab, transcript, turns, status bar, peer rail and `/msg`. What Codex does
-not report, DOXA does not paint — no ctx chip (it counts tokens but never
-reports a window size), no cost chip, no permission-mode chip — and it
-does not carry DOXA's LORE tools. A Codex session runs inside the TUI, so
-`ctrl+q` ends it instead of detaching. `doxa.engines.get("codex").supports()`
-is the whole map.
+**[Other engines](docs/manual.md#engines).** `--engine` (or the `engine`
+setting) runs a DOXA session on something other than the `claude` CLI, and
+each one declares what it can actually do rather than inheriting Claude's
+list. `codex` (v1.4.0) drives the Codex CLI. `deepseek` and `glm`
+(v1.10.0) are two third-party chat-completions APIs behind one
+implementation and one capability map — nine of seventeen fields true —
+so a run can mix vendors without also mixing what the terminal supports.
+Both are billed on their own API key, not on your Claude subscription, and
+refuse to start without it.
+
+What an engine does not report, DOXA does not paint. Codex counts tokens
+but never reports a window size, so there is no ctx chip; it reports no
+cost either, has one fixed permission posture rather than modes to cycle,
+and carries neither DOXA's LORE tools nor the tool gate. DeepSeek and GLM
+carry both of those — the model only ever *names* a call and DOXA executes
+it in-process, so the allowed set, the refusals and the two-strikes
+disable all apply — but they report no window size either and no
+per-session dollar figure, and they have no modes to cycle for a different
+reason: DOXA owns their whole tool surface, so a mode would configure
+nothing. None of the three has a daemon. They run inside the TUI, so
+`ctrl+q` ends the session rather than detaching from it, and
+`doxa.engines.get("deepseek").supports()` is the whole map for any of
+them.
 
 `launcher install` points at **the DOXA you ran it from**, by absolute
 path, and prints that path and version — so a shortcut that would start
@@ -224,20 +279,30 @@ and key — marking any your terminal cannot send.
 ## Status
 
 Beta, and a working daily driver for its author. Everything in
-[What you get](#what-you-get) and in the [manual](docs/manual.md) has
-shipped and behaves as described; [CHANGELOG.md](CHANGELOG.md) has the
-history. Config keys, socket protocol and command names can still change
-between minor versions.
+[What you get](#what-you-get) and in the [manual](docs/manual.md) is on
+`main` and behaves as described; [CHANGELOG.md](CHANGELOG.md) has the
+history. `main` is what the install script tracks by default, and it is
+currently ahead of the newest tag: the model's send tool, the
+cross-machine peer bridge and the fleet harness are merged but not in
+`v1.10.0`, so a pinned install does not have them. Config keys, socket
+protocol and command names can still change between minor versions.
 
-**Specified, not built.** Sixteen documents sit in
+**Specified, not built.** Seventeen documents sit in
 [`docs/plans/`](docs/plans/) and each states its own status in its opening
-lines. **Five have nothing behind them:** `plugin-api` (no loader exists —
-v0.34.0 shipped only the seams one could bind to), `mermaid`, `code-graph`,
-`sandbox`, `model-registry`. **One is part-built:** v1.8.0 shipped
-`doxa/remote_policy.py`, the decision layer that refuses by default, but no
-transport and no second renderer — nothing listens on a network, and
-`remote.md`'s own header still reads "Nothing implemented", which is now a
-release behind the code.
+lines — but two of those headers now lag their own code, so read them
+against this list rather than instead of it. **Five have nothing behind
+them:** `plugin-api` (no loader exists — v0.34.0 shipped only the seams one
+could bind to), `mermaid`, `code-graph`, `sandbox`, `model-registry`.
+**One is part-built:** `remote`. v1.8.0 shipped `doxa/remote_policy.py`,
+the decision layer that refuses by default, and `doxa/peernet.py` has
+since added the one transport that asks it — peer traffic between
+machines, bound to loopback behind `tailscale serve`, refused until
+`remote_enabled` is on and an allow-list names you. There is still no
+remote driver and no second renderer. `remote.md`'s own header reads
+"Nothing implemented", which is now two releases behind. **One is an
+experiment nobody has run:** `emergent-organization`, whose header calls
+its messaging substrate unbuilt — that substrate is precisely what
+shipped, while the experiment did not.
 
 **Ten left that list by shipping:** `plugins` (v0.74.0), `split-panes`
 (v0.91.0), `live-diff` (v0.92.0), `pane-groups` (v0.97.0, which inverted
@@ -250,8 +315,37 @@ Claude Code plugins (commands, skills, agents; never hooks or MCP servers)
 into the spawned CLI.
 
 **Not built, not specified.** No orchestration in any form: nothing
-schedules sessions, assigns work between them or supervises a fleet.
-`/msg` is the whole inter-session mechanism and a human always sends it.
+schedules sessions, assigns work between them or supervises a fleet, and
+no document proposes that it should — the one plan about multi-agent
+structure asks whether structure appears when nobody imposes it. What
+exists instead is a **measurement harness**. `uv run python -m doxa.fleet`
+spawns N sessions, hands every one the byte-identical prompt at the same
+moment, waits for the run to go quiet, collects the ledger and tears it
+all down — into a `DOXA_HOME` and a peer registry of the run's own, so the
+roster and the ledger are the run's rather than the machine's. It deals
+models from a pool, will run K of the N with memory off, and reports the
+residual spread between first and last dispatch rather than claiming
+simultaneity. It assigns nobody anything — [`docs/fleet.md`](docs/fleet.md)
+has the whole of it, including what the harness itself could not do at 128
+sessions.
+
+**`/msg` is no longer the only way a message is sent — this README said
+otherwise until now.** A human typing `/msg` was the whole mechanism, and
+a test asserted the operator registry never mentioned peers at all. That
+sentence is retired: `peer_send` is a model-callable tool that reaches one
+session or broadcasts to every one of them, and an arriving message can
+start a turn in a session sitting idle. Both are off unless armed
+(`agent_peer_send`, `peer_inbound_turns`), and both are read from your
+environment or `~/.doxa/config.toml` — never from a file in the repository
+a session happens to have open. The test was replaced rather than deleted:
+it now pins the peer tool list to exactly three names, so a fourth fails
+there before it reaches anyone. Every send, the model's and yours alike,
+is rate-limited by deliveries rather than by calls and appended with its
+full body to `$DOXA_HOME/peers/messages.jsonl`. `doxa/meshgraph.py` draws
+that file as a live browser view of which session messages which — a graph
+being the one artifact a terminal is honestly bad at — but nothing in the
+TUI or the CLI opens it yet, so it is reachable today only from Python.
+
 Also absent: history drill-in past `/search`, and custom keybindings.
 
 **Sessions older than v0.56.0 cannot be resumed.** That release stopped
@@ -263,9 +357,12 @@ Run the suite with `uv run pytest`.
 
 ## Non-goals
 
-Provider-agnostic model routing — the point is subscription auth, not a
-router. Replacing the LORE Claude Code plugin, which keeps shipping the
-same core. A plugin API of DOXA's own — `docs/plans/plugin-api.md` is a
+Provider-agnostic model routing. `--engine` is a deliberate per-session
+choice, not a router picking a backend for you, and nothing load-balances
+or falls back between them. Subscription auth remains the default path and
+the reason the Claude engine exists; the three others are there because a
+study that needs different models cannot be run on one. Replacing the LORE
+Claude Code plugin, which keeps shipping the same core. A plugin API of DOXA's own — `docs/plans/plugin-api.md` is a
 design with no loader behind it. Full Claude Code plugin compatibility:
 `adopt_plugins` carries in commands, skills and agents from the plugins
 you already have, and refuses their hooks and MCP servers unconditionally
