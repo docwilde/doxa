@@ -72,7 +72,9 @@ from datetime import datetime, timezone  # noqa: E402
 from doxa.app import ChipPicker, DoxaApp, ToolChip, TurnBlock  # noqa: E402
 from doxa.engine import EngineEvent, context_breakdown  # noqa: E402
 from doxa.identity import Usage, UsageLimit  # noqa: E402
+from doxa.lore_sync import SyncState  # noqa: E402
 from doxa.peers import PeerInfo  # noqa: E402
+from doxa.session.chips import PEER_LAMP_SECS  # noqa: E402
 from textual.widgets import TabbedContent  # noqa: E402
 from tests.fakes import FakeEngine  # noqa: E402
 from tests.helpers import _belief  # noqa: E402
@@ -1154,6 +1156,122 @@ async def _drive_folder_chip(app: DoxaApp, pilot) -> None:
 
 
 # --------------------------------------------------------------------- #
+# Scene: peer-lights -- the two modem lamps, one lit and one decayed.
+#
+# The pair is a rendering of two timestamps (doxa.session.chips.peer_lamp),
+# not a piece of state someone has to remember to clear, so the honest way
+# to script it is to put real traffic through the real counter and then age
+# one side past the window -- which is what a glance at the bar a few
+# seconds after a reply actually shows. A shot with both lamps lit would
+# show one glyph twice and say nothing about the decay that makes a lit
+# lamp mean "just now".
+# --------------------------------------------------------------------- #
+
+
+async def _drive_peer_lights(app: DoxaApp, pilot) -> None:
+    await _fill_hero_conversation(app, pilot)
+    pane = app.active_pane
+    assert pane is not None
+    # _note_peer_traffic is the one function the peer pump calls for a
+    # message leaving (tx) and arriving (rx); nothing here reaches around
+    # it to set a lamp directly.
+    for _ in range(4):
+        pane._note_peer_traffic("rx")
+    pane._note_peer_traffic("tx")
+    pane._peer_rx_at -= PEER_LAMP_SECS * 3
+    pane._refresh_status()
+    await _settle(pilot, 12)
+
+
+# --------------------------------------------------------------------- #
+# Scene: peer-turn -- a turn this window did not ask for.
+#
+# Everything here arrives through FakeEngine.push_peer_event, i.e. the
+# out-of-band queue SessionPane._peer_pump reads in production: the
+# message block, the system line that names the sender above the turn, and
+# the turn itself. The `peer_origin` string is the header
+# doxa.peers.frame_for_model writes and doxa.engine._peer_origin_line
+# reads back out of the prompt the model was given.
+# --------------------------------------------------------------------- #
+
+_PEER_FRAME = {
+    "from_id": "cafebabe1f",
+    "from_title": "kg-stats refactor",
+    "from_repo": "kg-stats",
+    "sent_at": "2026-09-18T09:14:02Z",
+    "body": (
+        "I am about to rename `Edge.weight` to `Edge.support` across "
+        "kg-stats. You hold the reader. Do you want the alias kept for a "
+        "release, or is a clean break fine?"
+    ),
+}
+
+_PEER_ORIGIN = (
+    "peer message \u00b7 kg-stats refactor (cafebabe) \u00b7 kg-stats "
+    "\u00b7 2026-09-18T09:14:02Z"
+)
+
+PEER_TURN_SCRIPT = [
+    EngineEvent("turn_started", {"peer_started": True, "peer_origin": _PEER_ORIGIN}),
+    EngineEvent("text_delta", {"text": "Keep the alias for one release. "}),
+    EngineEvent("text_delta", {"text": "The reader here resolves edges by attribute "}),
+    EngineEvent("text_delta", {"text": "name, so a clean break makes every pinned "}),
+    EngineEvent("text_delta", {"text": "consumer fail at read time rather than at "}),
+    EngineEvent("text_delta", {"text": "import.\n\nI have not changed anything on "}),
+    EngineEvent("text_delta", {"text": "this side -- that is your call to make, not "}),
+    EngineEvent("text_delta", {"text": "mine."}),
+    EngineEvent("turn_done", {"cost_usd": 0.0019, "duration_ms": 1120, "is_error": False,
+                              "session_cost_usd": 0.0050, "ctx_percentage": 13.0}),
+]
+
+
+async def _drive_peer_turn(app: DoxaApp, pilot) -> None:
+    await _fill_hero_conversation(app, pilot)
+    pane = app.active_pane
+    assert pane is not None
+    engine = pane.engine
+    assert engine is not None
+    engine.push_peer_event(EngineEvent("peer_message", dict(_PEER_FRAME)))
+    assert await _until(
+        pilot, lambda: bool(pane.query("PeerMessageBlock"))
+    ), "the peer message block never mounted"
+    for event in PEER_TURN_SCRIPT:
+        engine.push_peer_event(event)
+    assert await _until(
+        pilot,
+        lambda: any(
+            "your call to make" in getattr(b, "assistant_text", "")
+            for b in pane.query(TurnBlock)
+        ),
+    ), "the peer-started turn never finished"
+    app.query_one("#block-list").scroll_end(animate=False)
+    await _settle(pilot, 12)
+
+
+# --------------------------------------------------------------------- #
+# Scene: sync-chip -- LORE sync state on the bar, with one op contained.
+#
+# `_sync_state` is exactly the record doxa.lore_sync.read_state() returns
+# off a worker thread; the chip never opens a database itself, so handing
+# it the record IS the production path. The state chosen is the one the
+# chip exists for: a pull that landed recently, work of this machine's own
+# still to go out, and one op that failed its integrity check and was
+# staged rather than applied -- which is what paints the chip amber.
+# --------------------------------------------------------------------- #
+
+
+async def _drive_sync_chip(app: DoxaApp, pilot) -> None:
+    await _fill_hero_conversation(app, pilot)
+    pane = app.active_pane
+    assert pane is not None
+    pane._sync_state = SyncState(
+        last_pull_age_s=126.0, unpushed=3, conflicts=0, unverified=1,
+    )
+    pane._refresh_status()
+    await _settle(pilot, 12)
+
+
+# --------------------------------------------------------------------- #
 
 @dataclass
 class Scene:
@@ -1268,6 +1386,12 @@ SCENES: list[Scene] = [
           cwd_factory=_plain_folder,
           engine_factory=_folder_engine,
           new_session_factory=_sibling_tab_factory()),
+    Scene("peer-lights", _drive_peer_lights, size=WIDE,
+          engine_factory=_hero_engine, new_session_factory=_sibling_tab_factory()),
+    Scene("peer-turn", _drive_peer_turn, size=WIDE,
+          engine_factory=_hero_engine, new_session_factory=_sibling_tab_factory()),
+    Scene("sync-chip", _drive_sync_chip, size=WIDE,
+          engine_factory=_hero_engine, new_session_factory=_sibling_tab_factory()),
     # THE banner, since v0.70.0 dropped the raster tier: every terminal
     # draws this. The scene name is kept rather than renamed to `banner`
     # so the README's asset path and caption stay valid; there is no
