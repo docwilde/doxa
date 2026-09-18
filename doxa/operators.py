@@ -292,6 +292,13 @@ _LORE_BELIEF_SHOW = Operator(
     fn=_belief_show,
     cost="low",
     read_only=True,
+    # Gated on the SAME seam its sibling lore_belief_search is, and for the
+    # reason that one already states: an operator whose whole job is to
+    # read the belief store must not be OFFERED to a session that has no
+    # belief store wired. It was the one belief reader without the
+    # predicate, which made "LORE off" mean "four of the five readers are
+    # gone" -- a partial absence the model would have discovered by trying.
+    is_configured=_configured_if("belief_store"),
 )
 
 
@@ -482,6 +489,8 @@ _LORE_BELIEF_NEIGHBOURS = Operator(
     fn=_belief_neighbours,
     cost="low",
     read_only=True,
+    # See _LORE_BELIEF_SHOW's note: same seam, same reason.
+    is_configured=_configured_if("belief_store"),
 )
 
 
@@ -740,6 +749,14 @@ def _peer_list(limit: int = 25, op_ctx: "OperatorContext | None" = None) -> dict
             "provider": p.provider,
             "age_secs": round(peers_mod.age_secs(p.started_at)),
             "attached_clients": p.clients,
+            # Which machine, in the model's copy of the roster as well as
+            # the human's. None means this one; a label means another
+            # (doxa.peernet). Unlike every other string in this row it is
+            # NOT self-reported -- the reader stamps it from the endpoint
+            # it dialled -- and the two adjacent keys say which is which so
+            # a model weighing a peer's claim can tell them apart.
+            "origin": p.origin,
+            "is_remote": p.is_remote,
         }
         for p in bounded
     ]

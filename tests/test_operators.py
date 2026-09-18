@@ -133,13 +133,31 @@ def test_unconfigured_operators_never_appear():
     names = {t.name for t in ops.to_sdk_tools(
         executor, include_write=True, ctx={"lore_root": "/x"})}
     assert names == {
-        "lore_belief_show", "lore_belief_neighbours", "lore_memory_list", "lore_remember",
+        "lore_memory_list", "lore_remember",
+        # lore_belief_show and lore_belief_neighbours were HERE until the
+        # per-session memory switch (doxa.engine's DOXA_LORE / the daemon's
+        # --no-lore) went looking for every LORE tool and found these two
+        # with no is_configured predicate at all. They are belief READERS:
+        # both open the store through the same db_connect seam
+        # lore_belief_search is gated on, and both were reachable with no
+        # store wired -- a tool the model can see and never successfully
+        # call, which is the exact thing this test's own first comment says
+        # must not happen. They are now gated on "belief_store" like their
+        # three siblings, so "memory off" means all five are gone rather
+        # than three of five.
         # No seam to wire: the peer registry and the peer ledger are files
         # this process can open for itself, so discovery is configured
         # wherever DOXA runs. peer_send is absent for the OTHER reason --
         # its predicate reads DOXA_AGENT_PEER_SEND, which is off here.
         "peer_list", "peer_history",
     }
+    # ... and present again the moment the seam they actually need is
+    # named, which is what makes the absence above a gate rather than a
+    # deletion.
+    with_store = {t.name for t in ops.to_sdk_tools(
+        executor, include_write=True,
+        ctx={"lore_root": "/x", "belief_store": object()})}
+    assert {"lore_belief_show", "lore_belief_neighbours"} <= with_store
     # ctx=None means "don't gate on configuredness", never "nothing is
     # configured" -- every registered name appears.
     names_none = {t.name for t in ops.to_sdk_tools(executor, include_write=True, ctx=None)}

@@ -107,6 +107,13 @@ class EngineClient:
         # says otherwise, which is the safe direction to be wrong in for
         # one frame -- the narrower cycle, never the wider one.
         self.bypass_armed: bool = False
+        # Does the session behind this socket have memory (doxa.engine's
+        # LORE_ENV / the daemon's --no-lore)? Engine parity: SessionEngine
+        # carries the same attribute name, so a chip reads whichever
+        # object it has without knowing which side of the socket it is on.
+        # True until the first status reply says otherwise, which is the
+        # answer every session gave before the switch existed.
+        self.lore: bool = True
         self.cwd: str | None = None
         self.total_cost_usd = 0.0
         self.last_ctx_percentage: float | None = None
@@ -268,6 +275,21 @@ class EngineClient:
                     self._handle_event(frame)
         except asyncio.CancelledError:
             return
+        except OSError:
+            # The daemon went away mid-read -- a BrokenPipeError raised out
+            # of the transport while this task was parked in `readline`.
+            # MEASURED at N=128: every session's teardown produced one of
+            # these as an UNRETRIEVED task exception, and 128 asyncio
+            # tracebacks on stderr is how a run's log stops being readable
+            # exactly when something real goes wrong in it.
+            #
+            # Swallowed rather than handled, because the `finally` below
+            # already does the handling: it unblocks a waiting send() with
+            # an error turn_done and closes out the same way a local detach
+            # would. "The socket died" and "the daemon stopped" reach this
+            # method by different routes and have always had the same
+            # answer; this is the route that was missing one.
+            return
         finally:
             if not self._closed:
                 # Daemon went away underneath us (stop from another client,
@@ -382,6 +404,39 @@ class EngineClient:
             if ev.type == "turn_done":
                 break
         await self._refresh_status_quietly()
+
+    async def dispatch(self, prompt: str) -> dict:
+        """Hand one prompt over and return the daemon's ack, WITHOUT
+        consuming the turn it starts.
+
+        :meth:`send` is the interactive shape -- it writes the frame and
+        then yields events until ``turn_done``, which is exactly what a
+        pane wants. :mod:`doxa.fleet` wants the other half: N sessions have
+        to be handed the same prompt as close to one instant as the loop
+        allows, and an ``async for`` that does not return until a model has
+        finished thinking would prompt the last session a whole turn after
+        the first. So this returns on the ACK, and draining the events is
+        somebody else's job (:func:`doxa.fleet._drain`).
+
+        Raises :class:`EngineClientError` on a refusal, same as
+        :meth:`send`. A queued reply is a SUCCESS here and says so in the
+        returned dict -- a turn was already running, the daemon enqueued
+        this one, and that is an answer rather than a failure."""
+        reply = await self._prompt(prompt)
+        if not reply.get("ok"):
+            raise EngineClientError(reply.get("error") or "prompt refused")
+        return dict(reply)
+
+    async def next_turn_event(self) -> "EngineEvent | None":
+        """One event off the turn stream, or None when the client closed.
+
+        The companion to :meth:`dispatch`: ``EngineClient`` buffers turn
+        events in an UNBOUNDED queue, so a caller that dispatches and never
+        reads grows that queue for the length of the run, times N. This is
+        the public door to the queue that :meth:`send` otherwise owns."""
+        if self._closed and self._turn_queue.empty():
+            return None
+        return await self._turn_queue.get()
 
     async def list_queue(self) -> list[dict]:
         """Engine parity for :meth:`doxa.engine.SessionEngine.list_queue`
@@ -506,6 +561,8 @@ class EngineClient:
             self.permission_mode = str(status["permission_mode"])
         if "bypass_armed" in status:
             self.bypass_armed = bool(status["bypass_armed"])
+        if "lore" in status:
+            self.lore = bool(status["lore"])
         if isinstance(status.get("account"), dict):
             self.account = status["account"]
         if status.get("lore_root"):

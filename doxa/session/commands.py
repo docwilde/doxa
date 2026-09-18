@@ -50,6 +50,7 @@ from ..ui.labels import (
     lore_created_text,
     memory_entries,
     memory_fill,
+    peer_origin,
     peer_self_report,
 )
 from ..ui.transcript import ContextBlock, ImageBlock, ImageShowcaseBlock
@@ -1599,6 +1600,14 @@ class PaneCommandsMixin:
         lines = [
             f"{p.title}  {p.session_id[:8]}  {p.cwd}"
             f"  ·  up {_fmt_age(age_secs(p.started_at))}"
+            # WHICH MACHINE, before what the peer says it is: a row that
+            # looks like the session in the next terminal and is actually
+            # on a box in another building is the thing a reader cannot
+            # detect for themselves (docs/plans/remote.md, "say who is
+            # connected"). Printed for local rows too -- a roster where
+            # only the remote ones are labelled makes the reader infer the
+            # important case from silence.
+            f"  ·  {peer_origin(p.origin)}"
             f"  ·  {peer_self_report(p.provider, p.model, p.engine)}"
             for p in peers
         ]

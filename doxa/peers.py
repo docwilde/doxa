@@ -61,7 +61,7 @@ import json
 import os
 import socket
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields as dataclass_fields
 from datetime import datetime, timezone
 from pathlib import Path
@@ -256,22 +256,33 @@ def age_secs(ts: str) -> float:
     return (datetime.now(timezone.utc) - then).total_seconds()
 
 
-def runtime_dir() -> Path:
+def runtime_dir(env: "Mapping[str, str] | None" = None) -> Path:
     """Resolved per call (not import time) so DOXA_RUNTIME_DIR can point a
-    test -- or an unusual machine -- at a throwaway directory."""
-    override = os.environ.get("DOXA_RUNTIME_DIR", "").strip()
+    test -- or an unusual machine -- at a throwaway directory.
+
+    ``env`` names a DIFFERENT process's environment, and exists for
+    exactly one caller: :func:`doxa.daemon.spawn_daemon` spawning a child
+    with its own ``DOXA_RUNTIME_DIR`` (doxa.fleet gives every run its own,
+    so a fleet's registry is the fleet). The parent has to be able to ask
+    "where will the CHILD write its entry", and reading its own
+    ``os.environ`` answers a question nobody asked. Default None keeps
+    every existing call byte-identical."""
+    source = os.environ if env is None else env
+    override = str(source.get("DOXA_RUNTIME_DIR", "") or "").strip()
     if override:
         return Path(override)
-    xdg = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    xdg = str(source.get("XDG_RUNTIME_DIR", "") or "").strip()
     if xdg:
         return Path(xdg) / "doxa"
     return Path.home() / ".local" / "share" / "doxa"
 
 
-def registry_dir() -> Path:
+def registry_dir(env: "Mapping[str, str] | None" = None) -> Path:
     """Create-and-return the presence dir, clamping both it and its parent
-    runtime dir to 0700 -- the same-user boundary the whole layer rests on."""
-    base = runtime_dir()
+    runtime dir to 0700 -- the same-user boundary the whole layer rests on.
+
+    ``env`` is passed straight through to :func:`runtime_dir`; see there."""
+    base = runtime_dir(env)
     reg = base / "registry"
     reg.mkdir(parents=True, exist_ok=True)
     os.chmod(base, 0o700)
@@ -466,6 +477,38 @@ class PeerInfo:
     runs off a value each process carries on its own command line, so it
     survives an ancestor's entry being reaped, which a chain-walk through
     this field would not."""
+
+    origin: "str | None" = None
+    """WHICH MACHINE this peer is on -- None for this one, and the label of
+    the remote endpoint it was fetched from otherwise (doxa.peernet).
+
+    docs/plans/remote.md's "say who is connected", applied to a peer rather
+    than to a driver: "A silent second driver is the thing a user cannot
+    detect and cannot consent to." A roster row that looks exactly like the
+    session in the next terminal and is in fact a session on a machine in
+    another building is the same failure -- a human deciding whether to
+    message a peer, and a model deciding whether a peer's claim is
+    plausible, both need to know which side of a network the answer came
+    from.
+
+    NEVER read off the wire. :func:`doxa.peernet.fetch_roster` overwrites
+    it with the endpoint it actually dialled, so a remote machine cannot
+    return rows claiming to be local. It is the one field in this dataclass
+    the reader establishes rather than the writer -- everything else here
+    is a claim (see the self-description block above), and this is not.
+
+    None means local, which is also what an older build's entry and every
+    registry file on disk mean, since nothing ever writes this key to the
+    registry: a build that has never heard of remote peers reads every row
+    it can see as local, which is exactly right."""
+
+    @property
+    def is_remote(self) -> bool:
+        """True when this peer is on another machine. A property rather
+        than callers testing ``origin is not None`` themselves, because
+        that comparison written out at four display sites is four chances
+        to get the polarity backwards."""
+        return bool(self.origin)
 
     @property
     def scope_key(self) -> str:
