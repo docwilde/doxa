@@ -107,6 +107,13 @@ class EngineClient:
         # says otherwise, which is the safe direction to be wrong in for
         # one frame -- the narrower cycle, never the wider one.
         self.bypass_armed: bool = False
+        # Does the session behind this socket have memory (doxa.engine's
+        # LORE_ENV / the daemon's --no-lore)? Engine parity: SessionEngine
+        # carries the same attribute name, so a chip reads whichever
+        # object it has without knowing which side of the socket it is on.
+        # True until the first status reply says otherwise, which is the
+        # answer every session gave before the switch existed.
+        self.lore: bool = True
         self.cwd: str | None = None
         self.total_cost_usd = 0.0
         self.last_ctx_percentage: float | None = None
@@ -539,6 +546,8 @@ class EngineClient:
             self.permission_mode = str(status["permission_mode"])
         if "bypass_armed" in status:
             self.bypass_armed = bool(status["bypass_armed"])
+        if "lore" in status:
+            self.lore = bool(status["lore"])
         if isinstance(status.get("account"), dict):
             self.account = status["account"]
         if status.get("lore_root"):

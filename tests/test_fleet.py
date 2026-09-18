@@ -603,9 +603,7 @@ def test_capacity_does_not_invent_a_number_when_it_cannot_measure_one(monkeypatc
     monkeypatch.setattr(fleet_mod, "available_memory_mb", lambda: None)
     note = fleet_mod.capacity_note(8)
     assert "could not be measured" in note
-    assert fleet_mod.check_capacity(32) == note.replace("N=8", "N=32").replace(
-        "4.7", "18.8"
-    ) or "N=32" in fleet_mod.check_capacity(32)
+    assert "N=32" in fleet_mod.check_capacity(32)
 
 
 def test_a_run_root_too_deep_for_a_unix_socket_is_refused_up_front(tmp_path):

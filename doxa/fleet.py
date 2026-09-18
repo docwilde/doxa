@@ -663,6 +663,11 @@ class DaemonBackend:
             model=slot.assignment.model,
             wait_secs=spec.spawn_timeout_s,
             env=env,
+            # The per-agent memory draw, delivered on the command line --
+            # the channel that actually decides this session, where the
+            # env var beside it is only the config-layer default. See
+            # MemoryPolicy for why this is per agent and not per fleet.
+            lore=slot.assignment.lore,
         )
         slot.session_id = session_id
         slot.socket_path = socket_path

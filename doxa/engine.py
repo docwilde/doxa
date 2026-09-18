@@ -314,6 +314,39 @@ DEFAULT_PERMISSION_MODE = "default"
 # rather than a constant.
 BYPASS_ARM_FLAG = "allow-dangerously-skip-permissions"
 
+LORE_ENV = "DOXA_LORE"
+"""The per-session memory switch. ON by default -- turning it OFF is the
+new behaviour, and a session that says nothing gets the memory it has
+always had.
+
+Read here as the config-layer DEFAULT only. The authoritative answer for
+one session is :attr:`SessionEngine.lore`, set from a constructor argument
+the daemon threads in from its own ``--no-lore`` flag, because the value
+has to be able to DIFFER between sessions on one machine at one moment --
+doxa.fleet runs memory-on and memory-off agents side by side in a single
+run, and a process-wide variable cannot express that.
+
+WHY IT EXISTS, and it is measurement rather than hygiene. A LORE store
+shared by every session is a communication channel that appears in no
+ledger: agents that read and write one belief store can coordinate through
+memory instead of through messages, and the structure
+docs/plans/emergent-organization.md measures is the communication
+structure. A hierarchy negotiated through shared memory would be reported
+as emergence with nothing to show for it. Per-session control turns that
+confound into a variable a run can manipulate."""
+
+
+def lore_enabled_default() -> bool:
+    """``DOXA_LORE`` / the config file's ``lore`` row -- the default a
+    session takes when nobody told it otherwise. ON unless explicitly
+    turned off, the opposite posture to every other switch in this module
+    because this one REMOVES a capability rather than granting one."""
+    raw = config_mod.raw(LORE_ENV).strip()
+    if not raw:
+        return True
+    return raw.lower() not in ("0", "false", "no", "off")
+
+
 # The mode that flag exists for. Named so the rule below reads as a rule
 # rather than as a string comparison somebody has to recognise.
 BYPASS_MODE = "bypassPermissions"
@@ -1380,6 +1413,7 @@ class SessionEngine:
         resume: str | None = None,
         spawn_depth: int = 0,
         parent_session_id: str | None = None,
+        lore: "bool | None" = None,
     ) -> None:
         self.cwd = cwd
         self.model = model
@@ -1462,6 +1496,33 @@ class SessionEngine:
         # the setting later cannot retrofit a running session's argv, and
         # this attribute is what stops DOXA pretending otherwise.
         self.bypass_armed: bool = bypass_arming_enabled()
+        # Does THIS session have memory? Read once, here, like
+        # bypass_armed immediately above and for a related reason: the
+        # answer shapes the system prompt the CLI was launched with, and
+        # flipping a setting later cannot retrofit a prompt that has
+        # already been sent. An explicit argument WINS over the config row
+        # -- that is the whole point of the argument existing, since two
+        # sessions in one fleet run must be able to disagree.
+        #
+        # What OFF means, in full, enforced at each site below rather than
+        # in one place that could be bypassed:
+        #   * no snapshot in the system prompt (_build_options), and no
+        #     refresh, consult or graph block per turn
+        #     (_on_user_prompt_submit);
+        #   * the LORE operators are ABSENT from the projection -- not
+        #     refused, absent -- because the ctx seams they are configured
+        #     against are simply not named (_build_options again);
+        #   * no writes: no review or derive (_run_review_sync,
+        #     _maybe_schedule_derive), no session index (finalize), no
+        #     belief outcome or retraction, no proposal approved.
+        #
+        # What OFF does NOT mean: lore_core is still imported and still
+        # used for scrub_secrets on every persisted line, for project_slug
+        # and for PROJECTS_DIR. The transcript is still written -- it is
+        # DOXA's own session record, and /resume and the transcript pane
+        # depend on it. What stops is DOXA putting anything INTO the store
+        # or taking anything OUT of it.
+        self.lore: bool = lore_enabled_default() if lore is None else bool(lore)
         # The identity of a REMOTE driver currently attached to this
         # session, or None while nobody but the keyboard in front of it is
         # driving (R1, docs/plans/remote.md). No bridge process exists yet
@@ -1690,6 +1751,12 @@ class SessionEngine:
         point that exists per turn. The last two are separately gated
         (consult_floor / graph_context_enabled) and can be on independently
         of each other -- see _graph_context_block's docstring."""
+        # Memory off: none of the three producers below runs. Checked once
+        # here rather than three times inside, because "no memory reaches
+        # the context" has to be true of the whole hook, not of each part
+        # that remembered to ask.
+        if not self.lore:
+            return {}
         parts: list[str] = []
         interval = lore_context.refresh_interval()
         if interval is not None:
@@ -2019,7 +2086,7 @@ class SessionEngine:
         lore_core.deriver.cmd_review, not an explicit `lore review` command
         -- so this honors LORE_DISABLE_REVIEW the same way cmd_review's hook
         branch does: skip silently, never block the session over it."""
-        if stage_disabled("review"):
+        if not self.lore or stage_disabled("review"):
             return
         try:
             job = lore_deriver.build_review_job(
@@ -2160,6 +2227,8 @@ class SessionEngine:
         let the surface render it" calls the app awaits, and the daemon's
         ``pending`` RPC, which cannot put an unbounded list of free text in
         a single 64KB wire frame and therefore serves it in pages."""
+        if not self.lore:
+            return []
         records = self._pending_records()
         return records[max(0, offset) : max(0, offset) + max(0, limit)]
 
@@ -2193,6 +2262,8 @@ class SessionEngine:
 
         Off-loop (``asyncio.to_thread``) -- it writes SQLite rows, markdown
         files and a JSON ledger, and the UI must stay live while it does."""
+        if not self.lore:
+            return "this session runs with memory off (--no-lore): DOXA neither reads nor writes the LORE store here"
         state = lore_write_state()
         if not state.get("capable"):
             return state.get("reason") or "approving is not available here"
@@ -2233,6 +2304,8 @@ class SessionEngine:
         DOXA that cannot honestly record an approval should not be quietly
         emptying the queue the approval path reads from either -- read-only
         means read-only."""
+        if not self.lore:
+            return "this session runs with memory off (--no-lore): DOXA neither reads nor writes the LORE store here"
         state = lore_write_state()
         if not state.get("capable"):
             return state.get("reason") or "rejecting is not available here"
@@ -2260,7 +2333,7 @@ class SessionEngine:
         passed, nothing is already in flight, and the session isn't
         finalizing. Never blocks the turn path."""
         interval = derive_interval()
-        if interval is None or self._finalized:
+        if interval is None or self._finalized or not self.lore:
             return
         if self._derive_task is not None and not self._derive_task.done():
             return  # never more than one in flight
@@ -2305,7 +2378,11 @@ class SessionEngine:
     # -- lifecycle ---------------------------------------------------
 
     def _build_options(self) -> ClaudeAgentOptions:
-        snapshot = lore_context.build_context(self.cwd)
+        # Memory off (LORE_ENV / --no-lore): no snapshot is built at all,
+        # so nothing to append and nothing to report a length for. Building
+        # it and then discarding it would still read the store, which on a
+        # fleet run is the very access the switch exists to prevent.
+        snapshot = lore_context.build_context(self.cwd) if self.lore else ""
         # /context reports this length verbatim -- see lore_snapshot_chars.
         self.lore_snapshot_chars = len(snapshot)
         # Second (optional) system-prompt appendix -- see
@@ -2319,7 +2396,7 @@ class SessionEngine:
         # _graph_awareness_block's own docstring. Re-derived on every call
         # for the same reason worktree_block is: never a value cached from
         # an earlier turn or an earlier session in this same worktree.
-        awareness_block = _graph_awareness_block()
+        awareness_block = _graph_awareness_block() if self.lore else ""
         self.graph_awareness_chars = len(awareness_block) if awareness_block else None
         # One discovery walk feeds BOTH the skill count /context reports
         # and the plugins= kwarg below, and ONLY happens at all when
@@ -2348,8 +2425,21 @@ class SessionEngine:
             allowed=self.tool_gate.allowed,
             include_write=True,
             ctx={
-                "belief_store": lore_store.db_connect,
-                "lore_root": str(lore_core.ROOT),
+                # The two LORE seams, named ONLY when this session has
+                # memory. Absence here is what makes every lore_* operator
+                # absent from the projection rather than present and
+                # refusing -- exactly the mechanism peer_send already uses
+                # (operators._peer_send_configured): the model is never
+                # told the tool exists, which is a stronger position than
+                # a refusal it can retry.
+                **(
+                    {
+                        "belief_store": lore_store.db_connect,
+                        "lore_root": str(lore_core.ROOT),
+                    }
+                    if self.lore
+                    else {}
+                ),
                 # Named here for the same reason the other two are: the
                 # ctx lists the seams THIS engine wired, and peer_send's
                 # predicate requires both the user's setting and a real
@@ -3638,6 +3728,8 @@ class SessionEngine:
         """Active belief count for the status bar -- same query
         lore_core.context.build_context uses to decide whether to mention
         the belief store."""
+        if not self.lore:
+            return 0
         try:
             conn = lore_store.db_connect()
             return conn.execute(
@@ -3705,6 +3797,8 @@ class SessionEngine:
         :meth:`belief_evidence`. A picker over 600 beliefs must not put
         600 evidence trails through a 64KB frame, and this is how it
         doesn't."""
+        if not self.lore:
+            return []
         try:
             conn = lore_store.db_connect()
             have = {
@@ -3860,6 +3954,8 @@ class SessionEngine:
 
         ONE belief and ONE event per call, no list form -- the same rule
         :meth:`approve_pending` follows and for the same reason."""
+        if not self.lore:
+            return "this session runs with memory off (--no-lore): DOXA neither reads nor writes the LORE store here"
         state = belief_action_state()
         if not state.get("capable"):
             return state.get("reason") or "recording an outcome is not available here"
@@ -3924,6 +4020,8 @@ class SessionEngine:
         of lost data -- the row survives with `status='retracted'` and its
         evidence and outcome ledger intact -- but it is out of the working
         set and out of the model's context, which is the whole point."""
+        if not self.lore:
+            return "this session runs with memory off (--no-lore): DOXA neither reads nor writes the LORE store here"
         state = belief_action_state()
         if not state.get("capable"):
             return state.get("reason") or "retracting is not available here"
@@ -3965,6 +4063,8 @@ class SessionEngine:
         Lazy, one belief at a time, and capped -- see
         :data:`BELIEF_EVIDENCE_LIMIT`. ``limit + 1`` rows are read so the
         caller can be told the trail was cut without a second COUNT(*)."""
+        if not self.lore:
+            return []
         try:
             conn = lore_store.db_connect()
             rows = conn.execute(
@@ -4028,12 +4128,19 @@ class SessionEngine:
             self.peer_host = None
 
         indexed = 0
-        try:
-            conn = lore_store.db_connect()
-            added, _consumed = lore_store.index_live(conn, self.transcript_path)
-            indexed = added
-        except Exception:
-            pass
+        # Memory off: the transcript is still on disk (it is DOXA's own
+        # record -- /resume and the transcript pane read it), but it is
+        # never indexed into the shared store. Indexing is the write that
+        # would make this session's conversation searchable BY EVERY OTHER
+        # session, which is the invisible channel the switch exists to
+        # close.
+        if self.lore:
+            try:
+                conn = lore_store.db_connect()
+                added, _consumed = lore_store.index_live(conn, self.transcript_path)
+                indexed = added
+            except Exception:
+                pass
 
         loop = asyncio.get_running_loop()
         async with self._review_lock:

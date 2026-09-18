@@ -329,6 +329,7 @@ class SessionDaemon:
         spawn_depth: int = 0,
         parent_session_id: str | None = None,
         task: str | None = None,
+        lore: "bool | None" = None,
     ) -> None:
         self.cwd = str(cwd or os.getcwd())
         self.model = model
@@ -361,6 +362,19 @@ class SessionDaemon:
         # The first prompt this session runs by itself, with nobody
         # attached (see _run_initial_task). Only ever set by a spawn.
         self.task = (task or "").strip() or None
+        # Does THIS session have memory (doxa.engine.LORE_ENV)? Threaded
+        # the same argv way base_branch and spawn_depth are, and for the
+        # same mechanical reason: a daemon is a separate process and its
+        # command line is the only channel that reaches this constructor.
+        # None means "take the config row's answer" -- which is ON -- so a
+        # session nobody said anything about is unchanged.
+        #
+        # It has to be per SESSION rather than per machine because
+        # doxa.fleet runs memory-on and memory-off agents side by side in
+        # one run: a shared belief store is a coordination channel the
+        # message ledger cannot see, and the experiment's whole
+        # measurement is the communication structure.
+        self.lore = lore
         self.linger_secs = linger_secs
         self.socket_path = daemon_socket_path(self.session_id)
         self._engine_factory = engine_factory or (
@@ -368,6 +382,7 @@ class SessionDaemon:
                 cwd=cwd, model=self.model, session_id=sid, daemon_socket=dsock,
                 resume=self.resume, spawn_depth=self.spawn_depth,
                 parent_session_id=self.parent_session_id,
+                lore=self.lore,
             )
         )
         self.engine: SessionEngine | None = None
@@ -1221,6 +1236,12 @@ class SessionDaemon:
             # which is the caller this exists for.
             "running": self._turn_task is not None and not self._turn_task.done(),
             "queued": len(self._prompt_queue),
+            # Whether this session has memory. Published for the same
+            # reason bypass_armed is: a client cannot work it out for
+            # itself (it did not build the argv), and a status bar that
+            # showed a memory chip for a session with no memory would be
+            # reporting a capability the session does not have.
+            "lore": bool(getattr(self.engine, "lore", True)),
         }
 
     async def _reply(
@@ -1245,6 +1266,7 @@ def spawn_daemon(
     parent_session_id: str | None = None,
     task: str | None = None,
     env: "dict[str, str] | None" = None,
+    lore: bool = True,
 ) -> "tuple[str, str]":
     """Spawn a detached daemon for ``cwd`` and wait for its registry entry.
 
@@ -1319,6 +1341,12 @@ def spawn_daemon(
         cmd += ["--parent-session-id", str(parent_session_id)]
     if task:
         cmd += ["--task", str(task)]
+    # Appended ONLY when memory is off, which is the same discipline every
+    # flag above follows: a session that does not use a capability produces
+    # a byte-identical argv to the one this function built before the
+    # capability existed.
+    if not lore:
+        cmd += ["--no-lore"]
     with open(log_path, "ab") as log:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
@@ -1361,6 +1389,15 @@ def install_signal_handlers(
 
 
 async def _amain(args: argparse.Namespace) -> int:
+    if args.lore is False:
+        # This process hosts exactly ONE session, so its environment IS a
+        # per-session setting here -- which is why this is done in the
+        # daemon's own entry point and nowhere a second session could
+        # share it. LORE's op-log sync pushes and pulls the same store the
+        # switch exists to disconnect this session from, and it reads only
+        # an environment variable (doxa.lore_sync.sync_disabled), so this
+        # is the one channel that reaches it.
+        os.environ["LORE_DISABLE_SYNC"] = "1"
     daemon = SessionDaemon(
         cwd=args.cwd,
         model=args.model,
@@ -1370,6 +1407,7 @@ async def _amain(args: argparse.Namespace) -> int:
         resume=args.resume,
         spawn_depth=args.spawn_depth,
         parent_session_id=args.parent_session_id,
+        lore=args.lore,
         task=args.task,
     )
     install_signal_handlers(daemon)
@@ -1404,6 +1442,19 @@ def main(argv: "list[str] | None" = None) -> int:
                         help="v1.3.0: the session that asked for this one "
                              "(peers.PeerInfo.parent_session_id). Display "
                              "and lineage only -- never enforcement")
+    parser.add_argument("--no-lore", dest="lore", action="store_false",
+                        default=None,
+                        help="run this session with memory OFF: no LORE "
+                             "snapshot in its system prompt, no per-turn "
+                             "refresh, the lore_* tools absent from the "
+                             "model's tool list rather than refusing, and "
+                             "no writes -- no beliefs, no staged "
+                             "proposals, no session index. PER SESSION: "
+                             "doxa.fleet runs memory-on and memory-off "
+                             "agents in one experiment, because a shared "
+                             "belief store is a coordination channel the "
+                             "message ledger cannot see. Omitted means "
+                             "'whatever the config row says', which is on")
     parser.add_argument("--task", default=None,
                         help="v1.3.0: the first prompt this session runs "
                              "by itself, before anyone attaches. The "

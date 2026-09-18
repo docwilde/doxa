@@ -399,6 +399,26 @@ SETTINGS: tuple[Setting, ...] = (
              "row encodes.",
     ),
     Setting(
+        key="lore", env="DOXA_LORE", label="memory",
+        category="Memory", kind="bool_on", default="1",
+        help="Does a session have memory at all -- the LORE snapshot in "
+             "its system prompt, the per-turn refresh, the lore_* tools, "
+             "and every write back into the store "
+             "(doxa.engine.lore_enabled_default)",
+        note="ON by default, and the only switch in this file that "
+             "REMOVES a capability rather than granting one. OFF means "
+             "genuinely off: no snapshot is built, the lore_* operators "
+             "are ABSENT from the model's tool list rather than present "
+             "and refusing, and nothing is written -- no beliefs, no "
+             "staged proposals, no session index. The transcript is "
+             "still written (it is DOXA's own record; /resume and the "
+             "transcript pane read it) and lore_core is still used to "
+             "scrub secrets out of every line. This row is the DEFAULT: "
+             "a session can be started with memory off individually "
+             "(`doxa.daemon --no-lore`), which is what doxa.fleet uses "
+             "to run memory-on and memory-off agents in one experiment.",
+    ),
+    Setting(
         key="derive_secs", env="DOXA_DERIVE_SECS", label="derive secs",
         category="Memory", kind="number", default="900",
         help="Streaming-deriver debounce interval, seconds; 0 or off "
