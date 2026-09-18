@@ -4,6 +4,26 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.11.0 — 2026-09-18
+
+**Agents can find and message each other, and every message is visible.**
+
+- Three tools: **`peer_list`** and **`peer_history`** read-only, **`peer_send`** write-capable and **absent unless armed** (`DOXA_AGENT_PEER_SEND`). Being woken by an arriving message is a second switch, also off.
+- A broadcast **never starts a turn**, an ambiguous address is refused naming its candidates, and a peer-started turn is attributable in the transcript and by its turn id. Two lamps in the status bar flash on send and receive.
+- The README's claim that a human always sends is **withdrawn**: it was false, and the same document already described the tool ninety lines earlier.
+
+**A fleet of sessions, across machines, with memory optional per agent.**
+
+- New **`doxa/fleet.py`**: spawn N sessions, dispatch one identical prompt with no ordering advantage, collect a per-run ledger, tear down hard. Clean to N=64 on real daemons; an N that does not fit is refused with the arithmetic.
+- New **`doxa/peernet.py`**: peers across machines, every operation routed through `remote_policy`. No remote operation maps to a gated kind, so shell and bypass are unreachable by construction. Nothing binds unless enabled.
+- **Memory off per agent**, threaded on argv so two agents in one run disagree. The LORE tools are then absent from the projection, not refusing. It disables DOXA's memory behaviours, not `lore_core`'s presence.
+
+**Four flaky tests, fixed at the cause.**
+
+- New **`tests/wait_stable.py`**: wait for a predicate to hold across consecutive checks, not to first turn true.
+- The diff view captured its width before it settled, baking in the wrong layout permanently — measured at ~13% failures across 62 parallel runs, 0 across 80 once fixed.
+- Suite 2334. Three new screenshot scenes; no mesh-graph scene, because nothing in DOXA opens that view yet.
+
 ## 1.10.0 — 2026-09-18
 
 **Sessions learn which machine they belong to, and sync off stays invisible.**
