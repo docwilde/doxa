@@ -739,9 +739,11 @@ async def test_the_refusal_reaches_the_transcript_and_no_turn_block_is_drawn(
         assert engines[0].received_prompts == ["spend more", "again"]
 
 
-def test_the_cli_exposes_both_flags_and_they_reach_the_spec():
-    """The flags are the surface an operator actually uses at 2am."""
-    import argparse
+def test_the_cli_offers_both_flags_and_prints_the_arithmetic_on_a_dry_run():
+    """The flags are the surface an operator actually uses at 2am, and
+    --dry-run is where they look before spending anything. A dry run that
+    answered "does it fit" and not "what may it cost" would be the wrong
+    half of the two questions."""
     import contextlib
     import io
 
@@ -749,7 +751,16 @@ def test_the_cli_exposes_both_flags_and_they_reach_the_spec():
     with contextlib.redirect_stdout(buf), contextlib.suppress(SystemExit):
         fleet_mod.main(["--help"])
     help_text = buf.getvalue()
-
     assert "--run-budget" in help_text
     assert "--allow-unbudgeted" in help_text
-    assert isinstance(argparse.ArgumentParser, type)  # the import is load-bearing
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = fleet_mod.main([
+            "--prompt", "x", "--pool", "claude:sonnet", "-n", "4",
+            "--run-budget", "20", "--dry-run",
+        ])
+    assert code == 0
+    printed = buf.getvalue()
+    assert "run budget $20.0000" in printed
+    assert "$5.0000 per session" in printed
