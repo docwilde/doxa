@@ -2263,7 +2263,10 @@ class SessionEngine:
         Off-loop (``asyncio.to_thread``) -- it writes SQLite rows, markdown
         files and a JSON ledger, and the UI must stay live while it does."""
         if not self.lore:
-            return "this session runs with memory off (--no-lore): DOXA neither reads nor writes the LORE store here"
+            return (
+                "this session runs with memory off (--no-lore): DOXA "
+                "neither reads nor writes the LORE store here"
+            )
         state = lore_write_state()
         if not state.get("capable"):
             return state.get("reason") or "approving is not available here"
@@ -2305,7 +2308,10 @@ class SessionEngine:
         emptying the queue the approval path reads from either -- read-only
         means read-only."""
         if not self.lore:
-            return "this session runs with memory off (--no-lore): DOXA neither reads nor writes the LORE store here"
+            return (
+                "this session runs with memory off (--no-lore): DOXA "
+                "neither reads nor writes the LORE store here"
+            )
         state = lore_write_state()
         if not state.get("capable"):
             return state.get("reason") or "rejecting is not available here"
@@ -3960,7 +3966,10 @@ class SessionEngine:
         ONE belief and ONE event per call, no list form -- the same rule
         :meth:`approve_pending` follows and for the same reason."""
         if not self.lore:
-            return "this session runs with memory off (--no-lore): DOXA neither reads nor writes the LORE store here"
+            return (
+                "this session runs with memory off (--no-lore): DOXA "
+                "neither reads nor writes the LORE store here"
+            )
         state = belief_action_state()
         if not state.get("capable"):
             return state.get("reason") or "recording an outcome is not available here"
@@ -4026,7 +4035,10 @@ class SessionEngine:
         evidence and outcome ledger intact -- but it is out of the working
         set and out of the model's context, which is the whole point."""
         if not self.lore:
-            return "this session runs with memory off (--no-lore): DOXA neither reads nor writes the LORE store here"
+            return (
+                "this session runs with memory off (--no-lore): DOXA "
+                "neither reads nor writes the LORE store here"
+            )
         state = belief_action_state()
         if not state.get("capable"):
             return state.get("reason") or "retracting is not available here"
