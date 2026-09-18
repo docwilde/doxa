@@ -1314,6 +1314,40 @@ a block above itself naming the sender, and carries a `peer-` turn id into
 the ledger — so spend that began with an inbound message has a traceable
 cause.
 
+### Spend ceilings
+
+Both switches above hand something other than you the ability to spend
+this session's money, so there is now a bound on it.
+`session_budget_usd` / `DOXA_SESSION_BUDGET_USD` is **off by default** —
+unset, nothing about any session changes.
+
+Set it and the session stops **starting** turns once it has spent that
+much. It says so in the transcript, naming what it spent, what the
+ceiling is and how to lift it; every command still answers; and raising
+the number (Ctrl+, → Session, the config file, or the environment) lets
+the very next prompt through with no restart — the ceiling is read per
+turn, not captured at connect. A turn an **arriving peer message** would
+have started is refused the same way, which is the path it exists for,
+and the message is not lost: it rides the next turn that runs.
+
+Two things it does not do, both on purpose:
+
+- **It bounds starting a turn, not a turn in flight.** The only dollar
+  figure that exists arrives with the message that *ends* a turn, so a
+  session can exceed its ceiling by the price of the one turn that
+  crosses it. DOXA will not multiply tokens by a price sheet it would
+  have to maintain in order to pretend otherwise.
+- **It cannot be enforced on an engine that reports no cost.** `codex`
+  and both API vendors report token counts and no dollars, so their spend
+  reads as `$0.00` and a ceiling compared against it would never fire.
+  The settings row says so when you set it, and a session that starts
+  under such a ceiling says so too, rather than looking like a control.
+
+For a fleet, set the run-wide total instead — `doxa-fleet --run-budget`,
+divided into a per-session ceiling, because thirty-two individually
+reasonable limits multiply into one unreasonable one. See
+[docs/fleet.md](fleet.md).
+
 Each `/peers` row also carries what that session *says* it is:
 `self-reported: sonnet via claude on doxa` — its model, its provider, and
 the engine hosting it. Read that line as a claim, because it is one:
@@ -1443,6 +1477,7 @@ parse is refused rather than clobbering it.
 | `adopt_plugins` | `DOXA_ADOPT_PLUGINS` | off | load commands/skills/agents from your OWN installed Claude Code plugins into new sessions — never their hooks or MCP servers, never LORE (see [docs/plans/plugins.md](plans/plugins.md)) |
 | `auto_diff` | `DOXA_AUTO_DIFF` | off | open the live diff by itself the first time a session edits its worktree — once per session (see [The live diff](#the-live-diff)) |
 | `spawn_sessions` | `DOXA_SPAWN_SESSIONS` | off | offer the model `spawn_session`, which starts a second session in this repo and gives it a task (see [Session spawn](#session-spawn--off-unless-you-turn-it-on)) — read from this file and the environment only, never from a repository |
+| `session_budget_usd` | `DOXA_SESSION_BUDGET_USD` | off | dollars this session may spend before it stops STARTING turns (see [Spend ceilings](#spend-ceilings)) — a peer-started turn is refused exactly like a typed one |
 | `permission_mode` | `DOXA_PERMISSION_MODE` | `default` | mode new sessions connect in; accepts `default`/`acceptEdits`/`plan` only |
 | `linger_secs` | `DOXA_LINGER_SECS` | 120 | seconds a daemon outlives its last detached client |
 | `worktree_per_session` | `DOXA_WORKTREE` | on | give each session its own git worktree |

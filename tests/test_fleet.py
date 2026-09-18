@@ -82,6 +82,13 @@ def _spec(short_root, **kw):
     kw.setdefault("run_id", f"r{next(_RUN_IDS)}")
     kw.setdefault("n", 6)
     kw.setdefault("seed", 1234)
+    # A run that arms inbound turn-starting -- which every run here does --
+    # must say what it may spend before prepare() will start it (see
+    # doxa.fleet.check_run_budget, and tests/test_budget.py, which owns
+    # that refusal). Every test in THIS file is about orchestration, so
+    # each gets an ordinary budget rather than repeating the flag; the one
+    # test that cares sets its own.
+    kw.setdefault("run_budget_usd", 10.0)
     # Nothing here waits on a real model, so the deadlines are short; a
     # test that takes the timeout path should take it in milliseconds.
     kw.setdefault("quiescence_timeout_s", 2.0)

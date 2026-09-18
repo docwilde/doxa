@@ -229,6 +229,38 @@ SETTINGS: tuple[Setting, ...] = (
              "any setting.",
     ),
     Setting(
+        key="session_budget_usd", env="DOXA_SESSION_BUDGET_USD",
+        label="session spend ceiling ($)", category="Session",
+        kind="number", default="",
+        help="Stop STARTING turns once this session has spent this many "
+             "dollars (doxa.budget.session_ceiling / doxa.engine."
+             "SessionEngine._budget_refusal)",
+        note="OFF by default -- unset, and nothing about any session "
+             "changes -- and it is the row the two above make necessary. "
+             "With peer_send and inbound turns armed, sessions address "
+             "each other across repositories and wake each other, and "
+             "until this row existed nothing anywhere bounded what that "
+             "cost. It bounds STARTING a turn, not a turn in flight: the "
+             "only dollar figure that exists arrives with the message "
+             "that ENDS a turn, so a session may exceed this by the price "
+             "of the one turn that crosses it, and DOXA will not "
+             "multiply tokens by a price sheet to pretend otherwise (see "
+             "doxa.vendors). A session at its ceiling is STOPPED, not "
+             "dead: it says so in the transcript, every command still "
+             "answers, and raising this number here lets the next prompt "
+             "through with no restart. A turn an arriving PEER message "
+             "started is refused exactly like a typed one -- that path is "
+             "the reason this exists. Read through config.raw, so this "
+             "file and the environment are the two doors and nothing "
+             "inside a repository you open is one of them. Enforceable "
+             "only on an engine that reports cost: codex and both API "
+             "vendors report none, their spend reads as $0.00, and the "
+             "row says so rather than appearing to work. doxa.fleet's "
+             "--run-budget sets a run-wide total and derives this per "
+             "session, because thirty-two individually reasonable limits "
+             "multiply into one unreasonable one.",
+    ),
+    Setting(
         key="permission_mode", env="DOXA_PERMISSION_MODE",
         label="permission mode", category="Session",
         kind="choice", choices=("", "default", "acceptEdits", "plan"),

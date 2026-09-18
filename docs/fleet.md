@@ -82,6 +82,49 @@ fleet — a swapping fleet does not measure coordination, it measures paging.
 `check_capacity` refuses an N that does not fit and names the numbers;
 `--force` overrides and is recorded in the manifest.
 
+### What a run may spend
+
+Every session in a run is armed to be woken by another session's message,
+which is the point — an agent cannot answer another when nobody is
+typing. It also means the run keeps spending with nobody watching, so a
+run has to say what it may spend before it starts one.
+
+`--run-budget <dollars>` is a **run-wide total**, not a per-session one:
+thirty-two individually reasonable limits multiply into one unreasonable
+one, and the number an operator can reason about overnight is "this run
+may cost fifty dollars". It is enforced by division — each session is
+handed `run-budget / N` as its own `DOXA_SESSION_BUDGET_USD`, and N
+separately bounded sessions can together spend at most the total, because
+the bounds add.
+
+`check_run_budget` **refuses a run that arms inbound turn-starting with no
+budget**, before any directory is made and long before any process is,
+naming what to set. Launching the experiment unbounded by omission — by
+forgetting a flag at 2am — is the failure that refusal exists to prevent.
+`--allow-unbudgeted` overrides it, is recorded in the manifest as
+`unbudgeted`, and is deliberately **not** `--force`: "this machine's
+memory numbers are wrong" and "I accept a swarm with nothing bounding its
+spend" are two different claims. Its exit code is `3`, not capacity's `2`.
+
+Two limits the arithmetic does not hide, both printed by `budget_note`
+before the run and kept in the manifest:
+
+* **Unused share is not reallocated.** A quiet session's unspent half is
+  not available to a busy one, so a run spends at most the total and
+  typically less.
+* **The one-turn overshoot is per session.** A ceiling stops a turn from
+  *starting*; a turn already running is never interrupted, because the
+  only dollar figure that exists arrives with the message that ends it.
+  The true worst case is therefore `total + N x (one turn)` — at N=32,
+  thirty-two turns of slack.
+
+And one that is not a limit but a hole: **slots dealt an engine that
+reports no cost are not bounded at all.** `codex`, `deepseek` and `glm`
+report token counts and no dollars, so their spend reads as `$0.00` and
+their share is never enforced. `budget_note` names them in the line it
+prints before the run rather than letting the total look like it covers
+the whole pool.
+
 ### Nothing hangs, nothing is left behind
 
 Every phase has a deadline and every deadline has an escalation.

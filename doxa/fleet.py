@@ -100,12 +100,14 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
+from . import budget as budget_mod
 from . import peerledger as peerledger_mod
 from . import peers as peers_mod
 
 __all__ = [
     "DEFAULT_N",
     "Assignment",
+    "BudgetRefused",
     "DaemonBackend",
     "FleetBackend",
     "FleetRun",
@@ -115,8 +117,10 @@ __all__ = [
     "RunReport",
     "Slot",
     "assign",
+    "budget_note",
     "capacity_note",
     "check_capacity",
+    "check_run_budget",
     "run_fleet",
 ]
 
@@ -320,6 +324,46 @@ class FleetSpec:
     run_id: str = ""
     broadcast: bool = False
 
+    # -- what this run may spend ---------------------------------------
+    #
+    # A RUN-WIDE total, not a per-session one, and that is the whole point
+    # of putting it here rather than leaving each session to read its own
+    # knob. Thirty-two individually reasonable ceilings multiply into one
+    # unreasonable one, and the number an operator can actually reason
+    # about overnight is "this run may cost fifty dollars" -- never "each
+    # of thirty-two sessions may cost some amount I will now multiply in
+    # my head".
+    #
+    # It is enforced by DIVISION: :attr:`session_budget_usd` is the share
+    # each session is given through DOXA_SESSION_BUDGET_USD, and N
+    # separately-bounded sessions can together spend at most the total.
+    # See :func:`doxa.budget.per_session_share` for the two limitations
+    # that arithmetic does not hide -- unused share is not reallocated,
+    # and the one-turn overshoot is per session and therefore N-fold.
+
+    #: Dollars for the WHOLE run, or None for no ceiling. None is refused
+    #: at :meth:`FleetRun.prepare` when this run arms inbound
+    #: turn-starting, unless :attr:`allow_unbudgeted` says otherwise.
+    run_budget_usd: "float | None" = None
+
+    #: The operator said, in words, that they mean to run this unbounded.
+    #: Recorded in the manifest, exactly the way ``force`` is for the
+    #: memory arithmetic -- and deliberately NOT the same flag: "this
+    #: machine's memory numbers are wrong" and "I accept a swarm with
+    #: nothing bounding its spend" are two different claims, and one
+    #: ``--force`` that granted both would grant the second by accident.
+    allow_unbudgeted: bool = False
+
+    #: May an arriving peer message START a turn in this run's sessions
+    #: (doxa.peers.PEER_INBOUND_TURNS_ENV)? True, because a run with it off
+    #: measures nothing -- an agent cannot answer another when nobody is
+    #: typing. It is a FIELD rather than a constant so that the guard in
+    #: :func:`check_run_budget` has a real condition to read: a run that
+    #: genuinely cannot wake itself is a run the budget guard has no claim
+    #: over, and a guard whose condition is always true teaches nobody what
+    #: it is actually guarding against.
+    inbound_turns: bool = True
+
     # -- deadlines. Every one of them exists because the phase it bounds
     # has a way of never finishing, and a run that never ends is a run
     # that cannot be replicated.
@@ -351,6 +395,11 @@ class FleetSpec:
             )
         self.run_id = str(self.run_id or "").strip() or _mint_run_id()
         self.pool = tuple(self.pool)
+        # Normalised through the same parser the per-session knob uses, so
+        # "5", 5, "$5" and 5.0 are one value and zero/negative is OFF
+        # rather than "refuse everything" -- a mistyped ceiling must not be
+        # able to produce a run in which no session may start a turn.
+        self.run_budget_usd = budget_mod.usd(self.run_budget_usd)
 
     # -- where a run's state lives ------------------------------------
 
@@ -394,6 +443,23 @@ class FleetSpec:
     def manifest_path(self) -> Path:
         return self.run_root / "manifest.json"
 
+    @property
+    def session_budget_usd(self) -> "float | None":
+        """The run's total, divided into the share ONE session is given --
+        or None when the run has no total.
+
+        Division is what turns a run-wide number into something the
+        existing machinery can actually enforce: DOXA has no cross-process
+        cost aggregator, and this deliberately does not invent one (that
+        would be a shared file N sessions race on, which is a worse answer
+        than arithmetic). N sessions each bounded at ``total / N`` can
+        together spend at most ``total``, because the bounds add.
+        :func:`doxa.budget.per_session_share` states the two things that
+        buys and the two it does not."""
+        if self.run_budget_usd is None:
+            return None
+        return budget_mod.per_session_share(self.run_budget_usd, self.n)
+
     def env_for(self, assignment: Assignment) -> "dict[str, str]":
         """The environment ONE session is spawned with.
 
@@ -416,7 +482,21 @@ class FleetSpec:
         # starts one (doxa.peers.send_message's own `kind` field): at N=32
         # one broadcast would otherwise wake the entire fleet in a single
         # step.
-        env[peers_mod.PEER_INBOUND_TURNS_ENV] = "1"
+        if self.inbound_turns:
+            env[peers_mod.PEER_INBOUND_TURNS_ENV] = "1"
+        else:
+            env.pop(peers_mod.PEER_INBOUND_TURNS_ENV, None)
+        # This session's share of the run's ceiling. Set only when the run
+        # HAS one: an unbudgeted run leaves whatever the operator's own
+        # environment carries, because popping it would strip a ceiling
+        # they set deliberately and the only direction this function may
+        # err in is the safe one. A budgeted run OVERRIDES an inherited
+        # value -- the run's own total is authoritative for the sessions
+        # the run itself spawns, or the arithmetic in the manifest would
+        # be describing a bound that is not the one in force.
+        share = self.session_budget_usd
+        if share is not None:
+            env[budget_mod.SESSION_BUDGET_ENV] = repr(share)
         if not assignment.lore:
             env["DOXA_LORE"] = "0"
         else:
@@ -510,6 +590,87 @@ def check_capacity(n: int, *, force: bool = False, available_mb: "int | None" = 
             "force=True (--force) if this machine's numbers are wrong."
         )
     return note
+
+
+class BudgetRefused(RuntimeError):
+    """This run can wake its own sessions and nothing bounds what that
+    costs, and the run was not started.
+
+    Sibling of :class:`CapacityRefused` and deliberately a separate type:
+    one of them says the machine cannot hold the run, the other says
+    nobody has said what the run may spend. An operator who overrides one
+    has not said anything about the other."""
+
+
+def budget_note(spec: "FleetSpec") -> str:
+    """One sentence of arithmetic for this run's ceiling, for the operator
+    to read before spawning and for the manifest to keep afterwards.
+
+    Same job :func:`capacity_note` does for memory, and the same reason:
+    an estimate nobody reads is not a control. This one also names the
+    engines in the pool that cannot be held to it at all."""
+    if spec.run_budget_usd is None:
+        return (
+            "no run budget: nothing bounds what this run may spend"
+            + ("" if spec.inbound_turns else " (inbound turn-starting is off)")
+        )
+    share = spec.session_budget_usd or 0.0
+    note = (
+        f"run budget {budget_mod.format_usd(spec.run_budget_usd)} across "
+        f"N={spec.n} = {budget_mod.format_usd(share)} per session "
+        f"({budget_mod.SESSION_BUDGET_ENV}); each session stops STARTING "
+        "turns at its share, so the run spends at most the total plus one "
+        "turn of overshoot per session"
+    )
+    blind = sorted({
+        slot.engine for slot in spec.pool
+        if not budget_mod.enforceable_for(slot.engine)
+    })
+    if blind:
+        note += (
+            " -- EXCEPT on " + ", ".join(blind) + ", which report no dollar "
+            "figure at all, so slots dealt those engines are UNBOUNDED and "
+            "their share is not enforced (doxa.vendors: DOXA will not "
+            "multiply tokens by a price sheet it would have to maintain)"
+        )
+    return note
+
+
+def check_run_budget(spec: "FleetSpec") -> str:
+    """Refuse a run that arms inbound turn-starting with nothing bounding
+    its spend; return the note when it is allowed.
+
+    The condition is the honest one rather than a blanket rule. A fleet
+    whose sessions can be woken by each other's messages
+    (:attr:`FleetSpec.inbound_turns`, which :meth:`FleetSpec.env_for`
+    turns into ``DOXA_PEER_INBOUND_TURNS`` for all N) is a swarm that can
+    keep spending with nobody watching and nobody typing -- the whole
+    reason the emergence experiment is worth running is also the whole
+    reason it must not be launchable unbounded BY OMISSION. Forgetting a
+    flag is the most likely way that happens, so forgetting it is what
+    this refuses.
+
+    ``spec.allow_unbudgeted`` is the escape hatch, and it is explicit for
+    the same reason :func:`check_capacity`'s ``force`` is: an operator who
+    means it should be able to say so, once, in words, and have that fact
+    survive into the manifest where anyone reading the run later can see
+    what was accepted."""
+    note = budget_note(spec)
+    if spec.run_budget_usd is not None or not spec.inbound_turns:
+        return note
+    if spec.allow_unbudgeted:
+        return note + " -- ACCEPTED by allow_unbudgeted (--allow-unbudgeted)"
+    raise BudgetRefused(
+        f"this run arms inbound turn-starting for all {spec.n} sessions "
+        "(an arriving peer message starts a turn in an idle session, so "
+        "the fleet can keep spending with nobody typing) and no run "
+        "budget is set -- refusing to start. Set one: "
+        "FleetSpec(run_budget_usd=<dollars>) / --run-budget <dollars>, "
+        "which is divided into a per-session "
+        f"{budget_mod.SESSION_BUDGET_ENV} share. Run it unbounded only by "
+        "saying so: allow_unbudgeted=True / --allow-unbudgeted, which is "
+        "recorded in the manifest."
+    )
 
 
 def check_socket_budget(runtime: "Path | str") -> None:
@@ -871,6 +1032,14 @@ class RunReport:
     slots: "list[Slot]"
     capacity: str = ""
     forced: bool = False
+    #: The spend arithmetic this run started under (:func:`budget_note`).
+    budget: str = ""
+    #: The operator explicitly accepted a run with no ceiling. Its own
+    #: field rather than a clause of ``forced``: the manifest is the only
+    #: record of what a run was allowed to do, and "the memory numbers
+    #: were overridden" and "the spend ceiling was waived" must be
+    #: separately readable by anyone auditing a bill against a run.
+    unbudgeted: bool = False
     dispatch_order: "tuple[int, ...]" = ()
     dispatch_started_at: "float | None" = None
     dispatch_spread_s: "float | None" = None
@@ -908,6 +1077,10 @@ class RunReport:
                 "prompt": self.spec.prompt,
                 "prompt_sha256": _sha256(self.spec.prompt),
                 "broadcast": self.spec.broadcast,
+                "inbound_turns": self.spec.inbound_turns,
+                "run_budget_usd": self.spec.run_budget_usd,
+                "session_budget_usd": self.spec.session_budget_usd,
+                "allow_unbudgeted": self.spec.allow_unbudgeted,
                 "memory_off": self.spec.memory.resolved(self.spec.n),
                 "pool": [
                     {"engine": m.engine, "model": m.model, "weight": m.weight}
@@ -918,6 +1091,8 @@ class RunReport:
             },
             "capacity": self.capacity,
             "forced": self.forced,
+            "budget": self.budget,
+            "unbudgeted": self.unbudgeted,
             "assignments": [s.assignment.to_obj() for s in self.slots],
             "dispatch_order": list(self.dispatch_order),
             "dispatch_spread_s": self.dispatch_spread_s,
@@ -993,6 +1168,14 @@ class FleetRun:
         deep -- both are failures that are cheap here and expensive later."""
         self.report.capacity = check_capacity(self.spec.n, force=self.force)
         self.report.forced = self.force
+        # Before any directory is made and long before any process is: a
+        # run that may not spend must not leave a half-built run root
+        # behind either. Raises BudgetRefused, which is NOT what --force
+        # overrides -- see check_run_budget.
+        self.report.budget = check_run_budget(self.spec)
+        self.report.unbudgeted = (
+            self.spec.run_budget_usd is None and self.spec.allow_unbudgeted
+        )
         check_socket_budget(self.spec.runtime)
         for directory in (self.spec.run_root, self.spec.home, self.spec.runtime):
             directory.mkdir(parents=True, exist_ok=True)
@@ -1367,6 +1550,21 @@ def main(argv: "list[str] | None" = None) -> int:
                              "than a switch")
     parser.add_argument("--quiescence-timeout", type=float, default=1800.0)
     parser.add_argument("--quiet-dwell", type=float, default=20.0)
+    parser.add_argument("--run-budget", type=float, default=None,
+                        help="dollars for the WHOLE run, divided into a "
+                             "per-session ceiling (run-budget/N) each "
+                             "session stops starting turns at. Required "
+                             "while inbound turn-starting is armed, which "
+                             "it is by default -- see --allow-unbudgeted. "
+                             "Not enforceable on engines that report no "
+                             "cost (codex, deepseek, glm)")
+    parser.add_argument("--allow-unbudgeted", action="store_true",
+                        help="start a run that can wake its own sessions "
+                             "with NOTHING bounding its spend. Recorded in "
+                             "the manifest. Separate from --force on "
+                             "purpose: overriding the memory arithmetic "
+                             "says nothing about accepting an unbounded "
+                             "bill")
     parser.add_argument("--force", action="store_true",
                         help="start even when the memory arithmetic says N "
                              "does not fit. Recorded in the manifest")
@@ -1389,11 +1587,18 @@ def main(argv: "list[str] | None" = None) -> int:
         memory=MemoryPolicy(off_count=args.memory_off or None),
         root=Path(args.root) if args.root else None,
         run_id=args.run_id or "",
+        run_budget_usd=args.run_budget,
+        allow_unbudgeted=args.allow_unbudgeted,
         quiescence_timeout_s=args.quiescence_timeout,
         quiet_dwell_s=args.quiet_dwell,
     )
 
     print(capacity_note(spec.n))
+    # Printed beside the memory arithmetic and BEFORE --dry-run returns:
+    # the two questions an operator has to answer before spawning are
+    # "does it fit" and "what may it cost", and a dry run that answered
+    # only the first would be the wrong half.
+    print(budget_note(spec))
     if args.dry_run:
         for a in assign(spec.n, list(spec.pool), seed=spec.seed, memory=spec.memory):
             print(f"  slot {a.index:>3}  {a.label:<28} memory={'on' if a.lore else 'OFF'}")
@@ -1404,6 +1609,12 @@ def main(argv: "list[str] | None" = None) -> int:
     except CapacityRefused as exc:
         print(str(exc))
         return 2
+    except BudgetRefused as exc:
+        # Its own exit code, not shared with the capacity refusal: a
+        # wrapper script that retries on 2 by lowering N would otherwise
+        # "retry" its way past a missing budget forever.
+        print(str(exc))
+        return 3
     print(report.summary())
     print(f"manifest {spec.manifest_path}")
     print(f"ledger   {spec.ledger_path}")

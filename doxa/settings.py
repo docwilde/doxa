@@ -42,6 +42,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static, TabbedContent, TabPane
 
+from . import budget as budget_mod
 from . import config as config_mod
 
 CATEGORIES: tuple[str, ...] = (
@@ -162,6 +163,30 @@ class SettingsScreen(ModalScreen["bool"]):
         yield Static(setting.help, classes="setting-help")
         if setting.note:
             yield Static(setting.note, classes="setting-note")
+        warning = self._row_warning(setting)
+        if warning:
+            # Rule 2 of this panel's three, applied to the one row that can
+            # be set to a value which does NOTHING. The spend ceiling is
+            # enforced by comparing against a dollar figure the engine
+            # reports, and codex and both API vendors report none -- so a
+            # number typed here while one of those is the configured engine
+            # would sit in the file looking like a control and never fire.
+            # A settings menu that shows an inert value teaches the user
+            # that the menu lies; this says so at the moment of setting,
+            # and again immediately after save (action_save recomposes).
+            yield Static(f"⚠ {warning}", classes="setting-note")
+
+    @staticmethod
+    def _row_warning(setting: config_mod.Setting) -> str:
+        """A caveat about this row's CURRENT value, or "".
+
+        Distinct from ``Setting.note``, which is static prose about what
+        the knob does: this is computed from what the knob is set to right
+        now and what else is configured around it, so it appears only when
+        it applies."""
+        if setting.env != budget_mod.SESSION_BUDGET_ENV:
+            return ""
+        return budget_mod.configured_warning() or ""
 
     def _path_row(self, label: str, value: str, note: str) -> ComposeResult:
         yield Static(label, classes="setting-label")

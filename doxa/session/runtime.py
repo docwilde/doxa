@@ -27,7 +27,9 @@ from textual.containers import VerticalScroll
 from textual.widgets import Static
 
 from .. import banner as banner_mod
+from .. import budget as budget_mod
 from .. import diff as diff_mod
+from .. import engines as engines_mod
 from .. import identity as identity_mod
 from .. import keyboard as keyboard_mod
 from .. import lore_sync as lore_sync_mod
@@ -302,6 +304,21 @@ class PaneRuntimeMixin:
                 key_notice = SystemBlock(notice)
                 key_notice.id = "key-notice-block"
                 await block_list.mount(key_notice)
+        # A ceiling that is armed says so BEFORE it fires. A limit whose
+        # first appearance in the transcript is the moment it stops you is
+        # a limit you find out about by being stopped -- and on an engine
+        # that reports no cost this is the second of the two places (the
+        # settings row is the first) where "this number does nothing here"
+        # is said out loud instead of being discovered from a bill.
+        # Nothing is mounted when no ceiling is set, which is the default.
+        ceiling_note = budget_mod.start_note(
+            budget_mod.session_ceiling(),
+            reports_cost=engines_mod.capabilities_of(self.engine).cost,
+        )
+        if ceiling_note:
+            budget_block = SystemBlock(ceiling_note)
+            budget_block.id = "budget-block"
+            await block_list.mount(budget_block)
         if self._boot_report:
             # Item D restore: "restored N tabs, skipped M" -- once, on
             # whichever pane carried the report (doxa.cli picks exactly
@@ -420,6 +437,15 @@ class PaneRuntimeMixin:
                 # staged proposals await the SAME human review gate as ever
                 # -- this is a notification, never an auto-apply.
                 await self._announce_staged(ev.data)
+            elif ev.type == "turn_refused":
+                # A turn refused before it started -- the spend ceiling
+                # (doxa.budget). Reaches the out-of-band stream when the
+                # turn was one an arriving PEER message tried to start, or
+                # when another attached client on this daemon typed the
+                # prompt that was refused. Either way this pane says so:
+                # the money the ceiling just did not spend was about to be
+                # spent in THIS session.
+                await self._render_turn_refused(ev)
             elif ev.type in (
                 "prompt_queued", "prompt_dequeued", "prompt_cancelled",
                 "prompt_discarded",
@@ -568,6 +594,16 @@ class PaneRuntimeMixin:
             self.scroll_transcript_to_end(block_list)
             return
 
+        if first is not None and first.type == "turn_refused":
+            # REFUSED before starting -- today only by the spend ceiling
+            # (doxa.budget). Handled exactly where prompt_queued is, and
+            # for the same reason: no turn began, so no TurnBlock may be
+            # mounted for one. A line saying why, and the pane goes back to
+            # accepting prompts -- the session is stopped, not broken, and
+            # everything else about it still answers.
+            await self._render_turn_refused(first)
+            return
+
         if first is not None and first.type == "prompt_queued":
             # QUEUED, not started: rendered right here from the reply
             # this worker already has in hand (this pane's own
@@ -647,6 +683,31 @@ class PaneRuntimeMixin:
             # text after its final edit, and a stale diff is the one
             # thing this surface may not show.
             pane.schedule_refresh()
+
+    # -- the spend ceiling (doxa.budget) --------------------------------
+
+    async def _render_turn_refused(self, ev: EngineEvent) -> None:
+        """A turn that was not allowed to START: one system line, in the
+        transcript, saying so.
+
+        Reached from three directions and deliberately identical in all
+        three: this pane's own typed prompt (``_run_turn``'s peek at the
+        first event), a turn an arriving peer message tried to start
+        (``_peer_pump``, since nothing is synchronously waiting on one of
+        those), and a refusal another attached client's prompt earned on
+        the same daemon. A ceiling that announced itself differently
+        depending on who tripped it would be a ceiling the user learns
+        three separate times.
+
+        The text comes from the engine (:func:`doxa.budget.refusal_text`)
+        rather than being composed here, so the sentence the user reads is
+        the same one the daemon logged and the same one a second tab sees
+        -- no rendering of a float that could drift from the number the
+        check actually used."""
+        message = str(ev.data.get("message") or "turn refused")
+        block_list = self.query_one("#block-list", VerticalScroll)
+        await block_list.mount(SystemBlock(_escape_markup(message)))
+        self.scroll_transcript_to_end(block_list)
 
     # -- mid-turn prompt queue (design points 2/3/5/6) -----------------
 

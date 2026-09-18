@@ -84,6 +84,7 @@ from pathlib import Path
 from typing import Any
 
 from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see module docstring
+from . import budget as budget_mod
 from . import claude_plugins as claude_plugins_mod
 from . import cli_isolation as cli_isolation_mod
 from . import config as config_mod
@@ -2720,6 +2721,23 @@ class SessionEngine:
 
         prompt = peers_mod.PEER_TURN_INTRO + "\n\n" + peers_mod.frame_for_model([frame])
 
+        # The spend ceiling, at the entry to the path it exists for. A
+        # peer-started turn is refused exactly like a typed one --
+        # _send_turn's own check would catch it anyway, and does for a
+        # peer prompt already sitting in the queue when the ceiling trips
+        # -- but refusing HERE buys the thing that check cannot: the frame
+        # falls back to _pending_peer_frames instead of evaporating, so
+        # the message is not LOST by being refused. It rides the next turn
+        # that does run, which is the behaviour this method had before
+        # inbound turn-starting existed at all, and the refusal still says
+        # so out loud rather than looking like a message that quietly
+        # decided not to wake anyone.
+        refusal = self._budget_refusal(prompt)
+        if refusal is not None:
+            self._pending_peer_frames.append(dict(frame))
+            self._peer_queue.put_nowait(EngineEvent("turn_refused", refusal))
+            return
+
         if self._turn_running:
             try:
                 item = self._prompt_queue.enqueue(prompt)
@@ -3220,6 +3238,50 @@ class SessionEngine:
         }))
         return True
 
+    def budget_ceiling(self) -> "float | None":
+        """This session's spend ceiling in dollars, or None for none.
+
+        Read through :func:`doxa.budget.session_ceiling` on every call
+        rather than captured at connect, and that is what makes "raise it
+        and continue" true: a session stopped at its ceiling is stopped,
+        not finished, so a new number in the environment or the config file
+        reaches the very next prompt without restarting anything."""
+        return budget_mod.session_ceiling()
+
+    def _budget_refusal(self, prompt: str) -> "dict[str, Any] | None":
+        """The ``turn_refused`` payload for a turn that must not start, or
+        None when it may.
+
+        Compared against :attr:`total_cost_usd`, which is the sum of every
+        ``ResultMessage.total_cost_usd`` this session has seen -- the only
+        real dollar figure DOXA has, and the reason this class can enforce
+        a ceiling at all while the engines in doxa.codex and doxa.vendors
+        cannot (they report token counts and no dollars, so the same check
+        there would read $0.00 forever and never fire; doxa.budget's
+        :func:`unenforceable_note` is where a user is told so, at the
+        moment they set the number)."""
+        ceiling = self.budget_ceiling()
+        if not budget_mod.exhausted(self.total_cost_usd, ceiling):
+            return None
+        assert ceiling is not None  # exhausted() is False for None
+        # A peer-started turn is recognised the same way _send_turn below
+        # recognises one: by the marker inside the prompt the model reads,
+        # never by a flag carried beside it. The refusal therefore names
+        # the right cause however the prompt reached here -- straight from
+        # _on_peer_frame, or after minutes in the mid-turn queue.
+        peer_started = prompt.startswith(peers_mod.PEER_TURN_INTRO)
+        return {
+            "reason": "budget",
+            "message": budget_mod.refusal_text(
+                self.total_cost_usd, ceiling, peer_started=peer_started
+            ),
+            "spent_usd": self.total_cost_usd,
+            "ceiling_usd": ceiling,
+            "peer_started": peer_started,
+            "peer_origin": _peer_origin_line(prompt) if peer_started else None,
+            "prompt": prompt,
+        }
+
     async def _send_turn(self, prompt: str) -> AsyncIterator[EngineEvent]:
         """One turn: send `prompt`, stream back typed events until the
         ResultMessage. Every transcript-derived string is scrubbed before
@@ -3230,6 +3292,32 @@ class SessionEngine:
         buried in the middle of this one."""
         if not self._connected:
             raise RuntimeError("SessionEngine.start() must run before send()")
+
+        # THE SPEND CEILING, at the choke point every turn crosses.
+        #
+        # Here rather than in send() because this method is the one point
+        # every turn passes through: a typed prompt (send), a prompt that
+        # waited in the mid-turn queue (_run_queued_turn), and a turn an
+        # arriving peer message started (_on_peer_frame -> _run_queued_turn)
+        # all arrive at this line. A check in send() alone would leave the
+        # peer path -- the uncontrolled one, the one nobody is watching --
+        # unbounded, which is the whole reason the ceiling exists.
+        # (_on_peer_frame checks one step EARLIER as well, and its own
+        # comment says what that buys: a refused frame kept rather than
+        # lost. This is the backstop, and the one that cannot be bypassed.)
+        #
+        # Ahead of every side effect this turn would have: no peer title is
+        # set, no pending frames are drained (they stay pending for a turn
+        # that actually runs), nothing is persisted and nothing reaches
+        # self._client. The refusal is the turn's only event.
+        #
+        # BEFORE the turn, never during it: see doxa.budget's docstring for
+        # why mid-turn is not available to us and what that costs (at most
+        # one turn of overshoot).
+        refusal = self._budget_refusal(prompt)
+        if refusal is not None:
+            yield EngineEvent("turn_refused", refusal)
+            return
 
         # First-turn peer title (checked BEFORE num_turns increments, so
         # this is true on exactly one call): replace the cwd-basename
