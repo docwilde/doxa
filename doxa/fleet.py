@@ -651,7 +651,7 @@ class DaemonBackend:
 
     def __init__(self) -> None:
         self._clients: "dict[int, Any]" = {}
-        self._turns: "dict[int, asyncio.Task]" = {}
+        self._drains: "dict[int, asyncio.Task]" = {}
 
     async def spawn(self, slot: Slot, spec: FleetSpec) -> None:
         from .daemon import spawn_daemon
@@ -681,6 +681,10 @@ class DaemonBackend:
         client = EngineClient(slot.socket_path)
         await client.start()
         self._clients[slot.index] = client
+        # One drain per CLIENT, started at arm time and running for the
+        # whole session -- not one per dispatched turn. See _drain for the
+        # measured reason a per-turn drain was wrong.
+        self._drains[slot.index] = asyncio.create_task(_drain(client))
 
     async def dispatch(self, slot: Slot, prompt: str) -> None:
         client = self._clients.get(slot.index)
@@ -688,25 +692,43 @@ class DaemonBackend:
             raise RuntimeError("not armed -- nothing to dispatch to")
         # dispatch() hands the frame over and returns on the ACK, without
         # consuming the turn. Draining the turn's events is a separate,
-        # background job (below) precisely so that the dispatch instant is
-        # the write, not the first event to come back -- which would make
-        # a slow model's session look like a late dispatch.
+        # background job (see arm) precisely so that the dispatch instant
+        # is the write, not the first event to come back -- which would
+        # make a slow model's session look like a late dispatch.
+        #
+        # A queued ack is a SUCCESS, not a failure: a peer message may
+        # already have started a turn in this session (the fleet arms
+        # peer_inbound_turns), in which case the daemon enqueues this
+        # prompt behind it. It still runs, and the quiescence wait below
+        # counts the queue.
         await client.dispatch(prompt)
-        self._turns[slot.index] = asyncio.create_task(_drain(client))
 
     async def is_quiet(self, slot: Slot) -> bool:
+        """Idle means the DAEMON says so -- nothing running and nothing
+        queued.
+
+        MEASURED, at N=32 with the fleet actually messaging each other:
+        the first version of this asked whether the client's own turn-drain
+        task had finished, and the run never quiesced. The reason is worth
+        keeping: when a peer message has already started a turn, the
+        daemon ENQUEUES an arriving prompt rather than running it, and the
+        eventual turn's events then ride the out-of-band stream instead of
+        the dispatching client's own -- so that drain task never completes,
+        and a harness reading it as "still busy" waits out its entire
+        deadline on a session that went idle in four seconds.
+
+        Only the daemon can answer this at all: a turn started by an
+        arriving peer message begins with no client involved. Hence
+        ``running``/``queued`` in its status reply."""
         client = self._clients.get(slot.index)
         if client is None:
             return True
-        task = self._turns.get(slot.index)
-        if task is not None and not task.done():
-            return False
         status = await client.refresh_status()
-        return not bool(status.get("running"))
+        return not bool(status.get("running")) and not int(status.get("queued") or 0)
 
     async def stop(self, slot: Slot) -> None:
         client = self._clients.pop(slot.index, None)
-        task = self._turns.pop(slot.index, None)
+        task = self._drains.pop(slot.index, None)
         if task is not None:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -719,19 +741,34 @@ class DaemonBackend:
 
 
 async def _drain(client: Any) -> None:
-    """Consume one turn's events and throw them away.
+    """Consume this client's events for the whole session, and throw them
+    away.
 
-    Somebody has to: ``EngineClient`` buffers turn events in an UNBOUNDED
-    queue, so a harness that dispatches and never reads would grow that
-    queue for the length of the run, times N. The harness's measurement is
-    the ledger on disk, not the transcript, so the events themselves are
-    genuinely not wanted -- but they still have to be taken off the
-    queue."""
-    with contextlib.suppress(Exception):
+    Somebody has to: ``EngineClient`` buffers events in TWO unbounded
+    queues -- the turn stream and the out-of-band stream -- so a harness
+    that dispatches and never reads grows both for the length of the run,
+    times N. The harness's measurement is the ledger on disk, not the
+    transcript, so the events themselves are genuinely not wanted; they
+    still have to be taken off the queues.
+
+    BOTH queues, and for the whole session rather than for one turn. The
+    out-of-band stream is where a peer-started turn's events arrive, where
+    a queued prompt's eventual turn arrives, and where every peer join and
+    leave arrives -- at N=32 with the fleet messaging, that is the busier
+    of the two by a wide margin."""
+
+    async def _turns() -> None:
         while True:
             event = await client.next_turn_event()
-            if event is None or event.type == "turn_done":
+            if event is None:
                 return
+
+    async def _oob() -> None:
+        async for _event in client.peer_events():
+            pass
+
+    with contextlib.suppress(Exception):
+        await asyncio.gather(_turns(), _oob())
 
 
 def _registry_pid(runtime: Path, session_id: str) -> "int | None":
