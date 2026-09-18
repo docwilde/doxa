@@ -58,6 +58,7 @@ from tests.helpers import (  # noqa: F401 -- reused fixtures/helpers
     _proposals,
     _status_plain,
 )
+from tests.wait_stable import wait_stable
 
 
 async def _select(picker, rid: str) -> None:
@@ -143,7 +144,14 @@ async def test_approving_a_memory_proposal_moves_memory_and_staged_chips(
         await _select(picker, "act:approve!")
         await _wait(pilot, lambda: fake.approved == [pid])
 
-        await _wait(pilot, lambda: "3 proposals" not in _status_plain(app))
+        # wait_stable, not _wait, from here down: doxa/session/chips.py's
+        # _resolve_pending updates every chip in ONE synchronous
+        # _refresh_status() call ("one refresh ... settles all three
+        # correctly"), but the status bar still needs a settled repaint
+        # before either read below can be trusted, and under full-suite
+        # load a first-true poll can land on a frame the compositor has
+        # not actually finished painting yet.
+        await wait_stable(pilot, lambda: "3 proposals" not in _status_plain(app))
         # Anchored on the staged-proposals chip's OWN action, not the bare
         # word "proposal" -- this pane's cwd is `tmp_path` with no git repo,
         # so the bar also carries a `dir <cwd name>` chip (GitLine.
@@ -151,7 +159,7 @@ async def test_approving_a_memory_proposal_moves_memory_and_staged_chips(
         # name, which can (and for a sibling test, does) contain "proposal"
         # with nothing to do with whether the staged chip itself is showing.
         assert "open_pending_picker" not in _chip_actions(app), _status_plain(app)
-        await _wait(pilot, lambda: " p" in _mem_span(app))
+        await wait_stable(pilot, lambda: " p" in _mem_span(app))
         assert "mem u" in _status_plain(app) and " p" in _mem_span(app)
 
 

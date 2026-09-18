@@ -58,6 +58,7 @@ from doxa.ui.labels import (
 )
 
 from fakes import FakeEngine
+from tests.wait_stable import wait_stable
 
 DAY = 86400.0
 
@@ -839,10 +840,20 @@ async def test_the_in_flight_marker_clears_once_the_debounce_settles(
         await pilot.press("u")
         await pilot.press("v")
         assert picker.border_subtitle == "/uv …"
-        for _ in range(100):
-            if picker.border_subtitle == "/uv":
-                break
-            await pilot.pause(0.02)
+
+        def _settled() -> bool:
+            rows = [rid for rid, _l in picker._rows if rid.startswith("belief:")]
+            return picker.border_subtitle == "/uv" and rows == ["belief:2"]
+
+        # wait_stable, not a bare first-true loop: the marker and the row
+        # rebuild are written by the SAME debounce callback
+        # (dialogs.py's _apply_filter -> _render_rows sets ``_rows``
+        # before it clears ``border_subtitle``, in one synchronous call),
+        # but under full-suite load a poll can still land on a frame
+        # where the marker read settles a beat ahead of the rows actually
+        # repainting -- waiting for BOTH together, stably, is what the
+        # two asserts below are entitled to assume.
+        await wait_stable(pilot, _settled, tries=100)
         assert picker.border_subtitle == "/uv", (
             "the marker must clear once the debounced rebuild actually runs"
         )

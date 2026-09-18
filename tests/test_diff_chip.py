@@ -56,6 +56,7 @@ from doxa.ui.labels import (
 )
 from doxa.ui.statusline import StatusBar
 from tests.fakes import FakeEngine
+from tests.wait_stable import wait_stable
 
 
 @pytest.fixture(autouse=True)
@@ -647,11 +648,31 @@ async def test_the_pane_paints_the_wash_at_its_real_width(tmp_path):
         assert await _wait(pilot, lambda: bool(pane._session_id))
         assert await app.toggle_diff_pane() is None
         diff = next(iter(app.query(DiffPane)))
-        assert await _wait(
-            pilot,
-            lambda: diff.region.width > 0
-            and any(s.file_diff.path == "f.py" for s in diff.query(FileSection)),
-        )
+
+        _last_diff_width = {"value": -1}
+
+        def _diff_ready() -> bool:
+            width = diff.size.width
+            settled = width > 0 and width == _last_diff_width["value"]
+            _last_diff_width["value"] = width
+            return settled and any(
+                s.file_diff.path == "f.py" for s in diff.query(FileSection)
+            )
+
+        # diff.size.width is not final the first frame it turns nonzero --
+        # the split/pane geometry takes a few more layout passes to
+        # settle -- and it is captured EXACTLY ONCE below, by
+        # section.build(), to decide unified vs. side-by-side
+        # (doxa.diff.side_by_side_allowed) and to pad every row. Building
+        # against a width that has not yet settled can bake in the WRONG
+        # mode: measured under load, a premature read at or above
+        # SIDE_BY_SIDE_MIN_COLS chose side-by-side, whose rows carry no
+        # "+"/"-" marker at all, permanently -- nothing repaints it again
+        # unless a later resize happens to fire, which nothing in this
+        # test triggers. No amount of waiting afterwards recovers from a
+        # mode baked in wrong at build time. Wait for the SAME width to
+        # read twice running before trusting it.
+        await wait_stable(pilot, _diff_ready)
         section = next(
             s for s in diff.query(FileSection) if s.file_diff.path == "f.py"
         )
@@ -659,10 +680,38 @@ async def test_the_pane_paints_the_wash_at_its_real_width(tmp_path):
         section.build(diff.size.width)
         assert await _wait(pilot, lambda: bool(list(diff.query(HunkView))))
         view = next(iter(diff.query(HunkView)))
-        assert await _wait(pilot, lambda: view._body.size.width > 0)
-        body = view._body.renderable
-        rows = [r for r in body.plain.splitlines() if r.strip()]
-        changed = [r for r in rows if r[8:9] in "+-"]
-        assert changed, rows
+
+        def _changed_rows() -> "list[str]":
+            # ``_body`` (a bare ``Static``) starts life holding the
+            # literal "" its constructor passed, which HunkView.paint
+            # (called from on_mount, per its own comment) has not
+            # necessarily replaced yet the moment a HunkView first shows
+            # up in ``diff.query`` -- mount registers a widget in the
+            # tree synchronously, but Mount-event dispatch (on_mount, and
+            # so the actual paint) is a pump cycle later. A plain ``str``
+            # has no ``.plain``, so that pre-paint moment is read as "no
+            # rows yet" instead of raising.
+            body = view._body.renderable
+            text = body if isinstance(body, str) else body.plain
+            rows = [r for r in text.splitlines() if r.strip()]
+            return [r for r in rows if r[8:9] in "+-"]
+
+        def _settled() -> bool:
+            rows = _changed_rows()
+            return bool(rows) and all(
+                len(r) == view._body.size.width for r in rows
+            )
+
+        # size.width > 0 alone is not enough: Textual can report a
+        # provisional width mid-layout, one frame before the container
+        # settles to its real one -- and the row text was already padded
+        # to whatever width HunkView.paint captured when build() (above)
+        # called it, not to whatever view._body.size.width happens to
+        # read on the first poll that finds it nonzero. Wait for the
+        # padding and the measured width to actually AGREE, and keep
+        # agreeing, before trusting either.
+        await wait_stable(pilot, _settled)
+        changed = _changed_rows()
+        assert changed, changed
         for row in changed:
             assert len(row) == view._body.size.width, (len(row), row)
