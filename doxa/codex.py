@@ -391,6 +391,12 @@ class CodexEngine:
     #: What this handle says about itself (doxa.engines.capabilities_of).
     engine_capabilities = CODEX_CAPABILITIES
 
+    #: Which engine this handle is (doxa.engines.engine_id_of). The same
+    #: id the registry keys on, taken from that module rather than spelled
+    #: again here -- a handle that named a different string than its own
+    #: provider would send the model picker to the wrong catalogue.
+    engine_id = CODEX_ENGINE_ID
+
     #: The attach chip's predicate. False, and truthfully: no daemon
     #: hosts a Codex session, so there is nothing to detach from.
     detachable = False

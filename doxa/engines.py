@@ -157,6 +157,23 @@ class EngineCapabilities:
     lore_pickers: bool = False
 
     @classmethod
+    def field_names(cls) -> "tuple[str, ...]":
+        """Every capability this dataclass declares, in declaration order.
+
+        Derived from ``__dataclass_fields__`` rather than listed, which is
+        the whole point: a surface that renders THIS renders a field added
+        above without a second edit, and cannot describe a capability the
+        dataclass does not have."""
+        return tuple(cls.__dataclass_fields__)
+
+    @classmethod
+    def field_count(cls) -> int:
+        """How many capabilities there are to have -- the denominator every
+        surface showing "N of M" reads, so none of them carries a literal
+        that goes stale the next time a field is added."""
+        return len(cls.__dataclass_fields__)
+
+    @classmethod
     def claude(cls) -> "EngineCapabilities":
         """Everything, because SessionEngine is where every one of these
         surfaces was built. Written as an explicit all-True rather than a
@@ -168,6 +185,22 @@ class EngineCapabilities:
             live_model_switch=True, resume=True, detachable=True,
             peer_messaging=True, spawn_sessions=True, lore_pickers=True,
         )
+
+    def enabled(self) -> "tuple[str, ...]":
+        """The fields that are True, in declaration order.
+
+        The instrument the engine picker renders instead of prose. Prose
+        about what an engine can do is a second copy of this dataclass
+        written in English, and the two drift the moment a field is added
+        or a measurement is corrected -- which is exactly what the ``note``
+        on the settings ``engine`` row used to be."""
+        return tuple(n for n in self.field_names() if getattr(self, n))
+
+    def missing(self) -> "tuple[str, ...]":
+        """The fields that are False -- the half a picker must show, since
+        two engines that differ only in what they CANNOT do look identical
+        when only the positives are listed."""
+        return tuple(n for n in self.field_names() if not getattr(self, n))
 
     def without(self, **flags: bool) -> "EngineCapabilities":
         """A copy with some flags overridden -- used by a provider that is
@@ -200,6 +233,24 @@ def capabilities_of(engine: Any) -> EngineCapabilities:
     silence into a confident answer."""
     declared = getattr(engine, "engine_capabilities", None)
     return declared if isinstance(declared, EngineCapabilities) else DEFAULT_CAPABILITIES
+
+
+def engine_id_of(engine: Any) -> str:
+    """Which engine a live handle IS, by its own declaration.
+
+    The sibling of :func:`capabilities_of` and the same duck-typed,
+    strictly-additive convention: an optional ``engine_id`` attribute,
+    absent meaning :data:`DEFAULT_ENGINE_ID`. Every handle that predates
+    this function is a Claude session -- ``SessionEngine``, and
+    ``EngineClient``, which fronts a daemon that builds a ``SessionEngine``
+    specifically (``doxa.daemon``'s argv carries no ``--engine``) -- so the
+    absent case is a fact about those two, not a guess.
+
+    Used for the CATALOG question (:func:`doxa.providers.model_provider`),
+    never for capabilities: what a handle can do it declares itself, and
+    reading it off an id would let a registry entry overrule the handle."""
+    declared = str(getattr(engine, "engine_id", "") or "").strip().lower()
+    return declared or DEFAULT_ENGINE_ID
 
 
 @runtime_checkable
