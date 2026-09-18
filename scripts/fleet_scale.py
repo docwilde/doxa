@@ -48,6 +48,14 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+# A stub session must not run the LORE deriver on finalize. That review
+# shells out to a headless `claude -p`, which costs real tokens and takes
+# tens of seconds -- measured at N=4: 45 s of wall clock for a run whose
+# turns were one second each. A scale probe may not spend money to learn
+# how many sockets fit. (A REAL fleet run does run it, for the agents whose
+# memory is on; this line is about the probe, not the harness.)
+os.environ.setdefault("LORE_DISABLE_REVIEW", "1")
+
 from doxa import fleet as fleet_mod  # noqa: E402
 
 

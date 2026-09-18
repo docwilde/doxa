@@ -1116,6 +1116,21 @@ class FleetRun:
         # is still there is a leak too. Asked separately because "the stop
         # call returned" and "the process is gone" are different claims and
         # only the second one is the property.
+        #
+        # With a GRACE WINDOW first, measured rather than assumed: a daemon
+        # acknowledges `stop` and then runs its own finalize (the LORE
+        # review, the worktree decision, the SDK client's __aexit__) before
+        # exiting, so a liveness check taken in the same tick as the reply
+        # calls every clean shutdown a leak. Observed at N=4: all four.
+        # Waiting is not weakening the assertion -- what is asserted is
+        # still that nothing survives, only now measured after the exit has
+        # had the time a normal exit takes.
+        deadline = time.monotonic() + max(self.spec.kill_grace_s, 1.0)
+        pending = [s for s in self.slots if s.pid and s.phase == PHASE_STOPPED]
+        while pending and time.monotonic() < deadline:
+            pending = [s for s in pending if peers_mod._pid_alive(int(s.pid))]
+            if pending:
+                await asyncio.sleep(0.1)
         leaked: "list[int]" = []
         for slot in self.slots:
             if slot.pid and peers_mod._pid_alive(int(slot.pid)):
