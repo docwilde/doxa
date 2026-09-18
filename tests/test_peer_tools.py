@@ -141,7 +141,12 @@ def test_peer_send_is_absent_again_when_its_switch_is_off(monkeypatch):
     split alone does not protect anything in production -- this predicate
     does. Off is the default, and off means not OFFERED, not refused: a
     tool the model cannot see is a tool the model cannot call."""
-    ctx = {"belief_store": object(), "lore_root": "/tmp/lore"}
+    ctx = {
+        "belief_store": object(), "lore_root": "/tmp/lore",
+        # The seam a real SessionEngine names. See the seam test below for
+        # why its absence is also disqualifying.
+        "peer_send": lambda request: {},
+    }
 
     monkeypatch.setenv("DOXA_AGENT_PEER_SEND", "")
     off = {t.name for t in ops.to_sdk_tools(
@@ -156,6 +161,27 @@ def test_peer_send_is_absent_again_when_its_switch_is_off(monkeypatch):
     on = {t.name for t in ops.to_sdk_tools(
         lambda n, a: {}, include_write=True, ctx=ctx)}
     assert "peer_send" in on, "the switch must actually arm it, or it is dead code"
+
+
+def test_an_engine_with_no_outbound_path_is_not_offered_the_send_tool(monkeypatch):
+    """The setting alone is not enough, and the case is real rather than
+    hypothetical: doxa.vendors' engine (DeepSeek, GLM) hosts a PeerHost
+    and RECEIVES peer messages, but has no outbound path and names no
+    peer_send seam. With the switch on it would otherwise be offered a
+    tool whose only possible answer is "this session has no outbound peer
+    channel" -- a soft, safe refusal, and still exactly the defect the
+    configuredness filter exists to prevent."""
+    monkeypatch.setenv("DOXA_AGENT_PEER_SEND", "1")
+    no_seam = {"belief_store": object(), "lore_root": "/tmp/lore"}
+
+    names = {t.name for t in ops.to_sdk_tools(
+        lambda n, a: {}, include_write=True, ctx=no_seam)}
+
+    assert "peer_send" not in names
+    assert "peer_list" in names, (
+        "discovery needs no seam -- it reads two files this process can "
+        "open -- so an engine that cannot send keeps it"
+    )
 
 
 @pytest.mark.parametrize("value", ["0", "false", "no", "off", "  "])
@@ -710,6 +736,34 @@ def test_a_modem_light_goes_dark_on_its_own():
     assert "3 messages" in stale.hints[0][1], (
         "the count survives the decay -- the light says 'traffic', the "
         "tooltip says how much"
+    )
+
+
+def test_both_lights_are_actually_wired_to_traffic():
+    """A source check, for the same reason ``test_import_cost``'s bare-name
+    check is one: the alternative is a test that drives a real pane's
+    out-of-band pump, which either patches the wiring it is meant to be
+    proving or mounts a whole app to assert on two characters.
+
+    What it catches is the failure that would otherwise be invisible --
+    somebody restructures ``_peer_pump`` and one lamp silently stops
+    lighting. The peer tools work fine with a dead lamp, so nothing else
+    in this suite would notice, and a light that only works in one
+    direction is worse than none: it teaches you to trust it."""
+    from pathlib import Path
+
+    from doxa.session import runtime as runtime_mod
+
+    source = Path(runtime_mod.__file__).read_text(encoding="utf-8")
+    assert '_note_peer_traffic("rx")' in source, (
+        "nothing lights the receive lamp when a peer message arrives"
+    )
+    assert '_note_peer_traffic("tx")' in source, (
+        "nothing lights the send lamp on the engine's peer_sent event"
+    )
+    assert 'ev.type == "peer_sent"' in source, (
+        "the out-of-band pump does not handle peer_sent at all, so a send "
+        "made by the model or by a broadcast is invisible on the status bar"
     )
 
 

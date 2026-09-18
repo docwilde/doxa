@@ -2347,7 +2347,17 @@ class SessionEngine:
             self.tool_gate.execute,
             allowed=self.tool_gate.allowed,
             include_write=True,
-            ctx={"belief_store": lore_store.db_connect, "lore_root": str(lore_core.ROOT)},
+            ctx={
+                "belief_store": lore_store.db_connect,
+                "lore_root": str(lore_core.ROOT),
+                # Named here for the same reason the other two are: the
+                # ctx lists the seams THIS engine wired, and peer_send's
+                # predicate requires both the user's setting and a real
+                # outbound path. doxa.vendors' engine passes no such key
+                # and is therefore never offered the tool, which is
+                # honest rather than restrictive -- it has no way to send.
+                "peer_send": self._tool_peer_send,
+            },
             # The SIBLING registry (doxa.session_ops), composed onto the
             # SAME MCP server rather than a second one -- see
             # to_sdk_tools' own docstring for why two servers would fork
@@ -2970,11 +2980,16 @@ class SessionEngine:
         supported way to keep the two turns' events apart. ``interrupt()``
         is the SDK's only mid-turn control primitive, and it ABORTS the
         current turn rather than steering it. This is also why
-        :meth:`_on_peer_frame` above already holds a peer message for the
-        NEXT turn instead of injecting it mid-flight ("a peer message
-        never interrupts a running turn and never starts one"). Queueing
-        is therefore the fallback the design permits, and it is what
-        actually runs here.
+        :meth:`_on_peer_frame` above never injects a peer message
+        mid-flight: with inbound turn-starting armed it either starts a
+        turn of its own or joins THIS queue behind the running one, and
+        with it off it waits for the next turn, but in no case does it
+        reach a turn that is already in progress. (That method used to
+        say "a peer message never interrupts a running turn and never
+        starts one". The first half is still enforced, by the evidence
+        above. The second half is a setting now -- see its own
+        docstring.) Queueing is therefore the fallback the design
+        permits, and it is what actually runs here.
 
         No ``await`` runs between the busy check and either branch's
         commit below -- the same discipline

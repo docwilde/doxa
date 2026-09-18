@@ -856,19 +856,33 @@ _PEER_HISTORY = Operator(
 
 
 def _peer_send_configured(ctx: "dict | None") -> bool:
-    """``is_configured`` for peer_send: the setting, and only the setting.
+    """``is_configured`` for peer_send: the setting AND an engine that can
+    actually send. Both, not either.
 
     ``ctx=None`` still means "don't gate on configuredness" for
     schema-introspection callers, exactly as every other predicate here
-    does. Otherwise this ignores ctx's CONTENTS entirely -- what arms
-    sending is the user's own config file or environment, never a seam the
-    engine happened to wire. Same shape as
-    ``session_ops._spawn_configured``, and for the same reason: with the
-    setting off the tool is not refused, it is not OFFERED, and a tool the
-    model cannot see is a tool the model cannot call."""
+    does.
+
+    The setting half is what ``session_ops._spawn_configured`` does and
+    for the same reason -- with it off the tool is not refused, it is not
+    OFFERED, and a tool the model cannot see is a tool the model cannot
+    call.
+
+    The SEAM half was added because the setting alone is not enough, and
+    the case is real rather than hypothetical: ``doxa.vendors``'
+    :class:`VendorEngine` (DeepSeek, GLM) runs a full peer layer -- it
+    hosts a ``PeerHost``, receives frames, publishes presence -- but has
+    no outbound path and wires no ``peer_send`` seam. With the setting on,
+    a DeepSeek session would have been offered a tool that could only ever
+    answer "this session has no outbound peer channel". That is a soft,
+    safe refusal, and it is still exactly the defect the configuredness
+    filter exists to prevent: an operator whose backend is not wired on
+    this host is never offered, because a tool the model can see but never
+    successfully call just burns a step. The vendor engine now says so by
+    omission instead."""
     if ctx is None:
         return True
-    return peers_mod.peer_send_enabled()
+    return peers_mod.peer_send_enabled() and bool(ctx.get("peer_send"))
 
 
 def _peer_send(
