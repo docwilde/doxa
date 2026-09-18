@@ -370,7 +370,11 @@ class EngineClient:
         elif ev.type in ("peer_joined", "peer_left"):
             asyncio.ensure_future(self._refresh_status_quietly())
         if frame.get("turn") and frame["turn"] == self._active_turn:
-            if ev.type == "turn_done":
+            # Both terminal event types release the turn slot -- see send()
+            # below. A refused turn that left _active_turn set would keep
+            # routing the NEXT turn's events into a queue with nobody
+            # reading it.
+            if ev.type in ("turn_done", "turn_refused"):
                 self._active_turn = None
             self._turn_queue.put_nowait(ev)
         else:
@@ -401,7 +405,15 @@ class EngineClient:
         while True:
             ev = await self._turn_queue.get()
             yield ev
-            if ev.type == "turn_done":
+            # turn_done is how a turn that RAN ends; turn_refused is how
+            # one that was never allowed to start ends (doxa.budget -- the
+            # spend ceiling). Both are terminal for this iterator and both
+            # must be, because the loop's exit condition is the only thing
+            # standing between "the daemon refused before spending
+            # anything" and a pane waiting for a turn_done that is never
+            # coming -- the silent stall the ceiling is specifically not
+            # allowed to cause.
+            if ev.type in ("turn_done", "turn_refused"):
                 break
         await self._refresh_status_quietly()
 
