@@ -288,7 +288,12 @@ and stops there; it does not attempt it.
   local-only (`/usage`/`/context`) — see "Live telemetry, revisited" for
   why tokens burned is no longer in this bullet.
 - **No model-callable read of any of this.** The roster stays
-  human/TUI-facing, same as `/peers` today.
+  human/TUI-facing, same as `/peers` today. **Superseded:** `peer_list`
+  now returns these fields to the model, and this document's own rule is
+  what governs how — the result is stamped with `PEER_UNTRUSTED_INTRO`
+  verbatim, exactly as "A peer's self-description is untrusted" above
+  says it must be if it ever reaches the model. The advisory-never-
+  authoritative rule is unchanged and now has a wider audience.
 
 ## Live telemetry, revisited (v0.79.0)
 

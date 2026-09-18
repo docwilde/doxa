@@ -88,11 +88,15 @@ spend, fake account numbers. See
 - **[Pictures, or a straight answer why not.](docs/manual.md#images)**
   kitty graphics → sixel → half-block → text, settled by one probe.
 - **[Sessions talk to each other.](docs/manual.md#search-resume-and-peers)**
-  Same-repo sessions find each other and exchange `/msg` — always
-  human-sent; the model has no send tool. Each publishes what it is —
-  provider, model, engine, tokens spent — and none of it is believed: a
-  peer's self-description is displayed, never verified, and never decides
-  anything.
+  Same-repo sessions find each other and exchange `/msg`. The model can be
+  given a send tool too — off by default, because a model that can message
+  another session can reach a context you did not open it in. Turned on,
+  nothing about it is quiet: every message is rate limited by how many
+  sessions it reaches, appended with its full body to a ledger, and
+  flashed on the status bar in both directions. Each session publishes
+  what it is — provider, model, engine, tokens spent — and none of it is
+  believed: a peer's self-description is displayed, never verified, and
+  never decides anything.
 - **[An isolated CLI config.](docs/manual.md#the-spawned-cli)** Spawned
   `claude` processes use a config directory DOXA owns, not your
   `~/.claude`; your plugins load only if you opt in.
