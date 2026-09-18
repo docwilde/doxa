@@ -110,6 +110,7 @@ from .engines import (
     CODEX_ENGINE_ID,
     DEEPSEEK_ENGINE_ID,
     GLM_ENGINE_ID,
+    engine_id_of,
 )
 
 if TYPE_CHECKING:  # the spec is a doxa.vendors type, and importing that
@@ -128,8 +129,8 @@ if TYPE_CHECKING:  # the spec is a doxa.vendors type, and importing that
 FALLBACK_MODEL_ALIASES: tuple[str, ...] = ("haiku", "sonnet", "opus", "fable")
 
 
-# The short provider id for the one provider DOXA drives. ONE string, three
-# readers: ``ClaudeProvider.provider_id()`` returns it,
+# The short provider id for the provider DOXA was built on. ONE string,
+# three readers: ``ClaudeProvider.provider_id()`` returns it,
 # ``doxa.ui.labels.PROVIDER_GLYPHS`` keys on it, and
 # ``doxa.engine.SessionEngine`` publishes it as ``PeerInfo.provider`` at
 # connect (docs/plans/peer-publishing.md). Defined HERE, in the module that
@@ -228,9 +229,10 @@ class ModelProvider(Protocol):
 
 
 class ClaudeProvider:
-    """The only provider DOXA drives today -- see
-    doxa.ui.labels.PROVIDER_GLYPHS' own one-row comment for the parallel
-    note on the tab-label side."""
+    """The provider DOXA was built on, and the one whose catalogue is
+    hardest to get at -- see the module docstring's tier 1 for the
+    empirical finding, and doxa.ui.labels.PROVIDER_GLYPHS' own one-row
+    comment for the parallel note on the tab-label side."""
 
     def __init__(self) -> None:
         self._cache: "list[ModelInfo] | None" = None
@@ -491,6 +493,4 @@ def provider_for(engine: Any) -> "ModelProvider | None":
     The composition of :func:`doxa.engines.engine_id_of` and
     :func:`model_provider`, so a call site holding a handle never has to
     spell the duck-typed attribute itself."""
-    from .engines import engine_id_of
-
     return model_provider(engine_id_of(engine))
