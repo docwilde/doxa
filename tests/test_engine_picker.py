@@ -217,6 +217,14 @@ def test_a_handle_that_declares_nothing_is_read_as_claude():
     assert providers_mod.provider_for(FakeEngine([])).provider_id() == "claude"
 
 
+def test_a_provider_passed_where_a_handle_belongs_is_not_read_as_an_id():
+    """``EngineProvider`` names its engine with a METHOD of the same name,
+    so a provider handed to ``engine_id_of`` would otherwise stringify a
+    bound method into an id nothing can match, and the failure would
+    surface three frames away in the picker."""
+    assert engines_mod.engine_id_of(engines_mod.get("codex")) == "claude"
+
+
 def test_a_vendor_handle_declares_which_vendor_it_is():
     """One ChatApiEngine class serves both vendors, so a handle that read
     its id off the class would send GLM sessions to DeepSeek's catalogue."""

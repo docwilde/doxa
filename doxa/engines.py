@@ -248,9 +248,16 @@ def engine_id_of(engine: Any) -> str:
 
     Used for the CATALOG question (:func:`doxa.providers.model_provider`),
     never for capabilities: what a handle can do it declares itself, and
-    reading it off an id would let a registry entry overrule the handle."""
-    declared = str(getattr(engine, "engine_id", "") or "").strip().lower()
-    return declared or DEFAULT_ENGINE_ID
+    reading it off an id would let a registry entry overrule the handle.
+
+    The ``isinstance`` check is the same one :func:`capabilities_of` makes,
+    and it earns its keep here: ``EngineProvider`` names its engine with a
+    METHOD of this exact name, so a provider passed in by mistake would
+    otherwise stringify a bound method into an "engine id" nothing could
+    ever match, and the failure would surface three frames away."""
+    declared = getattr(engine, "engine_id", None)
+    value = declared.strip().lower() if isinstance(declared, str) else ""
+    return value or DEFAULT_ENGINE_ID
 
 
 @runtime_checkable
