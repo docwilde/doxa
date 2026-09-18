@@ -29,8 +29,11 @@ nobody runs.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import os
+import shutil
+import tempfile
 
 import pytest
 
@@ -47,17 +50,35 @@ POOL = (
 PROMPT = "Rename every occurrence of `foo` to `bar`. The suite is the oracle."
 
 
-def _spec(tmp_path, **kw):
-    """A spec whose run root is SHORT.
+_RUN_IDS = itertools.count()
 
-    ``tmp_path`` under pytest is long, and a fleet run puts a Unix socket
-    beneath it -- see :func:`doxa.fleet.check_socket_budget`. Tests that are
-    not about that budget use ``os.environ["TMPDIR"]``-free short paths, so
-    a path-length failure never masquerades as an orchestration failure."""
+
+@pytest.fixture
+def short_root():
+    """A run root SHORT enough for a Unix socket to live under it.
+
+    ``tmp_path`` under pytest is ~60 characters before a run id is appended,
+    and a fleet run puts an AF_UNIX socket beneath that -- see
+    :func:`doxa.fleet.check_socket_budget`, and
+    ``test_a_run_root_too_deep_for_a_unix_socket_is_refused_up_front``,
+    which is the test that owns that failure. Every OTHER test needs a path
+    that does not trip it, or a path-length refusal would masquerade as an
+    orchestration failure. This is also exactly the workaround an operator
+    has to apply on a real machine, so the suite runs the documented shape
+    rather than a special one."""
+    root = tempfile.mkdtemp(prefix="dxf", dir="/tmp")
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _spec(short_root, **kw):
     kw.setdefault("prompt", PROMPT)
-    kw.setdefault("cwd", str(tmp_path))
+    kw.setdefault("cwd", short_root)
     kw.setdefault("pool", POOL)
-    kw.setdefault("root", tmp_path / "f")
+    kw.setdefault("root", short_root)
+    kw.setdefault("run_id", f"r{next(_RUN_IDS)}")
     kw.setdefault("n", 6)
     kw.setdefault("seed", 1234)
     # Nothing here waits on a real model, so the deadlines are short; a
@@ -150,7 +171,7 @@ def _no_real_pids(monkeypatch):
 # =======================================================================
 
 
-async def test_no_session_is_prompted_before_every_session_is_armed(tmp_path):
+async def test_no_session_is_prompted_before_every_session_is_armed(short_root):
     """The failure this catches: a harness that spawns-and-prompts in a
     loop, so session 0 is working while session 31 does not yet exist.
 
@@ -160,7 +181,7 @@ async def test_no_session_is_prompted_before_every_session_is_armed(tmp_path):
     than emergence. The assertion is structural rather than temporal: in
     the whole event log, no `dispatch` may precede any `arm`."""
     backend = FakeBackend(arm_delay=0.005)
-    run = fleet_mod.FleetRun(_spec(tmp_path), backend, force=True)
+    run = fleet_mod.FleetRun(_spec(short_root), backend, force=True)
     run.prepare()
     await run.spawn_all()
     await run.arm_all()
@@ -175,12 +196,12 @@ async def test_no_session_is_prompted_before_every_session_is_armed(tmp_path):
     assert len(backend.prompts) == 6
 
 
-async def test_every_session_receives_the_byte_identical_prompt(tmp_path):
+async def test_every_session_receives_the_byte_identical_prompt(short_root):
     """The failure this catches: per-session prompt formatting -- "you are
     agent 7 of 32" -- which hands a participant its own position, and a
     position is the privilege the design refuses to grant."""
     backend = FakeBackend()
-    run = fleet_mod.FleetRun(_spec(tmp_path), backend, force=True)
+    run = fleet_mod.FleetRun(_spec(short_root), backend, force=True)
     run.prepare()
     await run.spawn_all()
     await run.arm_all()
@@ -190,7 +211,7 @@ async def test_every_session_receives_the_byte_identical_prompt(tmp_path):
     assert set(backend.prompts.values()) == {PROMPT}
 
 
-async def test_dispatch_order_is_drawn_from_the_seed_not_the_slot_index(tmp_path):
+async def test_dispatch_order_is_drawn_from_the_seed_not_the_slot_index(short_root):
     """The failure this catches: slot 0 going first in every run, so "who
     spoke first" is a constant correlated with the slot index the model
     assignment is recorded against -- an ordering advantage that survives
@@ -201,7 +222,7 @@ async def test_dispatch_order_is_drawn_from_the_seed_not_the_slot_index(tmp_path
     orders = []
     for seed in (1, 2, 3, 4):
         backend = FakeBackend()
-        run = fleet_mod.FleetRun(_spec(tmp_path, seed=seed, n=8), backend, force=True)
+        run = fleet_mod.FleetRun(_spec(short_root, seed=seed, n=8), backend, force=True)
         run.prepare()
         await run.spawn_all()
         await run.arm_all()
@@ -215,12 +236,12 @@ async def test_dispatch_order_is_drawn_from_the_seed_not_the_slot_index(tmp_path
     )
 
 
-async def test_the_dispatch_spread_is_measured_and_recorded(tmp_path):
+async def test_the_dispatch_spread_is_measured_and_recorded(short_root):
     """A paper may claim "simultaneous" only if the harness can say how
     simultaneous. The manifest records the observed width of the dispatch
     window rather than asserting the ideal."""
     backend = FakeBackend()
-    run = fleet_mod.FleetRun(_spec(tmp_path), backend, force=True)
+    run = fleet_mod.FleetRun(_spec(short_root), backend, force=True)
     run.prepare()
     await run.spawn_all()
     await run.arm_all()
@@ -236,7 +257,7 @@ async def test_the_dispatch_spread_is_measured_and_recorded(tmp_path):
 # =======================================================================
 
 
-async def test_a_hung_session_does_not_hang_the_run(tmp_path):
+async def test_a_hung_session_does_not_hang_the_run(short_root):
     """The failure this catches: one session whose status call never
     returns, holding the quiescence wait open until somebody notices --
     which, on an unattended 20-run sweep, is the next morning.
@@ -244,7 +265,7 @@ async def test_a_hung_session_does_not_hang_the_run(tmp_path):
     The hung slot is marked, dropped from the wait, and the run finishes.
     The other five still reach quiet."""
     backend = FakeBackend(hang_quiet={2})
-    spec = _spec(tmp_path, quiescence_timeout_s=5.0)
+    spec = _spec(short_root, quiescence_timeout_s=5.0)
     run = fleet_mod.FleetRun(spec, backend, force=True)
     run.prepare()
     await run.spawn_all()
@@ -262,7 +283,7 @@ async def test_a_hung_session_does_not_hang_the_run(tmp_path):
     ]
 
 
-async def test_a_run_that_never_goes_quiet_still_ends_at_its_deadline(tmp_path):
+async def test_a_run_that_never_goes_quiet_still_ends_at_its_deadline(short_root):
     """The other half: every session busy forever. The deadline is the only
     thing that ends this, so the deadline has to end it."""
 
@@ -271,7 +292,7 @@ async def test_a_run_that_never_goes_quiet_still_ends_at_its_deadline(tmp_path):
             return False
 
     backend = NeverQuiet()
-    spec = _spec(tmp_path, quiescence_timeout_s=0.3)
+    spec = _spec(short_root, quiescence_timeout_s=0.3)
     run = fleet_mod.FleetRun(spec, backend, force=True)
     run.prepare()
     await run.spawn_all()
@@ -285,7 +306,7 @@ async def test_a_run_that_never_goes_quiet_still_ends_at_its_deadline(tmp_path):
     assert all("quiescence deadline" in (s.error or "") for s in run.slots)
 
 
-async def test_teardown_leaves_nothing_running(tmp_path):
+async def test_teardown_leaves_nothing_running(short_root):
     """The failure this catches: ~600 MB per wedged daemon, times the ones
     that ignored `stop`, accumulating across a sweep until the machine is
     unusable between runs.
@@ -293,7 +314,7 @@ async def test_teardown_leaves_nothing_running(tmp_path):
     A session that will not stop is SIGTERMed and then SIGKILLed, and the
     run says so."""
     backend = FakeBackend(hang_stop={1, 4})
-    run = fleet_mod.FleetRun(_spec(tmp_path), backend, force=True)
+    run = fleet_mod.FleetRun(_spec(short_root), backend, force=True)
     run.prepare()
     await run.spawn_all()
     await run.arm_all()
@@ -308,12 +329,12 @@ async def test_teardown_leaves_nothing_running(tmp_path):
     assert sorted(i for k, i in backend.log if k == "kill") == [1, 4]
 
 
-async def test_a_session_that_survives_the_kill_is_reported_not_swallowed(tmp_path):
+async def test_a_session_that_survives_the_kill_is_reported_not_swallowed(short_root):
     """"Teardown leaves nothing running" is a claim, so the harness has to
     be able to say when it is false. A silent leak is worse than a loud
     one: the next run inherits the memory and nobody knows why it swapped."""
     backend = FakeBackend(hang_stop={3}, unkillable={3})
-    run = fleet_mod.FleetRun(_spec(tmp_path), backend, force=True)
+    run = fleet_mod.FleetRun(_spec(short_root), backend, force=True)
     run.prepare()
     await run.spawn_all()
     await run.arm_all()
@@ -324,12 +345,12 @@ async def test_a_session_that_survives_the_kill_is_reported_not_swallowed(tmp_pa
     assert run.slots[3].error
 
 
-async def test_a_session_that_fails_to_spawn_does_not_abort_the_run(tmp_path):
+async def test_a_session_that_fails_to_spawn_does_not_abort_the_run(short_root):
     """One daemon failing to come up is data about the run. Aborting on it
     produces no ledger at all, which is strictly worse than a ledger with a
     hole the manifest names."""
     backend = FakeBackend(fail_spawn={0, 5})
-    run = fleet_mod.FleetRun(_spec(tmp_path), backend, force=True)
+    run = fleet_mod.FleetRun(_spec(short_root), backend, force=True)
     run.prepare()
     await run.spawn_all()
     await run.arm_all()
@@ -341,7 +362,7 @@ async def test_a_session_that_fails_to_spawn_does_not_abort_the_run(tmp_path):
     assert run.report.to_obj()["slots"][0]["error"]
 
 
-async def test_the_whole_run_tears_down_even_when_a_phase_raises(tmp_path):
+async def test_the_whole_run_tears_down_even_when_a_phase_raises(short_root):
     """The `finally` is the contract. A harness that can leave thirty-two
     daemons behind on an exception costs someone an afternoon the first
     time it throws."""
@@ -351,7 +372,7 @@ async def test_the_whole_run_tears_down_even_when_a_phase_raises(tmp_path):
             raise MemoryError("boom")
 
     backend = ExplodingDispatch()
-    run = fleet_mod.FleetRun(_spec(tmp_path), backend, force=True)
+    run = fleet_mod.FleetRun(_spec(short_root), backend, force=True)
 
     report = await asyncio.wait_for(run.run(), timeout=10.0)
 
@@ -365,7 +386,7 @@ async def test_the_whole_run_tears_down_even_when_a_phase_raises(tmp_path):
 # =======================================================================
 
 
-async def test_each_runs_ledger_contains_only_its_own_run(tmp_path):
+async def test_each_runs_ledger_contains_only_its_own_run(short_root):
     """The failure this catches: one shared ledger filtered by time, which
     is correct until two runs overlap and then silently attributes one
     run's messages to the other.
@@ -375,7 +396,7 @@ async def test_each_runs_ledger_contains_only_its_own_run(tmp_path):
     reports = []
     for tag in ("alpha", "beta"):
         backend = FakeBackend()
-        spec = _spec(tmp_path, run_id=tag)
+        spec = _spec(short_root, run_id=tag)
         run = fleet_mod.FleetRun(spec, backend, force=True)
         run.prepare()
         await run.spawn_all()
@@ -399,13 +420,13 @@ async def test_each_runs_ledger_contains_only_its_own_run(tmp_path):
     assert reports[0][2].ledger_path != reports[1][2].ledger_path
 
 
-async def test_a_run_gives_every_session_its_own_home_and_runtime(tmp_path):
+async def test_a_run_gives_every_session_its_own_home_and_runtime(short_root):
     """The env a session is spawned with is where per-run isolation is
     actually delivered. If this regresses, the ledger silently becomes the
     machine's ledger and the registry silently becomes the machine's
     registry -- N stops being the N that was dealt."""
     backend = FakeBackend()
-    spec = _spec(tmp_path, run_id="iso")
+    spec = _spec(short_root, run_id="iso")
     run = fleet_mod.FleetRun(spec, backend, force=True)
     run.prepare()
     await run.spawn_all()
@@ -456,11 +477,11 @@ def test_a_weighted_pool_favours_the_cheap_vendor_without_excluding_the_dear_one
     assert counts["claude:opus"] > 0, "a low weight must not be an exclusion"
 
 
-async def test_the_manifest_records_the_assignment_and_the_prompt(tmp_path):
+async def test_the_manifest_records_the_assignment_and_the_prompt(short_root):
     """"Slot 7 coordinated" is uninterpretable without the manifest saying
     what slot 7 was running and what everybody was asked to do."""
     backend = FakeBackend()
-    spec = _spec(tmp_path, run_id="rec")
+    spec = _spec(short_root, run_id="rec")
     run = fleet_mod.FleetRun(spec, backend, force=True)
 
     await asyncio.wait_for(run.run(), timeout=10.0)
@@ -524,12 +545,12 @@ def test_memory_off_for_nobody_leaves_the_model_draw_untouched():
 
 
 async def test_a_memory_off_agent_is_spawned_with_lore_off_and_its_neighbour_is_not(
-    tmp_path,
+    short_root,
 ):
     """The assignment has to reach the process. This is the seam where a
     per-agent variable would quietly become a no-op."""
     backend = FakeBackend()
-    spec = _spec(tmp_path, n=8, memory=fleet_mod.MemoryPolicy(off_count=3))
+    spec = _spec(short_root, n=8, memory=fleet_mod.MemoryPolicy(off_count=3))
     run = fleet_mod.FleetRun(spec, backend, force=True)
     run.prepare()
     await run.spawn_all()
@@ -573,9 +594,18 @@ def test_a_refusal_can_be_overridden_only_on_purpose():
     assert "N=32" in note
 
 
-def test_capacity_does_not_invent_a_number_when_it_cannot_measure_one():
-    note = fleet_mod.capacity_note(8, available_mb=None)
+def test_capacity_does_not_invent_a_number_when_it_cannot_measure_one(monkeypatch):
+    """A machine whose memory cannot be read gets an honest "unknown",
+    never a plausible number -- the same rule doxa.ui.labels applies to an
+    unmeasured context limit. And an unknown does not become a refusal:
+    refusing every run on a platform without /proc would be inventing a
+    number in the other direction."""
+    monkeypatch.setattr(fleet_mod, "available_memory_mb", lambda: None)
+    note = fleet_mod.capacity_note(8)
     assert "could not be measured" in note
+    assert fleet_mod.check_capacity(32) == note.replace("N=8", "N=32").replace(
+        "4.7", "18.8"
+    ) or "N=32" in fleet_mod.check_capacity(32)
 
 
 def test_a_run_root_too_deep_for_a_unix_socket_is_refused_up_front(tmp_path):
