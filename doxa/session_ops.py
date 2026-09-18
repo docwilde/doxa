@@ -507,9 +507,12 @@ async def _spawn_after_confirm(
         "live_sessions": live + 1,
         "note": (
             "the session EXISTS and has been given the task; it is not "
-            "finished. Nothing reports back to you: a child cannot send "
-            "peer messages (only a human typing /msg can), and the peer "
-            "registry carries presence, not results. You will see a "
+            "finished. Nothing reports back to you automatically: the peer "
+            "registry carries presence, not results, and the child has no "
+            "obligation to message you. (If peer_send is armed on this "
+            "install, both of you CAN message each other -- but that is a "
+            "conversation you would each be choosing to have and paying "
+            "for, not a result channel.) You will see a "
             "peer_left event when it goes away -- which says 'gone', not "
             "'succeeded'. What actually comes back is its COMMITS, on its "
             "own doxa/<short> branch in its own worktree, which you can "

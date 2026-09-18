@@ -382,9 +382,20 @@ class PaneRuntimeMixin:
             return
         async for ev in self.engine.peer_events():
             if ev.type == "peer_message":
+                self._note_peer_traffic("rx")
                 block_list = self.query_one("#block-list", VerticalScroll)
                 await block_list.mount(PeerMessageBlock(ev.data))
                 self.scroll_transcript_to_end(block_list)
+            elif ev.type == "peer_sent":
+                # A message LEFT this session. It reaches here rather than
+                # being lit at the submit site because the sender can be
+                # the model (peer_send), a human typing /msg, or a
+                # broadcast -- three call sites, one lamp, and a lamp that
+                # only two of the three lit would be worse than no lamp.
+                # No block is mounted: the send is already visible as the
+                # tool call or the /msg acknowledgement that caused it,
+                # and a second rendering of the same event is noise.
+                self._note_peer_traffic("tx")
             elif ev.type == "tool_disabled":
                 block_list = self.query_one("#block-list", VerticalScroll)
                 await block_list.mount(SystemBlock(
@@ -429,7 +440,18 @@ class PaneRuntimeMixin:
                 await self._render_prompt_queue_event(ev)
             elif ev.type == "turn_started":
                 block_list = self.query_one("#block-list", VerticalScroll)
-                self._oob_turn = TurnBlock(str(ev.data.get("prompt") or ""))
+                if ev.data.get("peer_started"):
+                    # A turn nobody in this window asked for. It gets a
+                    # block of its own SAYING so, above the turn, because
+                    # the alternative -- a turn block that looks exactly
+                    # like one the user typed -- is how money gets spent
+                    # with no visible cause. The header naming the sender
+                    # comes off the same prompt the model read.
+                    await block_list.mount(SystemBlock(
+                        "✉ a peer message started this turn — "
+                        + str(ev.data.get("peer_origin") or "sender unknown")
+                    ))
+                self._oob_turn = TurnBlock(self._turn_block_title(ev.data))
                 self._oob_chips = {}
                 await block_list.mount(self._oob_turn)
                 # This client did not drive the turn but IS watching it --
@@ -487,6 +509,19 @@ class PaneRuntimeMixin:
                 # the pane went deaf. The refresh is a repaint; skipping
                 # one is invisible, and the next event does it again.
                 self._refresh_status()
+
+    @staticmethod
+    def _turn_block_title(data: dict) -> str:
+        """What a turn block's fold header says.
+
+        An ordinary turn shows the prompt. A peer-started one shows the
+        peer header instead: its prompt opens with
+        :data:`doxa.peers.PEER_TURN_INTRO`, a paragraph of framing that
+        would fill the header with boilerplate identical on every such
+        turn and push the one thing that differs off the end."""
+        if data.get("peer_started"):
+            return "✉ " + str(data.get("peer_origin") or "peer message")
+        return str(data.get("prompt") or "")
 
     async def _run_turn(self, prompt: str) -> None:
         # WAIT first, then check -- not the other way round. The assert
@@ -631,11 +666,19 @@ class PaneRuntimeMixin:
                 "id": item_id, "text": str(ev.data.get("text") or ""),
             })
             position = ev.data.get("position")
-            message = (
-                f"queued (position {position}): {text!r} -- starts "
-                "automatically once the current turn ends; /queue to "
-                "see or cancel it"
-            )
+            if ev.data.get("peer_started"):
+                origin = _escape_markup(str(ev.data.get("peer_origin") or "a peer"))
+                message = (
+                    f"✉ queued (position {position}): a peer message — "
+                    f"{origin} — starts a turn automatically once the "
+                    "current one ends; /queue to see or cancel it"
+                )
+            else:
+                message = (
+                    f"queued (position {position}): {text!r} -- starts "
+                    "automatically once the current turn ends; /queue to "
+                    "see or cancel it"
+                )
         elif ev.type == "prompt_dequeued":
             self._drop_queued(item_id)
             message = f"queue: starting next -- {text!r}"

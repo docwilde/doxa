@@ -107,6 +107,23 @@ class OperatorContext:
     reaping an ancestor's entry cannot lose it. See
     ``doxa.session_ops.MAX_SPAWN_DEPTH``."""
 
+    peer_send: "Callable[[dict], Any] | None" = None
+    """Async seam for "send this to that peer, and record it" --
+    ``SessionEngine._tool_peer_send``, which resolves the addressee,
+    charges the send-side rate limit, delivers, writes the ledger record
+    and flashes the status bar's send light.
+
+    A seam for the same reason ``belief_store`` and ``spawn_confirm`` are
+    seams, and with one extra consequence worth stating: sending needs
+    THIS session's socket, title, repo, turn context and rate limiter,
+    every one of which lives on the engine. An operator that reached for
+    them itself would either import the engine or build a second
+    limiter, and a second limiter is not a limit.
+
+    None means this session has no way to send at all --
+    ``doxa.operators`` treats that as a refusal, never as permission to
+    improvise one."""
+
     spawn_confirm: "Callable[[dict], Any] | None" = None
     """Async seam for "ask the human, and wait for a real answer" --
     ``SessionEngine._confirm_spawn``, which parks the call on the same

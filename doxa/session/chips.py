@@ -28,8 +28,10 @@ order; that folding step is deliberately NOT built here.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import os
+import time
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -214,6 +216,23 @@ def _ctx_tooltip_absolute(used: "int | None", limit: "int | None") -> str:
     )
 
 
+#: How long a modem light stays lit after the traffic that lit it, in
+#: seconds. Long enough to be caught out of the corner of an eye on a
+#: glance that was aimed somewhere else; short enough that a lamp still
+#: burning means something happened just now rather than at some point
+#: today. Two sends a second apart re-arm the same lamp rather than
+#: queueing two flashes -- the light says "traffic", the tooltip says how
+#: much.
+PEER_LAMP_SECS = 4.0
+
+#: The two lamps, dark and lit. A filled glyph beside an outlined one is
+#: legible at a glance and legible in a screenshot, which a colour change
+#: alone is not: the status bar is read peripherally and by people whose
+#: terminals disagree about what any given accent looks like.
+PEER_LAMP_DARK = "◌"
+PEER_LAMP_LIT = "●"
+
+
 @dataclass(frozen=True)
 class StatusChip:
     """One chip on the status line: what it paints, and what it explains.
@@ -262,6 +281,40 @@ class StatusChip:
 
     def render(self) -> str:
         return self.key if self.markup is None else self.markup
+
+
+def peer_lamp(kind: str, last_at: "float | None", count: int, now: float) -> StatusChip:
+    """One modem light: ``kind`` is "tx" or "rx".
+
+    A pure function of (when it last fired, how many times, now), which is
+    what makes it testable without a terminal and what keeps the decay
+    honest -- the lamp is not a piece of state that someone has to
+    remember to turn off, it is a rendering of a timestamp that stops
+    being recent. The repaint that makes the decay VISIBLE is scheduled
+    separately (see ``PaneChipsMixin._note_peer_traffic``), because this
+    status bar runs under a no-timer, no-per-frame rule and a lamp is not
+    worth a tick when nothing is happening.
+
+    Hidden-at-zero does NOT apply here, and that is the point of the pair:
+    a lamp that appeared only when it lit would be a chip that moves the
+    whole row sideways at the moment you are trying to read it, and a dark
+    lamp is itself information -- this session has a peer channel and
+    nothing is crossing it. The pair appears once anything has ever
+    crossed in either direction; a session that has never touched a peer
+    carries neither lamp nor its width."""
+    lit = last_at is not None and (now - last_at) < PEER_LAMP_SECS
+    arrow = "↑" if kind == "tx" else "↓"
+    glyph = PEER_LAMP_LIT if lit else PEER_LAMP_DARK
+    noun = "sent" if kind == "tx" else "received"
+    plural = "message" if count == 1 else "messages"
+    when = "nothing yet" if last_at is None else (
+        "just now" if lit else f"{int(now - last_at)}s ago"
+    )
+    return StatusChip.plain(
+        f"{arrow}{glyph}",
+        f"peer {noun}: {count} {plural} this session, last {when} "
+        f"(every one is in the ledger the mesh graph draws)",
+    )
 
 
 class PaneChipsMixin:
@@ -867,6 +920,16 @@ class PaneChipsMixin:
                 "(self-reported, up to a heartbeat stale); (N⌁) counts how "
                 "many are detached",
             ))
+        # The two modem lights, immediately after the peers count they
+        # belong to. Peripheral vision, not text to read: what the eye is
+        # meant to catch is a lamp being lit at all, and the counts are on
+        # hover for when the answer matters. Both appear together or
+        # neither does -- a pair that grew one lamp at a time would shift
+        # the chips to its right at the exact moment traffic arrived.
+        if self._peer_tx_at is not None or self._peer_rx_at is not None:
+            now = time.monotonic()
+            chips.append(peer_lamp("tx", self._peer_tx_at, self._peer_tx_count, now))
+            chips.append(peer_lamp("rx", self._peer_rx_at, self._peer_rx_count, now))
         disabled = engine.disabled_tools()
         if disabled:  # two-strikes containment note -- hidden when empty
             chips.append(StatusChip.plain(
@@ -875,6 +938,37 @@ class PaneChipsMixin:
                 "(two-strikes containment)",
             ))
         return chips
+
+    def _note_peer_traffic(self, direction: str) -> None:
+        """One peer message crossed. Light the lamp and arrange for it to
+        go dark again.
+
+        The decay repaint is a ONE-SHOT timer armed only when a lamp is
+        lit, not a tick. That distinction is what keeps this inside the
+        status bar's standing no-timer rule (see :class:`doxa.ui.
+        statusline.GitLine`): an idle session schedules nothing, and a
+        session seeing traffic schedules exactly one repaint per burst,
+        at the moment the lamp stops being honest. Re-arming on a second
+        message inside the window is harmless -- both timers fire, both
+        repaint, and :func:`peer_lamp` recomputes lit-ness from the
+        timestamp either way, so there is no state to get out of step.
+
+        A pane with no ``set_timer`` (a stub in a test, a pane not yet
+        mounted) still lights the lamp; it simply goes dark at the next
+        repaint something else causes, which is the same degradation the
+        rest of this bar accepts."""
+        now = time.monotonic()
+        if direction == "tx":
+            self._peer_tx_at = now
+            self._peer_tx_count += 1
+        else:
+            self._peer_rx_at = now
+            self._peer_rx_count += 1
+        self._refresh_status()
+        timer = getattr(self, "set_timer", None)
+        if timer is not None:
+            with contextlib.suppress(Exception):
+                timer(PEER_LAMP_SECS + 0.1, self._refresh_status)
 
     def _refresh_usage_chip(self) -> None:
         """Recompute the subscription-headroom chip (``s:9% w:48%``).

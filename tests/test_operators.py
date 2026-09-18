@@ -74,19 +74,32 @@ def test_registry_has_exactly_the_read_operators():
     assert set(ops.OPERATORS) == {
         "lore_belief_search", "lore_belief_show", "lore_belief_neighbours",
         "lore_memory_list", "lore_session_search",
+        # Peer DISCOVERY and self-observation. Read-only in the strong
+        # sense this registry means: they read a registry file and a
+        # ledger file and change nothing outside this process. The
+        # ability to SEND is not here; see the write registry below.
+        "peer_list", "peer_history",
     }
     assert all(op.read_only for op in ops.OPERATORS.values())
 
 
 def test_write_operators_are_separate_and_excluded_by_default():
-    """lore_remember is the ONE write-capable tool: never in OPERATORS,
-    never in the default projection -- it joins only on an explicit
-    include_write=True, and even then it only stages a pending proposal."""
-    assert set(ops.WRITE_OPERATORS) == {"lore_remember"}
-    assert ops.WRITE_OPERATORS["lore_remember"].read_only is False
+    """The write-capable tools: never in OPERATORS, never in the default
+    projection -- they join only on an explicit include_write=True.
+
+    The two are not equivalent and the difference is stated here so that
+    nobody reads the pair as interchangeable. lore_remember only STAGES a
+    proposal a human applies later, so the review gate is what keeps it
+    safe. peer_send delivers a message into another live session the
+    instant it returns and no human sees it first, which is why it alone
+    carries a second gate (its is_configured, exercised in
+    tests/test_peer_tools.py) on top of this one."""
+    assert set(ops.WRITE_OPERATORS) == {"lore_remember", "peer_send"}
+    assert all(op.read_only is False for op in ops.WRITE_OPERATORS.values())
     executor = lambda name, args: {}  # noqa: E731
     default_names = {t.name for t in ops.to_sdk_tools(executor)}
     assert "lore_remember" not in default_names
+    assert "peer_send" not in default_names
     gated_names = {t.name for t in ops.to_sdk_tools(executor, include_write=True)}
     assert "lore_remember" in gated_names
 
@@ -121,6 +134,11 @@ def test_unconfigured_operators_never_appear():
         executor, include_write=True, ctx={"lore_root": "/x"})}
     assert names == {
         "lore_belief_show", "lore_belief_neighbours", "lore_memory_list", "lore_remember",
+        # No seam to wire: the peer registry and the peer ledger are files
+        # this process can open for itself, so discovery is configured
+        # wherever DOXA runs. peer_send is absent for the OTHER reason --
+        # its predicate reads DOXA_AGENT_PEER_SEND, which is off here.
+        "peer_list", "peer_history",
     }
     # ctx=None means "don't gate on configuredness", never "nothing is
     # configured" -- every registered name appears.

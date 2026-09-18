@@ -1263,9 +1263,54 @@ other through a same-user runtime registry (`0700`, per-session presence
 file, heartbeat, dead entries reaped by any reader). `/peers` lists them;
 `/msg <session_prefix> <text>` delivers one line-JSON message over the
 target's own `0600` socket. Every received field is scrubbed before
-display and reaches the model only behind an untrusted-peer preamble. The
-model has no send tool — every peer message crosses because a human typed
-`/msg`.
+display and reaches the model only behind an untrusted-peer preamble.
+
+**The model can message peers too, and it is off by default.** Until this
+release the manual said the model had no send tool and that every peer
+message crossed because a human typed `/msg`. That sentence is now a
+setting rather than a fact, and the setting starts off. Turning on **let
+the model message other sessions** (`agent_peer_send` /
+`DOXA_AGENT_PEER_SEND`) offers three tools:
+
+- `peer_list` — who is running, across every repository you have open,
+  with what each one says it is and how long it has been up;
+- `peer_send` — one message to one session, or to all of them at once;
+- `peer_history` — this session's own sent and received traffic, so an
+  agent can see that a peer has asked it the same thing four times and
+  stop answering on its own judgement.
+
+`peer_list` and `peer_history` are read-only and available either way;
+only sending is gated. What the switch actually grants is worth stating
+plainly: a model that can send can reach another live session's context
+on its own initiative, in a repository you did not open this session in.
+Every guard below exists because of that, not as ceremony.
+
+- **Nothing is silent.** Every send — the model's and yours — is appended
+  with its full body to `$DOXA_HOME/peers/messages.jsonl`, the file the
+  mesh graph draws from, and flashes a light on the status bar. There are
+  two lights, one for sent and one for received; they decay to dark after
+  a few seconds and carry the counts on hover.
+- **Sending is rate limited by DELIVERIES, not by calls.** A broadcast to
+  31 peers costs 31. A refusal tells the model why and when the budget
+  frees up, because an agent told why can send to fewer peers or wait,
+  and one silently throttled just retries.
+- **Addressing does not guess.** Name a session by its full id or by a
+  prefix matching exactly one; an ambiguous prefix is refused, listing
+  every candidate. The sender's repo travels with the message and is
+  shown on arrival.
+
+**Being woken by a message is a second switch.** *Let an arriving message
+start a turn* (`peer_inbound_turns` / `DOXA_PEER_INBOUND_TURNS`), also off
+by default, decides whether an incoming message starts a turn when this
+session is idle — it queues behind a running one either way, in the same
+bounded FIFO a prompt you type mid-turn goes through. Accepting messages
+and being woken by them are different grants, which is why they are
+different switches. A **broadcast never starts a turn** at any setting: at
+thirty-two sessions one broadcast would otherwise wake the whole fleet in
+a single step. A turn a peer started says so in its own first line, mounts
+a block above itself naming the sender, and carries a `peer-` turn id into
+the ledger — so spend that began with an inbound message has a traceable
+cause.
 
 Each `/peers` row also carries what that session *says* it is:
 `self-reported: sonnet via claude on doxa` — its model, its provider, and

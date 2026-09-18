@@ -3,9 +3,14 @@
 a tmp_path runtime dir (DOXA_RUNTIME_DIR override; conftest.py additionally
 pins a process-wide throwaway default), so nothing here ever touches the
 machine's real registry or listens on a socket another process could see.
-The engine-level test at the bottom proves the model-visibility contract:
-peer messages queue and attach to the NEXT user turn only, behind the
-untrusted-peer marker.
+The engine-level test at the bottom proves the model-visibility contract
+AT THE DEFAULT SETTING: peer messages queue and attach to the NEXT user
+turn, behind the untrusted-peer marker. Since DOXA gained an inbound
+switch (``DOXA_PEER_INBOUND_TURNS``, off unless set, which is why these
+tests see the old behaviour unchanged) an arriving message can also start
+a turn of its own -- that half lives in tests/test_peer_tools.py, with
+both settings driven explicitly rather than inherited from the
+environment.
 """
 
 from __future__ import annotations
@@ -376,7 +381,9 @@ async def test_peer_message_queues_and_attaches_to_next_turn_only(tmp_path, monk
         assert FAKE_AWS_KEY not in ev.data["body"]
         assert "[REDACTED" in ev.data["body"]
 
-        # A peer message never starts a turn: nothing queried yet.
+        # With inbound turn-starting off -- the default, and what this
+        # test runs under -- a peer message starts no turn: nothing
+        # queried yet. (test_peer_tools.py covers the switch armed.)
         assert created[0].queried == []
 
         # NEXT user turn: pending frames attach, framed as untrusted.

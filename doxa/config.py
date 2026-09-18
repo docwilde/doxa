@@ -188,6 +188,47 @@ SETTINGS: tuple[Setting, ...] = (
              "regardless of mode and cannot be raised from here.",
     ),
     Setting(
+        key="agent_peer_send", env="DOXA_AGENT_PEER_SEND",
+        label="let the model message other sessions", category="Session",
+        kind="bool", default="",
+        help="Offer the model the peer_send tool, which delivers a message "
+             "straight into another live DOXA session (doxa.operators)",
+        note="OFF by default, and this is the knob that retires DOXA's "
+             "oldest statement about itself: until now the model had NO "
+             "send tool, and every peer message crossed because a human "
+             "typed /msg. Turning this on lets a model reach another "
+             "session's context on its own initiative -- possibly in a "
+             "different repository, since addressing is not scope-limited. "
+             "Nothing about it is silent: every send is charged against a "
+             "rate limit priced in DELIVERIES (a broadcast to 31 peers "
+             "costs 31), every send is appended with its full body to "
+             "$DOXA_HOME/peers/messages.jsonl, and both directions flash a "
+             "light on the status bar. Read through config.raw, so this "
+             "file or the environment are the two doors and nothing inside "
+             "a repository you open is one of them. peer_list and "
+             "peer_history stay available either way: seeing who is "
+             "running changes nothing outside this process.",
+    ),
+    Setting(
+        key="peer_inbound_turns", env="DOXA_PEER_INBOUND_TURNS",
+        label="let an arriving message start a turn", category="Session",
+        kind="bool", default="",
+        help="An incoming peer message starts a turn when this session is "
+             "idle, and queues behind the running one when it is not "
+             "(doxa.engine.SessionEngine._on_peer_frame)",
+        note="OFF by default, and deliberately NOT part of the row above: "
+             "accepting messages and being woken by them are different "
+             "grants, and a session may reasonably want the first without "
+             "the second. With this off, an arriving message renders "
+             "immediately and the model sees it on the next turn you "
+             "start -- the behaviour DOXA has always had. With it on, a "
+             "peer can spend this session's budget while you are not "
+             "watching; a turn it started says so in its own first line "
+             "and carries a peer- turn id into the ledger, so the spend "
+             "has a traceable cause. A BROADCAST never starts a turn at "
+             "any setting.",
+    ),
+    Setting(
         key="permission_mode", env="DOXA_PERMISSION_MODE",
         label="permission mode", category="Session",
         kind="choice", choices=("", "default", "acceptEdits", "plan"),

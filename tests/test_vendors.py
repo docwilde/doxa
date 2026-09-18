@@ -392,9 +392,26 @@ async def test_mcp_tools_is_true_because_the_operators_reach_the_model(tmp_path)
     # The SAME surface a Claude session gets, including the write path --
     # lore_remember only STAGES a proposal for the review gate. A narrower
     # surface would be a capability difference the map does not record.
-    assert offered == set(OPERATORS) | set(WRITE_OPERATORS)
+    #
+    # peer_send is the ONE documented subtraction, and it is a capability
+    # difference the engine really has rather than a gap: this engine
+    # hosts a PeerHost and receives peer messages, but has no outbound
+    # path and wires no peer_send seam, so the operator's is_configured
+    # (which requires the seam as well as the user's setting) leaves it
+    # out. Spelled as a set difference rather than a hardcoded list, so
+    # adding a sixth read operator does not have to touch this line.
+    assert offered == (set(OPERATORS) | set(WRITE_OPERATORS)) - {"peer_send"}
     assert "lore_belief_search" in offered
     assert "lore_remember" in offered
+    assert "peer_list" in offered, (
+        "peer DISCOVERY needs no seam -- it reads two files this process "
+        "can open -- so a vendor session keeps it"
+    )
+    assert "peer_send" not in offered, (
+        "an offered tool that can only answer 'this session has no "
+        "outbound peer channel' is exactly what the configuredness filter "
+        "exists to prevent"
+    )
     assert transport.last_body["tool_choice"] == "auto"
     assert VENDOR_CAPABILITIES.mcp_tools is True
 

@@ -591,9 +591,12 @@ def test_the_untrusted_peer_framing_is_unchanged():
 
 
 def test_frame_for_model_carries_only_message_fields():
-    """The single model-bound peer rendering reads four keys off a
-    received FRAME -- from_id, from_title, sent_at, body. A PeerInfo never
-    enters it, so no registry-published self-description can ride along."""
+    """The single model-bound peer rendering reads only keys the SENDER
+    put on the frame -- from_id, from_title, sent_at, body, and (since
+    addressing crossed repositories) from_repo. A PeerInfo never enters
+    it, so no registry-published self-description can ride along on a
+    message; a peer that wants to claim a model id has to say so in its
+    body, where it reads as the claim it is."""
     rendered = peers.frame_for_model([{
         "from_id": "abcd1234", "from_title": "scout",
         "sent_at": "now", "body": "hello",
@@ -615,8 +618,12 @@ async def test_a_peers_self_description_never_enters_a_prompt(tmp_path, monkeypa
     the model mentions it -- not the turn's prompt, not the connect-time
     options (system prompt, appended blocks, tool surface).
 
-    A peer claiming to run opus is a claim about ANOTHER process, and the
-    model has no reason to receive it and several reasons not to."""
+    A peer claiming to run opus is a claim about ANOTHER process, and it
+    is never PUSHED at the model. That is still exactly true with the peer
+    tools shipped: peer_list can be CALLED and will answer with this same
+    self-description, behind PEER_UNTRUSTED_INTRO -- what must not happen,
+    and what this test pins, is the same strings arriving unasked in a
+    prompt or in the connect-time options."""
     monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     factory, created = factory_with_script([
         ResultMessage(
@@ -655,17 +662,40 @@ async def test_a_peers_self_description_never_enters_a_prompt(tmp_path, monkeypa
         await engine.finalize()
 
 
-def test_no_operator_tool_exposes_the_peer_layer():
-    """The model-callable surface (doxa/operators.py -> the SDK tools) has
-    never mentioned peers, and this is the release that makes forgetting
-    that expensive: a peer's self-description stays TUI-facing until a
-    spec explicitly says otherwise AND argues the framing for it. A
-    source-level guard, because the thing to catch is a NEW tool being
-    added, not an existing one misbehaving."""
-    from pathlib import Path
+def test_exactly_three_operator_tools_reach_the_peer_layer():
+    """This test used to say the model-callable surface must never mention
+    peers at all, and it was right for as long as that was the design. It
+    is not any more: peer_list, peer_send and peer_history exist, and the
+    sentence they retire -- "the model has no send tool" -- was load-
+    bearing enough that the guard is replaced rather than deleted.
 
+    What it guards now is the same thing it always guarded, one step
+    further in: reaching the peer layer from a model-callable tool must be
+    a DELIBERATE act that touches this test. Three names, listed
+    literally; a fourth fails here before it reaches anyone.
+
+    The condition the owner attached to the change is the second half:
+    everything a peer wrote crosses PEER_UNTRUSTED_INTRO on its way to the
+    model. docs/plans/peer-publishing.md wrote that rule before any of
+    this existed -- "there is no 'this field is more structured, so it's
+    safer' exception" -- and a roster row claiming a model id is exactly
+    the structured lie it had in mind."""
     import doxa.operators as operators_mod
 
-    source = Path(operators_mod.__file__).read_text(encoding="utf-8")
-    assert "peer" not in source.lower()
-    assert "PeerInfo" not in source
+    peer_tools = {
+        name for name in
+        {**operators_mod.OPERATORS, **operators_mod.WRITE_OPERATORS}
+        if name.startswith("peer_")
+    }
+    assert peer_tools == {"peer_list", "peer_send", "peer_history"}
+
+    # The one that can act is the one that is gated, and it is the only
+    # one of the three that is not read-only.
+    assert "peer_send" in operators_mod.WRITE_OPERATORS
+    assert operators_mod.OPERATORS["peer_list"].read_only is True
+    assert operators_mod.OPERATORS["peer_history"].read_only is True
+
+    # Every peer-written string that reaches the model crosses the marker,
+    # verbatim -- a paraphrase would be a second wording to keep in step.
+    stamped = operators_mod._peer_untrusted({"peers": []})
+    assert stamped["trust"] == peers.PEER_UNTRUSTED_INTRO

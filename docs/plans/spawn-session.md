@@ -460,12 +460,18 @@ than force one to be the answer:
   learns, on the existing 15-second cadence, when its child's entry
   disappears. This is a **presence** signal, not a result: it says "gone,"
   not "succeeded," "failed," or "was killed."
-- **`/msg`** is model-*unreachable* on purpose — "the model has no send
+- **`/msg`** was model-*unreachable* on purpose — "the model has no send
   tool — every peer message crosses because a human typed `/msg`"
   (`docs/manual.md:444-445`). A child cannot proactively report back even if
   it wanted to; giving it that would be exactly the model-callable-send
   capability DOXA has withheld everywhere else, and this spec does not
-  propose reopening it.
+  propose reopening it. **Superseded:** a later release did reopen it —
+  `peer_send`, off by default behind `DOXA_AGENT_PEER_SEND`, every send
+  rate limited by fan-out and recorded in the peer ledger. The paragraph
+  above is kept as written because it is what this gate was designed
+  against; what changed is the answer, not the question, and a child
+  reporting back is still a conversation both sides pay for rather than
+  a result channel.
 - **The registry itself carries no result payload.** `PeerInfo` is presence
   plus identity, and `peer-publishing.md` already rejected putting live
   content on it. There is nothing to "read" from the registry beyond whether
