@@ -911,7 +911,18 @@ def _peer_send(
             "peer_send: this session has no outbound peer channel -- refusing "
             "to improvise one")}
 
-    text = scrub_secrets(str(body or "")).strip()
+    # NOT scrubbed here, deliberately, and this is the one place in this
+    # module where that is the right answer. ``peerledger.append`` hashes
+    # the body BEFORE it scrubs it, and its own docstring names the
+    # failure passing pre-scrubbed text would cause: "the hash would then
+    # describe the redaction rather than the message, and two identical
+    # messages would stop matching" -- which is how a looping exchange is
+    # recognised at all. The credential still never reaches a peer's
+    # display or a peer's model: ``peers.PeerHost._handle_conn`` scrubs
+    # every field at the one receive point, exactly as it already does for
+    # a message a human typed at ``/msg``, and only the scrubbed text is
+    # what the ledger writes to disk.
+    text = str(body or "").strip()
     if not text:
         return {"error": "peer_send: empty message -- a peer needs something to read"}
     if len(text) > MAX_PEER_BODY_CHARS:

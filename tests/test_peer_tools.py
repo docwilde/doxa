@@ -574,6 +574,41 @@ async def test_a_credential_in_a_sent_body_is_scrubbed_but_still_hashes(
 
 
 @pytest.mark.asyncio
+async def test_the_tool_hands_the_ledger_a_body_it_has_not_already_scrubbed(
+    tmp_path, monkeypatch,
+):
+    """A quiet bug, caught by reading peerledger's contract rather than by
+    anything failing: the ledger hashes the body BEFORE it scrubs it, so a
+    caller that scrubbed first would store a hash of the redaction. Two
+    identical messages would then hash differently, and identical-message
+    detection is how a looping exchange is recognised at all.
+
+    Driven through the OPERATOR, not the engine seam, because the operator
+    is where the extra scrub was."""
+    engine, _ = await _engine(tmp_path, monkeypatch)
+    try:
+        rt = tmp_path / "rt"
+        _peer_entry(rt, "target01", scope="/repo/t")
+        body = f"the key is {FAKE_AWS_KEY} -- use it"
+
+        result = ops.WRITE_OPERATORS["peer_send"].fn(
+            body=body, to="target01", op_ctx=engine.tool_gate.op_ctx,
+        )
+        assert asyncio.iscoroutine(result) or hasattr(result, "__await__"), result
+        out = await result
+        assert "error" not in out, out
+
+        record = engine._peer_ledger.recent(limit=1)[0]
+        assert FAKE_AWS_KEY not in record.body
+        assert record.body_sha256 == hashlib.sha256(body.encode("utf-8")).hexdigest(), (
+            "the operator scrubbed before the ledger did, so the hash now "
+            "describes the redaction instead of the message"
+        )
+    finally:
+        await engine.finalize()
+
+
+@pytest.mark.asyncio
 async def test_a_human_typed_message_is_recorded_too(tmp_path, monkeypatch):
     """/msg goes through the same one outbound path. A ledger that held
     only the model's traffic would make the mesh graph a picture of the

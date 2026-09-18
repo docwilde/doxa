@@ -2749,10 +2749,17 @@ class SessionEngine:
            :class:`peerledger.SendRefused`, whose decision carries the
            reason AND the reset; the caller surfaces both verbatim,
            because an agent told why it was refused can reason about it
-           and one silently throttled just retries.
+           and one silently throttled just retries. The charge is for the
+           ATTEMPT, so deliveries that then fail are still spent. That is
+           the safe direction and not an oversight: a session hammering a
+           dead socket is precisely the loop this bound exists to stop,
+           and a limit that refunded failures would not stop it.
         2. **Send, per peer, tolerating per-peer failure.** A dead socket
            or an oversize frame fails one delivery, not the call.
-        3. **Append AFTER, naming only the peers actually reached.** A
+        3. **Append AFTER, naming only the peers actually reached**, and
+           with the RAW body -- ``PeerLedger.append`` hashes before it
+           scrubs, so a caller that pre-scrubbed would hand it a hash of
+           the redaction and two identical messages would stop matching. A
            record written before the attempt counts a delivery that never
            happened, which inflates out-degree -- the first measure the
            experiment reports. One append per send, never one per
