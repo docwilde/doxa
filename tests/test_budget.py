@@ -559,8 +559,11 @@ def test_a_run_with_inbound_turns_off_needs_no_budget(short_root):
     run = fleet_mod.FleetRun(
         _spec(short_root, inbound_turns=False), backend=object(),
     )
-    note = run.prepare()  # must not raise
-    assert isinstance(note, str)
+    run.prepare()  # must not raise
+    assert "no run budget" in run.report.budget, (
+        "allowed, and still recorded -- a run nobody bounded says so in "
+        "its own manifest rather than looking like a budgeted one"
+    )
 
 
 def test_a_budgeted_run_starts_and_divides_the_total_across_its_sessions(short_root):
@@ -608,14 +611,14 @@ def test_the_override_starts_the_run_and_lands_in_the_manifest(short_root):
     spec = _spec(short_root, allow_unbudgeted=True)
     run = fleet_mod.FleetRun(spec, backend=object())
 
-    note = run.prepare()  # must not raise
+    run.prepare()  # must not raise
 
-    assert "ACCEPTED by allow_unbudgeted" in note
+    assert "ACCEPTED by allow_unbudgeted" in run.report.budget
     manifest = json.loads(run.write_manifest().read_text(encoding="utf-8"))
     assert manifest["unbudgeted"] is True
     assert manifest["spec"]["allow_unbudgeted"] is True
     assert manifest["spec"]["run_budget_usd"] is None
-    assert manifest["budget"] == note
+    assert manifest["budget"] == run.report.budget
     assert manifest["forced"] is False, (
         "--force and --allow-unbudgeted are two different claims and the "
         "manifest must keep them apart"
