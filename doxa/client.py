@@ -383,6 +383,39 @@ class EngineClient:
                 break
         await self._refresh_status_quietly()
 
+    async def dispatch(self, prompt: str) -> dict:
+        """Hand one prompt over and return the daemon's ack, WITHOUT
+        consuming the turn it starts.
+
+        :meth:`send` is the interactive shape -- it writes the frame and
+        then yields events until ``turn_done``, which is exactly what a
+        pane wants. :mod:`doxa.fleet` wants the other half: N sessions have
+        to be handed the same prompt as close to one instant as the loop
+        allows, and an ``async for`` that does not return until a model has
+        finished thinking would prompt the last session a whole turn after
+        the first. So this returns on the ACK, and draining the events is
+        somebody else's job (:func:`doxa.fleet._drain`).
+
+        Raises :class:`EngineClientError` on a refusal, same as
+        :meth:`send`. A queued reply is a SUCCESS here and says so in the
+        returned dict -- a turn was already running, the daemon enqueued
+        this one, and that is an answer rather than a failure."""
+        reply = await self._prompt(prompt)
+        if not reply.get("ok"):
+            raise EngineClientError(reply.get("error") or "prompt refused")
+        return dict(reply)
+
+    async def next_turn_event(self) -> "EngineEvent | None":
+        """One event off the turn stream, or None when the client closed.
+
+        The companion to :meth:`dispatch`: ``EngineClient`` buffers turn
+        events in an UNBOUNDED queue, so a caller that dispatches and never
+        reads grows that queue for the length of the run, times N. This is
+        the public door to the queue that :meth:`send` otherwise owns."""
+        if self._closed and self._turn_queue.empty():
+            return None
+        return await self._turn_queue.get()
+
     async def list_queue(self) -> list[dict]:
         """Engine parity for :meth:`doxa.engine.SessionEngine.list_queue`
         -- `/queue`'s bare listing over the socket."""

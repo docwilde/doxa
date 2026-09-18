@@ -61,7 +61,7 @@ import json
 import os
 import socket
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields as dataclass_fields
 from datetime import datetime, timezone
 from pathlib import Path
@@ -256,22 +256,33 @@ def age_secs(ts: str) -> float:
     return (datetime.now(timezone.utc) - then).total_seconds()
 
 
-def runtime_dir() -> Path:
+def runtime_dir(env: "Mapping[str, str] | None" = None) -> Path:
     """Resolved per call (not import time) so DOXA_RUNTIME_DIR can point a
-    test -- or an unusual machine -- at a throwaway directory."""
-    override = os.environ.get("DOXA_RUNTIME_DIR", "").strip()
+    test -- or an unusual machine -- at a throwaway directory.
+
+    ``env`` names a DIFFERENT process's environment, and exists for
+    exactly one caller: :func:`doxa.daemon.spawn_daemon` spawning a child
+    with its own ``DOXA_RUNTIME_DIR`` (doxa.fleet gives every run its own,
+    so a fleet's registry is the fleet). The parent has to be able to ask
+    "where will the CHILD write its entry", and reading its own
+    ``os.environ`` answers a question nobody asked. Default None keeps
+    every existing call byte-identical."""
+    source = os.environ if env is None else env
+    override = str(source.get("DOXA_RUNTIME_DIR", "") or "").strip()
     if override:
         return Path(override)
-    xdg = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    xdg = str(source.get("XDG_RUNTIME_DIR", "") or "").strip()
     if xdg:
         return Path(xdg) / "doxa"
     return Path.home() / ".local" / "share" / "doxa"
 
 
-def registry_dir() -> Path:
+def registry_dir(env: "Mapping[str, str] | None" = None) -> Path:
     """Create-and-return the presence dir, clamping both it and its parent
-    runtime dir to 0700 -- the same-user boundary the whole layer rests on."""
-    base = runtime_dir()
+    runtime dir to 0700 -- the same-user boundary the whole layer rests on.
+
+    ``env`` is passed straight through to :func:`runtime_dir`; see there."""
+    base = runtime_dir(env)
     reg = base / "registry"
     reg.mkdir(parents=True, exist_ok=True)
     os.chmod(base, 0o700)

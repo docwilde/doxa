@@ -1211,6 +1211,16 @@ class SessionDaemon:
             "disabled_tools": self.engine.disabled_tools(),
             "peers": [vars(p) for p in self.engine.list_peers()],
             "clients": len(self._clients),
+            # Is a turn running RIGHT NOW, and how many are waiting. The
+            # daemon is the only thing that knows: a client can see the
+            # turn IT dispatched, but a turn started by an arriving peer
+            # message (doxa.peers.peer_inbound_turns_enabled) begins with
+            # no client involved at all, and a harness waiting for a fleet
+            # to go quiet would call that session idle while it was
+            # answering another agent. See doxa.fleet's quiescence wait,
+            # which is the caller this exists for.
+            "running": self._turn_task is not None and not self._turn_task.done(),
+            "queued": len(self._prompt_queue),
         }
 
     async def _reply(
@@ -1234,6 +1244,7 @@ def spawn_daemon(
     spawn_depth: int = 0,
     parent_session_id: str | None = None,
     task: str | None = None,
+    env: "dict[str, str] | None" = None,
 ) -> "tuple[str, str]":
     """Spawn a detached daemon for ``cwd`` and wait for its registry entry.
 
@@ -1267,6 +1278,20 @@ def spawn_daemon(
     follows -- a new capability must not change the command line of every
     session that does not use it.
 
+    ``env`` replaces the child's whole environment instead of inheriting
+    this process's, and exists for :mod:`doxa.fleet`: a fleet run gives
+    every session its own ``DOXA_HOME`` (so the run's ledger is the whole
+    file, with nothing to filter) and its own ``DOXA_RUNTIME_DIR`` (so the
+    registry a fleet discovers is the fleet), and decides PER AGENT whether
+    memory is on. None -- the default -- inherits, which is what every
+    existing caller does and what a human-started session must keep doing.
+
+    Note what changes with it: ``reg`` and ``log_path`` below are then
+    resolved against the CHILD's runtime dir, not this process's, because
+    the entry this function polls for is the one the child will write. That
+    is the whole reason :func:`doxa.peers.runtime_dir` grew an ``env``
+    parameter.
+
     This function is BLOCKING and stays that way: it polls with
     ``time.sleep(0.1)`` for up to ``wait_secs``. Callers on an event loop
     (``session_ops._spawn_after_confirm``) hand it to ``asyncio.to_thread``
@@ -1275,8 +1300,8 @@ def spawn_daemon(
     import time as _time
 
     session_id = resume or str(uuid.uuid4())
-    reg = registry_dir()
-    log_path = runtime_dir() / f"daemon-{session_id[:8]}.log"
+    reg = registry_dir(env)
+    log_path = runtime_dir(env) / f"daemon-{session_id[:8]}.log"
     cmd = [
         sys.executable, "-m", "doxa.daemon",
         "--cwd", cwd, "--session-id", session_id,
@@ -1297,7 +1322,7 @@ def spawn_daemon(
     with open(log_path, "ab") as log:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-            start_new_session=True, cwd=cwd,
+            start_new_session=True, cwd=cwd, env=env,
         )
     entry_path = reg / f"{session_id}.json"
     deadline = _time.monotonic() + wait_secs
