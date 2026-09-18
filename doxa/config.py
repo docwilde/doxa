@@ -35,7 +35,7 @@ import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass(frozen=True)
@@ -61,6 +61,28 @@ class Setting:
     different STORAGE representation, not just a different default."""
 
     choices: tuple[str, ...] = ()
+    """The allowed values, when they are a fixed literal. Empty for a row
+    whose options come from :attr:`choices_source` instead."""
+
+    choices_source: "Callable[[], tuple[str, ...]] | None" = None
+    """A callable returning the allowed values, for a row whose options are
+    a REGISTRY rather than a literal.
+
+    A CALLABLE, not a tuple, and that is forced rather than preferred: the
+    one row that needs this (``engine``) takes its options from
+    :func:`doxa.engines.available`, which registers ``doxa.codex`` and
+    ``doxa.vendors`` on first lookup -- ~65 ms cold, most of it the
+    ``lore_core`` import ``doxa.vendors`` pulls in. Evaluating that at
+    import of THIS module would put it on every launch, including ``doxa
+    --version``, ``doxa doctor`` and ``doxa launcher install``, none of
+    which ever open a settings modal. Deferring it to :meth:`options` puts
+    it where the answer is actually wanted (2.7 ms once the TUI is up,
+    measured, because the app has already loaded what it drags in).
+
+    The tuple field stays for every other choice row: an effort level or an
+    image protocol is a closed literal with no registry behind it, and
+    turning those into callables would buy nothing and read worse."""
+
     default: str = ""
     read_only: bool = False
 
@@ -70,14 +92,49 @@ class Setting:
     note: str = ""
     """Extra line under the help, for rows that need a caveat."""
 
+    def options(self) -> "tuple[str, ...]":
+        """The allowed values for this row, whichever way they are
+        declared. THE one reader -- the placeholder the modal renders and
+        the save-time check in :func:`_coerce` both come through here, so a
+        registry-driven row cannot be validated against one list and
+        displayed as another."""
+        if self.choices_source is not None:
+            return tuple(self.choices_source())
+        return self.choices
+
     def placeholder(self) -> str:
-        if self.choices:
-            return " | ".join(c for c in self.choices if c)
+        options = self.options()
+        if options:
+            return " | ".join(c for c in options if c)
         if self.kind in ("bool", "bool_on"):
             return "1 = on, empty = off" if self.kind == "bool" else "1 = on, 0 = off (empty = on)"
         if self.kind == "strftime":
             return "e.g. %a %H:%M (empty = built-in format)"
         return self.default or "(default)"
+
+
+def _engine_choices() -> "tuple[str, ...]":
+    """The ``engine`` row's options, read from the engine REGISTRY.
+
+    ``doxa.engines.available()`` is already the one list ``doxa --engine
+    <id>`` is validated against and the one an unknown id is refused with;
+    this makes it the one the settings modal offers too. Before this the
+    row carried the literal ``("", "claude", "codex")`` and the two vendor
+    engines that shipped in 1.10.0 were unreachable from inside the app --
+    a hardcoded pair beside a real registry, which is the drift that
+    produces a fifth engine nobody can select either.
+
+    Imported at the point of call, not at module scope: see
+    :attr:`Setting.choices_source` for the measured cost, and note that
+    ``doxa.engines`` imports ``doxa.config`` nowhere, so this direction is
+    the only one there is.
+
+    The leading ``""`` is the row's "unset" value, the same first element
+    every other choice row here carries -- it means "no engine pinned", and
+    :func:`engine` resolves that to ``doxa.engines.DEFAULT_ENGINE_ID``."""
+    from . import engines as engines_mod
+
+    return ("", *engines_mod.available())
 
 
 # The knobs, in the order the modal shows them. Every row is load-bearing:
@@ -86,16 +143,18 @@ class Setting:
 SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="engine", env="DOXA_ENGINE", label="engine", category="Session",
-        kind="choice", choices=("", "claude", "codex"), default="claude",
+        kind="choice", choices_source=_engine_choices, default="claude",
         help="Which engine drives NEW sessions (doxa.engines -- `doxa "
-             "--engine <id>` is the flag layer)",
+             "--engine <id>` is the flag layer, `/engine` the in-app one)",
         note="Not every session surface exists on every engine, and the "
-             "ones that do not are HIDDEN rather than shown inert: a codex "
-             "session has no permission-mode chip, no ctx chip (it reports "
-             "tokens but no window size) and no cost chip, and it does not "
-             "carry DOXA's LORE tools. A codex session also runs inside "
-             "this TUI rather than in a daemon, so Ctrl+Q ends it instead "
-             "of detaching.",
+             "ones that do not are HIDDEN rather than shown inert -- no "
+             "permission-mode chip where there are no modes, no ctx chip "
+             "where no window size is reported, no cost chip where no "
+             "dollar figure is. `/engine` prints what each one can and "
+             "cannot do, read off doxa.engines.EngineCapabilities itself "
+             "rather than described here, where it would go stale. An "
+             "engine is chosen at CONNECT, so a change here reaches NEW "
+             "sessions and tabs and never the running one.",
     ),
     Setting(
         key="model", env="DOXA_MODEL", label="model", category="Session",
@@ -1229,7 +1288,8 @@ def _coerce(setting: Setting, value: str) -> "Any | None":
         if not text.strip():
             return None
         return value
-    if setting.choices and value not in setting.choices:
+    options = setting.options()
+    if options and value not in options:
         return None
     return value
 

@@ -30,6 +30,7 @@ from textual.css.query import NoMatches
 from textual.widgets import OptionList, TextArea
 
 from .. import commands as commands_mod
+from .. import engines as engines_mod
 from .. import layout as layout_mod
 from .. import history as history_mod
 from .. import naming as naming_mod
@@ -355,7 +356,15 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         # its result too (see doxa.providers), but this is what makes THAT
         # cache actually persist across picker opens instead of being
         # rebuilt (and re-probing the network) every time.
-        self._model_provider = providers_mod.ClaudeProvider()
+        #
+        # v1.12.0: keyed by ENGINE rather than a single ClaudeProvider.
+        # It used to be one instance built here, which meant every
+        # session's model chip listed Claude's four aliases -- a DeepSeek
+        # session included, where picking "sonnet" would have been sent to
+        # DeepSeek verbatim. Built on first use because the engine does not
+        # exist yet at __init__ (and, for a vendor, resolving its provider
+        # imports doxa.vendors).
+        self._model_providers: "dict[str, Any]" = {}
         # v0.91.0: this pane's OWN "you missed something" state, per class
         # name. Through v0.88.0 the tab header WAS this state -- one tab,
         # one pane, so writing the class was recording it. A tab can now
@@ -493,6 +502,27 @@ class SessionPane(PaneCommandsMixin, PaneChipsMixin, PaneRuntimeMixin, Vertical)
         self.engine = engine
         self._session_id = session_id
         self._adopted = True
+
+    def model_catalog(self) -> "Any | None":
+        """The model-catalogue provider for the engine THIS pane is
+        driving, or ``None`` when that engine publishes none.
+
+        One instance per engine id, held for the pane's life so the
+        provider's own per-instance cache (``list_models()``) survives
+        every picker open -- that cache is the only thing stopping a click
+        on the model chip from being a network round trip.
+
+        ``None`` is a real answer and every caller renders it as one: the
+        Codex CLI takes an arbitrary ``--model`` string with nothing
+        enumerated behind it, so there is no list to show, and showing
+        another engine's list instead is what this method replaced."""
+        engine = self.engine
+        if engine is None:
+            return None
+        engine_id = engines_mod.engine_id_of(engine)
+        if engine_id not in self._model_providers:
+            self._model_providers[engine_id] = providers_mod.model_provider(engine_id)
+        return self._model_providers[engine_id]
 
     async def _restore_transcript(
         self, session_id: str, cwd: str, *, require_backlog_skip: bool = True,

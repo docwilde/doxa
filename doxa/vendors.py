@@ -135,6 +135,7 @@ from .engines import (
     EngineCapabilities,
 )
 from .events import EngineEvent
+from .providers import DEEPSEEK_PROVIDER_ID, ZAI_PROVIDER_ID
 
 
 # -- constants ---------------------------------------------------------
@@ -192,6 +193,13 @@ VENDOR_EFFORT_ENV = "DOXA_VENDOR_EFFORT"
 TEMPERATURE = 0.2
 
 PEER_TITLE_MAX = 72
+
+#: How long :func:`fetch_models` may wait. SHORT, and deliberately shorter
+#: than anything a turn is allowed: this call sits between a click on the
+#: model chip and a list appearing, and a picker that hangs for a minute on
+#: an unreachable vendor is worse than one that quietly shows the static
+#: catalogue :data:`VendorSpec.models` already carries.
+MODELS_TIMEOUT_SECS = 8.0
 
 
 # -- the capability map ------------------------------------------------
@@ -309,9 +317,11 @@ class VendorSpec:
     #: errors; its VALUE never does.
     env_var: str
     #: Models the live API actually offered at the measurement, newest
-    #: last. Used for the "did you mean" in an unknown-model message, not
-    #: to reject one -- the vendor is the authority on its own catalogue
-    #: and this tuple goes stale by design.
+    #: last. The model picker's FALLBACK tier (doxa.providers.
+    #: VendorModelProvider) and the "did you mean" in an unknown-model
+    #: message -- not a filter on what may be asked for: the vendor is the
+    #: authority on its own catalogue, :func:`fetch_models` asks it, and
+    #: this tuple goes stale by design.
     models: "tuple[str, ...]"
     default_model: str
     #: Reasoning-effort values the API accepts. An ALLOW-list: an operator
@@ -330,7 +340,7 @@ class VendorSpec:
 DEEPSEEK = VendorSpec(
     engine_id=DEEPSEEK_ENGINE_ID,
     display_name="DeepSeek",
-    provider_id="deepseek",
+    provider_id=DEEPSEEK_PROVIDER_ID,
     chat_url="https://api.deepseek.com/chat/completions",
     models_url="https://api.deepseek.com/models",
     env_var="DEEPSEEK_API_KEY",
@@ -348,7 +358,7 @@ DEEPSEEK = VendorSpec(
 GLM = VendorSpec(
     engine_id=GLM_ENGINE_ID,
     display_name="GLM (Z.ai)",
-    provider_id="zai",
+    provider_id=ZAI_PROVIDER_ID,
     chat_url="https://api.z.ai/api/paas/v4/chat/completions",
     models_url="https://api.z.ai/api/paas/v4/models",
     env_var="ZAI_API_KEY",
@@ -431,6 +441,78 @@ def auth_headers(api_key: str) -> dict:
     line. Identical to ``panel_core.providers.auth_headers`` and for the
     same stated reason."""
     return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+
+def _model_ids(payload: Any) -> "tuple[str, ...]":
+    """The model ids out of an OpenAI-compatible ``GET /models`` body.
+
+    Both vendors serve the OpenAI catalogue shape -- ``{"object": "list",
+    "data": [{"id": ..., "object": "model", ...}]}`` -- and this reads the
+    ``id`` of each row and nothing else. A row that is a bare string is
+    accepted too, because the only thing this function is entitled to be
+    strict about is that it never INVENTS an id: anything it cannot read is
+    dropped, and a body it cannot read at all is an empty tuple, which the
+    caller renders as "the static list" rather than as "no models"."""
+    rows = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        return ()
+    ids: "list[str]" = []
+    for row in rows:
+        name = str(row.get("id") or "").strip() if isinstance(row, dict) else (
+            str(row).strip() if isinstance(row, str) else ""
+        )
+        if name and name not in ids:
+            ids.append(name)
+    return tuple(ids)
+
+
+def fetch_models(
+    spec: VendorSpec,
+    api_key: str,
+    opener: "Callable[..., Any] | None" = None,
+    timeout: float = MODELS_TIMEOUT_SECS,
+) -> "tuple[str, ...]":
+    """Every model id ``GET spec.models_url`` reports, in its own order.
+
+    The first use of :attr:`VendorSpec.models_url`, and the reason the
+    field was there: the vendor is the authority on its own catalogue, and
+    :attr:`VendorSpec.models` is a MEASUREMENT with a date on it that goes
+    stale by design. DOXA asks; the static tuple is the floor when the
+    answer does not arrive.
+
+    BLOCKING, on purpose and by the same argument
+    :class:`HttpStreamTransport` states: DOXA declares no HTTP dependency,
+    so this is ``urllib`` and the caller runs it off the event loop
+    (:class:`doxa.providers.VendorModelProvider` uses ``asyncio.to_thread``).
+    ``opener`` is injectable for exactly the reason ``transport`` is --
+    the suite proves both the live shape and every failure path with no
+    network and no credential.
+
+    Every failure is the empty tuple rather than an exception: an
+    unreachable vendor, an expired key, a 500, an HTML error page and a
+    catalogue with nothing in it are the same fact to a caller that has a
+    static fallback, and raising would only move the ``except`` one frame
+    up. Nothing about the failure is logged, because the one thing in
+    scope here besides a URL is the key."""
+    request = urllib.request.Request(
+        spec.models_url, headers=auth_headers(api_key), method="GET"
+    )
+    open_url = opener or urllib.request.urlopen
+    try:
+        response = open_url(request, timeout=timeout)
+    except Exception:  # noqa: BLE001 -- see the docstring: every failure is
+        # "no live catalogue", and the caller already has a floor.
+        return ()
+    try:
+        payload = json.loads(response.read().decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 -- a body that is not the catalogue
+        return ()
+    finally:
+        try:
+            response.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return _model_ids(payload)
 
 
 def _scrub(text: str, api_key: "str | None" = None) -> str:
@@ -906,6 +988,18 @@ class ChatApiEngine:
             _load_messages(transcript_dir / f"{self.resume}.messages.json")
             if self.resume else []
         )
+
+    # -- identity -------------------------------------------------------
+
+    @property
+    def engine_id(self) -> str:
+        """Which engine this handle is (doxa.engines.engine_id_of).
+
+        A PROPERTY rather than the class attribute ``CodexEngine`` carries,
+        because one class serves both vendors and the answer is whichever
+        spec it was built with -- reading it off the spec is what makes a
+        DeepSeek handle unable to claim GLM's catalogue."""
+        return self.spec.engine_id
 
     # -- persistence ---------------------------------------------------
 
