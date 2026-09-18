@@ -41,8 +41,9 @@ from doxa import budget as budget_mod
 from doxa import config as config_mod
 from doxa import fleet as fleet_mod
 from doxa import peers as peers_mod
-from doxa.engine import SessionEngine
-from tests.fakes import factory_with_script
+from doxa.app import DoxaApp, TurnBlock
+from doxa.engine import EngineEvent, SessionEngine
+from tests.fakes import FakeEngine, factory_with_script
 
 
 def _result(cost: float) -> ResultMessage:
@@ -652,6 +653,90 @@ def test_the_budget_note_names_pool_engines_that_cannot_be_bounded(short_root):
 
     clean = fleet_mod.budget_note(_spec(short_root, run_budget_usd=10.0))
     assert "UNBOUNDED" not in clean
+
+
+# -- the transcript, which is where "says so" actually has to happen ----
+
+
+class RefusingEngine(FakeEngine):
+    """An engine at its ceiling: every turn is refused before it starts.
+
+    Reproduces the CONTRACT the real engines implement rather than the
+    engine itself (the same thing tests/test_prompt_queue.py's
+    PacedQueueEngine does for the mid-turn queue): send() yields one
+    ``turn_refused`` and nothing else, which is exactly what
+    SessionEngine._send_turn and EngineClient.send both hand the pane."""
+
+    MESSAGE = "⊘ spend ceiling reached — this session has spent $1.5000"
+
+    def __init__(self) -> None:
+        super().__init__([])
+
+    async def send(self, prompt: str):  # type: ignore[override]
+        self.received_prompts.append(prompt)
+        yield EngineEvent("turn_refused", {
+            "reason": "budget", "message": self.MESSAGE,
+            "spent_usd": 1.5, "ceiling_usd": 1.0, "peer_started": False,
+        })
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_reaches_the_transcript_and_no_turn_block_is_drawn(
+    tmp_path,
+):
+    """"Say so in the transcript" is a claim about the screen, so it is
+    checked against the screen.
+
+    And the second half, which matters as much: NO turn block. A block
+    that looked like a turn would say a turn happened, which is a lie
+    about spend in the one surface a user reads to find out what was
+    spent."""
+    engines: "list[RefusingEngine]" = []
+
+    def make() -> RefusingEngine:
+        engines.append(RefusingEngine())
+        return engines[-1]
+
+    app = DoxaApp(cwd=str(tmp_path), engine_factory=make, new_session_factory=make)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if engines and engines[0].started:
+                break
+            await pilot.pause(0.02)
+        pane = app.panes()[0]
+
+        pane.query_one("#prompt-input").value = "spend more"
+        await pilot.press("enter")
+        for _ in range(200):
+            if engines[0].received_prompts:
+                break
+            await pilot.pause(0.02)
+        await pilot.pause(0.05)
+
+        painted = "\n".join(
+            "".join(segment.text for segment in strip)
+            for strip in app.screen._compositor.render_strips()
+        )
+        assert "spend ceiling reached" in painted, (
+            "the session stopped spending and told nobody"
+        )
+        assert not pane.query(TurnBlock), (
+            "a turn block was drawn for a turn that never ran"
+        )
+        assert pane.turn_in_flight is False, (
+            "the pane is still waiting on a turn that was refused -- that "
+            "is the silent stall, wearing the ceiling's clothes"
+        )
+
+        # ...and it still takes the next prompt, rather than being wedged.
+        pane.query_one("#prompt-input").value = "again"
+        await pilot.press("enter")
+        for _ in range(200):
+            if len(engines[0].received_prompts) == 2:
+                break
+            await pilot.pause(0.02)
+        assert engines[0].received_prompts == ["spend more", "again"]
 
 
 def test_the_cli_exposes_both_flags_and_they_reach_the_spec():
