@@ -4,6 +4,12 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.11.1 — 2026-09-18
+
+- The README named `1.10.0` as the newest release and told a pinned install it would not have the send tool, the peer bridge or the fleet. All three shipped in `1.11.0`; the pin instruction and the release count now say `1.11.1`.
+- **`peer_list`** and **`peer_history`** are named for the first time. The README covered sending but not that a model can **enumerate your sessions in other repositories with nothing switched on**.
+- **`--no-lore`** is named where per-agent memory off is described, so the flag that does it appears beside the behaviour.
+
 ## 1.11.0 — 2026-09-18
 
 **Agents can find and message each other, and every message is visible.**
