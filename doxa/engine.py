@@ -3293,7 +3293,7 @@ class SessionEngine:
         if not self._connected:
             raise RuntimeError("SessionEngine.start() must run before send()")
 
-        # THE SPEND CEILING, and this is the only place it is enforced.
+        # THE SPEND CEILING, at the choke point every turn crosses.
         #
         # Here rather than in send() because this method is the one point
         # every turn passes through: a typed prompt (send), a prompt that
@@ -3302,6 +3302,9 @@ class SessionEngine:
         # all arrive at this line. A check in send() alone would leave the
         # peer path -- the uncontrolled one, the one nobody is watching --
         # unbounded, which is the whole reason the ceiling exists.
+        # (_on_peer_frame checks one step EARLIER as well, and its own
+        # comment says what that buys: a refused frame kept rather than
+        # lost. This is the backstop, and the one that cannot be bypassed.)
         #
         # Ahead of every side effect this turn would have: no peer title is
         # set, no pending frames are drained (they stay pending for a turn

@@ -93,6 +93,15 @@ class EngineEvent:
     follows once it is, so every attached client -- not just the one that
     answered -- can drop its own copy of the dialog (same "everyone
     learns" convention ``model_changed`` already follows for /model).
+
+    ``turn_refused`` (data: ``reason``, ``message``, ``spent_usd``,
+    ``ceiling_usd``, ``peer_started``, ``peer_origin``, ``prompt``) is a
+    turn that was not allowed to START -- today only by the spend ceiling
+    in :mod:`doxa.budget`. It is TERMINAL in the same way ``turn_done``
+    is: it is the whole of that turn's event stream, ``EngineClient.send``
+    stops iterating on it, and the pane renders one system line rather
+    than mounting a block for a turn that did not happen. A refusal is
+    never mid-turn, so it is always the first event or there is none.
     """
 
     type: str
