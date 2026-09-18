@@ -136,8 +136,45 @@ def _serve_stub(argv: "list[str]") -> int:
         ),
     )
 
+    async def _chatter(session_id: str) -> None:
+        """One peer message per stub, onto the real socket and the real
+        ledger.
+
+        Without this the scale probe never touches the two primitives most
+        likely to break at N: the ledger's cross-process ``flock`` (N
+        writers, one file) and the registry-plus-socket send path (N
+        readers of a directory N writers are rewriting on a heartbeat).
+        A scale run that only spawned and stopped would measure the easy
+        half."""
+        from doxa import peerledger as peerledger_mod
+        from doxa import peers as peers_mod
+
+        await asyncio.sleep(0.5)
+        ledger = peerledger_mod.PeerLedger()
+        for _ in range(3):
+            live = [p for p in peers_mod.read_registry() if p.session_id != session_id]
+            if live:
+                target = live[hash(session_id) % len(live)]
+                try:
+                    await peers_mod.send_message(
+                        target.socket_path,
+                        from_id=session_id, from_title="stub",
+                        body=f"ack from {session_id[:8]}",
+                    )
+                    await ledger.append_async(
+                        sender=peerledger_mod.Sender(session=session_id, title="stub"),
+                        to=[target.session_id],
+                        body=f"ack from {session_id[:8]}",
+                    )
+                except Exception:
+                    pass
+                return
+            await asyncio.sleep(0.5)
+
     async def _run() -> int:
         install_signal_handlers(daemon)
+        if os.environ.get("DOXA_STUB_CHATTER"):
+            asyncio.get_running_loop().create_task(_chatter(daemon.session_id))
         await daemon.serve()
         return 0
 
@@ -259,9 +296,14 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument("--n", type=int, action="append", default=None)
     parser.add_argument("--root", default="/tmp/dxs")
     parser.add_argument("--seconds", type=float, default=120.0)
+    parser.add_argument("--quiet", action="store_true",
+                        help="skip the peer-message round; measures spawn "
+                             "and teardown only")
     args = parser.parse_args(argv)
     root = Path(args.root)
     root.mkdir(parents=True, exist_ok=True)
+    if not args.quiet:
+        os.environ["DOXA_STUB_CHATTER"] = "1"
     for n in args.n or [4, 8, 16, 32]:
         asyncio.run(_one(n, root, args.seconds))
     return 0
