@@ -32,6 +32,7 @@ import asyncio
 import itertools
 import json
 import os
+import time
 import shutil
 import tempfile
 
@@ -627,3 +628,75 @@ def test_a_fleet_needs_a_pool_and_a_prompt(tmp_path):
         fleet_mod.FleetSpec(prompt="   ", cwd=str(tmp_path), pool=POOL)
     with pytest.raises(ValueError, match=r"at least one session"):
         fleet_mod.FleetSpec(prompt="x", cwd=str(tmp_path), pool=POOL, n=0)
+
+
+# =======================================================================
+# The two failures scaling actually found
+# =======================================================================
+
+
+def test_a_zombie_child_is_not_a_leaked_session():
+    """MEASURED, at N=4, and it cost a whole scale run to find.
+
+    ``os.kill(pid, 0)`` reports a ZOMBIE as alive, and every session a
+    fleet spawns is this process's own child -- ``Popen(...,
+    start_new_session=True)`` starts a new session, not a new parent, and
+    nothing keeps the ``Popen`` object to wait on. So a daemon that
+    accepted ``stop``, finalized and exited perfectly cleanly stayed
+    "alive" to the liveness check: all four clean shutdowns were reported
+    as leaks. A harness crying wolf about the exact property it exists to
+    verify is worse than one that does not check."""
+    import os
+
+    def _really_alive(pid: int) -> bool:
+        try:
+            os.kill(int(pid), 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    pid = os.fork()
+    if pid == 0:  # the child: exit at once and become a zombie
+        os._exit(0)
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and not fleet_mod._is_zombie(pid):
+        time.sleep(0.01)
+
+    assert _really_alive(pid), (
+        "the companion: os.kill(pid, 0) still calls this exited process "
+        "alive, which is exactly the wrong answer _gone exists to replace"
+    )
+    assert fleet_mod._gone(pid) is True
+
+
+async def test_a_session_is_not_quiet_while_a_prompt_is_still_queued(short_root):
+    """MEASURED, at N=32 with the fleet actually messaging each other: the
+    run never quiesced.
+
+    When a peer message has already started a turn, the daemon ENQUEUES an
+    arriving prompt rather than running it -- so a session can be "not
+    running" and still have work in front of it. A quiescence check that
+    read only ``running`` would call that session idle and collect a
+    ledger from the middle of an exchange."""
+    answers = iter([
+        {"running": True, "queued": 0},
+        {"running": False, "queued": 2},
+        {"running": False, "queued": 0},
+    ])
+
+    class _Client:
+        async def refresh_status(self):
+            return next(answers)
+
+    backend = fleet_mod.DaemonBackend()
+    slot = fleet_mod.Slot(
+        assignment=fleet_mod.Assignment(index=0, engine="claude", model="sonnet")
+    )
+    backend._clients[0] = _Client()
+
+    assert await backend.is_quiet(slot) is False   # running
+    assert await backend.is_quiet(slot) is False   # queued behind a peer turn
+    assert await backend.is_quiet(slot) is True    # genuinely idle
