@@ -33,6 +33,7 @@ from textual.widgets import Static
 
 from doxa import errors
 from doxa.app import DoxaApp, ErrorBlock, SystemBlock
+from tests.wait_stable import wait_stable_ticking
 
 # tests/conftest.py's _errors_must_be_claimed guard: every OTHER module in
 # the suite fails if it quietly produced an error block, because a surface
@@ -475,6 +476,17 @@ async def test_quarantine_says_what_it_hid(tmp_path):
         widget = Exploding()
         await block_list.mount(widget)
         await _paint(app)
+
+        async def _tick() -> None:
+            # asyncio.sleep, never pilot.pause -- see _paint's own
+            # docstring on why a repaint driven through Pilot.pause
+            # bypasses the guarded exception path this test exists to
+            # prove. Textual's own screen-update timer keeps ticking
+            # through the guarded path on its regular cadence while this
+            # sleeps, so no manual re-arm is needed here either.
+            await asyncio.sleep(0.02)
+
+        await wait_stable_ticking(_tick, lambda: widget.display is False)
         assert widget.display is False, "the culprit is still being painted"
         title = _blocks(app)[0].title
         assert "Exploding" in title
