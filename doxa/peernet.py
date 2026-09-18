@@ -499,7 +499,7 @@ async def request(
             f"request too large ({len(payload)} bytes > {MAX_BODY_BYTES} max)"
         )
     headers = [
-        f"POST /peers HTTP/1.1",
+        "POST /peers HTTP/1.1",
         f"Host: {endpoint.host}:{endpoint.port}",
         "Content-Type: application/json",
         f"Content-Length: {len(payload)}",
