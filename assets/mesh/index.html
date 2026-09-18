@@ -1,0 +1,104 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-only
+
+     The page is STATIC. Not one byte of the ledger is templated into it:
+     records arrive as JSON over fetch/EventSource and are drawn to a
+     canvas or written through textContent. That is the structural reason
+     a message body containing <script> is harmless here -- it is a JSON
+     string value at every moment of its life and never a byte the HTML
+     parser is asked to look at.
+
+     No inline <style>, no inline style="", no onclick=, no <script> body.
+     The server sends `default-src 'none'; script-src 'self'; style-src
+     'self'`, which forbids all of those, so the CSP is not decoration --
+     breaking this rule breaks the page loudly and immediately.
+
+     Every url below is RELATIVE, which is what keeps the capability token
+     in the path (/<token>/mesh.js) without this file ever naming it.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>DOXA · peer mesh</title>
+<!-- An empty data: icon, so the browser does not request a favicon this
+     server would answer 404 for. The allow-list is deliberately four
+     files; this is cheaper than adding a fifth for a blank image. -->
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="mesh.css">
+</head>
+<body>
+
+<header id="bar">
+  <span id="brand">peer mesh</span>
+
+  <span class="stat"><b id="stat-nodes">0</b><i>sessions</i></span>
+  <span class="stat"><b id="stat-msgs">0</b><i>messages</i></span>
+  <span class="stat"><b id="stat-pairs">0</b><i>pairs</i></span>
+  <span class="stat"><b id="stat-bcast">0</b><i>broadcasts</i></span>
+
+  <span class="spacer"></span>
+
+  <label class="toggle" title="Hide broadcast fan-out and leave only pairwise traffic. One broadcast at N=32 is 31 deliveries; muting it is how you see whether structure survives without them.">
+    <input type="checkbox" id="opt-broadcast" checked>
+    <span>broadcast</span>
+  </label>
+
+  <label class="toggle" title="Labels for every node at once, rather than only the hovered and selected ones.">
+    <input type="checkbox" id="opt-labels">
+    <span>all labels</span>
+  </label>
+
+  <label class="slider" title="How long an edge takes to fade to its resting weight.">
+    <span>fade</span>
+    <input type="range" id="opt-fade" min="5" max="300" step="5" value="60">
+    <b id="opt-fade-read">60s</b>
+  </label>
+
+  <button id="btn-fit" type="button" title="Fit the graph to the window (or double-click the background)">fit</button>
+
+  <span id="conn" class="conn-wait" title="Live connection to the ledger">connecting</span>
+</header>
+
+<main>
+  <div id="stage">
+    <canvas id="graph"></canvas>
+    <div id="empty">
+      <p id="empty-head">No peer traffic recorded yet.</p>
+      <p id="empty-sub">This view is reading the append-only peer ledger. Nodes appear as sessions send their first message.</p>
+    </div>
+    <div id="legend">
+      <span class="key"><i class="swatch-direct"></i>direct</span>
+      <span class="key"><i class="swatch-broadcast"></i>broadcast</span>
+      <span class="key"><i class="swatch-running"></i>turn running</span>
+    </div>
+  </div>
+
+  <aside id="panel" class="is-empty">
+    <div id="panel-empty">
+      <p>Click a session to read its recent traffic.</p>
+    </div>
+
+    <div id="panel-body" hidden>
+      <button id="panel-close" type="button" title="Clear selection">close</button>
+      <h2 id="sel-title">&nbsp;</h2>
+      <p id="sel-repo" class="mono dim">&nbsp;</p>
+      <p id="sel-meta" class="mono dim">&nbsp;</p>
+
+      <div id="sel-counts">
+        <span class="stat"><b id="sel-out">0</b><i>sent</i></span>
+        <span class="stat"><b id="sel-in">0</b><i>received</i></span>
+        <span class="stat"><b id="sel-peers">0</b><i>peers</i></span>
+      </div>
+
+      <h3>recent traffic</h3>
+      <ol id="sel-feed"></ol>
+      <p id="sel-more" class="dim"></p>
+    </div>
+  </aside>
+</main>
+
+<script src="mesh.js" defer></script>
+</body>
+</html>
