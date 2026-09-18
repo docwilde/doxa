@@ -43,6 +43,7 @@ from .. import config as config_mod
 from .. import engines as engines_mod
 from .. import identity as identity_mod
 from .. import peers as peers_mod
+from .. import providers as providers_mod
 from ..events import BELIEF_LIST_LIMIT, PENDING_LIST_LIMIT
 from ..history import SessionSearch
 from ..ui.dialogs import ChipPicker, CompactConfirm, NeedsInputPopup, RowAction, SlashComplete
@@ -1059,22 +1060,30 @@ class PaneChipsMixin:
         return None
 
     async def open_model_picker(self) -> None:
-        """The model chip's click target -- lists whatever
-        ``doxa.providers.ClaudeProvider.list_models()`` resolves (see that
-        module for the full tier order and the empirical finding on why
-        tier 1, the live Models API, is unreachable under DOXA's normal
-        OAuth auth), marks the current one, and on selection calls the
-        SAME ``_cmd_model`` coroutine ``/model <name>`` uses -- one switch
-        path, two ways to reach it."""
+        """The model chip's click target -- lists whatever THIS SESSION'S
+        engine publishes (``doxa.providers.model_provider``; see that
+        module for each provider's tier order, the empirical finding on
+        why Claude's tier 1 is unreachable under DOXA's normal OAuth auth,
+        and why the vendors' tier 1 is not), marks the current one, and on
+        selection calls the SAME ``_cmd_model`` coroutine ``/model <name>``
+        uses -- one switch path, two ways to reach it.
+
+        v1.12.0: per ENGINE. Before that this was one ``ClaudeProvider``
+        built in the pane's ``__init__``, so a Codex or DeepSeek session's
+        model chip opened onto Claude's four aliases and a click sent
+        ``sonnet`` to a vendor that has never heard of it."""
         if self.engine is None:
             return
-        models = await self._model_provider.list_models()
-        note = ""
-        if models and models[0].source == "fallback":
-            note = (
-                "model catalog: static fallback -- the Anthropic Models "
-                "API is not reachable under this session's OAuth auth"
+        provider = self.model_catalog()
+        if provider is None:
+            await self._system(
+                providers_mod.no_catalog_text(
+                    engines_mod.engine_id_of(self.engine)
+                )
             )
+            return
+        models = await provider.list_models()
+        note = provider.catalog_note(models)
         rows = [(m.id, m.display_name) for m in models]
         current = str(getattr(self.engine, "model", None) or "")
         current_id = self._match_current_model(current, rows)

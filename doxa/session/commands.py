@@ -41,7 +41,6 @@ from ..ui.dialogs import AboutDialog, PermissionModeConfirm
 from ..ui.labels import (
     CONTEXT_UNAVAILABLE,
     MODE_EXPLAIN,
-    MODEL_ALIASES,
     PICKER_PREFIX_WIDTH,
     PICKER_ROW_MAX,
     _fmt_age,
@@ -364,16 +363,41 @@ class PaneCommandsMixin:
         switch and not a restart: the transcript, the daemon, the replay
         ring and every hook survive it untouched. The chosen model is also
         written to the settings file, because the settings modal's `model`
-        row and this command are the SAME state -- one source of truth."""
+        row and this command are the SAME state -- one source of truth.
+
+        The bare listing is THIS SESSION'S engine's catalogue (v1.12.0),
+        the same one the model chip's picker opens onto -- through
+        ``SessionPane.model_catalog``, so the two can never offer different
+        lists. It used to be ``labels.MODEL_ALIASES`` unconditionally,
+        which meant a DeepSeek session was offered haiku/sonnet/opus/fable
+        and a Codex session the same: four names neither vendor has ever
+        answered to."""
+        from .. import providers as providers_mod
+
         engine = self.engine
         current = str(getattr(engine, "model", None) or "default")
         if not args:
+            provider = self.model_catalog()
+            if provider is None:
+                from .. import engines as engines_mod
+
+                await self._system(
+                    f"model: {current}\n\n"
+                    + providers_mod.no_catalog_text(
+                        engines_mod.engine_id_of(engine)
+                    )
+                )
+                return
+            models = await provider.list_models()
             lines = [f"model: {current}", ""]
-            for alias in MODEL_ALIASES:
-                mark = "▸" if alias in current.lower() else " "
-                lines.append(f" {mark} {alias}")
+            for info in models:
+                mark = "▸" if info.id.lower() in current.lower() else " "
+                lines.append(f" {mark} {info.display_name}")
             lines.append("")
             lines.append("usage: /model <alias or full model id>")
+            note = provider.catalog_note(models)
+            if note:
+                lines.append(note)
             await self._system("\n".join(lines))
             return
         wanted = args.split()[0]
