@@ -222,7 +222,7 @@ def test_a_memory_off_session_runs_no_review(tmp_path, monkeypatch):
     assert built, "the companion proves the review path is reachable"
 
 
-def test_a_memory_off_session_schedules_no_derive(tmp_path, monkeypatch):
+async def test_a_memory_off_session_schedules_no_derive(tmp_path, monkeypatch):
     import doxa.engine as engine_mod
 
     monkeypatch.setattr(engine_mod, "derive_interval", lambda: 0.0)
@@ -381,10 +381,11 @@ def test_the_daemon_hands_its_memory_answer_to_the_engine_it_builds(monkeypatch)
 # =======================================================================
 
 
-def test_memory_off_does_not_disable_the_peer_tools():
+def test_memory_off_does_not_disable_the_peer_tools(monkeypatch):
     """"A session with LORE off must still work completely otherwise."
     The peer surface is the one that matters most here -- it is what the
     experiment measures, and it merely happens to import the same package."""
+    monkeypatch.setenv("DOXA_AGENT_PEER_SEND", "1")
     present = _projection({"peer_send": object()})
     assert {"peer_list", "peer_history", "peer_send"} <= present
 

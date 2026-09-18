@@ -2549,10 +2549,15 @@ class SessionEngine:
                 "type": "preset",
                 "preset": "claude_code",
                 "append": (
-                    "[LORE SNAPSHOT]\n" + snapshot
+                    # The marker goes with the snapshot. With memory off
+                    # there is no snapshot, and a bare "[LORE SNAPSHOT]"
+                    # heading over nothing would still TELL the model it
+                    # has a memory store -- an empty one, which is a
+                    # different and more misleading claim than silence.
+                    (f"[LORE SNAPSHOT]\n{snapshot}" if snapshot else "")
                     + (f"\n\n{worktree_block}" if worktree_block else "")
                     + (f"\n\n{awareness_block}" if awareness_block else "")
-                ),
+                ).lstrip("\n"),
             },
             hooks={
                 "UserPromptSubmit": [HookMatcher(hooks=[self._on_user_prompt_submit])],
