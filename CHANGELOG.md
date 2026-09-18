@@ -4,6 +4,20 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.10.0 — 2026-09-18
+
+**Sessions learn which machine they belong to, and sync off stays invisible.**
+
+- A tab set records its project and machine and restores only this machine's. A worktree sidecar records its machine; **`finalize()`** ignores a foreign one, and another machine's is reported as remote with no path to open.
+- The record filename now carries a machine. Two machines opening one repository hash the same path, so the second writer silently overwrote the first. A pre-upgrade record is **adopted once**, renamed rather than orphaned.
+- A **sync chip** beside the worktree and branch: last pull age, unpushed count, conflicts. Absent when sync is off or the store predates it, never zero and never an error.
+
+**Two engines from other vendors, and the groundwork for agents that message each other.**
+
+- New **`doxa/vendors.py`**: `--engine deepseek` and `--engine glm`, both driven by one implementation so a mixed fleet's arms cannot drift. 9 of 17 capability fields true, each false one justified by a measurement rather than by omission.
+- New **`doxa/peerledger.py`**: an append-only message ledger whose limiter counts deliveries, not calls, so one broadcast cannot amplify without bound. Bodies are scrubbed, the hash is not, so a loop stays detectable.
+- New **`doxa/meshgraph.py`** and `assets/mesh/`: a loopback-only browser view of which sessions message which. Nothing imports the ledger or the graph yet; no session can message another.
+
 ## 1.9.3 — 2026-09-17
 
 **The pinned LORE moves from 0.54.0 to 0.55.0.**
