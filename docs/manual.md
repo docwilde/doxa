@@ -10,7 +10,7 @@ a plan as if it were shipped.
 ## Contents
 
 - [Sessions and the daemon](#sessions-and-the-daemon)
-- [Engines](#engines) — and [a Codex session](#a-codex-session)
+- [Engines](#engines) — [engine capabilities](#engine-capabilities) and [a Codex session](#a-codex-session)
 - [The spawned CLI](#the-spawned-cli)
 - [The transcript](#the-transcript)
 - [Tabs](#tabs) — and [restoring them](#restoring-tabs)
@@ -120,6 +120,35 @@ rather than painting it inert: an engine that never reports a context
 window gets no `ctx` chip at all, because `ctx —` reads as "not yet" when
 the truth is "never", and `/context` says it cannot be asked rather than
 inventing a breakdown.
+
+### Engine capabilities
+
+What each engine can do, one row per surface. The rows are
+`doxa.engines.get(<id>).supports()` read off the registry, not a promise;
+`/engine` prints the same counts live (claude 18 of 18, codex 8, deepseek
+and glm 11). A fleet slot dealt an engine has exactly that engine's row.
+
+| | claude | codex | deepseek | glm |
+|---|---|---|---|---|
+| billed on | Claude subscription | Codex CLI sign-in | `DEEPSEEK_API_KEY` | `ZAI_API_KEY` |
+| daemon, detach, `doxa attach` | yes | yes | yes | yes |
+| LORE tools and the tool gate | yes | yes, via MCP | yes | yes |
+| permission modes, hooks, plugins | yes | no | no | no |
+| cost and context-window chips | yes | no | no | no |
+| `/msg` to a peer | yes | yes | yes | yes |
+| `peer_list`, `peer_history` tools for the model | yes | yes | yes | yes |
+| `peer_send` tool for the model | yes | yes | yes | yes |
+| budgets, `Task` spawns | yes | no | no | no |
+| fleet slot | yes | yes | yes | yes |
+| `--no-lore` honoured | yes | yes | yes | yes |
+
+
+Two rows deserve a sentence. *LORE tools and the tool gate* reach Codex
+through the stdio MCP server `CodexEngine` registers on every turn, and
+the gate lives in that server's process, so the two-strikes disable lasts
+one turn. *Budgets* need a dollar figure, which only the Claude engine
+reports; a slot on any other engine is unbounded and `doxa-fleet` says so
+before it starts.
 
 ### A Codex session
 

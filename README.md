@@ -24,8 +24,9 @@
 and Textual. Four engines: **Claude** on your Claude subscription, **Codex**
 through the Codex CLI on whatever it is signed into (a ChatGPT subscription
 or an API key), and **DeepSeek** and **GLM** on their own API keys. Pick one
-per session with `--engine` or `/engine`; the [table below](#quickstart)
-says what each can do. A Claude session runs in a **daemon** of its own:
+per session with `--engine` or `/engine`; the manual's
+[engine capabilities](docs/manual.md#engine-capabilities) table says what
+each can do. A Claude session runs in a **daemon** of its own:
 close the terminal, `doxa attach` an hour later, and the transcript picks up
 where it stopped. No tmux involved.
 
@@ -99,6 +100,8 @@ spend, fake account numbers. See
   from a pool, runs K without memory, splits a run budget, waits for quiet
   and tears down. Clean to N=64 on Claude; a mixed pool of Codex, DeepSeek
   and GLM ran, messaged across vendors and quiesced (see [Status](#status)).
+  What a slot can do depends on its engine:
+  [engine capabilities](docs/manual.md#engine-capabilities).
 - **[Peers on another machine, once you say so.](docs/fleet.md)** A tailnet
   bridge behind `tailscale serve` puts a second box's sessions in the
   roster, refused until `remote_enabled` is on and an allow-list names you.
@@ -226,22 +229,9 @@ uv run doxa --engine deepseek     # or DeepSeek, on DEEPSEEK_API_KEY
 uv run doxa --engine glm          # or GLM (Z.ai), on ZAI_API_KEY
 ```
 
-| | claude | codex | deepseek | glm |
-|---|---|---|---|---|
-| billed on | Claude subscription | Codex CLI sign-in | `DEEPSEEK_API_KEY` | `ZAI_API_KEY` |
-| daemon, detach, `doxa attach` | yes | yes | yes | yes |
-| LORE tools and the tool gate | yes | yes, via MCP | yes | yes |
-| permission modes, hooks, plugins | yes | no | no | no |
-| cost and context-window chips | yes | no | no | no |
-| `/msg` to a peer | yes | yes | yes | yes |
-| `peer_list`, `peer_history` tools for the model | yes | yes | yes | yes |
-| `peer_send` tool for the model | yes | yes | yes | yes |
-| budgets, `Task` spawns | yes | no | no | no |
-| fleet slot | yes | yes | yes | yes |
-| `--no-lore` honoured | yes | yes | yes | yes |
-
-The rows are `doxa.engines.get(<id>).supports()` read off the registry, not
-a promise; `/engine` prints the same counts live.
+What each engine can do — daemon and detach, LORE tools, permission
+modes, cost chips, peer tools, budgets, a fleet slot — is one table in the
+manual, read off the registry: [engine capabilities](docs/manual.md#engine-capabilities).
 
 **[Other engines](docs/manual.md#engines).** `--engine` (or the `engine`
 setting, or `/engine <id>` for the sessions and tabs you open next) runs a
