@@ -364,6 +364,106 @@ def create(
     return str(target)
 
 
+#: The subdirectories of a repository's COMMON git directory that a commit
+#: made inside a linked worktree writes into -- the whole list, and no more
+#: than the list. ``objects`` takes the new blob, tree and commit object;
+#: ``refs`` takes the branch update; ``logs`` takes that update's reflog
+#: entry. The per-worktree administrative directory (``index``,
+#: ``index.lock``, ``HEAD``, ``COMMIT_EDITMSG``) is not spelled here
+#: because :func:`external_git_roots` asks git where it is rather than
+#: composing the path itself.
+COMMIT_COMMON_SUBDIRS = ("objects", "refs", "logs")
+
+
+def external_git_roots(cwd: str) -> list[str]:
+    """Every directory OUTSIDE ``cwd`` that a ``git commit`` run inside
+    ``cwd`` has to write to. Empty unless ``cwd`` is a linked worktree.
+
+    A LINKED WORKTREE -- doxa's own (see :func:`create`) or one the user
+    made by hand -- keeps its administrative files in the MAIN repository
+    under ``.git/worktrees/<name>/``, with the object database and the
+    branch refs one level above that. A sandbox whose writable root is the
+    session's cwd therefore fails at ``index.lock`` before it ever reaches
+    the commit (issue #57)::
+
+        fatal: Unable to create '<main>/.git/worktrees/<n>/index.lock':
+        Read-only file system
+
+    The list is derived from git, never guessed: one ``git rev-parse``
+    reports the per-worktree git directory and the common one, and the
+    three names in :data:`COMMIT_COMMON_SUBDIRS` hang off the latter.
+    Anything already inside ``cwd``, and anything not on disk, is dropped
+    -- a root that does not exist is a rule a sandbox may refuse, and
+    every one of these exists from the moment ``git worktree add -b``
+    created the branch.
+
+    **The common directory ITSELF is never returned, and that omission is
+    the security boundary of this function.** Returning it would hand the
+    session ``.git/hooks`` -- scripts the user's own next git command runs
+    outside any sandbox -- and ``.git/config``, whose ``core.editor``,
+    ``core.fsmonitor`` and credential-helper rows are execution channels
+    of their own. What comes back instead can hold objects, move refs and
+    write reflogs: destructive to history, recoverable from it, and
+    incapable of running anything.
+
+    **An ordinary checkout gets ``[]``, and not because it needs nothing.**
+    Measured against codex-cli 0.144.4, a ``workspace-write`` sandbox marks
+    the workspace's own git directory read-only even when everything around
+    it is writable, so ``git add`` in a plain checkout fails the same way
+    (``fatal: Unable to create '<repo>/.git/index.lock': Read-only file
+    system``). There the index IS ``.git/index``, so the only grant that
+    would fix it is ``.git`` whole -- hooks, config and all -- which is
+    exactly the grant the paragraph above refuses. A linked worktree is the
+    layout in which the narrow answer EXISTS, and that is why this function
+    gives one only there. With ``worktree_per_session`` off a Codex session
+    still cannot commit; the remedy is to leave worktrees on, not to widen
+    further.
+
+    One measured consequence of stopping at those four: ``packed-refs.lock``
+    sits in the common directory, so git may warn that it cannot take it
+    (a live fleet worker reported exactly that). The commit still lands --
+    git writes a LOOSE ref under the granted ``refs/``, which is the normal
+    path anyway -- and the warning is the honest price of not handing over
+    the directory that also holds ``hooks``.
+
+    ``[]`` on any failure at all -- no git, not a repository, an
+    unparseable answer -- because the caller's fallback for ``[]`` is the
+    sandbox it already had, and refusing to widen is always the safe
+    direction."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute",
+             "--git-dir", "--git-common-dir"],
+            cwd=cwd, capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if len(lines) != 2:
+        return []
+
+    workspace = os.path.realpath(cwd)
+    git_dir, common_dir = (os.path.realpath(line) for line in lines)
+
+    def outside(path: str) -> bool:
+        try:
+            return os.path.commonpath([workspace, path]) != workspace
+        except ValueError:
+            return False  # unrelated roots cannot be compared; do not widen
+
+    if not outside(git_dir):
+        return []  # ordinary checkout: see the docstring's last paragraph
+    candidates = [git_dir] + [
+        os.path.join(common_dir, name) for name in COMMIT_COMMON_SUBDIRS
+    ]
+    return [
+        path for path in dict.fromkeys(candidates)
+        if outside(path) and os.path.isdir(path)
+    ]
+
+
 def is_clean(worktree_path: str) -> bool:
     """No uncommitted changes at all -- tracked or untracked -- in the
     worktree. Anything unreadable reads as DIRTY, the safe direction: a
