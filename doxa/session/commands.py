@@ -2014,14 +2014,19 @@ class PaneCommandsMixin:
         except ValueError:
             await self._system(
                 f"usage: /fleet attach <slot> — a slot NUMBER, 0 to "
-                f"{session.spec.n - 1}; /fleet status lists them"
+                # session_count, never n: a supervisor run's slots are
+                # 0..n (the supervisor plus n workers), and a range that
+                # stopped at n-1 would name every slot but the one an
+                # operator most often wants -- the supervisor's.
+                f"{session.spec.session_count - 1}; /fleet status lists them"
             )
             return
         row = session.snapshot(limit=0).slot(index)
         if row is None:
             await self._system(
                 f"fleet: no slot {index} in run {session.run_id} "
-                f"(this run has {session.spec.n}: 0 to {session.spec.n - 1})"
+                f"(this run has {session.spec.session_count}: 0 to "
+                f"{session.spec.session_count - 1})"
             )
             return
         socket_path = str(row.get("socket_path") or "")

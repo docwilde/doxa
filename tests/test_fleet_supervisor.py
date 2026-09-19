@@ -548,3 +548,25 @@ async def test_an_interactive_run_says_so_in_its_manifest(short_root):
     assert manifest["interactive"] is True
     assert manifest["spec"]["prompt"] == ""
     assert manifest["spec"]["quiescence_timeout_s"] == 0.2
+
+
+# =======================================================================
+# The one place a slot NUMBER is spoken aloud
+# =======================================================================
+
+
+def test_the_slot_range_an_attach_names_includes_the_supervisor():
+    """The failure this catches: ``/fleet attach``'s refusal naming "0 to
+    n-1" in a run whose slots are 0..n, so the range excludes exactly the
+    slot an operator most often wants -- the supervisor's.
+
+    Asserted on the arithmetic the message is built from, because the
+    message is one f-string over it and the property is the arithmetic."""
+    spec = fleet_mod.FleetSpec(
+        prompt="x", cwd="/repo", n=3, pool=POOL,
+        supervisor=fleet_mod.ModelSlot(engine="claude", model="opus"),
+    )
+    assert spec.session_count - 1 == 3
+    assert [a.index for a in fleet_mod.assign_for(spec)] == [0, 1, 2, 3]
+    plain = fleet_mod.FleetSpec(prompt="x", cwd="/repo", n=3, pool=POOL)
+    assert plain.session_count - 1 == 2
