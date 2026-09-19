@@ -22,12 +22,16 @@ and the ledger is a file under a tmp DOXA_HOME.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import stat
+import time
 
 import pytest
 
 from claude_agent_sdk import ResultMessage
 
+from doxa import mcpserver as mcpserver_mod
 from doxa import peerledger as pl
 from doxa import peers
 from doxa.codex import CodexEngine
@@ -35,7 +39,7 @@ from doxa.engine import SessionEngine
 from doxa.vendors import DEEPSEEK, ChatApiEngine
 
 from tests.fakes import factory_with_script
-from tests.test_engines import _FakeProc, _script
+from tests.test_engines import _FakeProc, _overrides, _script
 from tests.test_peer_tools import _peer_entry
 from tests.test_vendors import StubTransport, deepseek_tool_script, prose_script
 
@@ -473,7 +477,7 @@ async def test_a_typed_prompt_queues_behind_a_peer_started_vendor_turn(
         await eng.finalize()
 
 
-# -- Codex, which sends but cannot be given a send TOOL -----------------
+# -- Codex, whose model sends through the engine's control socket -------
 
 
 async def _codex(tmp_path, monkeypatch, *, lines=None, **kwargs):
@@ -500,13 +504,10 @@ async def _codex(tmp_path, monkeypatch, *, lines=None, **kwargs):
 
 
 async def test_a_codex_msg_is_charged_and_ledgered(tmp_path, monkeypatch):
-    """The only outbound path a Codex session has, and until now the only
-    one that was neither limited nor recorded. There is no model-facing
-    peer_send here and there cannot be one from DOXA: a Codex model's
-    tools live in the Codex CLI, which DOXA drives as a subprocess and
-    whose tool surface it does not compose (mcp_tools=False). /msg is the
-    whole of this engine's outbound traffic, so all of it is now bounded
-    and in the mesh graph."""
+    """``/msg`` on the shared path: charged, recorded, lit. The model's
+    own ``peer_send`` lands on the same object through the control socket
+    (below), which is what makes "one limiter, one ledger, one status
+    bar" true of the session rather than of one keystroke."""
     eng, _procs = await _codex(tmp_path, monkeypatch)
     try:
         _peer_entry(tmp_path / "rt", "target01", scope="/repo/t")
@@ -528,30 +529,218 @@ async def test_a_codex_msg_is_charged_and_ledgered(tmp_path, monkeypatch):
         await eng.finalize()
 
 
-async def test_a_codex_session_is_never_offered_the_send_tool(tmp_path, monkeypatch):
-    """The honest statement of the gap, held in place. Codex now reaches
-    DOXA's operators through the stdio MCP server the engine registers on
-    every turn (``mcp_tools`` is True), but ``peer_send`` is offered only
-    through a delivery seam the sidecar process can hold, and
-    ``doxa.peerdelivery`` exports none yet: the engine tells the server
-    so, and the capability field stays False rather than quietly becoming
-    True because ``/msg`` started working properly."""
-    from doxa import mcpserver as mcpserver_mod
+async def _control(path, payload, timeout=10.0) -> dict:
+    """One request on an engine control socket, exactly as a sidecar
+    makes it: one JSON line in, one JSON line out, connection closed."""
+    reader, writer = await asyncio.open_unix_connection(str(path))
+    try:
+        writer.write(json.dumps(payload).encode("utf-8") + b"\n")
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readline(), timeout)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+    return json.loads(line)
+
+
+async def _receiver(tmp_path, session_id="receiver-01"):
+    """A real second session's PeerHost, so a delivery below crosses a
+    real peer socket rather than a stand-in. Its inbox is the list its
+    on_message callback appends to -- already scrubbed by PeerHost's own
+    receive path, like every other frame."""
+    inbox: "list[dict]" = []
+    cwd = tmp_path / "other-repo"
+    cwd.mkdir(exist_ok=True)
+    host = peers.PeerHost(
+        session_id=session_id, cwd=str(cwd), title="receiver",
+        on_message=inbox.append, heartbeat_secs=3600.0,
+    )
+    await host.start()
+    return host, inbox
+
+
+async def _until(predicate, timeout=5.0):
+    """Wait for something another task does. The peer protocol is
+    fire-and-forget -- the sender's send_message returns once the frame is
+    written, and the receiver fires on_message after reading to EOF -- so
+    a delivery is observed, never awaited."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.02)
+    return False
+
+
+async def test_a_sidecar_peer_send_is_performed_by_the_engine(
+    tmp_path, monkeypatch,
+):
+    """THE claim this change makes. A request arriving on the control
+    socket is performed by the ENGINE, through the same PeerDelivery
+    ``/msg`` uses: the frame crosses a real peer socket, the limiter is
+    charged once, ONE ledger row is appended naming engine="codex" and the
+    SIDECAR's turn, and peer_sent lights the status bar.
+
+    The turn assertion is the sharp one. The engine is idle -- no turn is
+    running here -- so a row reading ``idle`` would mean the sidecar's
+    turn id was dropped and every Codex model send would be recorded as
+    unprompted."""
+    eng, _procs = await _codex(tmp_path, monkeypatch, peer_send=True)
+    host, inbox = await _receiver(tmp_path)
+    try:
+        assert eng._turn_id is None, "the engine must be idle for this to bite"
+
+        reply = await _control(eng._engine_control.path, {
+            "op": "peer_send",
+            "turn_id": "t-sidecar",
+            "request": {"body": "ready", "to": "receiver-01",
+                        "broadcast": False, "in_reply_to": None},
+        })
+
+        assert reply["ok"] is True, reply
+        result = reply["result"]
+        assert [d["session_id"] for d in result["delivered_to"]] == ["receiver-01"]
+
+        assert await _until(lambda: inbox), "no frame reached the peer socket"
+        assert inbox[0]["body"] == "ready"
+        assert inbox[0]["from_id"] == eng.session_id
+
+        assert eng._peer_delivery.limiter.used_in_window() == 1
+        rows = eng._peer_delivery.ledger.recent(limit=5)
+        assert len(rows) == 1, "one send, one row"
+        assert rows[0].sender.engine == "codex"
+        assert rows[0].sender.session == eng.session_id
+        assert list(rows[0].to) == ["receiver-01"]
+        assert rows[0].turn.id == "t-sidecar"
+        assert rows[0].turn.state == "running"
+
+        lit = [ev for ev in _drain(eng._peer_queue) if ev.type == "peer_sent"]
+        assert lit and lit[0].data["to"] == ["receiver-01"], (
+            "the status bar's send light never flashed"
+        )
+    finally:
+        await host.stop()
+        await eng.finalize()
+
+
+async def test_the_control_socket_serves_one_op_and_refuses_every_other(
+    tmp_path, monkeypatch,
+):
+    """The surface is one operation. Anything else is refused BY NAME --
+    a socket that quietly ignored an unknown op would be a socket whose
+    surface nobody can state -- and a refusal spends nothing."""
+    eng, _procs = await _codex(tmp_path, monkeypatch, peer_send=True)
+    path = eng._engine_control.path
+    try:
+        unknown = await _control(path, {"op": "peer_history", "request": {}})
+        assert unknown["ok"] is False
+        assert "unsupported op" in unknown["error"]
+        assert "'peer_history'" in unknown["error"]
+
+        shapeless = await _control(path, {"op": "peer_send", "request": "ready"})
+        assert shapeless["ok"] is False
+        assert "operator's request object" in shapeless["error"]
+
+        not_json = await _control(path, [1, 2, 3])
+        assert not_json["ok"] is False
+        assert "not a JSON object" in not_json["error"]
+
+        assert eng._peer_delivery.limiter.used_in_window() == 0
+        assert eng._peer_delivery.ledger.recent(limit=5) == []
+    finally:
+        await eng.finalize()
+
+
+async def test_the_switch_off_is_told_to_the_sidecar_and_enforced_at_the_socket(
+    tmp_path, monkeypatch,
+):
+    """Two halves of one switch. The sidecar is told ``0`` and therefore
+    offers no tool at all (tests/test_mcpserver.py proves the absence);
+    the socket refuses anyway, because the setting lives in the user's
+    environment or config file and can be turned off DURING a session --
+    a socket that had captured the answer at start() would keep sending
+    after the user said stop."""
+    eng, _procs = await _codex(tmp_path, monkeypatch, peer_send=False)
+    try:
+        overrides = " ".join(eng._mcp_overrides())
+        assert f'{mcpserver_mod.ENV_PEER_SEND}="0"' in overrides, overrides
+        assert mcpserver_mod.ENV_ENGINE_SOCKET not in overrides, (
+            "a sidecar that may not send is told nothing about where to"
+        )
+        assert mcpserver_mod.ENV_TURN_ID not in overrides
+
+        reply = await _control(eng._engine_control.path, {
+            "op": "peer_send", "turn_id": "t-1",
+            "request": {"body": "ready", "to": "receiver-01"},
+        })
+        assert reply["ok"] is False
+        assert "off on this DOXA install" in reply["error"]
+    finally:
+        await eng.finalize()
+
+
+async def test_the_engine_socket_is_0600_and_finalize_unlinks_it(
+    tmp_path, monkeypatch,
+):
+    """Same-user, enforced by the filesystem -- the boundary the peer
+    sockets already rest on, and the reason there is no token to put on
+    argv. Gone at finalize: a session that ended must leave nothing
+    behind for anything to connect to."""
+    eng, _procs = await _codex(tmp_path, monkeypatch, peer_send=True)
+    path = eng._engine_control.path
+    assert path.exists() and eng._engine_control.running is True
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert path.parent == peers.runtime_dir(), "beside the peer socket"
+
+    await eng.finalize()
+
+    assert not path.exists()
+    assert eng._engine_control.running is False
+
+
+async def test_the_engine_socket_does_not_cost_the_one_argv_shape(
+    tmp_path, monkeypatch,
+):
+    """The two new overrides are env entries like every other one, so the
+    resume argv still differs from the first turn's only by
+    ``resume <id>``. A second turn whose command line had drifted would
+    be a session whose tools changed shape after the first."""
+    eng, _procs = await _codex(tmp_path, monkeypatch, peer_send=True)
+    try:
+        eng.thread_id = "th-x"
+        eng._turn_id = "t-1"
+        first, resume = eng._argv(True), eng._argv(False)
+        assert resume[:2] == first[:2] == ["codex", "exec"]
+        assert resume[2:4] == ["resume", "th-x"]
+        assert resume[4:] == first[2:]
+
+        over = _overrides(first)
+        prefix = f"mcp_servers.{mcpserver_mod.SERVER_NAME}.env"
+        assert over[f"{prefix}.{mcpserver_mod.ENV_PEER_SEND}"] == '"1"'
+        assert over[f"{prefix}.{mcpserver_mod.ENV_ENGINE_SOCKET}"] == json.dumps(
+            str(eng._engine_control.path)
+        )
+        assert over[f"{prefix}.{mcpserver_mod.ENV_TURN_ID}"] == '"t-1"'
+    finally:
+        await eng.finalize()
+
+
+async def test_a_codex_session_is_offered_the_send_tool(tmp_path, monkeypatch):
+    """The gap this release closes. ``peer_send_tool`` is True because the
+    sidecar has somewhere to forward to, not because ``/msg`` works --
+    those are different grants and the capability map says so with
+    different fields."""
     from doxa.codex import CODEX_CAPABILITIES, _peer_delivery_available
 
     eng, _procs = await _codex(tmp_path, monkeypatch, peer_send=True)
     try:
         assert CODEX_CAPABILITIES.mcp_tools is True
-        assert CODEX_CAPABILITIES.peer_send_tool is False
-        assert CODEX_CAPABILITIES.peer_messaging is True, (
-            "/msg and the rail are DOXA's own layer and do work here"
-        )
-        assert _peer_delivery_available() is False, (
-            "once doxa.peerdelivery exports the sidecar factory, this test "
-            "and the capability field are the two places to flip"
-        )
+        assert CODEX_CAPABILITIES.peer_send_tool is True
+        assert CODEX_CAPABILITIES.peer_messaging is True
+        assert _peer_delivery_available() is True
+        assert eng._peer_send_armed() is True
         overrides = " ".join(eng._mcp_overrides())
-        assert f'{mcpserver_mod.ENV_PEER_SEND}="0"' in overrides, overrides
+        assert f'{mcpserver_mod.ENV_PEER_SEND}="1"' in overrides, overrides
     finally:
         await eng.finalize()
 
@@ -640,10 +829,11 @@ async def test_an_arriving_message_starts_no_codex_turn_while_the_switch_is_off(
 
 def test_peer_send_tool_says_which_engines_can_offer_the_model_a_send():
     """``peer_messaging`` means ``/msg`` works and is True on all four.
-    That stopped being enough the moment three of them could offer the
-    MODEL a send tool and the fourth could not: a human sending and a
-    model sending are different grants, and a map with one field for both
-    would have to lie about one of them.
+    ``peer_send_tool`` means the MODEL can send, which is a different
+    grant -- a map with one field for both would have to lie about one of
+    them. All four answer True to both now; the field stays because the
+    two questions stay different, and because a vendor session whose tool
+    surface failed to import still answers False to the second (below).
 
     Read off the registry rather than the modules, because the registry is
     what ``/engine`` and the README table read."""
@@ -654,7 +844,7 @@ def test_peer_send_tool_says_which_engines_can_offer_the_model_a_send():
         for engine_id in engines_mod.available()
     }
     assert can_send == {
-        "claude": True, "deepseek": True, "glm": True, "codex": False,
+        "claude": True, "deepseek": True, "glm": True, "codex": True,
     }
     for engine_id in can_send:
         assert engines_mod.get(engine_id).supports().peer_messaging is True, (

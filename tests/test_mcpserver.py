@@ -18,6 +18,7 @@ would be a test that passes only in the order it happens to run in.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -30,10 +31,12 @@ import pytest
 from doxa import mcpserver as mcpserver_mod
 from doxa.mcpserver import (
     ENV_CWD,
+    ENV_ENGINE_SOCKET,
     ENV_LORE,
     ENV_PEER_SEND,
     ENV_SESSION_ID,
     ENV_SPAWN_DEPTH,
+    ENV_TURN_ID,
     Identity,
     OperatorSurface,
     identity_from_env,
@@ -118,6 +121,19 @@ def test_the_environment_contract_is_read_exactly_as_documented(tmp_path):
     )
 
 
+def test_the_two_engine_variables_are_spelled_once_for_both_ends(tmp_path):
+    """``DOXA_MCP_ENGINE_SOCKET`` and ``DOXA_MCP_TURN_ID`` are set by
+    doxa.codex and read by doxa.peerdelivery; this module names them so
+    the documented contract and the code cannot say different things.
+    Imported rather than repeated, which is what this asserts."""
+    from doxa import peerdelivery as peerdelivery_mod
+
+    assert ENV_ENGINE_SOCKET == peerdelivery_mod.ENGINE_SOCKET_ENV
+    assert ENV_TURN_ID == peerdelivery_mod.ENGINE_TURN_ENV
+    assert ENV_ENGINE_SOCKET in mcpserver_mod.IDENTITY_ENV
+    assert ENV_TURN_ID in mcpserver_mod.IDENTITY_ENV
+
+
 def test_an_empty_environment_is_a_running_server_not_a_crash():
     """The server is spawned by a CLI DOXA does not control. A missing
     variable has to read as "no session", never as an exception that takes
@@ -156,7 +172,8 @@ async def test_initialize_and_tools_list_match_configured_names(tmp_path):
     # change cannot make the two halves agree by both being wrong.
     assert {t["name"] for t in surface.tools()} == expected
     # The five lore_* tools plus the two read-only peer ones. peer_send is
-    # absent: no delivery seam was wired (see _resolve_delivery).
+    # absent: this environment names no engine control socket, so there is
+    # nothing to forward a send to (see _resolve_delivery).
     assert "lore_memory_list" in expected and "peer_list" in expected
     assert "peer_send" not in expected
 
@@ -330,14 +347,154 @@ async def test_a_model_supplied_op_ctx_is_stripped(tmp_path):
 # -- the peer_send seam ------------------------------------------------
 
 
-def test_peer_send_is_not_offered_without_a_delivery_seam(tmp_path):
-    """doxa.peerdelivery does not exist yet. Until it does the tool is
-    ABSENT -- never wired to peers.send_message, which would bypass the
-    send-side rate limiter and the ledger (issue #39)."""
+def test_peer_send_is_not_offered_without_an_engine_socket(tmp_path, monkeypatch):
+    """A sidecar with no engine behind it offers NOTHING rather than a
+    tool that refuses: absence is what the model cannot call, and a
+    refusal is something it retries. Never wired to peers.send_message,
+    which would bypass the send-side rate limiter and the ledger."""
+    monkeypatch.delenv(ENV_ENGINE_SOCKET, raising=False)
     assert mcpserver_mod._resolve_delivery(
         Identity(session_id="s", cwd=str(tmp_path), peer_send=True)
     ) is None
     assert "peer_send" not in {t["name"] for t in _surface(tmp_path).tools()}
+
+
+def test_the_resolved_seam_forwards_and_never_sends_here(tmp_path, monkeypatch):
+    """What ``delivery_for`` hands back is the FORWARDING seam. This
+    process holds no limiter, no ledger and no PeerHost, and the object
+    the gate ends up carrying has to be the one that knows that."""
+    from doxa.peerdelivery import SidecarDelivery
+
+    monkeypatch.setenv(ENV_ENGINE_SOCKET, str(tmp_path / "engine.sock"))
+    monkeypatch.setenv(ENV_TURN_ID, "t-42")
+    seam = mcpserver_mod._resolve_delivery(
+        Identity(session_id="s", cwd=str(tmp_path), peer_send=True)
+    )
+    assert seam is not None
+    assert isinstance(seam.__self__, SidecarDelivery)
+    assert seam.__func__ is SidecarDelivery.tool_send
+    assert seam.__self__.turn_id == "t-42"
+
+
+def test_the_switch_off_beats_a_named_engine_socket(tmp_path, monkeypatch):
+    """``DOXA_MCP_PEER_SEND=0`` is the engine reporting the USER's switch.
+    It is checked before anything else, so a socket that happens to be
+    named cannot arm the tool behind the user's back."""
+    monkeypatch.setenv(ENV_ENGINE_SOCKET, str(tmp_path / "engine.sock"))
+    assert mcpserver_mod._resolve_delivery(
+        Identity(session_id="s", cwd=str(tmp_path), peer_send=False)
+    ) is None
+
+
+@asynccontextmanager
+async def _fake_engine(tmp_path: Path, *, reply: "dict | None" = None):
+    """A stand-in for :class:`doxa.peerdelivery.EngineControl`: it speaks
+    the protocol's engine half and records what the sidecar forwarded.
+
+    Deliberately not the real one. What this file tests is that the
+    SIDECAR forwards -- the request, whole, with the turn id -- and a fake
+    listener is the only way to read that off the wire rather than off a
+    result. The real engine performing the send is asserted in
+    tests/test_peer_delivery.py, against a real second session."""
+    seen: "list[dict]" = []
+    path = tmp_path / "engine.sock"
+    answer = reply if reply is not None else {
+        "ok": True,
+        "result": {"delivered_to": [{"session_id": "peer-01", "title": "t",
+                                     "repo": "/repo"}], "kind": "direct"},
+    }
+
+    async def handle(reader, writer):
+        line = await reader.readline()
+        try:
+            seen.append(json.loads(line))
+        except ValueError:
+            seen.append({"unparseable": line.decode("utf-8", "replace")})
+        writer.write(json.dumps(answer).encode("utf-8") + b"\n")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_unix_server(handle, path=str(path))
+    try:
+        yield path, seen
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_a_real_sidecar_forwards_peer_send_to_its_engine(tmp_path):
+    """The whole seam, over a real stdio MCP server subprocess: the tool
+    is offered, a ``tools/call`` reaches the ENGINE with the operator's
+    request and the turn id the engine spawned this server for, and what
+    comes back to the model is the engine's own result dict."""
+    async with _fake_engine(tmp_path) as (sock, seen):
+        async with _client(tmp_path, **{
+            ENV_PEER_SEND: "1",
+            ENV_ENGINE_SOCKET: str(sock),
+            ENV_TURN_ID: "t-77",
+            "DOXA_AGENT_PEER_SEND": "1",
+        }) as (session, _init):
+            listed = {t.name for t in (await session.list_tools()).tools}
+            assert "peer_send" in listed
+            result = await session.call_tool(
+                "peer_send", {"body": "ready", "to": "peer-01"},
+            )
+
+    assert len(seen) == 1, "the send was not forwarded exactly once"
+    assert seen[0]["op"] == "peer_send"
+    assert seen[0]["turn_id"] == "t-77", "the ledger row would name no turn"
+    assert seen[0]["request"]["body"] == "ready"
+    assert seen[0]["request"]["to"] == "peer-01"
+    assert seen[0]["request"]["broadcast"] is False
+
+    assert result.is_error is False
+    payload = json.loads(_text(result))
+    assert payload["delivered_to"][0]["session_id"] == "peer-01"
+
+
+@pytest.mark.asyncio
+async def test_an_engine_that_refused_is_a_result_the_model_reads(tmp_path):
+    """The engine's refusal comes back in the operator's own single-colon
+    shape. It must NOT read ``peer_send failed: ...`` -- that is the
+    string doxa.gate.is_hard_failure counts as a strike, and a limiter
+    doing its job twice would disable the tool."""
+    async with _fake_engine(
+        tmp_path, reply={"ok": False, "error": "over the per-turn limit"},
+    ) as (sock, _seen):
+        async with _client(tmp_path, **{
+            ENV_PEER_SEND: "1",
+            ENV_ENGINE_SOCKET: str(sock),
+            "DOXA_AGENT_PEER_SEND": "1",
+        }) as (session, _init):
+            result = await session.call_tool(
+                "peer_send", {"body": "ready", "to": "peer-01"},
+            )
+
+    error = json.loads(_text(result))["error"]
+    assert error == "peer_send: over the per-turn limit"
+    from doxa.gate import is_hard_failure
+
+    assert is_hard_failure("peer_send", {"error": error}) is False
+
+
+@pytest.mark.asyncio
+async def test_a_missing_engine_is_a_refusal_not_a_local_send(tmp_path):
+    """The failure mode this whole design exists to prevent: with the
+    engine gone the sidecar refuses. It has no PeerHost, no limiter and
+    no ledger, so anything it "delivered" would be off the record."""
+    async with _client(tmp_path, **{
+        ENV_PEER_SEND: "1",
+        ENV_ENGINE_SOCKET: str(tmp_path / "nothing-listens-here.sock"),
+        "DOXA_AGENT_PEER_SEND": "1",
+    }) as (session, _init):
+        result = await session.call_tool(
+            "peer_send", {"body": "ready", "to": "peer-01"},
+        )
+
+    error = json.loads(_text(result))["error"]
+    assert error.startswith("peer_send: ")
+    assert "nothing was sent" in error
 
 
 def test_peer_send_appears_the_moment_a_seam_is_passed(tmp_path, monkeypatch):
