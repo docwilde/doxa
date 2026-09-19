@@ -64,6 +64,12 @@ dependencies = [
 
 [project.scripts]
 doxa = "doxa.cli:main"
+# The name README.md and docs/fleet.md have used since the harness landed.
+# Until now it existed in the prose and nowhere else: `doxa-fleet --pool ...`
+# was a command that did not exist, and the working spelling was `python -m
+# doxa.fleet`. Same entry point either way -- doxa/fleet.py's main() is what
+# `python -m doxa.fleet` already calls.
+doxa-fleet = "doxa.fleet:main"
 
 [dependency-groups]
 dev = [

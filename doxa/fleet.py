@@ -88,12 +88,14 @@ the only part that knows doxa.daemon exists.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import contextlib
 import json
 import os
 import random
 import signal
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field, replace
@@ -109,6 +111,7 @@ __all__ = [
     "Assignment",
     "BudgetRefused",
     "DaemonBackend",
+    "FleetArgsError",
     "FleetBackend",
     "FleetRun",
     "FleetSpec",
@@ -118,10 +121,13 @@ __all__ = [
     "Slot",
     "assign",
     "budget_note",
+    "build_parser",
     "capacity_note",
     "check_capacity",
     "check_run_budget",
     "run_fleet",
+    "spec_from_args",
+    "spec_from_argv",
 ]
 
 
@@ -749,6 +755,12 @@ class Slot:
             "assignment": self.assignment.to_obj(),
             "phase": self.phase,
             "session_id": self.session_id,
+            # RECORDED because a reader outside this process has no other
+            # way to reach one session of a run: the run's peer registry
+            # lives under its OWN DOXA_RUNTIME_DIR, so the machine's
+            # doxa.peers.read_registry() cannot see it. `/fleet attach
+            # <slot>` opens an EngineClient on exactly this path.
+            "socket_path": self.socket_path,
             "pid": self.pid,
             "dispatched_at": self.dispatched_at,
             "error": self.error,
@@ -1064,6 +1076,20 @@ class RunReport:
     leaked_pids: "tuple[int, ...]" = ()
     started_at: str = ""
     finished_at: str = ""
+    #: This run is still going. True from :meth:`FleetRun.prepare` until
+    #: :meth:`FleetRun.run` has torn down, and it is what makes the
+    #: manifest readable WHILE the run happens rather than only after it:
+    #: a watcher (the TUI's fleet tab) re-reads the same file the CLI
+    #: prints at the end, and ``finished_at`` is left empty until there
+    #: genuinely is one. A manifest found live by a LATER process is a
+    #: run that died without tearing down -- the honest reading, and the
+    #: one ``/fleet runs`` prints.
+    live: bool = False
+    #: The operator asked for teardown before quiescence (``/fleet stop``,
+    #: :meth:`FleetRun.request_stop`). Its own field rather than a clause
+    #: of ``quiesced``: "the fleet went quiet" and "somebody ended it" are
+    #: different facts about a run and only one of them is a measurement.
+    stopped: bool = False
 
     @property
     def ledger_path(self) -> Path:
@@ -1113,6 +1139,8 @@ class RunReport:
             "dispatch_spread_s": self.dispatch_spread_s,
             "quiesced": self.quiesced,
             "quiescence_s": self.quiescence_s,
+            "live": self.live,
+            "stopped": self.stopped,
             "ledger": {
                 "path": str(self.ledger_path),
                 "messages": self.ledger_messages,
@@ -1134,9 +1162,11 @@ class RunReport:
         leak = (
             f", LEAKED {len(self.leaked_pids)}" if self.leaked_pids else ""
         )
+        stopped = ", STOPPED on request" if self.stopped else ""
         return (
             f"run {self.run_id}: n={self.spec.n} ({parts}); dispatch spread "
-            f"{spread}; ledger {self.ledger_messages} messages{leak}"
+            f"{spread}; ledger {self.ledger_messages} messages"
+            f"{stopped}{leak}"
         )
 
 
@@ -1163,10 +1193,21 @@ class FleetRun:
         backend: "FleetBackend | None" = None,
         *,
         force: bool = False,
+        stop: "asyncio.Event | None" = None,
     ) -> None:
         self.spec = spec
         self.backend: FleetBackend = backend or DaemonBackend()
         self.force = bool(force)
+        # AN END THE OPERATOR CAN ASK FOR, and the reason it is an Event
+        # rather than a task cancellation: teardown is the phase that must
+        # not be interrupted (it escalates stop -> SIGTERM -> SIGKILL and
+        # then asks the OS whether the process really went), so a stop has
+        # to be a value the phases READ, never an exception thrown into
+        # whichever await happens to be current. `python -m doxa.fleet`
+        # passes none and behaves exactly as it did; the TUI's /fleet stop
+        # sets it (:meth:`request_stop`) and the run takes the same
+        # teardown path the quiescence deadline takes.
+        self.stop_signal = stop if stop is not None else asyncio.Event()
         self.slots = [
             Slot(assignment=a)
             for a in assign(
@@ -1174,6 +1215,36 @@ class FleetRun:
             )
         ]
         self.report = RunReport(run_id=spec.run_id, spec=spec, slots=self.slots)
+
+    # -- the end an operator can ask for -------------------------------
+
+    def request_stop(self) -> None:
+        """End this run at the next phase boundary, then tear down.
+
+        Never kills anything here: what this does is make
+        :meth:`stopping` true, which every phase gate in :meth:`run` and
+        the quiescence wait's own loop read. Teardown then runs in the
+        ``finally`` it always runs in, so a stopped run is written down
+        exactly like a quiesced one -- with ``stopped`` in the manifest
+        saying which it was."""
+        self.report.stopped = True
+        self.stop_signal.set()
+
+    def stopping(self) -> bool:
+        return self.stop_signal.is_set()
+
+    async def _sleep_or_stop(self, seconds: float) -> bool:
+        """Sleep, unless a stop arrives first. True when one did.
+
+        The poll interval is seconds long and a stop the operator has to
+        wait out is a stop that reads as a hang, so the wait is on the
+        event rather than on the clock."""
+        try:
+            async with asyncio.timeout(seconds):
+                await self.stop_signal.wait()
+        except (asyncio.TimeoutError, TimeoutError):
+            return False
+        return True
 
     # -- phase 0: the ground ------------------------------------------
 
@@ -1196,6 +1267,11 @@ class FleetRun:
             directory.mkdir(parents=True, exist_ok=True)
             os.chmod(directory, 0o700)
         self.report.started_at = _iso_now()
+        # From here the manifest describes something that is HAPPENING.
+        # write_manifest() may now be called repeatedly (the TUI's fleet
+        # tab watches the file) and leaves finished_at empty until run()
+        # clears this.
+        self.report.live = True
         return self.report.capacity
 
     # -- phase 1: spawn ------------------------------------------------
@@ -1312,6 +1388,12 @@ class FleetRun:
         quiet_since: "float | None" = None
         started = time.monotonic()
         while time.monotonic() < deadline:
+            if self.stopping():
+                # An operator's stop is NOT a quiescence: the run ends
+                # here, quiesced stays False, and the slots still
+                # dispatched are handed to the same teardown the deadline
+                # would have handed them to.
+                break
             live = [s for s in self.slots if s.phase == PHASE_DISPATCHED]
             if not live:
                 self.report.quiesced = True
@@ -1337,7 +1419,8 @@ class FleetRun:
             elif time.monotonic() - quiet_since >= self.spec.quiet_dwell_s:
                 self.report.quiesced = True
                 break
-            await asyncio.sleep(self.spec.poll_interval_s)
+            if await self._sleep_or_stop(self.spec.poll_interval_s):
+                break
         else:
             # Deadline. Every session still dispatched is hung by
             # definition: the run asked for an end and did not get one.
@@ -1435,8 +1518,16 @@ class FleetRun:
     def write_manifest(self) -> Path:
         """Record the run. Written LAST but never skipped -- including
         after a failure, because the assignment and the phases are the only
-        interpretation a half-run ever gets."""
-        self.report.finished_at = _iso_now()
+        interpretation a half-run ever gets.
+
+        Also callable WHILE the run happens, which is how a watcher outside
+        this process sees a run it is not running: the TUI's fleet tab
+        reads this file and the run's ledger on a timer and never touches
+        a :class:`FleetRun` object. ``finished_at`` is stamped only once
+        :attr:`RunReport.live` is false, so a mid-run write cannot leave a
+        finishing time on a run that has not finished."""
+        if not self.report.live:
+            self.report.finished_at = _iso_now()
         path = self.spec.manifest_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -1458,10 +1549,20 @@ class FleetRun:
         self.prepare()
         try:
             await self.spawn_all()
-            await self.arm_all()
-            await self.dispatch()
-            await self.await_quiescence()
+            # A stop asked for mid-spawn skips the phases that would
+            # follow rather than cancelling the one in flight: spawn and
+            # arm are the two phases that CREATE processes, and a
+            # half-created session is exactly what the teardown below has
+            # the hardest time finding. So the run finishes making what it
+            # started, prompts nobody, and tears the lot down.
+            if not self.stopping():
+                await self.arm_all()
+            if not self.stopping():
+                await self.dispatch()
+            if not self.stopping():
+                await self.await_quiescence()
         finally:
+            self.report.live = False
             with contextlib.suppress(Exception):
                 await self.teardown()
             with contextlib.suppress(Exception):
@@ -1480,9 +1581,10 @@ async def run_fleet(
     backend: "FleetBackend | None" = None,
     *,
     force: bool = False,
+    stop: "asyncio.Event | None" = None,
 ) -> RunReport:
     """One run, start to finish. The function a script calls."""
-    return await FleetRun(spec, backend, force=force).run()
+    return await FleetRun(spec, backend, force=force, stop=stop).run()
 
 
 # -- the command line -------------------------------------------------
@@ -1511,14 +1613,34 @@ def _parse_pool(spec: str) -> "tuple[ModelSlot, ...]":
     return tuple(out)
 
 
-def main(argv: "list[str] | None" = None) -> int:
-    """``python -m doxa.fleet`` -- one run, from the shell.
+class FleetArgsError(ValueError):
+    """A ``--flag`` that does not parse, or a missing required one.
 
-    Prints the capacity arithmetic BEFORE spawning anything, because that
-    is the moment an operator can still change their mind about N, and
-    prints the manifest path after, because the manifest is the run."""
-    import argparse
+    Exists because :func:`build_parser` is read by TWO callers with
+    opposite failure modes: ``python -m doxa.fleet`` may print to stderr
+    and exit 2, and the TUI's ``/fleet start`` may do neither -- a
+    ``SystemExit`` raised inside a Textual worker takes the app down, and
+    argparse's own message goes to a stderr nobody is looking at behind a
+    full-screen terminal app. So the parser raises this instead of
+    exiting, and each caller decides what that means: :func:`main` prints
+    and returns 2 (argparse's own code, unchanged), the command mounts the
+    text as a block."""
 
+
+def build_parser() -> "argparse.ArgumentParser":
+    """THE fleet argument grammar. One parser, both front ends.
+
+    ``python -m doxa.fleet`` and the TUI's ``/fleet start`` build the same
+    :class:`FleetSpec` from the same flags because there is only one place
+    the flags are declared -- the drift this exists to prevent is the one
+    where a flag lands on the command line and the TUI silently ignores
+    it, or the two disagree about a default and two runs that look
+    identical are not.
+
+    ``--cwd`` has no default here on purpose: the CLI's is the process's
+    working directory and the TUI's is the SESSION's repo, and that is the
+    one thing the two front ends legitimately differ on. It is
+    :func:`spec_from_args`' argument rather than a parser default."""
     parser = argparse.ArgumentParser(
         prog="doxa-fleet",
         description=(
@@ -1527,14 +1649,24 @@ def main(argv: "list[str] | None" = None) -> int:
             "(docs/plans/emergent-organization.md)."
         ),
     )
-    parser.add_argument("--prompt", required=True,
+    # Bound method shadowed on the INSTANCE rather than a subclass, which
+    # keeps this a plain ArgumentParser for anything that reflects on it:
+    # argparse calls ``self.error(message)`` for every parse failure it
+    # has, including a missing required argument, so this is the single
+    # interception point.
+    def _refuse(message: str) -> "None":
+        raise FleetArgsError(message)
+
+    parser.error = _refuse  # type: ignore[method-assign]
+    parser.add_argument("--prompt", default=None,
                         help="the task text, byte-identical for every "
                              "session. Never formatted per session: a "
                              "number is a position and a position is a "
                              "privilege")
     parser.add_argument("--prompt-file", default=None,
-                        help="read the prompt from this file instead "
-                             "(--prompt then names the file's role only)")
+                        help="read the prompt from this file instead. One "
+                             "of --prompt and --prompt-file is required; "
+                             "--prompt-file wins when both are given")
     parser.add_argument("-n", type=int, default=DEFAULT_N,
                         help=f"sessions (default %(default)s). The "
                              f"experiment wants 32, which is about "
@@ -1587,15 +1719,26 @@ def main(argv: "list[str] | None" = None) -> int:
                         help="print the capacity arithmetic and the model "
                              "assignment this seed would deal, and spawn "
                              "nothing")
-    args = parser.parse_args(argv)
+    return parser
 
+
+def spec_from_args(args: "argparse.Namespace", *, cwd: str) -> FleetSpec:
+    """The parsed flags as the run they describe.
+
+    ``cwd`` is the fallback for ``--cwd`` and is the caller's to supply:
+    the shell's answer is ``os.getcwd()``, the TUI's is the session's own
+    repository. Everything else comes from the one parser above, so the
+    two front ends cannot deal a different fleet from the same words."""
     prompt = args.prompt
     if args.prompt_file:
         prompt = Path(args.prompt_file).read_text(encoding="utf-8")
-
-    spec = FleetSpec(
+    if not str(prompt or "").strip():
+        raise FleetArgsError(
+            "a fleet run needs a prompt: --prompt \"...\" or --prompt-file PATH"
+        )
+    return FleetSpec(
         prompt=prompt,
-        cwd=args.cwd or os.getcwd(),
+        cwd=args.cwd or cwd,
         n=args.n,
         pool=_parse_pool(args.pool),
         seed=args.seed,
@@ -1607,6 +1750,35 @@ def main(argv: "list[str] | None" = None) -> int:
         quiescence_timeout_s=args.quiescence_timeout,
         quiet_dwell_s=args.quiet_dwell,
     )
+
+
+def spec_from_argv(
+    argv: "list[str]", *, cwd: str
+) -> "tuple[FleetSpec, argparse.Namespace]":
+    """``build_parser`` + ``spec_from_args`` in one call -- what a caller
+    holding a list of words (a shell's ``sys.argv``, a ``/fleet start``
+    line through ``shlex.split``) wants. Raises :class:`FleetArgsError`
+    and never exits."""
+    args = build_parser().parse_args(argv)
+    return spec_from_args(args, cwd=cwd), args
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    """``python -m doxa.fleet`` / ``doxa-fleet`` -- one run, from the shell.
+
+    Prints the capacity arithmetic BEFORE spawning anything, because that
+    is the moment an operator can still change their mind about N, and
+    prints the manifest path after, because the manifest is the run."""
+    parser = build_parser()
+    try:
+        args = parser.parse_args(argv)
+        spec = spec_from_args(args, cwd=os.getcwd())
+    except FleetArgsError as exc:
+        # argparse's own shape, because that is what a shell and a wrapper
+        # script already expect from this program: usage on stderr, exit 2.
+        parser.print_usage(sys.stderr)
+        print(f"{parser.prog}: error: {exc}", file=sys.stderr)
+        return 2
 
     print(capacity_note(spec.n))
     # Printed beside the memory arithmetic and BEFORE --dry-run returns:
