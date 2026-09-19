@@ -321,6 +321,113 @@ Codex slots received but did not send, because at 1.13.0 a Codex model had
 no `peer_send`. Since 1.14.0 it has one, forwarded from the MCP sidecar to
 the engine and sent on the session's own limiter and ledger.
 
+### What a run may approve
+
+A session's engine stops and asks a human about some tool calls — the ones the
+Claude CLI would have shown its own permission prompt for, and any
+`AskUserQuestion` the model raises. In a session that is a dialog in the pane.
+In a fleet there is nobody at the keyboard, and until 1.15.0 nothing answered:
+the harness consumed the ask and discarded it, so the slot waited for a
+decision that was never coming. Measured on 1.14.0, a supervisor sat **6 min
+45 s** on `mcp__doxa__peer_list`; an operator then answered ten asks by hand
+and the whole exchange finished in 25 s.
+
+`--approve` is how a run says what it may decide on your behalf. It is a
+separate flag from `--allow-unbudgeted` on purpose — accepting an unbounded
+bill says nothing about accepting tool calls you never saw — and like that one
+it is recorded in the manifest, so a run's approval posture is readable
+afterwards instead of reconstructed from a shell history.
+
+| Value | What it auto-approves |
+|---|---|
+| `none` *(default)* | Nothing. |
+| `peer` | This run's own peer tools: `peer_list`, `peer_history`, `peer_send`. |
+| `all` | Every tool call the CLI asks about. |
+
+`peer` is the narrow value and the one most runs want. A supervisor reaches for
+`peer_list` and `peer_send` in its first turn, because that is how it finds its
+workers and hands out the task — those two are reads and writes of the run's
+own ledger, not of your repository. Everything else in the run still asks.
+
+**An unanswered ask is refused, not allowed.** A harness that quietly said yes
+would be handing every spawned session an approval the same operator declined
+to give one interactive session, from a flag nobody typed. A refusal is an
+ordinary tool result: the model reads it, says so in its reply and carries on,
+which is the behaviour `doxa.engine._no_answer_deny` already relies on. So the
+refusal is written for the person who was not watching — it names the tool, the
+run and the slot, and it names the flag that would have allowed the call:
+
+```
+nobody answered within 300s: mcp__doxa__peer_list was called inside a DOXA
+fleet run 20260919T..., slot 0, where nobody is at the keyboard. This run
+auto-approves nothing (--approve none, the default). --approve peer would
+have allowed this run's own peer tools, --approve all every tool the CLI
+asks about; `/fleet attach 0` answers one by hand.
+```
+
+Two kinds of ask are never auto-approved, whatever `--approve` says. A question
+is not a permission — `allow` is not a reply to *which branch?* — so an
+`AskUserQuestion` is declined, which is the graceful path the engine already
+documents. A `spawn_session` keeps its own gate for the reason that gate was
+built: a fleet spawning further fleet with nobody watching is the one outcome
+nobody asked for.
+
+### Answering one by hand
+
+`--approval-grace` is how long a parked ask waits for you before the policy
+decides it. The default is 300 seconds, which is long enough to read the tab,
+attach and choose, and far short of the 1800-second quiescence deadline. Zero
+refuses immediately and never waits.
+
+Inside that window the run is answerable. A parked slot is idle in every way a
+watcher can measure — no turn, no ledger line, `is_quiet` says yes — so the
+fleet tab is the only place it can be told apart from a finished agent, and it
+says so directly under the assignment table:
+
+```
+WAITING ON YOU — 1 permission ask(s) parked. A parked session looks idle from
+outside; it is not.
+  slot 0   permission mcp__doxa__peer_list        asked 12s ago, refused in 288s
+       Claude wants to use mcp__doxa__peer_list
+       answer it: /fleet attach 0
+```
+
+`/fleet attach 0` opens that session in a live tab and names the ask on
+arrival. The dialog itself arrives on its own: an attach replays the daemon's
+event ring, and a `needs_input` still in it opens the pane's question or
+permission popup exactly as it would in the session that asked. Answering
+there cancels the grace timer, and the run records that a **person** decided
+it rather than the policy.
+
+A run started from the shell has the same record but no answer path, which is
+the honest shape: `doxa-fleet` blocks inside `asyncio.run()` for the length of
+the run and cannot attach to anything. It writes the manifest out whenever the
+set of parked asks changes, so the run is readable from another terminal while
+it is blocked.
+
+### What the manifest says about it
+
+Every run carries an `approvals` block beside `capacity` and `budget`, because
+spending money and granting a permission are the two things a run does on an
+operator's behalf and both have to survive the run:
+
+```json
+"approvals": {
+  "policy": "peer",
+  "grace_s": 300.0,
+  "posture": "--approve peer: this run's own peer tools are auto-approved, …",
+  "asked": 4, "auto_approved": 3, "answered": 0,
+  "refused": 1, "ended_unanswered": 0, "pending": 0
+}
+```
+
+Each slot carries the evidence those counts are summed from: `approvals` is the
+decision log — tool, kind, decision, and `by` naming what decided it (`policy`,
+`operator`, `timeout` or `teardown`) — and `pending_asks` is what that slot is
+blocked on right now. `RunReport.summary()` prints the refusals in its one line
+and stays quiet when there were none, so a run nobody asked anything of reads
+exactly as it always has.
+
 ### Nothing hangs, nothing is left behind
 
 Every phase has a deadline and every deadline has an escalation.
@@ -332,6 +439,10 @@ Every phase has a deadline and every deadline has an escalation.
   session is idle between its own turn and the turn an arriving peer message
   starts, so the first moment everything is idle is routinely the middle of an
   exchange rather than the end of one.
+* A permission ask nobody answers becomes a decision inside `--approval-grace`
+  seconds, and an ask still open when the run ends is written into the manifest
+  as `by: teardown` rather than dropped. A session waiting on a human is the
+  one kind of stall a status poll cannot see, because a parked session is idle.
 * Teardown is `stop` → SIGTERM → SIGKILL, then a second pass that asks the OS
   whether the process is *actually* gone. `teardown()` returns the pids that
   survived all of it — normally empty, and loud when it is not.
