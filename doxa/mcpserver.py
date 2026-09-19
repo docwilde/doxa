@@ -84,6 +84,13 @@ TOML value:
                              is still only offered if
                              :mod:`doxa.peerdelivery` imports AND
                              exports the factory named below.
+``DOXA_MCP_ENGINE_SOCKET``   the engine's control socket for this
+                             session -- the seam ``peer_send`` is
+                             performed through. A PATH, not a
+                             credential; see the seam section below.
+``DOXA_MCP_TURN_ID``         the turn this server was spawned for.
+                             Rides the forwarded request so the
+                             ledger row names the right turn.
 ===========================  ====================================
 
 ``--no-lore`` on the command line is the same switch as ``DOXA_MCP_LORE=0``
@@ -96,17 +103,34 @@ MCP_ENV_PASSTHROUGH` is the list the engine forwards, and it is a list of
 non-secret path/switch variables on purpose -- a ``-c`` override lands on
 ``codex exec``'s argv, which is world-readable in ``ps``.
 
-THE peer_send SEAM, and why it is not wired yet. ``peer_send`` delivers
-immediately and must be charged to the send-side rate limiter and written
-to the ledger; only ``SessionEngine`` does that today, and a parallel
-change is extracting that path into ``doxa.peerdelivery``. Reaching for
-``doxa.peers.send_message`` from here would bypass both, which is the
-defect that change exists to fix. So: this module offers ``peer_send``
-only when :func:`_resolve_delivery` finds
-``doxa.peerdelivery.delivery_for(session_id, cwd)`` and it returns a
-callable. Until that module lands the tool is simply not in
-``tools/list`` -- ``operators._peer_send_configured`` sees no ``peer_send``
-key in the ctx and does not project it.
+THE peer_send SEAM, and how it reaches one limiter. ``peer_send``
+delivers immediately and must be charged to the session's send-side rate
+limiter, written to its ledger and shown on its status bar. A send
+performed HERE could do none of those things: this process is spawned and
+killed per ``codex exec`` turn, so its limiter would start empty every
+turn, its ledger writer would race the engine's for the same lock, and
+its lamps would light nothing. Reaching for ``doxa.peers.send_message``
+would skip the limiter and the ledger outright, which is the defect
+``doxa.peerdelivery`` exists to prevent.
+
+So this process does not send. :func:`_resolve_delivery` asks
+``doxa.peerdelivery.delivery_for(session_id, cwd)`` for an object with a
+``tool_send(request) -> dict``, and that object
+(:class:`doxa.peerdelivery.SidecarDelivery`) FORWARDS the operator's
+already-validated request over ``DOXA_MCP_ENGINE_SOCKET`` to the engine,
+which performs it through the one :class:`doxa.peerdelivery.PeerDelivery`
+that also serves the human's ``/msg``. One limiter per session across
+turns, one ledger writer, lamps and events immediate. When the engine did
+not set that variable the factory returns None and ``peer_send`` is
+simply not in ``tools/list`` -- ``operators._peer_send_configured`` sees
+no ``peer_send`` key in the ctx and does not project it, so the model
+cannot call a tool that would have nowhere to go.
+
+That socket carries no credential and needs none. It is 0600 inside the
+0700 runtime dir, so its boundary is the filesystem's -- the same
+same-user boundary the peer sockets themselves rest on -- and a token
+would have to ride ``-c mcp_servers.doxa.env.<KEY>``, which lands on
+``codex exec``'s argv and is world-readable in ``ps``.
 
 STDERR GOES NOWHERE USEFUL, AND THAT IS MEASURED. Nothing is written to
 it on the normal path: the disable callback writes one line, a fatal
@@ -134,6 +158,8 @@ from typing import Any, Callable
 
 from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see that module
 
+from .peerdelivery import ENGINE_SOCKET_ENV, ENGINE_TURN_ENV
+
 #: The MCP server's name. Codex namespaces the tools it exposes to the
 #: model under it; the WIRE names inside this process stay the registry's
 #: own (``lore_memory_list``), which is what ``doxa.gate`` keys on.
@@ -146,18 +172,26 @@ ENV_LORE = "DOXA_MCP_LORE"
 ENV_PEER_SEND = "DOXA_MCP_PEER_SEND"
 ENV_DEBUG = "DOXA_MCP_DEBUG"
 
+#: The two variables that name the engine behind this sidecar. Spelled in
+#: :mod:`doxa.peerdelivery` and imported rather than repeated, because
+#: that module is the one that READS them -- this process never does.
+ENV_ENGINE_SOCKET = ENGINE_SOCKET_ENV
+ENV_TURN_ID = ENGINE_TURN_ENV
+
 #: The identity variables, in one tuple, so the engine that SETS them and
 #: the server that READS them cannot drift -- doxa.codex imports this
 #: rather than spelling the names a second time.
 IDENTITY_ENV = (
     ENV_SESSION_ID, ENV_CWD, ENV_SPAWN_DEPTH, ENV_LORE, ENV_PEER_SEND,
+    ENV_ENGINE_SOCKET, ENV_TURN_ID,
 )
 
-#: The seam ``doxa.peerdelivery`` must export for peer_send to be offered:
-#: ``delivery_for(session_id, cwd)`` returning the async
-#: ``(payload: dict) -> dict`` callable ``OperatorContext.peer_send``
-#: takes, or None. Named here so the parallel change has one string to
-#: match rather than a shape to infer.
+#: The seam ``doxa.peerdelivery`` exports for peer_send to be offered:
+#: ``delivery_for(session_id, cwd)`` returning an object with an async
+#: ``tool_send(request: dict) -> dict`` -- the callable
+#: ``OperatorContext.peer_send`` takes -- or None when this process was
+#: not told where its engine listens. One string, so the two modules
+#: match by name rather than by a shape either could infer wrongly.
 PEER_DELIVERY_FACTORY = "delivery_for"
 
 
@@ -326,17 +360,20 @@ class OperatorSurface:
 def _resolve_delivery(identity: Identity) -> "Callable[[dict], Any] | None":
     """The ``peer_send`` seam, or None -- see the module docstring.
 
-    Deliberately NOT ``doxa.peers.send_message``: that bypasses the
-    send-side rate limiter and the ledger, which is the defect the
-    ``doxa.peerdelivery`` extraction exists to fix. Until that module
-    exists this returns None and ``peer_send`` is simply not offered."""
+    What comes back is the FORWARDING seam
+    (:meth:`doxa.peerdelivery.SidecarDelivery.tool_send`), never a send
+    performed in this process: the limiter, the ledger and the lamps all
+    live in the engine, and a second copy of any of them is a session
+    that cannot be bounded, recorded or watched. Deliberately NOT
+    ``doxa.peers.send_message``, which would skip the first two outright.
+
+    None whenever the seam cannot be built -- the setting is off, the
+    factory is missing, or the engine named no control socket -- and a
+    None seam is a tool that is ABSENT rather than one that refuses."""
     if not identity.peer_send:
         return None
-    try:
-        from . import peerdelivery  # noqa: F401 -- does not exist yet; see above
-    except ImportError:
-        _debug("peer_send asked for, but doxa.peerdelivery is not importable")
-        return None
+    from . import peerdelivery
+
     factory = getattr(peerdelivery, PEER_DELIVERY_FACTORY, None)
     if not callable(factory):
         _log(
@@ -345,11 +382,25 @@ def _resolve_delivery(identity: Identity) -> "Callable[[dict], Any] | None":
         )
         return None
     try:
-        return factory(identity.session_id, identity.cwd)
+        delivery = factory(identity.session_id, identity.cwd)
     except Exception as exc:  # noqa: BLE001 -- a seam that cannot be built
         # is a narrower surface, not a dead server.
         _log(f"peer_send not offered: {type(exc).__name__}: {exc}")
         return None
+    if delivery is None:
+        _debug(
+            f"peer_send asked for, but no engine control socket was named "
+            f"in {ENV_ENGINE_SOCKET}"
+        )
+        return None
+    seam = getattr(delivery, "tool_send", None)
+    if not callable(seam):
+        _log(
+            f"peer_send not offered: {PEER_DELIVERY_FACTORY} returned "
+            f"{type(delivery).__name__}, which has no tool_send(request)"
+        )
+        return None
+    return seam
 
 
 def build_server(surface: OperatorSurface) -> Any:

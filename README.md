@@ -24,8 +24,9 @@
 and Textual. Four engines: **Claude** on your Claude subscription, **Codex**
 through the Codex CLI on whatever it is signed into (a ChatGPT subscription
 or an API key), and **DeepSeek** and **GLM** on their own API keys. Pick one
-per session with `--engine` or `/engine`; the [table below](#quickstart)
-says what each can do. A Claude session runs in a **daemon** of its own:
+per session with `--engine` or `/engine`; the manual's
+[engine capabilities](docs/manual.md#engine-capabilities) table says what
+each can do. A Claude session runs in a **daemon** of its own:
 close the terminal, `doxa attach` an hour later, and the transcript picks up
 where it stopped. No tmux involved.
 
@@ -99,6 +100,8 @@ spend, fake account numbers. See
   from a pool, runs K without memory, splits a run budget, waits for quiet
   and tears down. Clean to N=64 on Claude; a mixed pool of Codex, DeepSeek
   and GLM ran, messaged across vendors and quiesced (see [Status](#status)).
+  What a slot can do depends on its engine:
+  [engine capabilities](docs/manual.md#engine-capabilities).
 - **[Peers on another machine, once you say so.](docs/fleet.md)** A tailnet
   bridge behind `tailscale serve` puts a second box's sessions in the
   roster, refused until `remote_enabled` is on and an allow-list names you.
@@ -226,22 +229,9 @@ uv run doxa --engine deepseek     # or DeepSeek, on DEEPSEEK_API_KEY
 uv run doxa --engine glm          # or GLM (Z.ai), on ZAI_API_KEY
 ```
 
-| | claude | codex | deepseek | glm |
-|---|---|---|---|---|
-| billed on | Claude subscription | Codex CLI sign-in | `DEEPSEEK_API_KEY` | `ZAI_API_KEY` |
-| daemon, detach, `doxa attach` | yes | yes | yes | yes |
-| LORE tools and the tool gate | yes | yes, via MCP | yes | yes |
-| permission modes, hooks, plugins | yes | no | no | no |
-| cost and context-window chips | yes | no | no | no |
-| `/msg` to a peer | yes | yes | yes | yes |
-| `peer_list`, `peer_history` tools for the model | yes | yes | yes | yes |
-| `peer_send` tool for the model | yes | no | yes | yes |
-| budgets, `Task` spawns | yes | no | no | no |
-| fleet slot | yes | yes | yes | yes |
-| `--no-lore` honoured | yes | yes | yes | yes |
-
-The rows are `doxa.engines.get(<id>).supports()` read off the registry, not
-a promise; `/engine` prints the same counts live.
+What each engine can do — daemon and detach, LORE tools, permission
+modes, cost chips, peer tools, budgets, a fleet slot — is one table in the
+manual, read off the registry: [engine capabilities](docs/manual.md#engine-capabilities).
 
 **[Other engines](docs/manual.md#engines).** `--engine` (or the `engine`
 setting, or `/engine <id>` for the sessions and tabs you open next) runs a
@@ -260,7 +250,11 @@ cost either and has one fixed permission posture rather than modes to
 cycle. Its DOXA tools arrive through a stdio MCP server DOXA registers on
 every `codex exec` (`doxa/mcpserver.py`), executed through the same tool
 gate the vendors use, and the memory snapshot rides the first prompt
-because Codex has no system message and no hook. DeepSeek and GLM carry
+because Codex has no system message and no hook. A `peer_send` from that
+server is not performed there: it is forwarded to the session's engine
+over a control socket and sent on the session's own rate limiter and
+ledger, so a Codex model's message and a human's `/msg` are bounded,
+recorded and lit identically. DeepSeek and GLM carry
 the tools in-process — the model only ever *names* a call and DOXA
 executes it, so the allowed set, the refusals and the two-strikes disable
 all apply — but they report no window size either and no per-session
@@ -342,15 +336,15 @@ assignment and the dispatch spread; the ledger carries every message.
 Measured on 1.13.0: `--pool deepseek@1,glm@1,codex@1 -n 5` dealt two
 Codex, two DeepSeek and one GLM slot; all five spawned on their engine,
 exchanged 17 messages (DeepSeek and GLM sent `ready` to every peer and
-`ack` back across vendors; the Codex slots received six and sent none),
-quiesced in 37 s and left no process behind. Three limits, all stated by
-the harness itself: a Codex model has no `peer_send` yet (it reaches
-DOXA's tools through an MCP sidecar that carries no delivery seam), so a
-Codex slot is receive-only; slots on codex, deepseek or glm report no
-dollar figure and are not bounded by `--run-budget` (`--allow-unbudgeted`
-is the switch that admits that); and a run's root must be a short path,
-because every session's socket lives under it and `AF_UNIX` allows 108
-bytes. [`docs/fleet.md`](docs/fleet.md) has the whole of it, including
+`ack` back across vendors; the Codex slots, which had no `peer_send`
+at 1.13.0, received six and sent none), quiesced in 37 s and left no
+process behind. A Codex model sends since 1.14.0: the sidecar forwards
+`peer_send` to its engine, which sends on the session's own limiter and
+ledger. Two limits remain, both stated by the harness itself: slots on
+codex, deepseek or glm report no dollar figure and are not bounded by
+`--run-budget` (`--allow-unbudgeted` is the switch that admits that); and
+a run's root must be a short path, because every session's socket lives
+under it and `AF_UNIX` allows 108 bytes. [`docs/fleet.md`](docs/fleet.md) has the whole of it, including
 what the harness could not do at 128 sessions.
 
 **`/msg` is no longer the only way a message is sent — this README said

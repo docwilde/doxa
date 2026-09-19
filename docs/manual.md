@@ -10,7 +10,7 @@ a plan as if it were shipped.
 ## Contents
 
 - [Sessions and the daemon](#sessions-and-the-daemon)
-- [Engines](#engines) — and [a Codex session](#a-codex-session)
+- [Engines](#engines) — [engine capabilities](#engine-capabilities) and [a Codex session](#a-codex-session)
 - [The spawned CLI](#the-spawned-cli)
 - [The transcript](#the-transcript)
 - [Tabs](#tabs) — and [restoring them](#restoring-tabs)
@@ -121,6 +121,35 @@ window gets no `ctx` chip at all, because `ctx —` reads as "not yet" when
 the truth is "never", and `/context` says it cannot be asked rather than
 inventing a breakdown.
 
+### Engine capabilities
+
+What each engine can do, one row per surface. The rows are
+`doxa.engines.get(<id>).supports()` read off the registry, not a promise;
+`/engine` prints the same counts live (claude 18 of 18, codex 8, deepseek
+and glm 11). A fleet slot dealt an engine has exactly that engine's row.
+
+| | claude | codex | deepseek | glm |
+|---|---|---|---|---|
+| billed on | Claude subscription | Codex CLI sign-in | `DEEPSEEK_API_KEY` | `ZAI_API_KEY` |
+| daemon, detach, `doxa attach` | yes | yes | yes | yes |
+| LORE tools and the tool gate | yes | yes, via MCP | yes | yes |
+| permission modes, hooks, plugins | yes | no | no | no |
+| cost and context-window chips | yes | no | no | no |
+| `/msg` to a peer | yes | yes | yes | yes |
+| `peer_list`, `peer_history` tools for the model | yes | yes | yes | yes |
+| `peer_send` tool for the model | yes | yes | yes | yes |
+| budgets, `Task` spawns | yes | no | no | no |
+| fleet slot | yes | yes | yes | yes |
+| `--no-lore` honoured | yes | yes | yes | yes |
+
+
+Two rows deserve a sentence. *LORE tools and the tool gate* reach Codex
+through the stdio MCP server `CodexEngine` registers on every turn, and
+the gate lives in that server's process, so the two-strikes disable lasts
+one turn. *Budgets* need a dollar figure, which only the Claude engine
+reports; a slot on any other engine is unbounded and `doxa-fleet` says so
+before it starts.
+
 ### A Codex session
 
 `--engine codex` runs a DOXA session on the Codex CLI, end to end: its own
@@ -160,9 +189,12 @@ the same `ToolGate` a vendor session builds. Two limits follow from Codex
 spawning that server per turn: the two-strikes disable lasts one turn,
 and Codex keeps the server's stderr, so a disable cannot be read back
 into a `tool_disabled` event; the gate's refusal result is the guarantee.
-`peer_send` is not offered to a Codex model yet: the sidecar has no
-delivery seam that carries the session's limiter and ledger. And **the
-LORE review is not wired for this engine**: the transcript is still
+`peer_send` is offered, and the sidecar performs none of it: it forwards
+the request over a per-session control socket to `CodexEngine`, which
+sends through the same `PeerDelivery` object `/msg` uses, so the
+session's rate limiter, its ledger and its status bar see a model's send
+and a human's identically. And **the LORE review is not wired for this
+engine**: the transcript is still
 indexed at session end, and the `session_done` event says `review:
 skipped` rather than implying one ran.
 

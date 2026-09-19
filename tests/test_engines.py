@@ -943,12 +943,18 @@ def test_a_cwd_with_a_quote_in_it_cannot_inject_config(tmp_path):
     assert json.loads(value) == str(nasty)
 
 
-def test_peer_send_is_not_asked_for_while_there_is_no_delivery_path(tmp_path):
-    """doxa.peerdelivery does not exist yet, so the engine says so rather
-    than asking for a tool that would have to bypass the rate limiter and
-    the ledger to work (issue #39)."""
-    over = _overrides(_engine(tmp_path)._argv(True))
+def test_peer_send_is_not_asked_for_before_the_control_socket_is_up(tmp_path):
+    """Three things arm the tool and all three are re-read per turn (see
+    CodexEngine._peer_send_armed). This engine was never started, so it
+    serves no control socket -- and a sidecar told to send at a socket
+    nobody is listening on would be offered a tool that always fails.
+    The other two arms are exercised in tests/test_peer_delivery.py."""
+    engine = _engine(tmp_path)
+    assert engine._engine_control.running is False
+    over = _overrides(engine._argv(True))
     assert over["mcp_servers.doxa.env.DOXA_MCP_PEER_SEND"] == '"0"'
+    assert "mcp_servers.doxa.env.DOXA_MCP_ENGINE_SOCKET" not in over
+    assert "mcp_servers.doxa.env.DOXA_MCP_TURN_ID" not in over
 
 
 @pytest.mark.asyncio
