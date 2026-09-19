@@ -4,6 +4,25 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.13.0 — 2026-09-19
+
+**Every engine runs in the daemon; a fleet slot runs the engine it was dealt.**
+
+- **`python -m doxa.daemon --engine <id>`** builds a non-Claude engine from the registry; `spawn_daemon(engine=)` adds the flag only when set, so a Claude argv is byte-identical. `detachable` is true for all four.
+- Nine LORE picker RPCs answer `engine has no memory surface` where the engine has none; `status` carries the engine id. **`--no-lore`** is honoured by DeepSeek and GLM: no snapshot, no `lore_*` tool. Closes #39.
+- The daemon's `running`/`queued`, `/queue` and `cancel_queued` see the engine's own turn and queue, so a fleet's quiescence wait no longer calls a session answering a peer idle.
+
+**One outbound peer path; DeepSeek and GLM models can send and wake.**
+
+- New **`doxa/peerdelivery.py`**: the limiter, ledger and lamps `SessionEngine` used alone. `ChatApiEngine` offers `peer_send` under `DOXA_AGENT_PEER_SEND`, ledgers `/msg` and wakes on a message; `CodexEngine` ledgers `/msg` and wakes.
+- **`EngineCapabilities.peer_send_tool`**: claude, deepseek, glm true; codex false. Live DeepSeek probe: `peer_send` delivered, one ledger row, the peer started an attributable turn.
+
+**Codex reaches DOXA's tools through MCP, and resumes its own thread.**
+
+- New **`doxa/mcpserver.py`** (stdio MCP) serves the operator registry through the vendors' `ToolGate`; `CodexEngine` registers it per `codex exec` and puts the LORE snapshot on the first prompt. Live: Codex called `lore_memory_list` twice.
+- **`/resume`** for every engine: Codex records its thread id beside the transcript (#43); `history.resume_state` asks each engine's artefact and respawns on it (#46); a vendor's saved conversation names its engine.
+- Not done: `peer_send` for a Codex model (the sidecar has no delivery seam), budgets on codex/deepseek/glm (no dollar figure reported). Suite 2490.
+
 ## 1.12.0 — 2026-09-19
 
 **A session and a fleet run can be given a ceiling.**
