@@ -116,7 +116,11 @@ tool names and counts. But a live run with the debug switch on put NONE
 of those lines in the 520 bytes ``codex exec`` wrote to its own stderr,
 and left no exec log under ``~/.codex/log``: Codex captures an MCP
 server's stderr and keeps it. So these lines are for someone driving this
-server directly (the suite does exactly that), not for DOXA's turn.
+server directly (the suite does exactly that), not for DOXA's turn. To
+see them under a real ``codex exec``, point ``command`` at ``/bin/sh``
+and ``args`` at ``["-c", "exec <python> -m doxa.mcpserver 2>>FILE"]`` --
+that is how the ``tools/list`` line quoted in :mod:`doxa.codex`'s header
+was captured.
 """
 
 from __future__ import annotations

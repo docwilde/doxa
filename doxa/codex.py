@@ -108,6 +108,20 @@ the server. Note ``"server":"doxa"``: Codex shows the tool to the model as
 ``doxa/lore_memory_list`` but calls ``tools/call`` with the bare registry
 name, so ``doxa.gate`` sees exactly the name it keys on.
 
+The server side of the same run, captured by giving ``command`` a
+``/bin/sh -c '... 2>>file'`` wrapper (the only way to see it, since Codex
+keeps the server's stderr)::
+
+    [doxa.mcpserver] serving session='probe-tee' cwd='...' lore=True peer_send=False
+    [doxa.mcpserver] tools/list -> 8: ['lore_belief_search', 'lore_belief_show',
+      'lore_belief_neighbours', 'lore_memory_list', 'lore_session_search',
+      'peer_list', 'peer_history', 'lore_remember']
+    [doxa.mcpserver] tools/call lore_memory_list
+
+-- so Codex really does run ``tools/list`` and take the whole surface,
+and that wrapper is the debugging route when one of these turns goes
+wrong.
+
 THE LORE SNAPSHOT. ``codex exec`` has no system-message channel and no
 SessionStart hook, so the snapshot ``doxa.vendors`` sends as a system
 message rides the FIRST turn's stdin prompt instead, under a header that
