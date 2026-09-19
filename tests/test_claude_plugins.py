@@ -542,3 +542,92 @@ def test_report_lists_the_exact_invocable_spelling(tmp_path):
     text = cp_mod.report(cp_mod.discover(base=base))
     assert "/caveman:caveman" in text
     assert "Switch intensity" in text
+
+
+# =======================================================================
+# A scope key is a directory name (panel finding 3)
+# =======================================================================
+
+
+@pytest.mark.parametrize("bad", ["..", "../x", "a/b", "..@..", "", "a b"])
+def test_an_unusable_scope_key_is_refused_and_never_becomes_a_path(bad):
+    """The key comes out of ``~/.claude/installed_plugins.json`` -- a
+    same-user file another program writes and a model with file tools can
+    edit -- and it names the directory ``_copy_sanitized`` rmtrees and
+    rebuilds. ``..`` resolved that directory to the isolated CLI config
+    dir itself."""
+    assert cp_mod.safe_scope_key(bad) is False
+    plugin = cp_mod.DiscoveredPlugin(
+        plugin=bad, marketplace="", scope_key=bad, version="1.0.0",
+        install_path=Path("/nowhere"), description="", user_enabled=True,
+        has_hooks=False, has_mcp=False, n_commands=1, n_skills=0, n_agents=0,
+        blocked=False, blocked_reason="",
+    )
+    assert plugin.refused is True
+    assert "scope key" in plugin.refusal_reason()
+    with pytest.raises(ValueError, match=r"unusable plugin scope key"):
+        cp_mod.staged_plugin_dir(plugin)
+
+
+def test_a_traversing_scope_key_stages_nothing_and_deletes_nothing(
+    tmp_path, monkeypatch,
+):
+    """End to end: the planted entry is discovered, refused, and the
+    directory its key pointed at is still there afterwards."""
+    monkeypatch.setenv("DOXA_ADOPT_PLUGINS", "1")
+    base = tmp_path / "real-claude"
+    cache = tmp_path / "cache"
+    plugin = _make_plugin(cache, "evil", commands=1)
+    _install(base, "..", plugin)
+
+    config_dir = iso_mod.ensure_cli_config_dir()
+    canary = config_dir / "settings.json"
+    assert canary.exists(), "the isolated config dir is what '..' resolved to"
+
+    discovered = cp_mod.discover(base=base)
+    assert [p.scope_key for p in discovered] == [".."]
+    assert discovered[0].refused is True
+    assert cp_mod.adopt(discovered) == []
+    assert canary.exists()
+    assert config_dir.is_dir()
+
+
+def test_a_good_scope_key_still_stages(tmp_path, monkeypatch):
+    """The check must not refuse the real thing: ``<plugin>@<marketplace>``
+    with dots, dashes and underscores in either half."""
+    monkeypatch.setenv("DOXA_ADOPT_PLUGINS", "1")
+    base = tmp_path / "real-claude"
+    cache = tmp_path / "cache"
+    plugin = _make_plugin(cache, "lore", commands=1)
+    _install(base, "lore-2.0_beta@my-marketplace.io", plugin)
+
+    result = cp_mod.adopt(cp_mod.discover(base=base))
+    assert len(result) == 1
+    assert Path(result[0]["path"]).name == "lore-2.0_beta@my-marketplace.io"
+
+
+def test_a_manifest_that_cannot_be_stripped_refuses_the_adoption(
+    tmp_path, monkeypatch,
+):
+    """The copy IS what the --plugin-dir flag points at, so a manifest
+    whose hazard keys could not be removed must not be offered. It used to
+    be: the write failure was swallowed and the CLI got a manifest with
+    its ``hooks`` and ``mcpServers`` intact."""
+    monkeypatch.setenv("DOXA_ADOPT_PLUGINS", "1")
+    base = tmp_path / "real-claude"
+    cache = tmp_path / "cache"
+    plugin = _make_plugin(cache, "caveman", commands=1, hooks_key=True, mcp_key=True)
+    _install(base, "caveman@caveman", plugin)
+
+    real_write = Path.write_text
+
+    def refuse(self, *args, **kwargs):
+        if self.name == "plugin.json":
+            raise OSError("read-only staging area")
+        return real_write(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", refuse)
+    discovered = cp_mod.discover(base=base)
+    assert cp_mod.adopt(discovered) == []
+    # And nothing half-built is left looking staged.
+    assert not cp_mod.staged_plugin_dir(discovered[0]).exists()
