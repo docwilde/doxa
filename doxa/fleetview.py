@@ -374,11 +374,18 @@ def render(
     lines.append("")
 
     # -- the traffic ---------------------------------------------------
-    total = manifest.get("ledger", {}).get("messages") if isinstance(
-        manifest.get("ledger"), dict) else None
+    # The manifest's own count is written by collect(), which runs once,
+    # at the end. While the run is LIVE there is no total to name -- and
+    # naming the tail's own length as if it were one would tell a reader
+    # the traffic had stopped growing. So a live run counts what it shows
+    # and says nothing it cannot know yet.
+    ledger_obj = manifest.get("ledger")
+    total = ledger_obj.get("messages") if isinstance(ledger_obj, dict) else None
     shown = len(snapshot.ledger)
-    count = total if isinstance(total, int) and not snapshot.live else shown
-    lines.append(f"ledger — last {shown} of {count} message(s)")
+    if snapshot.live or not isinstance(total, int):
+        lines.append(f"ledger — last {shown} message(s)")
+    else:
+        lines.append(f"ledger — last {shown} of {total} message(s)")
     lines += ledger_tail(snapshot)
     lines.append("")
 

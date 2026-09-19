@@ -99,11 +99,12 @@ class FleetTab(TabPane):
         Text is a view of this string, never a second source."""
         session = self.session
         mesh_url = ""
-        app = getattr(self, "_fleet_app", None) or self._safe_app()
+        app = self._safe_app()
         if app is not None:
-            mesh_url = str(getattr(app, "mesh_url_for", lambda _p: "")(
-                getattr(session, "ledger_path", None)
-            ) or "")
+            with contextlib.suppress(Exception):
+                mesh_url = str(
+                    app.mesh_url_for(session.ledger_path) or ""
+                )
         return fleetview_mod.render(
             session.snapshot(),
             mesh_url=mesh_url,

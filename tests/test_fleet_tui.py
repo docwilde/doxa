@@ -311,8 +311,9 @@ async def test_fleet_start_opens_a_tab_that_shows_the_run_to_quiescence(
         # Pre-written, because no real session exists to write it: the
         # run's ledger is its own DOXA_HOME's, which is exactly why
         # collecting a run is a file read and not a timestamp filter.
-        _ledger(tmp_path / "unused")  # touch the helper's import path
-        run_root = __import__("pathlib").Path(short_root) / "r1"
+        from pathlib import Path
+
+        run_root = Path(short_root) / "r1"
         _ledger(run_root, "ready", "done")
 
         note = await _run(app, pilot, (
@@ -344,6 +345,7 @@ async def test_fleet_start_opens_a_tab_that_shows_the_run_to_quiescence(
         # The ledger tail, in the run's own time base.
         assert "ready" in text and "done" in text
         assert "t+" in text
+        assert "ledger — last 2 of 2 message(s)" in text
         assert "leaked pids: none" in text
         assert str(run_root / "manifest.json") in text
 
