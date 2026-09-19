@@ -529,22 +529,29 @@ async def test_a_codex_msg_is_charged_and_ledgered(tmp_path, monkeypatch):
 
 
 async def test_a_codex_session_is_never_offered_the_send_tool(tmp_path, monkeypatch):
-    """The honest statement of the gap, held in place. peer_send is an
-    operator DOXA projects onto a tool surface it composes, and this
-    engine composes none -- the model's tools are the Codex CLI's. The
-    capability map says so in two fields, and neither may quietly become
-    True because /msg started working properly."""
-    from doxa.codex import CODEX_CAPABILITIES
+    """The honest statement of the gap, held in place. Codex now reaches
+    DOXA's operators through the stdio MCP server the engine registers on
+    every turn (``mcp_tools`` is True), but ``peer_send`` is offered only
+    through a delivery seam the sidecar process can hold, and
+    ``doxa.peerdelivery`` exports none yet: the engine tells the server
+    so, and the capability field stays False rather than quietly becoming
+    True because ``/msg`` started working properly."""
+    from doxa import mcpserver as mcpserver_mod
+    from doxa.codex import CODEX_CAPABILITIES, _peer_delivery_available
 
     eng, _procs = await _codex(tmp_path, monkeypatch, peer_send=True)
     try:
-        assert CODEX_CAPABILITIES.mcp_tools is False
+        assert CODEX_CAPABILITIES.mcp_tools is True
+        assert CODEX_CAPABILITIES.peer_send_tool is False
         assert CODEX_CAPABILITIES.peer_messaging is True, (
             "/msg and the rail are DOXA's own layer and do work here"
         )
-        assert getattr(eng, "_tools", None) is None, (
-            "no tool projection exists on this engine to add peer_send to"
+        assert _peer_delivery_available() is False, (
+            "once doxa.peerdelivery exports the sidecar factory, this test "
+            "and the capability field are the two places to flip"
         )
+        overrides = " ".join(eng._mcp_overrides())
+        assert f'{mcpserver_mod.ENV_PEER_SEND}="0"' in overrides, overrides
     finally:
         await eng.finalize()
 
@@ -572,8 +579,12 @@ async def test_an_arriving_message_starts_a_codex_turn(tmp_path, monkeypatch):
 
         assert len(procs) == 1, "no codex process was spawned for the turn"
         sent = procs[0].stdin.written.decode()
-        assert sent.startswith(peers.PEER_TURN_INTRO)
-        assert "please look at the parser" in sent
+        # A first turn on this engine opens with the LORE snapshot (the
+        # only channel Codex has for it), so the peer intro follows the
+        # memory block rather than the prompt's first byte; it still
+        # precedes the message it explains.
+        assert peers.PEER_TURN_INTRO in sent
+        assert sent.index(peers.PEER_TURN_INTRO) < sent.index("please look at the parser")
         assert peers.PEER_UNTRUSTED_INTRO in sent, (
             "a peer-started turn's body still crosses the untrusted marker"
         )

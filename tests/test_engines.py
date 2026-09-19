@@ -158,9 +158,13 @@ def test_codex_capability_map_is_the_measured_one():
     assert caps.context_window is False   # and carries no window size
     assert caps.cost is False             # no cost field anywhere
     assert caps.streaming_text is False   # agent_message arrives whole
-    assert caps.mcp_tools is False        # verified reachable, not taken
+    # Taken, as of this release: every turn registers doxa.mcpserver as a
+    # stdio MCP server, and the gate that contains those calls lives in
+    # that server's process. Proven below by the argv and by
+    # tests/test_mcpserver.py, which runs the server for real.
+    assert caps.mcp_tools is True
+    assert caps.tool_gate is True
     assert caps.permission_modes is False
-    assert caps.tool_gate is False
     # True since issue #39: the daemon takes --engine and hosts this one.
     assert caps.detachable is True
     assert caps.peer_messaging is True    # DOXA's own layer, engine-free
@@ -706,6 +710,174 @@ def test_the_argv_carries_no_flag_that_resume_would_reject(tmp_path):
         assert "-s" not in argv and "--sandbox" not in argv
         assert 'sandbox_mode="workspace-write"' in argv
         assert 'approval_policy="never"' in argv
+
+
+def _stdin_factory(procs: list, lines_per_call: "list[list[bytes]]"):
+    """``_factory``'s sibling that keeps the PROCESS, not just the argv --
+    the tests below assert on what was written to its stdin."""
+    async def make(*_argv, **_kwargs):
+        proc = _FakeProc(lines_per_call[len(procs)])
+        procs.append(proc)
+        return proc
+    return make
+
+
+def _stdin_of(proc) -> str:
+    return proc.stdin.written.decode("utf-8")
+
+
+def _overrides(argv: "list[str]") -> "dict[str, str]":
+    """The ``-c key=value`` pairs in an argv, as a dict."""
+    out: "dict[str, str]" = {}
+    for flag, pair in zip(argv, argv[1:]):
+        if flag == "-c" and "=" in pair:
+            key, _, value = pair.partition("=")
+            out[key] = value
+    return out
+
+
+def test_every_turn_registers_the_doxa_mcp_server(tmp_path):
+    """mcp_tools=True, in the one place it is actually true: the argv.
+
+    BOTH shapes, because the resume shape is where this can silently
+    regress -- a second turn without the server would look like a model
+    that simply chose not to call its tools, and nothing would say
+    otherwise. The four keys are the CLI's own spelling, read back off a
+    ``config.toml`` that ``codex mcp add`` generated."""
+    engine = _engine(tmp_path, session_id="s-42")
+    engine.thread_id = "th-x"
+    prefix = "mcp_servers.doxa"
+    for argv in (engine._argv(True), engine._argv(False)):
+        over = _overrides(argv)
+        assert over[f"{prefix}.command"] == json.dumps(sys.executable)
+        assert over[f"{prefix}.args"] == json.dumps(["-m", "doxa.mcpserver"])
+        # Without this Codex auto-cancels the call with "user cancelled
+        # MCP tool call" and tells the model it was refused.
+        assert over[f"{prefix}.default_tools_approval_mode"] == '"approve"'
+        assert over[f"{prefix}.env.DOXA_MCP_SESSION_ID"] == '"s-42"'
+        assert over[f"{prefix}.env.DOXA_MCP_CWD"] == json.dumps(str(tmp_path))
+        assert over[f"{prefix}.env.DOXA_MCP_LORE"] == '"1"'
+        # The prompt still arrives on stdin, after everything.
+        assert argv[-1] == "-"
+
+
+def test_the_mcp_overrides_do_not_cost_the_one_shape_property(tmp_path):
+    """The argv is still ONE shape: the resume form differs from the first
+    only by `resume <id>`, and by nothing else."""
+    engine = _engine(tmp_path)
+    engine.thread_id = "th-x"
+    first, resume = engine._argv(True), engine._argv(False)
+    assert resume[:2] == first[:2] == ["codex", "exec"]
+    assert resume[2:4] == ["resume", "th-x"]
+    assert resume[4:] == first[2:]
+
+
+def test_memory_off_is_told_to_the_server_and_to_the_prompt(tmp_path):
+    """``lore=False`` reaches the MCP server as an env switch, and the
+    server answers it by not OFFERING the lore_* tools (proven in
+    tests/test_mcpserver.py). Through v1.12.0 this argument was swallowed
+    by ``**_ignored``, so a memory-off Codex agent ran with memory on."""
+    on = _engine(tmp_path, lore=True)
+    off = _engine(tmp_path, lore=False)
+    assert on.lore is True and off.lore is False
+    assert _overrides(on._argv(True))["mcp_servers.doxa.env.DOXA_MCP_LORE"] == '"1"'
+    assert _overrides(off._argv(True))["mcp_servers.doxa.env.DOXA_MCP_LORE"] == '"0"'
+
+
+def test_the_forwarded_environment_is_an_allow_list_of_non_secrets(
+    tmp_path, monkeypatch,
+):
+    """A ``-c`` override lands on ``codex exec``'s argv, which every other
+    process on the machine can read out of ``ps``. Forwarding the whole
+    environment would put whatever key happens to be exported in there."""
+    monkeypatch.setenv("LORE_ROOT", str(tmp_path / "store"))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-should-never-appear")
+    argv = _engine(tmp_path)._argv(True)
+    over = _overrides(argv)
+    assert over["mcp_servers.doxa.env.LORE_ROOT"] == json.dumps(
+        str(tmp_path / "store")
+    )
+    assert not [k for k in over if "API_KEY" in k]
+    assert "ds-should-never-appear" not in " ".join(argv)
+
+
+def test_a_cwd_with_a_quote_in_it_cannot_inject_config(tmp_path):
+    """Same class of defect ``SANDBOX_MODES`` is an allow-list to prevent,
+    on the other value that reaches a TOML override."""
+    nasty = tmp_path / 'we"ird\\dir'
+    engine = _engine(nasty)
+    value = _overrides(engine._argv(True))["mcp_servers.doxa.env.DOXA_MCP_CWD"]
+    assert value == json.dumps(str(nasty))
+    assert json.loads(value) == str(nasty)
+
+
+def test_peer_send_is_not_asked_for_while_there_is_no_delivery_path(tmp_path):
+    """doxa.peerdelivery does not exist yet, so the engine says so rather
+    than asking for a tool that would have to bypass the rate limiter and
+    the ledger to work (issue #39)."""
+    over = _overrides(_engine(tmp_path)._argv(True))
+    assert over["mcp_servers.doxa.env.DOXA_MCP_PEER_SEND"] == '"0"'
+
+
+@pytest.mark.asyncio
+async def test_the_first_prompt_carries_the_lore_snapshot_under_a_header(
+    tmp_path, monkeypatch,
+):
+    """Codex has no system-message channel and no SessionStart hook, so
+    the snapshot rides the first turn's STDIN -- and only stdin: the
+    transcript keeps the operator's prompt alone, because the transcript
+    is what gets indexed back into the store at finalize."""
+    from lore_core import context as lore_context
+
+    monkeypatch.setattr(
+        lore_context, "build_context", lambda _cwd: "REMEMBERED: the fact"
+    )
+    procs: list = []
+    lines = [
+        _script({"type": "thread.started", "thread_id": "th-1"},
+                {"type": "turn.completed", "usage": {}}),
+        _script({"type": "turn.completed", "usage": {}}),
+    ]
+    engine = _engine(tmp_path, exec_factory=_stdin_factory(procs, lines))
+
+    [e async for e in engine.send("do a thing")]
+    first_stdin = _stdin_of(procs[0])
+    assert codex_mod.LORE_PREAMBLE_HEADER in first_stdin
+    assert "REMEMBERED: the fact" in first_stdin
+    assert codex_mod.LORE_PREAMBLE_FOOTER in first_stdin
+    assert first_stdin.endswith("do a thing")
+    assert engine.lore_snapshot_chars == len("REMEMBERED: the fact")
+    # The transcript got the prompt, not the snapshot -- it is what
+    # lore_store.index_live reads at finalize, and feeding the store its
+    # own contents back would be a memory that grows by quoting itself.
+    written = engine.transcript_path.read_text(encoding="utf-8")
+    assert "do a thing" in written
+    assert "REMEMBERED: the fact" not in written
+
+    # Turn two resumes the thread, which already holds it: re-sending
+    # would pay for the same text every turn.
+    [e async for e in engine.send("and another")]
+    assert _stdin_of(procs[1]) == "and another"
+
+
+@pytest.mark.asyncio
+async def test_memory_off_sends_no_snapshot_at_all(tmp_path, monkeypatch):
+    """Not "built and discarded": with memory off the store is never read,
+    which on a fleet run is the very access the switch exists to prevent."""
+    from lore_core import context as lore_context
+
+    def _must_not_run(_cwd):  # pragma: no cover -- the assertion is that it
+        raise AssertionError("the store was read with memory off")
+
+    monkeypatch.setattr(lore_context, "build_context", _must_not_run)
+    procs: list = []
+    engine = _engine(
+        tmp_path, lore=False,
+        exec_factory=_stdin_factory(procs, [_script({"type": "turn.completed"})]),
+    )
+    [e async for e in engine.send("do a thing")]
+    assert _stdin_of(procs[0]) == "do a thing"
+    assert engine.lore_snapshot_chars == 0
 
 
 def test_an_unrecognised_sandbox_mode_falls_back_never_passes_through(tmp_path):
