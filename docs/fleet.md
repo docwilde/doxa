@@ -130,8 +130,9 @@ start — a vendor key missing from the run's environment — is recorded
 failed with the reason in the manifest and the run goes on. Measured:
 `--pool deepseek@1,glm@1,codex@1 -n 5 --seed 1` dealt 2/2/1, all five
 spawned, 17 messages crossed vendors, quiesced in 37 s, nothing leaked; the
-Codex slots received but did not send, because a Codex model has no
-`peer_send` yet.
+Codex slots received but did not send, because at 1.13.0 a Codex model had
+no `peer_send`. Since 1.14.0 it has one, forwarded from the MCP sidecar to
+the engine and sent on the session's own limiter and ledger.
 
 ### Nothing hangs, nothing is left behind
 

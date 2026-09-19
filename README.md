@@ -346,15 +346,15 @@ assignment and the dispatch spread; the ledger carries every message.
 Measured on 1.13.0: `--pool deepseek@1,glm@1,codex@1 -n 5` dealt two
 Codex, two DeepSeek and one GLM slot; all five spawned on their engine,
 exchanged 17 messages (DeepSeek and GLM sent `ready` to every peer and
-`ack` back across vendors; the Codex slots received six and sent none),
-quiesced in 37 s and left no process behind. Three limits, all stated by
-the harness itself: a Codex model has no `peer_send` yet (it reaches
-DOXA's tools through an MCP sidecar that carries no delivery seam), so a
-Codex slot is receive-only; slots on codex, deepseek or glm report no
-dollar figure and are not bounded by `--run-budget` (`--allow-unbudgeted`
-is the switch that admits that); and a run's root must be a short path,
-because every session's socket lives under it and `AF_UNIX` allows 108
-bytes. [`docs/fleet.md`](docs/fleet.md) has the whole of it, including
+`ack` back across vendors; the Codex slots, which had no `peer_send`
+at 1.13.0, received six and sent none), quiesced in 37 s and left no
+process behind. A Codex model sends since 1.14.0: the sidecar forwards
+`peer_send` to its engine, which sends on the session's own limiter and
+ledger. Two limits remain, both stated by the harness itself: slots on
+codex, deepseek or glm report no dollar figure and are not bounded by
+`--run-budget` (`--allow-unbudgeted` is the switch that admits that); and
+a run's root must be a short path, because every session's socket lives
+under it and `AF_UNIX` allows 108 bytes. [`docs/fleet.md`](docs/fleet.md) has the whole of it, including
 what the harness could not do at 128 sessions.
 
 **`/msg` is no longer the only way a message is sent — this README said
