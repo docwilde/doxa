@@ -28,6 +28,40 @@ from .. import worktrees as worktrees_mod
 from .labels import _chip_span, git_branch_symbol
 
 
+#: A ref name ``.git/HEAD`` may point at. Git's own rule is narrower than
+#: this; what matters here is the part that makes a ref a PATH.
+#:
+#: ``_read_sha`` resolves ``commondir / ref`` and paints that file's first
+#: line. HEAD is a file in whatever repository the session has open --
+#: which DOXA does not own and did not clone -- so a HEAD reading
+#: ``ref: ../../../../etc/passwd`` made the status bar display the first
+#: line of that file. A ref has to name a ref.
+_REF_PREFIX = "refs/"
+
+
+def safe_ref(raw: str) -> "str | None":
+    """``raw`` if it names a ref under ``refs/``, else None.
+
+    Checked on the STRING, before it becomes a path: it is used both to
+    build ``commondir/<ref>`` and to match a line of ``packed-refs``, and
+    the second is not a path at all, so there is nothing to normalise
+    afterwards. Rejects anything not under ``refs/``, anything absolute,
+    any ``..`` segment and any backslash -- which together are every way
+    the join leaves the directory.
+
+    None means "paint nothing": a repository whose HEAD DOXA cannot read
+    as a ref gets no branch chip, which is what it already showed for a
+    repository with no HEAD at all."""
+    ref = str(raw or "").strip()
+    if not ref.startswith(_REF_PREFIX) or len(ref) <= len(_REF_PREFIX):
+        return None
+    if ref.startswith("/") or "\\" in ref or "\x00" in ref:
+        return None
+    if any(part in ("", ".", "..") for part in ref.split("/")):
+        return None
+    return ref
+
+
 class GitLine:
     """The `repo ⎇ branch sha` chip for the status line.
 
@@ -360,7 +394,14 @@ class GitLine:
             return self._branch
         self._sha_mtime = None  # HEAD moved: the sha must be re-read too
         if head.startswith("ref:"):
-            self._ref = head.split(":", 1)[1].strip()
+            # Validated before it is used as a path OR as a packed-refs
+            # needle -- see safe_ref. An unusable ref paints nothing
+            # rather than whatever file it pointed at.
+            self._ref = safe_ref(head.split(":", 1)[1])
+            if self._ref is None:
+                self._sha = None
+                self._branch = None
+                return None
             self._branch = self._ref.removeprefix("refs/heads/")
         else:
             self._ref = None
@@ -383,6 +424,17 @@ class GitLine:
         if self._commondir is None or self._ref is None:
             return self._sha
         ref_path = self._commondir / self._ref
+        # safe_ref already refused every ref that could leave the
+        # directory; this re-asks on the RESOLVED path, because a symlink
+        # planted inside .git/refs/ is the one escape a string check
+        # cannot see.
+        try:
+            if not ref_path.resolve().is_relative_to(
+                (self._commondir / _REF_PREFIX).resolve()
+            ):
+                return self._read_packed_sha()
+        except OSError:
+            return self._read_packed_sha()
         try:
             mtime = ref_path.stat().st_mtime
         except OSError:

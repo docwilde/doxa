@@ -462,3 +462,57 @@ async def test_the_two_hex_ids_in_the_bar_are_told_apart(monkeypatch, tmp_path):
         assert "⌁ session 4f8e2a91" in status
         # ...and no bare hex string sits in the bar unlabelled.
         assert f" {sha} " not in status
+
+
+# =======================================================================
+# A HEAD ref is a ref, not a path (panel finding 6)
+# =======================================================================
+
+
+@pytest.mark.parametrize("bad", [
+    "../../../../etc/passwd",
+    "refs/../../../../etc/passwd",
+    "/etc/passwd",
+    "refs/heads/../../../secret",
+    "refs/",
+])
+def test_a_head_that_points_outside_refs_paints_nothing(tmp_path, bad):
+    """``.git/HEAD`` is a file in a repository DOXA did not clone and does
+    not own, and ``_read_sha`` painted the first line of whatever
+    ``commondir/<ref>`` resolved to. A ref has to name a ref."""
+    repo = _repo(tmp_path)
+    secret = tmp_path / "secret"
+    secret.write_text("BEGIN OPENSSH PRIVATE KEY\nsecond line\n", encoding="utf-8")
+    (repo / ".git" / "HEAD").write_text(f"ref: {bad}\n", encoding="utf-8")
+
+    line = GitLine(str(repo))
+    chip = line.render()
+
+    assert "PRIVATE" not in (chip or "")
+    assert "passwd" not in (chip or "")
+    assert line._read_sha() is None
+    assert line.branch_label() is None
+
+
+def test_a_ref_symlinked_out_of_refs_paints_nothing(tmp_path):
+    """The string check cannot see a symlink, so the resolved path is
+    re-checked where the file is actually read."""
+    repo = _repo(tmp_path)
+    secret = tmp_path / "secret"
+    secret.write_text("BEGIN OPENSSH PRIVATE KEY\n", encoding="utf-8")
+    planted = repo / ".git" / "refs" / "heads" / "planted"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.symlink_to(secret)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/planted\n", encoding="utf-8")
+
+    line = GitLine(str(repo))
+    assert "PRIVATE" not in (line.render() or "")
+    assert line._read_sha() is None
+
+
+def test_an_ordinary_branch_still_paints_its_sha(tmp_path):
+    """The check must not refuse the real thing."""
+    repo = _repo(tmp_path)
+    line = GitLine(str(repo))
+    assert line.branch_label() == "trunk"
+    assert line._read_sha() == _short_sha(repo)
