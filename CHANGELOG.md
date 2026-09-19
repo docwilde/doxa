@@ -4,6 +4,26 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.12.0 — 2026-09-19
+
+**A session and a fleet run can be given a ceiling.**
+
+- **`DOXA_SESSION_BUDGET_USD`** caps one session; off by default, checked in **`SessionEngine._send_turn`** before the query, so a peer-started turn is subject to it like a typed one. A refused turn ends as a terminal `turn_refused`.
+- **`doxa-fleet --run-budget`** sets a run-wide total split per session; a run with inbound turns armed and no budget is refused at spawn unless `--allow-unbudgeted`. The manifest carries the arithmetic.
+- **`budget.enforceable_for`**: codex, deepseek and glm report no spend, so a slot dealt one of those is unbounded and the manifest says so. A restart resets the counter; not persisted.
+
+**Pick the engine and its model in the TUI, from the registry.**
+
+- New **`/engine [id]`** lists every registered engine with derived capability counts, or sets the engine for new sessions and tabs, never the running one. Same precedence as `doxa --engine` and `DOXA_ENGINE`.
+- **`Setting.choices_source`**: a settings row whose options come from a callable, here `doxa.engines.available()`, so the settings screen, `/engine` and the flag can never list different engines.
+- The model picker offered Claude's aliases for every engine; now resolved per engine, with live **`GET /models`** catalogues for DeepSeek and GLM. The fleet still runs the Claude engine in every slot, whatever the pool says (#39).
+
+**`doxa/app.py` split into six mixins, no behaviour change.**
+
+- **`DoxaApp`** 5582 → 1589 lines over six PRs: `doxa/appwindow/{failures,restore,sidebar,tabs,panetree,actions}.py`, every method moved byte-identical apart from three re-levelled deferred imports.
+- `BINDINGS`, `compose`, `on_mount` and the sixteen `@on` handlers stay on the class body: Textual's metaclass registers `@on` from the body it constructs, so a mixin's `@on` would be silently dead.
+- `doxa.app` is still a module and still re-exports what tests and scripts import from it. Suite 2417 on the final tip.
+
 ## 1.11.1 — 2026-09-18
 
 - The README named `1.10.0` as the newest release and told a pinned install it would not have the send tool, the peer bridge or the fleet. All three shipped in `1.11.0`; the pin instruction and the release count now say `1.11.1`.
