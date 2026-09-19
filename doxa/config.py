@@ -392,6 +392,20 @@ SETTINGS: tuple[Setting, ...] = (
              "CLI's were still two different id spaces) falls back to "
              "read-only either way, and the tab says so.",
     ),
+    Setting(
+        key="mesh_open_browser", env="DOXA_MESH_OPEN_BROWSER",
+        label="open the mesh graph in a browser", category="Session",
+        kind="bool", default="",
+        help="`/mesh` opens the graph in this machine's browser as well "
+             "as printing its URL. OFF by default",
+        note="Off because DOXA runs in terminals that have no browser to "
+             "open: over SSH, in a container, on a headless box. "
+             "`webbrowser.open` there either does nothing, prints a "
+             "launcher's error over the TUI's own screen, or opens a "
+             "text browser on top of it -- and the URL is printed either "
+             "way, so nothing is lost by the default. On a desktop this "
+             "saves a copy-paste.",
+    ),
     # -- remote authorization (R1, docs/plans/remote.md) -----------------
     #
     # No transport ships yet -- these four rows are the allow/deny
@@ -1048,6 +1062,19 @@ def linger_secs() -> float:
     except ValueError:
         return DEFAULT_LINGER_SECS
     return parsed if parsed >= 0 else DEFAULT_LINGER_SECS
+
+
+def mesh_open_browser() -> bool:
+    """``DOXA_MESH_OPEN_BROWSER`` / the config file's
+    ``mesh_open_browser`` row, default OFF: does ``/mesh`` try to open the
+    graph in a browser, or only print its URL?
+
+    Read per call, like every other env-driven knob here, so the settings
+    modal's toggle takes effect on the next ``/mesh`` without a
+    restart."""
+    return raw("DOXA_MESH_OPEN_BROWSER").strip().lower() not in (
+        "", "0", "false", "no", "off",
+    )
 
 
 def background_mode() -> str:

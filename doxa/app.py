@@ -1511,8 +1511,16 @@ class DoxaApp(
         captured output would be measuring its own harness."""
         from . import window as window_mod
 
-        with window_mod.terminal_title(window_mod.title_for(self.cwd)):
-            return super().run(*args, **kwargs)
+        try:
+            with window_mod.terminal_title(window_mod.title_for(self.cwd)):
+                return super().run(*args, **kwargs)
+        finally:
+            # The one door, so the mesh graph's loopback port closes with
+            # the window on every launch shape -- see
+            # WindowActionsMixin.on_unmount for the other half and why
+            # neither alone is enough.
+            with contextlib.suppress(Exception):
+                self.stop_mesh()
 
     async def on_mount(self) -> None:
         """Auto-run /setup exactly once: a genuine first launch on this

@@ -109,6 +109,100 @@ class WindowActionsMixin:
     and closes, the rail it widens, and the sessions the peer registry
     says are attachable."""
 
+    # -- the mesh graph server (one per window, never per pane) --------
+    #
+    # A PORT IS PROCESS-WIDE, so the server is too: two panes that each
+    # started one would bind two loopback ports over the same ledger and
+    # print two URLs, and the status chip -- which every pane in the
+    # window paints -- could then only be honest about one of them. The
+    # handle therefore lives on the window and every /mesh goes through
+    # the three methods below.
+
+    def mesh_server(self) -> "object | None":
+        """The running :class:`doxa.meshgraph.MeshServer`, or None.
+
+        ``getattr`` rather than an ``__init__`` default: this mixin has no
+        constructor of its own (the window's is in doxa/app.py) and adding
+        one to carry a field that is None on every launch but the ones
+        where somebody typed /mesh would put the attribute before the
+        need."""
+        return getattr(self, "_mesh_server", None)
+
+    def mesh_url_for(self, path: "object | None" = None) -> str:
+        """The URL, but only if the running server is serving ``path``.
+
+        The fleet tab asks with its own run's ledger, which is the whole
+        point: a mesh started over THIS machine's peer ledger is not a
+        view of that run, and a tab that printed its URL anyway would be
+        pointing an operator at the wrong graph. ``None`` asks for the
+        URL whatever it is serving, which is what the status chip and
+        /mesh's own reply want."""
+        from pathlib import Path
+
+        server = self.mesh_server()
+        if server is None:
+            return ""
+        if path is not None and Path(str(path)) != Path(str(server.path)):
+            return ""
+        return str(server.url)
+
+    def start_mesh(self, path: "object") -> "tuple[object | None, str]":
+        """Start the loopback graph server over ``path``. Returns
+        ``(server, note)``; ``server`` is None when nothing started.
+
+        Refuses to start a SECOND one rather than replacing the first: the
+        running server holds a port and a token the operator may already
+        have open in a browser, and silently swapping the file underneath
+        that URL is worse than saying no and naming ``/mesh stop``."""
+        from pathlib import Path
+
+        from .. import meshgraph as meshgraph_mod
+
+        running = self.mesh_server()
+        if running is not None:
+            same = Path(str(running.path)) == Path(str(path))
+            return running, (
+                f"mesh is already up on {running.url}"
+                + ("" if same else f" over {running.path} — /mesh stop first")
+            )
+        try:
+            server = meshgraph_mod.MeshServer(path=Path(str(path)))
+        except Exception as exc:  # noqa: BLE001 -- a bind failure is a
+            # message, not a crash: the port may be taken, and the caller
+            # is a keystroke.
+            return None, f"mesh could not start: {type(exc).__name__}: {exc}"
+        self._mesh_server = server
+        for pane in self.panes():
+            with contextlib.suppress(Exception):
+                pane._refresh_status()
+        return server, ""
+
+    def stop_mesh(self) -> bool:
+        """Stop it and drop the handle. True when one was running."""
+        server = self.mesh_server()
+        self._mesh_server = None
+        if server is None:
+            return False
+        with contextlib.suppress(Exception):
+            server.stop()
+        for pane in self.panes():
+            with contextlib.suppress(Exception):
+                pane._refresh_status()
+        return True
+
+    def on_unmount(self) -> None:
+        """The window is going away: release the mesh port.
+
+        BOTH here and in :meth:`doxa.app.DoxaApp.run`'s own ``finally``,
+        because neither alone covers every exit -- doxa/app.py's ``run``
+        docstring already records that ``on_unmount`` does not fire on
+        every way out of a TUI, and ``run()`` is not the door
+        ``App.run_test`` comes through. :meth:`stop_mesh` is idempotent,
+        so being called twice is not a state anybody has to reason
+        about."""
+        with contextlib.suppress(Exception):
+            self.stop_mesh()
+
     def action_toggle_sidebar(self) -> None:
         """F3. Reports a width refusal where the user is looking --
         the active pane's transcript -- rather than doing nothing, which
@@ -428,6 +522,19 @@ class WindowActionsMixin:
                 command.group, command.palette, command.summary, callback,
                 sort_key=(0, f"{index:03d}"),
             ))
+            # A row's own verbs, directly under it and in its own group --
+            # never a second ordering (doxa/palette.py). The sort key
+            # extends the parent's rather than replacing it, so "012.00"
+            # falls between "012" and "013" by plain string order and a
+            # verb can never drift away from the command it belongs to.
+            for position, sub in enumerate(command.subcommands):
+                line = f"{command.name} {sub.argument}"
+                entries.append(PaletteEntry(
+                    command.group, sub.palette, sub.summary,
+                    partial(self._cmd_prefill, line + " ") if sub.prefill
+                    else partial(self._cmd_run_slash, line),
+                    sort_key=(0, f"{index:03d}.{position:02d}"),
+                ))
         # Attach: live daemon-hosted sessions from the shared peer/daemon
         # registry, newest first, never any session already open in a tab.
         open_ids = {
@@ -517,10 +624,35 @@ class WindowActionsMixin:
 
     def _cmd_run_slash(self, name: str) -> None:
         """Palette -> the ACTIVE pane's slash handler. One dispatch path for
-        both surfaces: the palette never reimplements a command."""
-        pane = self.active_pane
+        both surfaces: the palette never reimplements a command.
+
+        ``active_pane`` is SessionPane-only and is therefore None whenever
+        a READ-ONLY tab is the active one -- an archived transcript, a
+        subagent's activity, a fleet run. Through v1.14.0 that made every
+        palette command a no-op in those tabs, which is the "documented
+        action that silently does nothing" failure this house treats as a
+        defect rather than a rough edge; the two tab kinds that know which
+        pane they belong to (``owner``) supply one, so "Fleet: status"
+        works from the tab the run is in."""
+        pane = self.active_pane or self._owner_of_active_tab()
         if pane is not None:
             pane.run_worker(pane._run_command(name), group="command")
+
+    def _owner_of_active_tab(self) -> "object | None":
+        """The SessionPane a read-only active tab belongs to, or None.
+
+        Reads ``owner`` off whatever tab is active rather than asking each
+        tab kind by type: a tab that declares an owner is declaring that a
+        command typed "here" means that pane, and a tab that does not
+        (an archived transcript -- its session is gone) truthfully has
+        nobody to answer for it."""
+        from ..session.pane import SessionPane
+
+        active: "object | None" = None
+        with contextlib.suppress(Exception):
+            active = self._strip().active_pane
+        owner = getattr(active, "owner", None)
+        return owner if isinstance(owner, SessionPane) else None
 
     def _cmd_prefill(self, text: str) -> None:
         pane = self.active_pane
@@ -637,6 +769,7 @@ class WindowActionsMixin:
         # change HERE for that to be true -- the mounted-pane scan this
         # reads from is the one and only choke point, which is the point.
         self._persist_tabset()
+        self.stop_mesh()
         await App.action_quit(self)
 
     async def action_quit(self) -> None:
@@ -652,4 +785,5 @@ class WindowActionsMixin:
         # Item D: every pane stays mounted here (detach() only clears the
         # engine handle) -- the snapshot picks all of them up on its own.
         self._persist_tabset()
+        self.stop_mesh()
         await App.action_quit(self)

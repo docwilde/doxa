@@ -100,7 +100,8 @@ spend, fake account numbers. See
   from a pool, runs K without memory, splits a run budget, waits for quiet
   and tears down. Clean to N=64 on Claude; a mixed pool of Codex, DeepSeek
   and GLM ran, messaged across vendors and quiesced (see [Status](#status)).
-  What a slot can do depends on its engine:
+  `/fleet start` from any session opens the run in a tab; `/mesh` shows the
+  graph. What a slot can do depends on its engine:
   [engine capabilities](docs/manual.md#engine-capabilities).
 - **[Peers on another machine, once you say so.](docs/fleet.md)** A tailnet
   bridge behind `tailscale serve` puts a second box's sessions in the
@@ -365,8 +366,12 @@ there before it reaches anyone. Every send, the model's and yours alike,
 is rate-limited by deliveries rather than by calls and appended with its
 full body to `$DOXA_HOME/peers/messages.jsonl`. `doxa/meshgraph.py` draws
 that file as a live browser view of which session messages which — a graph
-being the one artifact a terminal is honestly bad at — but nothing in the
-TUI or the CLI opens it yet, so it is reachable today only from Python.
+being the one artifact a terminal is honestly bad at — and `/mesh` is how
+it is opened: bare for this machine's ledger, with a run id for that run's.
+The server binds loopback, gates every route on a per-process token, and a
+`⌗ mesh` chip on the status bar says while it is up; `/mesh stop` ends it.
+It opens a browser only if `mesh_open_browser` is on, because DOXA runs in
+terminals that have none.
 
 Also absent: history drill-in past `/search`, and custom keybindings.
 

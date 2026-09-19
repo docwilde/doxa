@@ -56,6 +56,40 @@ GROUPS: tuple[str, ...] = (
 
 
 @dataclass(frozen=True)
+class SubCommand:
+    """One VERB of a command that has several, as the palette shows it.
+
+    ``/fleet`` is one registry row with seven verbs, and a palette that
+    offered only the bare name would make the two an operator reaches for
+    most -- ``/fleet status`` and ``/fleet stop`` -- something you have to
+    already know exists in order to find. So the verbs that are worth a
+    row get one, HERE, on the command's own definition: the registry stays
+    the single list (doxa/palette.py's "no second ordering"), and the
+    palette folds these in directly after their parent, in this order.
+
+    Only verbs that take no further argument RUN from the palette;
+    ``prefill`` is for the ones that need words after them (``/fleet
+    start`` needs a pool and a prompt), which then land in the prompt for
+    the user to finish -- the same treatment :attr:`SlashCommand.
+    palette_prefill` already gives a whole command."""
+
+    argument: str
+    """What follows the command name, e.g. ``start`` or ``stop``."""
+
+    palette: str
+    """Display name on the Ctrl+P palette. Never empty: a SubCommand
+    exists to be a palette row, and one that did not appear there would be
+    a definition with no surface."""
+
+    summary: str
+    """One line, the same job :attr:`SlashCommand.summary` does."""
+
+    prefill: bool = False
+    """PREFILL the prompt instead of running -- for a verb that needs
+    arguments the palette cannot supply."""
+
+
+@dataclass(frozen=True)
 class SlashCommand:
     """One command, as every surface sees it."""
 
@@ -90,6 +124,11 @@ class SlashCommand:
     group: str = "Session"
     """Functional group -- one of :data:`GROUPS`. Ordering lives HERE, on
     the definition, so every surface derives the same sequence from it."""
+
+    subcommands: "tuple[SubCommand, ...]" = ()
+    """Verbs of this command that get their own palette row and their own
+    ``/help`` line -- see :class:`SubCommand`. Empty for every command
+    that is one verb, which is nearly all of them."""
 
     def call_form(self) -> str:
         return self.usage or self.name
@@ -190,6 +229,51 @@ REGISTRY: tuple[SlashCommand, ...] = (
         usage="/msg <session_prefix> <text>",
         palette="Peers: message",
         palette_prefill=True,
+    ),
+    SlashCommand(
+        name="/fleet",
+        group="Panes & tabs",
+        # Beside /peers and /msg because it is the same subject at a
+        # different scale: those two are one session talking to another,
+        # this is N of them started together and watched in one tab. The
+        # harness itself is doxa.fleet and `doxa-fleet` still runs it from
+        # a shell -- what this row adds is starting one from a session
+        # that is itself working, and watching it without leaving DOXA.
+        summary="Start and watch a fleet run — N sessions, one prompt, one "
+                "instant, in a tab",
+        # The verbs, but NOT their arguments -- the same rule /mode's row
+        # states for its six modes: /help pads its command column to the
+        # widest call form here, and spelling out `start`'s flags would
+        # indent every other row in the file past the point of being
+        # scannable. Bare `/fleet` is the surface with room for them.
+        usage="/fleet start|status|stop|runs|attach|mesh",
+        palette="Fleet: start a run",
+        # PREFILL: a run needs a pool and a prompt and there is no default
+        # for either (doxa.fleet: "a covariate nobody chose is a covariate
+        # nobody can defend"), so the palette hands over a half-typed line
+        # rather than starting a fleet nobody specified.
+        palette_prefill=True,
+        subcommands=(
+            SubCommand("status", "Fleet: status",
+                       "This session's run: assignment, quiescence, ledger tail"),
+            SubCommand("stop", "Fleet: stop",
+                       "Tear the run down now — the tab keeps the final report"),
+            SubCommand("detach", "Fleet: detach",
+                       "Leave the run going when its tab closes (it keeps "
+                       "spending)"),
+        ),
+    ),
+    SlashCommand(
+        name="/mesh",
+        group="Panes & tabs",
+        summary="Who is messaging whom, in a browser — loopback only, "
+                "token-gated, off until you ask",
+        usage="/mesh [run-id | stop]",
+        palette="Mesh: graph the message ledger",
+        subcommands=(
+            SubCommand("stop", "Mesh: stop",
+                       "Stop the graph server and release its port"),
+        ),
     ),
     SlashCommand(
         name="/img",
