@@ -25,6 +25,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -69,6 +70,7 @@ os.environ.setdefault("DOXA_SKIP_FIRST_RUN", "1")
 
 from datetime import datetime, timezone  # noqa: E402
 
+from doxa import fleetview as fleetview_mod  # noqa: E402
 from doxa.app import ChipPicker, DoxaApp, ToolChip, TurnBlock  # noqa: E402
 from doxa.engine import EngineEvent, context_breakdown  # noqa: E402
 from doxa.identity import Usage, UsageLimit  # noqa: E402
@@ -1272,6 +1274,325 @@ async def _drive_sync_chip(app: DoxaApp, pilot) -> None:
 
 
 # --------------------------------------------------------------------- #
+# Scene: fleet (v1.14.0, NEW FILE -- the harness is v1.11.0, the tab is
+# v1.14.0) -- a mixed-vendor run of eight sessions, watched in the
+# read-only tab `/fleet start` opens.
+#
+# THE TAB READS TWO FILES AND NOTHING ELSE -- doxa.ui.fleettab says so
+# and doxa.fleetview exists to make it true: a run's `manifest.json` and
+# its `home/peers/messages.jsonl`. That is what makes this scene
+# possible at all, and it is why it is honest: the scene writes those
+# two files under this module's own throwaway temp root and points the
+# tab at them. No daemon is spawned, nothing is dispatched, no token is
+# spent, and the eight sessions on screen never existed. A scene that
+# had to run a fleet to photograph one would cost eight daemons and a
+# real bill every time the gallery was refreshed.
+#
+# WHAT IS INVENTED HERE AND WHAT IS NOT, because that difference is the
+# whole claim of the image. Invented: the session ids, the phases, the
+# spread, the quiescence, the message bodies -- the same discipline
+# every other scene in this file holds to. NOT invented: the spec is
+# built by `doxa.fleet.build_parser` through `spec_from_argv`, the same
+# parser `doxa-fleet` and `/fleet start` both read; the assignment table
+# is dealt by the real seeded `doxa.fleet.assign` from the pool named
+# below rather than typed out by hand; and the two arithmetic lines are
+# `capacity_note` and `budget_note`'s own strings. So the engine column,
+# which two agents lost their memory, and the "EXCEPT on codex,
+# deepseek, glm" clause are what that pool and that seed really produce,
+# and a change to any of them moves this shot rather than silently
+# leaving it wrong.
+#
+# `available_mb` is PASSED rather than measured, for the same reason the
+# isolation block at the top of this file exists: `capacity_note` reads
+# this machine's own /proc/meminfo, and a gallery image must not carry
+# the free memory of whoever regenerated it.
+#
+# THE RUN'S CLOCK IS ANCHORED TO GENERATION TIME, not to a date written
+# here. `fleetview.render` prints `t+<age>` from the manifest's
+# `started_at` against the real wall clock, so a fixed date would make
+# this line read `t+3.1h` on the day it was captured and `t+9000.0h` a
+# year later -- a number that rots on its own. Anchoring the manifest
+# five minutes behind the capture makes the line stable (`t+5m`) and the
+# ledger's own `t+` column exact, since every record is written at its
+# offset from that same instant.
+#
+# NO MESH URL ON THIS PANEL. `FleetTab.text()` prints one only while a
+# MeshServer is up over this run's own ledger, and starting one here
+# would bind a port and mint a fresh token per capture -- a different
+# image every run. The graph has an asset of its own and a script of its
+# own (scripts/mesh_shot.py), which is the honest place for it: it is a
+# browser page, not a Textual widget.
+# --------------------------------------------------------------------- #
+
+_FLEET_RUN_ID = "20260919T113402-8c41"
+
+#: The pool the run was dealt from. Four engines, because the one thing
+#: a fleet still has to show that no other scene can is that a run is
+#: mixed: the engine column is the difference between "eight agents" and
+#: "eight agents, and here is what each of them actually was".
+_FLEET_POOL = (
+    "claude:opus@2,claude:sonnet@3,codex:gpt-5.4-codex@2,"
+    "deepseek:deepseek-chat@2,glm:glm-4.6@1"
+)
+
+#: The one prompt all eight were handed, byte-identical and at the same
+#: instant -- that is what the harness guarantees and what the dispatch
+#: spread below measures.
+_FLEET_PROMPT = (
+    "Map how DOXA loads configuration and report where a setting can "
+    "come from. Fifteen other sessions have this same prompt; peer_list "
+    "names them."
+)
+
+#: Invented ids, 12 hex characters like the real thing; the table and
+#: the ledger tail both show the first eight.
+_FLEET_SESSION_IDS = [
+    "7f3a1c9d40b2", "b81e6d20af53", "2c4f90ab7d18", "d5a37e1b8062",
+    "9e0b42c7fa31", "46d8ba09c5e7", "a3f71e5c208d", "e29c04b6d71f",
+    "1b6ef3902ac4", "c04d8172be69", "58a2c93df016", "f71b05e8a3c2",
+    "3ad9601fc47b", "8c52e7d3901a", "d60374bf1e85", "05f8ac46293e",
+]
+
+#: How far behind the capture the run is anchored -- see the block above.
+_FLEET_AGE_S = 300.0
+
+#: `(t+seconds, sender slot, recipient slots or None for a broadcast,
+#: body)`. Thirty-four records, of which the tab shows the last thirty
+#: (`fleetview.LEDGER_TAIL`) and the header names the total -- which is
+#: the one number in this scene that must agree with the file, so it is
+#: counted from this table rather than written down beside it.
+_FLEET_TRAFFIC = [
+    (3.2, 0, None, "16 of us on one prompt. I am taking doxa/config.py."),
+    (3.9, 4, None, "taking doxa/setup.py and the first-run writer."),
+    (4.6, 9, None, "I have the env table: every DOXA_ name and what reads it."),
+    (5.4, 2, None, "taking the CLI flags in doxa/cli.py."),
+    (6.1, 13, None, "the settings screen is mine. It writes config.toml."),
+    (6.9, 7, None, "I will read doxa/peers.py for the runtime dir."),
+    (7.6, 11, None, "taking docs/manual.md, to check its claims against code."),
+    (8.4, 5, None, "nobody has the daemon's argv. Taking that."),
+    (9.2, 15, [0], "config.py is yours; I take the TOML load path under it."),
+    (10.1, 3, None, "taking the engine and model resolution order."),
+    (11.0, 8, [9], "which env names are read twice? DOXA_HOME is in three."),
+    (11.8, 9, [8], "DOXA_HOME: config, setup, peers. One reader, three callers."),
+    (12.7, 6, None, "taking the worktree paths. They read config too."),
+    (13.5, 12, [2], "do flags beat env? The manual reads the other way round."),
+    (14.4, 2, [12], "flag, then env, then config.toml, then the field default."),
+    (15.2, 12, None, "correcting myself: flags win. I misread the manual."),
+    (16.1, 10, None, "nothing reads config.toml twice; it is cached per run."),
+    (17.0, 0, [15], "confirmed here too: invalidate() drops it on every write."),
+    (17.9, 14, None, "taking the image and clock settings. Both env-only."),
+    (18.8, 4, [13], "first run writes the same file your settings screen does."),
+    (19.8, 13, [4], "one writer then, and nothing else in the tree touches it."),
+    (20.9, 1, None, "I have no file left to take. Reading for contradictions."),
+    (22.0, 15, None, "four sources: flag, env, config.toml, field default."),
+    (23.2, 8, [15], "five. A caller can pass an override in process."),
+    (24.3, 15, [8], "that is the same layer as a flag. Four, for a user."),
+    (25.5, 9, None, "every env name is DOXA_ prefixed except CLAUDE_CONFIG_DIR."),
+    (26.8, 0, [9], "that one is the spawned CLI's, not a DOXA setting."),
+    (28.0, 9, [0], "agreed. I attribute it to the CLI rather than list it."),
+    (29.3, 2, None, "31 flags, 9 with an env twin. The nine are in my answer."),
+    (30.6, 12, [2], "which nine? I want them in the precedence paragraph."),
+    (31.8, 2, [12], "home, runtime, engine, model, lore, image, clock, tz."),
+    (33.1, 13, None, "the settings screen shows provenance per row. Worth naming."),
+    (34.5, 7, None, "runtime dir is XDG_RUNTIME_DIR, not config. Another home."),
+    (35.9, 11, None, "the manual agrees with the code on all four sources."),
+    (37.2, 1, [0], "yours is the only draft claiming a cache. Say per process."),
+    (38.6, 0, None, "drafting now: four sources, precedence as slot 2 has it."),
+    (40.0, 6, None, "worktrees read the same config and carry none of their own."),
+    (41.5, 5, None, "the daemon's argv carries the engine, not a setting."),
+    (43.0, 3, None, "engine resolves flag, then env, then config. Written."),
+    (44.6, 14, None, "image and clock are env-only. Written, with the names."),
+    (46.1, 10, None, "written. The cache is per process and dropped on write."),
+    (47.7, 8, None, "written. Nothing I read contradicts slot 0's draft."),
+    (49.2, 4, None, "written. First run writes nothing until you accept it."),
+    (50.8, 15, None, "written. Going quiet."),
+]
+
+
+def _fleet_spec():
+    """The run's spec, from the SAME parser both front ends read.
+
+    `doxa-fleet` and `/fleet start` share `doxa.fleet.build_parser` --
+    that is the property tests/test_fleet_tui.py pins -- so building this
+    scene's spec through it is what makes the pool, the memory-off count
+    and the budget arithmetic on screen the ones those words really
+    produce."""
+    from doxa import fleet as fleet_mod
+
+    spec, _ = fleet_mod.spec_from_argv(
+        [
+            "--pool", _FLEET_POOL, "-n", "16", "--seed", "172",
+            "--memory-off", "3", "--run-budget", "24",
+            "--quiescence-timeout", "180",
+            "--root", str(_tmp / "fleet"), "--run-id", _FLEET_RUN_ID,
+            "--prompt", _FLEET_PROMPT,
+            # NOT this checkout, and that is the same call `live-diff`
+            # makes with `cwd_factory`: the panel prints the run's cwd
+            # verbatim, and a gallery image that printed the path of
+            # whichever worktree happened to regenerate it would be
+            # naming a directory the reader does not have and the author
+            # will delete. A scratch path under this module's own
+            # throwaway root is what the run really is.
+            "--cwd", str(_tmp / "repos" / "doxa"),
+        ],
+        cwd=str(ROOT),
+    )
+    return spec
+
+
+def _fleet_run_root() -> Path:
+    """Write one finished run's two files and return its root.
+
+    The manifest is built as a real :class:`doxa.fleet.RunReport` and
+    serialised through its own ``to_obj``, rather than as a dict shaped
+    like one by hand: the tab parses whatever the harness writes, and a
+    fixture that agreed with that shape today would drift from it at the
+    first field either side gained."""
+    import json
+
+    from doxa import fleet as fleet_mod
+
+    spec = _fleet_spec()
+    Path(spec.cwd).mkdir(parents=True, exist_ok=True)
+    # Whole seconds: the manifest's own stamp format carries no
+    # fraction (`doxa.fleet._iso_now`), and the ledger's `t+` column
+    # is measured against it -- so an anchor with a fraction in it
+    # would shift every offset in the table below by that fraction.
+    started = float(int(time.time() - _FLEET_AGE_S))
+
+    # The deal is the harness's own, seeded -- including which three
+    # agents lose their memory, which `assign` draws from the same stream
+    # after the models.
+    assignments = fleet_mod.assign(
+        spec.n, spec.pool, seed=spec.seed, memory=spec.memory,
+    )
+    slots = [
+        fleet_mod.Slot(
+            assignment=assignment,
+            phase=fleet_mod.PHASE_STOPPED,
+            session_id=_FLEET_SESSION_IDS[assignment.index],
+            socket_path=str(spec.runtime / f"{_FLEET_SESSION_IDS[assignment.index]}.sock"),
+            pid=40311 + assignment.index,
+            dispatched_at=started,
+        )
+        for assignment in assignments
+    ]
+
+    ledger = spec.ledger_path
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with ledger.open("w", encoding="utf-8") as handle:
+        for index, (offset, sender, targets, body) in enumerate(_FLEET_TRAFFIC):
+            recipients = (
+                [_FLEET_SESSION_IDS[i] for i in range(len(slots)) if i != sender]
+                if targets is None
+                else [_FLEET_SESSION_IDS[i] for i in targets]
+            )
+            handle.write(json.dumps({
+                "v": 1,
+                "id": f"f{index:04d}",
+                "ts": _fleet_ledger_stamp(started + offset),
+                "from": {
+                    "session": _FLEET_SESSION_IDS[sender],
+                    "title": f"fleet slot {sender}",
+                    "repo": spec.cwd,
+                    "model": slots[sender].assignment.model,
+                    "engine": slots[sender].assignment.engine,
+                },
+                "to": recipients,
+                "kind": "broadcast" if targets is None else "direct",
+                "in_reply_to": None,
+                "body": body,
+                "body_sha256": f"{index:064x}",
+                "latency_ms": None,
+                "turn": {"id": None, "state": "idle"},
+            }) + "\n")
+
+    report = fleet_mod.RunReport(
+        run_id=_FLEET_RUN_ID,
+        spec=spec,
+        slots=slots,
+        # Real strings from the real functions; only the machine's free
+        # memory is supplied rather than read (see the block above).
+        capacity=fleet_mod.capacity_note(spec.n, available_mb=62_000),
+        budget=fleet_mod.budget_note(spec),
+        dispatch_order=(11, 3, 14, 0, 7, 9, 2, 15, 5, 12, 1, 8, 6, 13, 4, 10),
+        dispatch_spread_s=0.0112,
+        quiesced=True,
+        quiescence_s=58.0,
+        ledger_messages=len(_FLEET_TRAFFIC),
+        leaked_pids=(),
+        started_at=_fleet_stamp(started),
+        finished_at=_fleet_stamp(started + 71.0),
+        live=False,
+    )
+    spec.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    spec.manifest_path.write_text(
+        json.dumps(report.to_obj(), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return spec.run_root
+
+
+def _fleet_stamp(epoch: float) -> str:
+    """The manifest's own stamp format (`doxa.fleet._iso_now`), for an
+    instant this scene chose rather than for now."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def _fleet_ledger_stamp(epoch: float) -> str:
+    """The LEDGER's stamp, which carries microseconds where the
+    manifest's does not (`doxa.peerledger`'s shape, quoted in
+    `doxa.meshgraph.parse_record`). Second resolution here would quantise
+    the `t+` column and turn a message sent 3.4s in into one sent at
+    3.0s -- a measurement, silently rounded."""
+    return (
+        datetime.fromtimestamp(epoch, timezone.utc)
+        .strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+    )
+
+
+class _FleetRunOnDisk:
+    """What the tab is handed instead of a :class:`doxa.fleetsession.
+    FleetSession`.
+
+    Four attributes and one method, which is the whole surface
+    `FleetTab` uses -- and that is the point rather than a convenience:
+    the tab consults a session for the three things a file cannot say
+    (is the task still going, was `/fleet detach` asked for, did the run
+    refuse before there was a manifest) and reads everything else off
+    disk. A stand-in this small is evidence of that, not a shortcut past
+    it."""
+
+    def __init__(self, run_root: Path) -> None:
+        self.run_root = run_root
+        self.run_id = _FLEET_RUN_ID
+        self.ledger_path = fleetview_mod.run_ledger_path(run_root)
+        #: The run has ended, so the tab paints once and stops its timer
+        #: rather than re-reading two files behind the screenshot.
+        self.alive = False
+        self.detached = False
+        self.note = ""
+
+    def snapshot(self, limit: int = fleetview_mod.LEDGER_TAIL):
+        return fleetview_mod.RunSnapshot.read(self.run_root, limit)
+
+
+async def _drive_fleet(app: DoxaApp, pilot) -> None:
+    # The same three-tab, real-Q&A fill `settings`/`clock`/`context` use.
+    # A fleet is started FROM a session that is itself working (`/fleet
+    # start` is a slash command in a pane), and the tab strip is where
+    # that shows: three sessions and the run beside them.
+    await _fill_hero_conversation(app, pilot)
+    pane = app.active_pane
+    session = _FleetRunOnDisk(_fleet_run_root())
+    tab = await app.open_fleet_tab(session, owner=pane)
+    assert await _until(pilot, lambda: "leaked pids" in tab.text()), (
+        "the fleet tab never rendered the run"
+    )
+    await _settle(pilot, 12)
+
+
+# --------------------------------------------------------------------- #
 
 @dataclass
 class Scene:
@@ -1391,6 +1712,8 @@ SCENES: list[Scene] = [
     Scene("peer-turn", _drive_peer_turn, size=WIDE,
           engine_factory=_hero_engine, new_session_factory=_sibling_tab_factory()),
     Scene("sync-chip", _drive_sync_chip, size=WIDE,
+          engine_factory=_hero_engine, new_session_factory=_sibling_tab_factory()),
+    Scene("fleet", _drive_fleet, size=WIDE,
           engine_factory=_hero_engine, new_session_factory=_sibling_tab_factory()),
     # THE banner, since v0.70.0 dropped the raster tier: every terminal
     # draws this. The scene name is kept rather than renamed to `banner`
