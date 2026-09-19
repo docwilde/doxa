@@ -159,6 +159,17 @@ class EngineClient:
         self._disabled: list[str] = []
         self._usage: dict = {}
         self._closed = False
+        # Set by _close(), not by the reader task's own completion: issue
+        # #58's fix (stop() below) needs a way to wait for "the connection
+        # is closed" that is not "await self._reader_task" -- that task
+        # cancels ITSELF from inside its own `finally` on a normal EOF
+        # (see _close), and asyncio still reports a task cancelled that
+        # way as cancelled even though nothing external asked it to stop,
+        # which would make a caller awaiting the task see a spurious
+        # CancelledError on the ordinary close path, indistinguishable
+        # from a real external cancellation. A plain Event has no such
+        # ambiguity: it is set exactly once, only by _close().
+        self._closed_event = asyncio.Event()
 
     # -- lifecycle ---------------------------------------------------
 
@@ -219,16 +230,52 @@ class EngineClient:
         """Explicit finalize-now: the daemon runs the LORE review + index
         and exits; every attached client sees the socket close.
 
+        WAITS for that close before returning, rather than detaching the
+        instant the ack arrives (issue #58's fix). The ack means only
+        that the daemon ACCEPTED the request -- ``engine.finalize()``
+        (the LORE review/index, the SDK client's own ``__aexit__``) and
+        ``_finalize_worktree`` still run afterward, on the daemon's own
+        clock, and ``SessionDaemon._handle_client`` drops THIS connection
+        only once they are done (``_handle_frame``'s ``"stop"`` branch
+        awaits ``_shutdown`` before its read loop checks ``_stopping`` and
+        breaks -- see that method and ``_shutdown``'s docstring). Closing
+        the instant the ack landed, as this method used to, is exactly
+        what made a LORE-enabled session's slow-but-CLEAN shutdown look
+        like a wedge to :meth:`doxa.fleet.FleetRun.teardown`: the fixed
+        grace window it timed the pid's disappearance against was sized
+        for the ack, never for the finalize that follows it. Measured
+        against a real spawned Claude/sonnet daemon (see the PR for issue
+        #58): a trivial single-turn transcript finalizes in well under a
+        second (0.018s observed), and the LORE review/index this waits on
+        scales with transcript size and with whether a deriver LLM is
+        configured -- the issue's own report (a longer, tool-using
+        transcript) is the case that exceeded the OLD 5s window. Either
+        way this sits comfortably inside ``FleetSpec.stop_timeout_s`` (60s
+        default), which is what now bounds this wait instead of a
+        separate guess. A daemon that never closes -- genuinely wedged,
+        not merely slow -- leaves this call pending until THAT caller's
+        timeout cancels it; nothing in this method waits forever on its
+        own.
+
         ``note``, when present, is worktree-per-session's (#3) closing
         word: `kept doxa/<id> — merge when ready` when the daemon kept a
         dirty or unmerged worktree rather than removing it. The daemon
         computes and embeds it in the "stop" reply itself (fast, git-only,
         ahead of the potentially-slow LORE review) so it survives even
-        though this method closes the socket right after."""
+        though the reply lands well before this method now returns."""
         try:
             reply = await self._call("stop")
         except EngineClientError:
             reply = {}  # daemon already gone: stopped is what we wanted
+        # The ack is not the signal -- the daemon's own close is (see
+        # above), signalled here by _closed_event rather than by the
+        # reader task's own completion (see that field's comment for why
+        # awaiting the task itself is the wrong tool). Already-set (daemon
+        # gone before we even got here, or a prior close raced us)
+        # resolves this wait immediately. A genuine CancelledError from a
+        # caller's own timeout is NOT caught here, so a wedged finalize
+        # still surfaces as a failure to whoever is waiting on this call.
+        await self._closed_event.wait()
         self._close()
         data: dict[str, Any] = {"stopped": True}
         if not reply.get("ok"):
@@ -241,6 +288,7 @@ class EngineClient:
         if self._closed:
             return
         self._closed = True
+        self._closed_event.set()
         if self._reader_task is not None:
             self._reader_task.cancel()
         if self._writer is not None:

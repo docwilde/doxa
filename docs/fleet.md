@@ -335,6 +335,19 @@ Every phase has a deadline and every deadline has an escalation.
 * Teardown is `stop` → SIGTERM → SIGKILL, then a second pass that asks the OS
   whether the process is *actually* gone. `teardown()` returns the pids that
   survived all of it — normally empty, and loud when it is not.
+* `stop` waits for the session's own finalize to actually finish — the LORE
+  review/index for a memory-enabled session, the worktree decision, the SDK
+  client's own teardown — not just for the daemon to acknowledge the
+  request. The daemon closes the socket only once that work is done, and
+  the client-side call does not return before then, bounded by
+  `FleetSpec.stop_timeout_s` (60 s default) rather than by a fixed clock.
+  Before this (issue #58), a LORE-enabled session's slow-but-clean
+  shutdown could outlast the short second-pass grace window and get
+  SIGKILLed anyway — correctly torn down, but the manifest called it
+  `killed` when it had actually `stopped` cleanly. `FleetSpec.kill_grace_s`
+  now covers only the residual gap between the socket closing and the OS
+  reporting the pid gone, which is why it can stay small while
+  `stop_timeout_s` carries the real budget.
 
 ### Reproducing a run
 

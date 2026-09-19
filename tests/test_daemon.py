@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import json
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -288,6 +289,50 @@ async def test_explicit_stop_finalizes_immediately(tmp_path, monkeypatch):
         assert done.data.get("stopped") is True
         await asyncio.wait_for(serve_task, 5)
         assert created[0].exited is True
+
+
+@pytest.mark.asyncio
+async def test_explicit_stop_waits_for_a_slow_but_clean_finalize(
+    tmp_path, monkeypatch,
+):
+    """Issue #58's mechanism, isolated at the layer that owns it.
+    ``engine.finalize()`` stands in for a LORE-enabled session's slow
+    review/index -- SLOW, not wedged, so it still returns -- and
+    ``EngineClient.stop()`` must not report done before it actually has.
+
+    Before the fix, ``stop()`` closed the socket the instant the ack
+    arrived, so this returned in milliseconds regardless of how long
+    finalize took -- and ``doxa.fleet.FleetRun.teardown`` learned nothing
+    from it about whether the daemon was actually gone. The fix makes
+    ``stop()`` wait for the daemon's own close, which ``_handle_client``
+    only does once ``_shutdown`` (finalize included) has returned -- so
+    the elapsed time here has to be at least the finalize delay, not
+    however long the ack took."""
+    FINALIZE_DELAY = 0.3
+
+    async with running_daemon(tmp_path, monkeypatch, linger=600.0) as (
+        daemon, created, serve_task,
+    ):
+        async def slow_finalize():
+            await asyncio.sleep(FINALIZE_DELAY)
+            daemon.engine._finalized = True
+            return EngineEvent("session_done", {"indexed": 0, "belief_count": 0})
+
+        daemon.engine.finalize = slow_finalize
+
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+
+        started = time.monotonic()
+        done = await asyncio.wait_for(client.stop(), timeout=5.0)
+        elapsed = time.monotonic() - started
+
+        assert done.data.get("stopped") is True
+        assert elapsed >= FINALIZE_DELAY - 0.05, (
+            f"stop() returned after {elapsed:.3f}s -- before the "
+            f"{FINALIZE_DELAY}s finalize it was supposed to wait for"
+        )
+        await asyncio.wait_for(serve_task, 5)
 
 
 @pytest.mark.asyncio

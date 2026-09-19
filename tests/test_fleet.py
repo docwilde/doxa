@@ -353,6 +353,121 @@ async def test_a_session_that_survives_the_kill_is_reported_not_swallowed(short_
     assert run.slots[3].error
 
 
+async def test_teardown_ends_a_slot_stopped_when_its_real_finalize_is_slow_but_clean(
+    short_root, tmp_path, monkeypatch,
+):
+    """Issue #58, at the layer that actually broke: a real ``DaemonBackend``
+    driving a real ``SessionDaemon`` over a real socket, standing in for a
+    LORE-enabled session whose finalize (the review/index) is genuinely
+    slow -- not wedged, just slow. Before the fix, ``EngineClient.stop()``
+    returned the instant the daemon acknowledged the request, so
+    ``FleetRun.teardown`` declared this slot done in milliseconds -- long
+    before the finalize it was supposedly waiting on had actually run, and
+    only ``kill_grace_s``'s fixed clock stood between that lie and the pid
+    being SIGKILLed out from under a session that was shutting down
+    cleanly. The fix makes ``backend.stop()`` (via ``EngineClient.stop``)
+    block until the daemon really closes the connection, so teardown here
+    must take at least as long as the finalize -- and end the slot
+    `stopped`, never `killed`."""
+    from doxa.engine import EngineEvent
+    from tests.test_daemon import running_daemon
+
+    FINALIZE_DELAY = 0.3
+
+    async with running_daemon(tmp_path, monkeypatch, linger=600.0) as (
+        daemon, created, serve_task,
+    ):
+        async def slow_finalize():
+            await asyncio.sleep(FINALIZE_DELAY)
+            daemon.engine._finalized = True
+            return EngineEvent(
+                "session_done", {"indexed": 0, "belief_count": 0}
+            )
+
+        daemon.engine.finalize = slow_finalize
+
+        spec = _spec(short_root, n=1, stop_timeout_s=5.0, kill_grace_s=0.2)
+        run = fleet_mod.FleetRun(spec, fleet_mod.DaemonBackend(), force=True)
+        slot = run.slots[0]
+        # No real OS process behind this slot -- the daemon runs in-process
+        # against a real socket, as test_daemon.py's own harness does, so
+        # `_gone`'s pid check has nothing to answer about and correctly
+        # stays out of the way (see fleet.Slot.pid's guard in teardown).
+        # What this test measures is the FIRST-pass wait inside `one()`,
+        # not the second-pass reap check -- a real pid belongs to the
+        # mandatory live-fleet verification, not a unit test.
+        slot.socket_path = str(daemon.socket_path)
+        slot.pid = None
+        slot.phase = fleet_mod.PHASE_QUIET
+        await run.backend.arm(slot, spec)
+
+        started = time.monotonic()
+        leaked = await asyncio.wait_for(run.teardown(), timeout=5.0)
+        elapsed = time.monotonic() - started
+
+        assert leaked == []
+        assert slot.phase == fleet_mod.PHASE_STOPPED, (
+            f"a slow-but-clean finalize must not be mistaken for a wedge "
+            f"(error={slot.error!r})"
+        )
+        assert elapsed >= FINALIZE_DELAY - 0.05, (
+            f"teardown() returned after {elapsed:.3f}s -- before the "
+            f"{FINALIZE_DELAY}s finalize it was supposed to wait for"
+        )
+        await asyncio.wait_for(serve_task, 5)
+
+
+async def test_teardown_still_kills_and_names_a_slot_whose_finalize_never_returns(
+    short_root, tmp_path, monkeypatch,
+):
+    """The other half of issue #58's fix, and the property the fix must not
+    trade away: a finalize that is not merely slow but genuinely over
+    budget must still be escalated and still show up in the manifest.
+
+    Before the fix this was WORSE than the reported defect, not better:
+    ``EngineClient.stop()`` closed on the ack alone, so a session wedged
+    INSIDE finalize was reported `stopped` forever and never revisited --
+    a real daemon leaked with nobody told. The fix makes `stop()` wait for
+    the daemon's own close, so a finalize that outruns ``stop_timeout_s``
+    now bounds the wait the same way any other unresponsive session does,
+    and still ends the slot `killed` with the reason on record."""
+    from doxa.engine import EngineEvent
+    from tests.test_daemon import running_daemon
+
+    WEDGE_S = 1.0
+
+    async with running_daemon(tmp_path, monkeypatch, linger=600.0) as (
+        daemon, created, serve_task,
+    ):
+        async def wedged_finalize():
+            await asyncio.sleep(WEDGE_S)  # bounded so the test cleans up
+            daemon.engine._finalized = True
+            return EngineEvent(
+                "session_done", {"indexed": 0, "belief_count": 0}
+            )
+
+        daemon.engine.finalize = wedged_finalize
+
+        spec = _spec(short_root, n=1, stop_timeout_s=0.15, kill_grace_s=0.2)
+        run = fleet_mod.FleetRun(spec, fleet_mod.DaemonBackend(), force=True)
+        slot = run.slots[0]
+        slot.socket_path = str(daemon.socket_path)
+        slot.pid = None  # nothing to signal for real; see the sibling test
+        slot.phase = fleet_mod.PHASE_QUIET
+        await run.backend.arm(slot, spec)
+
+        leaked = await asyncio.wait_for(run.teardown(), timeout=5.0)
+
+        assert slot.phase == fleet_mod.PHASE_KILLED
+        assert slot.error, "a wedge must say why, not just that it happened"
+        assert leaked == []  # slot.pid is None: nothing real left to report
+
+        # The daemon is still finishing its (bounded) finalize in the
+        # background; let it, rather than tearing the fixture down while
+        # SessionDaemon._shutdown is mid-flight.
+        await asyncio.wait_for(serve_task, 5)
+
+
 async def test_a_session_that_fails_to_spawn_does_not_abort_the_run(short_root):
     """One daemon failing to come up is data about the run. Aborting on it
     produces no ledger at all, which is strictly worse than a ledger with a
