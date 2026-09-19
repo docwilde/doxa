@@ -854,23 +854,33 @@ def test_kill_pid_will_not_signal_a_pid_that_is_no_longer_a_daemon():
     assert not [s for _pid, s in sent if s in (signal_mod.SIGTERM, signal_mod.SIGKILL)]
 
 
-def test_a_real_daemon_pid_is_recognised_from_its_cmdline():
+def test_a_daemon_pid_is_recognised_from_its_cmdline():
     """The other half: the check must not refuse every pid, or teardown
     stops working. ``python -m doxa.daemon`` is how spawn_daemon starts
-    one, so the marker is in argv."""
+    one, so the marker is in argv -- reproduced here as a process that
+    carries the same string and then SLEEPS. Spawning a real
+    ``-m doxa.daemon --help`` instead was racy under suite load: it exits
+    at once, and a zombie's ``/proc/<pid>/cmdline`` reads back empty."""
     import subprocess
     import sys
 
     proc = subprocess.Popen(
-        [sys.executable, "-m", "doxa.daemon", "--help"],
+        [sys.executable, "-c", "import time; time.sleep(30)", "-m", "doxa.daemon"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     try:
+        for _ in range(200):
+            if fleet_mod._is_doxa_daemon(proc.pid) is True:
+                break
+            time.sleep(0.01)
         assert fleet_mod._is_doxa_daemon(proc.pid) is True
     finally:
+        proc.kill()
         proc.wait(timeout=30)
-    # And a pid that no longer exists is False, not None: nothing to kill.
-    assert fleet_mod._is_doxa_daemon(proc.pid) in (False, True)
+
+    # An empty or absent cmdline -- a reaped pid, a zombie, a kernel
+    # thread -- is False, which is "do not signal it": the safe direction.
+    assert fleet_mod._is_doxa_daemon(999999) is False
 
 
 def test_an_unreadable_proc_entry_is_not_read_as_a_dead_process(monkeypatch):
