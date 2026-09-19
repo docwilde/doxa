@@ -130,9 +130,21 @@ def _run_attached(
         # session id (a resume keeps its id; see that function's
         # docstring). Threaded into every DoxaApp construction in this
         # module so /resume is daemon-backed wherever the TUI is.
+        #
+        # ON THE SESSION'S OWN ENGINE (issue #46), not this window's. The
+        # `engine` closed over here is what a FRESH tab spawns -- the
+        # --engine this process was launched with -- and handing it to a
+        # resume would reopen a Codex conversation as a Claude one, under
+        # the resumed id, on top of the resumed transcript.
+        # history.resumable_engine derives the right one from the artefact
+        # the session left beside that transcript: the SAME answer the
+        # gate allowed the resume on, so the spawn cannot disagree with
+        # the dialog. None (a vendor artefact, which cannot say WHICH
+        # vendor wrote it) keeps this window's engine, exactly as before.
+        session_engine, _artefact = history_mod.resumable_engine(session_id)
         _sid, dsock = _spawn_daemon(
             path, model=model, linger_secs=linger, resume=session_id,
-            engine=engine,
+            engine=session_engine or engine,
         )
         return EngineClient(dsock)
 
@@ -212,6 +224,13 @@ def ended_tab_spec(
     session id DOXA minted before v0.56.0, when its ids and the CLI's were
     two different id spaces (see ``SessionEngine._build_options``), so
     those tabs come back exactly as they do today AND SAY WHY.
+
+    Issue #46: that question, and the ``resume_factory`` spawn below, are
+    both per ENGINE. A saved tab records no engine (doxa.tabsets.TabRecord
+    is a session id, a pinned name and a cwd), so both derive it from the
+    artefact the session left beside its transcript --
+    :func:`doxa.history.resumable_engine` -- and a restored Codex tab
+    comes back on Codex, resuming its own recorded thread.
 
     EAGER, not deferred, and the cost argument is why: a resumed tab costs
     one process, not tokens. The CLI loads that conversation out of its
@@ -293,9 +312,21 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
         # session id (a resume keeps its id; see that function's
         # docstring). Threaded into every DoxaApp construction in this
         # module so /resume is daemon-backed wherever the TUI is.
+        #
+        # ON THE SESSION'S OWN ENGINE (issue #46), not this window's. The
+        # `engine` closed over here is what a FRESH tab spawns -- the
+        # --engine this process was launched with -- and handing it to a
+        # resume would reopen a Codex conversation as a Claude one, under
+        # the resumed id, on top of the resumed transcript.
+        # history.resumable_engine derives the right one from the artefact
+        # the session left beside that transcript: the SAME answer the
+        # gate allowed the resume on, so the spawn cannot disagree with
+        # the dialog. None (a vendor artefact, which cannot say WHICH
+        # vendor wrote it) keeps this window's engine, exactly as before.
+        session_engine, _artefact = history_mod.resumable_engine(session_id)
         _sid, dsock = _spawn_daemon(
             path, model=model, linger_secs=linger, resume=session_id,
-            engine=engine,
+            engine=session_engine or engine,
         )
         return EngineClient(dsock)
 

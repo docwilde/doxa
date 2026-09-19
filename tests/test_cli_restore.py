@@ -261,3 +261,123 @@ def test_run_restored_with_live_tabs_builds_specs_in_saved_order(monkeypatch, tm
     assert kwargs["restore_report"] == (
         "tab restore: restored 2 tabs, skipped 1 session no longer running."
     )
+
+
+# -- a restored tab comes back on ITS OWN engine (issue #46) -------------
+#
+# The `engine` _run_restored closes over is what a FRESH tab spawns -- the
+# --engine this process was launched with. Handing it to a RESUME would
+# reopen a Codex conversation as a Claude one, under the resumed id and on
+# top of the resumed transcript, which is the same defect the gate had one
+# layer up. A saved tab records no engine (TabRecord is a session id, a
+# pinned name and a cwd), so the spawn derives it the way the gate does:
+# from the artefact the session left beside its transcript.
+
+CODEX_SID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+CLAUDE_SID = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+
+
+@pytest.fixture
+def _projects_dir(monkeypatch, tmp_path):
+    """This test file's own PROJECTS_DIR (see tests/test_resume.py's
+    fixture of the same shape for why the attribute, not the env var)."""
+    import lore_core.config as lore_config
+
+    project = tmp_path / "projects" / "-work"
+    project.mkdir(parents=True)
+    monkeypatch.setattr(lore_config, "PROJECTS_DIR", tmp_path / "projects")
+    return project
+
+
+def _spy_spawn_kwargs(monkeypatch):
+    """_spy_spawn_only's recording sibling: keeps every kwarg, because the
+    thing under test here IS one of them."""
+    calls = []
+
+    def fake_spawn(cwd, **kwargs):
+        calls.append({"cwd": cwd, **kwargs})
+        return kwargs.get("resume") or "spawned-session-id", "/tmp/spawned.sock"
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", fake_spawn)
+    monkeypatch.setattr(cli_mod, "DoxaApp", _RecordingApp)
+    return calls
+
+
+def _one_ended_tab(session_id: str, cwd: str):
+    return tabsets.ResolvedRestore(
+        tabs=[], skipped=0, active_session_id=session_id,
+        archived=[tabsets.TabRecord(session_id, None, cwd)],
+    )
+
+
+def test_a_restored_codex_tab_is_resumed_on_codex(
+    monkeypatch, tmp_path, _projects_dir
+):
+    """Launched as a Claude window, restoring an ended CODEX conversation:
+    the resume spawn carries engine="codex", not the window's own."""
+    (_projects_dir / f"{CODEX_SID}.codex.json").write_text(
+        json.dumps({"thread_id": "thr-0199", "session_id": CODEX_SID}),
+        encoding="utf-8",
+    )
+    calls = _spy_spawn_kwargs(monkeypatch)
+
+    cli_mod._run_restored(
+        _one_ended_tab(CODEX_SID, str(tmp_path)), str(tmp_path), None, 120.0,
+        engine=None,
+    )
+
+    specs = _RecordingApp.instances[0].kwargs["restore_tabs"]
+    assert [s.session_id for s in specs] == [CODEX_SID]
+    assert specs[0].resume is True  # the gate said yes -- it used to say no
+    specs[0].engine_factory()  # the spawn itself, deferred until now
+
+    resume_calls = [c for c in calls if c.get("resume") == CODEX_SID]
+    assert len(resume_calls) == 1
+    assert resume_calls[0]["engine"] == "codex"
+
+
+def test_a_restored_claude_tab_is_resumed_on_claude_in_a_codex_window(
+    monkeypatch, tmp_path, _projects_dir
+):
+    """The other direction, which is the same bug mirrored: a window
+    launched with --engine codex must not reopen a Claude conversation on
+    Codex. The derived engine WINS over the window's."""
+    from doxa import cli_isolation as cli_isolation_mod
+
+    cli_history = (
+        cli_isolation_mod.cli_config_dir() / "projects" / "-work"
+        / f"{CLAUDE_SID}.jsonl"
+    )
+    cli_history.parent.mkdir(parents=True, exist_ok=True)
+    cli_history.write_text('{"type":"user"}\n', encoding="utf-8")
+    calls = _spy_spawn_kwargs(monkeypatch)
+
+    cli_mod._run_restored(
+        _one_ended_tab(CLAUDE_SID, str(tmp_path)), str(tmp_path), None, 120.0,
+        engine="codex",
+    )
+
+    specs = _RecordingApp.instances[0].kwargs["restore_tabs"]
+    specs[0].engine_factory()
+
+    resume_calls = [c for c in calls if c.get("resume") == CLAUDE_SID]
+    assert len(resume_calls) == 1
+    assert resume_calls[0]["engine"] == "claude"
+
+
+def test_a_tab_no_engine_can_resume_still_comes_back_read_only(
+    monkeypatch, tmp_path, _projects_dir
+):
+    """No artefact anywhere: the pre-existing outcome, unchanged, and no
+    spawn at all."""
+    calls = _spy_spawn_kwargs(monkeypatch)
+
+    cli_mod._run_restored(
+        _one_ended_tab(CODEX_SID, str(tmp_path)), str(tmp_path), None, 120.0,
+    )
+
+    specs = _RecordingApp.instances[0].kwargs["restore_tabs"]
+    assert specs[0].archived is True
+    assert specs[0].resume is False
+    assert "v0.56.0" in specs[0].resume_note
+    assert [c for c in calls if c.get("resume")] == []

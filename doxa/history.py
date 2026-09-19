@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 
 from rich.text import Text
 from textual.widgets import OptionList
@@ -293,7 +294,8 @@ def with_titles(hits: list[dict]) -> list[dict]:
 
 RESUME_OK = "ok"
 """This conversation can be resumed: not running, cwd still there, and the
-CLI's own store holds it."""
+store ITS OWN engine resumes from still holds it -- see
+:func:`resumable_engine`."""
 
 RESUME_RUNNING = "running"
 """There is a LIVE daemon under this session id. Resuming is the wrong
@@ -304,9 +306,20 @@ RESUME_NO_CWD = "no_cwd"
 there is nowhere to reopen it."""
 
 RESUME_NO_HISTORY = "no_history"
-"""The isolated CLI has no transcript under this id -- in practice a
-session DOXA started before v0.56.0, when its id and the CLI's were two
-different id spaces."""
+"""Nothing on disk holds what this session's engine would resume FROM: the
+isolated Claude CLI's own store for a claude session, a recorded Codex
+thread id for a codex one, the saved message array for a vendor one. In
+practice, for claude, a session DOXA started before v0.56.0, when its id
+and the CLI's were two different id spaces."""
+
+#: What :class:`doxa.vendors.ChatApiEngine` leaves beside its transcript --
+#: ``<session id>.messages.json``, the conversation it replays on a resume.
+#: Spelled here because that module spells it as a literal rather than a
+#: constant, and importing the vendor engine (httpx, the whole provider
+#: catalogue) to read one suffix would put a network client on the path of
+#: a keystroke. The codex suffix opposite it IS a constant
+#: (:data:`doxa.codex.THREAD_SUFFIX`) and is imported rather than copied.
+VENDOR_MESSAGES_SUFFIX = ".messages.json"
 
 
 def resume_restored() -> bool:
@@ -322,6 +335,97 @@ def resume_restored() -> bool:
     if not raw:
         return True
     return raw.lower() not in ("0", "false", "no", "off")
+
+
+def _beside_transcript(session_id: str, suffix: str) -> "list[Path]":
+    """Every ``PROJECTS_DIR/<slug>/<session_id><suffix>`` that exists, in
+    path order -- the files an engine leaves NEXT TO the LORE transcript
+    (:mod:`doxa.transcript`) to make a conversation resumable later.
+
+    Globbed across every project directory rather than derived from a cwd,
+    and that is the whole reason this helper exists: the slug comes from
+    ``lore_core.config.project_slug``, which shells out to git for the
+    repository root, and :func:`resume_state` promises no subprocess on
+    the keystroke path. One glob answers the question exactly, with no
+    second implementation of somebody else's path scheme to keep in step
+    -- the same posture, for the same reason, as
+    :func:`doxa.cli_isolation.cli_session_file`.
+
+    Never raises: an unreadable state directory reads as "no artefact",
+    which is the same answer the caller acts on anyway."""
+    from lore_core.config import PROJECTS_DIR
+
+    if not session_id:
+        return []
+    try:
+        return sorted(
+            path for path in PROJECTS_DIR.glob(f"*/{session_id}{suffix}")
+            if path.is_file()
+        )
+    except OSError:
+        return []
+
+
+def resumable_engine(session_id: str) -> "tuple[str | None, Path | None]":
+    """``(engine id, the file that engine resumes from)`` for one session
+    -- the second half ``None`` when there is nothing to resume from.
+
+    DERIVED FROM DISK, because nothing else records it (issue #46).
+    A saved tab (:class:`doxa.tabsets.TabRecord`), a ``/search`` row
+    (LORE's ``sessions`` table: session id, project, cwd, title, times,
+    message count) and this popup's own group all carry the session id
+    and no engine. The ONE place an engine id is ever written down is the
+    peer registry entry (:attr:`doxa.peers.PeerInfo.engine`), and that
+    file is unlinked the moment the session's pid dies -- which is exactly
+    the state a resume starts from. So the question is answered by the
+    artefact each engine leaves beside its transcript:
+
+    1. ``<id>.codex.json`` (:data:`doxa.codex.THREAD_SUFFIX`) -- codex.
+       It holds the Codex thread id that ``codex exec resume`` takes.
+    2. ``<id>.messages.json`` (:data:`VENDOR_MESSAGES_SUFFIX`) -- a vendor
+       engine. It holds the conversation
+       :class:`doxa.vendors.ChatApiEngine` replays.
+    3. the isolated Claude CLI's own store -- claude
+       (:func:`doxa.cli_isolation.cli_session_file`), the question this
+       module asked of EVERY session before this function existed.
+
+    The codex answer is THE ENGINE'S OWN PREDICATE rather than a second
+    guess at it. ``CodexEngine.start`` refuses with ``CodexThreadUnknown``
+    when :func:`doxa.codex._recorded_thread` comes back ``None``, so that
+    is what is called here: a ``.codex.json`` that exists but holds no id
+    (a truncated write, a record from some future shape) reads as "codex,
+    and it cannot be resumed", and the gate and the engine agree by
+    construction instead of by coincidence.
+
+    The vendor answer names no engine id, and that is honest rather than
+    lazy: ``deepseek`` and ``glm`` write the same file under the same name
+    and nothing inside it says which wrote it. Guessing one would be this
+    issue's own bug with a different engine on the receiving end. So
+    ``(None, path)`` means "resumable, by a vendor engine this cannot
+    name" and the caller keeps whatever engine it already had; ``(None,
+    None)`` -- only from an empty id -- means there is nothing to go on at
+    all.
+
+    Never raises, same contract as its caller: every question that cannot
+    be answered is answered "not resumable"."""
+    from . import cli_isolation as cli_isolation_mod
+    from . import codex as codex_mod
+    from . import engines as engines_mod
+
+    sid = str(session_id or "")
+    if not sid:
+        return None, None
+    threads = _beside_transcript(sid, codex_mod.THREAD_SUFFIX)
+    if threads:
+        for path in threads:
+            # The engine's own reader, deliberately (see above).
+            if codex_mod._recorded_thread(path):
+                return engines_mod.CODEX_ENGINE_ID, path
+        return engines_mod.CODEX_ENGINE_ID, None
+    messages = _beside_transcript(sid, VENDOR_MESSAGES_SUFFIX)
+    if messages:
+        return None, messages[0]
+    return engines_mod.CLAUDE_ENGINE_ID, cli_isolation_mod.cli_session_file(sid)
 
 
 def resume_state(session_id: str, cwd: str) -> "tuple[str, str]":
@@ -347,13 +451,22 @@ def resume_state(session_id: str, cwd: str) -> "tuple[str, str]":
     1. is a daemon LIVE under this id? (``peers.read_registry`` -- the
        same reaped view ``doxa attach`` and ``/sessions`` read)
     2. does the cwd still exist?
-    3. does the CLI's store hold this id?
-       (:func:`doxa.cli_isolation.cli_session_file`)
+    3. does the store THIS SESSION'S OWN ENGINE resumes from hold it?
+       (:func:`resumable_engine`)
+
+    Question 3 asked the Claude CLI's store of every session until issue
+    #46, which made a Codex conversation read-only for the one reason that
+    could never be true of it: no Codex session is ever written into the
+    ``claude`` CLI's history, so every one of them fell out here with a
+    refusal about ids DOXA and that CLI stopped minting separately in
+    v0.56.0. Since #43 a Codex thread IS resumable, from its own recorded
+    id -- so the gate now asks each engine's own question, and the refusal
+    names the engine it is about.
 
     Never raises: every question that cannot be answered is answered NO,
     because "we could not check" and "it will not work" lead to the same
     honest sentence on screen."""
-    from . import cli_isolation as cli_isolation_mod
+    from . import engines as engines_mod
     from . import peers as peers_mod
 
     sid = str(session_id or "")
@@ -373,14 +486,21 @@ def resume_state(session_id: str, cwd: str) -> "tuple[str, str]":
             f"the directory this session ran in is gone "
             f"({cwd or 'never recorded'}) — there is nowhere to reopen it."
         )
-    if cli_isolation_mod.cli_session_file(sid) is None:
+    engine_id, artefact = resumable_engine(sid)
+    if artefact is not None:
+        return RESUME_OK, ""
+    if engine_id == engines_mod.CODEX_ENGINE_ID:
         return RESUME_NO_HISTORY, (
-            "the claude CLI has no history under this session id, so it "
-            "cannot be continued. DOXA and the CLI only started sharing "
-            "one session id in v0.56.0 — conversations from before that "
-            "stay readable and searchable, but not resumable."
+            "this Codex session has no recorded thread id, so `codex exec "
+            "resume` has nothing to continue — its conversation stays "
+            "readable and searchable here, but not resumable."
         )
-    return RESUME_OK, ""
+    return RESUME_NO_HISTORY, (
+        "the claude CLI has no history under this session id, so it "
+        "cannot be continued. DOXA and the CLI only started sharing "
+        "one session id in v0.56.0 — conversations from before that "
+        "stay readable and searchable, but not resumable."
+    )
 
 
 def excerpt_provenance(hit: dict) -> str:
