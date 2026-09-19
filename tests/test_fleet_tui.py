@@ -566,6 +566,51 @@ async def test_a_no_prompt_run_prints_the_attach_line_and_waits(
 
 
 @pytest.mark.asyncio
+async def test_the_tab_fleet_start_opens_is_the_one_left_on_screen(
+    monkeypatch, tmp_path, short_root
+):
+    """The failure this catches: the run opens in a tab nobody is looking
+    at.
+
+    ``open_fleet_tab`` says the tab is "never focused away from -- the
+    run is the thing the operator just asked for", and it activates the
+    tab and then asks ``_focus_tab`` to put the keyboard in it. Through
+    v1.14.0 that second call did nothing for this tab kind: it named the
+    two other read-only tabs by class and not this one, so the keyboard
+    stayed in the prompt of the session ``/fleet start`` was typed in --
+    and a focused ``PromptInput`` re-activates its OWN TabPane one
+    message-pump turn later (``TabbedContent._on_tab_pane_focused``). The
+    tab appeared, held the screen for a single turn and bounced back.
+
+    Asserted as "arrives AND stays", never as one poll, for the reason
+    tests/test_screenshot_driver.py states: a tab that is being flipped
+    back and forth is active half the time, so a single check passes on
+    the broken code."""
+    monkeypatch.setattr(fleet_mod, "DaemonBackend", FakeBackend)
+    app, _fake = await _app(monkeypatch, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        pane = app.active_pane
+        await _run(app, pilot, (
+            f"/fleet start --pool claude:sonnet@1 -n 2 --seed 3 "
+            f"--allow-unbudgeted --quiet-dwell 0 --quiescence-timeout 20 "
+            f"--root {short_root} --run-id seen --prompt \"say ready\""
+        ), pane)
+
+        tabs = app.fleet_tabs()
+        assert len(tabs) == 1
+        tab = tabs[0]
+        strip = app.tabbed_holding(tab.id or "")
+        assert strip is not None
+        for _ in range(20):
+            await pilot.pause(0.02)
+            assert strip.active == tab.id, (
+                f"the run's tab lost the screen to {strip.active}"
+            )
+        assert tab.display, "the fleet tab is active but not shown"
+
+
+@pytest.mark.asyncio
 async def test_fleet_stop_tears_the_run_down_through_the_teardown_path(
     monkeypatch, tmp_path, short_root
 ):

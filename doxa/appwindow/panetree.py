@@ -109,6 +109,7 @@ from .. import layout as layout_mod
 from ..session.pane import SessionPane
 from ..ui import split as split_mod
 from ..ui.diffview import DiffPane
+from ..ui.fleettab import FleetTab
 from ..ui.prompt import PromptInput
 from ..ui.split import PaneGroup, PaneTab, SplitBox
 from ..ui.transcript import ArchivedSessionTab, SubagentTranscriptTab
@@ -624,7 +625,21 @@ class WindowPaneTreeMixin:
             if leaf is not None:
                 self._focus_tab(leaf)
             return
-        if isinstance(tab, (ArchivedSessionTab, SubagentTranscriptTab)):
+        # The read-only tabs, all three of which own a `.scroll` for
+        # exactly this. `FleetTab` joined them in v1.14.0 and was missed
+        # here, which was not cosmetic: `open_fleet_tab` activates the
+        # tab and then calls this, so a kind this line does not name
+        # leaves the keyboard in the prompt of the session the command
+        # was typed in -- and a focused `PromptInput` re-activates ITS
+        # OWN TabPane one message-pump turn later
+        # (`TabbedContent._on_tab_pane_focused`). Measured: `/fleet
+        # start` opened its tab, showed it for one turn and bounced
+        # straight back to the session, against `open_fleet_tab`'s own
+        # docstring ("never focused away from -- the run is the thing the
+        # operator just asked for"). Found while capturing the gallery's
+        # `fleet` scene, which could not photograph a tab that would not
+        # stay on screen.
+        if isinstance(tab, (ArchivedSessionTab, SubagentTranscriptTab, FleetTab)):
             with contextlib.suppress(Exception):
                 tab.scroll.focus()
 
