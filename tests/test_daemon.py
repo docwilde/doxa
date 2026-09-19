@@ -2236,3 +2236,22 @@ async def test_a_gated_mode_is_refused_mid_turn_and_allowed_once_idle(
 
 async def _collect(agen):
     return [ev async for ev in agen]
+
+
+@pytest.mark.asyncio
+async def test_the_daemon_refuses_a_session_id_that_is_a_path(tmp_path, monkeypatch):
+    """The argv half of verify_transcript_traversal.py's finding: every
+    downstream use of this id is a filename -- the transcript, the
+    registry entry, the peer socket, the daemon log -- so an id that is
+    not a name is refused at the door rather than scattering a session's
+    files wherever it pointed."""
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    with pytest.raises(ValueError, match=r"invalid session id"):
+        SessionDaemon(cwd=str(tmp_path), session_id="../../../../etc/passwd")
+    with pytest.raises(ValueError, match=r"invalid resume id"):
+        SessionDaemon(cwd=str(tmp_path), resume="../../elsewhere/leak")
+    # A well-formed id is untouched, and an absent one is still minted.
+    assert SessionDaemon(
+        cwd=str(tmp_path), session_id="4f8e2a91-77bc-4c1d-9a01-000000000000"
+    ).session_id == "4f8e2a91-77bc-4c1d-9a01-000000000000"
+    assert SessionDaemon(cwd=str(tmp_path)).session_id

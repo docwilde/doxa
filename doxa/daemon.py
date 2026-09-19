@@ -96,6 +96,7 @@ from . import __version__
 from . import engines as engines_mod
 from . import notify as notify_mod
 from . import worktrees as worktrees_mod
+from .identity import require_session_id
 from .engine import (
     BELIEF_EVIDENCE_LIMIT,
     BELIEF_LIST_LIMIT,
@@ -389,13 +390,24 @@ class SessionDaemon:
     ) -> None:
         self.cwd = str(cwd or os.getcwd())
         self.model = model
-        self.session_id = session_id or str(uuid.uuid4())
+        # Both ids are checked HERE, at the one door argv comes through
+        # (``__main__`` below hands ``--session-id``/``--resume`` straight
+        # to this constructor). Downstream every one of them becomes a
+        # filename -- the transcript ``<id>.jsonl``, the registry entry
+        # ``<id>.json``, the peer socket ``peer-<id[:8]>-<pid>.sock``, the
+        # daemon log -- so an id that is not a name would put this
+        # session's files wherever it pointed. A ValueError here refuses
+        # to start the daemon, which is the correct outcome: there is no
+        # partial version of "run as this session".
+        self.session_id = (
+            require_session_id(session_id) if session_id else str(uuid.uuid4())
+        )
         # v0.56.0 (/resume): this daemon CONTINUES an existing conversation
         # rather than starting one. The id is not new -- see spawn_daemon,
         # which passes the SAME string as both session_id and resume, so
         # the transcript file, the registry entry and the /search row all
         # stay the one session they already were.
-        self.resume = resume or None
+        self.resume = require_session_id(resume, "resume id") if resume else None
         # Item S #1 (`doxa new --branch <name>`): the ref the session's OWN
         # worktree forks from, plumbed here from spawn_daemon's subprocess
         # arg. cli.py has already validated it exists before ever spawning
@@ -1602,7 +1614,11 @@ def spawn_daemon(
     import subprocess
     import time as _time
 
-    session_id = resume or str(uuid.uuid4())
+    # Checked before it becomes four filenames (the log below, the
+    # registry entry this function polls for, and the child's own
+    # transcript and socket) -- see SessionDaemon.__init__, which checks
+    # the same two ids again on the far side of argv.
+    session_id = require_session_id(resume, "resume id") if resume else str(uuid.uuid4())
     reg = registry_dir(env)
     log_path = runtime_dir(env) / f"daemon-{session_id[:8]}.log"
     cmd = [

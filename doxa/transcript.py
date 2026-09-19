@@ -64,6 +64,8 @@ from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see that module
 
 from lore_core.config import PROJECTS_DIR, project_slug
 
+from .identity import valid_session_id
+
 # How many of the most recent turns a restored tab renders. A restore is
 # "put me back where I was", not "re-read the whole project": the turns
 # BEFORE this are still on disk and still in /search, and the pane says
@@ -125,9 +127,19 @@ def transcript_path(session_id: str, cwd: str) -> "Path | None":
     """Where :class:`doxa.engine.SessionEngine` persists this session --
     ``PROJECTS_DIR/<project_slug(cwd)>/<session_id>.jsonl``, resolved the
     same way the engine's own constructor resolves it. None when the
-    arguments cannot name a file (an empty session id) or the slug lookup
-    fails; the FILE need not exist, callers check that themselves."""
-    if not session_id:
+    arguments cannot name a file (an empty or malformed session id) or the
+    slug lookup fails; the FILE need not exist, callers check that
+    themselves.
+
+    The session id is a NAME here, never a path fragment: it is checked
+    against :func:`doxa.identity.valid_session_id` before it is
+    interpolated, so an id carrying ``../`` names no transcript rather
+    than one belonging to a different project -- or to no project at all.
+    ``doxa.tabsets`` hands this function whatever a
+    ``~/.doxa/tabsets/*.json`` record holds, which is a same-user file
+    that an older build, a hand edit or another program may have
+    written."""
+    if not valid_session_id(session_id):
         return None
     try:
         return PROJECTS_DIR / project_slug(cwd or ".") / f"{session_id}.jsonl"

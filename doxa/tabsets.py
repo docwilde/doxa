@@ -198,6 +198,7 @@ import contextlib
 import hashlib
 import json
 import os
+import sys
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -208,6 +209,7 @@ from . import config as config_mod
 from . import layout as layout_mod
 from . import lore_sync as lore_sync_mod
 from . import peers as peers_mod
+from .identity import valid_session_id
 from . import transcript as transcript_mod
 
 
@@ -794,7 +796,14 @@ def load(scope_key: str) -> "TabSetRecord | None":
     """The saved set for this scope, or ``None`` -- a missing file, a
     corrupt one, or one that resolves to zero usable tabs all read as
     "nothing to restore" alike, never a crash and never a distinction the
-    caller has to make itself."""
+    caller has to make itself.
+
+    This file is same-user JSON that an older build, a hand edit or
+    another program may have written, and its ``session_id`` values reach
+    ``doxa.transcript`` and ``doxa.history``, which build paths out of
+    them. A record whose id is not a name
+    (:func:`doxa.identity.valid_session_id`) is DROPPED with a line on
+    stderr -- the rest of the set still restores."""
     if not scope_key:
         return None
     path = _file_for(scope_key)
@@ -817,6 +826,21 @@ def load(scope_key: str) -> "TabSetRecord | None":
             continue
         session_id = str(entry.get("session_id") or "").strip()
         if not session_id:
+            continue
+        if not valid_session_id(session_id):
+            # Dropped, not raised: this file is the user's whole window
+            # layout, and one bad record must not cost them the other
+            # tabs. Said out loud on stderr rather than swallowed,
+            # because a tab silently missing after a restart is the kind
+            # of thing a user reports as "doxa lost my session". The id
+            # is a NAME that several readers interpolate into a path (see
+            # doxa.identity.valid_session_id), so a record carrying
+            # something else is not a tab this build can restore.
+            print(
+                f"doxa: dropping a saved tab with an unusable session id "
+                f"{session_id!r} from {path}",
+                file=sys.stderr,
+            )
             continue
         pinned = entry.get("pinned_name")
         cwd = entry.get("cwd")

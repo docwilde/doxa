@@ -30,6 +30,15 @@ home directory, an existing ``.config.json`` in that directory wins over
 ``.claude.json``), so pointing DOXA at a throwaway config dir -- what the
 test suite does -- points it at the same file the CLI would use there.
 
+SESSION IDS live here too, and the join is narrower than the module name
+suggests: this is the module that answers "who is this", and a session id
+is the name a session is known by on disk. :func:`valid_session_id` is the
+one shape check, kept here because this module imports nothing from
+``doxa`` at all -- so the four places that build a path from a session id
+(``doxa.transcript``, ``doxa.history``, ``doxa.cli_isolation``,
+``doxa.tabsets``) and the two that accept one from argv
+(``doxa.daemon``) can all reach it without an import cycle.
+
 THE SPLIT (item AA, see ``doxa.cli_isolation``'s module docstring for the
 full defect/fix writeup): this module reads ``CLAUDE_CONFIG_DIR`` out of
 THIS process's own environment, which ``doxa.cli_isolation`` never touches
@@ -47,6 +56,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +69,56 @@ from typing import Any
 # file moves the mtime, so the cache self-invalidates; invalidate() forces
 # it for the case where it doesn't (same-second rewrite of the same size).
 _CACHE: "tuple[tuple[str, float, int], dict[str, Any]] | None" = None
+
+
+# -- session ids -------------------------------------------------------
+
+#: The shape a session id is allowed to have. Every id DOXA mints is a
+#: uuid4 (``SessionDaemon.__init__``, ``SessionEngine.__init__``,
+#: ``spawn_daemon``), so this is wider than it needs to be for a minted
+#: one and deliberately so: the suite and the fleet use short readable
+#: ids, and the CLI's own resume ids are its business, not ours. What it
+#: excludes is the only thing that matters -- ``/``, ``\``, ``.`` and
+#: anything else that turns a NAME into a PATH. First character
+#: alphanumeric, so ``..`` and a leading ``-`` are out by construction.
+_SESSION_ID_RE = re.compile(r"\A[0-9A-Za-z][0-9A-Za-z-]{0,127}\Z")
+
+
+def valid_session_id(session_id: Any) -> bool:
+    """Is this string safe to interpolate into a filename?
+
+    **The one shape check.** A session id arrives from three untrusted-ish
+    places -- a ``~/.doxa/tabsets/*.json`` record written by an older
+    build or by hand, ``--session-id``/``--resume`` on the daemon's own
+    argv, and a ``/resume`` row -- and every consumer turns it into a path
+    by interpolation: ``PROJECTS_DIR/<slug>/{id}.jsonl``,
+    ``PROJECTS_DIR.glob(f"*/{id}{suffix}")``, ``registry/{id}.json``. An
+    id carrying ``../`` therefore named a file outside the directory the
+    caller believed it was reading, and a glob pattern is not a path at
+    all -- it cannot be normalised into safety after the fact. So the
+    check is on the NAME, before anything is built from it.
+
+    Returns a bool rather than raising: every caller's honest answer to a
+    malformed id is "there is no such session", which is what they already
+    return for an id that simply does not exist."""
+    return bool(session_id) and bool(
+        _SESSION_ID_RE.fullmatch(str(session_id))
+    )
+
+
+def require_session_id(session_id: Any, what: str = "session id") -> str:
+    """:func:`valid_session_id` for the paths where a malformed id is a
+    caller error rather than a miss -- daemon argv, which a person or a
+    script typed, and which would otherwise mint a daemon whose transcript
+    and registry entry land wherever the id pointed.
+
+    Returns the id unchanged; raises ValueError naming what was wrong."""
+    if not valid_session_id(session_id):
+        raise ValueError(
+            f"invalid {what}: {str(session_id)!r} -- expected letters, "
+            "digits and dashes only"
+        )
+    return str(session_id)
 
 
 def claude_config_path() -> Path:

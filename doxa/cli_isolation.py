@@ -155,6 +155,7 @@ import shutil
 from pathlib import Path
 
 from . import config as config_mod
+from .identity import valid_session_id
 
 DIR_NAME = "claude-cli"
 
@@ -362,9 +363,14 @@ def cli_session_file(session_id: str) -> "Path | None":
     the path (callers only need its truthiness today, but the file is what
     the answer is ABOUT, and a bool would throw that away).
 
+    The id is checked against :func:`doxa.identity.valid_session_id`
+    before it becomes a glob pattern, for the reason
+    :func:`doxa.history._beside_transcript` gives: a pattern is not a
+    path and cannot be made safe afterwards.
+
     Never raises: an unreadable config directory reads as "not
     resumable", which is the same answer the caller acts on anyway."""
-    if not session_id:
+    if not valid_session_id(session_id):
         return None
     try:
         matches = sorted(
