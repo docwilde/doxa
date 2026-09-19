@@ -1833,7 +1833,8 @@ class PaneCommandsMixin:
             "  /fleet stop       tear it down now; the tab keeps the final "
             "report\n"
             "  /fleet runs       past runs under the run root\n"
-            "  /fleet attach <slot>  open one slot's session in a live tab\n"
+            "  /fleet attach <slot>  open one slot's session in a live "
+            "tab — and answer a permission ask it is parked on\n"
             "  /fleet mesh       graph this run's ledger in a browser\n"
             "  /fleet detach     leave the run going when its tab closes\n"
             f"\n{state}"
@@ -2041,10 +2042,29 @@ class PaneCommandsMixin:
         await self.app._attach_socket_in_new_tab(
             socket_path, str(session.spec.cwd), f"slot {index}",
         )
+        # A PARKED ASK IS WHY AN OPERATOR ATTACHES (issue #56), so it is
+        # named here rather than left for them to find. The dialog itself
+        # arrives on its own: this attach replays the daemon's ring, and a
+        # needs_input still in it opens the pane's own question/permission
+        # popup exactly as it would in the session that asked.
+        parked = [
+            ask for ask in (row.get("pending_asks") or [])
+            if isinstance(ask, dict)
+        ]
+        waiting = ""
+        if parked:
+            first = parked[0]
+            waiting = (
+                f"\nThis slot is PARKED on {len(parked)} permission ask(s) — "
+                f"first: {first.get('tool') or first.get('kind') or '?'}"
+                f"{(' (' + str(first.get('summary'))[:80] + ')') if first.get('summary') else ''}"
+                ". Answer it in that tab; the run's --approve policy "
+                "refuses it on its own once the grace window runs out."
+            )
         await self._system(
             f"attached to slot {index} ({session_id[:8]}) in a new tab. It "
             "is a live session: what you type there is a message into the "
-            "run, and the run's ledger records it like any other."
+            "run, and the run's ledger records it like any other." + waiting
         )
 
     async def _fleet_mesh(self, rest: str) -> None:

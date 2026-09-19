@@ -50,9 +50,14 @@ Boundaries used, and why:
   that DID reach one of the two asking branches and could not get an
   answer is DENIED, never allowed -- "the human was not asked" is not
   "the human said yes"; see ``_on_can_use_tool``. Every OTHER call
-  reaching this callback returns a bare allow. See ``_on_can_use_tool``
-  below and the queue item 5 task report for the exact SDK source this
-  reads (installed ``claude_agent_sdk`` package,
+  reaching this callback returns a bare allow. The ANSWERER need not be
+  a person: ``doxa.fleet.ApprovalDesk`` answers on a fleet run's behalf,
+  under a policy the operator named on the command line, and supplies its
+  own refusal wording through the answer's ``reason`` (see
+  ``_answer_reason``) -- the decision is still read from ``decision`` /
+  ``declined``, so no answerer can talk its way into an allow. See
+  ``_on_can_use_tool`` below and the queue item 5 task report for the
+  exact SDK source this reads (installed ``claude_agent_sdk`` package,
   ``_internal/query.py``/``types.py``).
 * Native tools -- ``doxa.operators``' registry, projected to an IN-PROCESS
   SDK MCP server (``create_sdk_mcp_server``, PHASE0 SS6: the SDK's own
@@ -404,6 +409,33 @@ def _no_answer_deny(exc: BaseException) -> "PermissionResultDeny":
     return PermissionResultDeny(
         message=f"no answer: {reason}", interrupt=False,
     )
+
+
+def _answer_reason(answer: Any, fallback: str) -> str:
+    """The words a refusal travels back to the model in.
+
+    An answerer MAY supply its own ``reason``; every answerer that does
+    not gets the sentence this callback has always used. The point is the
+    one :func:`_no_answer_deny` already makes -- "a refused call whose
+    stated reason is 'no answer' is something the model can act on, where
+    a bare denial is not" -- extended to the answerers that are not a
+    person at a keyboard. :class:`doxa.fleet.ApprovalDesk` is the first:
+    it refuses on a run's behalf and says which flag would have allowed
+    the call, so the model can put that in its reply and the operator
+    learns what their run needed.
+
+    ONLY THE MESSAGE. The decision is still read from ``decision`` /
+    ``declined`` exactly as before, so an answerer cannot talk its way
+    into an allow -- and the message it supplies reaches nothing but the
+    tool result, which is already the answerer's to influence (an
+    ``AskUserQuestion``'s ``answers`` go straight into the tool input).
+    Trimmed, because this string is handed to the CLI as a tool result and
+    an answerer is not a source of bounded text."""
+    if isinstance(answer, dict):
+        reason = str(answer.get("reason") or "").strip()
+        if reason:
+            return reason[:1000]
+    return fallback
 
 
 def available_modes(armed: bool) -> "tuple[str, ...]":
@@ -2067,7 +2099,10 @@ class SessionEngine:
         })
         if not isinstance(answer, dict) or answer.get("declined"):
             return PermissionResultDeny(
-                message="the user declined to answer", interrupt=False,
+                message=_answer_reason(
+                    answer, "the user declined to answer",
+                ),
+                interrupt=False,
             )
         answers = answer.get("answers")
         updated_input = dict(tool_input)
@@ -2092,7 +2127,9 @@ class SessionEngine:
         decision = answer.get("decision") if isinstance(answer, dict) else None
         if decision == "allow":
             return PermissionResultAllow()
-        return PermissionResultDeny(message="the user denied this tool call")
+        return PermissionResultDeny(
+            message=_answer_reason(answer, "the user denied this tool call"),
+        )
 
     async def _confirm_spawn(self, payload: dict) -> dict:
         """The approval gate for ``spawn_session`` (v1.3.0,

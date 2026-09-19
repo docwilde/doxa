@@ -47,6 +47,8 @@ __all__ = [
     "BODY_WIDTH",
     "LEDGER_TAIL",
     "RunSnapshot",
+    "approval_block",
+    "approval_line",
     "assignment_table",
     "ledger_tail",
     "list_runs",
@@ -305,6 +307,73 @@ def mode_line(snapshot: "RunSnapshot") -> str:
     return line
 
 
+def approval_line(snapshot: "RunSnapshot") -> str:
+    """This run's approval posture, in the manifest's own words.
+
+    Beside the capacity and budget lines, because it is the third thing a
+    run is allowed to do on an operator's behalf: spend money, use this
+    much memory, and say yes to a tool call nobody saw. A manifest written
+    before 1.15.0 has no ``approvals`` block at all, and that is stated
+    rather than guessed at -- those runs had no policy, which is exactly
+    why one of them could park for seven minutes."""
+    block = snapshot.manifest.get("approvals")
+    if not isinstance(block, dict):
+        return (
+            "approvals: not recorded — this run predates --approve, so an "
+            "ask nobody answered simply waited"
+        )
+    posture = str(block.get("posture") or "")
+    if posture:
+        return f"approvals: {posture}"
+    return f"approvals: --approve {block.get('policy', '?')}"
+
+
+def approval_block(snapshot: "RunSnapshot", *, now: "float | None" = None) -> "list[str]":
+    """The asks this run is PARKED ON right now, and what became of the
+    ones it is not.
+
+    THE POINT OF THIS BLOCK (issue #56): a slot waiting on a permission
+    ask is idle in every way a watcher can see -- it is not running a
+    turn, it is not writing to the ledger, and `is_quiet` says yes. It
+    reads as a finished agent. So the one place it can be told apart from
+    a finished agent is here, named, with the command that answers it.
+
+    Empty when a run has never been asked anything, which is most runs and
+    which must stay a quiet screen rather than a heading over nothing."""
+    now = time.time() if now is None else now
+    pending: "list[str]" = []
+    count = 0
+    for row in sorted(snapshot.slots, key=lambda r: int(r.get("index") or 0)):
+        index = int(row.get("index") or 0)
+        asks = row.get("pending_asks")
+        for ask in asks if isinstance(asks, list) else []:
+            if not isinstance(ask, dict):
+                continue
+            asked = _iso_epoch(str(ask.get("asked_at") or ""))
+            waited = f"{max(0.0, now - asked):.0f}s ago" if asked else "just now"
+            grace = ask.get("grace_s")
+            left = ""
+            if isinstance(grace, (int, float)) and asked is not None:
+                left = f", refused in {max(0.0, float(grace) - (now - asked)):.0f}s"
+            what = str(ask.get("tool") or ask.get("kind") or "?")
+            summary = str(ask.get("summary") or "")
+            count += 1
+            pending.append(
+                f"  slot {index:<3} {str(ask.get('kind') or '?'):<10.10} "
+                f"{what:<26.26}  asked {waited}{left}"
+            )
+            if summary:
+                pending.append(f"       {summary[:BODY_WIDTH]}")
+            pending.append(f"       answer it: /fleet attach {index}")
+    if not pending:
+        return []
+    head = (
+        f"WAITING ON YOU — {count} permission ask(s) parked. A parked "
+        "session looks idle from outside; it is not."
+    )
+    return [head, *pending]
+
+
 def ledger_tail(
     snapshot: "RunSnapshot", *, limit: int = LEDGER_TAIL
 ) -> "list[str]":
@@ -396,6 +465,7 @@ def render(
         lines.append("capacity arithmetic OVERRIDDEN (--force)")
     if manifest.get("unbudgeted"):
         lines.append("run accepted with NO spend ceiling (--allow-unbudgeted)")
+    lines.append(approval_line(snapshot))
     lines.append(
         f"cwd {spec.get('cwd', '?')}  ·  seed {spec.get('seed', '?')}  ·  "
         f"memory off on {spec.get('memory_off', 0)} of {spec.get('n', '?')}"
@@ -406,6 +476,15 @@ def render(
     # -- who was dealt what --------------------------------------------
     lines += assignment_table(snapshot)
     lines.append("")
+
+    # -- and who is stuck waiting for a person -------------------------
+    # Directly under the table, which is where the eye already is: a
+    # reader who has just found slot 3 in the table is one line away from
+    # learning that slot 3 is not idle, it is blocked on them.
+    parked = approval_block(snapshot, now=now)
+    if parked:
+        lines += parked
+        lines.append("")
 
     # -- the symmetric start, measured ---------------------------------
     spread = manifest.get("dispatch_spread_s")
@@ -451,6 +530,18 @@ def render(
         lines.append(f"ledger — last {shown} of {total} message(s)")
     lines += ledger_tail(snapshot)
     lines.append("")
+
+    # -- what the run said yes and no to -------------------------------
+    approvals = manifest.get("approvals")
+    if isinstance(approvals, dict) and int(approvals.get("asked") or 0):
+        lines.append(
+            f"permission asks: {approvals.get('asked', 0)} — "
+            f"{approvals.get('auto_approved', 0)} auto-approved, "
+            f"{approvals.get('answered', 0)} answered by hand, "
+            f"{approvals.get('refused', 0)} REFUSED unanswered, "
+            f"{approvals.get('ended_unanswered', 0)} still open at teardown"
+        )
+        lines.append("")
 
     # -- what a run must always be able to say about itself ------------
     leaked = manifest.get("leaked_pids")
