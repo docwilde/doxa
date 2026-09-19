@@ -103,6 +103,27 @@ Codex's OWN tools (its shell, its file edits) are not DOXA's to gate and
 never were: they never leave the CLI, and ``sandbox_mode`` plus
 ``approval_policy`` are the whole of DOXA's control over them.
 
+THE SIDECAR SENDS NOTHING -- IT ASKS THIS ENGINE TO. ``peer_send`` was
+withheld from a Codex model through v1.13.0 for a reason that was about
+state, not about tools: the sidecar is spawned and killed per ``codex
+exec`` run, so a send performed there would be charged to a rate limiter
+that starts empty every turn, appended by a second ledger writer racing
+the engine's lock, and announced on lamps no TUI is watching. So the
+sidecar forwards instead. :class:`CodexEngine` serves a per-session
+control socket beside its peer socket
+(:class:`doxa.peerdelivery.EngineControl`, 0600 in the 0700 runtime dir),
+hands the sidecar its path and the current turn id as ordinary identity
+variables, and performs every forwarded request through the SAME
+:class:`doxa.peerdelivery.PeerDelivery` the human's ``/msg`` uses. One
+limiter per session across turns, one ledger row per send with
+``engine="codex"`` and the sidecar's own turn id, ``peer_sent`` on the
+status bar the moment it happens. The socket carries no token, and the
+reason is the same one that keeps secrets out of ``MCP_ENV_PASSTHROUGH``:
+anything handed to the sidecar rides ``codex exec``'s argv, which every
+process on this machine can read out of ``ps``. Its boundary is the
+filesystem's -- same uid, same machine -- exactly as the peer sockets'
+already is.
+
 LIVE, 2026-09-19, ``codex-cli 0.144.4`` signed in with ChatGPT, against a
 throwaway ``LORE_ROOT`` seeded with one ``USER.md`` line. First turn::
 
@@ -342,14 +363,16 @@ CODEX_CAPABILITIES = EngineCapabilities(
     detachable=True,
     # DOXA's own layer, and there is no model in it.
     peer_messaging=True,
-    # FALSE, and it is the one field that separates this engine from the
-    # vendors on the peer surface. /msg works and is ledgered like every
-    # other send (CodexEngine.send_peer_message), but peer_send is an
-    # operator DOXA projects onto a tool surface it composes, and this
-    # engine composes none -- the model's tools are the Codex CLI's, which
-    # DOXA drives as a subprocess. mcp_tools=False above is the same fact
-    # seen from the other side.
-    peer_send_tool=False,
+    # TRUE since the sidecar got a delivery seam. The Codex model's tools
+    # live in the Codex CLI, so DOXA offers peer_send through the stdio
+    # MCP server it registers per turn -- and that server does not send.
+    # It forwards the operator's request over this session's engine
+    # control socket (doxa.peerdelivery.EngineControl), and the ENGINE
+    # performs it through the same PeerDelivery /msg uses: one rate
+    # limiter across turns, one ledger writer, one status bar. Offered
+    # only when the user's own DOXA_AGENT_PEER_SEND switch is on, like
+    # everywhere else.
+    peer_send_tool=True,
     spawn_sessions=False,
     # The belief store is shared and real; its PICKERS live on
     # SessionEngine. belief_count() below is honest and complete; the
@@ -689,6 +712,18 @@ class CodexEngine:
             turn_id=lambda: self._turn_id,
             emit=self._peer_queue.put_nowait,
         )
+        # ...and the socket through which the MCP sidecar reaches that
+        # object. A Codex model's peer_send runs in the process `codex
+        # exec` spawns, which has no limiter, no ledger handle and no
+        # event queue of this session's; it forwards the request here
+        # instead (doxa.peerdelivery.EngineControl). Constructed here,
+        # bound in start(), unlinked in finalize().
+        self._engine_control = peerdelivery_mod.EngineControl(self._peer_delivery)
+        #: Why the control socket is not up, when it is not. Same posture
+        #: as ``peer_error``: additive, never fatal -- a session with no
+        #: control socket is one whose model is offered no peer_send, not
+        #: one that failed to start.
+        self.engine_control_error: "str | None" = None
         self._disabled: list[str] = []
         self._finalized = False
         self._started = False
@@ -849,6 +884,16 @@ class CodexEngine:
         except Exception as exc:  # noqa: BLE001 -- peers are strictly additive
             self.peer_host = None
             self.peer_error = repr(exc)
+        try:
+            # Opened whatever DOXA_AGENT_PEER_SEND currently says, and
+            # gated only where the path is HANDED OUT (_peer_send_armed):
+            # the switch lives in the user's environment or config file
+            # and can be flipped mid-session, and EngineControl re-reads
+            # it on every request, so a session need not be restarted for
+            # either direction to take effect.
+            await self._engine_control.start()
+        except Exception as exc:  # noqa: BLE001 -- additive, like the peer host
+            self.engine_control_error = repr(exc)
         return EngineEvent("session_started", {
             "session_id": self.session_id, "model": self.model, "cwd": self.cwd,
         })
@@ -872,6 +917,12 @@ class CodexEngine:
             except Exception:  # noqa: BLE001
                 pass
             self.peer_host = None
+        try:
+            # Closed AND unlinked: a session that ended must leave no
+            # socket for anything to connect to.
+            await self._engine_control.stop()
+        except Exception:  # noqa: BLE001
+            pass
         indexed = 0
         try:
             conn = lore_store.db_connect()
@@ -968,7 +1019,14 @@ class CodexEngine:
 
         Values are TOML-quoted through :func:`_toml`. Every one of them is
         a non-secret path or switch (see :data:`MCP_ENV_PASSTHROUGH`),
-        because a ``-c`` override is argv and argv is world-readable."""
+        because a ``-c`` override is argv and argv is world-readable.
+
+        Called from :meth:`_argv`, which ``_send_turn`` calls AFTER it has
+        minted ``self._turn_id`` -- so the turn id forwarded to the
+        sidecar is this turn's, and the one-shape property holds because
+        the first-turn and resume argvs are built from the same state in
+        the same instant."""
+        peer_send = self._peer_send_armed()
         env = {
             mcpserver_mod.ENV_SESSION_ID: self.session_id,
             mcpserver_mod.ENV_CWD: self.cwd,
@@ -977,13 +1035,19 @@ class CodexEngine:
             # server's tools/list, not present and refusing -- the same
             # promise doxa.engine keeps by omitting the seams from its ctx.
             mcpserver_mod.ENV_LORE: "1" if self.lore else "0",
-            # Asked for only when a delivery path exists at all; the
-            # server still checks for itself, and still declines when the
-            # user's own DOXA_AGENT_PEER_SEND setting is off.
-            mcpserver_mod.ENV_PEER_SEND: (
-                "1" if _peer_delivery_available() else "0"
-            ),
+            # The model's send tool. See _peer_send_armed: the switch is
+            # the user's, the socket is this session's, and the server
+            # still checks both for itself.
+            mcpserver_mod.ENV_PEER_SEND: "1" if peer_send else "0",
         }
+        if peer_send:
+            # WHERE to send, and AS WHICH TURN. Both are identity, not
+            # secrets: the path names a 0600 socket inside a 0700
+            # directory only this user can enter, and the turn id names a
+            # row in this session's own ledger. Neither would be safe to
+            # replace with a token -- these land on argv.
+            env[mcpserver_mod.ENV_ENGINE_SOCKET] = str(self._engine_control.path)
+            env[mcpserver_mod.ENV_TURN_ID] = self._turn_id or ""
         for name in MCP_ENV_PASSTHROUGH:
             value = os.environ.get(name, "")
             if value:
@@ -998,6 +1062,24 @@ class CodexEngine:
         for name in sorted(env):
             argv += ["-c", f"{prefix}.env.{name}={_toml(env[name])}"]
         return argv
+
+    def _peer_send_armed(self) -> bool:
+        """May THIS turn's sidecar be offered ``peer_send``? Three things,
+        all of them re-read per turn rather than captured at start.
+
+        The USER's switch (``peers.peer_send_enabled``), because it lives
+        in the environment or ``~/.doxa/config.toml`` and may be flipped
+        between turns -- never in a file in the repository the session has
+        open. This session's CONTROL SOCKET, because a path to a socket
+        nobody serves would offer the model a tool that always fails. And
+        the FACTORY the sidecar will look for, because the tool is only
+        reachable if ``doxa.peerdelivery`` still exports the seam
+        :mod:`doxa.mcpserver` resolves by name."""
+        return (
+            self._engine_control.running
+            and peers_mod.peer_send_enabled()
+            and _peer_delivery_available()
+        )
 
     def _preamble(self, prompt: str) -> str:
         """The FIRST turn's prompt, with the LORE snapshot in front of it.
@@ -1720,12 +1802,13 @@ class CodexEngine:
         charged against this session's send limit, written to the peer
         ledger, flashed on the status bar's send light.
 
-        It is the ONLY way a Codex session sends. There is no model-facing
-        peer_send here and cannot be one from DOXA: a Codex model's tools
-        live in the Codex CLI, which DOXA drives as a subprocess and whose
-        tool surface it does not compose -- mcp_tools=False says so
-        already. The human's /msg is the whole of this engine's outbound
-        traffic, and since this change all of it is bounded and recorded.
+        It is no longer the only way a Codex session sends. The model's
+        own ``peer_send`` arrives through the MCP sidecar and lands on
+        THIS object too, by way of the control socket
+        (doxa.peerdelivery.EngineControl): the human's keystroke and the
+        model's tool call are charged to one limiter, appended by one
+        writer and shown on one status bar, which is the whole reason the
+        sidecar forwards instead of sending.
 
         Two consequences of routing through the shared path are
         deliberate: the addressee resolves against every live session
@@ -1826,24 +1909,21 @@ def _lore_enabled_default() -> bool:
 
 
 def _peer_delivery_available() -> bool:
-    """Is there a peer delivery path the MCP server may offer ``peer_send``
-    through?
+    """Does ``doxa.peerdelivery`` still export the seam the sidecar
+    resolves by name?
 
-    The import is attempted HERE, at the call site, deliberately.
-    ``doxa.peerdelivery`` does not exist yet: a parallel change is
-    extracting ``SessionEngine``'s limiter+ledger delivery path into it.
-    Until it lands this returns False, the server is told so, and
-    ``peer_send`` is not offered -- which is the correct answer, not a
-    placeholder. What must NOT happen is wiring the tool to
-    ``doxa.peers.send_message`` directly: that bypasses the send-side rate
-    limiter and the ledger, which is the defect the extraction exists to
-    fix (issue #39)."""
-    try:
-        from . import peerdelivery  # noqa: F401 -- see above
-    except ImportError:
-        return False
+    The one thing the engine cannot check by holding an object: the
+    sidecar is a separate process that looks the factory up by the string
+    :data:`doxa.mcpserver.PEER_DELIVERY_FACTORY`, so the question "will
+    that lookup succeed" is answered by performing it. A rename that kept
+    this module compiling and left the sidecar with nothing to find would
+    fail here rather than as a tool that is quietly never offered.
+
+    What must NOT happen -- and the reason this predicate exists at all --
+    is wiring the tool to ``doxa.peers.send_message``: that bypasses the
+    send-side rate limiter and the ledger (issue #39)."""
     return callable(
-        getattr(peerdelivery, mcpserver_mod.PEER_DELIVERY_FACTORY, None)
+        getattr(peerdelivery_mod, mcpserver_mod.PEER_DELIVERY_FACTORY, None)
     )
 
 

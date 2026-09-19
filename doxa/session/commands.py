@@ -440,7 +440,7 @@ class PaneCommandsMixin:
         and the fields it does NOT have, read off
         :class:`doxa.engines.EngineCapabilities` rather than described in
         prose here: the four engines differ sharply (18 of 18 fields for
-        claude, 7 for codex, 11 for each vendor), a picker that listed them
+        claude, 8 for codex, 11 for each vendor), a picker that listed them
         as interchangeable would be lying, and prose describing the
         difference is a second copy of that dataclass that drifts the next
         time a field is added or a measurement corrected.

@@ -235,7 +235,7 @@ uv run doxa --engine glm          # or GLM (Z.ai), on ZAI_API_KEY
 | cost and context-window chips | yes | no | no | no |
 | `/msg` to a peer | yes | yes | yes | yes |
 | `peer_list`, `peer_history` tools for the model | yes | yes | yes | yes |
-| `peer_send` tool for the model | yes | no | yes | yes |
+| `peer_send` tool for the model | yes | yes | yes | yes |
 | budgets, `Task` spawns | yes | no | no | no |
 | fleet slot | yes | yes | yes | yes |
 | `--no-lore` honoured | yes | yes | yes | yes |
@@ -260,7 +260,11 @@ cost either and has one fixed permission posture rather than modes to
 cycle. Its DOXA tools arrive through a stdio MCP server DOXA registers on
 every `codex exec` (`doxa/mcpserver.py`), executed through the same tool
 gate the vendors use, and the memory snapshot rides the first prompt
-because Codex has no system message and no hook. DeepSeek and GLM carry
+because Codex has no system message and no hook. A `peer_send` from that
+server is not performed there: it is forwarded to the session's engine
+over a control socket and sent on the session's own rate limiter and
+ledger, so a Codex model's message and a human's `/msg` are bounded,
+recorded and lit identically. DeepSeek and GLM carry
 the tools in-process — the model only ever *names* a call and DOXA
 executes it, so the allowed set, the refusals and the two-strikes disable
 all apply — but they report no window size either and no per-session

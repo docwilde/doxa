@@ -160,9 +160,12 @@ the same `ToolGate` a vendor session builds. Two limits follow from Codex
 spawning that server per turn: the two-strikes disable lasts one turn,
 and Codex keeps the server's stderr, so a disable cannot be read back
 into a `tool_disabled` event; the gate's refusal result is the guarantee.
-`peer_send` is not offered to a Codex model yet: the sidecar has no
-delivery seam that carries the session's limiter and ledger. And **the
-LORE review is not wired for this engine**: the transcript is still
+`peer_send` is offered, and the sidecar performs none of it: it forwards
+the request over a per-session control socket to `CodexEngine`, which
+sends through the same `PeerDelivery` object `/msg` uses, so the
+session's rate limiter, its ledger and its status bar see a model's send
+and a human's identically. And **the LORE review is not wired for this
+engine**: the transcript is still
 indexed at session end, and the `session_done` event says `review:
 skipped` rather than implying one ran.
 
