@@ -124,6 +124,31 @@ process on this machine can read out of ``ps``. Its boundary is the
 filesystem's -- same uid, same machine -- exactly as the peer sockets'
 already is.
 
+LIVE, 2026-09-19, ``codex-cli 0.144.4`` signed in with ChatGPT: two
+``CodexEngine`` sessions in one process under a throwaway ``DOXA_HOME``,
+A told to call ``peer_list``, then ``peer_send`` the word ``ready``, then
+answer. A's stream::
+
+    {"type":"item.completed","item":{"id":"item_2","type":"mcp_tool_call",
+     "server":"doxa","tool":"peer_send","arguments":{"to":"f109895e-...",
+     "body":"ready"},"result":{"content":[{"type":"text","text":
+     "{\"delivered_to\": [...], \"kind\": \"direct\", \"message_id\":
+     \"59496dec...\", \"deliveries_charged\": 1, \"turn_deliveries_used\":
+     1, \"turn_delivery_limit\": 64, ...}"}]},"status":"completed"}}
+
+-- the limit counters in that result are the ENGINE's, which is the whole
+proof: a sidecar-local send would have reported a limiter that had never
+seen a send before. The ledger row written by the same call::
+
+    {"from":{"session":"fe348daf-...","engine":"codex",...},
+     "to":["f109895e-..."],"body":"ready",
+     "turn":{"id":"1f6682b6a4fd","state":"running"}}
+
+and ``1f6682b6a4fd`` is the id A's own ``turn_started`` carried, so the
+row names the turn the model was actually in. B received it
+(``peer_message``, body ``ready``) and, with ``DOXA_PEER_INBOUND_TURNS``
+on, started a turn of its own and answered "Acknowledged."
+
 LIVE, 2026-09-19, ``codex-cli 0.144.4`` signed in with ChatGPT, against a
 throwaway ``LORE_ROOT`` seeded with one ``USER.md`` line. First turn::
 
