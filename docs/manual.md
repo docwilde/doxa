@@ -33,8 +33,9 @@ a plan as if it were shipped.
 
 ## Sessions and the daemon
 
-Each session runs as its own **daemon process** hosting the Claude Agent
-SDK client, the LORE hooks and the transcript. The TUI is a thin client
+Each session runs as its own **daemon process** hosting the engine — the
+Claude Agent SDK client, or whichever `--engine` named — plus the LORE
+hooks and the transcript. The TUI is a thin client
 attached over a `0600` Unix socket (JSON, one object per line); closing the
 terminal detaches rather than killing the session. A daemon finalizes a
 session (LORE review + index) once every attached client has been gone for
@@ -166,8 +167,8 @@ store neither engine owns. The belief and proposal *pickers* are not: they
 live on `SessionEngine` because that is where they were written, which is
 a fact about the code's shape rather than about the engine. So the
 `N beliefs` chip is plain rather than clickable here, and `/beliefs` stays
-in the command list and answers `beliefs: this session's handle cannot
-list beliefs` rather than opening an empty picker. The peer layer has no
+in the command list and says the engine has no memory surface rather than
+opening an empty picker. The peer layer has no
 model in it, so the rail, `/msg` and the registry work identically.
 
 ## The spawned CLI
