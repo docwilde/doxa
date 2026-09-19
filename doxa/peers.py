@@ -569,9 +569,22 @@ def socket_alive(path: "str | Path | None", timeout: float = 0.2) -> bool:
             sock.close()
 
 
-def _reap_socket(socket_path: "str | Path | None") -> None:
-    """Unlink ``socket_path`` ONLY when it is a socket living inside this
-    run's :func:`runtime_dir`; otherwise leave the filesystem alone.
+def _reap_socket(socket_path: "str | Path | None", pid: "int | None") -> None:
+    """Unlink ``socket_path`` ONLY when its session's pid is gone AND the
+    path is a socket living inside this run's :func:`runtime_dir`;
+    otherwise leave the filesystem alone.
+
+    **The pid must be DEAD, not merely quiet.** An entry goes stale for
+    two different reasons and only one of them means the session is over:
+    a dead pid, or a heartbeat older than :data:`STALE_AFTER_SECS`. A
+    session that is SUSPENDED (SIGSTOP, a laptop lid, a daemon wedged
+    inside an SDK call) stops beating while its server is still bound and
+    still listening -- and unlinking the path out from under a bound
+    server is not recoverable: the listener keeps its inode, nobody can
+    reach it by name again, and the session advertises an address that no
+    longer exists until it restarts. The entry is still dropped, which
+    costs that session its place in the roster until its next beat
+    rewrites the file; the socket is the part that cannot be undone.
 
     The boundary: a registry entry is a file another process wrote, and
     ``socket_path`` is a string inside it -- the same untrusted class as
@@ -589,6 +602,8 @@ def _reap_socket(socket_path: "str | Path | None") -> None:
     entry either way, and the one thing a refusal must not do is emit
     text a model can read back and use to probe the filesystem."""
     if not socket_path:
+        return
+    if pid is None or _pid_alive(int(pid)):
         return
     try:
         target = Path(socket_path).resolve()
@@ -620,9 +635,11 @@ def read_registry(reap: bool = True, probe: bool = False) -> list[PeerInfo]:
     :func:`sweep_stale`'s deliberate, once-per-launch job.
 
     Reaping removes the entry FILE unconditionally and the entry's
-    ``socket_path`` only through :func:`_reap_socket`, which confines the
-    unlink to a socket inside :func:`runtime_dir`. The entry names that
-    path, and an entry is not a fact -- see there."""
+    ``socket_path`` only through :func:`_reap_socket`, which requires the
+    pid to be DEAD and the path to be a socket inside :func:`runtime_dir`.
+    A stale heartbeat alone therefore drops the entry and leaves the
+    socket: the entry can be rewritten by the next beat, an unlinked
+    socket cannot be rebound. See there."""
     live: list[PeerInfo] = []
     for path in sorted(registry_dir().glob("*.json")):
         try:
@@ -678,7 +695,7 @@ def read_registry(reap: bool = True, probe: bool = False) -> list[PeerInfo]:
             if reap:
                 with contextlib.suppress(OSError):
                     path.unlink()
-                _reap_socket(info.socket_path)
+                _reap_socket(info.socket_path, info.pid)
             continue
         if probe and not socket_alive(info.socket_path):
             continue
@@ -697,9 +714,11 @@ def sweep_stale() -> int:
     not -- the caller says out loud when this returns nonzero.
 
     The presence file is removed unconditionally; its ``socket_path`` goes
-    through :func:`_reap_socket`, so only a socket inside
-    :func:`runtime_dir` is ever unlinked. A swept entry counts as swept
-    whether or not its named socket was in reach."""
+    through :func:`_reap_socket`, so a socket is unlinked only when its
+    pid is gone and it sits inside :func:`runtime_dir`. A swept entry
+    counts as swept whether or not its named socket was reaped -- the two
+    questions have different answers for a session that is merely
+    suspended."""
     swept = 0
     for path in sorted(registry_dir().glob("*.json")):
         try:
@@ -720,7 +739,7 @@ def sweep_stale() -> int:
             continue
         with contextlib.suppress(OSError):
             path.unlink()
-        _reap_socket(socket_path)
+        _reap_socket(socket_path, pid)
         swept += 1
     return swept
 

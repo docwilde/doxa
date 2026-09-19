@@ -596,3 +596,67 @@ def test_reaping_refuses_a_symlink_that_escapes_the_runtime_dir(
     assert peers.sweep_stale() == 1
     assert victim.exists()
     assert link.is_symlink(), "the symlink itself is not ours to remove either"
+
+
+def test_a_suspended_session_keeps_its_inbox_socket(tmp_path, monkeypatch):
+    """A stale heartbeat is not a dead session. SIGSTOP, a closed laptop
+    lid, a daemon wedged inside an SDK call: the pid is alive and the
+    server is still bound, but the beat stopped. Unlinking the path out
+    from under a bound server cannot be undone -- the listener keeps its
+    inode and nobody can reach it by name again -- so the pid has to be
+    DEAD before the socket goes. The ENTRY is still dropped; the next
+    beat rewrites it."""
+    from datetime import datetime, timedelta, timezone
+
+    rt = tmp_path / "rt"
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(rt))
+    peers.registry_dir()
+    sock_path = rt / "peer-wedged.sock"
+    _OPEN_SOCKETS.append(_listening(sock_path))
+
+    old_hb = (datetime.now(timezone.utc) - timedelta(seconds=300)).strftime(
+        peers._TS_FMT
+    )
+    entry = {
+        "session_id": "wedged", "pid": os.getpid(),
+        "socket_path": str(sock_path),
+        "cwd": "/some/repo", "repo_root": "/some/repo", "title": "suspended",
+        "started_at": old_hb, "heartbeat_at": old_hb,
+    }
+    path = rt / "registry" / "wedged.json"
+    path.write_text(json.dumps(entry), encoding="utf-8")
+
+    assert peers.read_registry(reap=True) == []
+    assert not path.exists(), "a stale entry is still dropped from the roster"
+    assert sock_path.exists(), "the live session's inbox socket was unlinked"
+
+    # And the same through the launch-time sweep.
+    path.write_text(json.dumps(entry), encoding="utf-8")
+    assert peers.sweep_stale() == 1
+    assert sock_path.exists()
+
+
+def test_a_dead_session_still_loses_its_socket(tmp_path, monkeypatch):
+    """The other half: the pid check must not disable reaping. A real
+    dead pid still takes its socket with it."""
+    import subprocess as _subprocess
+
+    rt = tmp_path / "rt"
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(rt))
+    peers.registry_dir()
+    sock_path = rt / "peer-gone.sock"
+    _OPEN_SOCKETS.append(_listening(sock_path))
+
+    proc = _subprocess.Popen(["true"])
+    proc.wait()
+    entry = {
+        "session_id": "gone", "pid": proc.pid,
+        "socket_path": str(sock_path),
+        "cwd": "/some/repo", "repo_root": "/some/repo", "title": "t",
+        "started_at": "2020-01-01T00:00:00.000000Z",
+        "heartbeat_at": "2020-01-01T00:00:00.000000Z",
+    }
+    (rt / "registry" / "gone.json").write_text(json.dumps(entry), encoding="utf-8")
+
+    assert peers.read_registry(reap=True) == []
+    assert not sock_path.exists()
