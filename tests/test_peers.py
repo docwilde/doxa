@@ -507,3 +507,92 @@ def test_a_registry_entry_is_scrubbed_where_it_is_built(tmp_path, monkeypatch):
     assert secret not in got.title
     assert secret not in got.cwd
     assert "REDACTED" in got.title
+
+
+def test_reaping_never_unlinks_a_path_outside_the_runtime_dir(tmp_path, monkeypatch):
+    """Mirrors probe_registry_unlink.py / probe_registry_unlink_sweep.py:
+    a planted entry whose ``socket_path`` names an arbitrary user-owned
+    file used to have that file deleted by the default-on, read-only
+    ``peer_list`` operator and by every launch's ``sweep_stale``."""
+    rt = tmp_path / "rt"
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(rt))
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do not delete me\n", encoding="utf-8")
+
+    reg = peers.registry_dir()
+    entry = {
+        "session_id": "planted", "pid": 999999,
+        "socket_path": str(victim),
+        "cwd": "/some/repo", "repo_root": "/some/repo", "title": "t",
+        "started_at": "2020-01-01T00:00:00.000000Z",
+        "heartbeat_at": "2020-01-01T00:00:00.000000Z",
+    }
+    path = reg / "planted.json"
+    path.write_text(json.dumps(entry), encoding="utf-8")
+
+    assert peers.read_registry(reap=True) == []
+    assert not path.exists(), "the stale entry itself must still be dropped"
+    assert victim.exists(), "an out-of-runtime path must never be unlinked"
+
+    path.write_text(json.dumps(entry), encoding="utf-8")
+    assert peers.sweep_stale() == 1
+    assert not path.exists()
+    assert victim.exists()
+
+
+def test_reaping_still_unlinks_a_stale_socket_inside_the_runtime_dir(
+    tmp_path, monkeypatch
+):
+    """The other half of the containment rule: a real socket where the
+    entry says it is stays reapable, so the fix does not simply disable
+    socket cleanup."""
+    rt = tmp_path / "rt"
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(rt))
+    peers.registry_dir()
+    sock_path = rt / "peer-planted.sock"
+    listener = _listening(sock_path)
+    _OPEN_SOCKETS.append(listener)
+    assert stat.S_ISSOCK(os.lstat(sock_path).st_mode)
+
+    entry = {
+        "session_id": "stale-sock", "pid": 999999,
+        "socket_path": str(sock_path),
+        "cwd": "/some/repo", "repo_root": "/some/repo", "title": "t",
+        "started_at": "2020-01-01T00:00:00.000000Z",
+        "heartbeat_at": "2020-01-01T00:00:00.000000Z",
+    }
+    (rt / "registry" / "stale-sock.json").write_text(
+        json.dumps(entry), encoding="utf-8"
+    )
+
+    assert peers.read_registry(reap=True) == []
+    assert not sock_path.exists()
+
+
+def test_reaping_refuses_a_symlink_that_escapes_the_runtime_dir(
+    tmp_path, monkeypatch
+):
+    """Containment is checked on the RESOLVED path, so a symlink planted
+    inside the runtime dir cannot borrow its containment."""
+    rt = tmp_path / "rt"
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(rt))
+    peers.registry_dir()
+    victim = tmp_path / "victim-symlinked.txt"
+    victim.write_text("keep me\n", encoding="utf-8")
+    link = rt / "peer-link.sock"
+    link.symlink_to(victim)
+
+    entry = {
+        "session_id": "symlinked", "pid": 999999,
+        "socket_path": str(link),
+        "cwd": "/some/repo", "repo_root": "/some/repo", "title": "t",
+        "started_at": "2020-01-01T00:00:00.000000Z",
+        "heartbeat_at": "2020-01-01T00:00:00.000000Z",
+    }
+    (rt / "registry" / "symlinked.json").write_text(
+        json.dumps(entry), encoding="utf-8"
+    )
+
+    assert peers.sweep_stale() == 1
+    assert victim.exists()
+    assert link.is_symlink(), "the symlink itself is not ours to remove either"

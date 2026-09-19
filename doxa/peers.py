@@ -60,6 +60,7 @@ import inspect
 import json
 import os
 import socket
+import stat
 import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields as dataclass_fields
@@ -568,6 +569,42 @@ def socket_alive(path: "str | Path | None", timeout: float = 0.2) -> bool:
             sock.close()
 
 
+def _reap_socket(socket_path: "str | Path | None") -> None:
+    """Unlink ``socket_path`` ONLY when it is a socket living inside this
+    run's :func:`runtime_dir`; otherwise leave the filesystem alone.
+
+    The boundary: a registry entry is a file another process wrote, and
+    ``socket_path`` is a string inside it -- the same untrusted class as
+    ``title`` or ``cwd``, not a fact. Every reaping path (``read_registry``
+    with reap=True, which the default-on read-only ``peer_list`` operator
+    reaches, and ``sweep_stale``, which runs at every launch) used to pass
+    that string straight to ``unlink``, so a planted entry naming any
+    user-owned path deleted it. Containment is checked on the RESOLVED
+    path -- ``Path.resolve()`` on both sides, then ``is_relative_to`` --
+    so neither a ``..`` segment nor a symlink planted inside the runtime
+    dir escapes it, and ``S_ISSOCK`` on that same resolved path keeps a
+    regular file that happens to sit in the runtime dir out of reach.
+
+    A refusal is silent by construction: the caller drops the registry
+    entry either way, and the one thing a refusal must not do is emit
+    text a model can read back and use to probe the filesystem."""
+    if not socket_path:
+        return
+    try:
+        target = Path(socket_path).resolve()
+        base = runtime_dir().resolve()
+    except OSError:
+        return
+    if not target.is_relative_to(base) or target == base:
+        return
+    try:
+        if not stat.S_ISSOCK(os.lstat(target).st_mode):
+            return
+    except OSError:
+        return
+    with contextlib.suppress(OSError):
+        target.unlink()
+
 def read_registry(reap: bool = True, probe: bool = False) -> list[PeerInfo]:
     """All live entries. Stale ones (dead pid, old heartbeat, malformed
     JSON) are never returned and -- reap=True -- removed on sight by
@@ -580,7 +617,12 @@ def read_registry(reap: bool = True, probe: bool = False) -> list[PeerInfo]:
     unconnectable entry is FILTERED but not reaped here: a session still
     coming up has a presence file before it has a server, and reaping it
     would race the session that is about to be fine. Sweeping those is
-    :func:`sweep_stale`'s deliberate, once-per-launch job."""
+    :func:`sweep_stale`'s deliberate, once-per-launch job.
+
+    Reaping removes the entry FILE unconditionally and the entry's
+    ``socket_path`` only through :func:`_reap_socket`, which confines the
+    unlink to a socket inside :func:`runtime_dir`. The entry names that
+    path, and an entry is not a fact -- see there."""
     live: list[PeerInfo] = []
     for path in sorted(registry_dir().glob("*.json")):
         try:
@@ -636,8 +678,7 @@ def read_registry(reap: bool = True, probe: bool = False) -> list[PeerInfo]:
             if reap:
                 with contextlib.suppress(OSError):
                     path.unlink()
-                with contextlib.suppress(OSError):
-                    Path(info.socket_path).unlink()
+                _reap_socket(info.socket_path)
             continue
         if probe and not socket_alive(info.socket_path):
             continue
@@ -653,7 +694,12 @@ def sweep_stale() -> int:
     Run once at launch. A crash will always be able to leave a file behind,
     so the fleet needs a sweeper independent of anything shutting down
     cleanly; this is it. Silently cleaning is fine, silently IGNORING is
-    not -- the caller says out loud when this returns nonzero."""
+    not -- the caller says out loud when this returns nonzero.
+
+    The presence file is removed unconditionally; its ``socket_path`` goes
+    through :func:`_reap_socket`, so only a socket inside
+    :func:`runtime_dir` is ever unlinked. A swept entry counts as swept
+    whether or not its named socket was in reach."""
     swept = 0
     for path in sorted(registry_dir().glob("*.json")):
         try:
@@ -674,8 +720,7 @@ def sweep_stale() -> int:
             continue
         with contextlib.suppress(OSError):
             path.unlink()
-        with contextlib.suppress(OSError):
-            Path(socket_path).unlink()
+        _reap_socket(socket_path)
         swept += 1
     return swept
 
