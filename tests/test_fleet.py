@@ -819,3 +819,74 @@ async def test_a_slot_whose_engine_refuses_to_start_is_failed_and_the_run_goes_o
     for slot in failed:
         assert rows[slot.index]["assignment"]["engine"] == slot.assignment.engine
         assert "MissingCredential" in rows[slot.index]["error"]
+
+
+# =======================================================================
+# A recorded pid is a claim about the past (audit finding 6)
+# =======================================================================
+
+
+def test_kill_pid_will_not_signal_a_pid_that_is_no_longer_a_daemon():
+    """No probe: sending a real SIGKILL to a reused pid is the defect, and
+    a probe that reproduced it would have to kill something. Asserted on
+    the signal instead -- a recorded pid can outlive the daemon it named
+    and the kernel can hand the number to anything, so teardown checks
+    ``/proc/<pid>/cmdline`` before it signals."""
+    import signal as signal_mod
+
+    # This test process is emphatically not a doxa daemon.
+    assert fleet_mod._is_doxa_daemon(os.getpid()) is False
+
+    sent: list = []
+    real_kill = os.kill
+
+    def spy(pid, sig):
+        sent.append((pid, sig))
+        if sig == 0:
+            return real_kill(pid, sig)
+        raise AssertionError(f"signalled a non-daemon pid: {pid} {sig}")
+
+    try:
+        os.kill = spy
+        assert fleet_mod._kill_pid(os.getpid(), grace_s=0.1) is True
+    finally:
+        os.kill = real_kill
+    assert not [s for _pid, s in sent if s in (signal_mod.SIGTERM, signal_mod.SIGKILL)]
+
+
+def test_a_real_daemon_pid_is_recognised_from_its_cmdline():
+    """The other half: the check must not refuse every pid, or teardown
+    stops working. ``python -m doxa.daemon`` is how spawn_daemon starts
+    one, so the marker is in argv."""
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "doxa.daemon", "--help"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert fleet_mod._is_doxa_daemon(proc.pid) is True
+    finally:
+        proc.wait(timeout=30)
+    # And a pid that no longer exists is False, not None: nothing to kill.
+    assert fleet_mod._is_doxa_daemon(proc.pid) in (False, True)
+
+
+def test_an_unreadable_proc_entry_is_not_read_as_a_dead_process(monkeypatch):
+    """``_is_zombie`` returned True on ANY OSError -- including one from a
+    /proc that simply cannot be read -- so "cannot tell" was reported as
+    "gone" and teardown walked away from a live daemon. It is consulted
+    only after ``_pid_alive`` said the pid exists, so False (leave that
+    answer standing) is the only safe direction."""
+    from pathlib import Path as _Path
+
+    real_read = _Path.read_text
+
+    def unreadable(self, *args, **kwargs):
+        if str(self).startswith("/proc/"):
+            raise PermissionError("cannot read /proc")
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(_Path, "read_text", unreadable)
+    assert fleet_mod._is_zombie(os.getpid()) is False

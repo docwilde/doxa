@@ -1011,12 +1011,49 @@ def _is_zombie(pid: int) -> bool:
     """``/proc/<pid>/stat`` field 3 is the process state; ``Z`` is a
     process that has exited and is waiting to be reaped. Linux-only and a
     miss is silent -- a platform without /proc gets the ``os.kill`` answer,
-    which is the answer this module had before."""
+    which is the answer this module had before.
+
+    An OSError is NOT a zombie. This function is only ever consulted
+    AFTER :func:`doxa.peers._pid_alive` has said the pid exists, so an
+    unreadable ``/proc/<pid>/stat`` -- no /proc mounted, a hardened
+    kernel, a permission error -- means "cannot tell", and "cannot tell"
+    reported as "gone" is a live daemon the teardown walks away from.
+    False leaves ``_pid_alive``'s answer standing, which is the answer
+    this module had before /proc was consulted at all. A pid that has
+    actually vanished raises FileNotFoundError and still reads as gone."""
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-    except OSError:
+    except FileNotFoundError:
         return True  # it vanished between the two checks: gone
+    except OSError:
+        return False  # cannot tell -- _pid_alive already said it exists
     return stat.rpartition(")")[2].strip().startswith("Z")
+
+
+#: What ``/proc/<pid>/cmdline`` must contain for :func:`_kill_pid` to
+#: signal a pid. The daemon is spawned as ``python -m doxa.daemon``
+#: (:func:`doxa.daemon.spawn_daemon`), so the marker is in its argv and
+#: needs no cooperation from the process.
+_DAEMON_CMDLINE_MARK = "doxa.daemon"
+
+
+def _is_doxa_daemon(pid: int) -> "bool | None":
+    """Is this pid still a DOXA daemon? ``None`` when there is no way to
+    tell on this platform.
+
+    Linux only, by reading ``/proc/<pid>/cmdline``. A pid that has gone
+    away reads as False (there is nothing to signal); a ``/proc`` that
+    cannot be read at all reads as None, which :func:`_kill_pid` treats as
+    "no better answer than the pid itself"."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    return _DAEMON_CMDLINE_MARK in raw.decode("utf-8", "replace").replace(
+        "\x00", " "
+    )
 
 
 def _kill_pid(pid: "int | None", grace_s: float = 5.0) -> bool:
@@ -1024,8 +1061,24 @@ def _kill_pid(pid: "int | None", grace_s: float = 5.0) -> bool:
 
     The teardown's floor. A daemon that ignored ``stop`` is a daemon whose
     engine is wedged inside an SDK call, and no amount of further asking
-    over the socket it is not reading will change that."""
+    over the socket it is not reading will change that.
+
+    **What is checked before a signal is sent.** The pid comes from a
+    registry entry or a slot recorded earlier in the run, which is a claim
+    about the past: a daemon can exit and the kernel reuse its number
+    while this run is still holding it. On Linux the pid's
+    ``/proc/<pid>/cmdline`` must still name ``doxa.daemon``
+    (:func:`_is_doxa_daemon`) or nothing is signalled and this reports
+    True -- the daemon the pid stood for is gone, which is what the caller
+    asked about. On every other platform there is no cheap way to ask, so
+    the pid IS the whole check; that is a real limit of this function and
+    it is written down here rather than assumed."""
     if _gone(pid):
+        return True
+    if _is_doxa_daemon(int(pid)) is False:
+        # Either it exited between the two checks, or this number now
+        # belongs to something else. Both mean "the daemon is not here",
+        # and neither is a reason to signal whatever is.
         return True
     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
         os.kill(int(pid), signal.SIGTERM)
