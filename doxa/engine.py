@@ -3101,6 +3101,15 @@ class SessionEngine:
         self._peer_queue.put_nowait(EngineEvent("prompt_dequeued", {
             "id": item.id, "text": item.text,
         }))
+        # Set HERE, synchronously, exactly as _on_peer_frame does one
+        # screen up and for one more reason than the race it names. This
+        # call site is send()'s ``finally``, which has just cleared the
+        # flag -- so between this line and the task's first step the loop
+        # is free to run anything, and everything it might run reads a
+        # session that is about to start a turn as IDLE. The daemon's
+        # ``running`` says no, its quiescence wait says finished, and a
+        # concurrent send() starts a second turn beside this one.
+        self._turn_running = True
         self._queued_turn_task = asyncio.ensure_future(
             self._run_queued_turn(item.text)
         )
@@ -3109,7 +3118,13 @@ class SessionEngine:
         """One dequeued prompt's turn, run and published exactly like
         _advance_queue's docstring describes -- the SAME shape send()
         itself takes, minus the direct caller send() has and this does
-        not."""
+        not.
+
+        Both callers set ``_turn_running`` before creating the task, so
+        the assignment below is a re-assertion rather than the first one.
+        Kept because this coroutine owns clearing the flag on every exit,
+        and a method that clears a flag it never sets is one edit away
+        from clearing one that was never set."""
         self._turn_running = True
         try:
             async for ev in self._send_turn(prompt):
