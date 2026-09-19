@@ -99,6 +99,19 @@ part worth more than a clean report.
   has no balance, billing or quota endpoint at all. Neither is a
   per-session dollar figure -- see ``cost=False``.
 
+EVERY READ OFF THE WIRE IS BOUNDED. A vendor endpoint is a remote party
+DOXA does not control, and an unbounded read from one is memory the
+process cannot refuse: ``response.read()`` on the catalogue, ``exc.read()``
+on an error body, and iterating a streaming response all buffer whatever
+arrives, including a single line that never ends. Four named caps bound
+them -- :data:`CATALOGUE_BODY_MAX` (the model catalogue),
+:data:`ERROR_BODY_MAX` (an error body, which was already truncated for
+display and is now truncated at the socket), :data:`STREAM_LINE_MAX` (one
+SSE line) and :data:`STREAM_BODY_MAX` (one turn's whole stream). Passing a
+cap is a typed failure, never a silent truncation: the catalogue falls
+back to :attr:`VendorSpec.models`, and a stream over either cap ends the
+turn with a :class:`VendorApiError` naming the cap.
+
 NO KEY IS EVER STORED. The engine holds no credential attribute. The key
 is read from the environment at the moment a request is built and dropped
 when it returns, so it cannot appear in a ``repr``, a pickle, a traceback
@@ -129,6 +142,7 @@ from lore_core.scrub import scrub_secrets
 
 from . import peerdelivery as peerdelivery_mod
 from . import peers as peers_mod
+from .identity import require_session_id
 from .engines import (
     DEEPSEEK_ENGINE_ID,
     GLM_ENGINE_ID,
@@ -161,8 +175,31 @@ RESULT_SUMMARY_MAX = 280
 
 #: How much of an error body is kept for the message. Bounded because a
 #: vendor that answers an error with an HTML page must not cost megabytes
-#: for a line that gets truncated anyway.
+#: for a line that gets truncated anyway. Applied at the SOCKET
+#: (``exc.read(ERROR_BODY_MAX + 1)``), not after a full read -- reading
+#: megabytes in order to slice 800 bytes off the front is the same
+#: unbounded read with a tidier result.
 ERROR_BODY_MAX = 800
+
+#: How much of a model catalogue :func:`fetch_models` will read. Two
+#: hundred model ids with their metadata is tens of kilobytes; anything
+#: past this is not a catalogue, and the caller already has
+#: :attr:`VendorSpec.models` as its floor.
+CATALOGUE_BODY_MAX = 4 * 1024 * 1024
+
+#: The longest single SSE line :class:`HttpStreamTransport` will accept.
+#: An SSE frame carries one delta -- a few hundred bytes typically, a few
+#: kilobytes for a large tool-call argument blob. A line longer than this
+#: is not a frame this transport can parse, and the only alternative to a
+#: cap is buffering until the process dies, because a line has no length
+#: until its newline arrives.
+STREAM_LINE_MAX = 1024 * 1024
+
+#: The most one turn's stream may carry in total. Generous next to a real
+#: turn (a long reasoning trace is low single-digit megabytes) and finite,
+#: which is the property that matters: an endpoint that streams forever
+#: ends the turn with a typed error rather than the session with an OOM.
+STREAM_BODY_MAX = 64 * 1024 * 1024
 
 #: Reasoning effort when nothing asks for one. ``"low"`` is the only value
 #: BOTH vendors accept that is also cheap, and the fleet in
@@ -518,7 +555,15 @@ def fetch_models(
         # "no live catalogue", and the caller already has a floor.
         return ()
     try:
-        payload = json.loads(response.read().decode("utf-8", "replace"))
+        # CATALOGUE_BODY_MAX + 1, so an over-cap body is DETECTED rather
+        # than silently parsed from a truncated prefix -- which would
+        # either raise here anyway or, worse, parse as a shorter
+        # catalogue. Over the cap is "no live catalogue", the same answer
+        # every other failure on this path gives.
+        body = response.read(CATALOGUE_BODY_MAX + 1)
+        if len(body) > CATALOGUE_BODY_MAX:
+            return ()
+        payload = json.loads(body.decode("utf-8", "replace"))
     except Exception:  # noqa: BLE001 -- a body that is not the catalogue
         return ()
     finally:
@@ -740,7 +785,9 @@ class HttpStreamTransport:
             except urllib.error.HTTPError as exc:
                 detail = ""
                 try:
-                    detail = exc.read().decode("utf-8", "replace")[:ERROR_BODY_MAX]
+                    detail = exc.read(ERROR_BODY_MAX + 1).decode(
+                        "utf-8", "replace"
+                    )[:ERROR_BODY_MAX]
                 except Exception:  # noqa: BLE001 -- a body we cannot read is
                     # still a failure with a status, and the status is the
                     # part the caller needs.
@@ -763,8 +810,33 @@ class HttpStreamTransport:
                 push(done)
                 return
             try:
-                for raw in response:
-                    if stop.is_set():
+                # readline(N), not `for raw in response`. Iterating the
+                # response reads a line at a time with NO limit, and a
+                # line has no length until its newline arrives -- so an
+                # endpoint that sends one that never ends buffers until
+                # the process dies, with nothing in this loop able to see
+                # it happening. Both caps are checked on the bytes as they
+                # land, and either one ends the turn with the same typed
+                # error the rest of this function reports failures with.
+                streamed = 0
+                while not stop.is_set():
+                    raw = response.readline(STREAM_LINE_MAX + 1)
+                    if not raw:
+                        break
+                    if len(raw) > STREAM_LINE_MAX:
+                        push(VendorApiError(
+                            0,
+                            f"stream line exceeded {STREAM_LINE_MAX} bytes "
+                            f"(doxa.vendors.STREAM_LINE_MAX)",
+                        ))
+                        break
+                    streamed += len(raw)
+                    if streamed > STREAM_BODY_MAX:
+                        push(VendorApiError(
+                            0,
+                            f"stream exceeded {STREAM_BODY_MAX} bytes "
+                            f"(doxa.vendors.STREAM_BODY_MAX)",
+                        ))
                         break
                     line = raw.decode("utf-8", "replace").strip()
                     if not line.startswith("data:"):
@@ -951,8 +1023,13 @@ class ChatApiEngine:
         self.spec = spec or DEEPSEEK
         self.cwd = str(cwd)
         self.model = model or self.spec.default_model
-        self.session_id = session_id or str(uuid.uuid4())
-        self.resume = resume or None
+        # Checked for the same reason SessionEngine checks it: this id
+        # becomes `<id>.jsonl` and `<id>.messages.json` below, and
+        # `self.resume` names a third. See doxa.identity.valid_session_id.
+        self.session_id = (
+            require_session_id(session_id) if session_id else str(uuid.uuid4())
+        )
+        self.resume = require_session_id(resume, "resume id") if resume else None
         self.spawn_depth = max(0, int(spawn_depth or 0))
         self.parent_session_id = parent_session_id or None
         # Set when a doxa.daemon.SessionDaemon hosts this session (issue

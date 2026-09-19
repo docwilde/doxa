@@ -614,3 +614,32 @@ def test_the_section_still_declares_no_transition_and_no_indicator():
     assert issubclass(ToolCallsSection, __import__(
         "textual.widgets", fromlist=["Collapsible"]
     ).Collapsible)
+
+
+# =======================================================================
+# A prompt does not get to paint its own fold title (panel finding 2)
+# =======================================================================
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_of_rich_markup_paints_literally_in_the_fold_title(
+    monkeypatch, tmp_path,
+):
+    """A Collapsible title is rendered with markup and cannot be told not
+    to be, so the prompt text interpolated into it has to be escaped. It
+    was not: a prompt of ``[bold red]x[/]`` painted as markup, and an
+    unbalanced bracket raised MarkupError on the block carrying the turn.
+    A peer's relayed text and a restored transcript both land here."""
+    app = _app(tmp_path, monkeypatch)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        block_list = app.active_pane.query_one("#block-list", VerticalScroll)
+        block = TurnBlock("[bold red]deploy[/] now [unbalanced")
+        await block_list.mount(block)
+        await pilot.pause()
+
+        assert "\\[bold red]deploy\\[/] now \\[unbalanced" in block.title
+        # And it paints: the characters reach the screen, nothing raised.
+        painted = "".join(_rows(app, block))
+        assert "[bold red]deploy[/]" in painted
+        assert "[unbalanced" in painted

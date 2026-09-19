@@ -32,7 +32,7 @@ THE ADOPT/REFUSE LINE, decided per capability rather than per plugin:
   when the model reaches for it, an agent spawns only through a Task-tool
   call the running permission mode still gates. None of the three executes
   anything at session start. Skills specifically are the SAME risk class
-  ``cli_isolation.ensure_skills_link`` already carries wholesale for the
+  ``cli_isolation.ensure_skills_snapshot`` already carries wholesale for the
   user's own ``~/.claude/skills`` -- this module only widens the source to
   include the skills a PLUGIN bundles (``~/.claude/plugins/cache/.../
   skills/``), which that symlink never reached.
@@ -103,6 +103,7 @@ gating.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -125,6 +126,34 @@ _MANIFEST_HAZARD_KEYS = ("hooks", "mcpServers")
 # OWN config dir, so it is cleaned up, permissioned and reasoned about
 # alongside everything else DOXA owns there.
 STAGED_SUBDIR = "plugins-adopted"
+
+#: What a scope key is allowed to look like. ``<plugin>@<marketplace>``,
+#: both halves package names -- letters, digits, dot, underscore, dash --
+#: joined by the ``@`` the key's own format uses.
+#:
+#: This key names a DIRECTORY (:func:`staged_plugin_dir`) that
+#: :func:`_copy_sanitized` then ``rmtree``s and rebuilds, and it comes out
+#: of ``~/.claude/installed_plugins.json`` -- a same-user file, written by
+#: another program, which a model with file tools can edit. A key of
+#: ``..`` resolved the staging directory to the isolated CLI config dir
+#: ITSELF, which the rebuild then deleted.
+_SCOPE_KEY_RE = re.compile(r"\A[A-Za-z0-9._@-]+\Z")
+
+
+def safe_scope_key(scope_key: str) -> bool:
+    """Is this key a NAME, safe to use as one path segment?
+
+    Two checks, and the second is not implied by the first: the pattern
+    excludes ``/`` and every other separator, and the explicit ``..``
+    rejection covers the one string made entirely of allowed characters
+    that is still a traversal. A key that fails is refused outright
+    (:meth:`DiscoveredPlugin.refused`) rather than sanitized into some
+    neighbouring name -- there is no correct guess at what a plugin
+    called ``..`` meant, and inventing one silently stages a directory
+    the operator never installed."""
+    key = str(scope_key or "")
+    return bool(_SCOPE_KEY_RE.fullmatch(key)) and ".." not in key
+
 
 # Hard-refused regardless of the opt-in setting or the operator's own
 # enabledPlugins -- see the module docstring's "LORE, SPECIFICALLY" section.
@@ -173,12 +202,22 @@ class DiscoveredPlugin:
     def refused(self) -> bool:
         """True when NOTHING from this plugin will be staged, regardless
         of the opt-in setting -- see :meth:`refusal_reason` for why."""
-        return self.blocked or not self.user_enabled or not self.has_adoptable_content
+        return (
+            not safe_scope_key(self.scope_key)
+            or self.blocked
+            or not self.user_enabled
+            or not self.has_adoptable_content
+        )
 
     def refusal_reason(self) -> str:
         """Empty when adoptable. A refusal that does not say why is a bug
         report waiting to happen (the task's own words) -- this is the
         one place that sentence is written down as code."""
+        if not safe_scope_key(self.scope_key):
+            return (
+                "unusable name in installed_plugins.json -- a scope key is "
+                "a directory name, and this one is not"
+            )
         if self.blocked:
             return self.blocked_reason
         if not self.user_enabled:
@@ -439,9 +478,24 @@ def adoption_enabled() -> bool:
 def staged_plugin_dir(discovered: DiscoveredPlugin) -> Path:
     """Where a plugin's sanitized copy lives -- one directory per scope
     key, so ``lore@lore`` and a hypothetical ``lore@other-marketplace``
-    never collide."""
-    safe = discovered.scope_key.replace("/", "_")
-    return cli_isolation_mod.cli_config_dir() / STAGED_SUBDIR / safe
+    never collide.
+
+    Raises ValueError on a key :func:`safe_scope_key` rejects, rather than
+    returning a path. The returned path is handed to
+    :func:`_copy_sanitized`, which ``rmtree``s it -- so "the worst this
+    function can return" is the whole of its contract, and a key of ``..``
+    used to make that the isolated CLI config directory itself. Callers
+    inside this module never see the exception (``refused`` already covers
+    the same keys), which is the point: it is here for the caller that
+    forgets."""
+    if not safe_scope_key(discovered.scope_key):
+        raise ValueError(
+            f"unusable plugin scope key {discovered.scope_key!r} -- "
+            "a scope key names one directory"
+        )
+    return (
+        cli_isolation_mod.cli_config_dir() / STAGED_SUBDIR / discovered.scope_key
+    )
 
 
 def _copy_sanitized(source: Path, dest: Path) -> None:
@@ -476,6 +530,16 @@ def _copy_sanitized(source: Path, dest: Path) -> None:
 
 
 def _strip_manifest_hazards(manifest_path: Path) -> None:
+    """Remove ``hooks``/``mcpServers`` from the STAGED manifest, in place.
+
+    Raises OSError when the rewrite fails, and :func:`adopt` turns that
+    into a refusal for that plugin. The previous version swallowed it,
+    reasoning that "the unsanitized key staying in a copy nothing points a
+    --plugin-dir flag at costs nothing" -- but the copy IS what the flag
+    points at: ``adopt`` appends this directory to the plugin list right
+    after this call. A swallowed failure handed the CLI a manifest with
+    its ``hooks`` and ``mcpServers`` keys intact, which is the whole of
+    what this module refuses."""
     if not manifest_path.exists():
         return
     data = _load_json(manifest_path)
@@ -488,11 +552,7 @@ def _strip_manifest_hazards(manifest_path: Path) -> None:
             changed = True
     if not changed:
         return
-    try:
-        manifest_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    except OSError:
-        pass  # the unsanitized key staying in a copy nothing points a
-        # --plugin-dir flag at costs nothing; the flag is what matters.
+    manifest_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def adopt(discovered: "list[DiscoveredPlugin] | None" = None) -> "list[dict]":
@@ -523,6 +583,11 @@ def adopt(discovered: "list[DiscoveredPlugin] | None" = None) -> "list[dict]":
         try:
             _copy_sanitized(plugin.install_path, dest)
         except OSError:
+            # Including a manifest this module could not strip: a copy
+            # whose sanitizing did not finish is not offered to the CLI,
+            # and the half-built directory goes with it rather than
+            # sitting there looking staged.
+            shutil.rmtree(dest, ignore_errors=True)
             continue
         out.append({"type": "local", "path": str(dest)})
     return out

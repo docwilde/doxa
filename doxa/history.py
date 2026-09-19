@@ -66,6 +66,7 @@ from rich.text import Text
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
+from .identity import valid_session_id
 from .peers import age_secs
 from .ui.labels import _fmt_age
 
@@ -351,11 +352,17 @@ def _beside_transcript(session_id: str, suffix: str) -> "list[Path]":
     -- the same posture, for the same reason, as
     :func:`doxa.cli_isolation.cli_session_file`.
 
+    A glob PATTERN cannot be normalised into safety after it is built, so
+    the id is checked against :func:`doxa.identity.valid_session_id`
+    first: an id carrying ``../`` would otherwise make this glob walk out
+    of ``PROJECTS_DIR`` and answer with files that are not resume
+    artefacts at all.
+
     Never raises: an unreadable state directory reads as "no artefact",
     which is the same answer the caller acts on anyway."""
     from lore_core.config import PROJECTS_DIR
 
-    if not session_id:
+    if not valid_session_id(session_id):
         return []
     try:
         return sorted(

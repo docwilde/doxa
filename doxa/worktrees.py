@@ -380,13 +380,31 @@ def is_clean(worktree_path: str) -> bool:
     return not proc.stdout.strip()
 
 
-def commits_ahead(worktree_path: str, base_ref: str) -> "int | None":
-    """How many commits the worktree's branch carries beyond ``base_ref``.
+def commits_ahead(
+    worktree_path: str, base_ref: str, branch: "str | None" = None
+) -> "int | None":
+    """How many commits ``branch`` carries beyond ``base_ref``.
     ``None`` when it cannot be measured (the base ref is gone, e.g.) --
-    finalize treats that the same as "ahead", never as zero."""
+    finalize treats that the same as "ahead", never as zero.
+
+    ``branch`` is the SIDECAR'S recorded branch, and passing it is what
+    makes the answer about the session's work rather than about wherever
+    the worktree's HEAD happens to point. A ``git checkout`` inside the
+    worktree moves HEAD off ``doxa/<short>`` -- detaching onto the base to
+    read something, or switching to another branch -- and
+    ``base_ref..HEAD`` then counts 0 while the session's commits sit safe
+    on a branch nobody asked about. :func:`finalize` reads that 0 as
+    "nothing unmerged" and REMOVES the worktree and deletes the branch,
+    which is the one outcome this whole keep-or-remove decision exists to
+    prevent.
+
+    ``None`` (the default) keeps the old HEAD-relative meaning for a
+    caller that genuinely means "here", and there is one: ``switch_base``
+    asks about the checkout it is holding still."""
+    target = branch or "HEAD"
     try:
         proc = subprocess.run(
-            ["git", "rev-list", "--count", f"{base_ref}..HEAD"],
+            ["git", "rev-list", "--count", f"{base_ref}..{target}"],
             cwd=worktree_path, capture_output=True, text=True, timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
@@ -619,7 +637,12 @@ def finalize(worktree_path: str) -> "str | None":
         # back instead of losing it on the next session end.
         ahead = None
     else:
-        ahead = commits_ahead(worktree_path, base_ref)
+        # Counted from the RECORDED branch, not from HEAD: a checkout
+        # inside the worktree moves HEAD off doxa/<short> and
+        # base_ref..HEAD then reads 0 for a branch carrying real commits.
+        # See commits_ahead -- this is the call whose wrong answer deletes
+        # the work.
+        ahead = commits_ahead(worktree_path, base_ref, branch)
     if clean and ahead == 0:
         _remove(main_root, worktree_path, branch)
         _drop_meta(target)

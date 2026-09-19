@@ -1213,3 +1213,76 @@ def test_clear_removes_an_unadopted_legacy_record_too(tmp_path, monkeypatch):
     tabsets._legacy_file_for(scope).write_text('{"marker": "old"}', encoding="utf-8")
     tabsets.clear(scope)
     assert _tabsets_files(tmp_path) == []
+
+
+# =======================================================================
+# Session ids are names, not paths (audit finding 3)
+# =======================================================================
+
+
+def test_a_tab_record_whose_session_id_is_a_path_is_dropped_with_a_warning(
+    tmp_path, capsys,
+):
+    """Mirrors verify_transcript_traversal.py's precondition: this file is
+    same-user JSON that an older build or a hand edit may have written,
+    and ``tabsets.resolve()`` runs on every launch. A record whose id
+    walks out of PROJECTS_DIR is dropped; the healthy tab beside it still
+    restores, and the drop is said out loud rather than swallowed."""
+    scope = str(tmp_path / "repo")
+    path = tabsets._file_for(scope)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "scope_key": scope,
+        "tabs": [
+            {"session_id": "../../../../etc/passwd"},
+            {"session_id": "sid-good"},
+        ],
+        "active_session_id": "sid-good",
+    }), encoding="utf-8")
+
+    record = tabsets.load(scope)
+    assert record is not None
+    assert [t.session_id for t in record.tabs] == ["sid-good"]
+    assert "unusable session id" in capsys.readouterr().err
+
+
+def test_transcript_and_resume_lookups_refuse_a_traversing_session_id(
+    tmp_path, monkeypatch,
+):
+    """Mirrors verify_transcript_traversal.py end to end: the three places
+    that build a path out of a session id -- doxa.transcript's
+    ``<slug>/<id>.jsonl``, doxa.history's glob and
+    doxa.cli_isolation's glob -- each answer "no such session" rather than
+    naming a file outside the directory they mean."""
+    from doxa import cli_isolation as cli_isolation_mod
+    from doxa import history as history_mod
+    from doxa import transcript as transcript_mod
+
+    monkeypatch.setenv("LORE_PROJECTS_DIR", str(tmp_path / "projects"))
+    crafted = "../../../../etc/passwd"
+    assert transcript_mod.transcript_path(crafted, str(tmp_path)) is None
+    assert transcript_mod.exists(crafted, str(tmp_path)) is False
+    assert history_mod._beside_transcript(crafted, ".jsonl") == []
+    assert cli_isolation_mod.cli_session_file(crafted) is None
+
+    # A well-formed id still resolves -- the check is on shape, not on
+    # the file existing.
+    good = transcript_mod.transcript_path("4f8e2a91-77bc-4c1d-9a01-000000000000",
+                                          str(tmp_path))
+    assert good is not None and good.name.endswith(".jsonl")
+
+
+def test_no_engine_will_open_a_transcript_outside_its_project_dir():
+    """The invariant stated where the paths are actually built: both
+    engine constructors that interpolate a session id into a filename
+    refuse one that is not a name, so the check does not rest on every
+    caller having gone through SessionDaemon."""
+    from doxa.engine import SessionEngine
+    from doxa.vendors import ChatApiEngine
+
+    with pytest.raises(ValueError, match=r"invalid session id"):
+        SessionEngine(cwd=".", session_id="../../../../etc/passwd")
+    with pytest.raises(ValueError, match=r"invalid session id"):
+        ChatApiEngine(cwd=".", session_id="../../../../etc/passwd")
+    with pytest.raises(ValueError, match=r"invalid resume id"):
+        ChatApiEngine(cwd=".", resume="../elsewhere")

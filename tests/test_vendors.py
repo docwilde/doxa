@@ -27,6 +27,7 @@ make this suite two readings of one doc that agree with each other.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 
@@ -898,14 +899,21 @@ def test_one_engine_that_cannot_import_leaves_the_others_registered(monkeypatch)
 
 
 class _FakeResponse:
-    """What urllib hands back: an iterable of raw lines, and a close()."""
+    """What urllib hands back: a buffered byte stream with readline(limit)
+    and a close(). Modelled on ``http.client.HTTPResponse``, which is an
+    ``io.BufferedIOBase`` -- the transport reads it with a LIMIT, so a
+    fake that only knew how to iterate would not exercise the cap it is
+    the transport's job to enforce."""
 
     def __init__(self, lines) -> None:
-        self._lines = list(lines)
+        self._buf = io.BytesIO(b"".join(lines))
         self.closed = False
 
+    def readline(self, limit=-1):
+        return self._buf.readline(limit)
+
     def __iter__(self):
-        return iter(self._lines)
+        return iter(self._buf)
 
     def close(self):
         self.closed = True
@@ -1261,3 +1269,121 @@ async def test_a_lore_call_the_model_invents_is_refused_when_memory_is_off(tmp_p
         assert "entries" not in json.dumps(result)
     finally:
         await eng.finalize()
+
+
+# -- bounded reads off the wire (audit finding 5) ----------------------
+
+
+async def test_an_endless_sse_line_ends_the_turn_instead_of_the_process():
+    """No probe: this one was found by reading, and the failure it
+    prevents cannot be probed without spending the machine's memory. The
+    transport used to iterate the response, which reads a line at a time
+    with no limit -- and a line has no length until its newline arrives,
+    so an endpoint sending one that never ends buffers until the process
+    dies. The cap is checked on the bytes as they land, and passing it is
+    a typed failure naming the constant."""
+    from doxa.vendors import STREAM_LINE_MAX, HttpStreamTransport
+
+    class _Endless:
+        """A response whose first line never terminates."""
+
+        def __init__(self) -> None:
+            self.served = 0
+
+        def readline(self, limit=-1):
+            assert limit > 0, "the transport must read with a limit"
+            self.served += limit
+            return b"data: " + b"x" * (limit - 6)
+
+        def close(self):
+            pass
+
+        def __iter__(self):  # pragma: no cover -- must not be reached
+            raise AssertionError("the transport must not iterate the response")
+
+    endless = _Endless()
+
+    def opener(request, timeout=None):
+        return endless
+
+    with pytest.raises(VendorApiError, match=r"STREAM_LINE_MAX"):
+        async for _ in HttpStreamTransport(opener=opener).stream(
+            "https://example.invalid/chat", {}, {}, 1.0
+        ):
+            pass
+    # Bounded, and bounded ONCE: the cap is not a retry loop.
+    assert endless.served <= STREAM_LINE_MAX + 1
+
+
+async def test_a_stream_that_never_ends_is_capped_in_total():
+    """The second cap, for the endpoint that stays within the line limit
+    and simply never stops sending them."""
+    from doxa.vendors import STREAM_BODY_MAX, HttpStreamTransport
+
+    line = b"data: " + b"y" * 60000 + b"\n"
+
+    class _Forever:
+        def __init__(self) -> None:
+            self.served = 0
+
+        def readline(self, limit=-1):
+            self.served += len(line)
+            return line
+
+        def close(self):
+            pass
+
+    forever = _Forever()
+    with pytest.raises(VendorApiError, match=r"STREAM_BODY_MAX"):
+        async for _ in HttpStreamTransport(opener=lambda r, timeout=None: forever).stream(
+            "https://example.invalid/chat", {}, {}, 1.0
+        ):
+            pass
+    assert forever.served <= STREAM_BODY_MAX + len(line)
+
+
+async def test_an_error_body_is_read_bounded_not_read_then_sliced():
+    """``exc.read()`` then ``[:ERROR_BODY_MAX]`` bought a tidy 800-byte
+    string with an unbounded read. The bound belongs at the socket."""
+    import urllib.error
+
+    from doxa.vendors import ERROR_BODY_MAX, HttpStreamTransport
+
+    reads: list = []
+
+    class _CountingBody(io.BytesIO):
+        def read(self, size=-1):
+            reads.append(size)
+            return super().read(size)
+
+    body = _CountingBody(b'{"error":{"code":"1113","message":"' + b"z" * 5000 + b'"}}')
+
+    def opener(request, timeout=None):
+        raise urllib.error.HTTPError(
+            request.full_url, 429, "Too Many Requests", {}, body
+        )
+
+    with pytest.raises(VendorApiError) as excinfo:
+        async for _ in HttpStreamTransport(opener=opener).stream(
+            "https://example.invalid/chat", {}, {}, 1.0
+        ):
+            pass
+    assert reads and all(0 < n <= ERROR_BODY_MAX + 1 for n in reads), reads
+    assert len(excinfo.value.detail) <= ERROR_BODY_MAX
+
+
+def test_an_oversized_model_catalogue_falls_back_to_the_static_list():
+    """The catalogue GET read the whole body. A vendor answering the
+    models endpoint with something enormous is "no live catalogue", which
+    is the answer every other failure on this path already gives."""
+    from doxa.vendors import CATALOGUE_BODY_MAX, DEEPSEEK, fetch_models
+
+    class _Huge:
+        def read(self, size=-1):
+            assert size == CATALOGUE_BODY_MAX + 1, size
+            return b"[" + b"x" * CATALOGUE_BODY_MAX
+
+        def close(self):
+            pass
+
+    assert fetch_models(DEEPSEEK, "key", opener=lambda r, timeout=None: _Huge()) == ()

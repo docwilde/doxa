@@ -568,7 +568,19 @@ class MeshServer:
                 # here to authenticate INTO -- the token is the whole
                 # capability. compare_digest, not ==, so the check does
                 # not leak its progress through timing.
-                if not secrets.compare_digest(supplied, mesh.token):
+                #
+                # BYTES on both sides, not str. compare_digest accepts str
+                # only when BOTH arguments are ASCII and raises TypeError
+                # otherwise; http.server decodes the request line as
+                # iso-8859-1, so a raw 0xE9 byte in the path -- no
+                # percent-encoding needed -- put a non-ASCII str here, the
+                # handler raised before answering, and the traceback
+                # printed over the Textual UI. The encoding is total, so
+                # every request now gets the same 404 a wrong token gets.
+                if not secrets.compare_digest(
+                    supplied.encode("utf-8", "surrogateescape"),
+                    mesh.token.encode("utf-8", "surrogateescape"),
+                ):
                     self.send_error(404)
                     return
 

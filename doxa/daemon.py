@@ -96,17 +96,55 @@ from . import __version__
 from . import engines as engines_mod
 from . import notify as notify_mod
 from . import worktrees as worktrees_mod
+from .identity import require_session_id
 from .engine import (
     BELIEF_EVIDENCE_LIMIT,
     BELIEF_LIST_LIMIT,
+    GATED_MODES,
+    PERMISSION_MODES,
     PENDING_LIST_LIMIT,
     EngineEvent,
     SessionEngine,
+    available_modes,
 )
 from .peers import MAX_FRAME_BYTES, registry_dir, runtime_dir
 from .promptqueue import PromptQueue, PromptQueueFull
 
 from .events import PROTOCOL_VERSION  # noqa: F401 -- re-exported
+#: The modes this daemon will not let a socket client ESCALATE into
+#: without both of the conditions in
+#: :meth:`SessionDaemon._gated_mode_refusal`. Derived, never spelled out:
+#: ``GATED_MODES`` is what the TUI puts behind a confirmation dialog, and
+#: the difference between every mode and the modes an UNARMED session may
+#: hold is what launch-time arming exists to withhold
+#: (``bypassPermissions``). A mode added to either set is covered here the
+#: day it is added.
+GATED_SOCKET_MODES = frozenset(GATED_MODES) | (
+    frozenset(PERMISSION_MODES) - frozenset(available_modes(False))
+)
+
+#: How many bytes may sit unsent in ONE client's socket buffer before the
+#: daemon stops treating it as a client.
+#:
+#: ``_publish`` writes without ``drain()``, deliberately -- it is called
+#: from the turn's own event loop and awaiting one slow reader would stall
+#: the turn for every other client and for the engine. The cost of not
+#: awaiting is that a client which stops reading has its frames buffered
+#: in the daemon's memory forever: an attached TUI whose process is
+#: SIGSTOPped, a detached client on a dead network, a script that opened
+#: the socket and walked away. Unbounded, that is the daemon's memory as a
+#: function of somebody else's inattention.
+#:
+#: The bound is read off the transport's OWN write buffer rather than kept
+#: in a second queue in front of it: the transport already counts exactly
+#: this, and a queue of our own would only move the same bytes one layer
+#: up while adding a pump task that can reorder them. Past the bound the
+#: client is DROPPED (``_drop_client``, which closes it and re-arms the
+#: linger) -- a client this far behind has already lost the stream's
+#: ordering guarantee, and the replay ring is how it catches up when it
+#: reattaches.
+CLIENT_WRITE_BUFFER_MAX = 8 * 1024 * 1024
+
 DEFAULT_LINGER_SECS = 120.0
 # A freshly spawned daemon that NO client has attached to yet gets this
 # claim window (>= spawn_daemon's own wait) before giving up, regardless of
@@ -341,6 +379,24 @@ def daemon_socket_path(session_id: str) -> Path:
     return runtime_dir() / f"daemon-{session_id[:8]}-{os.getpid()}.sock"
 
 
+def _write_buffer_size(writer: asyncio.StreamWriter) -> int:
+    """How many bytes are queued but unsent for this client, or 0 when the
+    transport cannot say.
+
+    0 on an unknown transport rather than a large number: this value gates
+    a DROP, and a transport that does not report its buffer is not evidence
+    that a client is misbehaving. Test doubles and non-socket transports
+    land here."""
+    transport = getattr(writer, "transport", None)
+    sizer = getattr(transport, "get_write_buffer_size", None)
+    if not callable(sizer):
+        return 0
+    try:
+        return int(sizer())
+    except Exception:  # noqa: BLE001 -- a transport mid-close counts as 0
+        return 0
+
+
 class SessionDaemon:
     """One detachable session: hosts an engine, serves the socket.
 
@@ -374,13 +430,24 @@ class SessionDaemon:
     ) -> None:
         self.cwd = str(cwd or os.getcwd())
         self.model = model
-        self.session_id = session_id or str(uuid.uuid4())
+        # Both ids are checked HERE, at the one door argv comes through
+        # (``__main__`` below hands ``--session-id``/``--resume`` straight
+        # to this constructor). Downstream every one of them becomes a
+        # filename -- the transcript ``<id>.jsonl``, the registry entry
+        # ``<id>.json``, the peer socket ``peer-<id[:8]>-<pid>.sock``, the
+        # daemon log -- so an id that is not a name would put this
+        # session's files wherever it pointed. A ValueError here refuses
+        # to start the daemon, which is the correct outcome: there is no
+        # partial version of "run as this session".
+        self.session_id = (
+            require_session_id(session_id) if session_id else str(uuid.uuid4())
+        )
         # v0.56.0 (/resume): this daemon CONTINUES an existing conversation
         # rather than starting one. The id is not new -- see spawn_daemon,
         # which passes the SAME string as both session_id and resume, so
         # the transcript file, the registry entry and the /search row all
         # stay the one session they already were.
-        self.resume = resume or None
+        self.resume = require_session_id(resume, "resume id") if resume else None
         # Item S #1 (`doxa new --branch <name>`): the ref the session's OWN
         # worktree forks from, plumbed here from spawn_daemon's subprocess
         # arg. cli.py has already validated it exists before ever spawning
@@ -819,6 +886,12 @@ class SessionDaemon:
             if writer is exclude:
                 continue
             try:
+                if _write_buffer_size(writer) > CLIENT_WRITE_BUFFER_MAX:
+                    # Not reading, and far enough behind that continuing to
+                    # buffer for it is this daemon's memory rather than
+                    # that client's problem. See CLIENT_WRITE_BUFFER_MAX.
+                    self._drop_client(writer)
+                    continue
                 writer.write(payload)
             except Exception:
                 self._drop_client(writer)
@@ -1069,19 +1142,20 @@ class SessionDaemon:
             # no reconnect and nothing in the ring disturbed.
             #
             # The DAEMON owns the operation; the client sends a name.
-            # SessionEngine.set_permission_mode validates it here rather
-            # than trusting the caller, which matters more on this path
-            # than on the in-process one: a socket is reachable by
-            # something that is not this TUI. That validation is NOT the
-            # confirmation gate, though -- the confirmation is a UI act
-            # and lives with the UI (``_cmd_mode``). A daemon cannot show
-            # a dialog, and pretending otherwise by refusing gated modes
-            # here would only mean a detached session could never reach
-            # one at all.
+            # SessionEngine.set_permission_mode validates the NAME; this
+            # method decides whether THIS connection, right now, may
+            # escalate into a gated one -- see _gated_mode_refusal. A
+            # daemon still cannot show a confirmation dialog, so it does
+            # not pretend to: it narrows the gated modes to the two
+            # conditions under which the confirmation the TUI showed is
+            # the only explanation for the request.
+            wanted = str(params.get("mode") or "")
+            refusal = self._gated_mode_refusal(wanted, writer)
+            if refusal is not None:
+                await self._reply(writer, req_id, ok=False, error=refusal)
+                return
             try:
-                mode = await self.engine.set_permission_mode(
-                    str(params.get("mode") or "")
-                )
+                mode = await self.engine.set_permission_mode(wanted)
             except Exception as exc:  # noqa: BLE001 -- the client shows it
                 await self._reply(writer, req_id, ok=False,
                                   error=f"{type(exc).__name__}: {exc}")
@@ -1333,6 +1407,52 @@ class SessionDaemon:
             await self._reply(writer, req_id, ok=False,
                               error=f"unknown method: {method!r}")
 
+    def _gated_mode_refusal(
+        self, wanted: str, writer: asyncio.StreamWriter
+    ) -> "str | None":
+        """Why this connection may not escalate into ``wanted`` right now,
+        or None when it may.
+
+        Two conditions, both of which an escalation into
+        :data:`GATED_SOCKET_MODES` must satisfy:
+
+        * **The connection completed the attach handshake.** A client is in
+          ``_clients`` only after it sent an ``attach`` frame
+          (``_handle_frame``), which is what ``EngineClient.start`` does
+          before it can call anything. A bare connection that reads the
+          hello and issues a ``call`` has skipped it, and a gated mode is
+          the one operation where "some process on this machine opened the
+          socket" is not a good enough account of who asked.
+        * **No turn is running and none is queued.** The model runs only
+          inside a turn, so a session that is mid-turn is exactly the
+          window in which a request to stop asking about tool calls did
+          not come from the person at the keyboard. A user who wants the
+          mode changed can change it when the turn ends; a turn cannot
+          wait for the user, which is why the refusal goes this way round.
+
+        Neither condition applies to a DE-escalation or to a no-op: the
+        gate is on entering a gated mode, and getting out of one must
+        never be the operation that is hard to perform. Nothing here is
+        the confirmation dialog -- that is a UI act and still lives in
+        ``doxa.session.commands._cmd_mode``; this is what makes the dialog
+        the only remaining way a gated mode gets chosen.
+        """
+        if wanted not in GATED_SOCKET_MODES:
+            return None
+        if wanted == getattr(self.engine, "permission_mode", None):
+            return None  # already there: not an escalation
+        if writer not in self._clients:
+            return (
+                f"{wanted} needs an attached client; this connection never "
+                "sent an attach frame"
+            )
+        if self._running() or self._queued_count():
+            return (
+                f"{wanted} cannot be set while a turn is running or queued; "
+                "let the session go idle and ask again"
+            )
+        return None
+
     def _running(self) -> bool:
         """Is ANY turn running in this session -- this daemon's or the
         engine's own.
@@ -1540,7 +1660,11 @@ def spawn_daemon(
     import subprocess
     import time as _time
 
-    session_id = resume or str(uuid.uuid4())
+    # Checked before it becomes four filenames (the log below, the
+    # registry entry this function polls for, and the child's own
+    # transcript and socket) -- see SessionDaemon.__init__, which checks
+    # the same two ids again on the far side of argv.
+    session_id = require_session_id(resume, "resume id") if resume else str(uuid.uuid4())
     reg = registry_dir(env)
     log_path = runtime_dir(env) / f"daemon-{session_id[:8]}.log"
     cmd = [

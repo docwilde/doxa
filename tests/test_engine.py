@@ -1052,3 +1052,43 @@ async def test_a_turn_that_raises_does_not_leave_the_engine_busy_forever(tmp_pat
     assert third[0].type == "turn_started"
     assert third[-1].type == "turn_done"
     assert not third[-1].data.get("is_error")
+
+
+@pytest.mark.asyncio
+async def test_a_queued_turn_leaves_no_idle_gap_when_the_one_before_it_ends(
+    tmp_path,
+):
+    """Panel finding 8. ``_advance_queue`` runs inside send()'s ``finally``,
+    which has just cleared ``_turn_running``, and it used to schedule the
+    next turn as a task without setting the flag back -- so between that
+    ``finally`` and the task's first step the loop was free to run
+    anything, and everything it ran saw a session with a turn pending as
+    IDLE. The daemon's ``running`` said no, the fleet's quiescence wait
+    said finished, and a concurrent send() started a second turn beside
+    this one.
+
+    Asserted across ``_advance_queue`` itself, with NO await in between:
+    the gap is exactly one synchronous call wide, so an end-to-end test
+    would be racing the very scheduling slot it is trying to observe."""
+    gate = asyncio.Event()
+    engine = SessionEngine(
+        cwd=str(tmp_path), client_factory=_paced_client_factory(gate),
+    )
+    await engine.start()
+    try:
+        engine._prompt_queue.enqueue("queued")
+        assert engine.turn_running is False
+
+        engine._advance_queue()  # what send()'s finally calls
+
+        assert engine.turn_running is True, (
+            "a queued turn was scheduled and the session read as idle"
+        )
+        # The task really was created, and it is the one that clears the
+        # flag again -- so this is not a flag set and forgotten.
+        assert engine._queued_turn_task is not None
+        gate.set()
+        await asyncio.wait_for(engine._queued_turn_task, 5)
+        assert engine.turn_running is False
+    finally:
+        await engine.finalize()

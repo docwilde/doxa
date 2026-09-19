@@ -46,9 +46,13 @@ Boundaries used, and why:
   already denied) returns a bare allow, unchanged from today's silent
   pass-through -- the callback is invoked for every tool call the PreToolUse
   hook didn't deny, so defaulting to allow is what keeps this addition
-  zero-regression rather than a new prompt on every tool call. See
-  ``_on_can_use_tool`` below and the queue item 5 task report for the
-  exact SDK source this reads (installed ``claude_agent_sdk`` package,
+  zero-regression rather than a new prompt on every tool call. A call
+  that DID reach one of the two asking branches and could not get an
+  answer is DENIED, never allowed -- "the human was not asked" is not
+  "the human said yes"; see ``_on_can_use_tool``. Every OTHER call
+  reaching this callback returns a bare allow. See ``_on_can_use_tool``
+  below and the queue item 5 task report for the exact SDK source this
+  reads (installed ``claude_agent_sdk`` package,
   ``_internal/query.py``/``types.py``).
 * Native tools -- ``doxa.operators``' registry, projected to an IN-PROCESS
   SDK MCP server (``create_sdk_mcp_server``, PHASE0 SS6: the SDK's own
@@ -94,6 +98,7 @@ from . import operators as operators_mod
 from . import peerdelivery as peerdelivery_mod
 from . import peerledger as peerledger_mod
 from . import peers as peers_mod
+from .identity import require_session_id
 from .promptqueue import PromptQueue, PromptQueueFull
 # Imported for ONE constant (CLAUDE_PROVIDER_ID, published as
 # PeerInfo.provider at connect) -- doxa.providers costs nothing at import
@@ -375,6 +380,30 @@ def bypass_arming_enabled() -> bool:
     can retrofit it."""
     raw = config_mod.raw("DOXA_ALLOW_BYPASS").strip()
     return bool(raw) and raw.lower() not in ("0", "false", "no", "off")
+
+
+def _no_answer_deny(exc: BaseException) -> "PermissionResultDeny":
+    """The refusal :meth:`SessionEngine._on_can_use_tool` returns when it
+    could not obtain the user's decision.
+
+    Its own function so the two asking branches cannot drift apart, and so
+    the reason reaches the model rather than only the log: the message is
+    what the CLI hands back as the tool result, and a refused call whose
+    stated reason is "no answer" is something the model can act on --
+    ask again in words, or do something else -- where a bare denial is
+    not. The exception's TYPE and text are included; the class name alone
+    would not distinguish a dead client from a dialog bug.
+
+    Only ``Exception`` reaches here. ``CancelledError`` is a
+    ``BaseException`` and stays uncaught on purpose: a session tearing
+    down must be able to cancel the coroutine awaiting the answer, not
+    receive a synthesised tool result from it. The SDK's own behaviour for
+    a callback that raises is to fail the tool call -- the same closed
+    direction this function takes deliberately."""
+    reason = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    return PermissionResultDeny(
+        message=f"no answer: {reason}", interrupt=False,
+    )
 
 
 def available_modes(armed: bool) -> "tuple[str, ...]":
@@ -1411,7 +1440,18 @@ class SessionEngine:
     ) -> None:
         self.cwd = cwd
         self.model = model
-        self.session_id = session_id or str(uuid.uuid4())
+        # Checked, not just minted: this id becomes `<id>.jsonl` below and
+        # `peer-<id[:8]>-<pid>.sock` in PeerHost. The daemon checks it too
+        # (SessionDaemon.__init__) and is the only production caller that
+        # supplies one -- this is the invariant stated where the path is
+        # actually built. See doxa.identity.valid_session_id.
+        self.session_id = (
+            require_session_id(session_id) if session_id else str(uuid.uuid4())
+        )
+        # The spend ceiling, RESOLVED ONCE, here -- see budget_ceiling for
+        # why a per-turn read was a ceiling the capped session could raise
+        # by writing the config file it was read from.
+        self._budget_ceiling: "float | None" = budget_mod.session_ceiling()
         # v0.56.0 (session resume): the id of the conversation this engine
         # CONTINUES rather than starts. Not a second id -- a resumed
         # session keeps the id it is resuming (see _build_options), so
@@ -1939,16 +1979,36 @@ class SessionEngine:
     ) -> PermissionResult:
         """The ``can_use_tool`` callback -- see the module docstring's
         "Interactive permission" bullet for the two cases this actually
-        handles and why every other call defaults to allow. Never denies
-        via a raised exception: a bug in here must degrade to "let the
-        call through" (the SDK's own default when the callback errors is
-        to fail the tool call outright, which would turn a UI bug into a
-        stuck session), so both branches are wrapped."""
+        handles and why every other call defaults to allow.
+
+        **A call that reaches one of the two asking branches is never
+        allowed without an answer.** Those branches run only for a call
+        the CLI itself would have stopped to ask a human about, so an
+        exception on the way to the answer -- the client gone, the pane
+        dead, a bug in the dialog, ``_wait_for_answer`` cancelled -- means
+        the human was not asked, and "not asked" is not "approved". The
+        failure returns :class:`PermissionResultDeny` naming the reason.
+
+        This replaces an earlier allow-on-exception, whose stated worry
+        was that a UI bug would turn into a stuck session. It does not: a
+        deny is an ordinary tool result. The model reads the refusal and
+        carries on, exactly as it does for the decline path
+        ``_ask_user_question`` already returns, and the reason travels in
+        the message so the failure is visible in the transcript rather
+        than silent. A wedged session and an unapproved tool call are not
+        equally bad outcomes, and only one of them is recoverable by the
+        person watching.
+
+        The third branch -- nothing in ``context`` populated, which is the
+        common case -- still returns a bare allow. That is the CLI saying
+        it had nothing to ask about, not an answer this callback failed to
+        get."""
         if tool_name == "AskUserQuestion":
             try:
                 return await self._ask_user_question(tool_input, context)
-            except Exception:
-                return PermissionResultAllow()
+            except Exception as exc:  # noqa: BLE001 -- see the docstring:
+                # no answer is a denial, never an allow.
+                return _no_answer_deny(exc)
         if context.title or context.display_name or context.decision_reason:
             # The CLI only populates these for a call it would genuinely
             # have shown its own interactive permission prompt for --
@@ -1957,8 +2017,8 @@ class SessionEngine:
             # that flows through silently today gains a new prompt.
             try:
                 return await self._request_permission(tool_name, tool_input, context)
-            except Exception:
-                return PermissionResultAllow()
+            except Exception as exc:  # noqa: BLE001 -- same rule.
+                return _no_answer_deny(exc)
         return PermissionResultAllow()
 
     async def _wait_for_answer(self, kind: str, data: dict) -> dict:
@@ -3041,6 +3101,15 @@ class SessionEngine:
         self._peer_queue.put_nowait(EngineEvent("prompt_dequeued", {
             "id": item.id, "text": item.text,
         }))
+        # Set HERE, synchronously, exactly as _on_peer_frame does one
+        # screen up and for one more reason than the race it names. This
+        # call site is send()'s ``finally``, which has just cleared the
+        # flag -- so between this line and the task's first step the loop
+        # is free to run anything, and everything it might run reads a
+        # session that is about to start a turn as IDLE. The daemon's
+        # ``running`` says no, its quiescence wait says finished, and a
+        # concurrent send() starts a second turn beside this one.
+        self._turn_running = True
         self._queued_turn_task = asyncio.ensure_future(
             self._run_queued_turn(item.text)
         )
@@ -3049,7 +3118,13 @@ class SessionEngine:
         """One dequeued prompt's turn, run and published exactly like
         _advance_queue's docstring describes -- the SAME shape send()
         itself takes, minus the direct caller send() has and this does
-        not."""
+        not.
+
+        Both callers set ``_turn_running`` before creating the task, so
+        the assignment below is a re-assertion rather than the first one.
+        Kept because this coroutine owns clearing the flag on every exit,
+        and a method that clears a flag it never sets is one edit away
+        from clearing one that was never set."""
         self._turn_running = True
         try:
             async for ev in self._send_turn(prompt):
@@ -3105,12 +3180,20 @@ class SessionEngine:
     def budget_ceiling(self) -> "float | None":
         """This session's spend ceiling in dollars, or None for none.
 
-        Read through :func:`doxa.budget.session_ceiling` on every call
-        rather than captured at connect, and that is what makes "raise it
-        and continue" true: a session stopped at its ceiling is stopped,
-        not finished, so a new number in the environment or the config file
-        reaches the very next prompt without restarting anything."""
-        return budget_mod.session_ceiling()
+        THE SNAPSHOT taken in ``__init__``, not a fresh read. It used to
+        be read on every call, which made "raise it and continue" true --
+        and made it true for the capped session too: ``~/.doxa/config.toml``
+        is an ordinary same-user file and this session has file tools, so
+        a ceiling re-read per turn is a ceiling its own subject can raise
+        between turns, silently, with no record anywhere but the file's
+        mtime. A limit a limited party can lift is not a limit.
+
+        Env still beat the file when the snapshot was taken (that is
+        :func:`doxa.config.raw`'s own order), so the fleet's per-run
+        environment still sets a ceiling for the sessions it spawns.
+        Raising a RUNNING session's ceiling now costs a new session. See
+        :mod:`doxa.budget`'s "CAPTURED AT SESSION START" paragraph."""
+        return self._budget_ceiling
 
     def _budget_refusal(self, prompt: str) -> "dict[str, Any] | None":
         """The ``turn_refused`` payload for a turn that must not start, or
@@ -3517,11 +3600,28 @@ class SessionEngine:
         is refused rather than forwarded, since the CLI's own reaction to
         an invalid mode is not something DOXA should be discovering
         mid-session. **Refusing is not the security boundary** -- every
-        one of the six is accepted here, gated or not. The boundary is
-        that nothing reaches this method with a gated mode except a path
-        that has already shown the user a confirmation naming what stops
-        happening; see :func:`next_cycle_mode` for the hotkey's half of
-        that and ``_cmd_mode`` for the command's.
+        one of the six is accepted here, gated or not.
+
+        The boundary is what each CALLER is allowed to hand this method.
+        In-process, that is a path which has already shown the user a
+        confirmation naming what stops happening: see
+        :func:`next_cycle_mode` for the hotkey's half and ``_cmd_mode``
+        for the command's. Over the daemon socket, a dialog is not
+        available, so ``SessionDaemon._gated_mode_refusal`` substitutes
+        the two conditions under which the dialog is the only account of
+        the request: the caller completed the attach handshake, and no
+        turn is running or queued. The second is what keeps a MODEL out --
+        a model acts only inside a turn, and a turn is exactly when the
+        socket is refused.
+
+        What stays inside the boundary, by construction and not by
+        oversight: a process running as the same user, on an idle
+        session, through an attached client. The socket is 0600 in a 0700
+        runtime dir, so that process already has the user's uid -- it can
+        read the session's transcript, sign its git commits and write its
+        ssh config. Same-user idle-time access is the boundary every 0600
+        socket has; nothing here narrows it further and nothing here
+        pretends to.
 
         Returns the mode now in force. Raises RuntimeError when the
         session cannot switch (not connected, or a client without the

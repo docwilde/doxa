@@ -877,3 +877,25 @@ def test_a_line_told_the_row_it_already_shows_writes_nothing():
                      marks=("-attention",)))
     assert "-attention" in writes and "-working" in writes
     assert line.has_class("-attention") and not line.has_class("-working")
+
+
+def test_a_session_title_of_rich_markup_paints_literally():
+    """A rail row's text is a session title, derived from the session's
+    own first prompt -- so a model writes it. The line used to render with
+    markup on, so ``[bold red]done[/]`` painted as markup and an
+    unbalanced bracket raised MarkupError on a row the user cannot then
+    read. ``_text`` already promised "everything this string says, it says
+    in characters"; the widget now agrees."""
+    from textual.visual import visualize
+
+    line = SidebarLine(
+        Row(Row.SESSION, "[bold red]done[/] and [unbalanced", session_id="abc")
+    )
+    assert line._render_markup is False
+
+    # What the widget will actually paint. With markup on, Rich eats the
+    # tags (and chokes on the stray bracket); with it off, the title is
+    # the characters it is made of.
+    painted = visualize(line, line._content, markup=line._render_markup).plain
+    assert "[bold red]done[/]" in painted
+    assert "[unbalanced" in painted

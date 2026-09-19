@@ -421,3 +421,62 @@ async def test_no_dialog_means_focus_is_left_alone(tmp_path, monkeypatch):
         await pilot.click(block_list)
         await pilot.pause()
         assert app.focused is block_list
+
+
+# =======================================================================
+# The asking party does not get to paint the dialog (panel finding 2)
+# =======================================================================
+
+
+@pytest.mark.asyncio
+async def test_rich_markup_in_a_question_or_a_title_renders_literally(
+    tmp_path, monkeypatch,
+):
+    """Everything this popup shows came from outside it: the heading is a
+    CLI permission title, a tool input summary, or a spawned child's
+    verbatim task text; the labels are the model's own AskUserQuestion
+    options. An Option renders markup, so an unescaped ``[bold red]`` was
+    the party BEING GATED choosing how its own gate paints, and an
+    unbalanced bracket raised MarkupError instead of showing the question
+    at all."""
+    engine = FakeEngine([])
+    monkeypatch.setattr("doxa.app.notify_mod.notify", lambda *a, **k: None)
+    app = DoxaApp(
+        cwd=str(tmp_path),
+        engine_factory=lambda: engine, new_session_factory=lambda: engine,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        pane = app.active_pane
+        engine.push_peer_event(EngineEvent("needs_input", {
+            "id": "req-x", "kind": "ask_user", "tool_name": "AskUserQuestion",
+            "questions": [{
+                "question": "which color?",
+                "header": "[bold red]Pick[/] one [unbalanced",
+                "options": [{"label": "[blink]Red", "description": "[dim]warm"}],
+                "multiSelect": False,
+            }],
+        }))
+        assert await _wait(pilot, lambda: _popup(pane).is_open)
+
+        popup = _popup(pane)
+        shown = "\n".join(str(opt.prompt) for opt in popup._options)
+        # The model's own option text, and the heading it chose with it.
+        assert "\\[bold red]Pick\\[/] one \\[unbalanced" in shown
+        assert "\\[blink]Red" in shown
+        assert "\\[dim]warm" in shown
+        await pilot.press("escape")
+        assert await _wait(pilot, lambda: _popup(pane).is_open is False)
+
+        # And the permission branch, whose heading is a CLI-supplied title
+        # plus a tool INPUT summary -- the model writes the input.
+        engine.push_peer_event(EngineEvent("needs_input", {
+            "id": "req-y", "kind": "permission", "tool_name": "Bash",
+            "input_summary": "Bash echo [bold red]owned[/]",
+            "title": "Claude wants to run echo [green]x",
+            "display_name": "Run command", "description": None,
+        }))
+        assert await _wait(pilot, lambda: _popup(pane).is_open)
+        heading = str(_popup(pane)._options[0].prompt)
+        assert "\\[green]x" in heading
+        assert "\\[bold red]owned\\[/]" in heading

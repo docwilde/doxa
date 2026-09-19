@@ -148,7 +148,10 @@ class EngineClient:
         self._reader_task: asyncio.Task | None = None
         self._req_ids = itertools.count(1)
         self._pending: dict[int, asyncio.Future] = {}
-        self._turn_queue: asyncio.Queue[EngineEvent] = asyncio.Queue()
+        # ``None`` is the CLOSED sentinel, the same shape ``_oob_queue``
+        # uses: a consumer parked in ``get()`` when the socket dies has to
+        # be woken by something, and nothing else ever arrives.
+        self._turn_queue: "asyncio.Queue[EngineEvent | None]" = asyncio.Queue()
         self._oob_queue: asyncio.Queue[EngineEvent | None] = asyncio.Queue()
         self._active_turn: str | None = None
         self._peers: list[PeerInfo] = []
@@ -248,6 +251,13 @@ class EngineClient:
                 fut.set_exception(EngineClientError("connection closed"))
         self._pending.clear()
         self._oob_queue.put_nowait(None)  # end the peer_events iterator
+        # And the TURN queue, which had no such wake-up: a ``send()``
+        # parked on ``_turn_queue.get()`` mid-turn waited for a
+        # ``turn_done`` that a closed socket can never deliver. Pending
+        # RPCs were failed and ``peer_events`` was ended, so closing
+        # during a turn hung exactly one caller -- the one a user is
+        # watching.
+        self._turn_queue.put_nowait(None)
 
     # -- wire --------------------------------------------------------
 
@@ -420,6 +430,8 @@ class EngineClient:
             return
         while True:
             ev = await self._turn_queue.get()
+            if ev is None:  # _close(): the socket went while this turn ran
+                raise EngineClientError("connection closed mid-turn")
             yield ev
             # turn_done is how a turn that RAN ends; turn_refused is how
             # one that was never allowed to start ends (doxa.budget -- the
@@ -464,7 +476,7 @@ class EngineClient:
         the public door to the queue that :meth:`send` otherwise owns."""
         if self._closed and self._turn_queue.empty():
             return None
-        return await self._turn_queue.get()
+        return await self._turn_queue.get()  # None once _close() has run
 
     async def list_queue(self) -> list[dict]:
         """Engine parity for :meth:`doxa.engine.SessionEngine.list_queue`

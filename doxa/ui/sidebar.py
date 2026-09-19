@@ -478,7 +478,15 @@ class SidebarLine(Static):
     paint hook and must return a ``Visual``."""
 
     def __init__(self, row: Row) -> None:
-        super().__init__("")
+        # markup=False, and :meth:`_text` says why it is safe: this line
+        # says everything it says in characters. The row text is a session
+        # title -- derived from the session's own first prompt, so a model
+        # writes it -- and a title of `[bold red]done[/]` painting as
+        # markup, or an unbalanced bracket raising MarkupError, is a rail
+        # row that renders something other than the title it stands for.
+        # Static.update() honours the constructor's flag, so every later
+        # rewrite in set_row is covered by this one argument.
+        super().__init__("", markup=False)
         # Deliberately NOT ``self.row = row`` before the call below:
         # :meth:`set_row` short-circuits on a row it is already showing,
         # so seeding the attribute here would skip the one write that

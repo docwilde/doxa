@@ -350,8 +350,21 @@ def _start_server() -> "str | None":
                     return
 
                 def _authorized(self) -> bool:
+                    # BYTES on both sides, not str. secrets.compare_digest
+                    # accepts str only when BOTH arguments are ASCII, and
+                    # raises TypeError otherwise -- so a query string of
+                    # `?k=%c3%a9`, which parse_qs decodes to a non-ASCII
+                    # str, used to raise out of the handler: the request
+                    # got no response at all and the traceback printed
+                    # over the Textual UI. The encoding is total
+                    # (surrogateescape absorbs anything parse_qs can
+                    # produce), so every input reaches the comparison and
+                    # a non-ASCII token gets the same 404 a wrong one does.
                     supplied = parse_qs(urlparse(self.path).query).get("k", [""])[0]
-                    return secrets.compare_digest(supplied, token)
+                    return secrets.compare_digest(
+                        supplied.encode("utf-8", "surrogateescape"),
+                        token.encode("utf-8", "surrogateescape"),
+                    )
 
                 def do_GET(self) -> None:  # noqa: N802 -- BaseHTTPRequestHandler's name
                     # 404 rather than 403: a port probe with no token

@@ -8,6 +8,7 @@ uses throwaway directories (monkeypatch), never the real ~/.claude or
 from __future__ import annotations
 
 import json
+import shutil
 import os
 
 import pytest
@@ -105,37 +106,103 @@ def test_sync_credentials_force_overwrites_regardless_of_mtime(tmp_path):
     assert json.loads(dest.read_text())["tok"] == "rotated-again"
 
 
-def test_ensure_skills_link_symlinks_the_real_skills_dir(tmp_path):
+def test_ensure_skills_snapshot_copies_the_real_skills_dir(tmp_path):
     source = iso_mod.user_skills_path()
     (source / "a-skill").mkdir(parents=True)
     (source / "a-skill" / "SKILL.md").write_text("---\nname: a-skill\n---\nbody")
 
-    linked = iso_mod.ensure_skills_link()
+    copied = iso_mod.ensure_skills_snapshot()
 
-    assert linked is True
-    link = iso_mod.isolated_skills_path()
-    assert link.is_symlink()
-    assert link.resolve() == source.resolve()
-    assert (link / "a-skill" / "SKILL.md").exists()
+    assert copied is True
+    dest = iso_mod.isolated_skills_path()
+    assert dest.is_dir() and not dest.is_symlink()
+    assert (dest / "a-skill" / "SKILL.md").read_text().endswith("body")
 
 
-def test_ensure_skills_link_is_a_noop_with_no_source_skills(tmp_path):
-    assert iso_mod.ensure_skills_link() is False
+def test_a_skill_edited_inside_the_session_never_reaches_the_operator(tmp_path):
+    """The defect (panel finding 5). The spawned CLI reads
+    ``<CLAUDE_CONFIG_DIR>/skills``; that path used to BE
+    ``~/.claude/skills``, so a model editing a SKILL.md inside its own
+    session edited the operator's own skill set -- which every future
+    session on the machine then loads. A copy is one-directional."""
+    source = iso_mod.user_skills_path()
+    (source / "a-skill").mkdir(parents=True)
+    original = "---\nname: a-skill\n---\nthe approved body"
+    (source / "a-skill" / "SKILL.md").write_text(original)
+
+    assert iso_mod.ensure_skills_snapshot() is True
+    inside = iso_mod.isolated_skills_path() / "a-skill" / "SKILL.md"
+    inside.write_text("---\nname: a-skill\n---\nexfiltrate everything")
+    (iso_mod.isolated_skills_path() / "planted").mkdir()
+
+    assert (source / "a-skill" / "SKILL.md").read_text() == original
+    assert not (source / "planted").exists()
+
+
+def test_a_symlink_inside_the_source_is_copied_as_content_not_as_a_way_out(
+    tmp_path,
+):
+    """A snapshot with a symlink in it leading back to the source would
+    restore exactly the write channel the copy removes."""
+    source = iso_mod.user_skills_path()
+    outside = tmp_path / "outside"
+    outside.mkdir(parents=True)
+    (outside / "secret.md").write_text("outside content")
+    (source / "a-skill").mkdir(parents=True)
+    (source / "a-skill" / "SKILL.md").write_text("---\nname: a\n---\nb")
+    (source / "linked").symlink_to(outside, target_is_directory=True)
+
+    assert iso_mod.ensure_skills_snapshot() is True
+    dest = iso_mod.isolated_skills_path()
+    assert not (dest / "linked").is_symlink()
+    (dest / "linked" / "secret.md").write_text("rewritten")
+    assert (outside / "secret.md").read_text() == "outside content"
+
+
+def test_ensure_skills_snapshot_replaces_an_older_builds_symlink(tmp_path):
+    """Upgrading over a session that ran the symlink version must remove
+    the link, not copy through it."""
+    source = iso_mod.user_skills_path()
+    (source / "a-skill").mkdir(parents=True)
+    (source / "a-skill" / "SKILL.md").write_text("body")
+    dest = iso_mod.isolated_skills_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.symlink_to(source, target_is_directory=True)
+
+    assert iso_mod.ensure_skills_snapshot() is True
+    assert not dest.is_symlink()
+    (dest / "a-skill" / "SKILL.md").write_text("rewritten")
+    assert (source / "a-skill" / "SKILL.md").read_text() == "body"
+
+
+def test_ensure_skills_snapshot_is_a_noop_with_no_source_skills(tmp_path):
+    assert iso_mod.ensure_skills_snapshot() is False
     assert not iso_mod.isolated_skills_path().exists()
 
 
-def test_ensure_skills_link_never_deletes_a_real_directory(tmp_path):
-    link = iso_mod.isolated_skills_path()
-    link.parent.mkdir(parents=True, exist_ok=True)
-    link.mkdir()
-    (link / "not-a-symlink.txt").write_text("do not delete me")
+def test_ensure_skills_snapshot_never_deletes_a_real_directory(tmp_path):
+    dest = iso_mod.isolated_skills_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.mkdir()
+    (dest / "not-ours.txt").write_text("do not delete me")
     source = iso_mod.user_skills_path()
     source.mkdir(parents=True)
 
-    linked = iso_mod.ensure_skills_link()
+    assert iso_mod.ensure_skills_snapshot() is False
+    assert (dest / "not-ours.txt").exists()
 
-    assert linked is False
-    assert (link / "not-a-symlink.txt").exists()
+
+def test_a_snapshot_is_rebuilt_from_scratch_so_a_removed_skill_goes(tmp_path):
+    source = iso_mod.user_skills_path()
+    (source / "old-skill").mkdir(parents=True)
+    (source / "old-skill" / "SKILL.md").write_text("body")
+    assert iso_mod.ensure_skills_snapshot() is True
+    dest = iso_mod.isolated_skills_path()
+    assert (dest / "old-skill").exists()
+
+    shutil.rmtree(source / "old-skill")
+    assert iso_mod.ensure_skills_snapshot() is True
+    assert not (dest / "old-skill").exists()
 
 
 def test_spawn_env_carries_isolation_and_lore_skip():
