@@ -1,4 +1,4 @@
-# Fleets: N sessions, one prompt, one instant — and more than one machine
+# Fleets: N sessions, one task — symmetric or supervised — and more than one machine
 
 Three things landed together, because the experiment in
 [`plans/emergent-organization.md`](plans/emergent-organization.md) needs all
@@ -10,6 +10,19 @@ three and none of them is useful alone:
    a fleet and the fleets can see and message each other.
 3. **Memory as a per-agent variable** — `doxa.daemon --no-lore`, because a
    shared LORE store is a coordination channel the message ledger cannot see.
+
+A fourth came later and is deliberately **not** part of the experiment.
+`--supervisor` inverts a run: one session receives the operator's task and
+hands the pieces to the others over peer messages, because ordinary software
+work wants a head and the experiment wants none. It is the same harness —
+same barrier, same manifest, same teardown — with a different dispatch, so it
+lives inside section 1 rather than in a section of its own.
+
+This document was written about the symmetric shape and still is. Every
+sentence below that says *every session gets the identical prompt* is a
+statement about the **default** shape;
+[supervisor mode](#supervisor-mode-one-session-takes-the-task) is where each
+of those sentences stops being true, and says so.
 
 ---
 
@@ -77,9 +90,129 @@ approximation, in the order the properties matter:
 | | mechanism |
 |---|---|
 | **Nobody is prompted until everybody is armed** | every session is spawned *and* has a client attached before the first prompt frame is written. Absolute, not approximate: no session can begin work in a world where another does not yet exist. |
-| **The text is byte-identical** | one string, handed to every session unmodified. No per-session formatting exists in `FleetRun.dispatch` — "you are agent 7 of 32" would hand a participant its own position, and a position is a privilege. |
+| **The text is byte-identical** | one string, handed to every session unmodified. No per-session formatting exists in `FleetRun._dispatch_symmetric` — "you are agent 7 of 32" would hand a participant its own position, and a position is a privilege. |
 | **Dispatch order is randomised per run** | drawn from the run seed, so slot 0 is not systematically first across a cell's five replications. |
 | **The residual spread is measured** | `dispatch_spread_s` in the manifest. Observed: **1–11 ms across N = 4…32** on a 16-core laptop. A paper states that number rather than claiming simultaneity. |
+
+### Supervisor mode: one session takes the task
+
+Everything above is an instrument, and an instrument is the wrong tool for a
+refactor. Four agents each deciding independently how to rename a symbol is
+four conflicting answers and three wasted sessions — the symmetry that makes
+the experiment interpretable is exactly what makes ordinary work collide.
+`--supervisor <engine[:model]>` is the second shape: the operator's prompt
+reaches **one** session, which divides the job, hands the pieces out over peer
+messages, and integrates the replies.
+
+```bash
+uv run python -m doxa.fleet \
+    --supervisor claude:opus --pool 'claude:sonnet@1' -n 3 \
+    --run-budget 5 --root /tmp/dx \
+    --prompt "$(cat task.txt)"
+```
+
+The flag takes **one** `engine[:model]`, parsed by the same grammar one
+`--pool` entry uses, and a comma in it is refused rather than truncated — a
+run has exactly one supervisor. The supervisor is **not drawn from the pool**:
+`--pool` deals the workers and nothing else, so the coordinator's model is a
+choice rather than a draw, which is what lets a strong model supervise cheap
+ones.
+
+**`-n` counts workers.** `-n 3 --supervisor claude:opus` starts four sessions:
+the supervisor at **slot 0**, workers at slots 1, 2 and 3. Slot 0 is fixed
+rather than last so that `/fleet attach 0` reaches the supervisor whatever `-n`
+was. Everything that counts sessions counts four — `check_capacity`'s
+arithmetic, the `--run-budget` division into per-session shares, and teardown's
+evidence that nothing survived. `FleetSpec.session_count` is that number, and
+the manifest records it as `spec.sessions`.
+
+`--memory-off K` draws from the **workers** only, and the supervisor always
+keeps memory. It is the session that has to hold the shape of the whole job
+across every worker's reply, which is the continuity a memory-off agent does
+not have; a run that silently dealt the coordinator no memory would fail as
+*the supervisor forgot what it had already handed out*. The draw is otherwise
+the same seeded one — `assign_for` shifts the symmetric assignment to slots
+1..n and inserts the supervisor at 0, so one seed deals the same workers in
+either shape.
+
+**The briefings, and why they are turns.** The barrier is unchanged: nothing
+is prompted until every session is armed. What changes is the order after it,
+and **the order is the protocol** — every
+worker is briefed *and has acknowledged the write* before the supervisor is
+prompted at all, so there is no instant at which the supervisor could hand a
+task to a session that has not yet been told a task is coming. It is
+deterministic (workers in slot order, supervisor last) and lands in the
+manifest as `dispatch_order`, the same field the shuffle writes. Deterministic
+rather than shuffled for the opposite of the shuffle's reason: a protocol whose
+order varies per run is a protocol whose failures do not reproduce.
+
+| gets | what `doxa.fleet` composes |
+|---|---|
+| **each worker** (`worker_briefing`) | its own slot and session id, its supervisor's session id and model, that tasks arrive as peer messages from that session and start a turn, that it carries each one out *in this checkout* and reports back with `peer_send` to that id, and that it does nothing until a task arrives. It closes `reply now with a single line: ready`. |
+| **the supervisor** (`supervisor_briefing`) | the roster — every worker's slot, session id, engine and model — the protocol from the other side, that each worker has its own checkout and which branches and files each task should name, then `--- task ---` and the operator's prompt verbatim. |
+
+A worker is told **nothing about the job**. It has not seen the operator's
+prompt and cannot guess at it, which is the point: a worker that starts work it
+was not given is the failure this shape exists to remove. The closing `ready`
+is not ceremony either — it is the only evidence, in the run's own transcript,
+that a worker received its briefing and is listening.
+
+Both are **dispatched as turns**, through the same `FleetBackend.dispatch` the
+operator's own prompt goes through, rather than injected as a system preamble.
+A preamble would have to be plumbed through each of the four engines' own
+notion of one, would differ between them in ways nothing here could test, and
+would be invisible afterwards. A turn costs one short exchange per worker and
+buys a run whose entire instruction set is readable in the transcript.
+
+**Each session works in its own checkout.** `worktree_per_session` is on by
+default and a run's worktrees are rooted under the run's own `DOXA_HOME`, so
+every session that starts in a git repository already holds a git worktree of
+it on its own branch — two workers never edit one file in one tree. The
+manifest records each slot's effective `cwd`, read from the registry entry the
+daemon wrote, because nothing outside the run can find those worktrees by
+looking.
+
+**An interactive run has no prompt, and quiet does not end it.** `--prompt`
+is optional in supervisor mode and only there; a symmetric run without one is
+still refused in the same words. Omitting it starts the fleet, briefs the
+workers, and tells the supervisor that the operator will attach and give it
+the task. Such a run **is not ended by quiet**: every session goes idle
+seconds after being briefed, so the usual `--quiet-dwell` would tear the whole
+fleet down while the operator was still reading the tab. It runs until `/fleet
+stop` (or SIGINT), or until an explicitly passed `--quiescence-timeout` — which
+is why that flag's parser default is now unset rather than 1800 seconds:
+*asked for half an hour* and *asked for nothing* have to be different answers,
+and they are only different in this one shape.
+
+Because the shape needs somebody to attach, it is a **TUI shape**. `/fleet
+start --supervisor … -n 3` opens the run's tab and prints the exact line to run
+next:
+
+```
+/fleet attach 0
+```
+
+The attach is printed rather than performed, because at the instant the command
+returns nothing has spawned yet and the supervisor has no socket — waiting for
+the spawn phase inside a slash command would hide the tab and swallow a
+capacity or budget refusal that belongs on its first line. `doxa-fleet`
+**refuses** an interactive run outright: that process blocks inside its own run
+for the duration and cannot attach to the session it just spawned, so it names
+the TUI instead of starting a fleet nobody can reach.
+
+**What the manifest records.** `mode` (`symmetric` or `supervisor`) and
+`interactive` sit at the top level, because every other field means something
+slightly different under the other one — `dispatch_order` is a shuffle in the
+first and a protocol in the second, `quiesced` is a measurement in the first
+and an impossibility in an interactive run. Beside them: a `supervisor` block
+naming its slot, session id, engine, model and worktree; a `role` on every slot
+and every assignment; `spec.sessions`; and `spec.quiescence_timeout_s` as it
+was actually in force. A manifest with no `mode` key predates the modes and is
+read as the symmetric run it was.
+
+The [manual's supervisor-mode section](manual.md#supervisor-mode) is the same
+material from the operator's side, with the `/fleet` verbs and the tab's mode
+line.
 
 ### Per-run isolation
 
@@ -121,7 +254,9 @@ N = 8                        ~4.8 GB
 19 GB of new anonymous memory on a 30 GB laptop is a swap storm rather than a
 fleet — a swapping fleet does not measure coordination, it measures paging.
 `check_capacity` refuses an N that does not fit and names the numbers;
-`--force` overrides and is recorded in the manifest.
+`--force` overrides and is recorded in the manifest. It counts every session
+the run starts, so a supervisor run is checked against `n + 1` — a
+coordinating session costs the same ~600 MB as a working one.
 
 ### What a run may spend
 
@@ -136,7 +271,8 @@ one, and the number an operator can reason about overnight is "this run
 may cost fifty dollars". It is enforced by division — each session is
 handed `run-budget / N` as its own `DOXA_SESSION_BUDGET_USD`, and N
 separately bounded sessions can together spend at most the total, because
-the bounds add.
+the bounds add. In a supervisor run N is `n + 1`: the supervisor spends
+too, and a ceiling that had not counted it would be one whole share short.
 
 `check_run_budget` **refuses a run that arms inbound turn-starting with no
 budget**, before any directory is made and long before any process is,
@@ -193,7 +329,9 @@ Every phase has a deadline and every deadline has an escalation.
 ### Reproducing a run
 
 The manifest carries the seed, the pool, the prompt and its sha256, and the
-assignment. `fleet.assign(n, pool, seed=…)` replays the draw exactly.
+assignment. `fleet.assign(n, pool, seed=…)` replays the draw exactly; for a
+supervisor run, `fleet.assign_for(spec)` replays the whole slot list, the
+supervisor at 0 included.
 
 ---
 
