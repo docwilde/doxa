@@ -96,12 +96,15 @@ spend, fake account numbers. See
   flashed on the status bar. An arriving message *starting* a turn is a
   second switch, also off.
 - **[A fleet, measured rather than managed.](docs/fleet.md)** `doxa-fleet`
-  spawns N sessions on one prompt at one moment, deals engines and models
-  from a pool, runs K without memory, splits a run budget, waits for quiet
-  and tears down. Clean to N=64 on Claude; a mixed pool of Codex, DeepSeek
-  and GLM ran, messaged across vendors and quiesced (see [Status](#status)).
-  `/fleet start` from any session opens the run in a tab; `/mesh` shows the
-  graph. What a slot can do depends on its engine:
+  — a real script entry since 1.14.0, not a name the prose used for
+  `python -m doxa.fleet` — spawns N sessions on one prompt at one moment,
+  deals engines and models from a pool, runs K without memory, splits a run
+  budget, waits for quiet and tears down. Clean to N=64 on Claude; a mixed
+  pool of Codex, DeepSeek and GLM ran, messaged across vendors and quiesced
+  (see [Status](#status)). `/fleet start|status|stop|runs|attach|mesh|detach`
+  runs the same harness from a session you are working in and watches it in
+  a read-only tab, and `/mesh [run-id]` graphs that run's ledger in a
+  browser. What a slot can do depends on its engine:
   [engine capabilities](docs/manual.md#engine-capabilities).
 - **[Or a fleet with a head, for ordinary work.](docs/manual.md#supervisor-mode)**
   `--supervisor claude:opus` makes one session the only one the prompt
@@ -169,6 +172,14 @@ binding yours cannot send.
 ![The right end of the status bar: 'peers 2 (1⌁)', then an up arrow with a filled lamp and a down arrow with a hollow one](assets/shots/peer-lights.png)
 
 *Two lamps beside the peer count, one per direction. Filled is traffic in the last four seconds, hollow is a channel that exists and is quiet — a filled glyph beside an outlined one, because a colour change alone survives neither peripheral vision nor a screenshot. They appear as a pair or not at all, so neither arrives by shifting the row sideways at the moment traffic does.*
+
+![A fleet tab headed 'fleet 20260919T113402-8c41 — finished' over 'mode symmetric': sixteen worker slots dealt claude, codex, deepseek and glm, three reading 'OFF' under mem, above 'dispatch spread 11 ms across 16 sessions', 'quiesced after 58s' and thirty ledger lines](assets/shots/fleet.png)
+
+*`/fleet start` spawns N sessions on one prompt at one instant and opens this tab: which shape the run is, what it was allowed to be, who was dealt what and in which role, how far apart the prompts landed, when it went quiet, what the agents said to each other, and whether teardown left anything running. This one is a symmetric run and says so; a `--supervisor` run names the slot holding the prompt on the same line. The tab reads the run's manifest and its ledger and never the run itself — so it still says all of that once the run's task has gone, and closing it ends the run unless you typed `/fleet detach`.*
+
+![The peer mesh in a browser under '9 sessions 32 messages 46 pairs 4 broadcasts': nine session nodes rimmed by engine colour, 'release notes' selected in white, and a side panel reading '/home/you/repo/doxa', 'claude · own turn running', '3 sent 10 received' above a feed of message bodies, one tagged BCAST to 8 recipients](assets/shots/mesh.png)
+
+*`/mesh` serves the peer ledger as a graph on loopback, gated by a token in the URL and off until you ask for it. An edge is a delivery that happened and its thickness is how many; a broadcast is drawn as one fan rather than as N sessions each deciding to speak, because the ledger records that difference rather than inferring it. Click a session and its own recent traffic opens beside the graph, bodies included. A graph is the one thing a terminal cannot draw honestly, so this view is a browser page — and the only asset here with no SVG twin.*
 
 ![The permission-mode chip cycling: grey 'default', teal 'plan', amber 'auto', red 'bypassPermissions'](assets/shots/permission-mode.gif)
 
@@ -353,17 +364,36 @@ run is interactive: the supervisor waits for you to attach to it, and
 does not end on quiet. [The manual has
 it](docs/manual.md#supervisor-mode).
 
+Since 1.14.0 the same harness has a front end in the TUI, and `doxa-fleet`
+is a script entry rather than a name this README used for `python -m
+doxa.fleet`. `/fleet start|status|stop|runs|attach|mesh|detach` reads the
+flags with the parser the shell reads them with — one grammar, so the two
+front ends cannot deal a different run from the same words, `--supervisor`
+included — and opens the run in a read-only tab: the capacity and budget
+arithmetic it was allowed to start under, which shape the run is and which
+slot holds the prompt, the assignment table with each slot's role, the
+dispatch spread, quiescence, the ledger tail and what leaked. That tab
+reads the run's manifest and ledger and never the run object, so it keeps
+working after the run's task has gone; closing it ends the run unless
+`/fleet detach` was typed, because a fleet keeps N daemons armed and
+spending with nobody typing. `/mesh [run-id]` serves that ledger as a
+graph on loopback behind a token, and a `⌗ mesh :<port>` chip sits on the
+status bar while it is up.
+
 Measured on 1.13.0: `--pool deepseek@1,glm@1,codex@1 -n 5` dealt two
 Codex, two DeepSeek and one GLM slot; all five spawned on their engine,
 exchanged 17 messages (DeepSeek and GLM sent `ready` to every peer and
 `ack` back across vendors; the Codex slots, which had no `peer_send`
 at 1.13.0, received six and sent none), quiesced in 37 s and left no
-process behind. A Codex model sends since 1.14.0: the sidecar forwards
-`peer_send` to its engine, which sends on the session's own limiter and
-ledger. Two limits remain, both stated by the harness itself: slots on
-codex, deepseek or glm report no dollar figure and are not bounded by
-`--run-budget` (`--allow-unbudgeted` is the switch that admits that); and
-a run's root must be a short path, because every session's socket lives
+process behind. A Codex model sends since 1.14.0: the MCP sidecar is
+spawned and killed per `codex exec` run, so it forwards `peer_send` over a
+per-session control socket to the engine, which sends on the session's own
+limiter and ledger — one limiter across turns, one row per send, and the
+lamps on the bar of the window that is watching. Two limits remain, both
+stated by the harness itself: slots on codex, deepseek or glm report no
+dollar figure and are not bounded by `--run-budget` (`--allow-unbudgeted`
+is the switch that admits that); and a run's root must be a short path,
+because every session's socket lives
 under it and `AF_UNIX` allows 108 bytes. [`docs/fleet.md`](docs/fleet.md) has the whole of it, including
 what the harness could not do at 128 sessions.
 
