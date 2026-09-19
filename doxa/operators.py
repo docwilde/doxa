@@ -885,18 +885,25 @@ def _peer_send_configured(ctx: "dict | None") -> bool:
     OFFERED, and a tool the model cannot see is a tool the model cannot
     call.
 
-    The SEAM half was added because the setting alone is not enough, and
-    the case is real rather than hypothetical: ``doxa.vendors``'
-    :class:`VendorEngine` (DeepSeek, GLM) runs a full peer layer -- it
-    hosts a ``PeerHost``, receives frames, publishes presence -- but has
-    no outbound path and wires no ``peer_send`` seam. With the setting on,
-    a DeepSeek session would have been offered a tool that could only ever
-    answer "this session has no outbound peer channel". That is a soft,
-    safe refusal, and it is still exactly the defect the configuredness
-    filter exists to prevent: an operator whose backend is not wired on
-    this host is never offered, because a tool the model can see but never
-    successfully call just burns a step. The vendor engine now says so by
-    omission instead."""
+    The SEAM half asks a different question: can this session send AT
+    ALL? Every DOXA engine that projects tools now answers yes.
+    ``doxa.engine``'s :class:`SessionEngine` and ``doxa.vendors``'
+    :class:`ChatApiEngine` (DeepSeek, GLM) each hold a
+    :class:`doxa.peerdelivery.PeerDelivery` -- one rate limiter, one
+    ledger, one send light -- and each names it here, so a DeepSeek
+    session with the setting on is offered a tool that really sends and
+    is charged and recorded exactly as a Claude one is. (``doxa.codex``
+    sends through the same object for ``/msg``, but projects no DOXA
+    tools of any kind -- a Codex model's tools live in the Codex CLI --
+    so this predicate never runs for it.)
+
+    The gate stays, because "every engine today" is not "every engine"
+    and the failure it prevents is concrete: with no seam the operator
+    can only ever answer "this session has no outbound peer channel",
+    which is a soft, safe refusal that still burns a step. A ctx built
+    without one -- a session whose tool surface failed to import, a
+    future engine that hosts no ``PeerHost`` -- says so by omission
+    rather than by offering a tool that cannot work."""
     if ctx is None:
         return True
     return peers_mod.peer_send_enabled() and bool(ctx.get("peer_send"))

@@ -127,6 +127,7 @@ from lore_core import store as lore_store
 from lore_core.config import PROJECTS_DIR, project_slug
 from lore_core.scrub import scrub_secrets
 
+from . import peerdelivery as peerdelivery_mod
 from . import peers as peers_mod
 from .engines import (
     DEEPSEEK_ENGINE_ID,
@@ -971,6 +972,31 @@ class ChatApiEngine:
         self.peer_error: "str | None" = None
         self._peer_queue: "asyncio.Queue[EngineEvent]" = asyncio.Queue()
         self._pending_peer_frames: list[dict] = []
+
+        # The turn this session is running right now, or None between
+        # turns. Minted in _send_turn and cleared by send()'s finally, and
+        # it exists for the ledger rather than for the engine: every peer
+        # message records the SENDER's turn context, so a send made
+        # outside any turn is recorded as idle instead of attributed to
+        # whichever turn happened to run last.
+        self._turn_id: "str | None" = None
+
+        # THE outbound peer path, the same object a Claude session holds
+        # (doxa/peerdelivery.py). Before this a vendor session called
+        # peers.send_message directly: no rate limit, no ledger row, no
+        # send light, so the mesh graph the experiment reads was missing
+        # every message a DeepSeek or GLM agent sent. Read callables
+        # rather than self, because the host is None until start() and
+        # None again after finalize(), the model changes under /model, and
+        # the turn id changes every turn.
+        self._peer_delivery = peerdelivery_mod.PeerDelivery(
+            session_id=self.session_id,
+            engine_id=self.spec.engine_id,
+            host=lambda: self.peer_host,
+            model=lambda: self.model,
+            turn_id=lambda: self._turn_id,
+            emit=self._peer_queue.put_nowait,
+        )
         self._gate: Any = None
         self._tools: "list[dict]" = []
         self._finalized = False
@@ -1085,6 +1111,13 @@ class ChatApiEngine:
                     # No channel to ask a human on and no spawn from this
                     # engine -- see spawn_sessions=False.
                     spawn_confirm=None,
+                    # The outbound seam, which this engine now has: the
+                    # same PeerDelivery /msg goes through, so a model send
+                    # and a human send are charged against one limiter and
+                    # land in one ledger. peer_send is still gated by the
+                    # user's own DOXA_AGENT_PEER_SEND -- the seam says the
+                    # engine CAN send, never that it may.
+                    peer_send=self._peer_delivery.tool_send,
                 ),
                 on_disable=self._on_tool_disabled,
             )
@@ -1095,6 +1128,7 @@ class ChatApiEngine:
             self._tools = operator_tools({
                 "belief_store": lore_store.db_connect,
                 "lore_root": self.lore_root,
+                "peer_send": self._peer_delivery.tool_send,
             })
         except Exception as exc:  # noqa: BLE001 -- an absent tool surface is
             # a narrower session, not a failed one, and it SAYS it is
@@ -1191,6 +1225,21 @@ class ChatApiEngine:
         }
 
     async def send(self, prompt: str) -> AsyncIterator[EngineEvent]:
+        """Public entry point for a typed prompt.
+
+        Thin on purpose: it exists so the turn id minted below is cleared
+        on EVERY exit, a cancelled turn included. A turn id that outlived
+        its turn would attribute the next idle send to a turn that has
+        ended -- in the peer ledger and in the rate limit's per-turn
+        bucket alike, which is the same failure
+        :meth:`doxa.engine.SessionEngine.send` clears it for."""
+        try:
+            async for event in self._send_turn(prompt):
+                yield event
+        finally:
+            self._turn_id = None
+
+    async def _send_turn(self, prompt: str) -> AsyncIterator[EngineEvent]:
         """One turn: as many model calls as the model's tool use needs.
 
         The turn is a LOOP, not a request, and that is the whole
@@ -1230,8 +1279,16 @@ class ChatApiEngine:
         # failing and a succeeding turn report the same number -- the
         # off-by-one CodexEngine fixed in v1.7.3, not repeated.
         self.num_turns += 1
+        # Whose turn this is, and what it is called. Read by two things
+        # that must agree: the rate limit's per-turn bucket and every peer
+        # ledger record a send made during this turn writes.
+        self._turn_id = uuid.uuid4().hex[:12]
         yield EngineEvent("turn_started", {
             "prompt": prompt, "peer_context": prompt_out is not prompt,
+            # The transcript's half of the same attribution: the id on
+            # this event and the id on every ledger record written during
+            # the turn are one string, so a reader can join them.
+            "turn_id": self._turn_id,
         })
 
         started = time.monotonic()
@@ -1617,16 +1674,19 @@ class ChatApiEngine:
         return len(self.list_peers())
 
     async def send_peer_message(self, target_prefix: str, text: str) -> Any:
-        if self.peer_host is None:
-            raise peers_mod.PeerSendError("peer layer is not running in this session")
-        peer = peers_mod.resolve_peer(self.peer_host.list_peers(), target_prefix)
-        await peers_mod.send_message(
-            peer.socket_path,
-            from_id=self.session_id,
-            from_title=self.peer_host.title,
-            body=text,
-        )
-        return peer
+        """``/msg``: one message to one peer, through the SAME outbound
+        path a Claude session uses (doxa.peerdelivery.PeerDelivery) --
+        charged against this session's send limit, written to the peer
+        ledger, and flashed on the status bar's send light.
+
+        It used to call peers.send_message here, which did none of those
+        three. Two consequences of the change are worth naming: the
+        addressee is now resolved against every live session rather than
+        this repo's, because addressing crosses repositories (see
+        PeerDelivery.addressable_peers), and the sender's repo now travels
+        with the frame so the reader can tell which project it is about.
+        """
+        return await self._peer_delivery.send_to(target_prefix, text)
 
 
 # -- the providers -----------------------------------------------------
