@@ -108,10 +108,15 @@ callable. Until that module lands the tool is simply not in
 ``tools/list`` -- ``operators._peer_send_configured`` sees no ``peer_send``
 key in the ctx and does not project it.
 
-STDERR IS CODEX'S TO READ. Nothing is written to it on the normal path.
-The disable callback writes one line, a fatal error writes one line, and
-``DOXA_MCP_DEBUG=1`` adds request-level lines for probing. No secret ever
-reaches it: results are not logged, only tool names and counts.
+STDERR GOES NOWHERE USEFUL, AND THAT IS MEASURED. Nothing is written to
+it on the normal path: the disable callback writes one line, a fatal
+error writes one line, and ``DOXA_MCP_DEBUG=1`` adds request-level lines
+for probing. No secret ever reaches it -- results are not logged, only
+tool names and counts. But a live run with the debug switch on put NONE
+of those lines in the 520 bytes ``codex exec`` wrote to its own stderr,
+and left no exec log under ``~/.codex/log``: Codex captures an MCP
+server's stderr and keeps it. So these lines are for someone driving this
+server directly (the suite does exactly that), not for DOXA's turn.
 """
 
 from __future__ import annotations

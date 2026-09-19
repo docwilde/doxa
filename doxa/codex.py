@@ -75,13 +75,38 @@ hands it on the server's environment, and executes every ``tools/call``
 through ``gate.execute``. So the allowed-set check, the never-raises
 contract and the two-strikes disable all apply to DOXA's tools. Two
 things are honestly different from the Claude engine and both are stated
-where they are read: the disable is per TURN, because Codex spawns the
-server per ``codex exec`` run and the tracker is session-scoped state in
-that run; and there is no ``tool_disabled`` EngineEvent, because the
-strike is counted in a child process -- the server writes one stderr line
-instead. Codex's OWN tools (its shell, its file edits) are not DOXA's to
-gate and never were: they never leave the CLI, and ``sandbox_mode`` plus
+where they are read:
+
+* the disable is per TURN, because Codex spawns the server per ``codex
+  exec`` run and the tracker is session-scoped state inside that run;
+* there is no ``tool_disabled`` EngineEvent, and it is not merely that
+  the strike is counted in a child process -- Codex CAPTURES an MCP
+  server's stderr and does not forward it to ``codex exec``'s own
+  stderr. Measured: a run with ``DOXA_MCP_DEBUG=1`` on the server put
+  nothing from the server in the 520 bytes ``codex exec`` wrote to
+  stderr, and ``~/.codex/log`` held no exec log at all. So the server's
+  one-line disable notice reaches whoever runs the server by hand, and
+  nobody else; what the MODEL sees -- the gate's refusal result -- is
+  the whole of the containment DOXA can observe here.
+
+Codex's OWN tools (its shell, its file edits) are not DOXA's to gate and
+never were: they never leave the CLI, and ``sandbox_mode`` plus
 ``approval_policy`` are the whole of DOXA's control over them.
+
+LIVE, 2026-09-19, ``codex-cli 0.144.4`` signed in with ChatGPT, against a
+throwaway ``LORE_ROOT`` seeded with one ``USER.md`` line. First turn::
+
+    {"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call",
+     "server":"doxa","tool":"lore_memory_list","arguments":{"scope":"all"},
+     "result":{"content":[{"type":"text","text":"...\\"entries\\": [\\"The
+     operator's codename for this probe is PLUM-ORBIT-4417.\\"]..."}]},
+     "error":null,"status":"completed"}}
+
+and the second turn -- ``codex exec resume <thread>`` -- produced the same
+``mcp_tool_call`` item, which is what proves the resume shape still loads
+the server. Note ``"server":"doxa"``: Codex shows the tool to the model as
+``doxa/lore_memory_list`` but calls ``tools/call`` with the bare registry
+name, so ``doxa.gate`` sees exactly the name it keys on.
 
 THE LORE SNAPSHOT. ``codex exec`` has no system-message channel and no
 SessionStart hook, so the snapshot ``doxa.vendors`` sends as a system
