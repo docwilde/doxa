@@ -777,3 +777,32 @@ def test_the_server_stops_cleanly_with_a_stream_still_open(ledger):
     threading.Thread(target=lambda: (mesh.stop(), done.set()), daemon=True).start()
     assert done.wait(10), "stop() blocked on an open event stream"
     stream.close()
+
+
+def test_a_non_ascii_request_path_is_answered_not_raised(server):
+    """Mirrors probe_meshgraph_nonascii.py. http.server decodes the
+    request line as iso-8859-1, so a raw 0xE9 byte in the path -- no
+    percent-encoding, no client cooperation needed -- reaches the token
+    check as a non-ASCII str. ``secrets.compare_digest`` on str raises
+    TypeError unless BOTH sides are ASCII, so the handler used to raise
+    before answering: the request got an empty response and the traceback
+    printed over the full-screen TUI. The answer must be the same 404 a
+    wrong token gets."""
+    with socket.create_connection((server.host, server.port), timeout=5) as sock:
+        sock.sendall(
+            b"GET /\xe9-nonascii/ledger HTTP/1.1\r\nHost: x\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+        sock.settimeout(5)
+        chunks = []
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    response = b"".join(chunks)
+
+    assert response, "the handler raised instead of answering"
+    assert response.startswith(b"HTTP/1.1 404")
+    # And the server is still serving, on the real capability path.
+    assert get(server, "")[0] == 200

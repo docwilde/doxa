@@ -721,3 +721,40 @@ async def test_the_graph_label_stays_narrower_than_the_widest_verb_beside_it(
     # And it does not arm: arming is for the destructive verbs, and this
     # one opens a view.
     assert BELIEF_GRAPH_ROW_ACTION.arms is False
+
+
+def test_a_non_ascii_token_query_is_answered_not_raised():
+    """Mirrors verify_beliefgraph_nonascii2.py. ``?k=%c3%a9`` decodes to a
+    non-ASCII str, and ``secrets.compare_digest`` on str raises TypeError
+    unless BOTH sides are ASCII -- so the handler used to raise before
+    answering: an empty response, and a traceback printed over the
+    full-screen TUI. The answer must be the same 404 a wrong token gets."""
+    import socket
+    from urllib.parse import urlparse
+
+    base = beliefgraph._start_server()
+    assert base
+    parsed = urlparse(base)
+
+    def raw(target: bytes) -> bytes:
+        with socket.create_connection(
+            (parsed.hostname, parsed.port), timeout=5
+        ) as sock:
+            sock.sendall(
+                b"GET " + target + b" HTTP/1.1\r\nHost: x\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+            sock.settimeout(5)
+            chunks = []
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        return b"".join(chunks)
+
+    response = raw(b"/?k=%c3%a9")
+    assert response, "the handler raised instead of answering"
+    assert b" 404 " in response.split(b"\r\n", 1)[0]
+    # A wrong ASCII token is answered the same way, and the server lives.
+    assert b" 404 " in raw(b"/?k=wrong").split(b"\r\n", 1)[0]
