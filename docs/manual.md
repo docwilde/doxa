@@ -149,18 +149,22 @@ codex-cli 0.144.4:
 | content deltas (`agent_message` arrives whole) | still one `text_delta`, just one per message |
 | reasoning content | no reasoning fold; the usage block counts reasoning tokens but the stream carries none |
 | permission modes | no `mode:` chip, nothing on Shift+Tab |
-| a hook surface | the LORE snapshot cannot be injected mid-session, so it rides the first prompt instead |
+| a hook surface | the LORE snapshot cannot be injected mid-session, so `CodexEngine` prepends it to the first prompt under a header that says what it is |
 | the model it actually resolved | `self.model` is what was *asked for*; an unasked-for default publishes as absent, never guessed |
 
-Two consequences worth stating plainly. **A Codex session does not carry
-DOXA's LORE tools** — reaching them would need a stdio MCP server process
-built from `doxa/operators.py`, and a process outside DOXA is a process
-outside `ToolGate`: no `can_use_tool` refusal, no two-strikes disable, for
-exactly the engine that has no tool gate of its own. A live probe
-confirmed `codex mcp add` genuinely works, so this is "not through this
-release", not "it cannot". And **the LORE review is not wired for this
-engine**: the transcript is still indexed at session end, and the
-`session_done` event says `review: skipped` rather than implying one ran.
+Two consequences worth stating plainly. **A Codex session reaches DOXA's
+LORE and peer tools through a stdio MCP server**, `python -m
+doxa.mcpserver`, which `CodexEngine` registers on every `codex exec` with
+`-c mcp_servers.doxa.*` overrides and which executes every call through
+the same `ToolGate` a vendor session builds. Two limits follow from Codex
+spawning that server per turn: the two-strikes disable lasts one turn,
+and Codex keeps the server's stderr, so a disable cannot be read back
+into a `tool_disabled` event; the gate's refusal result is the guarantee.
+`peer_send` is not offered to a Codex model yet: the sidecar has no
+delivery seam that carries the session's limiter and ledger. And **the
+LORE review is not wired for this engine**: the transcript is still
+indexed at session end, and the `session_done` event says `review:
+skipped` rather than implying one ran.
 
 The belief *count* is real on both engines — it is one `SELECT` against a
 store neither engine owns. The belief and proposal *pickers* are not: they
@@ -341,13 +345,14 @@ tab restore: restored 2 tabs, resumed 1 ended conversation, skipped 1 session no
 
 A tab whose session has since ended is handled by `resume_restored`
 (default on): the tab comes back as a **live session continuing that
-conversation** (one `claude` process spawned with `--resume`; no tokens
-spent until you type). Off, or when the conversation cannot be continued,
-the tab comes back **read-only** over its transcript, marked `⏺`, with the
-first block naming why: the session is somehow still running, its
-directory is gone, or the `claude` CLI has no history under that id (true
-of any conversation recorded before v0.56.0, when DOXA and the CLI still
-minted separate session ids).
+conversation** (one daemon spawned with `--resume`, on the engine the
+session ran on; no tokens spent until you type). Off, or when the
+conversation cannot be continued, the tab comes back **read-only** over
+its transcript, marked `⏺`, with the first block naming why: the session
+is somehow still running, its directory is gone, the `claude` CLI has no
+history under that id (true of any Claude conversation recorded before
+v0.56.0, when DOXA and the CLI still minted separate session ids), or a
+Codex session has no recorded thread id.
 
 A tab closed with `ctrl+w` stays in the saved set (only detached). A tab
 ended with `ctrl+q` also stays in the set — it resumes or comes back

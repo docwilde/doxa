@@ -228,15 +228,16 @@ uv run doxa --engine glm          # or GLM (Z.ai), on ZAI_API_KEY
 | | claude | codex | deepseek | glm |
 |---|---|---|---|---|
 | billed on | Claude subscription | Codex CLI sign-in | `DEEPSEEK_API_KEY` | `ZAI_API_KEY` |
-| daemon, detach, `doxa attach` | yes | no | no | no |
-| LORE tools and the tool gate | yes | no | yes | yes |
+| daemon, detach, `doxa attach` | yes | yes | yes | yes |
+| LORE tools and the tool gate | yes | yes, via MCP | yes | yes |
 | permission modes, hooks, plugins | yes | no | no | no |
 | cost and context-window chips | yes | no | no | no |
 | `/msg` to a peer | yes | yes | yes | yes |
-| `peer_list`, `peer_history` tools for the model | yes | no | yes | yes |
+| `peer_list`, `peer_history` tools for the model | yes | yes | yes | yes |
 | `peer_send` tool for the model | yes | no | yes | yes |
 | budgets, `Task` spawns | yes | no | no | no |
-| fleet slot | yes | not yet (#39) | not yet (#39) | not yet (#39) |
+| fleet slot | yes | yes | yes | yes |
+| `--no-lore` honoured | yes | yes | yes | yes |
 
 The rows are `doxa.engines.get(<id>).supports()` read off the registry, not
 a promise; `/engine` prints the same counts live.
@@ -247,22 +248,26 @@ DOXA session on something other than the `claude` CLI, and
 each one declares what it can actually do rather than inheriting Claude's
 list. `codex` (v1.4.0) drives the Codex CLI. `deepseek` and `glm`
 (v1.10.0) are two third-party chat-completions APIs behind one
-implementation and one capability map — ten of eighteen fields true —
+implementation and one capability map — eleven of eighteen fields true —
 so a run can mix vendors without also mixing what the terminal supports.
 Both are billed on their own API key, not on your Claude subscription, and
 refuse to start without it.
 
 What an engine does not report, DOXA does not paint. Codex counts tokens
 but never reports a window size, so there is no ctx chip; it reports no
-cost either, has one fixed permission posture rather than modes to cycle,
-and carries neither DOXA's LORE tools nor the tool gate. DeepSeek and GLM
-carry both of those — the model only ever *names* a call and DOXA executes
-it in-process, so the allowed set, the refusals and the two-strikes
-disable all apply — but they report no window size either and no
-per-session dollar figure, and they have no modes to cycle for a different
-reason: DOXA owns their whole tool surface, so a mode would configure
-nothing. None of the three has a daemon. They run inside the TUI, so
-`ctrl+q` ends the session rather than detaching from it, and
+cost either and has one fixed permission posture rather than modes to
+cycle. Its DOXA tools arrive through a stdio MCP server DOXA registers on
+every `codex exec` (`doxa/mcpserver.py`), executed through the same tool
+gate the vendors use, and the memory snapshot rides the first prompt
+because Codex has no system message and no hook. DeepSeek and GLM carry
+the tools in-process — the model only ever *names* a call and DOXA
+executes it, so the allowed set, the refusals and the two-strikes disable
+all apply — but they report no window size either and no per-session
+dollar figure, and they have no modes to cycle for a different reason:
+DOXA owns their whole tool surface, so a mode would configure nothing.
+Since 1.13.0 every engine runs in a daemon, so `ctrl+q` detaches and
+`doxa attach` reattaches whatever the engine; `--in-process` is the one
+door that still hosts an engine inside the TUI.
 `doxa.engines.get("deepseek").supports()` is the whole map for any of
 them.
 
@@ -357,10 +362,13 @@ TUI or the CLI opens it yet, so it is reachable today only from Python.
 
 Also absent: history drill-in past `/search`, and custom keybindings.
 
-**Sessions older than v0.56.0 cannot be resumed.** That release stopped
-DOXA and the CLI minting two session ids and pinned them to one, and the
-fix cannot reach backwards: an older conversation is addressed by an id
-the CLI's own store never knew, so it returns read-only and says so first.
+**Claude sessions older than v0.56.0 cannot be resumed.** That release
+stopped DOXA and the CLI minting two session ids and pinned them to one,
+and the fix cannot reach backwards: an older conversation is addressed by
+an id the CLI's own store never knew, so it returns read-only and says so
+first. A Codex or vendor session resumes from the record its own engine
+kept beside the transcript, and refuses in the same words when there is
+none.
 
 Run the suite with `uv run pytest`.
 
