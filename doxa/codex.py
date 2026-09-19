@@ -1469,9 +1469,19 @@ class CodexEngine:
             return 0
 
     def disabled_tools(self) -> "list[str]":
-        """Always empty, and structurally so: the two-strikes tracker lives
-        in doxa.gate.ToolGate, which this engine has no way to reach (see
-        ``tool_gate=False``)."""
+        """Always empty, and structurally so -- but for a NARROWER reason
+        than it used to be.
+
+        ``tool_gate`` is True now: there IS a two-strikes tracker, in the
+        :mod:`doxa.mcpserver` process ``codex exec`` spawns, and it does
+        remove a repeatedly-failing tool from that server's ``tools/list``
+        and refuse it thereafter. What this engine has no way to do is
+        READ it back: the tracker is state in a child process whose only
+        channel to DOXA is the Codex event stream, and that stream carries
+        tool RESULTS, not DOXA's own containment decisions -- Codex
+        captures the server's stderr and forwards none of it (measured;
+        see the module docstring). So the containment happens and this
+        list cannot report it. Empty rather than guessed."""
         return list(self._disabled)
 
     # -- peers ---------------------------------------------------------
