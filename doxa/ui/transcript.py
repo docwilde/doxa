@@ -355,9 +355,13 @@ class ErrorBlock(Collapsible):
         self.add_class("error-block")
 
     def _render_title(self) -> str:
+        # Escaped for the same reason PromptBlock._render_title is: a
+        # Collapsible title renders markup, and a headline can carry text
+        # a vendor's error body put there.
         mark = self.FATAL_MARK if self.failure.fatal else self.MARK
         tally = f"  ·  ×{self.repeats}" if self.repeats > 1 else ""
-        return f"{mark} {_one_line(self.failure.headline(), 150)}{tally}"
+        headline = _escape_markup(_one_line(self.failure.headline(), 150))
+        return f"{mark} {headline}{tally}"
 
     def bump(self, repeats: int) -> None:
         """The same failure again. A title rewrite only -- as cheap as
@@ -571,7 +575,16 @@ class PeerMessageBlock(Static):
     """One incoming peer message. Visually distinct from turns (dim border,
     peer title in the header -- see PeerMessageBlock rules in theme.tcss);
     the body was scrubbed on receive in peers.PeerHost, the one choke point
-    for peer input."""
+    for peer input.
+
+    ``markup=False``, because every character of this block comes from
+    ANOTHER SESSION. The scrub at the receive choke point removes secrets;
+    it does not, and should not, parse markup. A body of
+    ``[bold red]...[/]`` used to be rendered as markup rather than shown,
+    which is a peer deciding how this pane paints -- and a body with an
+    unbalanced bracket raised MarkupError inside the pane instead of
+    displaying. The header is plain characters too, so nothing here wanted
+    markup in the first place: it was on by default."""
 
     def __init__(self, frame: dict) -> None:
         self.frame = frame
@@ -582,6 +595,7 @@ class PeerMessageBlock(Static):
         super().__init__(
             f"✉ peer · {title} ({short_id}) · {sent_at}\n{body}",
             classes="peer-block",
+            markup=False,
         )
 
 
@@ -1199,7 +1213,12 @@ class TurnBlock(Collapsible):
         budget = max(self._title_budget() - len(suffix), 8)
         shown, truncated = _truncate_at_word(collapsed, budget)
         self._sync_prompt_full(collapsed, truncated)
-        return f"{_TITLE_LEAD}{shown}{suffix}"
+        # ESCAPED: a Collapsible title is rendered with markup and cannot
+        # be told not to be, and `shown` is the user's or a peer's own
+        # prompt text. `_TITLE_LEAD` and `suffix` are this module's own
+        # (a glyph and a duration/cost tally), so only the interpolated
+        # prompt is escaped -- the rule _escape_markup's docstring states.
+        return f"{_TITLE_LEAD}{_escape_markup(shown)}{suffix}"
 
     def _sync_prompt_full(self, collapsed: str, truncated: bool) -> None:
         """The fold-body half of the truncation fix (item 2): whenever the

@@ -1354,6 +1354,15 @@ def belief_evidence_rows(rows: "list[dict]") -> "list[str]":
     evidence event (session, project, note), each meant to become its OWN
     disabled row beneath the expanded belief.
 
+    **Plain text, not markup.** Escaping happens once, where these are
+    rendered (:meth:`doxa.ui.dialogs.ChipPicker._render_rows`), because
+    that is also where the OTHER sources of expansion rows arrive -- the
+    ``g`` graph block from ``lore_core.beliefs.format_edges`` and the
+    "evidence unavailable" fallbacks, neither of which passes through
+    here. Escaping in two of the three places is how the site that
+    rendered a note's ``[bold red]`` as markup came to sit next to one
+    that showed a reader a literal backslash.
+
     v0.69.0 removed the beliefs browser's ``EvidenceTrail`` widget (which
     mounted the whole trail as one Static under the row) in favour of
     expanding a belief's evidence in place on the chip picker itself:
@@ -1391,9 +1400,9 @@ def belief_evidence_rows(rows: "list[dict]") -> "list[str]":
         head = f"    {when}  session {session}"
         if project:
             head += f"  [{project}]"
-        text = _escape_markup(head)
+        text = head
         if note:
-            text += "\n" + _escape_markup(f"        {note}")
+            text += f"\n        {note}"
         if row.get("note_truncated"):
             text += "\n        [note truncated — larger than one wire frame]"
         out.append(text)

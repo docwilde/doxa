@@ -1254,3 +1254,56 @@ async def test_the_model_picker_still_takes_real_focus_and_types_locally(
         assert not picker.prompt_filter_active
         assert picker.has_focus
         assert not picker._row_actions
+
+
+# =======================================================================
+# Stored text does not get to paint the picker (panel finding 2)
+# =======================================================================
+
+
+@pytest.mark.asyncio
+async def test_an_evidence_note_of_rich_markup_renders_literally(
+    monkeypatch, tmp_path,
+):
+    """An evidence line is stored text -- a prompt, a tool result -- and an
+    ``Option`` renders markup. The belief row above it was already escaped;
+    the evidence rows under it were not, so a note of ``[bold red]x[/]``
+    painted as markup and an unbalanced bracket raised MarkupError on the
+    whole picker."""
+    fake = FakeEngine([])
+    fake.list_beliefs_result = [_belief(9, "prefers terse commits")]
+    fake.belief_evidence_result = {9: [
+        _evidence("sess-m", "[bold red]LEAK[/] and an unbalanced [one"),
+    ]}
+    app = await _open(monkeypatch, tmp_path, fake)
+    async with app.run_test(size=(200, 48)) as pilot:
+        await pilot.pause()
+        _pane, picker = await _beliefs_picker(pilot, app)
+        picker.highlighted = _row_index(picker, "belief:9")
+        picker.expand_current()
+        for _ in range(100):
+            if fake.belief_evidence_calls:
+                break
+            await pilot.pause(0.02)
+        await pilot.pause()
+
+        def _raw():
+            return [str(picker.get_option_at_index(i).prompt)
+                    for i in range(picker.option_count)]
+
+        row = next(r for r in _raw() if "sess-m" in r)
+        assert "\\[bold red]LEAK\\[/]" in row
+        assert "\\[one" in row
+        # Escaped ONCE: a reader sees the characters, not a backslash.
+        assert any("[bold red]LEAK[/] and an unbalanced [one" in shown
+                   for shown in _shown(picker))
+        assert "\\\\[" not in row
+
+        # The OTHER producer of expansion rows -- the `g` graph block from
+        # lore_core.beliefs.format_edges, which never passes through the
+        # evidence formatter -- goes through the same one render boundary.
+        picker.expand_rows("belief:9", ["  [italic]relates to[/] [x"])
+        await pilot.pause()
+        edge = next(r for r in _raw() if "relates to" in r)
+        assert "\\[italic]relates to\\[/] \\[x" in edge
+        assert "\\\\[" not in edge

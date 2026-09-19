@@ -193,3 +193,57 @@ async def test_peer_joined_event_updates_status_chip(monkeypatch, tmp_path):
                 break
             await pilot.pause(0.02)
         assert "peers 1" in str(app.query_one("#status-bar").renderable)
+
+
+# =======================================================================
+# A peer does not get to choose how this pane paints (panel finding 2)
+# =======================================================================
+
+
+@pytest.mark.asyncio
+async def test_a_peer_body_of_rich_markup_renders_literally(monkeypatch, tmp_path):
+    """Every character of a PeerMessageBlock comes from another session.
+    The receive-side scrub removes secrets; it does not parse markup, so
+    a body of ``[bold red]x[/]`` used to be RENDERED as markup -- a peer
+    choosing this pane's colours -- and an unbalanced bracket raised
+    MarkupError inside the pane instead of showing the message."""
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    factory, _created = factory_with_script([
+        ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+            num_turns=1, session_id="s", total_cost_usd=0.0,
+        ),
+    ])
+    monkeypatch.setattr(
+        "doxa.app.SessionEngine",
+        lambda cwd, model=None: SessionEngine(cwd=cwd, model=model, client_factory=factory),
+    )
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test() as pilot:
+        for _ in range(100):
+            if app.engine is not None and getattr(app.engine, "peer_host", None):
+                break
+            await pilot.pause(0.02)
+        assert app.engine.peer_host is not None
+
+        await peers.send_message(
+            app.engine.peer_host.socket_path,
+            from_id="ffff9999-0000", from_title="[bold red]scout",
+            body="[bold red]ALERT[/] and an unbalanced [one",
+        )
+        blocks = await _wait_blocks(app, pilot, PeerMessageBlock)
+        assert len(blocks) == 1
+        block = blocks[0]
+        # Not interpreted: the widget was told the content is not markup.
+        assert block._render_markup is False
+        # And it actually paints, rather than raising on the stray bracket.
+        from textual.geometry import Region
+
+        strip_text = "".join(
+            segment.text
+            for strip in block.render_lines(Region(0, 0, 120, 6))
+            for segment in strip
+        )
+        assert "[bold red]ALERT[/]" in strip_text
+        assert "unbalanced [one" in strip_text
+        await app.action_quit()

@@ -372,11 +372,23 @@ class NeedsInputPopup(OptionList):
         self._render(heading, self._rows)
 
     def _render(self, heading: str, options: list[dict]) -> None:
+        """Paint one question or permission request.
+
+        **Everything here is escaped**, at this one place rather than at
+        each of the three callers, because everything here came from
+        outside: the heading is a CLI-supplied permission title, a tool
+        input summary, or a spawned child's verbatim task text
+        (:func:`_spawn_heading`); the labels and descriptions are the
+        model's own ``AskUserQuestion`` options. An ``Option`` renders
+        markup, so an unescaped ``[bold red]`` in any of them was the
+        asking party choosing how the dialog that gates it paints -- and
+        an unbalanced bracket raised MarkupError instead of showing the
+        question at all. The numbering and the em dash are ours."""
         self.clear_options()
-        self.add_option(Option(heading, disabled=True))
+        self.add_option(Option(_escape_markup(heading), disabled=True))
         for index, opt in enumerate(options, start=1):
-            label = str(opt.get("label") or "")
-            description = str(opt.get("description") or "")
+            label = _escape_markup(str(opt.get("label") or ""))
+            description = _escape_markup(str(opt.get("description") or ""))
             text = f"  {index}. {label}" + (f" — {description}" if description else "")
             self.add_option(Option(text))
         self.highlighted = 1 if options else 0
@@ -1376,7 +1388,18 @@ class ChipPicker(OptionList):
                 # makes.
                 if not self._filter_text:
                     for evidence_row in self._expanded.get(rid, ()):
-                        self.add_option(Option(evidence_row, disabled=True))
+                        # Escaped HERE, like the belief row above it, and
+                        # here ONLY: ``_expanded`` holds plain text from
+                        # three different producers (the evidence
+                        # formatter, the ``g`` graph block, the
+                        # "unavailable" fallbacks) and an Option renders
+                        # markup. An evidence note is stored text -- a
+                        # prompt, a tool result -- so it painted as markup
+                        # and an unbalanced bracket raised MarkupError
+                        # over the whole picker.
+                        self.add_option(
+                            Option(_escape_markup(evidence_row), disabled=True)
+                        )
                         self._rows.append(("", ""))
                     if rid in self._expanding:
                         self.add_option(Option("      … loading", disabled=True))
