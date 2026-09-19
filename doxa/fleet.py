@@ -1531,7 +1531,18 @@ class ApprovalDesk:
         coroutine simply stops, which is the whole mechanism by which a
         human beats the clock."""
         await asyncio.sleep(float(self.spec.approval_grace_s))
-        # Popped rather than cancelled: this IS the timer task, and
+        # Nobody awaits this task, so an exception escaping it would
+        # surface as "Task exception was never retrieved" on the stderr
+        # behind a full-screen terminal application -- which is the same
+        # as no message at all (doxa.fleetsession._drive says it first).
+        # CancelledError is a BaseException and still propagates, which
+        # is the one that has to: a cancelled timer is a human who
+        # answered, not a failure.
+        with contextlib.suppress(Exception):
+            await self._refuse_now(req_id, ask)
+
+    async def _refuse_now(self, req_id: str, ask: "dict[str, Any]") -> None:
+        # Popped rather than cancelled: the caller IS the timer task, and
         # _cancel_timer refusing to cancel the running task is what keeps
         # that from raising CancelledError into its own refusal.
         self._timers.pop(req_id, None)

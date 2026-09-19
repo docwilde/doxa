@@ -590,3 +590,36 @@ def test_the_parked_ask_row_does_not_repeat_the_tool_name_as_its_summary():
     text = fleetview_mod.render(snapshot, now=1789000000.0)
     assert text.count("mcp__doxa__peer_list") == 1
     assert "permission asks: 1 — 1 WAITING," in text
+
+
+async def test_a_grace_timer_that_throws_does_not_reach_the_loops_error_handler(
+    short_root,
+):
+    """Nobody awaits the grace timer, so an exception escaping it would
+    reach the event loop's exception handler as *Task exception was never
+    retrieved* -- on the stderr behind a full-screen terminal application,
+    which is the same as no message at all.
+    ``doxa.fleetsession._drive`` states the reason first; this is the
+    second task in the fleet with no awaiter.
+
+    The sabotage is the RECORDER rather than the client, because the
+    client's own failure is already caught and written down. What this
+    closes is everything after it."""
+    slot = fleet_mod.Slot(assignment=fleet_mod.assign_for(_spec(short_root))[0])
+    spec = _spec(short_root, approval_grace_s=0.01)
+    desk = fleet_mod.ApprovalDesk(slot, spec, FakeClient())
+    slot.record_decision = lambda record: (_ for _ in ()).throw(
+        RuntimeError("the record could not be written"),
+    )
+    seen: "list[dict]" = []
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: seen.append(context))
+    try:
+        await desk.on_event(EngineEvent(
+            "needs_input", _permission_ask("r1", "Bash"),
+        ))
+        await asyncio.sleep(0.2)
+    finally:
+        loop.set_exception_handler(previous)
+    assert seen == []
