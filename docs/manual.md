@@ -110,7 +110,7 @@ reaches new sessions and tabs and never the running one, and the command
 says so rather than letting you find out by watching it do nothing.
 
 **Capability is not uniform, and pretending otherwise is the trap.** Each
-provider declares an `EngineCapabilities` — seventeen flat booleans naming
+provider declares an `EngineCapabilities` — eighteen flat booleans naming
 the surfaces it actually has, every one defaulting to `False` so a
 provider that forgets something under-promises instead of over-promising.
 `doxa.engines.get("codex").supports()` is the whole map for that engine.

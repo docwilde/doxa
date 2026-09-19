@@ -278,6 +278,15 @@ VENDOR_CAPABILITIES = EngineCapabilities(
     detachable=False,
     # TRUE. DOXA's own layer, with no model in it.
     peer_messaging=True,
+    # TRUE since docwilde/doxa#39. This engine holds a
+    # doxa.peerdelivery.PeerDelivery -- the same object a Claude session
+    # sends through -- and names it both on the OperatorContext and in the
+    # ctx operator_tools projects against, so with DOXA_AGENT_PEER_SEND on
+    # the model is offered peer_send and every send it makes is charged
+    # against one limiter and written to one ledger. Before that the
+    # engine had no outbound path at all and the operator's own
+    # configuredness check kept the tool away from it.
+    peer_send_tool=True,
     # FALSE, and MEASURED rather than assumed: doxa.daemon.spawn_daemon
     # builds `python -m doxa.daemon --cwd ... --session-id ...` and there
     # is no --engine among the flags it appends, while doxa.daemon hosts a
@@ -1153,7 +1162,12 @@ class ChatApiEngine:
             self._gate = None
             self._tools = []
             self.engine_capabilities = VENDOR_CAPABILITIES.without(
-                mcp_tools=False, tool_gate=False
+                # peer_send_tool with them: the seam survived this failure
+                # (PeerDelivery is built in __init__ and /msg still works),
+                # but there is no tool surface left to offer the operator
+                # ON, so a map that still claimed it would be describing a
+                # tool this session cannot project.
+                mcp_tools=False, tool_gate=False, peer_send_tool=False,
             )
             self.peer_error = f"tools unavailable: {type(exc).__name__}"
 

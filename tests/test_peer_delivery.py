@@ -622,3 +622,61 @@ async def test_an_arriving_message_starts_no_codex_turn_while_the_switch_is_off(
         assert len(eng._pending_peer_frames) == 1
     finally:
         await eng.finalize()
+
+
+# -- the capability field that says which of these is true --------------
+
+
+def test_peer_send_tool_says_which_engines_can_offer_the_model_a_send():
+    """``peer_messaging`` means ``/msg`` works and is True on all four.
+    That stopped being enough the moment three of them could offer the
+    MODEL a send tool and the fourth could not: a human sending and a
+    model sending are different grants, and a map with one field for both
+    would have to lie about one of them.
+
+    Read off the registry rather than the modules, because the registry is
+    what ``/engine`` and the README table read."""
+    from doxa import engines as engines_mod
+
+    can_send = {
+        engine_id: engines_mod.get(engine_id).supports().peer_send_tool
+        for engine_id in engines_mod.available()
+    }
+    assert can_send == {
+        "claude": True, "deepseek": True, "glm": True, "codex": False,
+    }
+    for engine_id in can_send:
+        assert engines_mod.get(engine_id).supports().peer_messaging is True, (
+            f"{engine_id}: /msg works everywhere -- if this flips, the new "
+            "field is measuring the wrong thing"
+        )
+
+
+async def test_a_vendor_session_whose_tool_surface_failed_stops_claiming_the_send_tool(
+    tmp_path, monkeypatch,
+):
+    """The narrowed posture has to narrow this field too. The seam
+    survives an import failure -- PeerDelivery is built in __init__ and
+    /msg still works -- but there is no tool surface left to offer the
+    operator ON, and a handle still claiming peer_send_tool would be
+    describing a tool this session cannot project."""
+    _isolate(tmp_path, monkeypatch, peer_send=True)
+
+    def _boom(*_args, **_kwargs):
+        raise ImportError("no tool surface here")
+
+    monkeypatch.setattr("doxa.vendors.operator_tools", _boom)
+    eng = ChatApiEngine(cwd=str(tmp_path), spec=DEEPSEEK, transport=StubTransport())
+    await eng.start()
+    try:
+        assert eng._tools == []
+        assert eng.engine_capabilities.mcp_tools is False
+        assert eng.engine_capabilities.peer_send_tool is False
+        assert eng.engine_capabilities.peer_messaging is True, (
+            "/msg is DOXA's own layer and does not need the tool surface"
+        )
+        assert eng._peer_delivery is not None, (
+            "the outbound path is built in __init__ and is not what failed"
+        )
+    finally:
+        await eng.finalize()

@@ -202,6 +202,14 @@ CODEX_CAPABILITIES = EngineCapabilities(
     detachable=False,
     # DOXA's own layer, and there is no model in it.
     peer_messaging=True,
+    # FALSE, and it is the one field that separates this engine from the
+    # vendors on the peer surface. /msg works and is ledgered like every
+    # other send (CodexEngine.send_peer_message), but peer_send is an
+    # operator DOXA projects onto a tool surface it composes, and this
+    # engine composes none -- the model's tools are the Codex CLI's, which
+    # DOXA drives as a subprocess. mcp_tools=False above is the same fact
+    # seen from the other side.
+    peer_send_tool=False,
     spawn_sessions=False,
     # The belief store is shared and real; its PICKERS live on
     # SessionEngine. belief_count() below is honest and complete; the

@@ -148,6 +148,17 @@ class EngineCapabilities:
     #: report True, and it is a field rather than an assumption because the
     #: next engine may not be able to host a PeerHost at all.
     peer_messaging: bool = False
+    #: The MODEL can send a peer message: this engine wires the
+    #: ``peer_send`` seam (doxa.peerdelivery.PeerDelivery) onto a tool
+    #: surface it composes, so the operator is offered once the user's own
+    #: DOXA_AGENT_PEER_SEND says it may be. Separate from
+    #: ``peer_messaging`` above, which is about ``/msg``, the rail and the
+    #: registry -- a human sending and a model sending are different
+    #: grants, and Codex has the first without the second: its model's
+    #: tools live in the Codex CLI, which DOXA drives as a subprocess and
+    #: whose tool surface it does not compose. False therefore means the
+    #: tool is never offered here, whatever the setting says.
+    peer_send_tool: bool = False
     #: spawn_session (doxa.session_ops). Same-engine only, per the spec.
     spawn_sessions: bool = False
     #: The belief/pending PICKERS (list_beliefs, list_pending, the approve
@@ -183,7 +194,8 @@ class EngineCapabilities:
             plugins=True, resolved_model=True, context_window=True,
             token_usage=True, cost=True, reasoning=True, streaming_text=True,
             live_model_switch=True, resume=True, detachable=True,
-            peer_messaging=True, spawn_sessions=True, lore_pickers=True,
+            peer_messaging=True, peer_send_tool=True, spawn_sessions=True,
+            lore_pickers=True,
         )
 
     def enabled(self) -> "tuple[str, ...]":
