@@ -939,6 +939,7 @@ class ChatApiEngine:
         transport: "StreamTransport | None" = None,
         effort: "str | None" = None,
         daemon_socket: "str | None" = None,
+        lore: "bool | None" = None,
         **_ignored: Any,
     ) -> None:
         # **_ignored, deliberately, for the reason CodexEngine states:
@@ -989,7 +990,19 @@ class ChatApiEngine:
         self.permission_mode: str = "default"
         self.bypass_armed: bool = False
         self.account: dict = {}
-        self.lore_root: "str | None" = lore_root_path()
+        # The memory switch, the same rule SessionEngine applies: None means
+        # "the config row's answer", which is ON. Off means three absences
+        # -- no snapshot in the system message, no lore_* operator in the
+        # tool projection (their seams are simply not named, so
+        # is_configured keeps them out rather than a refusal), and a gate
+        # allowed-set that names only what was offered -- so a fleet's
+        # memory-off arm on this engine is memory-off in fact, not only in
+        # the manifest. Through v1.12.0 the flag reached this constructor
+        # through **_ignored and changed nothing.
+        from .engine import lore_enabled_default
+
+        self.lore: bool = lore_enabled_default() if lore is None else bool(lore)
+        self.lore_root: "str | None" = lore_root_path() if self.lore else None
         self.lore_snapshot_chars: "int | None" = None
         self.num_turns = 0
         self.usage_totals: "dict[str, int]" = {}
@@ -1171,11 +1184,15 @@ class ChatApiEngine:
             # engine actually wired -- an operator whose is_configured says
             # no is simply not projected, and a tool the model cannot see
             # is a tool the model cannot call.
-            self._tools = operator_tools({
-                "belief_store": lore_store.db_connect,
-                "lore_root": self.lore_root,
-                "peer_send": self._peer_delivery.tool_send,
-            })
+            ctx: dict = {"peer_send": self._peer_delivery.tool_send}
+            if self.lore:
+                ctx["belief_store"] = lore_store.db_connect
+                ctx["lore_root"] = self.lore_root
+            self._tools = operator_tools(ctx)
+            # The gate executes only what the model was offered: a lore_*
+            # name the model produces from training rather than from the
+            # tool list is refused, not run against the store.
+            self._gate.allowed = {t["function"]["name"] for t in self._tools}
         except Exception as exc:  # noqa: BLE001 -- an absent tool surface is
             # a narrower session, not a failed one, and it SAYS it is
             # narrower instead of offering tools that cannot run.
@@ -1260,11 +1277,12 @@ class ChatApiEngine:
         from lore_core import context as lore_context
 
         snapshot = ""
-        try:
-            snapshot = lore_context.build_context(self.cwd) or ""
-        except Exception:  # noqa: BLE001 -- a LORE store that cannot be read
-            # is a session without memory, not a session that cannot run.
-            snapshot = ""
+        if self.lore:
+            try:
+                snapshot = lore_context.build_context(self.cwd) or ""
+            except Exception:  # noqa: BLE001 -- a LORE store that cannot be read
+                # is a session without memory, not a session that cannot run.
+                snapshot = ""
         self.lore_snapshot_chars = len(snapshot)
         header = (
             f"You are a DOXA session running on {self.spec.display_name}. "

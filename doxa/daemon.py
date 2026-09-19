@@ -479,11 +479,11 @@ class SessionDaemon:
         ignored by the vendor engines rather than honoured, and pretending
         otherwise is what this comment exists to prevent:
 
-        * ``lore`` -- doxa.vendors.ChatApiEngine and doxa.codex.CodexEngine
-          have no memory switch at all, so ``--no-lore`` does not reach
-          them. They always have the belief store; :meth:`_status`
-          therefore reports ``lore: true`` for them, which is what the
-          session actually does.
+        * ``lore`` -- doxa.vendors.ChatApiEngine honours it (no snapshot,
+          no lore_* operator, a gate allowing only what was offered). An
+          engine that carries no ``lore`` attribute does not, and
+          :meth:`_status` reports ``lore: true`` for it, which is what the
+          session actually does; the startup warning below names it.
         * ``daemon_socket`` -- threaded, and load-bearing: the registry
           entry's ``daemon_socket`` field IS how :func:`spawn_daemon`
           learns this daemon is ready and how ``doxa attach`` finds it.
@@ -558,12 +558,11 @@ class SessionDaemon:
         )
         # --no-lore on an engine that has no memory switch. Said out loud,
         # in the one channel a headless session always has, rather than
-        # swallowed: doxa.vendors.ChatApiEngine and doxa.codex.CodexEngine
-        # carry no `lore` attribute and always have the belief store, so
-        # the flag reaches them and does nothing. _status therefore reports
-        # lore: true for such a session -- which is what it does -- and a
-        # fleet manifest that says an agent ran with memory off must be
-        # read against this line.
+        # swallowed. doxa.vendors.ChatApiEngine honours the flag; an engine
+        # that carries no `lore` attribute does not, and _status reports
+        # lore: true for it -- which is what it does -- so a fleet manifest
+        # that says such an agent ran with memory off must be read against
+        # this line.
         if self.lore is False and not hasattr(self.engine, "lore"):
             print(
                 f"doxa: --no-lore has no effect on the "
