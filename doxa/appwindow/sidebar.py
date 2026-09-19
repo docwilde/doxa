@@ -60,9 +60,9 @@ what Textual has to meet in the class body it builds: the six
 scans a plain mixin's. ``action_toggle_sidebar``,
 ``action_sidebar_wider`` and ``action_sidebar_narrower`` stay for a
 different reason -- they are the actions family, and they move with it.
-``_pane_ctx``, ``_pane_repo_root`` and ``_describe_session`` stay under the
-``-- the session sidebar`` and ``-- the rail's model`` banners, which is
-why both are still in doxa/app.py. No constant moved: ``GROUP_FLASH_SECS``
+``_pane_ctx``, ``_pane_repo_root`` and ``_describe_session`` are not here
+either: they went with the tabs, into :mod:`doxa.appwindow.tabs`, because
+they are facts about a SESSION. No constant moved: ``GROUP_FLASH_SECS``
 is a class attribute of DoxaApp, read here as ``self.GROUP_FLASH_SECS``
 like any other, and ``dir(doxa.app)`` is unchanged.
 """

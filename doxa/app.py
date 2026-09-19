@@ -1189,8 +1189,8 @@ class DoxaApp(
     # root, never a member of it. Nothing in this section touches the
     # tree, and nothing in the tree section above knows the rail exists --
     # that separation is the feature's whole design (see
-    # doxa/ui/sidebar.py) and the reason _window_root() one method up
-    # needed no change at all.
+    # doxa/ui/sidebar.py) and the reason _window_root() (now in
+    # doxa/appwindow/panetree.py) needed no change at all.
 
     # -- painting -----------------------------------------------------
 
