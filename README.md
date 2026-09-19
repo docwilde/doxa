@@ -20,13 +20,14 @@
 > [Non-goals](#non-goals) before trusting it with anything you would mind
 > losing.
 
-**DOXA** is a terminal for Claude agents, built on the Claude Agent SDK
-and Textual and billed through your Claude subscription rather than an API
-key. Each session runs in a **daemon** of its own: close the terminal,
-`doxa attach` an hour later, and the transcript picks up where it stopped.
-No tmux involved. Three other engines are reachable through `--engine`
-and are billed on their own API keys instead — see
-[Quickstart](#quickstart).
+**DOXA** is a terminal for coding agents, built on the Claude Agent SDK
+and Textual. Four engines: **Claude** on your Claude subscription, **Codex**
+through the Codex CLI on whatever it is signed into (a ChatGPT subscription
+or an API key), and **DeepSeek** and **GLM** on their own API keys. Pick one
+per session with `--engine` or `/engine`; the [table below](#quickstart)
+says what each can do. A Claude session runs in a **daemon** of its own:
+close the terminal, `doxa attach` an hour later, and the transcript picks up
+where it stopped. No tmux involved.
 
 Start DOXA inside a repository and the session already knows the project.
 Durable facts about that codebase — conventions, past workarounds,
@@ -102,6 +103,17 @@ spend, fake account numbers. See
   provider, model, engine, tokens spent — and none of it is believed: a
   peer's self-description is displayed, never verified, and never decides
   anything.
+- **[A fleet, measured rather than managed.](docs/fleet.md)** `doxa-fleet`
+  spawns N sessions in a `DOXA_HOME` of the run's own, hands every one the
+  byte-identical prompt at the same moment, deals models from a
+  `--pool engine:model@weight`, runs `--memory-off K` of them without
+  memory, splits `--run-budget` per session, arms the peer tools for the
+  run, waits for it to go quiet, then tears everything down and reports
+  what leaked. The manifest carries the seed, the assignment and the
+  dispatch spread; the ledger carries every message. Clean to N=64 on real
+  daemons; an N the machine cannot hold is refused with the arithmetic.
+  One gap, open as #39: every slot runs the Claude engine today, whatever
+  the pool names.
 - **[Peers on another machine, once you say so.](docs/fleet.md)** A tailnet
   bridge puts sessions on a second box into the same roster, behind
   `tailscale serve`, bound to loopback and refused until `remote_enabled`
@@ -237,8 +249,24 @@ uv run doxa --engine deepseek     # or DeepSeek, on DEEPSEEK_API_KEY
 uv run doxa --engine glm          # or GLM (Z.ai), on ZAI_API_KEY
 ```
 
+| | claude | codex | deepseek | glm |
+|---|---|---|---|---|
+| billed on | Claude subscription | Codex CLI sign-in | `DEEPSEEK_API_KEY` | `ZAI_API_KEY` |
+| daemon, detach, `doxa attach` | yes | no | no | no |
+| LORE tools and the tool gate | yes | no | yes | yes |
+| permission modes, hooks, plugins | yes | no | no | no |
+| cost and context-window chips | yes | no | no | no |
+| `/msg` to a peer | yes | yes | yes | yes |
+| `peer_list`, `peer_history` tools for the model | yes | no | yes | yes |
+| `peer_send` tool, budgets, `Task` spawns | yes | no | no | no |
+| fleet slot | yes | not yet (#39) | not yet (#39) | not yet (#39) |
+
+The rows are `doxa.engines.get(<id>).supports()` read off the registry, not
+a promise; `/engine` prints the same counts live.
+
 **[Other engines](docs/manual.md#engines).** `--engine` (or the `engine`
-setting) runs a DOXA session on something other than the `claude` CLI, and
+setting, or `/engine <id>` for the sessions and tabs you open next) runs a
+DOXA session on something other than the `claude` CLI, and
 each one declares what it can actually do rather than inheriting Claude's
 list. `codex` (v1.4.0) drives the Codex CLI. `deepseek` and `glm`
 (v1.10.0) are two third-party chat-completions APIs behind one
@@ -281,10 +309,11 @@ and key — marking any your terminal cannot send.
 Beta, and a working daily driver for its author. Everything in
 [What you get](#what-you-get) and in the [manual](docs/manual.md) is on
 `main` and behaves as described; [CHANGELOG.md](CHANGELOG.md) has the
-history. `main` is what the install script tracks by default, and `v1.11.1`
-names it: the model's send tool, the cross-machine peer bridge and the
-fleet harness are all in the newest tag, so a pinned install has them. Config keys, socket
-protocol and command names can still change between minor versions.
+history. `main` is what the install script tracks by default, and `v1.12.0`
+names it: the model's send tool, the cross-machine peer bridge, the fleet
+harness, session and run budgets and the engine picker are all in the
+newest tag, so a pinned install has them. Config keys, socket protocol and
+command names can still change between minor versions.
 
 **Specified, not built.** Seventeen documents sit in
 [`docs/plans/`](docs/plans/) and each states its own status in its opening
