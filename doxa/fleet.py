@@ -824,6 +824,21 @@ class DaemonBackend:
             model=slot.assignment.model,
             wait_secs=spec.spawn_timeout_s,
             env=env,
+            # The engine this slot was DEALT (issue #39). Until the daemon
+            # took an --engine, this argument did not exist and every slot
+            # ran Claude whatever the pool said -- so the manifest's engine
+            # column and budget_note's "unbounded on deepseek/glm"
+            # described assignments that never ran. It is the whole reason
+            # a mixed pool means anything.
+            #
+            # A slot whose engine cannot start -- a vendor with no API key
+            # raises doxa.vendors.MissingCredential inside the daemon,
+            # which then exits during startup -- surfaces here as
+            # spawn_daemon's RuntimeError carrying the daemon log's tail.
+            # FleetRun.spawn_all records that on the slot (PHASE_FAILED,
+            # with the reason in slot.error and therefore in the manifest)
+            # and the run continues with the rest.
+            engine=slot.assignment.engine,
             # The per-agent memory draw, delivered on the command line --
             # the channel that actually decides this session, where the
             # env var beside it is only the config-layer default. See
