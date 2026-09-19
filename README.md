@@ -85,51 +85,27 @@ spend, fake account numbers. See
   call passes `PreToolUse`; a tool failing hard twice is disabled for the
   session.
 - **[Numbers that were measured.](docs/manual.md#the-status-bar)**
-  Twenty-one tooltipped chips — `dir NAME` outside a repo, `diff 3 files
-  +42 −7` when the worktree has work in it — and a `/context` the CLI
-  itself counted. A chip an engine cannot answer for is hidden, never
-  painted blank.
+  Twenty-one tooltipped chips and a `/context` the CLI itself counted. A
+  chip an engine cannot answer for is hidden, never painted blank.
 - **[Pictures, or a straight answer why not.](docs/manual.md#images)**
   kitty graphics → sixel → half-block → text, settled by one probe.
 - **[Sessions talk to each other.](docs/manual.md#search-resume-and-peers)**
-  Same-repo sessions find each other and exchange `/msg`. The model can be
-  given a send tool too — off by default, because a model that can message
-  another session can reach a context you did not open it in. Turned on,
-  nothing about it is quiet: every message is rate limited by how many
-  sessions it reaches, appended with its full body to a ledger, and
-  flashed on the status bar in both directions. Letting an arriving
-  message *start* a turn is a second switch, also off, and a broadcast
-  never starts one at any setting. Each session publishes what it is —
-  provider, model, engine, tokens spent — and none of it is believed: a
-  peer's self-description is displayed, never verified, and never decides
-  anything.
+  Same-repo sessions exchange `/msg`. The model's own send tool is off by
+  default; on, every message is rate limited, ledgered with its body and
+  flashed on the status bar. An arriving message *starting* a turn is a
+  second switch, also off.
 - **[A fleet, measured rather than managed.](docs/fleet.md)** `doxa-fleet`
-  spawns N sessions in a `DOXA_HOME` of the run's own, hands every one the
-  byte-identical prompt at the same moment, deals models from a
-  `--pool engine:model@weight`, runs `--memory-off K` of them without
-  memory, splits `--run-budget` per session, arms the peer tools for the
-  run, waits for it to go quiet, then tears everything down and reports
-  what leaked. The manifest carries the seed, the assignment and the
-  dispatch spread; the ledger carries every message. Clean to N=64 on real
-  daemons; an N the machine cannot hold is refused with the arithmetic.
-  One gap, open as #39: every slot runs the Claude engine today, whatever
-  the pool names.
+  spawns N sessions on one prompt at one moment, deals models from a pool,
+  runs K without memory, splits a run budget, waits for quiet and tears
+  down. Clean to N=64; every slot still runs the Claude engine (#39).
 - **[Peers on another machine, once you say so.](docs/fleet.md)** A tailnet
-  bridge puts sessions on a second box into the same roster, behind
-  `tailscale serve`, bound to loopback and refused until `remote_enabled`
-  is on and an allow-list names you. It asks the same policy layer a
-  remote driver would, and can reach no question that layer does not
-  already have an answer for.
+  bridge behind `tailscale serve` puts a second box's sessions in the
+  roster, refused until `remote_enabled` is on and an allow-list names you.
 - **[Memory is a setting, not a premise.](docs/manual.md#lore-integration)**
-  `lore` is on by default; turned off (`doxa --no-lore`, or `lore = false`),
-  a session gets no snapshot and writes nothing, and the `lore_*` tools are
-  absent from the model's list rather than present and refusing. The fleet harness flips the same
-  switch per agent, so a run can ask whether a shared store is doing the
-  coordinating. When [LORE](https://github.com/docwilde/LORE) sync is
-  configured, a `⇅ sync` chip says how stale this machine's copy is, how
-  much has not gone out, and how many conflicts and failed integrity
-  checks are waiting on you — and the chip is absent entirely, never a
-  zero, when sync is off.
+  `doxa --no-lore` gives a session no snapshot, no writes and no `lore_*`
+  tools; the fleet flips it per agent. With [LORE](https://github.com/docwilde/LORE)
+  sync on, a `⇅ sync` chip shows staleness, unpushed ops and conflicts;
+  off, no chip.
 - **[An isolated CLI config.](docs/manual.md#the-spawned-cli)** Spawned
   `claude` processes use a config directory DOXA owns, not your
   `~/.claude`; your plugins load only if you opt in.
