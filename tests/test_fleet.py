@@ -509,9 +509,14 @@ async def test_the_manifest_records_the_assignment_and_the_prompt(short_root):
         manifest["spec"]["n"], list(POOL), seed=manifest["spec"]["seed"]
     )
     assert [a.to_obj() for a in replayed] == [
-        {k: a[k] for k in ("index", "engine", "model", "lore")}
+        {k: a[k] for k in ("index", "engine", "model", "lore", "role")}
         for a in manifest["assignments"]
     ]
+    # A symmetric run has no supervisor and says so, rather than leaving a
+    # reader to infer the mode from a missing key.
+    assert manifest["mode"] == "symmetric"
+    assert manifest["supervisor"] is None
+    assert {a["role"] for a in manifest["assignments"]} == {"worker"}
 
 
 # =======================================================================

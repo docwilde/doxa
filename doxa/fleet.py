@@ -79,6 +79,36 @@ memory unless the caller explicitly overrides -- a refusal that names the
 numbers, never a silent success that ends in the OOM killer taking half
 the fleet and leaving a ledger that looks like attrition.
 
+SUPERVISOR MODE, and why a module built to refuse privilege grew a way
+to grant one. Everything above describes an INSTRUMENT: a symmetric run
+exists to answer a question about emergence, and every asymmetry in it is
+a confound. Ordinary software work is the opposite problem. An operator
+who wants four sessions to split a refactor does not want four agents
+each deciding independently to edit the same file; they want one session
+to take the task and hand out the pieces. ``--supervisor <engine:model>``
+is that second shape, and it is a MODE rather than a replacement:
+
+* ``mode="symmetric"`` -- today's run, unchanged in every particular. One
+  prompt, one instant, no roles, no supervisor. Nothing in this paragraph
+  reaches it.
+* ``mode="supervisor"`` -- ``n`` WORKERS drawn from ``--pool`` exactly as
+  before, plus ONE supervisor session at slot 0 (workers shift to
+  1..n). The operator's prompt goes to the supervisor and to nobody
+  else; the workers get a short briefing composed by this module, and
+  their work arrives from the supervisor as peer messages.
+
+The two properties the symmetric run keeps, because they are correct in
+both shapes: the BARRIER (nothing is prompted until every session is
+armed) and the RECORD (who was dealt what, in which order they were
+prompted, in the manifest). What supervisor mode drops is the shuffle --
+dispatch order there is a deliberate sequence, workers first and the
+supervisor last, so that no worker can be handed a task before it has
+been told what it is. It is recorded like any other order.
+
+The briefings are :func:`worker_briefing` and :func:`supervisor_briefing`
+and they are dispatched AS TURNS, which is the one structural decision
+worth defending here. See :func:`worker_briefing`'s own comment.
+
 TESTING THIS. Every backend seam is injected (:class:`FleetBackend`), so
 the orchestration -- the barrier, the seeded shuffle, the quiescence
 deadline, the teardown escalation -- is testable without spawning a single
@@ -108,6 +138,10 @@ from . import peers as peers_mod
 
 __all__ = [
     "DEFAULT_N",
+    "MODE_SUPERVISOR",
+    "MODE_SYMMETRIC",
+    "ROLE_SUPERVISOR",
+    "ROLE_WORKER",
     "Assignment",
     "BudgetRefused",
     "DaemonBackend",
@@ -120,6 +154,7 @@ __all__ = [
     "RunReport",
     "Slot",
     "assign",
+    "assign_for",
     "budget_note",
     "build_parser",
     "capacity_note",
@@ -129,6 +164,8 @@ __all__ = [
     "run_fleet",
     "spec_from_args",
     "spec_from_argv",
+    "supervisor_briefing",
+    "worker_briefing",
 ]
 
 
@@ -177,6 +214,28 @@ SOCKET_NAME_BUDGET = 40
 runtime directory: ``daemon-<8 hex>-<pid>.sock`` is 8 + 8 + 7 + 5 = ~28,
 and the margin covers a seven-digit pid and the ``.tmp`` suffixes the
 registry writes beside it."""
+
+
+# -- the two shapes a run can have ------------------------------------
+
+MODE_SYMMETRIC = "symmetric"
+"""N sessions, one identical prompt, one instant, no roles. The
+experiment's shape and this module's original one."""
+
+MODE_SUPERVISOR = "supervisor"
+"""One supervisor session gets the operator's prompt and distributes the
+work to N briefed workers over peer messages. Ordinary software work's
+shape, and the one that is NOT a measurement instrument."""
+
+ROLE_WORKER = "worker"
+"""What a slot drawn from ``--pool`` is. Also what every slot of a
+SYMMETRIC run is: a symmetric run has no supervisor, so the honest
+reading of its rows is "workers, nobody directing them" rather than a
+third role invented to describe the absence of the second."""
+
+ROLE_SUPERVISOR = "supervisor"
+"""The one slot in a supervisor run that receives the operator's prompt.
+Exactly one per run, always slot 0 -- see :func:`assign_for`."""
 
 
 # -- what a run is ----------------------------------------------------
@@ -253,6 +312,11 @@ class Assignment:
     engine: str
     model: "str | None"
     lore: bool = True
+    #: :data:`ROLE_WORKER` or :data:`ROLE_SUPERVISOR`. Recorded for the
+    #: same reason the model is: "the supervisor integrated nothing" and
+    #: "slot 0 integrated nothing" are the same observation only if the
+    #: manifest says which slot was the supervisor.
+    role: str = ROLE_WORKER
 
     @property
     def label(self) -> str:
@@ -264,6 +328,7 @@ class Assignment:
             "engine": self.engine,
             "model": self.model,
             "lore": self.lore,
+            "role": self.role,
         }
 
 
@@ -313,6 +378,45 @@ def assign(
     return assignments
 
 
+def assign_for(spec: "FleetSpec") -> "list[Assignment]":
+    """Every slot this run has, in slot order -- the supervisor included.
+
+    A SYMMETRIC run is :func:`assign` and nothing else, byte for byte:
+    same seed, same draw, same memory sample, same indices. That equality
+    is the point rather than an implementation detail, because a run
+    recorded before supervisor mode existed has to replay from its
+    manifest into the same assignment it had.
+
+    A SUPERVISOR run is the same draw for the ``n`` workers, SHIFTED to
+    slots 1..n, with the supervisor inserted at slot 0. Slot 0 is chosen
+    rather than slot n for one reason a reader will meet: ``/fleet attach
+    0`` is the line an operator types to reach the session that holds the
+    task, and a number that moves with N is a number they have to look up
+    first.
+
+    The supervisor is NOT drawn from the pool and is NOT subject to
+    ``--memory-off``. It is the session that has to hold the shape of the
+    whole job across every worker's reply, which is precisely the
+    continuity a memory-off agent does not have; and a run that silently
+    dealt the coordinating session no memory would be a run whose failure
+    mode is "the supervisor forgot what it had already handed out". The
+    policy still applies in full to the workers, where it means what it
+    always meant."""
+    workers = assign(spec.n, list(spec.pool), seed=spec.seed, memory=spec.memory)
+    if spec.supervisor is None:
+        return workers
+    head = Assignment(
+        index=0,
+        engine=spec.supervisor.engine,
+        model=spec.supervisor.model,
+        lore=True,
+        role=ROLE_SUPERVISOR,
+    )
+    return [head] + [
+        replace(w, index=w.index + 1, role=ROLE_WORKER) for w in workers
+    ]
+
+
 @dataclass
 class FleetSpec:
     """Everything a run is, in one object that goes into the manifest.
@@ -330,6 +434,14 @@ class FleetSpec:
     root: "Path | None" = None
     run_id: str = ""
     broadcast: bool = False
+
+    #: The supervisor's engine and model, or None for a symmetric run.
+    #: A :class:`ModelSlot` rather than a plain string because it is
+    #: parsed by the same grammar one ``--pool`` entry is, so
+    #: ``claude:opus`` means here what it means there -- and because its
+    #: ``weight`` is then structurally meaningless, which is the honest
+    #: shape: there is exactly one supervisor and nothing to weight.
+    supervisor: "ModelSlot | None" = None
 
     # -- what this run may spend ---------------------------------------
     #
@@ -377,7 +489,13 @@ class FleetSpec:
     spawn_timeout_s: float = 90.0
     arm_timeout_s: float = 20.0
     dispatch_timeout_s: float = 30.0
-    quiescence_timeout_s: float = 1800.0
+    #: None means NO deadline, which only an INTERACTIVE supervisor run
+    #: (:attr:`interactive`) may ask for: a session waiting for a human to
+    #: attach and type has no phase that can be timed, and a deadline
+    #: there would tear the run down while the operator was still reading
+    #: the tab. Every other run keeps a number, and the default is the
+    #: one it has always been.
+    quiescence_timeout_s: "float | None" = 1800.0
     quiet_dwell_s: float = 20.0
     poll_interval_s: float = 2.0
     stop_timeout_s: float = 60.0
@@ -391,7 +509,13 @@ class FleetSpec:
     spawn_concurrency: int = 8
 
     def __post_init__(self) -> None:
-        if not str(self.prompt).strip():
+        # A SYMMETRIC run still refuses a missing prompt exactly as it
+        # always has: the prompt IS the run there, and a fleet spawned
+        # without one would be N sessions sitting idle at a cost. A
+        # SUPERVISOR run may legitimately have none -- that is the
+        # interactive shape, where the operator attaches to the
+        # supervisor and types the task into it.
+        if self.supervisor is None and not str(self.prompt).strip():
             raise ValueError("a fleet run needs a prompt")
         if int(self.n) <= 0:
             raise ValueError(f"a fleet needs at least one session, got n={self.n}")
@@ -407,6 +531,42 @@ class FleetSpec:
         # rather than "refuse everything" -- a mistyped ceiling must not be
         # able to produce a run in which no session may start a turn.
         self.run_budget_usd = budget_mod.usd(self.run_budget_usd)
+
+    # -- which of the two shapes this run is ---------------------------
+
+    @property
+    def mode(self) -> str:
+        """:data:`MODE_SYMMETRIC` or :data:`MODE_SUPERVISOR`.
+
+        Derived rather than stored, so it cannot disagree with the field
+        that decides it -- a spec carrying ``mode="supervisor"`` and no
+        supervisor would be a manifest that lies about the run."""
+        return MODE_SUPERVISOR if self.supervisor is not None else MODE_SYMMETRIC
+
+    @property
+    def session_count(self) -> int:
+        """Sessions this run actually starts: ``n``, plus the supervisor.
+
+        ``n`` stays the number of WORKERS -- ``-n 4 --supervisor
+        claude:opus`` is four workers and a supervisor, not three and a
+        supervisor -- because the operator is choosing how many hands the
+        job gets, and silently spending one of them on the coordinator is
+        the sort of arithmetic that surprises somebody at the bill.
+        Everything that counts sessions (capacity, the budget division,
+        teardown's evidence) counts THIS."""
+        return int(self.n) + (1 if self.supervisor is not None else 0)
+
+    @property
+    def interactive(self) -> bool:
+        """A supervisor run with no prompt: the operator will attach to
+        the supervisor and type the task there.
+
+        The run then has no measurable end of its own -- the supervisor
+        sits idle until a human types, which is indistinguishable from a
+        finished fleet to anything outside the session -- so
+        :meth:`FleetRun.await_quiescence` refuses to end it on quiet. See
+        that method."""
+        return self.supervisor is not None and not str(self.prompt or "").strip()
 
     # -- where a run's state lives ------------------------------------
 
@@ -462,10 +622,17 @@ class FleetSpec:
         than arithmetic). N sessions each bounded at ``total / N`` can
         together spend at most ``total``, because the bounds add.
         :func:`doxa.budget.per_session_share` states the two things that
-        buys and the two it does not."""
+        buys and the two it does not.
+
+        Divided by :attr:`session_count`, never by ``n``: in a supervisor
+        run the supervisor spends too, and a ceiling that had not counted
+        it would be a ceiling the run can exceed by one whole session's
+        share."""
         if self.run_budget_usd is None:
             return None
-        return budget_mod.per_session_share(self.run_budget_usd, self.n)
+        return budget_mod.per_session_share(
+            self.run_budget_usd, self.session_count
+        )
 
     def env_for(self, assignment: Assignment) -> "dict[str, str]":
         """The environment ONE session is spawned with.
@@ -622,9 +789,13 @@ def budget_note(spec: "FleetSpec") -> str:
             + ("" if spec.inbound_turns else " (inbound turn-starting is off)")
         )
     share = spec.session_budget_usd or 0.0
+    # N here is every session the run STARTS, which in supervisor mode is
+    # the workers plus the supervisor -- the number the division actually
+    # used, so an operator checking the arithmetic against the bill is
+    # reading the same one the sessions were given.
     note = (
         f"run budget {budget_mod.format_usd(spec.run_budget_usd)} across "
-        f"N={spec.n} = {budget_mod.format_usd(share)} per session "
+        f"N={spec.session_count} = {budget_mod.format_usd(share)} per session "
         f"({budget_mod.SESSION_BUDGET_ENV}); each session stops STARTING "
         "turns at its share, so the run spends at most the total plus one "
         "turn of overshoot per session"
@@ -668,7 +839,8 @@ def check_run_budget(spec: "FleetSpec") -> str:
     if spec.allow_unbudgeted:
         return note + " -- ACCEPTED by allow_unbudgeted (--allow-unbudgeted)"
     raise BudgetRefused(
-        f"this run arms inbound turn-starting for all {spec.n} sessions "
+        f"this run arms inbound turn-starting for all "
+        f"{spec.session_count} sessions "
         "(an arriving peer message starts a turn in an idle session, so "
         "the fleet can keep spending with nobody typing) and no run "
         "budget is set -- refusing to start. Set one: "
@@ -733,6 +905,13 @@ class Slot:
     session_id: "str | None" = None
     socket_path: "str | None" = None
     pid: "int | None" = None
+    #: Where this session is ACTUALLY working, read from the registry
+    #: entry the daemon wrote -- which is its own git worktree whenever
+    #: ``doxa.worktrees.enabled()`` and ``cwd`` is a repository, and both
+    #: are true by default. It is the run's only record of where the work
+    #: ended up: a fleet's worktrees live under the RUN's ``DOXA_HOME``,
+    #: so nothing outside the run can find them by looking.
+    cwd: "str | None" = None
     dispatched_at: "float | None" = None
     error: "str | None" = None
     handle: Any = None
@@ -740,6 +919,14 @@ class Slot:
     @property
     def index(self) -> int:
         return self.assignment.index
+
+    @property
+    def role(self) -> str:
+        return self.assignment.role
+
+    @property
+    def is_supervisor(self) -> bool:
+        return self.assignment.role == ROLE_SUPERVISOR
 
     def fail(self, phase: str, exc: BaseException) -> None:
         """Record a failure WITHOUT raising. One session failing to spawn
@@ -753,9 +940,15 @@ class Slot:
     def to_obj(self) -> "dict[str, Any]":
         return {
             "index": self.index,
+            "role": self.role,
             "assignment": self.assignment.to_obj(),
             "phase": self.phase,
             "session_id": self.session_id,
+            # The worktree, when there is one. Beside the socket for the
+            # same reason the socket is here: a reader outside this
+            # process cannot derive it, because it is named after a
+            # session id under a DOXA_HOME only the run knows.
+            "cwd": self.cwd,
             # RECORDED because a reader outside this process has no other
             # way to reach one session of a run: the run's peer registry
             # lives under its OWN DOXA_RUNTIME_DIR, so the machine's
@@ -766,6 +959,168 @@ class Slot:
             "dispatched_at": self.dispatched_at,
             "error": self.error,
         }
+
+
+# -- what the two roles are told --------------------------------------
+#
+# COMPOSED BY THE HARNESS, DISPATCHED AS A TURN, and both halves of that
+# are deliberate.
+#
+# Composed here rather than by a model: the briefing is the run's own
+# protocol -- who reports to whom, over which channel, with which tool --
+# and a protocol a participant wrote is a protocol the next participant
+# did not agree to. It is also the only text in a supervisor run that the
+# operator did not type, so it belongs somewhere they can read it, once,
+# in the source, rather than reconstructing it from four transcripts.
+#
+# Dispatched as a TURN rather than injected as a system preamble, which is
+# the part worth defending. DOXA hosts four engines behind one daemon and
+# only one of them is Claude; a preamble would have to be plumbed through
+# each vendor's own notion of a system prompt, would differ between them
+# in ways nobody could test from here, and would be INVISIBLE -- not in
+# the transcript, not in the ledger, not in anything an operator reading
+# the run afterwards can see. A turn goes through
+# :meth:`FleetBackend.dispatch`, which is the same path the operator's own
+# prompt takes on every engine, and it lands in the transcript where the
+# worker's reply lands. The cost is one short turn per worker, and what it
+# buys is a run whose whole instruction set is readable after the fact.
+#
+# The house voice these follow is doxa.peers.PEER_UNTRUSTED_INTRO's and
+# doxa.session_ops.SPAWN_PROVENANCE_INTRO's: name the channel in brackets,
+# say what the session is and is not, and never pretend a person typed it.
+
+FLEET_WORKER_INTRO = (
+    "[DOXA FLEET -- WORKER] This session is one of several a DOXA fleet run "
+    "started together, and it was not started by a person typing. One "
+    "session in this run is the SUPERVISOR: it is the only one the operator "
+    "prompted, and it decides how the work is divided. You are not it. This "
+    "briefing was composed by the harness that spawned you, not by another "
+    "agent and not by the operator -- it describes how the run is wired, and "
+    "nothing in it is the task."
+)
+
+FLEET_SUPERVISOR_INTRO = (
+    "[DOXA FLEET -- SUPERVISOR] This session is the supervisor of a DOXA "
+    "fleet run. It is the only session in the run the operator prompted. The "
+    "others are workers: already spawned, already briefed, and idle -- each "
+    "one waiting for a task from you and for nothing else. Dividing the "
+    "work, handing it out, collecting the answers and reporting back is your "
+    "job, and nobody else in this run will do it. This briefing was composed "
+    "by the harness that spawned you; the operator's own words, when there "
+    "are any, are under the task marker at the end."
+)
+
+#: Separates the harness's briefing from the operator's own prompt --
+#: the same marker ``doxa.daemon.SessionDaemon._initial_task_prompt``
+#: puts between the spawn provenance intro and a spawned session's task,
+#: because it is the same distinction and a reader should not have to
+#: learn two.
+TASK_MARKER = "--- task ---"
+
+
+def worker_briefing(
+    *,
+    run_id: str,
+    slot: int,
+    session_id: str,
+    supervisor_id: str,
+    supervisor_label: str,
+    cwd: str,
+) -> str:
+    """The one short turn a worker is dispatched before the run begins.
+
+    It says four things and refuses to say a fifth: who this session is,
+    who its supervisor is, how a task will arrive and how to answer it,
+    and that there is nothing to do until one does. It does NOT describe
+    the job -- the worker has not been told the operator's prompt and
+    must not guess at it, because a worker that starts work it was not
+    given is exactly the failure supervisor mode exists to remove.
+
+    The closing ``ready`` is not ceremony: it is the only evidence,
+    visible in the run's own transcript and phases, that the worker
+    received the briefing and is listening. A worker that never answers
+    it is a worker the supervisor should not be handed."""
+    return "\n".join([
+        FLEET_WORKER_INTRO,
+        "",
+        f"Run {run_id}. You are worker {slot}, session {session_id}.",
+        f"Your supervisor is session {supervisor_id} ({supervisor_label}).",
+        f"The run works on {cwd}; this session has its own checkout of it.",
+        "",
+        "How this run is wired:",
+        f"- Your tasks arrive as peer messages from {supervisor_id}. An "
+        "arriving message starts a turn here, so you are woken by the work "
+        "rather than waiting for it.",
+        "- Carry each task out IN THIS CHECKOUT. Commit what you change.",
+        "- Then report back with peer_send to session "
+        f"{supervisor_id}: what you did, where it is (branch, files), and "
+        "anything you could not do. That message is the only way your work "
+        "reaches the run -- nobody reads your transcript.",
+        "- Do nothing else until a task arrives. Do not start work you were "
+        "not given, and do not message the other workers.",
+        "",
+        "Reply now with a single line: ready",
+    ])
+
+
+def supervisor_briefing(
+    *,
+    run_id: str,
+    session_id: str,
+    workers: "list[tuple[int, str, str]]",
+    cwd: str,
+    prompt: str,
+) -> str:
+    """The supervisor's first turn: the roster, the protocol, the task.
+
+    ``workers`` is ``(slot, session_id, label)`` per worker, in slot
+    order, and it is spelled out rather than left to ``peer_list``
+    because the supervisor has to be able to address a worker in its
+    FIRST turn -- a roster it would have to go and fetch is a roster it
+    may decide not to fetch.
+
+    The task comes last, under :data:`TASK_MARKER`, so that the operator's
+    own words are the final thing in the prompt and are unambiguously
+    separable from the harness's. With no prompt at all the marker still
+    appears and says so: a supervisor told nothing would otherwise invent
+    a task, which at N workers is an expensive way to be wrong."""
+    roster = [
+        f"  slot {slot:>3}  session {sid}  {label}"
+        for slot, sid, label in workers
+    ] or ["  (none -- every worker failed to start; you are on your own)"]
+    task = str(prompt or "").strip() or (
+        "No task yet. The operator will attach to THIS session and type it. "
+        "Wait for it: brief nobody, dispatch nothing, and do not invent work "
+        "for the workers. When the task arrives, divide it and hand it out."
+    )
+    return "\n".join([
+        FLEET_SUPERVISOR_INTRO,
+        "",
+        f"Run {run_id}. You are the supervisor, session {session_id}.",
+        "Your workers:",
+        *roster,
+        "",
+        f"The run works on {cwd}. Every worker has its OWN checkout of it -- "
+        "a git worktree on its own branch -- so two workers never edit one "
+        "file in one tree. They do share the repository's history, so say in "
+        "each task which files and which branch that worker owns.",
+        "",
+        "How this run is wired:",
+        "- Give a worker work with peer_send naming its session id. One task "
+        "per message, and self-contained: a worker knows nothing about the "
+        "others, about this briefing, or about the operator's words.",
+        "- A worker's reply arrives here as a peer message and starts a turn, "
+        "so you are woken when an answer lands instead of polling for it.",
+        "- peer_list shows this run's sessions; peer_history shows the "
+        "traffic you have already had.",
+        "- Divide the task, dispatch it, wait for the replies, integrate "
+        "them, and report the result.",
+        "- Do the work yourself only when no worker fits it. A supervisor "
+        "that does the job alone has spent the fleet for nothing.",
+        "",
+        TASK_MARKER,
+        task,
+    ])
 
 
 # -- the injectable backend -------------------------------------------
@@ -860,7 +1215,9 @@ class DaemonBackend:
         )
         slot.session_id = session_id
         slot.socket_path = socket_path
-        slot.pid = _registry_pid(Path(env["DOXA_RUNTIME_DIR"]), session_id)
+        entry = _registry_entry(Path(env["DOXA_RUNTIME_DIR"]), session_id)
+        slot.pid = _entry_pid(entry)
+        slot.cwd = _entry_cwd(entry)
 
     async def arm(self, slot: Slot, spec: FleetSpec) -> None:
         from .client import EngineClient
@@ -960,21 +1317,43 @@ async def _drain(client: Any) -> None:
         await asyncio.gather(_turns(), _oob())
 
 
-def _registry_pid(runtime: Path, session_id: str) -> "int | None":
-    """The daemon's pid, read from the registry entry it just wrote.
+def _registry_entry(runtime: Path, session_id: str) -> "dict[str, Any]":
+    """The registry entry this session just wrote, or ``{}``.
 
-    Read rather than returned by the spawn: ``spawn_daemon`` returns the
-    session id and socket, and the pid it holds is the pid of the process
-    it forked -- which, with ``start_new_session=True``, is the daemon
-    itself, but only incidentally. The registry entry is where the daemon
-    states its own pid, and the teardown's last resort has to aim at the
-    process that is actually there."""
-    entry = runtime / "registry" / f"{session_id}.json"
+    ONE read for the two facts the harness needs from it (the pid and the
+    working directory), rather than one read each: the file is written
+    once at startup and both callers want the same instant's answer, and
+    two reads would be two chances to catch a rewrite.
+
+    Read at all -- rather than taken from the spawn's return value --
+    because ``spawn_daemon`` returns the session id and socket and
+    nothing else. The pid it holds is the pid of the process it forked,
+    which with ``start_new_session=True`` is the daemon itself but only
+    incidentally, and the cwd it was given is the one the daemon then
+    REPLACED with a worktree of its own (:meth:`doxa.daemon.SessionDaemon
+    ._apply_worktree`, which runs before the presence entry is written).
+    The entry is where the daemon states both for itself."""
+    path = runtime / "registry" / f"{session_id}.json"
     try:
-        data = json.loads(entry.read_text(encoding="utf-8"))
-        return int(data["pid"])
-    except (OSError, ValueError, KeyError, TypeError):
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _entry_pid(entry: "dict[str, Any]") -> "int | None":
+    """The daemon's own pid -- what the teardown's last resort aims at."""
+    try:
+        return int(entry["pid"])
+    except (KeyError, ValueError, TypeError):
         return None
+
+
+def _entry_cwd(entry: "dict[str, Any]") -> "str | None":
+    """Where the session is really working: its worktree, when it made
+    one, and the run's ``cwd`` when it did not."""
+    value = str(entry.get("cwd") or "").strip()
+    return value or None
 
 
 def _gone(pid: "int | None") -> bool:
@@ -1160,17 +1539,47 @@ class RunReport:
     def dispatched(self) -> "list[Slot]":
         return [s for s in self.slots if s.dispatched_at is not None]
 
+    @property
+    def supervisor_slot(self) -> "Slot | None":
+        """The run's supervisor, or None in a symmetric run."""
+        for slot in self.slots:
+            if slot.is_supervisor:
+                return slot
+        return None
+
     def to_obj(self) -> "dict[str, Any]":
+        supervisor = self.supervisor_slot
         return {
             "run_id": self.run_id,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            # WHICH SHAPE THIS RUN WAS, first-class and at the top level
+            # rather than inferred from the presence of a supervisor key.
+            # Every other field in this document means something slightly
+            # different in the two modes -- dispatch_order is a shuffle in
+            # one and a protocol in the other, `quiesced` is a measurement
+            # in one and an impossibility in the other -- so a reader has
+            # to know which before reading any of them.
+            "mode": self.spec.mode,
+            "interactive": self.spec.interactive,
+            "supervisor": None if supervisor is None else {
+                "slot": supervisor.index,
+                "session_id": supervisor.session_id,
+                "engine": supervisor.assignment.engine,
+                "model": supervisor.assignment.model,
+                "cwd": supervisor.cwd,
+            },
             "spec": {
                 "n": self.spec.n,
+                "sessions": self.spec.session_count,
                 "cwd": self.spec.cwd,
                 "seed": self.spec.seed,
                 "prompt": self.spec.prompt,
                 "prompt_sha256": _sha256(self.spec.prompt),
+                "supervisor": None if self.spec.supervisor is None else {
+                    "engine": self.spec.supervisor.engine,
+                    "model": self.spec.supervisor.model,
+                },
                 "broadcast": self.spec.broadcast,
                 "inbound_turns": self.spec.inbound_turns,
                 "run_budget_usd": self.spec.run_budget_usd,
@@ -1181,6 +1590,7 @@ class RunReport:
                     {"engine": m.engine, "model": m.model, "weight": m.weight}
                     for m in self.spec.pool
                 ],
+                "quiescence_timeout_s": self.spec.quiescence_timeout_s,
                 "home": str(self.spec.home),
                 "runtime": str(self.spec.runtime),
             },
@@ -1217,10 +1627,18 @@ class RunReport:
             f", LEAKED {len(self.leaked_pids)}" if self.leaked_pids else ""
         )
         stopped = ", STOPPED on request" if self.stopped else ""
+        # The mode leads, because every number after it reads differently
+        # under the other one -- and the session count is spelled with the
+        # supervisor in it, since that is how many sessions ran.
+        shape = (
+            f"{self.spec.session_count} sessions "
+            f"({self.spec.n} workers + supervisor)"
+            if self.spec.supervisor is not None else f"n={self.spec.n}"
+        )
         return (
-            f"run {self.run_id}: n={self.spec.n} ({parts}); dispatch spread "
-            f"{spread}; ledger {self.ledger_messages} messages"
-            f"{stopped}{leak}"
+            f"run {self.run_id} [{self.spec.mode}]: {shape} ({parts}); "
+            f"dispatch spread {spread}; ledger "
+            f"{self.ledger_messages} messages{stopped}{leak}"
         )
 
 
@@ -1262,12 +1680,7 @@ class FleetRun:
         # sets it (:meth:`request_stop`) and the run takes the same
         # teardown path the quiescence deadline takes.
         self.stop_signal = stop if stop is not None else asyncio.Event()
-        self.slots = [
-            Slot(assignment=a)
-            for a in assign(
-                spec.n, list(spec.pool), seed=spec.seed, memory=spec.memory
-            )
-        ]
+        self.slots = [Slot(assignment=a) for a in assign_for(spec)]
         self.report = RunReport(run_id=spec.run_id, spec=spec, slots=self.slots)
 
     # -- the end an operator can ask for -------------------------------
@@ -1306,7 +1719,12 @@ class FleetRun:
         """Make the run's directories and state the arithmetic. Raises
         before anything is spawned when N does not fit or the paths are too
         deep -- both are failures that are cheap here and expensive later."""
-        self.report.capacity = check_capacity(self.spec.n, force=self.force)
+        # Every session the run STARTS, supervisor included: the memory
+        # arithmetic is about resident megabytes, and a coordinating
+        # session costs the same ~600 MB as a working one.
+        self.report.capacity = check_capacity(
+            self.spec.session_count, force=self.force
+        )
         self.report.forced = self.force
         # Before any directory is made and long before any process is: a
         # run that may not spend must not leave a half-built run root
@@ -1371,6 +1789,22 @@ class FleetRun:
     # -- phase 3: the identical prompt, at one instant -----------------
 
     async def dispatch(self) -> None:
+        """Prompt the run -- symmetrically, or through its supervisor.
+
+        The BARRIER is common to both and is the reason this is a phase
+        rather than something spawn does: this method runs only after
+        :meth:`arm_all` has returned, so no session is prompted while any
+        other is still being armed. What differs is what is written and
+        in which order, and each shape has its own method below."""
+        if self.spec.supervisor is None:
+            await self._dispatch_symmetric()
+        else:
+            await self._dispatch_supervisor()
+        stamps = [s.dispatched_at for s in self.slots if s.dispatched_at is not None]
+        if stamps:
+            self.report.dispatch_spread_s = max(stamps) - min(stamps)
+
+    async def _dispatch_symmetric(self) -> None:
         """Hand every armed session the SAME prompt, released together.
 
         Three mechanisms, each answering a different way the start could
@@ -1416,9 +1850,78 @@ class FleetRun:
         self.report.dispatch_started_at = time.monotonic()
         released.set()
         await asyncio.gather(*tasks)
-        stamps = [s.dispatched_at for s in self.slots if s.dispatched_at is not None]
-        if stamps:
-            self.report.dispatch_spread_s = max(stamps) - min(stamps)
+
+    async def _dispatch_supervisor(self) -> None:
+        """Brief every worker, then hand the supervisor the task.
+
+        THE ORDER IS THE PROTOCOL, and it is the exact inverse of the
+        symmetric shape's shuffle. Every worker is briefed and has
+        acknowledged the write before the supervisor is prompted at all,
+        so there is no instant at which the supervisor could dispatch a
+        task to a session that has not yet been told what a task is. It
+        is deterministic (workers in slot order, supervisor last) because
+        a protocol whose order varies per run is a protocol whose
+        failures do not reproduce -- the opposite of the shuffle's
+        reason, for the opposite kind of run.
+
+        A worker is briefed by :func:`worker_briefing` with its OWN
+        session id and the supervisor's, so the two can address each
+        other by name from the first turn. Nothing here formats the
+        operator's prompt into a worker's text: a worker is told how the
+        run is wired and nothing about the job, because the job is the
+        supervisor's to divide.
+
+        With no supervisor session to report to -- it failed to spawn or
+        to arm -- NOTHING is dispatched. Briefing four workers to send
+        their results to a session that does not exist would spend four
+        turns to produce a run that cannot go anywhere, and the manifest
+        already carries the reason on the supervisor's own slot."""
+        boss = self.report.supervisor_slot
+        if boss is None or boss.phase != PHASE_ARMED or not boss.session_id:
+            return
+        workers = [
+            s for s in self.slots
+            if not s.is_supervisor and s.phase == PHASE_ARMED
+        ]
+        self.report.dispatch_order = tuple(
+            [s.index for s in workers] + [boss.index]
+        )
+        self.report.dispatch_started_at = time.monotonic()
+
+        for slot in workers:
+            await self._dispatch_one(slot, worker_briefing(
+                run_id=self.spec.run_id,
+                slot=slot.index,
+                session_id=str(slot.session_id or "?"),
+                supervisor_id=str(boss.session_id),
+                supervisor_label=boss.assignment.label,
+                cwd=self.spec.cwd,
+            ))
+        await self._dispatch_one(boss, supervisor_briefing(
+            run_id=self.spec.run_id,
+            session_id=str(boss.session_id),
+            workers=[
+                (s.index, str(s.session_id or "?"), s.assignment.label)
+                for s in workers if s.phase == PHASE_DISPATCHED
+            ],
+            cwd=self.spec.cwd,
+            prompt=self.spec.prompt,
+        ))
+
+    async def _dispatch_one(self, slot: Slot, prompt: str) -> None:
+        """One write, with the phase and the stamp the report reads.
+
+        Shared by the sequential supervisor path rather than by the
+        symmetric one, whose task body has to stay inside its own barrier
+        -- but the bookkeeping either way is identical, and two copies of
+        it is how a slot ends up dispatched with no ``dispatched_at``."""
+        try:
+            async with asyncio.timeout(self.spec.dispatch_timeout_s):
+                await self.backend.dispatch(slot, prompt)
+            slot.dispatched_at = time.monotonic()
+            slot.phase = PHASE_DISPATCHED
+        except (Exception, asyncio.TimeoutError) as exc:
+            slot.fail(PHASE_FAILED, exc)
 
     # -- phase 4: quiescence -------------------------------------------
 
@@ -1437,11 +1940,26 @@ class FleetRun:
         :data:`PHASE_HUNG` and stops being waited on -- never waited on
         forever, which is the failure that turns one wedged SDK call into a
         run nobody gets back. It is still torn down, still killed if it has
-        to be, and still named in the manifest."""
-        deadline = time.monotonic() + self.spec.quiescence_timeout_s
+        to be, and still named in the manifest.
+
+        AN INTERACTIVE RUN IS NOT ENDED BY QUIET AT ALL
+        (:attr:`FleetSpec.interactive`). Its supervisor is waiting for a
+        human to attach and type, which from out here is
+        indistinguishable from a fleet that has finished -- and every
+        session in the run goes quiet within seconds of being briefed. A
+        dwell would therefore tear the run down before the operator had
+        finished reading the tab, which is not a subtle failure: it is
+        five spawned sessions and a worktree each, gone. So the dwell is
+        skipped, the deadline is whatever the operator asked for (and
+        ``None``, meaning none at all, is what they get by not asking),
+        and the only things that end such a run are
+        :meth:`request_stop` and every session dying."""
+        interactive = self.spec.interactive
+        timeout = self.spec.quiescence_timeout_s
+        deadline = None if timeout is None else time.monotonic() + timeout
         quiet_since: "float | None" = None
         started = time.monotonic()
-        while time.monotonic() < deadline:
+        while deadline is None or time.monotonic() < deadline:
             if self.stopping():
                 # An operator's stop is NOT a quiescence: the run ends
                 # here, quiesced stays False, and the slots still
@@ -1450,7 +1968,12 @@ class FleetRun:
                 break
             live = [s for s in self.slots if s.phase == PHASE_DISPATCHED]
             if not live:
-                self.report.quiesced = True
+                # Nothing left to wait on. In a prompted run that IS
+                # quiescence; in an interactive one it means every
+                # session died, which is an end but not a measurement --
+                # and it is also what keeps a deadline-less wait from
+                # being an infinite one.
+                self.report.quiesced = not interactive
                 break
             busy = False
             for slot in live:
@@ -1466,7 +1989,9 @@ class FleetRun:
                     continue
                 if not quiet:
                     busy = True
-            if busy:
+            if interactive:
+                quiet_since = None
+            elif busy:
                 quiet_since = None
             elif quiet_since is None:
                 quiet_since = time.monotonic()
@@ -1482,7 +2007,7 @@ class FleetRun:
                 if slot.phase == PHASE_DISPATCHED:
                     slot.phase = PHASE_HUNG
                     slot.error = slot.error or (
-                        f"still running at the {self.spec.quiescence_timeout_s:.0f}s "
+                        f"still running at the {float(timeout or 0.0):.0f}s "
                         "quiescence deadline"
                     )
         for slot in self.slots:
@@ -1681,6 +2206,24 @@ class FleetArgsError(ValueError):
     text as a block."""
 
 
+def _parse_supervisor(spec: str) -> ModelSlot:
+    """``claude:opus`` -- ONE pool entry's grammar, for the one slot that
+    is not drawn from the pool.
+
+    Parsed by :func:`_parse_pool` rather than by a second reader, so
+    ``--supervisor`` and ``--pool`` cannot disagree about what a colon
+    means. Two entries are refused rather than silently reduced to the
+    first: a run has exactly one supervisor, and a comma there is an
+    operator who believes otherwise."""
+    entries = _parse_pool(spec)
+    if len(entries) != 1:
+        raise FleetArgsError(
+            f"--supervisor takes ONE engine[:model], got {spec!r} -- a run "
+            "has exactly one supervisor. Use --pool for the workers."
+        )
+    return entries[0]
+
+
 def build_parser() -> "argparse.ArgumentParser":
     """THE fleet argument grammar. One parser, both front ends.
 
@@ -1713,14 +2256,19 @@ def build_parser() -> "argparse.ArgumentParser":
 
     parser.error = _refuse  # type: ignore[method-assign]
     parser.add_argument("--prompt", default=None,
-                        help="the task text, byte-identical for every "
-                             "session. Never formatted per session: a "
-                             "number is a position and a position is a "
-                             "privilege")
+                        help="the task text. In a symmetric run it is "
+                             "byte-identical for every session and never "
+                             "formatted per session: a number is a position "
+                             "and a position is a privilege. In a "
+                             "--supervisor run it goes to the supervisor "
+                             "ALONE, and may be omitted -- then the "
+                             "operator attaches to the supervisor and types "
+                             "it there")
     parser.add_argument("--prompt-file", default=None,
                         help="read the prompt from this file instead. One "
-                             "of --prompt and --prompt-file is required; "
-                             "--prompt-file wins when both are given")
+                             "of --prompt and --prompt-file is required "
+                             "unless --supervisor is given; --prompt-file "
+                             "wins when both are given")
     parser.add_argument("-n", type=int, default=DEFAULT_N,
                         help=f"sessions (default %(default)s). The "
                              f"experiment wants 32, which is about "
@@ -1732,6 +2280,17 @@ def build_parser() -> "argparse.ArgumentParser":
                              "'claude:sonnet@8,claude:opus@1'. Required: "
                              "the model assignment is the run's primary "
                              "covariate and there is no default for it")
+    parser.add_argument("--supervisor", default=None,
+                        help="ONE engine[:model], same grammar as a --pool "
+                             "entry (e.g. claude:opus). Makes this a "
+                             "SUPERVISOR run: n workers from --pool, plus a "
+                             "supervisor at slot 0 which is the only session "
+                             "the prompt goes to. It briefs the workers over "
+                             "peer messages and integrates their replies. "
+                             "Without it the run is symmetric -- every "
+                             "session gets the identical prompt at one "
+                             "instant, which is what the experiment needs "
+                             "and what ordinary work does not")
     parser.add_argument("--seed", type=int, default=0,
                         help="the run seed. The model assignment and the "
                              "dispatch order are both drawn from it, so a "
@@ -1749,7 +2308,18 @@ def build_parser() -> "argparse.ArgumentParser":
                              "is a coordination channel the message ledger "
                              "cannot see, so this is a variable rather "
                              "than a switch")
-    parser.add_argument("--quiescence-timeout", type=float, default=1800.0)
+    # DEFAULT None so that "the operator asked for 1800" and "the
+    # operator asked for nothing" are distinguishable here -- they are
+    # the same number in every run but one, and in that one (an
+    # interactive supervisor run) the difference decides whether the run
+    # ends on a clock at all. spec_from_args resolves it.
+    parser.add_argument("--quiescence-timeout", type=float, default=None,
+                        help="seconds before a run that will not go quiet "
+                             "is torn down (default 1800). An interactive "
+                             "--supervisor run -- one with no --prompt -- "
+                             "has NO deadline unless this names one, "
+                             "because its supervisor is waiting for you to "
+                             "type")
     parser.add_argument("--quiet-dwell", type=float, default=20.0)
     parser.add_argument("--run-budget", type=float, default=None,
                         help="dollars for the WHOLE run, divided into a "
@@ -1786,22 +2356,38 @@ def spec_from_args(args: "argparse.Namespace", *, cwd: str) -> FleetSpec:
     prompt = args.prompt
     if args.prompt_file:
         prompt = Path(args.prompt_file).read_text(encoding="utf-8")
-    if not str(prompt or "").strip():
+    supervisor = (
+        _parse_supervisor(args.supervisor)
+        if getattr(args, "supervisor", None) else None
+    )
+    # A prompt is required in a SYMMETRIC run and optional in a supervisor
+    # one -- and the refusal here is the same words it has always been,
+    # because a symmetric run's behaviour is unchanged in every particular.
+    if supervisor is None and not str(prompt or "").strip():
         raise FleetArgsError(
             "a fleet run needs a prompt: --prompt \"...\" or --prompt-file PATH"
         )
+    # The deadline, resolved from "asked for" to "in force". An
+    # interactive supervisor run that named no timeout gets None -- no
+    # deadline at all -- because its end is a human saying so. Every
+    # other run gets the number it has always had.
+    timeout = args.quiescence_timeout
+    if timeout is None:
+        interactive = supervisor is not None and not str(prompt or "").strip()
+        timeout = None if interactive else 1800.0
     return FleetSpec(
-        prompt=prompt,
+        prompt=prompt or "",
         cwd=args.cwd or cwd,
         n=args.n,
         pool=_parse_pool(args.pool),
+        supervisor=supervisor,
         seed=args.seed,
         memory=MemoryPolicy(off_count=args.memory_off or None),
         root=Path(args.root) if args.root else None,
         run_id=args.run_id or "",
         run_budget_usd=args.run_budget,
         allow_unbudgeted=args.allow_unbudgeted,
-        quiescence_timeout_s=args.quiescence_timeout,
+        quiescence_timeout_s=timeout,
         quiet_dwell_s=args.quiet_dwell,
     )
 
@@ -1834,15 +2420,37 @@ def main(argv: "list[str] | None" = None) -> int:
         print(f"{parser.prog}: error: {exc}", file=sys.stderr)
         return 2
 
-    print(capacity_note(spec.n))
+    # AN INTERACTIVE SUPERVISOR RUN IS NOT A SHELL SHAPE, and this is
+    # the honest refusal rather than a run that starts and then cannot be
+    # used. Such a run's whole premise is that the operator ATTACHES to
+    # the supervisor and types the task into it; this process has no way
+    # to do that -- it is about to block inside asyncio.run() for the
+    # length of the run -- so what it would produce is a supervisor
+    # sitting idle, a fleet of briefed workers, and a bill. The TUI's
+    # /fleet start can attach, so that is where this points.
+    if spec.interactive:
+        print(
+            "doxa-fleet: --supervisor with no --prompt starts a run whose "
+            "supervisor waits for you to attach and type -- and this "
+            "process cannot attach to it. Start it from the TUI instead: "
+            "/fleet start --supervisor <engine[:model]> --pool <...> -n <n>, "
+            "then /fleet attach 0. Or give this run a --prompt.",
+            file=sys.stderr,
+        )
+        return 2
+
+    print(capacity_note(spec.session_count))
     # Printed beside the memory arithmetic and BEFORE --dry-run returns:
     # the two questions an operator has to answer before spawning are
     # "does it fit" and "what may it cost", and a dry run that answered
     # only the first would be the wrong half.
     print(budget_note(spec))
     if args.dry_run:
-        for a in assign(spec.n, list(spec.pool), seed=spec.seed, memory=spec.memory):
-            print(f"  slot {a.index:>3}  {a.label:<28} memory={'on' if a.lore else 'OFF'}")
+        for a in assign_for(spec):
+            print(
+                f"  slot {a.index:>3}  {a.role:<10}  {a.label:<28} "
+                f"memory={'on' if a.lore else 'OFF'}"
+            )
         return 0
 
     try:

@@ -1819,6 +1819,15 @@ class PaneCommandsMixin:
             "PATH also works;\n"
             "                    --dry-run prints the arithmetic and spawns "
             "nothing)\n"
+            "  /fleet start --supervisor claude:opus --pool claude:sonnet@1 "
+            "-n 3 [--prompt \"…\"]\n"
+            "                    SUPERVISOR mode: n workers plus one "
+            "supervisor at slot 0, which\n"
+            "                    alone gets the prompt and hands the work "
+            "out over peer\n"
+            "                    messages. With no --prompt, attach to it "
+            "(/fleet attach 0)\n"
+            "                    and type the task there\n"
             "  /fleet status     this session's run: assignment, "
             "quiescence, ledger tail\n"
             "  /fleet stop       tear it down now; the tab keeps the final "
@@ -1881,14 +1890,12 @@ class PaneCommandsMixin:
             # "does it fit" and "what may it cost" -- and the assignment
             # this seed deals, exactly what `doxa-fleet --dry-run` prints.
             rows = "\n".join(
-                f"  slot {a.index:>3}  {a.label:<28} "
+                f"  slot {a.index:>3}  {a.role:<10}  {a.label:<28} "
                 f"memory={'on' if a.lore else 'OFF'}"
-                for a in fleet_mod.assign(
-                    spec.n, list(spec.pool), seed=spec.seed, memory=spec.memory
-                )
+                for a in fleet_mod.assign_for(spec)
             )
             await self._system(
-                f"{fleet_mod.capacity_note(spec.n)}\n"
+                f"{fleet_mod.capacity_note(spec.session_count)}\n"
                 f"{fleet_mod.budget_note(spec)}\n{rows}\n"
                 "(dry run — nothing was spawned)"
             )
@@ -1897,10 +1904,33 @@ class PaneCommandsMixin:
         self._fleet = session
         session.start()
         await self.app.open_fleet_tab(session, owner=self)
+        shape = (
+            f"n={spec.n}"
+            if spec.supervisor is None
+            else f"{spec.n} workers + supervisor {spec.supervisor.label} at "
+                 "slot 0"
+        )
         await self._system(
-            f"fleet {session.run_id} starting — n={spec.n}, root "
+            f"fleet {session.run_id} starting — {shape}, root "
             f"{spec.run_root}. Its tab shows the run; closing that tab "
             "tears it down unless you /fleet detach first."
+            # THE LINE, PRINTED, rather than the attach performed here.
+            # `session.start()` has only created the run's task: no
+            # session has spawned yet, so the supervisor has no socket
+            # for another second or ninety. Attaching from this handler
+            # would mean awaiting the whole spawn phase inside a slash
+            # command -- during which the operator would see nothing, and
+            # a capacity or budget refusal would be swallowed here
+            # instead of landing on the tab's first line where it
+            # belongs. So the run starts, the tab paints, and the exact
+            # line to type once slot 0 is up is right here.
+            + ("" if not spec.interactive else (
+                "\n\nThis run has NO prompt: the supervisor is waiting for "
+                "you. Once its tab shows slot 0 dispatched, run:\n"
+                "  /fleet attach 0\n"
+                "and type the task there. The run does not end on quiet — "
+                "/fleet stop ends it."
+            ))
         )
 
     async def _fleet_status(self, rest: str) -> None:
@@ -1984,14 +2014,19 @@ class PaneCommandsMixin:
         except ValueError:
             await self._system(
                 f"usage: /fleet attach <slot> — a slot NUMBER, 0 to "
-                f"{session.spec.n - 1}; /fleet status lists them"
+                # session_count, never n: a supervisor run's slots are
+                # 0..n (the supervisor plus n workers), and a range that
+                # stopped at n-1 would name every slot but the one an
+                # operator most often wants -- the supervisor's.
+                f"{session.spec.session_count - 1}; /fleet status lists them"
             )
             return
         row = session.snapshot(limit=0).slot(index)
         if row is None:
             await self._system(
                 f"fleet: no slot {index} in run {session.run_id} "
-                f"(this run has {session.spec.n}: 0 to {session.spec.n - 1})"
+                f"(this run has {session.spec.session_count}: 0 to "
+                f"{session.spec.session_count - 1})"
             )
             return
         socket_path = str(row.get("socket_path") or "")

@@ -25,7 +25,7 @@ a plan as if it were shipped.
 - [LORE integration](#lore-integration)
 - [Shell escape](#shell-escape)
 - [Images](#images)
-- [Search, resume, and peers](#search-resume-and-peers) — [fleets from the TUI](#fleets-from-the-tui) and [spend ceilings](#spend-ceilings)
+- [Search, resume, and peers](#search-resume-and-peers) — [fleets from the TUI](#fleets-from-the-tui), [supervisor mode](#supervisor-mode) and [spend ceilings](#spend-ceilings)
 - [Keyboard protocol](#keyboard-protocol)
 - [Commands](#commands)
 - [Settings](#settings)
@@ -1441,6 +1441,124 @@ releases the port. It opens a browser only when `mesh_open_browser` is on
 (off by default): DOXA runs in terminals that have none — over SSH, in a
 container, on a headless box — and the URL is printed either way.
 
+### Supervisor mode
+
+A fleet run has two shapes, and `--supervisor` is how you ask for the
+second one. The default shape is **symmetric**: every session receives the
+identical prompt at one instant and none is privileged, which is what the
+[emergence experiment](plans/emergent-organization.md) needs and what
+ordinary work does not — four agents each deciding independently how to
+refactor the same module is four conflicting answers and three wasted
+sessions. **Supervisor mode** gives the run a head. One session receives
+the operator's prompt, divides the work, hands the pieces out over peer
+messages and integrates what comes back; the others wait to be told what
+to do.
+
+```
+/fleet start --supervisor claude:opus --pool claude:sonnet@1 -n 3 --prompt "…"
+```
+
+`--supervisor` takes **one** `engine[:model]`, the same grammar one
+`--pool` entry uses, and it is the only flag that decides the mode. The
+supervisor is **not** drawn from the pool: `--pool` deals the workers and
+nothing else, so the coordinator's model is a deliberate choice rather
+than a draw — a strong model supervising cheap ones is the mix this flag
+exists to let you express.
+
+**`-n` counts workers.** `-n 3 --supervisor claude:opus` starts four
+sessions: the supervisor at **slot 0** and workers at slots 1, 2 and 3.
+Everything that counts sessions counts four — the capacity arithmetic, the
+`--run-budget` division into per-session shares, and the teardown's
+evidence that nothing was left running. Slot 0 is fixed rather than last
+so that `/fleet attach 0` reaches the supervisor whatever `-n` was.
+
+Two things the memory policy does not do here: `--memory-off K` draws from
+the **workers** only, and the supervisor always keeps memory. It is the
+session that has to hold the shape of the whole job across every worker's
+reply, and a run that silently dealt the coordinator no memory would fail
+as *the supervisor forgot what it had already handed out*.
+
+**The briefing protocol.** Nothing is prompted until every session is
+armed — the barrier is the same one the symmetric run uses. What differs
+is the order after it, and the order **is** the protocol: every worker is
+briefed and has acknowledged the write before the supervisor is prompted
+at all, so there is no instant at which the supervisor could hand a task
+to a session that has not yet been told a task is coming. It is
+deterministic (workers in slot order, supervisor last) and recorded in
+the manifest as `dispatch_order`.
+
+| gets | text |
+|---|---|
+| each worker | who it is (slot and session id), who its supervisor is, that tasks arrive as peer messages from that session, that it reports results back with `peer_send` to that id, and that it does nothing until a task arrives. It ends `reply now with a single line: ready`. |
+| the supervisor | the roster — every worker's slot, session id, engine and model — the same protocol from the other side, a note that each worker has its own checkout, and then `--- task ---` and the operator's prompt verbatim. |
+
+A worker is told **nothing about the job**. It has not seen the operator's
+prompt and cannot guess at it, which is the point: a worker that starts
+work it was not given is the failure this mode exists to remove.
+
+Both briefings are composed by the harness (`doxa.fleet.worker_briefing`
+and `supervisor_briefing`) and dispatched **as turns**, not injected as a
+system preamble. A preamble would have to be plumbed through each of the
+four engines' own notion of a system prompt, would differ between them in
+ways nothing here could test, and would be invisible afterwards. A turn
+takes the same path the operator's own prompt takes on every engine and
+lands in the transcript beside the reply it produced, so the run's whole
+instruction set is readable after the fact.
+
+**Each session works in its own checkout.** Worktree-per-session is on by
+default (`worktree_per_session`) and a fleet run's worktrees are rooted
+under the run's own `DOXA_HOME`, so every session that starts in a git
+repository already has a git worktree of it on its own branch. Two workers
+therefore never edit one file in one tree, and the supervisor's briefing
+says so and asks it to name the branch and files each task owns. The
+manifest records each slot's effective `cwd`, which is the only record of
+where the work ended up — nothing outside the run can find those worktrees
+by looking.
+
+**An interactive run has no prompt — you type it.** `--prompt` is
+optional in supervisor mode and only there; a symmetric run without one
+is still refused in the same words. Omitting it starts the fleet, briefs
+the workers, and tells the supervisor that the operator will attach and
+give it the task:
+
+```
+/fleet start --supervisor claude:opus --pool claude:sonnet@1 -n 3
+/fleet attach 0
+```
+
+Such a run **does not end when it goes quiet.** Every session is idle
+within seconds of being briefed, so the usual quiescence dwell would tear
+down the whole fleet while you were still reading the tab. It runs until
+`/fleet stop` — or until an explicitly passed `--quiescence-timeout`, which
+is why that flag's default is now unset rather than 1800 seconds: *asked
+for half an hour* and *asked for nothing* have to be different answers.
+The tab's mode line says which state the run is in and prints the attach
+line.
+
+`/fleet start` prints the `/fleet attach 0` line rather than opening that
+tab itself, because at the instant the command returns nothing has spawned
+yet and the supervisor has no socket — waiting for the spawn phase inside
+a slash command would hide the tab and swallow any refusal that belongs on
+its first line. **`doxa-fleet` refuses an interactive run outright**: that
+process blocks inside its own run for the duration and cannot attach to
+the session it just spawned, so it names `/fleet start` instead of
+starting a fleet nobody can reach.
+
+**What the run records.** The manifest
+(`<root>/<run-id>/manifest.json`) carries `mode` (`symmetric` or
+`supervisor`), `interactive`, a `supervisor` block naming its slot,
+session id, engine, model and worktree, a `role` on every slot and
+assignment, the dispatch order, and `spec.sessions` — the `n+1` the
+arithmetic actually used. A manifest with no `mode` key predates the
+modes and is read as the symmetric run it was. The fleet tab renders all
+of it: a mode line above the assignment table and a role column in it.
+
+> **Note:** a run's root must be a **short** path. Every session's Unix
+> socket lives under it and `AF_UNIX` allows 108 bytes for the whole path,
+> so `--root /tmp/dxf` works where a run directory under a long home does
+> not. The refusal fires before anything is spawned and names the
+> arithmetic.
+
 ### Spend ceilings
 
 Both switches above hand something other than you the ability to spend
@@ -1557,7 +1675,7 @@ commands this session carries, and is omitted entirely when there are none
 | `/cd <path>` | Open that path in a **new** tab; this session stays where it is |
 | `/peers` | Live sessions in this project right now |
 | `/msg <session_prefix> <text>` | Send a message to one same-project peer session |
-| `/fleet start\|status\|stop\|runs\|attach\|mesh` | Start and watch a fleet run — N sessions, one prompt, one instant, in a tab; `detach` leaves it running past its tab ([fleets from the TUI](#fleets-from-the-tui)) |
+| `/fleet start\|status\|stop\|runs\|attach\|mesh` | Start and watch a fleet run — N sessions, one prompt, one instant, in a tab; `--supervisor` gives one session the prompt and lets it hand the work to the rest ([supervisor mode](#supervisor-mode)); `detach` leaves it running past its tab ([fleets from the TUI](#fleets-from-the-tui)) |
 | `/mesh [run-id \| stop]` | Graph the message ledger in a browser — this machine's, or one fleet run's; loopback only, token-gated |
 | `/detach` | Close this tab but leave its session running |
 | `/attach [prefix]` | Reattach a live detached session in a new tab |
