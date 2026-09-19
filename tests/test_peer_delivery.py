@@ -30,10 +30,12 @@ from claude_agent_sdk import ResultMessage
 
 from doxa import peerledger as pl
 from doxa import peers
+from doxa.codex import CodexEngine
 from doxa.engine import SessionEngine
 from doxa.vendors import DEEPSEEK, ChatApiEngine
 
 from tests.fakes import factory_with_script
+from tests.test_engines import _FakeProc, _script
 from tests.test_peer_tools import _peer_entry
 from tests.test_vendors import StubTransport, deepseek_tool_script, prose_script
 
@@ -468,4 +470,155 @@ async def test_a_typed_prompt_queues_behind_a_peer_started_vendor_turn(
         )
     finally:
         eng._turn_running = False
+        await eng.finalize()
+
+
+# -- Codex, which sends but cannot be given a send TOOL -----------------
+
+
+async def _codex(tmp_path, monkeypatch, *, lines=None, **kwargs):
+    """A started Codex session, and the list its spawned fake processes
+    land in -- what the model was asked is the bytes written to a child's
+    stdin, so the child has to be reachable.
+
+    ``shutil.which`` is faked because start() refuses without the CLI on
+    PATH, and no test here may depend on one being installed."""
+    _isolate(tmp_path, monkeypatch, **kwargs)
+    monkeypatch.setattr("doxa.codex.shutil.which", lambda _name: "/usr/bin/codex")
+    scripts = list(lines if lines is not None else [])
+    procs: list = []
+
+    async def exec_factory(*_argv, **_kwargs):
+        proc = _FakeProc(scripts[len(procs)] if len(procs) < len(scripts) else [])
+        procs.append(proc)
+        return proc
+
+    eng = CodexEngine(cwd=str(tmp_path), exec_factory=exec_factory)
+    await eng.start()
+    assert eng.peer_host is not None
+    return eng, procs
+
+
+async def test_a_codex_msg_is_charged_and_ledgered(tmp_path, monkeypatch):
+    """The only outbound path a Codex session has, and until now the only
+    one that was neither limited nor recorded. There is no model-facing
+    peer_send here and there cannot be one from DOXA: a Codex model's
+    tools live in the Codex CLI, which DOXA drives as a subprocess and
+    whose tool surface it does not compose (mcp_tools=False). /msg is the
+    whole of this engine's outbound traffic, so all of it is now bounded
+    and in the mesh graph."""
+    eng, _procs = await _codex(tmp_path, monkeypatch)
+    try:
+        _peer_entry(tmp_path / "rt", "target01", scope="/repo/t")
+
+        peer = await eng.send_peer_message("target01", "from a codex pane")
+
+        assert peer.session_id == "target01"
+        assert eng._peer_delivery.limiter.used_in_window() == 1
+        record = eng._peer_delivery.ledger.recent(limit=1)[0]
+        assert record.body == "from a codex pane"
+        assert record.sender.session == eng.session_id
+        assert record.sender.engine == "codex"
+        assert record.turn.state == "idle"
+        lit = [ev for ev in _drain(eng._peer_queue) if ev.type == "peer_sent"]
+        assert lit and lit[0].data["to"] == ["target01"], (
+            "the status bar's send light never flashed"
+        )
+    finally:
+        await eng.finalize()
+
+
+async def test_a_codex_session_is_never_offered_the_send_tool(tmp_path, monkeypatch):
+    """The honest statement of the gap, held in place. peer_send is an
+    operator DOXA projects onto a tool surface it composes, and this
+    engine composes none -- the model's tools are the Codex CLI's. The
+    capability map says so in two fields, and neither may quietly become
+    True because /msg started working properly."""
+    from doxa.codex import CODEX_CAPABILITIES
+
+    eng, _procs = await _codex(tmp_path, monkeypatch, peer_send=True)
+    try:
+        assert CODEX_CAPABILITIES.mcp_tools is False
+        assert CODEX_CAPABILITIES.peer_messaging is True, (
+            "/msg and the rail are DOXA's own layer and do work here"
+        )
+        assert getattr(eng, "_tools", None) is None, (
+            "no tool projection exists on this engine to add peer_send to"
+        )
+    finally:
+        await eng.finalize()
+
+
+async def test_an_arriving_message_starts_a_codex_turn(tmp_path, monkeypatch):
+    """A Codex turn is one `codex exec resume` process, which is what
+    makes waking one possible at all: it costs a spawn, not an injection
+    into a conversation DOXA does not hold."""
+    eng, procs = await _codex(
+        tmp_path, monkeypatch, inbound=True,
+        lines=[_script(
+            {"type": "item.completed",
+             "item": {"id": "a", "type": "agent_message", "text": "on it"}},
+            {"type": "turn.completed", "usage": {}},
+        )],
+    )
+    try:
+        eng._on_peer_frame({
+            "from_id": "cause01", "from_title": "the cause", "sent_at": "t0",
+            "body": "please look at the parser", "from_repo": "/repo/cause",
+            "kind": "direct",
+        })
+        assert eng._turn_running is True
+        await eng._queued_turn_task
+
+        assert len(procs) == 1, "no codex process was spawned for the turn"
+        sent = procs[0].stdin.written.decode()
+        assert sent.startswith(peers.PEER_TURN_INTRO)
+        assert "please look at the parser" in sent
+        assert peers.PEER_UNTRUSTED_INTRO in sent, (
+            "a peer-started turn's body still crosses the untrusted marker"
+        )
+
+        started = [ev for ev in _drain(eng._peer_queue) if ev.type == "turn_started"]
+        assert started, "no turn_started reached the transcript"
+        data = started[0].data
+        assert data["peer_started"] is True
+        assert "the cause" in str(data["peer_origin"])
+        assert str(data["turn_id"]).startswith("peer-"), (
+            "every ledger record written in this turn carries this id"
+        )
+        assert eng._pending_peer_frames == []
+    finally:
+        await eng.finalize()
+
+
+async def test_a_broadcast_never_wakes_a_codex_session(tmp_path, monkeypatch):
+    eng, procs = await _codex(tmp_path, monkeypatch, inbound=True)
+    try:
+        eng._on_peer_frame({
+            "from_id": "loud", "from_title": "loud", "sent_at": "now",
+            "body": "everyone please respond", "from_repo": "/repo/loud",
+            "kind": "broadcast",
+        })
+
+        assert eng._turn_running is False
+        assert procs == [], "no codex process may be spawned by a broadcast"
+        assert len(eng._pending_peer_frames) == 1
+    finally:
+        await eng.finalize()
+
+
+async def test_an_arriving_message_starts_no_codex_turn_while_the_switch_is_off(
+    tmp_path, monkeypatch,
+):
+    eng, procs = await _codex(tmp_path, monkeypatch, inbound=False)
+    try:
+        eng._on_peer_frame({
+            "from_id": "quiet", "from_title": "quiet", "sent_at": "now",
+            "body": "no rush", "from_repo": "/repo/quiet", "kind": "direct",
+        })
+
+        assert eng._turn_running is False
+        assert procs == []
+        assert len(eng._pending_peer_frames) == 1
+    finally:
         await eng.finalize()

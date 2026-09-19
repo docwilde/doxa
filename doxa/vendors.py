@@ -1270,8 +1270,13 @@ class ChatApiEngine:
             return
         self._turn_running = True
         cancelled = False
+        # Held by name rather than iterated anonymously so it can be
+        # CLOSED below: a caller that drops this generator mid-turn must
+        # not leave the inner one suspended at a yield until a
+        # garbage-collection pass gets to it.
+        turn = self._send_turn(prompt)
         try:
-            async for event in self._send_turn(prompt):
+            async for event in turn:
                 yield event
         except (GeneratorExit, asyncio.CancelledError):
             # Cancelled from outside (pane teardown, app shutdown): the
@@ -1281,6 +1286,7 @@ class ChatApiEngine:
             cancelled = True
             raise
         finally:
+            await turn.aclose()
             self._turn_running = False
             self._turn_id = None
             if not cancelled:
