@@ -21,6 +21,7 @@ what the spec asks for. Nothing here loads anything.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import textwrap
 from dataclasses import dataclass, field
@@ -92,6 +93,8 @@ class CommandBinding:
 PANE_COMMANDS: "tuple[CommandBinding, ...]" = (
     CommandBinding("/peers", "_cmd_peers"),
     CommandBinding("/msg", "_cmd_msg"),
+    CommandBinding("/fleet", "_cmd_fleet"),
+    CommandBinding("/mesh", "_cmd_mesh"),
     CommandBinding("/img", "_cmd_img"),
     CommandBinding("/login", "_cmd_auth", ("login",)),
     CommandBinding("/logout", "_cmd_auth", ("logout",)),
@@ -1749,6 +1752,386 @@ class PaneCommandsMixin:
             await self._system(f"msg error: {exc}")
             return
         await self._system(f"sent to {peer.title} ({peer.session_id[:8]})")
+
+    # -- fleets, and the graph of what they say to each other ----------
+
+    async def _cmd_fleet(self, args: str) -> None:
+        """``/fleet [start … | status | stop | runs | attach <slot> |
+        mesh | detach]`` -- N sessions, one prompt, one instant, watched
+        in a tab.
+
+        THE HARNESS IS UNCHANGED. Everything a run does -- its own
+        DOXA_HOME, its own peer registry, the barrier that prompts nobody
+        until everybody is armed, the capacity and budget refusals, the
+        teardown escalation -- is :mod:`doxa.fleet`'s, reached through the
+        same :func:`doxa.fleet.build_parser` ``doxa-fleet`` parses with.
+        What this adds is WHERE a run can be started from and how it is
+        watched: a session that is itself working, and a read-only tab
+        that reads the run's own two files.
+
+        Bare, it says what the verbs are and whether a run is live here --
+        the one question an operator arriving at a session with a fleet in
+        it actually has."""
+        verb, _, rest = args.strip().partition(" ")
+        verb = verb.strip().lower()
+        rest = rest.strip()
+        if not verb:
+            await self._system(self._fleet_overview())
+            return
+        handlers = {
+            "start": self._fleet_start,
+            "status": self._fleet_status,
+            "stop": self._fleet_stop,
+            "runs": self._fleet_runs,
+            "attach": self._fleet_attach,
+            "mesh": self._fleet_mesh,
+            "detach": self._fleet_detach,
+        }
+        handler = handlers.get(verb)
+        if handler is None:
+            await self._system(
+                f"fleet: no such subcommand: {verb}\n\n"
+                + self._fleet_overview()
+            )
+            return
+        await handler(rest)
+
+    def _fleet_overview(self) -> str:
+        session = getattr(self, "_fleet", None)
+        if session is None:
+            state = "no fleet run in this session"
+        elif session.alive:
+            state = (
+                f"run {session.run_id} is LIVE — /fleet status for the "
+                "table, /fleet stop to end it"
+            )
+        else:
+            state = (
+                f"run {session.run_id} has finished — its tab holds the "
+                "final report"
+            )
+        return (
+            "fleet — N sessions, one identical prompt at one instant, one "
+            "ledger (docs/fleet.md)\n"
+            "  /fleet start --pool claude:sonnet@1 -n 4 --run-budget 5 "
+            '--prompt "…"\n'
+            "                    spawn a run and open its tab (--prompt-file "
+            "PATH also works;\n"
+            "                    --dry-run prints the arithmetic and spawns "
+            "nothing)\n"
+            "  /fleet status     this session's run: assignment, "
+            "quiescence, ledger tail\n"
+            "  /fleet stop       tear it down now; the tab keeps the final "
+            "report\n"
+            "  /fleet runs       past runs under the run root\n"
+            "  /fleet attach <slot>  open one slot's session in a live tab\n"
+            "  /fleet mesh       graph this run's ledger in a browser\n"
+            "  /fleet detach     leave the run going when its tab closes\n"
+            f"\n{state}"
+        )
+
+    async def _fleet_start(self, rest: str) -> None:
+        """``/fleet start <the doxa-fleet flags>``.
+
+        The flags are parsed by :func:`doxa.fleet.build_parser` -- the
+        SAME parser ``doxa-fleet`` uses, not a copy of it -- so a line
+        that works in a shell works here and the two cannot deal a
+        different fleet from the same words. ``--cwd`` defaults to THIS
+        session's own directory rather than to the process's, which is
+        the one difference between the two front ends and the reason
+        :func:`doxa.fleet.spec_from_args` takes it as an argument.
+
+        A refusal that fires before the run exists -- the capacity
+        arithmetic, the missing run budget, a run root too deep for a Unix
+        socket -- reaches the operator as the TAB'S FIRST LINE, never a
+        traceback in a worker nobody is reading. A flag that does not
+        parse is answered here, before any tab is opened at all."""
+        import shlex
+
+        from .. import fleet as fleet_mod
+        from .. import fleetsession as fleetsession_mod
+
+        existing = getattr(self, "_fleet", None)
+        if existing is not None and existing.alive:
+            await self._system(
+                f"fleet: run {existing.run_id} is still live in this "
+                "session. /fleet stop ends it, /fleet detach leaves it "
+                "running — one session drives one run."
+            )
+            return
+        try:
+            tokens = shlex.split(rest)
+        except ValueError as exc:
+            await self._system(f"fleet: {exc}")
+            return
+        if not tokens or {"-h", "--help"} & set(tokens):
+            await self._system(fleet_mod.build_parser().format_help())
+            return
+        cwd = str(getattr(self.engine, "cwd", None) or self.cwd)
+        try:
+            spec, parsed = fleet_mod.spec_from_argv(tokens, cwd=cwd)
+        except (fleet_mod.FleetArgsError, ValueError) as exc:
+            await self._system(f"fleet: {exc}")
+            return
+        except OSError as exc:
+            await self._system(f"fleet: --prompt-file: {exc}")
+            return
+        if parsed.dry_run:
+            # The two questions an operator answers before spawning --
+            # "does it fit" and "what may it cost" -- and the assignment
+            # this seed deals, exactly what `doxa-fleet --dry-run` prints.
+            rows = "\n".join(
+                f"  slot {a.index:>3}  {a.label:<28} "
+                f"memory={'on' if a.lore else 'OFF'}"
+                for a in fleet_mod.assign(
+                    spec.n, list(spec.pool), seed=spec.seed, memory=spec.memory
+                )
+            )
+            await self._system(
+                f"{fleet_mod.capacity_note(spec.n)}\n"
+                f"{fleet_mod.budget_note(spec)}\n{rows}\n"
+                "(dry run — nothing was spawned)"
+            )
+            return
+        session = fleetsession_mod.FleetSession(spec, force=parsed.force)
+        self._fleet = session
+        session.start()
+        await self.app.open_fleet_tab(session)
+        await self._system(
+            f"fleet {session.run_id} starting — n={spec.n}, root "
+            f"{spec.run_root}. Its tab shows the run; closing that tab "
+            "tears it down unless you /fleet detach first."
+        )
+
+    async def _fleet_status(self, rest: str) -> None:
+        session = getattr(self, "_fleet", None)
+        if session is None:
+            await self._system("no fleet run in this session")
+            return
+        from .. import fleetview as fleetview_mod
+
+        await self._system(fleetview_mod.render(
+            session.snapshot(),
+            mesh_url=self._mesh_url_for(session.ledger_path),
+            detached=session.detached,
+            note=session.note,
+        ))
+
+    async def _fleet_stop(self, rest: str) -> None:
+        session = getattr(self, "_fleet", None)
+        if session is None:
+            await self._system("no fleet run in this session")
+            return
+        if not session.alive:
+            await self._system(
+                f"fleet {session.run_id} has already ended — its tab holds "
+                "the final report"
+            )
+            return
+        session.request_stop()
+        await self._system(
+            f"fleet {session.run_id}: stopping — every session is stopped, "
+            "then SIGTERM, then SIGKILL, and the run reports what survived "
+            "all of it. The tab keeps the final report."
+        )
+
+    async def _fleet_runs(self, rest: str) -> None:
+        """``/fleet runs [root]`` -- what has been run under this root.
+
+        Read from the manifests themselves (:func:`doxa.fleetview.
+        list_runs`), because a run root is whatever directories the runs
+        made and there is no index of them -- inventing one would be a
+        second source of truth for a fact the directory already holds."""
+        from pathlib import Path
+
+        from .. import fleet as fleet_mod
+        from .. import fleetview as fleetview_mod
+
+        if rest:
+            root = Path(rest).expanduser()
+        else:
+            session = getattr(self, "_fleet", None)
+            root = (
+                session.run_root.parent if session is not None
+                else fleet_mod.default_root()
+            )
+        rows = fleetview_mod.list_runs(root)
+        await self._system(
+            f"fleet runs under {root}\n" + fleetview_mod.runs_table(rows)
+        )
+
+    async def _fleet_attach(self, rest: str) -> None:
+        """``/fleet attach <slot>`` -- watch ONE agent of the run live.
+
+        Goes through the run's MANIFEST rather than the peer registry, and
+        that is not a shortcut: a fleet run gets its own
+        ``DOXA_RUNTIME_DIR`` precisely so the registry it discovers is the
+        fleet and not the operator's own editor session -- which means
+        ``doxa.peers.read_registry()``, reading THIS machine's, cannot see
+        one of the run's sessions at all. The manifest records each slot's
+        socket, and that is the handle this attaches to.
+
+        A slot that is not a number, not in the run, or has no socket yet
+        is refused in words. An operator typing a slot index is typing a
+        guess about a run they are watching, and the honest answer to a
+        wrong guess is which slots there are."""
+        session = getattr(self, "_fleet", None)
+        if session is None:
+            await self._system("no fleet run in this session")
+            return
+        try:
+            index = int(rest.strip())
+        except ValueError:
+            await self._system(
+                f"usage: /fleet attach <slot> — a slot NUMBER, 0 to "
+                f"{session.spec.n - 1}; /fleet status lists them"
+            )
+            return
+        row = session.snapshot(limit=0).slot(index)
+        if row is None:
+            await self._system(
+                f"fleet: no slot {index} in run {session.run_id} "
+                f"(this run has {session.spec.n}: 0 to {session.spec.n - 1})"
+            )
+            return
+        socket_path = str(row.get("socket_path") or "")
+        session_id = str(row.get("session_id") or "")
+        if not socket_path:
+            await self._system(
+                f"fleet: slot {index} has no daemon to attach to — it is "
+                f"{row.get('phase') or 'not spawned'}"
+                + (f" ({row.get('error')})" if row.get("error") else "")
+            )
+            return
+        await self.app._attach_socket_in_new_tab(
+            socket_path, str(session.spec.cwd), f"slot {index}",
+        )
+        await self._system(
+            f"attached to slot {index} ({session_id[:8]}) in a new tab. It "
+            "is a live session: what you type there is a message into the "
+            "run, and the run's ledger records it like any other."
+        )
+
+    async def _fleet_mesh(self, rest: str) -> None:
+        session = getattr(self, "_fleet", None)
+        if session is None:
+            await self._system(
+                "no fleet run in this session — /mesh with no argument "
+                "graphs this MACHINE's peer ledger instead"
+            )
+            return
+        await self._start_mesh(session.ledger_path, what=f"run {session.run_id}")
+
+    async def _fleet_detach(self, rest: str) -> None:
+        session = getattr(self, "_fleet", None)
+        if session is None:
+            await self._system("no fleet run in this session")
+            return
+        session.detach()
+        await self._system(
+            f"fleet {session.run_id} detached — closing its tab now leaves "
+            "the run going, and it keeps spending until it quiesces or you "
+            "/fleet stop it. `doxa-fleet` is the other way to run one "
+            "without a tab."
+        )
+
+    async def _cmd_mesh(self, args: str) -> None:
+        """``/mesh [run-id | stop]`` -- who is messaging whom, in a
+        browser.
+
+        A GRAPH IS THE ONE ARTIFACT A TERMINAL IS BAD AT, which is
+        :mod:`doxa.meshgraph`'s own reason for being a page rather than a
+        pane, and nothing here changes its posture: the server binds
+        loopback (:func:`doxa.meshgraph.require_loopback` refuses anything
+        else before a bind is attempted), every route is gated by a
+        per-process token that is never written to disk, and it exists
+        only while somebody has asked for it.
+
+        WHAT IT READS is the one choice this command makes. Bare, it is
+        this machine's own peer ledger -- every session's traffic, the
+        file ``/msg`` and the model's ``peer_send`` append to. With a run
+        id it is that FLEET RUN's ledger, which is a different file
+        because a run gets its own DOXA_HOME: a run's graph must be the
+        run, with nothing to filter and nothing of the operator's own
+        sessions in it.
+
+        The URL is PRINTED, and opened in a browser only when
+        ``mesh_open_browser`` says so (off by default). DOXA runs in
+        terminals with no browser behind them -- over SSH, in a container,
+        on a headless box -- and a view that tried to open one there would
+        at best do nothing and at worst paint a launcher's error over the
+        TUI."""
+        rest = args.strip()
+        if rest.lower() == "stop":
+            stopped = self.app.stop_mesh()
+            await self._system(
+                "mesh: stopped — the port is released and the token is gone "
+                "(a new /mesh mints another)" if stopped
+                else "mesh: nothing is running"
+            )
+            return
+        if not rest:
+            from .. import peerledger as peerledger_mod
+
+            await self._start_mesh(
+                peerledger_mod.ledger_path(), what="this machine's peer ledger"
+            )
+            return
+        await self._mesh_for_run(rest)
+
+    async def _mesh_for_run(self, run_id: str) -> None:
+        from .. import fleet as fleet_mod
+        from .. import fleetview as fleetview_mod
+
+        session = getattr(self, "_fleet", None)
+        root = (
+            session.run_root.parent if session is not None
+            else fleet_mod.default_root()
+        )
+        run_root = fleetview_mod.resolve_run(root, run_id)
+        if run_root is None:
+            await self._system(
+                f"mesh: no run matching {run_id!r} under {root} — /fleet "
+                "runs lists them. A prefix matching two runs is refused "
+                "rather than guessed at."
+            )
+            return
+        await self._start_mesh(
+            fleetview_mod.run_ledger_path(run_root), what=f"run {run_root.name}"
+        )
+
+    async def _start_mesh(self, path: "Any", what: str) -> None:
+        """Start the window's one mesh server over ``path`` and say where
+        it is. Shared by ``/mesh`` and ``/fleet mesh`` so the two cannot
+        differ about the browser rule or about what a second server
+        means."""
+        server, note = self.app.start_mesh(path)
+        if server is None:
+            await self._system(note)
+            return
+        opened = ""
+        if config_mod.mesh_open_browser():
+            import webbrowser
+
+            # Off the event loop: webbrowser.open execs a launcher, and on
+            # a machine where that is slow (or where it is a text browser
+            # that wants the terminal) a blocking call here would freeze
+            # the TUI at the exact moment it is telling the user what it
+            # just started.
+            await asyncio.to_thread(webbrowser.open, server.url)
+            opened = " (opened in your browser)"
+        await self._system(
+            (note + "\n" if note else "")
+            + f"mesh: {what}\n{server.url}{opened}\n"
+            "loopback only, token-gated, and it stops with this window or "
+            "on /mesh stop. Message bodies are shown in full — that is what "
+            "the view is for."
+        )
+
+    def _mesh_url_for(self, path: "Any") -> str:
+        with contextlib.suppress(Exception):
+            return str(self.app.mesh_url_for(path) or "")
+        return ""
 
     async def _cmd_auth(self, verb: str, args: str) -> None:
         """/login [provider] and /logout [provider].

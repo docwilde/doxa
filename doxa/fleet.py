@@ -123,6 +123,7 @@ __all__ = [
     "budget_note",
     "build_parser",
     "capacity_note",
+    "default_root",
     "check_capacity",
     "check_run_budget",
     "run_fleet",
@@ -412,7 +413,7 @@ class FleetSpec:
     @property
     def run_root(self) -> Path:
         """Everything this run writes, under one directory."""
-        base = self.root if self.root is not None else _default_root()
+        base = self.root if self.root is not None else default_root()
         return Path(base) / self.run_id
 
     @property
@@ -510,7 +511,7 @@ class FleetSpec:
         return env
 
 
-def _default_root() -> Path:
+def default_root() -> Path:
     """Where runs land when a caller names no root: ``$DOXA_HOME/fleet``.
 
     Resolved per call, never at import, for the same reason every other

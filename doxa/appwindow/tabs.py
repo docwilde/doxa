@@ -68,7 +68,9 @@ it rather than ahead of it.
 
 One moved line is not byte-identical, and the edit is arithmetic:
 ``_attach_in_new_tab``'s deferred ``from .client import EngineClient`` is
-``from ..client`` here, because this module sits one package deeper. No
+``from ..client`` here, because this module sits one package deeper. (It
+now sits in :meth:`_attach_socket_in_new_tab`, the half ``/fleet attach``
+shares -- same line, one method further down.) No
 constant moved, and nothing the suite patches on ``doxa.app`` is read by
 anything that did -- neither ``SessionEngine`` nor ``notify_mod`` nor the
 module-level ``_stop_session`` appears in the twenty-eight, and
@@ -100,6 +102,7 @@ from ..ui.diffview import DiffPane
 from ..ui.labels import ellipsize, short_model
 from ..ui.prompt import PromptInput
 from ..ui.split import PaneGroup, PaneTab
+from ..ui.fleettab import FleetTab
 from ..ui.transcript import ArchivedSessionTab, SubagentTranscriptTab
 
 
@@ -322,9 +325,11 @@ class WindowTabsMixin:
         An in-process session with no daemon socket cannot be attached to
         at all, and is refused in words rather than quietly resumed: a
         second CLI on a live conversation is exactly what this branch
-        exists to avoid."""
-        from ..client import EngineClient  # deferred: no daemon, no import
+        exists to avoid.
 
+        The lookup is the whole of what this method still does for
+        itself; the tab is :meth:`_attach_socket_in_new_tab`'s, shared
+        with ``/fleet attach``."""
         entry = next(
             (e for e in peers_mod.read_registry() if e.session_id == session_id),
             None,
@@ -337,10 +342,35 @@ class WindowTabsMixin:
                 "not resumable while it runs — end it first, or use the "
                 "window that owns it."
             )
+        await self._attach_socket_in_new_tab(
+            socket_path, str(getattr(entry, "cwd", "") or self.cwd), title,
+        )
+        return (
+            f"{session_id[:8]} is still running — attached to it in a new "
+            "tab rather than resuming it. a live conversation has one "
+            "writer, and a second would fork it."
+        )
+
+    async def _attach_socket_in_new_tab(
+        self, socket_path: str, cwd: str, title: str,
+    ) -> "Any":
+        """The attach itself: a new tab holding an
+        :class:`~doxa.client.EngineClient` on ``socket_path``.
+
+        Split out of :meth:`_attach_in_new_tab` for ``/fleet attach``,
+        which knows a socket and cannot use the registry lookup that
+        method starts with: a fleet run's peer registry lives under the
+        RUN's own ``DOXA_RUNTIME_DIR``, so ``doxa.peers.read_registry()``
+        -- which reads this machine's -- cannot see one of its sessions at
+        all. The run's manifest records each slot's socket instead, and
+        this is where that path lands. Everything after the lookup is
+        identical, which is the point of the split: there is one attach,
+        with two ways of naming what to attach to."""
+        from ..client import EngineClient  # deferred: no daemon, no import
+
         tabbed = self._strip()
         pane = self._make_pane_at(
-            str(getattr(entry, "cwd", "") or self.cwd),
-            lambda: EngineClient(socket_path),
+            cwd or self.cwd, lambda: EngineClient(socket_path),
         )
         if title:
             pane.custom_name = title[:40]
@@ -353,11 +383,55 @@ class WindowTabsMixin:
         self._activate_tab(tab)
         self._focus_tab(tab)
         self._persist_tabset()
-        return (
-            f"{session_id[:8]} is still running — attached to it in a new "
-            "tab rather than resuming it. a live conversation has one "
-            "writer, and a second would fork it."
-        )
+        return tab
+
+    # -- the fleet tab -------------------------------------------------
+
+    def fleet_tabs(self) -> "list[FleetTab]":
+        """Every open fleet tab in this window. Deliberately NOT part of
+        :meth:`panes`, exactly like :meth:`archived_tabs`: a fleet run is
+        not a session and every engine-touching caller reads ``panes()``
+        as "tabs with a session behind them"."""
+        return list(self.query(FleetTab))
+
+    async def open_fleet_tab(self, session: "Any") -> "FleetTab":
+        """A read-only tab watching one fleet run.
+
+        Opened by ``/fleet start`` in the group the command was typed in,
+        and never focused away from -- the run is the thing the operator
+        just asked for, and a tab that opened behind the one they are in
+        would be a run happening out of sight."""
+        tabbed = self._strip()
+        tab = FleetTab(session, id=f"fleet-{session.run_id}")
+        await tabbed.add_pane(tab)
+        self._activate_tab(tab)
+        self._focus_tab(tab)
+        return tab
+
+    async def _close_fleet_tab(self, tab: "FleetTab") -> None:
+        """Ctrl+W on a fleet tab: the run ends with it, unless it was
+        detached.
+
+        THIS IS THE POLICY, not an implementation detail -- a fleet is not
+        a background service. A run keeps N daemons alive, arms every one
+        of them to be woken by another's message, and therefore keeps
+        spending with nobody typing; letting a tab close quietly leave
+        that running is the same failure
+        :func:`doxa.fleet.check_run_budget` refuses to let an operator
+        reach by forgetting a flag. ``/fleet detach`` is the explicit "keep
+        this running" gesture, exactly as ``/detach`` is for a session, and
+        the tab's own header says which of the two states it is in.
+
+        The stop is REQUESTED, not awaited: teardown escalates stop ->
+        SIGTERM -> SIGKILL with its own deadlines, which is far longer than
+        a keypress may block the UI for. The run's task owns finishing it,
+        and it writes the manifest either way."""
+        session = getattr(tab, "session", None)
+        if session is not None and not getattr(session, "detached", False):
+            with contextlib.suppress(Exception):
+                session.request_stop()
+        with contextlib.suppress(Exception):
+            await self._strip_for(tab.id or "").remove_pane(tab.id or "")
 
     @staticmethod
     def _pane_ctx(pane: "Any") -> "float | None":
@@ -725,6 +799,9 @@ class WindowTabsMixin:
             return True
         if isinstance(active, ArchivedSessionTab):
             await self._close_archived_tab(active)
+            return True
+        if isinstance(active, FleetTab):
+            await self._close_fleet_tab(active)
             return True
         return False
 

@@ -1900,7 +1900,14 @@ def help_text() -> str:
     whose protocol we could not measure, nothing is marked and /help is
     byte-identical to what it always was."""
     lines = ["commands", ""]
-    width = max(len(cmd.call_form()) for cmd in commands_mod.REGISTRY)
+    width = max(
+        max(len(cmd.call_form()) for cmd in commands_mod.REGISTRY),
+        max(
+            (len(f"{cmd.name} {sub.argument}")
+             for cmd in commands_mod.REGISTRY for sub in cmd.subcommands),
+            default=0,
+        ),
+    )
     bound: set[str] = set()
     marked = False
     # Same grouping and the same order the dropdown and the palette use --
@@ -1919,6 +1926,13 @@ def help_text() -> str:
             lines.append(
                 f"    {command.call_form():<{width}}  {command.summary}{note}"
             )
+            # A multi-verb command's own verbs, indented under it: the
+            # registry carries them (commands.SubCommand) so /help and the
+            # palette read one list, and a verb nobody can find is a verb
+            # that may as well not exist.
+            for sub in command.subcommands:
+                call = f"{command.name} {sub.argument}"
+                lines.append(f"      {call:<{width - 2}}  {sub.summary}")
         lines.append("")
     while lines and lines[-1] == "":
         lines.pop()

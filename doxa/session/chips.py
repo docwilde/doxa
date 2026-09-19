@@ -233,6 +233,15 @@ PEER_LAMP_SECS = 4.0
 PEER_LAMP_DARK = "◌"
 PEER_LAMP_LIT = "●"
 
+#: The mesh chip's glyph -- U+2317, a viewfinder/grid. Checked against
+#: every other glyph this row paints (⌁ session/peers, ⧉ subagents, ⚑
+#: needs input, ⊘ disabled, ⎇ branch, ◎ remote driver, ⇅ sync, ◌/●
+#: lamps) and used by none of them, the same clearance
+#: doxa.ui.labels.REMOTE_DRIVER_GLYPH and SYNC_GLYPH were given. It reads
+#: as a mesh rather than as a globe, which would say "the internet" about
+#: a server that binds 127.0.0.1 and nothing else.
+MESH_GLYPH = "⌗"
+
 
 @dataclass(frozen=True)
 class StatusChip:
@@ -931,6 +940,20 @@ class PaneChipsMixin:
             now = time.monotonic()
             chips.append(peer_lamp("tx", self._peer_tx_at, self._peer_tx_count, now))
             chips.append(peer_lamp("rx", self._peer_rx_at, self._peer_rx_count, now))
+        # The mesh graph server, hidden at zero exactly like the peers
+        # chip and the remote-driver chip above it: its ABSENCE says "no
+        # local HTTP server is up", which is the ordinary state and needs
+        # no chip of its own. A server that binds a port and serves full
+        # message bodies is the opposite -- it is a second surface on this
+        # machine that the user started and can forget, and the same rule
+        # the remote-driver chip is written for applies ("a silent second
+        # driver is the thing a user cannot detect and cannot consent
+        # to"). Never blank: the chip paints only when there is a URL to
+        # name, and it names the port, because the port is what the
+        # operator has to recognise in a browser tab later.
+        mesh = self._mesh_chip()
+        if mesh is not None:
+            chips.append(mesh)
         disabled = engine.disabled_tools()
         if disabled:  # two-strikes containment note -- hidden when empty
             chips.append(StatusChip.plain(
@@ -939,6 +962,29 @@ class PaneChipsMixin:
                 "(two-strikes containment)",
             ))
         return chips
+
+    def _mesh_chip(self) -> "StatusChip | None":
+        """``⌗ mesh :<port>`` while the window's graph server is up.
+
+        Reads the WINDOW's handle rather than any of this pane's state:
+        the server is one per process (a port is), so every pane in the
+        window shows the same chip and stopping it from any pane clears
+        it everywhere. Returns None -- not an empty chip -- when there is
+        nothing up, which is what "hidden at zero" means on this row."""
+        app = getattr(self, "app", None)
+        url = ""
+        with contextlib.suppress(Exception):
+            url = str(app.mesh_url_for() or "") if app is not None else ""
+        if not url:
+            return None
+        port = url.rstrip("/").rsplit(":", 1)[-1].split("/")[0]
+        return StatusChip.plain(
+            f"{MESH_GLYPH} mesh :{port}",
+            "the message-graph server is running on loopback for this "
+            "window — who is messaging whom, drawn from the peer ledger, "
+            "token-gated and reachable only from this machine. /mesh "
+            "prints the URL again; /mesh stop ends it",
+        )
 
     def _note_peer_traffic(self, direction: str) -> None:
         """One peer message crossed. Light the lamp and arrange for it to
