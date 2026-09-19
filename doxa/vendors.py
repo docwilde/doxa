@@ -142,6 +142,7 @@ from lore_core.scrub import scrub_secrets
 
 from . import peerdelivery as peerdelivery_mod
 from . import peers as peers_mod
+from .identity import require_session_id
 from .engines import (
     DEEPSEEK_ENGINE_ID,
     GLM_ENGINE_ID,
@@ -1022,8 +1023,13 @@ class ChatApiEngine:
         self.spec = spec or DEEPSEEK
         self.cwd = str(cwd)
         self.model = model or self.spec.default_model
-        self.session_id = session_id or str(uuid.uuid4())
-        self.resume = resume or None
+        # Checked for the same reason SessionEngine checks it: this id
+        # becomes `<id>.jsonl` and `<id>.messages.json` below, and
+        # `self.resume` names a third. See doxa.identity.valid_session_id.
+        self.session_id = (
+            require_session_id(session_id) if session_id else str(uuid.uuid4())
+        )
+        self.resume = require_session_id(resume, "resume id") if resume else None
         self.spawn_depth = max(0, int(spawn_depth or 0))
         self.parent_session_id = parent_session_id or None
         # Set when a doxa.daemon.SessionDaemon hosts this session (issue

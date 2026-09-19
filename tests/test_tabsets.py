@@ -1270,3 +1270,19 @@ def test_transcript_and_resume_lookups_refuse_a_traversing_session_id(
     good = transcript_mod.transcript_path("4f8e2a91-77bc-4c1d-9a01-000000000000",
                                           str(tmp_path))
     assert good is not None and good.name.endswith(".jsonl")
+
+
+def test_no_engine_will_open_a_transcript_outside_its_project_dir():
+    """The invariant stated where the paths are actually built: both
+    engine constructors that interpolate a session id into a filename
+    refuse one that is not a name, so the check does not rest on every
+    caller having gone through SessionDaemon."""
+    from doxa.engine import SessionEngine
+    from doxa.vendors import ChatApiEngine
+
+    with pytest.raises(ValueError, match=r"invalid session id"):
+        SessionEngine(cwd=".", session_id="../../../../etc/passwd")
+    with pytest.raises(ValueError, match=r"invalid session id"):
+        ChatApiEngine(cwd=".", session_id="../../../../etc/passwd")
+    with pytest.raises(ValueError, match=r"invalid resume id"):
+        ChatApiEngine(cwd=".", resume="../elsewhere")

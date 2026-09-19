@@ -94,6 +94,7 @@ from . import operators as operators_mod
 from . import peerdelivery as peerdelivery_mod
 from . import peerledger as peerledger_mod
 from . import peers as peers_mod
+from .identity import require_session_id
 from .promptqueue import PromptQueue, PromptQueueFull
 # Imported for ONE constant (CLAUDE_PROVIDER_ID, published as
 # PeerInfo.provider at connect) -- doxa.providers costs nothing at import
@@ -1411,7 +1412,14 @@ class SessionEngine:
     ) -> None:
         self.cwd = cwd
         self.model = model
-        self.session_id = session_id or str(uuid.uuid4())
+        # Checked, not just minted: this id becomes `<id>.jsonl` below and
+        # `peer-<id[:8]>-<pid>.sock` in PeerHost. The daemon checks it too
+        # (SessionDaemon.__init__) and is the only production caller that
+        # supplies one -- this is the invariant stated where the path is
+        # actually built. See doxa.identity.valid_session_id.
+        self.session_id = (
+            require_session_id(session_id) if session_id else str(uuid.uuid4())
+        )
         # v0.56.0 (session resume): the id of the conversation this engine
         # CONTINUES rather than starts. Not a second id -- a resumed
         # session keeps the id it is resuming (see _build_options), so
