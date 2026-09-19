@@ -49,6 +49,7 @@ __all__ = [
     "RunSnapshot",
     "approval_block",
     "approval_line",
+    "parked_note",
     "assignment_table",
     "ledger_tail",
     "list_runs",
@@ -378,6 +379,31 @@ def approval_block(snapshot: "RunSnapshot", *, now: "float | None" = None) -> "l
         "session looks idle from outside; it is not."
     )
     return [head, *pending]
+
+
+def parked_note(row: "dict[str, Any]") -> str:
+    """What ``/fleet attach <slot>`` says about the ask that slot is parked
+    on, or ``""`` when it is parked on none.
+
+    HERE rather than in the command, so the one sentence an operator reads
+    on arrival and the block they read in the tab cannot drift apart --
+    and so the rule about not repeating the tool name as its own summary
+    is written once. A manifest with no ``pending_asks`` key predates the
+    policy and is read as "nothing parked", which is what those runs
+    could say."""
+    parked = [a for a in (row.get("pending_asks") or []) if isinstance(a, dict)]
+    if not parked:
+        return ""
+    first = parked[0]
+    what = str(first.get("tool") or first.get("kind") or "?")
+    summary = str(first.get("summary") or "")
+    detail = f" ({summary[:80]})" if summary and summary != what else ""
+    return (
+        f"\nThis slot is PARKED on {len(parked)} permission ask(s) — "
+        f"first: {what}{detail}. Answer it in that tab; the run's "
+        "--approve policy decides it on its own once the grace window "
+        "runs out."
+    )
 
 
 def ledger_tail(

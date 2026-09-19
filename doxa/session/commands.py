@@ -2047,20 +2047,9 @@ class PaneCommandsMixin:
         # arrives on its own: this attach replays the daemon's ring, and a
         # needs_input still in it opens the pane's own question/permission
         # popup exactly as it would in the session that asked.
-        parked = [
-            ask for ask in (row.get("pending_asks") or [])
-            if isinstance(ask, dict)
-        ]
-        waiting = ""
-        if parked:
-            first = parked[0]
-            waiting = (
-                f"\nThis slot is PARKED on {len(parked)} permission ask(s) — "
-                f"first: {first.get('tool') or first.get('kind') or '?'}"
-                f"{(' (' + str(first.get('summary'))[:80] + ')') if first.get('summary') else ''}"
-                ". Answer it in that tab; the run's --approve policy "
-                "refuses it on its own once the grace window runs out."
-            )
+        from .. import fleetview as fleetview_mod
+
+        waiting = fleetview_mod.parked_note(row)
         await self._system(
             f"attached to slot {index} ({session_id[:8]}) in a new tab. It "
             "is a live session: what you type there is a message into the "

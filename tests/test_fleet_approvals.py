@@ -623,3 +623,36 @@ async def test_a_grace_timer_that_throws_does_not_reach_the_loops_error_handler(
     finally:
         loop.set_exception_handler(previous)
     assert seen == []
+
+
+def test_attach_names_the_ask_the_slot_is_parked_on_and_stays_silent_otherwise():
+    """``/fleet attach <slot>`` is the answer path, so the reason to use it
+    has to be the first thing it says. The sentence lives in
+    ``doxa.fleetview`` beside the tab's own block so the two cannot drift,
+    and it follows the same rule about not repeating the tool name as its
+    own summary."""
+    parked = fleetview_mod.parked_note({
+        "index": 0,
+        "pending_asks": [{
+            "id": "r1", "kind": "permission", "tool": "mcp__doxa__peer_send",
+            "summary": "Claude wants to message slot 2",
+        }],
+    })
+    assert "PARKED on 1 permission ask(s)" in parked
+    assert "mcp__doxa__peer_send" in parked
+    assert "Claude wants to message slot 2" in parked
+    assert "--approve" in parked
+
+    # Nothing parked, and a manifest that predates the policy: both are
+    # silence, never a sentence about an ask that does not exist.
+    assert fleetview_mod.parked_note({"index": 0, "pending_asks": []}) == ""
+    assert fleetview_mod.parked_note({"index": 0}) == ""
+
+    # The summary is dropped when it only repeats the column beside it.
+    echoed = fleetview_mod.parked_note({
+        "pending_asks": [{
+            "id": "r1", "kind": "permission", "tool": "mcp__doxa__peer_list",
+            "summary": "mcp__doxa__peer_list",
+        }],
+    })
+    assert echoed.count("mcp__doxa__peer_list") == 1
