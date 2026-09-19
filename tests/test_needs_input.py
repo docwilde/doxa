@@ -280,3 +280,79 @@ async def test_a_call_the_cli_had_no_question_about_is_still_a_bare_allow(tmp_pa
     engine._build_options()
     result = await engine._on_can_use_tool("Read", {"file_path": "x.py"}, _ctx())
     assert isinstance(result, PermissionResultAllow)
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_carries_the_answerers_own_reason_to_the_model(tmp_path):
+    """Issue #56: the answerer is not always a person.
+
+    ``doxa.fleet.ApprovalDesk`` refuses on a fleet run's behalf and needs
+    to say WHY -- which flag would have allowed the call -- because the
+    refusal is the only channel back to an operator who is not watching.
+    The sentence this callback has always used stays the fallback for
+    every answerer that supplies none."""
+    engine = SessionEngine(cwd=str(tmp_path))
+    engine._build_options()
+    task = asyncio.ensure_future(engine._on_can_use_tool(
+        "mcp__doxa__peer_list", {}, _ctx(title="Claude wants to list peers"),
+    ))
+    ev = await engine._peer_queue.get()
+    await engine.answer_needs_input(ev.data["id"], {
+        "decision": "deny",
+        "reason": "nobody answered within 300s: start the run with --approve peer",
+    })
+    result = await task
+    assert isinstance(result, PermissionResultDeny)
+    assert "--approve peer" in result.message
+
+
+@pytest.mark.asyncio
+async def test_a_declined_question_carries_the_answerers_reason_too(tmp_path):
+    engine = SessionEngine(cwd=str(tmp_path))
+    engine._build_options()
+    task = asyncio.ensure_future(engine._on_can_use_tool(
+        "AskUserQuestion", {"questions": [{"question": "which?"}]}, _ctx(),
+    ))
+    ev = await engine._peer_queue.get()
+    await engine.answer_needs_input(ev.data["id"], {
+        "declined": True, "reason": "a fleet cannot invent an answer",
+    })
+    result = await task
+    assert isinstance(result, PermissionResultDeny)
+    assert result.message == "a fleet cannot invent an answer"
+
+
+@pytest.mark.asyncio
+async def test_an_answerer_cannot_talk_its_way_into_an_allow(tmp_path):
+    """Only the message is the answerer's. The DECISION is still read from
+    ``decision``/``declined`` exactly as before, so a reason on an answer
+    that never said allow is still a denial."""
+    engine = SessionEngine(cwd=str(tmp_path))
+    engine._build_options()
+    task = asyncio.ensure_future(engine._on_can_use_tool(
+        "Bash", {"command": "rm -rf /"}, _ctx(title="Claude wants to run bash"),
+    ))
+    ev = await engine._peer_queue.get()
+    await engine.answer_needs_input(ev.data["id"], {
+        "reason": "allow", "allow": True, "decision": "allow-ish",
+    })
+    result = await task
+    assert isinstance(result, PermissionResultDeny)
+    assert result.message == "allow"
+
+
+@pytest.mark.asyncio
+async def test_an_answerers_reason_cannot_be_unbounded(tmp_path):
+    """The string is handed to the CLI as a tool result and an answerer is
+    not a source of bounded text."""
+    engine = SessionEngine(cwd=str(tmp_path))
+    engine._build_options()
+    task = asyncio.ensure_future(engine._on_can_use_tool(
+        "Bash", {"command": "ls"}, _ctx(display_name="Bash"),
+    ))
+    ev = await engine._peer_queue.get()
+    await engine.answer_needs_input(
+        ev.data["id"], {"decision": "deny", "reason": "x" * 5000},
+    )
+    result = await task
+    assert len(result.message) == 1000

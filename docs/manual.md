@@ -25,7 +25,7 @@ a plan as if it were shipped.
 - [LORE integration](#lore-integration)
 - [Shell escape](#shell-escape)
 - [Images](#images)
-- [Search, resume, and peers](#search-resume-and-peers) — [fleets from the TUI](#fleets-from-the-tui), [supervisor mode](#supervisor-mode) and [spend ceilings](#spend-ceilings)
+- [Search, resume, and peers](#search-resume-and-peers) — [fleets from the TUI](#fleets-from-the-tui), [supervisor mode](#supervisor-mode), [permission asks in a fleet](#permission-asks-in-a-fleet) and [spend ceilings](#spend-ceilings)
 - [Keyboard protocol](#keyboard-protocol)
 - [Commands](#commands)
 - [Settings](#settings)
@@ -1633,6 +1633,57 @@ of it: a mode line above the assignment table and a role column in it.
 > not. The refusal fires before anything is spawned and names the
 > arithmetic.
 
+### Permission asks in a fleet
+
+A session stops and asks you about some tool calls — the ones the Claude
+CLI would show its own permission prompt for, and any question the model
+raises with `AskUserQuestion`. In a session that is a dialog in the pane.
+In a fleet nobody is at the keyboard, and a slot that asks is a slot that
+waits: it is running no turn, writing nothing to the ledger, and looks
+idle to everything watching it. Until 1.15.0 it waited out the whole
+quiescence deadline.
+
+`--approve` is how a run says what it may decide on your behalf. It is a
+separate flag from `--allow-unbudgeted`, because accepting an unbounded
+bill says nothing about accepting tool calls you never saw, and like that
+one it is written into the manifest.
+
+| Value | What it auto-approves |
+|---|---|
+| `none` *(default)* | Nothing. |
+| `peer` | This run's own peer tools — `peer_list`, `peer_history`, `peer_send`. |
+| `all` | Every tool call the CLI asks about. |
+
+`peer` is the value a supervisor run usually wants. A supervisor reaches
+for `peer_list` and `peer_send` in its first turn — that is how it finds
+its workers and hands out the task — and those two read and write the
+run's own ledger, not your repository. Everything else in the run still
+asks.
+
+**Nothing is approved by silence.** An ask nobody answers is *refused*
+after `--approval-grace` seconds (300 by default), and the refusal names
+the tool, the run, the slot and the flag that would have allowed the call,
+so the model can say so in its reply and you learn what your run needed. A
+question is declined rather than answered, because `allow` is not a reply
+to *which branch?*, and a `spawn_session` is never auto-approved under any
+value — a fleet spawning further fleet with nobody watching is the one
+outcome nobody asked for.
+
+Inside the grace window the run is answerable. The fleet tab prints a
+`WAITING ON YOU` block directly under the assignment table, naming the
+slot, the tool, how long it has waited and how long is left; `/fleet
+attach <slot>` opens that session in a live tab and names the ask on
+arrival, and the daemon's replayed event ring opens the same permission
+dialog the session would have shown. Answering there cancels the grace
+timer, and the run records that a **person** decided it.
+
+The manifest carries an `approvals` block beside `capacity` and `budget` —
+the policy, the grace window, and counts of what was auto-approved,
+answered by hand, refused unanswered or still open at teardown — and every
+slot carries its own decision log. See [docs/fleet.md](fleet.md) for the
+block's shape and for the run-from-a-shell case, which has the same record
+and no way to attach.
+
 ### Spend ceilings
 
 Both switches above hand something other than you the ability to spend
@@ -1749,7 +1800,7 @@ commands this session carries, and is omitted entirely when there are none
 | `/cd <path>` | Open that path in a **new** tab; this session stays where it is |
 | `/peers` | Live sessions in this project right now |
 | `/msg <session_prefix> <text>` | Send a message to one same-project peer session |
-| `/fleet start\|status\|stop\|runs\|attach\|mesh` | Start and watch a fleet run — N sessions, one prompt, one instant, in a tab; `--supervisor` gives one session the prompt and lets it hand the work to the rest ([supervisor mode](#supervisor-mode)); `detach` leaves it running past its tab ([fleets from the TUI](#fleets-from-the-tui)) |
+| `/fleet start\|status\|stop\|runs\|attach\|mesh` | Start and watch a fleet run — N sessions, one prompt, one instant, in a tab; `--supervisor` gives one session the prompt and lets it hand the work to the rest ([supervisor mode](#supervisor-mode)); `--approve` says what the run may approve on your behalf and `attach <slot>` answers an ask by hand ([permission asks in a fleet](#permission-asks-in-a-fleet)); `detach` leaves it running past its tab ([fleets from the TUI](#fleets-from-the-tui)) |
 | `/mesh [run-id \| stop]` | Graph the message ledger in a browser — this machine's, or one fleet run's; loopback only, token-gated |
 | `/detach` | Close this tab but leave its session running |
 | `/attach [prefix]` | Reattach a live detached session in a new tab |

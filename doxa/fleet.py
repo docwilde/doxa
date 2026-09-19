@@ -137,11 +137,18 @@ from . import peerledger as peerledger_mod
 from . import peers as peers_mod
 
 __all__ = [
+    "APPROVAL_GRACE_S",
+    "APPROVE_ALL",
+    "APPROVE_CHOICES",
+    "APPROVE_NONE",
+    "APPROVE_PEER",
     "DEFAULT_N",
     "MODE_SUPERVISOR",
     "MODE_SYMMETRIC",
+    "PEER_TOOLS",
     "ROLE_SUPERVISOR",
     "ROLE_WORKER",
+    "ApprovalDesk",
     "Assignment",
     "BudgetRefused",
     "DaemonBackend",
@@ -153,6 +160,8 @@ __all__ = [
     "ModelSlot",
     "RunReport",
     "Slot",
+    "approval_posture",
+    "approval_refusal",
     "assign",
     "assign_for",
     "budget_note",
@@ -161,6 +170,7 @@ __all__ = [
     "default_root",
     "check_capacity",
     "check_run_budget",
+    "may_auto_approve",
     "run_fleet",
     "spec_from_args",
     "spec_from_argv",
@@ -236,6 +246,189 @@ third role invented to describe the absence of the second."""
 ROLE_SUPERVISOR = "supervisor"
 """The one slot in a supervisor run that receives the operator's prompt.
 Exactly one per run, always slot 0 -- see :func:`assign_for`."""
+
+
+# -- what a fleet may approve, on whose authority, recorded where ------
+#
+# THE PROBLEM THIS SECTION ANSWERS (issue #56). A session's engine asks a
+# human about a tool call the CLI would have stopped on:
+# ``doxa.engine.SessionEngine._on_can_use_tool`` queues a ``needs_input``
+# event and waits for an answer, forever, because queue item 5 is explicit
+# that a parked question must not time out on its own. In a TUI a pane
+# answers it. In a FLEET nobody does -- :func:`_drain` consumed the event
+# and threw it away -- so the slot sat until the quiescence deadline.
+# Measured on 1.14.0: a supervisor parked 6 min 45 s on
+# ``mcp__doxa__peer_list``; once an operator answered by hand the whole
+# exchange finished in 25 s.
+#
+# WHY THE FIX IS NOT "ALLOW". An unconditional allow inside the harness
+# would hand every spawned session a blanket approval the same operator
+# refused to give a single interactive session -- and it would do it
+# silently, from a flag nobody typed. So the harness ANSWERS every ask,
+# always within a bounded time, but what it answers is a POLICY the
+# operator names on the command line and the manifest records:
+#
+#   --approve none   (default)  nothing is auto-approved. An ask nobody
+#                               answers within the grace window is DENIED,
+#                               and the refusal names the flag that would
+#                               have allowed it.
+#   --approve peer              this run's own peer tools, and nothing
+#                               else. The narrow case that actually blocks
+#                               a supervisor run: peer_list and peer_send
+#                               are the first thing a supervisor reaches
+#                               for, and they are reads and writes of the
+#                               run's OWN ledger -- not the repository.
+#   --approve all               every tool call the CLI asks about. The
+#                               blanket claim, spelled out, in the
+#                               manifest.
+#
+# A DENIAL IS NOT A HANG, and that is the whole safety argument for making
+# the default a refusal rather than a wait: the model receives an ordinary
+# refused tool call with a reason it can read, and carries on -- exactly
+# what ``doxa.engine._no_answer_deny`` already relies on. A wedged slot and
+# a refused tool call are not equally bad outcomes.
+
+APPROVE_NONE = "none"
+"""Nothing is auto-approved. The default, and the posture a run that asks
+for nothing has always had."""
+
+APPROVE_PEER = "peer"
+"""This run's own peer tools (:data:`PEER_TOOLS`) are auto-approved.
+Everything else is treated exactly as :data:`APPROVE_NONE` treats it."""
+
+APPROVE_ALL = "all"
+"""Every tool call the CLI would have asked a human about is
+auto-approved. The operator's blanket claim, and it is recorded."""
+
+APPROVE_CHOICES: "tuple[str, ...]" = (APPROVE_NONE, APPROVE_PEER, APPROVE_ALL)
+
+PEER_TOOLS: "frozenset[str]" = frozenset({
+    "mcp__doxa__peer_list",
+    "mcp__doxa__peer_history",
+    "mcp__doxa__peer_send",
+})
+"""What ``--approve peer`` covers, spelled as the MODEL sees them.
+
+Spelled out rather than derived from :mod:`doxa.operators`, which this
+module deliberately does not import (it drags the whole operator registry
+in for three strings). ``tests/test_fleet_approvals.py`` pins the two
+spellings together, so a rename there fails here rather than silently
+narrowing the policy to nothing."""
+
+NEVER_AUTO_KINDS: "frozenset[str]" = frozenset({"ask_user", "spawn"})
+"""Kinds of ask no ``--approve`` value ever answers with a yes.
+
+``ask_user`` because a policy cannot invent an answer: the model asked a
+QUESTION, and "allow" is not a reply to one. It is declined, which is the
+graceful path ``doxa.engine._ask_user_question`` already documents.
+
+``spawn`` because :meth:`doxa.engine.SessionEngine._confirm_spawn` is
+DOXA's own gate rather than the CLI's, and its stated reason applies here
+with more force than anywhere else: "a fleet spawning further fleet with
+nobody watching is exactly the outcome nobody asked for". ``--approve
+all`` means every tool call the CLI asks about; starting more sessions is
+not one of those."""
+
+APPROVAL_GRACE_S = 300.0
+"""Seconds a parked ask waits for a human before the policy resolves it.
+
+FIVE MINUTES, and the number is a compromise between two real failures.
+Shorter and ``/fleet attach <slot>`` stops being a genuine answer path --
+an operator has to read the tab, type the command, find the dialog and
+choose. Longer and a run spends its quiescence deadline waiting on a
+question nobody is going to answer, which is the deadlock this whole
+section exists to close. It is a flag (``--approval-grace``) because the
+right number is different for a watched interactive run and an overnight
+one."""
+
+APPROVAL_LOG_LIMIT = 50
+"""Approval decisions kept per slot for the manifest.
+
+Bounded because the manifest is rewritten on a one-second heartbeat and
+read by a widget on a half-second timer: an unbounded decision log on a
+long run would grow both. The COUNTS in
+:meth:`RunReport.approval_counts` are computed from the same list and are
+what a reader auditing a run's posture actually needs; the tail is the
+evidence for the last few."""
+
+
+def may_auto_approve(policy: str, kind: str, tool_name: str) -> bool:
+    """May this run answer THIS ask with a yes, unasked?
+
+    A pure function of the three things that decide it, so the policy is
+    readable in one place and testable without a session. Everything it
+    does not say yes to is parked for a human and then refused -- see
+    :func:`approval_refusal`."""
+    if kind in NEVER_AUTO_KINDS or kind != "permission":
+        return False
+    if policy == APPROVE_ALL:
+        return True
+    if policy == APPROVE_PEER:
+        return tool_name in PEER_TOOLS
+    return False
+
+
+def approval_refusal(
+    policy: str, kind: str, tool_name: str, *,
+    grace_s: float, run_id: str, slot: int,
+) -> str:
+    """Why this ask was refused, in the words the MODEL receives.
+
+    It goes back as the tool result, so it is written for the thing that
+    reads it: say who refused, say that nobody was asked, and NAME THE
+    FLAG that would have allowed it. A model that is told "no answer" can
+    only guess; a model told "this ran in a fleet started with --approve
+    none" can say so in its reply, which is how the operator finds out
+    their run needed a flag."""
+    where = f"DOXA fleet run {run_id}, slot {slot}"
+    waited = f"nobody answered within {grace_s:.0f}s"
+    if kind == "ask_user":
+        return (
+            f"{waited}: this question was asked inside a {where}, where "
+            "nobody is at the keyboard. A fleet cannot invent an answer -- "
+            "--approve only ever approves tool calls, never replies to a "
+            f"question. `/fleet attach {slot}` reaches this session while "
+            "the run is live."
+        )
+    if kind == "spawn":
+        return (
+            f"{waited}: spawn_session was asked for inside a {where}. A "
+            "fleet never auto-approves starting further sessions, whatever "
+            "--approve says -- a fleet that spawns fleet is the one outcome "
+            f"nobody asked for. `/fleet attach {slot}` approves one by hand."
+        )
+    if policy == APPROVE_PEER:
+        covers = ", ".join(sorted(PEER_TOOLS))
+        return (
+            f"{waited}: {tool_name} was called inside a {where} started "
+            f"with --approve peer, which covers only this run's own peer "
+            f"tools ({covers}). --approve all covers every tool the CLI "
+            f"asks about; `/fleet attach {slot}` answers one by hand."
+        )
+    return (
+        f"{waited}: {tool_name} was called inside a {where}, where nobody "
+        "is at the keyboard. This run auto-approves nothing (--approve "
+        "none, the default). --approve peer would have allowed this run's "
+        "own peer tools, --approve all every tool the CLI asks about; "
+        f"`/fleet attach {slot}` answers one by hand."
+    )
+
+
+def approval_posture(policy: str, grace_s: float) -> str:
+    """One sentence naming what this run auto-approves and what happens to
+    everything else. The manifest's own words, and the fleet tab's."""
+    grace = f"an unanswered ask is refused after {grace_s:.0f}s"
+    if policy == APPROVE_ALL:
+        return (
+            f"--approve all: every tool call the CLI asks about is "
+            f"auto-approved; a question or a spawn still asks, and {grace}"
+        )
+    if policy == APPROVE_PEER:
+        return (
+            f"--approve peer: this run's own peer tools are auto-approved, "
+            f"nothing else is, and {grace}"
+        )
+    return f"--approve none: nothing is auto-approved, and {grace}"
 
 
 # -- what a run is ----------------------------------------------------
@@ -483,6 +676,26 @@ class FleetSpec:
     #: it is actually guarding against.
     inbound_turns: bool = True
 
+    # -- what this run may approve on the operator's behalf ------------
+    #
+    # ITS OWN FLAG, for the reason ``allow_unbudgeted`` is its own flag:
+    # "I accept a swarm with nothing bounding its spend" and "I accept a
+    # swarm that says yes to tool calls I never saw" are two different
+    # claims, and one flag granting both would grant the second by
+    # accident. Both are recorded, separately, in the manifest, so a run's
+    # approval posture is readable after the fact rather than reconstructed
+    # from a shell history.
+
+    #: :data:`APPROVE_NONE`, :data:`APPROVE_PEER` or :data:`APPROVE_ALL`
+    #: -- see that section's comment for what each one means and why the
+    #: default is the one that approves nothing.
+    approve: str = APPROVE_NONE
+
+    #: How long a parked ask waits for a human before the policy resolves
+    #: it. NEVER None: an ask that is never answered has to become a
+    #: decision, or this is the deadlock issue #56 names with extra steps.
+    approval_grace_s: float = APPROVAL_GRACE_S
+
     # -- deadlines. Every one of them exists because the phase it bounds
     # has a way of never finishing, and a run that never ends is a run
     # that cannot be replicated.
@@ -554,6 +767,22 @@ class FleetSpec:
         # rather than "refuse everything" -- a mistyped ceiling must not be
         # able to produce a run in which no session may start a turn.
         self.run_budget_usd = budget_mod.usd(self.run_budget_usd)
+        # Validated HERE rather than only in the parser, because
+        # FleetSpec is also built directly -- by a test, by a REPL, by
+        # doxa.fleetsession -- and a policy string nobody checked would
+        # fail open: may_auto_approve returns False for an unknown value,
+        # which is the safe direction, but a run whose manifest recorded
+        # `approve="peeer"` would be a run whose posture nobody can read.
+        self.approve = str(self.approve or APPROVE_NONE)
+        if self.approve not in APPROVE_CHOICES:
+            raise ValueError(
+                f"unknown --approve policy {self.approve!r}: one of "
+                + ", ".join(APPROVE_CHOICES)
+            )
+        # A grace of zero is legitimate (refuse immediately, never wait);
+        # a negative one is a typo, and clamping it is the only direction
+        # that cannot make a run wait longer than the operator asked.
+        self.approval_grace_s = max(0.0, float(self.approval_grace_s))
 
     # -- which of the two shapes this run is ---------------------------
 
@@ -939,6 +1168,33 @@ class Slot:
     error: "str | None" = None
     handle: Any = None
 
+    #: Permission asks this session is parked on RIGHT NOW, keyed by the
+    #: request id ``doxa.engine.SessionEngine._wait_for_answer`` minted.
+    #: Written into the manifest, which is how a blocked slot reaches the
+    #: fleet tab as "waiting on you" instead of presenting as an idle
+    #: session -- the misreading issue #56 opens with.
+    pending_asks: "dict[str, dict[str, Any]]" = field(default_factory=dict)
+
+    #: Every approval decision this slot's asks reached, newest last and
+    #: capped at :data:`APPROVAL_LOG_LIMIT`. The run's own record of what
+    #: was approved on the operator's behalf, by what, and when.
+    approvals: "list[dict[str, Any]]" = field(default_factory=list)
+
+    def record_ask(self, ask: "dict[str, Any]") -> None:
+        """A new parked ask. Keyed by request id so a second event for the
+        same id (a replay, a reconnect) updates rather than duplicates."""
+        self.pending_asks[str(ask.get("id") or "")] = dict(ask)
+
+    def record_decision(self, decision: "dict[str, Any]") -> None:
+        """One ask resolved: drop it from the pending map and keep the
+        decision. Both halves together, because a decision recorded
+        without clearing the pending entry is a tab that says a resolved
+        ask is still waiting."""
+        self.pending_asks.pop(str(decision.get("id") or ""), None)
+        self.approvals.append(dict(decision))
+        if len(self.approvals) > APPROVAL_LOG_LIMIT:
+            del self.approvals[:-APPROVAL_LOG_LIMIT]
+
     @property
     def index(self) -> int:
         return self.assignment.index
@@ -981,6 +1237,14 @@ class Slot:
             "pid": self.pid,
             "dispatched_at": self.dispatched_at,
             "error": self.error,
+            # WHY THESE ARE IN THE MANIFEST and not only in a log: the
+            # fleet tab reads a run from two files and never touches a
+            # FleetRun, so the manifest is the only channel a parked ask
+            # has to the person who could answer it. The decisions stay
+            # after the run for the other half of the same question --
+            # what did this run approve, and on whose authority.
+            "pending_asks": list(self.pending_asks.values()),
+            "approvals": list(self.approvals),
         }
 
 
@@ -1149,6 +1413,201 @@ def supervisor_briefing(
 # -- the injectable backend -------------------------------------------
 
 
+class ApprovalDesk:
+    """One slot's answer to every permission ask its session parks on.
+
+    THE SEAT NOBODY WAS SITTING IN (issue #56). A session's engine parks
+    on ``needs_input`` and waits for a human; in a fleet there is no
+    human, so this object sits in that seat -- under the run's own policy
+    (:attr:`FleetSpec.approve`), within the run's own grace window
+    (:attr:`FleetSpec.approval_grace_s`), and writing every decision onto
+    the slot so the manifest says what was approved and by what.
+
+    THREE RULES, and each one is the reason for the next:
+
+    1. **Every ask is answered.** Allow, deny or decline -- but never
+       nothing. A run must not be able to hang on this, so the grace
+       window is a number rather than an option, and when it elapses the
+       ask BECOMES a decision.
+    2. **The default decision is a refusal, not an approval.** A refusal
+       is an ordinary tool result the model reads and works around
+       (``doxa.engine._no_answer_deny`` already rests on exactly that);
+       an approval nobody gave is a permission the operator never
+       granted. Only one of those two is recoverable by the person
+       watching.
+    3. **A human beats the clock.** An operator who attaches
+       (``/fleet attach <slot>``) and answers resolves the ask through
+       the engine's own ``answer_needs_input``; the resulting
+       ``needs_input_resolved`` lands here, the grace timer is cancelled,
+       and the run records that a person -- not the policy -- decided it.
+
+    NOTHING HERE TOUCHES THE SESSION'S PERMISSION MODE. Reusing
+    ``set_permission_mode`` per slot was the other obvious shape and it is
+    the wrong one twice over: ``doxa.daemon.SessionDaemon.
+    _gated_mode_refusal`` exists precisely to stop a socket client
+    escalating into a gated mode, and routing around it from a harness
+    would be a regression dressed as a feature; and a mode is BLANKET
+    where this is per-ask, per-tool and recorded. The session keeps asking
+    exactly what it asked before. What changed is that somebody answers."""
+
+    def __init__(self, slot: "Slot", spec: "FleetSpec", client: Any) -> None:
+        self.slot = slot
+        self.spec = spec
+        self.client = client
+        self._timers: "dict[str, asyncio.Task]" = {}
+        self._closed = False
+
+    # -- the one entry point ------------------------------------------
+
+    async def on_event(self, event: Any) -> None:
+        """One out-of-band event. Everything that is not an ask or its
+        resolution is ignored here and thrown away by :func:`_drain`, the
+        same as it always was."""
+        etype = str(getattr(event, "type", "") or "")
+        data = dict(getattr(event, "data", None) or {})
+        if etype == "needs_input":
+            await self._park(data)
+        elif etype == "needs_input_resolved":
+            self._resolved_elsewhere(str(data.get("id") or ""))
+
+    def close(self) -> None:
+        """Teardown. Cancels the grace timers and writes down every ask
+        that was still open, because "the run ended before anyone
+        answered" is a fact about the run and a manifest that had silently
+        dropped it would read as though nothing was ever asked."""
+        self._closed = True
+        for task in list(self._timers.values()):
+            task.cancel()
+        self._timers.clear()
+        for ask in list(self.slot.pending_asks.values()):
+            self.slot.record_decision({
+                **ask,
+                "decision": "unanswered",
+                "by": "teardown",
+                "why": "the run ended before this ask was answered",
+                "delivered": False,
+                "decided_at": _iso_now(),
+            })
+
+    # -- what happens to one ask ---------------------------------------
+
+    async def _park(self, data: "dict[str, Any]") -> None:
+        req_id = str(data.get("id") or "")
+        if not req_id or self._closed:
+            return
+        kind = str(data.get("kind") or "")
+        tool = str(data.get("tool_name") or "")
+        ask = {
+            "id": req_id,
+            "kind": kind,
+            "tool": tool,
+            # The CLI's own prompt sentence when it gave us one, else the
+            # summary doxa.engine composed. Truncated: this lands in a
+            # manifest a widget re-reads twice a second, and a tool input
+            # is unbounded.
+            "summary": str(
+                data.get("title") or data.get("input_summary") or ""
+            )[:200],
+            "asked_at": _iso_now(),
+            "grace_s": float(self.spec.approval_grace_s),
+        }
+        self.slot.record_ask(ask)
+        if may_auto_approve(self.spec.approve, kind, tool):
+            await self._answer(
+                req_id, {"decision": "allow"}, ask=ask,
+                decision="allow", by="policy",
+                why=f"--approve {self.spec.approve}",
+            )
+            return
+        self._timers[req_id] = asyncio.create_task(
+            self._refuse_after_grace(req_id, ask),
+            name=f"fleet-approval-{self.spec.run_id}-{self.slot.index}",
+        )
+
+    async def _refuse_after_grace(
+        self, req_id: str, ask: "dict[str, Any]"
+    ) -> None:
+        """Wait out the window, then refuse in words that name the flag.
+
+        Cancelled -- by an operator's answer, or by teardown -- this
+        coroutine simply stops, which is the whole mechanism by which a
+        human beats the clock."""
+        await asyncio.sleep(float(self.spec.approval_grace_s))
+        # Nobody awaits this task, so an exception escaping it would
+        # surface as "Task exception was never retrieved" on the stderr
+        # behind a full-screen terminal application -- which is the same
+        # as no message at all (doxa.fleetsession._drive says it first).
+        # CancelledError is a BaseException and still propagates, which
+        # is the one that has to: a cancelled timer is a human who
+        # answered, not a failure.
+        with contextlib.suppress(Exception):
+            await self._refuse_now(req_id, ask)
+
+    async def _refuse_now(self, req_id: str, ask: "dict[str, Any]") -> None:
+        # Popped rather than cancelled: the caller IS the timer task, and
+        # _cancel_timer refusing to cancel the running task is what keeps
+        # that from raising CancelledError into its own refusal.
+        self._timers.pop(req_id, None)
+        reason = approval_refusal(
+            self.spec.approve, str(ask.get("kind") or ""),
+            str(ask.get("tool") or ""),
+            grace_s=float(self.spec.approval_grace_s),
+            run_id=str(self.spec.run_id), slot=self.slot.index,
+        )
+        # An AskUserQuestion is DECLINED, not denied: the model asked a
+        # question, and doxa.engine._ask_user_question's own contract for
+        # a declined one is a graceful refused call rather than an error.
+        answer = (
+            {"declined": True, "reason": reason}
+            if str(ask.get("kind") or "") == "ask_user"
+            else {"decision": "deny", "reason": reason}
+        )
+        await self._answer(
+            req_id, answer, ask=ask, decision="deny", by="timeout", why=reason,
+        )
+
+    async def _answer(
+        self, req_id: str, answer: "dict[str, Any]", *,
+        ask: "dict[str, Any]", decision: str, by: str, why: str,
+    ) -> None:
+        if req_id not in self.slot.pending_asks:
+            return  # already resolved -- an operator beat us to it
+        self._cancel_timer(req_id)
+        delivered = False
+        try:
+            delivered = bool(await self.client.answer_needs_input(req_id, answer))
+        except Exception as exc:  # noqa: BLE001 -- see below
+            # A socket that has gone is not a reason to lose the record:
+            # the session is unreachable, so the ask cannot be answered at
+            # all, and the run's own account of what it decided is the
+            # only thing left that is true.
+            why = f"{why} (not delivered: {type(exc).__name__}: {exc})"
+        self.slot.record_decision({
+            **ask, "decision": decision, "by": by, "why": why,
+            "delivered": delivered, "decided_at": _iso_now(),
+        })
+
+    def _resolved_elsewhere(self, req_id: str) -> None:
+        """``needs_input_resolved`` for an ask this desk did not answer:
+        somebody attached and decided it. Recorded as theirs."""
+        if not req_id:
+            return
+        self._cancel_timer(req_id)
+        ask = self.slot.pending_asks.get(req_id)
+        if ask is None:
+            return  # our own answer's echo; the decision is already down
+        self.slot.record_decision({
+            **ask, "decision": "answered", "by": "operator",
+            "why": "answered on an attached client (`/fleet attach`)",
+            "delivered": True, "decided_at": _iso_now(),
+        })
+
+    def _cancel_timer(self, req_id: str) -> None:
+        task = self._timers.pop(req_id, None)
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+
+
 class FleetBackend(Protocol):
     """Everything the orchestration needs a real session for, and nothing
     else.
@@ -1204,6 +1663,7 @@ class DaemonBackend:
     def __init__(self) -> None:
         self._clients: "dict[int, Any]" = {}
         self._drains: "dict[int, asyncio.Task]" = {}
+        self._desks: "dict[int, ApprovalDesk]" = {}
 
     async def spawn(self, slot: Slot, spec: FleetSpec) -> None:
         from .daemon import spawn_daemon
@@ -1242,18 +1702,35 @@ class DaemonBackend:
         slot.pid = _entry_pid(entry)
         slot.cwd = _entry_cwd(entry)
 
-    async def arm(self, slot: Slot, spec: FleetSpec) -> None:
+    async def connect(self, socket_path: str) -> Any:
+        """One attached :class:`doxa.client.EngineClient`, started.
+
+        ITS OWN METHOD so that the wiring below -- the drain, the approval
+        desk, the order they are created in -- is reachable from a test
+        without a daemon on the other end of a socket. The alternative was
+        a test that either spawned a real session or exercised none of
+        this, and the permission deadlock issue #56 names lives exactly
+        here."""
         from .client import EngineClient
 
+        client = EngineClient(socket_path)
+        await client.start()
+        return client
+
+    async def arm(self, slot: Slot, spec: FleetSpec) -> None:
         if not slot.socket_path:
             raise RuntimeError("no daemon socket -- the spawn did not finish")
-        client = EngineClient(slot.socket_path)
-        await client.start()
+        client = await self.connect(slot.socket_path)
         self._clients[slot.index] = client
+        # The seat nobody was sitting in until issue #56: this session
+        # will park on the first tool call the CLI would have asked a
+        # human about, and in a fleet there is no human. See ApprovalDesk.
+        desk = ApprovalDesk(slot, spec, client)
+        self._desks[slot.index] = desk
         # One drain per CLIENT, started at arm time and running for the
         # whole session -- not one per dispatched turn. See _drain for the
         # measured reason a per-turn drain was wrong.
-        self._drains[slot.index] = asyncio.create_task(_drain(client))
+        self._drains[slot.index] = asyncio.create_task(_drain(client, desk))
 
     async def dispatch(self, slot: Slot, prompt: str) -> None:
         client = self._clients.get(slot.index)
@@ -1297,6 +1774,13 @@ class DaemonBackend:
 
     async def stop(self, slot: Slot) -> None:
         client = self._clients.pop(slot.index, None)
+        # BEFORE the drain is cancelled: closing the desk writes down
+        # every ask that was still open, and a desk closed after its own
+        # event source had gone would be writing that record from a task
+        # already being torn down.
+        desk = self._desks.pop(slot.index, None)
+        if desk is not None:
+            desk.close()
         task = self._drains.pop(slot.index, None)
         if task is not None:
             task.cancel()
@@ -1309,9 +1793,9 @@ class DaemonBackend:
         return await asyncio.to_thread(_kill_pid, slot.pid)
 
 
-async def _drain(client: Any) -> None:
+async def _drain(client: Any, desk: "ApprovalDesk | None" = None) -> None:
     """Consume this client's events for the whole session, and throw them
-    away.
+    away -- except the ones somebody has to answer.
 
     Somebody has to: ``EngineClient`` buffers events in TWO unbounded
     queues -- the turn stream and the out-of-band stream -- so a harness
@@ -1324,7 +1808,14 @@ async def _drain(client: Any) -> None:
     out-of-band stream is where a peer-started turn's events arrive, where
     a queued prompt's eventual turn arrives, and where every peer join and
     leave arrives -- at N=32 with the fleet messaging, that is the busier
-    of the two by a wide margin."""
+    of the two by a wide margin.
+
+    IT IS ALSO WHERE A PERMISSION ASK ARRIVES, which is the defect issue
+    #56 names: this function consumed ``needs_input`` and discarded it
+    like everything else, so the session stayed parked until the
+    quiescence deadline. ``desk`` is the answer -- see
+    :class:`ApprovalDesk`. Passing None keeps the old behaviour, which is
+    what a caller with no slot to record against wants."""
 
     async def _turns() -> None:
         while True:
@@ -1333,8 +1824,18 @@ async def _drain(client: Any) -> None:
                 return
 
     async def _oob() -> None:
-        async for _event in client.peer_events():
-            pass
+        async for event in client.peer_events():
+            if desk is None:
+                continue
+            try:
+                await desk.on_event(event)
+            except Exception:  # noqa: BLE001 -- see below
+                # A desk that raised must not take the drain down with
+                # it: this coroutine is the only thing keeping two
+                # unbounded queues from growing for the length of the
+                # run, times N, and one unanswerable ask is a smaller
+                # failure than a fleet that runs out of memory.
+                continue
 
     with contextlib.suppress(Exception):
         await asyncio.gather(_turns(), _oob())
@@ -1562,6 +2063,30 @@ class RunReport:
     def dispatched(self) -> "list[Slot]":
         return [s for s in self.slots if s.dispatched_at is not None]
 
+    def approval_counts(self) -> "dict[str, int]":
+        """How this run's permission asks came out, summed over its slots.
+
+        Counted from the slots' own records rather than tallied as they
+        happen, so a manifest written mid-run and one written at the end
+        are the same arithmetic over the same evidence -- and so a reader
+        can redo the sum from ``slots[].approvals`` and get this."""
+        counts = {
+            "asked": 0, "auto_approved": 0, "refused": 0,
+            "answered": 0, "ended_unanswered": 0, "pending": 0,
+        }
+        by_key = {
+            "policy": "auto_approved", "timeout": "refused",
+            "operator": "answered", "teardown": "ended_unanswered",
+        }
+        for slot in self.slots:
+            counts["pending"] += len(slot.pending_asks)
+            counts["asked"] += len(slot.pending_asks) + len(slot.approvals)
+            for record in slot.approvals:
+                key = by_key.get(str(record.get("by") or ""))
+                if key is not None:
+                    counts[key] += 1
+        return counts
+
     @property
     def supervisor_slot(self) -> "Slot | None":
         """The run's supervisor, or None in a symmetric run."""
@@ -1608,6 +2133,8 @@ class RunReport:
                 "run_budget_usd": self.spec.run_budget_usd,
                 "session_budget_usd": self.spec.session_budget_usd,
                 "allow_unbudgeted": self.spec.allow_unbudgeted,
+                "approve": self.spec.approve,
+                "approval_grace_s": self.spec.approval_grace_s,
                 "memory_off": self.spec.memory.resolved(self.spec.n),
                 "pool": [
                     {"engine": m.engine, "model": m.model, "weight": m.weight}
@@ -1621,6 +2148,19 @@ class RunReport:
             "forced": self.forced,
             "budget": self.budget,
             "unbudgeted": self.unbudgeted,
+            # WHAT THIS RUN WAS ALLOWED TO SAY YES TO, beside what it was
+            # allowed to spend and for the same reason: a bill and a
+            # permission are the two things a run can hand out on an
+            # operator's behalf, and both have to be readable afterwards
+            # from the run's own record rather than from a shell history.
+            "approvals": {
+                "policy": self.spec.approve,
+                "grace_s": self.spec.approval_grace_s,
+                "posture": approval_posture(
+                    self.spec.approve, self.spec.approval_grace_s
+                ),
+                **self.approval_counts(),
+            },
             "assignments": [s.assignment.to_obj() for s in self.slots],
             "dispatch_order": list(self.dispatch_order),
             "dispatch_spread_s": self.dispatch_spread_s,
@@ -1650,6 +2190,19 @@ class RunReport:
             f", LEAKED {len(self.leaked_pids)}" if self.leaked_pids else ""
         )
         stopped = ", STOPPED on request" if self.stopped else ""
+        # LOUD when it bites, silent when it does not: a run in which
+        # nothing was ever asked reads exactly as it always has, and a run
+        # that refused a tool call nobody was there to approve says so in
+        # the one line an operator actually reads.
+        approvals = self.approval_counts()
+        asks = ""
+        if approvals["refused"]:
+            asks = (
+                f", {approvals['refused']} ask(s) REFUSED unanswered "
+                f"(--approve {self.spec.approve})"
+            )
+        elif approvals["asked"]:
+            asks = f", {approvals['asked']} permission ask(s)"
         # The mode leads, because every number after it reads differently
         # under the other one -- and the session count is spelled with the
         # supervisor in it, since that is how many sessions ran.
@@ -1661,7 +2214,7 @@ class RunReport:
         return (
             f"run {self.run_id} [{self.spec.mode}]: {shape} ({parts}); "
             f"dispatch spread {spread}; ledger "
-            f"{self.ledger_messages} messages{stopped}{leak}"
+            f"{self.ledger_messages} messages{asks}{stopped}{leak}"
         )
 
 
@@ -1982,6 +2535,11 @@ class FleetRun:
         deadline = None if timeout is None else time.monotonic() + timeout
         quiet_since: "float | None" = None
         started = time.monotonic()
+        # None, not the current signature: an ask can be parked before
+        # this phase is even entered (the drain runs from arm time), and
+        # seeding with it would make that ask the baseline -- never a
+        # change, never written out, invisible for as long as it blocks.
+        parked: "tuple[tuple[int, str], ...] | None" = None
         while deadline is None or time.monotonic() < deadline:
             if self.stopping():
                 # An operator's stop is NOT a quiescence: the run ends
@@ -2021,6 +2579,19 @@ class FleetRun:
             elif time.monotonic() - quiet_since >= self.spec.quiet_dwell_s:
                 self.report.quiesced = True
                 break
+            # A PARKED ASK IS NEWS, and this is the only loop running
+            # while it happens. The TUI has its own manifest heartbeat
+            # (doxa.fleetsession), but `doxa-fleet` from a shell writes
+            # the manifest once, at the end -- so without this a run
+            # blocked on a permission ask would be unreadable from
+            # outside for exactly as long as it was blocked, which is the
+            # window a reader needs it most. Written only when the set
+            # CHANGES, so a quiet run still writes the file once.
+            changed = self._parked_signature()
+            if changed != parked:
+                parked = changed
+                with contextlib.suppress(Exception):
+                    self.write_manifest()
             if await self._sleep_or_stop(self.spec.poll_interval_s):
                 break
         else:
@@ -2038,6 +2609,17 @@ class FleetRun:
                 slot.phase = PHASE_QUIET
         self.report.quiescence_s = time.monotonic() - started
         return self.report.quiesced
+
+    def _parked_signature(self) -> "tuple[tuple[int, str], ...]":
+        """Which asks are open, right now, across the run.
+
+        A value rather than a count: an ask answered and another parked in
+        the same poll interval is a change a count would miss."""
+        return tuple(
+            (slot.index, req_id)
+            for slot in self.slots
+            for req_id in sorted(slot.pending_asks)
+        )
 
     # -- phase 5: teardown ---------------------------------------------
 
@@ -2368,6 +2950,30 @@ def build_parser() -> "argparse.ArgumentParser":
                              "purpose: overriding the memory arithmetic "
                              "says nothing about accepting an unbounded "
                              "bill")
+    parser.add_argument("--approve", default=APPROVE_NONE,
+                        choices=list(APPROVE_CHOICES),
+                        help="what this run may approve on your behalf "
+                             "when a session's engine stops to ask about a "
+                             "tool call (default %(default)s). `none` "
+                             "approves nothing and REFUSES an ask nobody "
+                             "answers, naming this flag in the refusal; "
+                             "`peer` approves this run's own peer tools "
+                             "and nothing else -- the narrow case a "
+                             "supervisor run actually blocks on; `all` "
+                             "approves every tool call the CLI asks "
+                             "about. A question and a spawn_session are "
+                             "never auto-approved under any of the three. "
+                             "Recorded in the manifest. Separate from "
+                             "--allow-unbudgeted on purpose: accepting an "
+                             "unbounded bill says nothing about accepting "
+                             "unsupervised tool calls")
+    parser.add_argument("--approval-grace", type=float,
+                        default=APPROVAL_GRACE_S,
+                        help="seconds a parked permission ask waits for "
+                             "you before --approve decides it (default "
+                             "%(default)s). `/fleet attach <slot>` is how "
+                             "you answer one inside that window; 0 "
+                             "refuses immediately and never waits")
     parser.add_argument("--force", action="store_true",
                         help="start even when the memory arithmetic says N "
                              "does not fit. Recorded in the manifest")
@@ -2419,6 +3025,11 @@ def spec_from_args(args: "argparse.Namespace", *, cwd: str) -> FleetSpec:
         run_id=args.run_id or "",
         run_budget_usd=args.run_budget,
         allow_unbudgeted=args.allow_unbudgeted,
+        approve=getattr(args, "approve", APPROVE_NONE) or APPROVE_NONE,
+        approval_grace_s=(
+            APPROVAL_GRACE_S if getattr(args, "approval_grace", None) is None
+            else args.approval_grace
+        ),
         quiescence_timeout_s=timeout,
         quiet_dwell_s=args.quiet_dwell,
     )
