@@ -537,6 +537,28 @@ async def request(
     return answer
 
 
+#: The :class:`doxa.peers.PeerInfo` fields that describe how to reach a
+#: session ON ITS OWN MACHINE, and the values that say "not from here".
+#:
+#: A Unix socket path, a pid and a daemon socket are coordinates in one
+#: kernel's namespace. Sent across a machine boundary they are at best
+#: meaningless and at worst a map of the other machine -- and a reader that
+#: adopted them would hold a PeerInfo whose ``socket_path`` names a path in
+#: ITS OWN filesystem that some entirely unrelated process may own. So they
+#: are blanked on the way out (:func:`local_handlers`) AND on the way in
+#: (:func:`fetch_roster`), by the same rule ``origin`` already follows:
+#: what the reader can establish for itself, it establishes for itself, and
+#: this it establishes by knowing the row came off a socket.
+#:
+#: Blanked rather than dropped so the dataclass keeps its declared types --
+#: ``socket_path: str``, ``pid: int`` -- and every consumer's falsiness
+#: check (``socket_alive("")`` is False, ``if peer.daemon_socket``) already
+#: reads them as "no". Delivery to a remote session goes through
+#: :data:`OP_DELIVER`, which resolves the target on the machine that owns
+#: it; there is nothing a local caller could do with these anyway.
+_TRANSPORT_LOCAL_BLANKS = {"socket_path": "", "pid": 0, "daemon_socket": None}
+
+
 async def fetch_roster(
     endpoint: Endpoint, *, login: "str | None" = None
 ) -> "list[peers_mod.PeerInfo]":
@@ -558,7 +580,9 @@ async def fetch_roster(
             continue
         with contextlib.suppress(Exception):
             peer = peers_mod.peer_from_mapping(row)
-            out.append(replace(peer, origin=endpoint.label))
+            out.append(replace(
+                peer, origin=endpoint.label, **_TRANSPORT_LOCAL_BLANKS
+            ))
     return out
 
 
@@ -609,11 +633,17 @@ def local_handlers(
     handlers have to be something a test supplies. These are what a real
     bridge supplies.
 
-    ``roster`` returns registry rows unchanged -- including
-    ``origin: None``, which is TRUE from here (these sessions are local to
-    this machine) and which the fetching side overwrites with its own
-    label anyway. Nothing tries to guess what the asker should call this
-    machine.
+    ``scope_key`` bounds ALL THREE ops, not just the roster: the sessions
+    a roster lists, the sessions ``deliver`` can resolve a target among,
+    and the repo whose ledger rows ``history`` returns. A scope that one
+    op honours and two ignore is not a scope.
+
+    ``roster`` returns registry rows with their ``origin: None`` intact --
+    TRUE from here (these sessions are local to this machine), and the
+    fetching side overwrites it with its own label anyway -- and with
+    ``socket_path``/``pid``/``daemon_socket`` blanked, because those name
+    a place in THIS kernel and mean nothing, or something wrong, anywhere
+    else. See :data:`_TRANSPORT_LOCAL_BLANKS`.
 
     ``deliver`` resolves the target against the live registry and hands the
     message to ``peers.send_message`` -- the SAME call a local ``/msg``
@@ -622,11 +652,27 @@ def local_handlers(
     another machine cannot arrive with fewer checks than one from the
     session next door."""
 
+    def _in_scope(rows: "list[peers_mod.PeerInfo]") -> "list[peers_mod.PeerInfo]":
+        """``scope_key`` applied, for the handlers that answer about
+        sessions. All three ops are scoped by it or none of them is: a
+        roster that hides the sessions in another repo while `deliver`
+        still reaches them, and `history` still quotes them, is not a
+        scope -- it is a filter on one screen."""
+        if not scope_key:
+            return rows
+        return [p for p in rows if p.scope_key == scope_key]
+
     def _roster(_body: dict) -> dict:
-        live = peers_mod.read_registry(probe=True)
-        if scope_key:
-            live = [p for p in live if p.scope_key == scope_key]
-        return {"peers": [vars(p) for p in live], "count": len(live)}
+        live = _in_scope(peers_mod.read_registry(probe=True))
+        rows = []
+        for peer in live:
+            # vars(), then the transport-local fields blanked -- see
+            # _TRANSPORT_LOCAL_BLANKS for why a socket path and a pid do
+            # not cross a machine boundary.
+            row = dict(vars(peer))
+            row.update(_TRANSPORT_LOCAL_BLANKS)
+            rows.append(row)
+        return {"peers": rows, "count": len(rows)}
 
     async def _deliver(body: dict) -> dict:
         target = str(body.get("target") or "").strip()
@@ -635,7 +681,9 @@ def local_handlers(
         body_text = str(body.get("body") or "")
         if not body_text:
             raise PeerNetError("deliver: empty message")
-        peer = peers_mod.resolve_peer(peers_mod.read_registry(probe=True), target)
+        peer = peers_mod.resolve_peer(
+            _in_scope(peers_mod.read_registry(probe=True)), target
+        )
         await peers_mod.send_message(
             peer.socket_path,
             from_id=str(body.get("from_id") or "?"),
@@ -649,8 +697,17 @@ def local_handlers(
     def _history(body: dict) -> dict:
         from . import peerledger as peerledger_mod
 
-        limit = int(body.get("limit") or peerledger_mod.DEFAULT_LIMIT)
-        rows = peerledger_mod.ledger().recent(limit=max(1, min(limit, 200)))
+        limit = max(1, min(int(body.get("limit") or peerledger_mod.DEFAULT_LIMIT), 200))
+        ledger = peerledger_mod.ledger()
+        # Scoped by the SENDER's repo, which is the same
+        # ``PeerHost.scope_key`` a roster row is filtered by -- see
+        # _in_scope. The predicate goes into the scan, so a scoped caller
+        # gets `limit` rows from its own repo rather than whatever
+        # survived a global slice.
+        rows = (
+            ledger.in_repo(scope_key, limit=limit) if scope_key
+            else ledger.recent(limit=limit)
+        )
         return {"messages": [m.to_obj() for m in rows], "count": len(rows)}
 
     return {OP_ROSTER: _roster, OP_DELIVER: _deliver, OP_HISTORY: _history}

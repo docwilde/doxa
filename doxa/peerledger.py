@@ -740,6 +740,18 @@ class PeerLedger:
         """The newest ``limit`` records, newest first."""
         return self._newest_first(lambda _message: True, limit)
 
+    def in_repo(self, repo: str, limit: int = DEFAULT_LIMIT) -> "list[Message]":
+        """The newest ``limit`` records whose SENDER named this repo, newest
+        first -- the scoped twin of :meth:`recent`.
+
+        The predicate goes INTO the scan rather than filtering its result,
+        so a scoped caller gets ``limit`` rows from its own repo instead of
+        however many of the last ``limit`` global rows happened to be its.
+        The sender's repo is its ``PeerHost.scope_key``
+        (``doxa.peerdelivery``), which is the same key
+        :func:`doxa.peernet.local_handlers` scopes a roster by."""
+        return self._newest_first(lambda m: m.sender.repo == repo, limit)
+
     def sent_by(self, session_id: str, limit: int = DEFAULT_LIMIT) -> "list[Message]":
         """What this session sent, newest first."""
         return self._newest_first(lambda m: m.sender.session == session_id, limit)

@@ -469,3 +469,97 @@ async def test_an_oversize_request_is_refused_before_a_byte_moves():
         await peernet_mod.request(
             endpoint, {"op": "roster", "pad": "x" * (peernet_mod.MAX_BODY_BYTES + 1)}
         )
+
+
+# =======================================================================
+# Scope and transport-local fields at the machine boundary (finding 7)
+# =======================================================================
+
+
+def test_every_local_handler_honours_the_scope_key(monkeypatch, tmp_path):
+    """No probe: nothing wires a bridge yet, so this is latent. ``_roster``
+    applied ``scope_key`` and ``_deliver``/``_history`` ignored it -- a
+    roster that hides the sessions in another repo while delivery still
+    reaches them, and history still quotes them, is not a scope."""
+    from doxa import peerledger as peerledger_mod
+
+    from dataclasses import replace as _replace
+
+    mine = _replace(_peer("mine"), cwd="/repo-a", repo_root="/repo-a")
+    theirs = _replace(_peer("theirs"), cwd="/repo-b", repo_root="/repo-b")
+    monkeypatch.setattr(peers_mod, "read_registry", lambda **kw: [mine, theirs])
+
+    handlers = peernet_mod.local_handlers(scope_key="/repo-a")
+
+    # roster: only the in-scope session.
+    assert [r["session_id"] for r in handlers[peernet_mod.OP_ROSTER]({})["peers"]] == [
+        "mine"
+    ]
+
+    # deliver: an out-of-scope target cannot be resolved at all.
+    sent: list = []
+
+    async def _send(socket_path, **kw):
+        sent.append((socket_path, kw))
+
+    monkeypatch.setattr(peers_mod, "send_message", _send)
+    with pytest.raises(peers_mod.PeerSendError, match=r"theirs"):
+        asyncio.run(handlers[peernet_mod.OP_DELIVER]({
+            "target": "theirs", "body": "hello",
+        }))
+    assert sent == []
+
+    # history: scoped by the sender's repo, which is the same scope key.
+    asked: list = []
+
+    class _Ledger:
+        def recent(self, limit):
+            asked.append(("recent", limit))
+            return []
+
+        def in_repo(self, repo, limit):
+            asked.append(("in_repo", repo, limit))
+            return []
+
+    monkeypatch.setattr(peerledger_mod, "ledger", lambda: _Ledger())
+    handlers[peernet_mod.OP_HISTORY]({"limit": 5})
+    assert asked == [("in_repo", "/repo-a", 5)]
+
+
+def test_a_roster_row_never_carries_a_socket_path_across_the_boundary(monkeypatch):
+    """A Unix socket path and a pid are coordinates in one kernel. Sent
+    across a machine boundary they are at best meaningless, and a reader
+    that ADOPTED one would hold a PeerInfo naming a path in its own
+    filesystem that some unrelated process may own. Blanked on the way out
+    AND on the way in, by the same rule ``origin`` already follows."""
+    monkeypatch.setattr(
+        peers_mod, "read_registry",
+        lambda **kw: [_peer("srv-1", daemon_socket="/run/doxa/daemon.sock")],
+    )
+    rows = peernet_mod.local_handlers()[peernet_mod.OP_ROSTER]({})["peers"]
+    assert rows[0]["session_id"] == "srv-1"
+    assert rows[0]["socket_path"] == ""
+    assert rows[0]["pid"] == 0
+    assert rows[0]["daemon_socket"] is None
+
+
+async def test_fetch_roster_refuses_a_socket_path_the_reply_supplied(monkeypatch):
+    """The receiving half, asserted against a server that sends them
+    anyway -- a bridge on an older build, or one that is not DOXA at all."""
+    _permissive(monkeypatch)
+    monkeypatch.setattr(peers_mod, "read_registry", lambda **kw: [])
+    leaky = dict(vars(_peer("remote-1", daemon_socket="/run/theirs.sock")))
+    handlers = {peernet_mod.OP_ROSTER: lambda body: {"peers": [leaky]}}
+    server = peernet_mod.PeerNetServer(handlers, host="127.0.0.1", port=0)
+    await server.start()
+    endpoint = peernet_mod.Endpoint("workstation", "127.0.0.1", server.port_in_use)
+    try:
+        fetched = await peernet_mod.fetch_roster(endpoint, login=LOGIN)
+    finally:
+        await server.stop()
+
+    assert [p.session_id for p in fetched] == ["remote-1"]
+    assert fetched[0].origin == "workstation"
+    assert fetched[0].socket_path == ""
+    assert fetched[0].pid == 0
+    assert fetched[0].daemon_socket is None
