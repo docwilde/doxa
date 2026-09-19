@@ -140,8 +140,13 @@ class EngineCapabilities:
     live_model_switch: bool = False
     #: The conversation can be continued after the process running it exits.
     resume: bool = False
-    #: The session can be detached from and reattached to -- the daemon
-    #: split. An in-process engine reports False and Ctrl+Q stops it.
+    #: The ENGINE can be hosted by doxa.daemon, so a session on it can be
+    #: detached from and reattached to. A property of the engine, not of
+    #: one handle: a handle running inside the TUI (``doxa --in-process``)
+    #: carries its own ``detachable = False`` and Ctrl+Q stops it, whatever
+    #: this field says. False here means no daemon can host the engine at
+    #: all -- and since issue #39 gave doxa.daemon an ``--engine``, no
+    #: engine DOXA ships reports False.
     detachable: bool = False
     #: DOXA's peer layer (the rail, /msg, the registry). Engine-agnostic by
     #: construction -- doxa.peers has no model in it -- so both engines
@@ -240,9 +245,12 @@ def capabilities_of(engine: Any) -> EngineCapabilities:
     is believed about itself.
 
     Note what is NOT done here: no lookup of ``engine.engine_id`` in the
-    registry. ``EngineClient`` fronts a daemon and cannot know from its own
-    side what that daemon hosts; asking the registry would turn a socket's
-    silence into a confident answer."""
+    registry. A handle is believed about itself, and a registry entry must
+    not be able to overrule it. ``EngineClient`` does now learn which
+    engine its daemon hosts -- the daemon publishes it in the hello frame
+    and every status reply (issue #39) -- and sets both attributes from
+    that answer, which is the daemon SAYING so rather than this function
+    guessing."""
     declared = getattr(engine, "engine_capabilities", None)
     return declared if isinstance(declared, EngineCapabilities) else DEFAULT_CAPABILITIES
 
@@ -252,11 +260,13 @@ def engine_id_of(engine: Any) -> str:
 
     The sibling of :func:`capabilities_of` and the same duck-typed,
     strictly-additive convention: an optional ``engine_id`` attribute,
-    absent meaning :data:`DEFAULT_ENGINE_ID`. Every handle that predates
-    this function is a Claude session -- ``SessionEngine``, and
-    ``EngineClient``, which fronts a daemon that builds a ``SessionEngine``
-    specifically (``doxa.daemon``'s argv carries no ``--engine``) -- so the
-    absent case is a fact about those two, not a guess.
+    absent meaning :data:`DEFAULT_ENGINE_ID`. ``SessionEngine`` declares
+    nothing and is a Claude session, so the absent case is a fact about
+    it, not a guess. ``EngineClient`` used to be the same fact for the
+    same reason -- the daemon built a ``SessionEngine`` specifically --
+    but since issue #39 the daemon takes an ``--engine`` and says which
+    one it hosts in its hello frame, so that client sets the attribute
+    from the daemon's own answer rather than relying on the default.
 
     Used for the CATALOG question (:func:`doxa.providers.model_provider`),
     never for capabilities: what a handle can do it declares itself, and

@@ -33,8 +33,9 @@ a plan as if it were shipped.
 
 ## Sessions and the daemon
 
-Each session runs as its own **daemon process** hosting the Claude Agent
-SDK client, the LORE hooks and the transcript. The TUI is a thin client
+Each session runs as its own **daemon process** hosting the engine — the
+Claude Agent SDK client, or whichever `--engine` named — plus the LORE
+hooks and the transcript. The TUI is a thin client
 attached over a `0600` Unix socket (JSON, one object per line); closing the
 terminal detaches rather than killing the session. A daemon finalizes a
 session (LORE review + index) once every attached client has been gone for
@@ -132,9 +133,11 @@ long-lived process for the whole session; a Codex session is **one `codex
 exec --json` process per turn**, the first starting a thread and every
 later one running `codex exec resume <id>`. The prompt goes in on stdin
 rather than argv, because a pasted prompt can be megabytes and `ARG_MAX`
-is not. Because no daemon hosts it, a Codex session lives in the TUI
-process: there is nothing to detach from, the `⌁ session` chip is absent,
-and `ctrl+q` ends the session rather than detaching it.
+is not. Since v1.13.0 the daemon hosts it like any other engine
+(`doxa.daemon --engine codex`), so a Codex session detaches, reattaches
+with `doxa attach` and survives the terminal closing. `doxa --in-process
+--engine codex` still runs it inside the TUI, and there `ctrl+q` ends the
+session rather than detaching it.
 
 What Codex does not report, DOXA does not paint. Measured against
 codex-cli 0.144.4:
@@ -164,8 +167,8 @@ store neither engine owns. The belief and proposal *pickers* are not: they
 live on `SessionEngine` because that is where they were written, which is
 a fact about the code's shape rather than about the engine. So the
 `N beliefs` chip is plain rather than clickable here, and `/beliefs` stays
-in the command list and answers `beliefs: this session's handle cannot
-list beliefs` rather than opening an empty picker. The peer layer has no
+in the command list and says the engine has no memory surface rather than
+opening an empty picker. The peer layer has no
 model in it, so the rail, `/msg` and the registry work identically.
 
 ## The spawned CLI

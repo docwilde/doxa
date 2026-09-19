@@ -54,6 +54,11 @@ from .events import (
     PENDING_LIST_LIMIT,
     EngineEvent,
 )
+# doxa.engines imports doxa.events and nothing else, so naming the
+# default engine and its capability map here costs this module nothing.
+# The REGISTRY lookup that _adopt_engine makes is deferred into that
+# method, because resolving a provider imports the engine's own module.
+from .engines import DEFAULT_CAPABILITIES, DEFAULT_ENGINE_ID
 from .peers import MAX_FRAME_BYTES, PeerInfo, PeerSendError, peer_from_mapping
 
 CALL_TIMEOUT_SECS = 15.0
@@ -114,6 +119,16 @@ class EngineClient:
         # True until the first status reply says otherwise, which is the
         # answer every session gave before the switch existed.
         self.lore: bool = True
+        # Which engine the daemon behind this socket hosts, and what that
+        # engine can do (issue #39). Both are what doxa.engines.
+        # engine_id_of / capabilities_of read off a handle, so every
+        # surface that asks a handle those questions gets the DAEMON's
+        # answer without knowing there is a socket in the way. Seeded to
+        # the defaults a daemon that predates the field implies -- it
+        # could only ever have hosted a Claude session -- and corrected
+        # by the hello frame, which arrives before anything paints.
+        self.engine_id: str = DEFAULT_ENGINE_ID
+        self.engine_capabilities = DEFAULT_CAPABILITIES
         self.cwd: str | None = None
         self.total_cost_usd = 0.0
         self.last_ctx_percentage: float | None = None
@@ -170,6 +185,7 @@ class EngineClient:
         if hello.get("permission_mode"):
             self.permission_mode = str(hello["permission_mode"])
         self.bypass_armed = bool(hello.get("bypass_armed"))
+        self._adopt_engine(hello.get("engine"))
         self.cwd = hello.get("cwd")
         if self.skip_backlog:
             # The daemon has advertised its ring head since the protocol's
@@ -575,6 +591,8 @@ class EngineClient:
             self.bypass_armed = bool(status["bypass_armed"])
         if "lore" in status:
             self.lore = bool(status["lore"])
+        if status.get("engine"):
+            self._adopt_engine(status["engine"])
         if isinstance(status.get("account"), dict):
             self.account = status["account"]
         if status.get("lore_root"):
@@ -597,6 +615,38 @@ class EngineClient:
             if isinstance(p, dict)
         ]
         return status
+
+    def _adopt_engine(self, engine_id: Any) -> None:
+        """Take the daemon's word for which engine it hosts, and with it
+        that engine's capability map.
+
+        The map comes from the REGISTRY rather than over the wire, on
+        purpose: it is a fact about the engine (what a DeepSeek session
+        can do), not about this daemon, and shipping it as a dict would
+        put a second, older copy of :class:`doxa.engines.
+        EngineCapabilities` on the wire every time the two sides were
+        different builds. An id this client's registry does not know
+        leaves both attributes alone -- the seeded Claude defaults, which
+        over-promise rather than hide a surface that may well be there,
+        and which is what every client did before this field existed.
+
+        Silent on failure for the same reason ``_refresh_status_quietly``
+        is: nothing here is worth failing an attach over."""
+        name = str(engine_id or "").strip().lower()
+        if not name or name == self.engine_id:
+            return
+        # Deferred: doxa.engines registers its non-Claude providers on
+        # first LOOKUP, which imports their modules. A Claude session
+        # never reaches this line (the id matches the seed above), so a
+        # plain attach still pays nothing for engines it is not using.
+        from . import engines as engines_mod
+
+        try:
+            provider = engines_mod.get(name)
+        except KeyError:
+            return
+        self.engine_id = provider.engine_id()
+        self.engine_capabilities = provider.supports()
 
     async def _refresh_status_quietly(self) -> None:
         with contextlib.suppress(Exception):

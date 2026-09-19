@@ -735,3 +735,87 @@ async def test_a_daemon_that_dies_mid_read_does_not_leave_an_unretrieved_excepti
         "task exception per session is the noise this test exists to stop"
     )
     assert client._closed is True, "the finally must still close out"
+
+
+# =======================================================================
+# Issue #39 -- a slot runs the engine it was dealt
+# =======================================================================
+
+
+MIXED_POOL = (
+    fleet_mod.ModelSlot(engine="claude", model="sonnet", weight=1),
+    fleet_mod.ModelSlot(engine="deepseek", model="deepseek-chat", weight=1),
+)
+
+
+async def test_the_daemon_backend_spawns_each_slot_on_its_own_engine(
+    short_root, monkeypatch,
+):
+    """The defect issue #39 names: DaemonBackend.spawn never passed
+    slot.assignment.engine, and spawn_daemon had no parameter to take it,
+    so a pool entry `deepseek:deepseek-chat` started CLAUDE with
+    `--model deepseek-chat` -- and the manifest recorded an engine that
+    never ran."""
+    from doxa import daemon as daemon_mod
+
+    calls = []
+
+    def fake_spawn(**kwargs):
+        calls.append(kwargs)
+        return f"sess-{len(calls)}", f"/tmp/fake-{len(calls)}.sock"
+
+    monkeypatch.setattr(daemon_mod, "spawn_daemon", fake_spawn)
+    spec = _spec(short_root, pool=MIXED_POOL, n=6)
+    run = fleet_mod.FleetRun(spec, fleet_mod.DaemonBackend(), force=True)
+    run.prepare()
+    backend = run.backend
+    slots = run.slots
+    for slot in slots:
+        await backend.spawn(slot, spec)
+
+    assert [c["engine"] for c in calls] == [s.assignment.engine for s in slots]
+    # The draw has to have produced both, or this test would pass on a
+    # single-engine run and prove nothing.
+    assert set(c["engine"] for c in calls) == {"claude", "deepseek"}
+    # And the model still travels with it, per slot.
+    assert [c["model"] for c in calls] == [s.assignment.model for s in slots]
+
+
+async def test_a_slot_whose_engine_refuses_to_start_is_failed_and_the_run_goes_on(
+    short_root,
+):
+    """A vendor engine with no API key raises MissingCredential inside the
+    daemon, which exits during startup; spawn_daemon turns that into a
+    RuntimeError carrying the log tail. One slot that cannot start is data
+    about the run -- recorded per slot, with the reason -- and the rest of
+    the fleet still runs."""
+
+    class _NoCredential(FakeBackend):
+        async def spawn(self, slot, spec) -> None:
+            if slot.assignment.engine != "claude":
+                raise RuntimeError(
+                    "doxa daemon exited during startup (code 1). Log tail:\n"
+                    "MissingCredential: DEEPSEEK_API_KEY is not set"
+                )
+            await super().spawn(slot, spec)
+
+    backend = _NoCredential()
+    spec = _spec(short_root, pool=MIXED_POOL, n=6)
+    run = fleet_mod.FleetRun(spec, backend, force=True)
+    run.prepare()
+    await run.spawn_all()
+    await run.arm_all()
+    await run.dispatch()
+
+    failed = [s for s in run.slots if s.phase == fleet_mod.PHASE_FAILED]
+    ran = [s for s in run.slots if s.phase == fleet_mod.PHASE_DISPATCHED]
+    assert failed and ran, "the draw must contain both engines"
+    assert all(s.assignment.engine != "claude" for s in failed)
+    assert all(s.assignment.engine == "claude" for s in ran)
+    assert all("DEEPSEEK_API_KEY" in (s.error or "") for s in failed)
+    # And the manifest carries both the assignment and the reason.
+    obj = run.report.to_obj()
+    rows = {row["index"]: row for row in obj["slots"]}
+    for slot in failed:
+        assert rows[slot.index]["assignment"]["engine"] == slot.assignment.engine
+        assert "MissingCredential" in rows[slot.index]["error"]

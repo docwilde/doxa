@@ -272,10 +272,14 @@ VENDOR_CAPABILITIES = EngineCapabilities(
     # to disk beside the transcript after every turn, so a later process
     # replays it EXACTLY, tool calls and tool results included.
     resume=True,
-    # FALSE. doxa.daemon's RPC surface is SessionEngine's; no daemon hosts
-    # this engine, so a session lives in the TUI process and Ctrl+Q ends
-    # it rather than detaching from it. Same as Codex.
-    detachable=False,
+    # TRUE since issue #39: doxa.daemon takes --engine and hosts whichever
+    # engine the registry names, so a DeepSeek or GLM session runs in a
+    # daemon like a Claude one and `doxa attach` reattaches to it. The RPC
+    # surface is still SessionEngine's, and the part of it this engine
+    # does not implement -- the belief/pending pickers, see lore_pickers
+    # below -- is answered with a typed error rather than an
+    # AttributeError (doxa.daemon.MEMORY_RPC_MEMBERS). Same as Codex.
+    detachable=True,
     # TRUE. DOXA's own layer, with no model in it.
     peer_messaging=True,
     # TRUE since docwilde/doxa#39. This engine holds a
@@ -287,16 +291,15 @@ VENDOR_CAPABILITIES = EngineCapabilities(
     # engine had no outbound path at all and the operator's own
     # configuredness check kept the tool away from it.
     peer_send_tool=True,
-    # FALSE, and MEASURED rather than assumed: doxa.daemon.spawn_daemon
-    # builds `python -m doxa.daemon --cwd ... --session-id ...` and there
-    # is no --engine among the flags it appends, while doxa.daemon hosts a
-    # SessionEngine specifically. So a spawn_session from here would
-    # silently start a CLAUDE child under a DeepSeek parent's name -- both
-    # a cross-engine spawn (out of scope per
-    # docs/plans/engine-providers.md) and a mislabelled agent, which in a
-    # randomised fleet is the one mistake nobody would notice. The
-    # operator is not offered at all: a tool the model cannot see is a
-    # tool the model cannot call.
+    # FALSE. The mechanical blocker is gone -- spawn_daemon takes an
+    # `engine` since issue #39, so a child COULD be started on this same
+    # engine -- but the seam a spawn needs is not wired here: this engine
+    # builds its ToolGate with ``spawn_confirm=None`` (no channel to ask a
+    # human on), and doxa.session_ops' confirmation gate is what makes a
+    # spawn an act somebody agreed to rather than one a model performed.
+    # Wiring that is its own piece of work and is not verified by this
+    # release. The operator is not offered at all: a tool the model cannot
+    # see is a tool the model cannot call.
     spawn_sessions=False,
     # FALSE, same as Codex and for the same reason: the belief/pending
     # PICKERS are lore_core queries that happen to live on SessionEngine.
@@ -640,10 +643,11 @@ def operator_tools(ctx: "dict | None" = None) -> "list[dict]":
     one failure mode ``mcp_tools=True`` must not hide.
 
     ``doxa.session_ops.SESSION_OPERATORS`` is the DELIBERATE exception and
-    the map does record it: ``spawn_session`` shells out to a command line
-    that threads no engine id, so a spawn from here would start a Claude
-    child under a DeepSeek parent's name. It is not offered, and
-    ``spawn_sessions=False`` says so.
+    the map does record it: a spawn needs the confirmation gate this
+    engine has no channel for (its ToolGate is built with
+    ``spawn_confirm=None``). It is not offered, and ``spawn_sessions=
+    False`` says so -- see that field's own comment in
+    ``VENDOR_CAPABILITIES``.
 
     ``doxa.operators`` is imported HERE rather than at module scope for
     the reason ``doxa.engines``' docstring states: it pulls
@@ -912,8 +916,14 @@ class ChatApiEngine:
     #: turns out to be unavailable in THIS process -- see there.
     engine_capabilities = VENDOR_CAPABILITIES
 
-    #: The attach chip's predicate. False, truthfully: no daemon hosts
-    #: this engine, so there is nothing to detach from.
+    #: The attach chip's predicate, and it is about THIS HANDLE, not
+    #: about the engine: a handle the TUI holds directly is one running
+    #: in the TUI process (``doxa --in-process``), and there is nothing
+    #: to detach from it. ``SessionEngine`` answers False here the same
+    #: way, by having no such attribute at all. When the daemon hosts
+    #: this engine (issue #39) the TUI holds a ``doxa.client.
+    #: EngineClient`` instead, and that is the object carrying
+    #: ``detachable = True``.
     detachable = False
 
     def __init__(
@@ -928,6 +938,8 @@ class ChatApiEngine:
         parent_session_id: "str | None" = None,
         transport: "StreamTransport | None" = None,
         effort: "str | None" = None,
+        daemon_socket: "str | None" = None,
+        lore: "bool | None" = None,
         **_ignored: Any,
     ) -> None:
         # **_ignored, deliberately, for the reason CodexEngine states:
@@ -943,6 +955,15 @@ class ChatApiEngine:
         self.resume = resume or None
         self.spawn_depth = max(0, int(spawn_depth or 0))
         self.parent_session_id = parent_session_id or None
+        # Set when a doxa.daemon.SessionDaemon hosts this session (issue
+        # #39), and load-bearing rather than decorative: it is what puts
+        # the ``daemon_socket`` marker on this session's registry entry
+        # (peers.PeerInfo.daemon_socket), which is how spawn_daemon learns
+        # the daemon came up and how `doxa attach` finds it afterwards. A
+        # session that dropped it would register as one nothing could
+        # attach to, and spawn_daemon would time out waiting for a field
+        # that was never going to appear. None in-process.
+        self.daemon_socket = daemon_socket or None
         self.slug = project_slug(self.cwd)
         # NO environment is captured here, and that is the guarantee, not
         # an omission: an injectable env dict would be a credential stored
@@ -969,7 +990,19 @@ class ChatApiEngine:
         self.permission_mode: str = "default"
         self.bypass_armed: bool = False
         self.account: dict = {}
-        self.lore_root: "str | None" = lore_root_path()
+        # The memory switch, the same rule SessionEngine applies: None means
+        # "the config row's answer", which is ON. Off means three absences
+        # -- no snapshot in the system message, no lore_* operator in the
+        # tool projection (their seams are simply not named, so
+        # is_configured keeps them out rather than a refusal), and a gate
+        # allowed-set that names only what was offered -- so a fleet's
+        # memory-off arm on this engine is memory-off in fact, not only in
+        # the manifest. Through v1.12.0 the flag reached this constructor
+        # through **_ignored and changed nothing.
+        from .engine import lore_enabled_default
+
+        self.lore: bool = lore_enabled_default() if lore is None else bool(lore)
+        self.lore_root: "str | None" = lore_root_path() if self.lore else None
         self.lore_snapshot_chars: "int | None" = None
         self.num_turns = 0
         self.usage_totals: "dict[str, int]" = {}
@@ -1151,11 +1184,15 @@ class ChatApiEngine:
             # engine actually wired -- an operator whose is_configured says
             # no is simply not projected, and a tool the model cannot see
             # is a tool the model cannot call.
-            self._tools = operator_tools({
-                "belief_store": lore_store.db_connect,
-                "lore_root": self.lore_root,
-                "peer_send": self._peer_delivery.tool_send,
-            })
+            ctx: dict = {"peer_send": self._peer_delivery.tool_send}
+            if self.lore:
+                ctx["belief_store"] = lore_store.db_connect
+                ctx["lore_root"] = self.lore_root
+            self._tools = operator_tools(ctx)
+            # The gate executes only what the model was offered: a lore_*
+            # name the model produces from training rather than from the
+            # tool list is refused, not run against the store.
+            self._gate.allowed = {t["function"]["name"] for t in self._tools}
         except Exception as exc:  # noqa: BLE001 -- an absent tool surface is
             # a narrower session, not a failed one, and it SAYS it is
             # narrower instead of offering tools that cannot run.
@@ -1178,7 +1215,7 @@ class ChatApiEngine:
                 on_message=self._on_peer_frame,
                 on_peer_joined=self._on_peer_joined,
                 on_peer_left=self._on_peer_left,
-                daemon_socket=None,
+                daemon_socket=self.daemon_socket,
                 # A self-description, exactly as v1.0.2 defined it: shown,
                 # never verified, and it decides nothing.
                 provider=self.spec.provider_id,
@@ -1240,11 +1277,12 @@ class ChatApiEngine:
         from lore_core import context as lore_context
 
         snapshot = ""
-        try:
-            snapshot = lore_context.build_context(self.cwd) or ""
-        except Exception:  # noqa: BLE001 -- a LORE store that cannot be read
-            # is a session without memory, not a session that cannot run.
-            snapshot = ""
+        if self.lore:
+            try:
+                snapshot = lore_context.build_context(self.cwd) or ""
+            except Exception:  # noqa: BLE001 -- a LORE store that cannot be read
+                # is a session without memory, not a session that cannot run.
+                snapshot = ""
         self.lore_snapshot_chars = len(snapshot)
         header = (
             f"You are a DOXA session running on {self.spec.display_name}. "

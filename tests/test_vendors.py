@@ -594,11 +594,17 @@ async def test_permission_modes_is_false_and_the_setter_refuses_by_name(tmp_path
     assert VENDOR_CAPABILITIES.permission_modes is False
 
 
-async def test_detachable_is_false_on_the_handle_as_well_as_the_map(tmp_path):
-    """The attach chip reads the attribute, not the map, so both have to
-    agree -- no daemon hosts this engine."""
+async def test_the_handle_is_not_detachable_but_the_engine_is(tmp_path):
+    """Two different claims, and after issue #39 they differ.
+
+    The MAP says the daemon can host this engine -- it takes an --engine
+    now. The HANDLE's attribute is the attach chip's predicate and is about
+    this object: a ChatApiEngine the TUI holds directly is one running
+    in-process, and there is nothing to detach from it. (When a daemon
+    hosts it, the TUI holds an EngineClient instead, which carries
+    detachable = True.)"""
     assert engine(tmp_path).detachable is False
-    assert VENDOR_CAPABILITIES.detachable is False
+    assert VENDOR_CAPABILITIES.detachable is True
 
 
 def test_lore_pickers_is_false_and_the_methods_are_genuinely_absent(tmp_path):
@@ -1212,3 +1218,46 @@ async def test_a_turn_that_outruns_its_wall_clock_budget_is_stopped(tmp_path, mo
 async def test_switch_branch_refuses_because_this_engine_owns_no_worktree(tmp_path):
     with pytest.raises(NotImplementedError, match=r"does not manage its own worktree"):
         await engine(tmp_path).switch_branch("main")
+
+
+# -- the memory switch (docwilde/doxa#39 follow-up) ------------------------
+
+
+@pytest.mark.parametrize("lore", [True, False])
+async def test_the_memory_switch_removes_the_snapshot_and_the_lore_tools(tmp_path, lore):
+    """`lore=False` is three absences, not a refusal: no snapshot in the
+    system message, no lore_* operator in the projection, and a gate whose
+    allowed-set names only what was offered. Through v1.12.0 the flag
+    reached the constructor through **_ignored and changed nothing, so a
+    fleet's memory-off arm on this engine ran with memory on."""
+    eng = engine(tmp_path, lore=lore)
+    await eng.start()
+    try:
+        offered = {t["function"]["name"] for t in eng._tools}
+        eng._system_message()
+        lore_tools = {name for name in offered if name.startswith("lore_")}
+        assert eng.lore is lore
+        if lore:
+            assert lore_tools, "memory on must offer the lore_* operators"
+            assert eng.lore_root is not None
+        else:
+            assert not lore_tools, f"memory off still offered {sorted(lore_tools)}"
+            assert eng.lore_snapshot_chars == 0
+            assert eng.lore_root is None
+        assert {"peer_list", "peer_history"} <= offered
+        assert eng._gate is not None and eng._gate.allowed == offered
+    finally:
+        await eng.finalize()
+
+
+async def test_a_lore_call_the_model_invents_is_refused_when_memory_is_off(tmp_path):
+    """A name the model produces from training rather than from the tool
+    list must not run against the store."""
+    eng = engine(tmp_path, lore=False)
+    await eng.start()
+    try:
+        result = eng._gate.execute("lore_memory_list", {"scope": "all"})
+        assert "error" in result, result
+        assert "entries" not in json.dumps(result)
+    finally:
+        await eng.finalize()

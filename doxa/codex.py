@@ -197,9 +197,14 @@ CODEX_CAPABILITIES = EngineCapabilities(
     # gets its own -m. Still a live switch from the operator's side.
     live_model_switch=True,
     resume=True,
-    # No daemon hosts this engine: a Codex session lives in the TUI
-    # process, so Ctrl+Q ends it rather than detaching from it.
-    detachable=False,
+    # TRUE since issue #39: doxa.daemon takes --engine and hosts whichever
+    # engine the registry names, so a Codex session runs in a daemon like
+    # a Claude one and `doxa attach` reattaches to it. The RPC surface is
+    # still SessionEngine's, and the part of it this engine does not
+    # implement -- the belief/pending pickers, see lore_pickers below --
+    # is answered with a typed error rather than an AttributeError
+    # (doxa.daemon.MEMORY_RPC_MEMBERS).
+    detachable=True,
     # DOXA's own layer, and there is no model in it.
     peer_messaging=True,
     # FALSE, and it is the one field that separates this engine from the
@@ -407,8 +412,14 @@ class CodexEngine:
     #: provider would send the model picker to the wrong catalogue.
     engine_id = CODEX_ENGINE_ID
 
-    #: The attach chip's predicate. False, and truthfully: no daemon
-    #: hosts a Codex session, so there is nothing to detach from.
+    #: The attach chip's predicate, and it is about THIS HANDLE, not
+    #: about the engine: a handle the TUI holds directly is one running
+    #: in the TUI process (``doxa --in-process``), and there is nothing
+    #: to detach from it. ``SessionEngine`` answers False here the same
+    #: way, by having no such attribute at all. When the daemon hosts
+    #: this engine (issue #39) the TUI holds a ``doxa.client.
+    #: EngineClient`` instead, and that is the object carrying
+    #: ``detachable = True``.
     detachable = False
 
     def __init__(
@@ -422,6 +433,7 @@ class CodexEngine:
         parent_session_id: "str | None" = None,
         exec_factory: "Callable[..., Any] | None" = None,
         sandbox: "str | None" = None,
+        daemon_socket: "str | None" = None,
         **_ignored: Any,
     ) -> None:
         # **_ignored, deliberately: EngineProvider.new_session takes DOXA's
@@ -435,6 +447,15 @@ class CodexEngine:
         self.resume = resume or None
         self.spawn_depth = max(0, int(spawn_depth or 0))
         self.parent_session_id = parent_session_id or None
+        # Set when a doxa.daemon.SessionDaemon hosts this session (issue
+        # #39), and load-bearing rather than decorative: it is what puts
+        # the ``daemon_socket`` marker on this session's registry entry
+        # (peers.PeerInfo.daemon_socket), which is how spawn_daemon learns
+        # the daemon came up and how `doxa attach` finds it afterwards. A
+        # session that dropped it would register as one nothing could
+        # attach to, and spawn_daemon would time out waiting for a field
+        # that was never going to appear. None in-process.
+        self.daemon_socket = daemon_socket or None
         self.slug = project_slug(self.cwd)
         wanted = str(sandbox or os.environ.get("DOXA_CODEX_SANDBOX", "")).strip()
         self.sandbox = wanted if wanted in SANDBOX_MODES else DEFAULT_SANDBOX
@@ -575,7 +596,7 @@ class CodexEngine:
                 on_message=self._on_peer_frame,
                 on_peer_joined=self._on_peer_joined,
                 on_peer_left=self._on_peer_left,
-                daemon_socket=None,
+                daemon_socket=self.daemon_socket,
                 # A self-description, exactly as v1.0.2 defined it: shown,
                 # never verified, and it decides nothing. What is new is
                 # that `engine` finally distinguishes two real things.

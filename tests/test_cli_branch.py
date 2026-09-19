@@ -41,11 +41,12 @@ def _spies(monkeypatch):
     spawn_calls = []
     attach_calls = []
 
-    def fake_spawn(cwd, model=None, linger_secs=120.0, base_branch=None):
+    def fake_spawn(cwd, model=None, linger_secs=120.0, base_branch=None,
+                   engine=None, **_rest):
         spawn_calls.append({"cwd": cwd, "base_branch": base_branch})
         return "fake-session-id", "/tmp/fake.sock"
 
-    def fake_run_attached(socket_path, cwd, model, linger):
+    def fake_run_attached(socket_path, cwd, model, linger, engine=None):
         attach_calls.append(socket_path)
 
     monkeypatch.setattr(cli_mod, "spawn_daemon", fake_spawn)

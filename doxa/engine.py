@@ -1713,6 +1713,33 @@ class SessionEngine:
         transcript_dir.mkdir(parents=True, exist_ok=True)
         self.transcript_path = transcript_dir / f"{self.session_id}.jsonl"
 
+    # -- turn state, read-only (see _turn_running / _prompt_queue above) --
+
+    @property
+    def turn_running(self) -> bool:
+        """Is a turn running on THIS engine right now.
+
+        The read-only half of ``_turn_running``, published because the
+        host process cannot work it out from outside: ``doxa.daemon``
+        tracks only the turns IT started, and a turn this engine started
+        by itself -- an arriving peer message waking the session
+        (:meth:`_on_peer_frame`), or the queue advancing
+        (:meth:`_advance_queue`) -- never passes through the daemon at
+        all. A status reply built from the daemon's own task alone
+        reported such a session as idle, and ``doxa.fleet``'s quiescence
+        wait believed it."""
+        return self._turn_running
+
+    def queued_count(self) -> int:
+        """How many prompts are waiting on THIS engine's queue.
+
+        The counting half of the same surface, and a separate member
+        rather than a second property so it reads like the ``len()`` it
+        is at the call site. :meth:`list_queue` is the same queue's
+        listing; this exists because a status reply needs the number
+        every few seconds and must not pay for the snapshot."""
+        return len(self._prompt_queue)
+
     # -- persistence ---------------------------------------------------
 
     def _persist(self, record: dict) -> None:
