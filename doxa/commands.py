@@ -240,7 +240,8 @@ REGISTRY: tuple[SlashCommand, ...] = (
         # a shell -- what this row adds is starting one from a session
         # that is itself working, and watching it without leaving DOXA.
         summary="Start and watch a fleet run — N sessions, one prompt, one "
-                "instant, in a tab",
+                "instant, in a tab; --supervisor gives ONE session the "
+                "prompt and lets it hand the work to the rest",
         # The verbs, but NOT their arguments -- the same rule /mode's row
         # states for its six modes: /help pads its command column to the
         # widest call form here, and spelling out `start`'s flags would
