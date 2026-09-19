@@ -724,3 +724,75 @@ def test_update_base_preserves_the_machine_id(tmp_path, _sync_on):
     meta = worktrees_mod.read_meta(path)
     assert meta["base_ref"] == "other"
     assert meta["machine_id"] == _sync_on
+
+
+# =======================================================================
+# Unmerged is a property of the BRANCH, not of HEAD (panel finding 10)
+# =======================================================================
+
+
+def test_finalize_keeps_work_when_head_moved_off_the_recorded_branch(tmp_path):
+    """Mirrors probe_worktree_finalize.py.
+
+    ``commits_ahead`` counted ``base_ref..HEAD``. A ``git checkout`` inside
+    the worktree -- detaching onto the base to read something, switching
+    to another branch -- moves HEAD off ``doxa/<short>``, and that count
+    then reads 0 while the session's commits sit on a branch nobody asked
+    about. finalize read the 0 as "nothing unmerged", removed the worktree
+    and DELETED the branch: the commit was gone."""
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "movedhead")
+    assert path is not None
+    branch = worktrees_mod.read_meta(path)["branch"]
+    (Path(path) / "new.txt").write_text("important", encoding="utf-8")
+    subprocess.run(["git", "-C", path, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", path, "commit", "-qm", "real work"], check=True)
+    kept_sha = subprocess.run(
+        ["git", "-C", path, "rev-parse", branch],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    # Somebody looks at the base inside the worktree and leaves it there.
+    subprocess.run(["git", "-C", path, "checkout", "-q", "--detach", "trunk"],
+                   check=True)
+
+    note = worktrees_mod.finalize(path)
+
+    assert note == f"kept {branch} — merge when ready"
+    assert Path(path).exists()
+    assert branch in _branches(repo)
+    still = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", branch],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert still == kept_sha
+
+
+def test_commits_ahead_counts_the_branch_it_is_given(tmp_path):
+    """The unit underneath it, both ways round: the recorded branch is
+    ahead, the detached HEAD beside it is not."""
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "countid1")
+    assert path is not None
+    branch = worktrees_mod.read_meta(path)["branch"]
+    (Path(path) / "new.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "-C", path, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", path, "commit", "-qm", "work"], check=True)
+    subprocess.run(["git", "-C", path, "checkout", "-q", "--detach", "trunk"],
+                   check=True)
+
+    assert worktrees_mod.commits_ahead(path, "trunk", branch) == 1
+    assert worktrees_mod.commits_ahead(path, "trunk") == 0  # HEAD, as before
+
+
+def test_finalize_still_removes_a_worktree_that_really_has_nothing(tmp_path):
+    """The check must not turn every worktree into a kept one."""
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "emptyid1")
+    assert path is not None
+    branch = worktrees_mod.read_meta(path)["branch"]
+    subprocess.run(["git", "-C", path, "checkout", "-q", "--detach", "trunk"],
+                   check=True)
+    assert worktrees_mod.finalize(path) is None
+    assert not Path(path).exists()
+    assert branch not in _branches(repo)
