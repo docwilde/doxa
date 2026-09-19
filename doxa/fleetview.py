@@ -362,7 +362,13 @@ def approval_block(snapshot: "RunSnapshot", *, now: "float | None" = None) -> "l
                 f"  slot {index:<3} {str(ask.get('kind') or '?'):<10.10} "
                 f"{what:<26.26}  asked {waited}{left}"
             )
-            if summary:
+            # Only when it SAYS something the row above did not. The CLI
+            # populates `title` with a whole sentence ("Claude wants to
+            # read foo.txt") for some calls and nothing for others, and
+            # doxa.engine's fallback summary for an MCP tool with no
+            # arguments is just the tool name again -- printed here it
+            # would be one wasted line under every row.
+            if summary and summary != what:
                 pending.append(f"       {summary[:BODY_WIDTH]}")
             pending.append(f"       answer it: /fleet attach {index}")
     if not pending:
@@ -534,9 +540,15 @@ def render(
     # -- what the run said yes and no to -------------------------------
     approvals = manifest.get("approvals")
     if isinstance(approvals, dict) and int(approvals.get("asked") or 0):
+        # `waiting` leads the breakdown while a run is live, because it is
+        # the only one of the five that is still actionable -- a reader
+        # whose run has one parked ask must not have to infer it from four
+        # zeros that do not add up to the total.
+        waiting = int(approvals.get("pending") or 0)
         lines.append(
             f"permission asks: {approvals.get('asked', 0)} — "
-            f"{approvals.get('auto_approved', 0)} auto-approved, "
+            + (f"{waiting} WAITING, " if waiting else "")
+            + f"{approvals.get('auto_approved', 0)} auto-approved, "
             f"{approvals.get('answered', 0)} answered by hand, "
             f"{approvals.get('refused', 0)} REFUSED unanswered, "
             f"{approvals.get('ended_unanswered', 0)} still open at teardown"

@@ -554,3 +554,39 @@ async def test_a_shell_run_writes_the_parked_ask_out_while_it_is_still_parked(
     finally:
         run.request_stop()
         await task
+
+
+def test_the_parked_ask_row_does_not_repeat_the_tool_name_as_its_summary():
+    """``doxa.engine`` falls back to the tool name when the CLI gave no
+    prompt sentence, which under an MCP tool with no arguments is the
+    column immediately to its left. A run's live breakdown also has to
+    lead with the count that is still actionable: four zeros that do not
+    add up to the total is a reader doing arithmetic to find the one fact
+    they needed."""
+    snapshot = fleetview_mod.RunSnapshot(
+        run_root="/tmp/nowhere",
+        manifest={
+            "run_id": "r3", "live": True, "started_at": "2026-09-19T12:00:00Z",
+            "approvals": {
+                "policy": "none", "grace_s": 30.0, "asked": 1, "pending": 1,
+                "auto_approved": 0, "refused": 0, "answered": 0,
+                "ended_unanswered": 0, "posture": "x",
+            },
+            "spec": {"n": 1, "cwd": "/repo", "seed": 1, "memory_off": 0},
+            "slots": [{
+                "index": 0, "role": "worker", "phase": "dispatched",
+                "assignment": {"engine": "claude", "model": "opus"},
+                "pending_asks": [{
+                    "id": "r1", "kind": "permission",
+                    "tool": "mcp__doxa__peer_list",
+                    "summary": "mcp__doxa__peer_list",
+                    "asked_at": "2026-09-19T12:00:02Z", "grace_s": 30.0,
+                }],
+                "approvals": [],
+            }],
+        },
+        ledger=[],
+    )
+    text = fleetview_mod.render(snapshot, now=1789000000.0)
+    assert text.count("mcp__doxa__peer_list") == 1
+    assert "permission asks: 1 — 1 WAITING," in text

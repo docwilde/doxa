@@ -388,7 +388,6 @@ says so directly under the assignment table:
 WAITING ON YOU — 1 permission ask(s) parked. A parked session looks idle from
 outside; it is not.
   slot 0   permission mcp__doxa__peer_list        asked 12s ago, refused in 288s
-       Claude wants to use mcp__doxa__peer_list
        answer it: /fleet attach 0
 ```
 
