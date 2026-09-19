@@ -50,6 +50,7 @@ __all__ = [
     "assignment_table",
     "ledger_tail",
     "list_runs",
+    "mode_line",
     "read_manifest",
     "render",
     "resolve_run",
@@ -213,20 +214,37 @@ def _ago(seconds: "float | None") -> str:
     return f"{seconds / 3600:.1f}h"
 
 
+def _role_of(row: "dict[str, Any]") -> str:
+    """This slot's role, from the manifest, defaulting to ``worker``.
+
+    Defaulted rather than shown as ``?`` because a manifest written
+    before roles existed describes a symmetric run, and every slot of a
+    symmetric run IS a worker -- reading an old run should not paint a
+    column of question marks over a fact that is known."""
+    assignment = row.get("assignment")
+    assignment = assignment if isinstance(assignment, dict) else {}
+    return str(row.get("role") or assignment.get("role") or "worker")
+
+
 def assignment_table(snapshot: "RunSnapshot") -> "list[str]":
-    """slot, engine, model, memory, phase, session, error -- one row per
-    participant.
+    """slot, role, engine, model, memory, phase, session, error -- one row
+    per participant.
 
     Every column is a fact the run is uninterpretable without: "slot 7
     coordinated" says nothing until this table says what slot 7 was
-    running and whether it had memory. Fixed columns rather than a joined
-    string, for the same reason every picker in this app uses fixed
-    columns: a reader scans one column down, not a sentence across."""
+    running and whether it had memory. ROLE joins them for the same
+    reason in a supervisor run, where the supervisor's transcript is the
+    only one that ever saw the operator's prompt -- a reader who cannot
+    tell which row that was is reading four workers' silence as failure.
+    Fixed columns rather than a joined string, for the same reason every
+    picker in this app uses fixed columns: a reader scans one column
+    down, not a sentence across."""
     rows = sorted(snapshot.slots, key=lambda r: int(r.get("index") or 0))
     if not rows:
         return ["  (no assignment yet)"]
     lines = [
-        "  slot  engine      model           mem  phase       session   error",
+        "  slot  role        engine      model           mem  phase       "
+        "session   error",
     ]
     for row in rows:
         assignment = row.get("assignment") if isinstance(row.get("assignment"), dict) else {}
@@ -237,10 +255,54 @@ def assignment_table(snapshot: "RunSnapshot") -> "list[str]":
         session = _short(row.get("session_id")) if row.get("session_id") else "-"
         error = str(row.get("error") or "")
         lines.append(
-            f"  {int(row.get('index') or 0):>4}  {engine:<10.10}  {model:<14.14}  "
+            f"  {int(row.get('index') or 0):>4}  {_role_of(row):<10.10}  "
+            f"{engine:<10.10}  {model:<14.14}  "
             f"{memory:<3}  {phase:<10.10}  {session:<8}  {error[:52]}"
         )
     return lines
+
+
+def mode_line(snapshot: "RunSnapshot") -> str:
+    """Which of the two shapes this run is, in one line.
+
+    ABOVE the assignment table rather than below it, because it changes
+    how the table reads: in a supervisor run one row is the session that
+    received the operator's words and every other row is a session that
+    did not, and a reader who learns that afterwards has already
+    misread. A manifest with no ``mode`` key predates the modes and is a
+    symmetric run -- stated, not guessed at, because that is what those
+    runs were.
+
+    The interactive case gets its own sentence, since the thing an
+    operator most needs to know about such a run is that nothing will
+    happen until they attach and type."""
+    manifest = snapshot.manifest
+    mode = str(manifest.get("mode") or "symmetric")
+    if mode != "supervisor":
+        return (
+            "mode symmetric — every session got the identical prompt at one "
+            "instant; no session directs another"
+        )
+    supervisor = manifest.get("supervisor")
+    supervisor = supervisor if isinstance(supervisor, dict) else {}
+    slot = supervisor.get("slot")
+    who = _short(supervisor.get("session_id")) if supervisor.get("session_id") else "-"
+    label = str(supervisor.get("engine") or "?")
+    if supervisor.get("model"):
+        label = f"{label}:{supervisor['model']}"
+    spec = manifest.get("spec") if isinstance(manifest.get("spec"), dict) else {}
+    line = (
+        f"mode supervisor — slot {slot if slot is not None else '?'} "
+        f"({label}, {who}) holds the prompt and hands work to "
+        f"{spec.get('n', '?')} worker(s) over peer messages"
+    )
+    if manifest.get("interactive"):
+        line += (
+            "\ninteractive — no prompt was given: attach to the supervisor "
+            "(`/fleet attach 0`) and type the task. This run does NOT end on "
+            "quiet; `/fleet stop` ends it."
+        )
+    return line
 
 
 def ledger_tail(
@@ -338,6 +400,7 @@ def render(
         f"cwd {spec.get('cwd', '?')}  ·  seed {spec.get('seed', '?')}  ·  "
         f"memory off on {spec.get('memory_off', 0)} of {spec.get('n', '?')}"
     )
+    lines.append(mode_line(snapshot))
     lines.append("")
 
     # -- who was dealt what --------------------------------------------

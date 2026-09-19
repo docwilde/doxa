@@ -153,6 +153,7 @@ def test_the_tui_and_the_cli_build_the_same_spec_from_the_same_words(short_root)
     words = [
         "--pool", "claude:sonnet@8,deepseek:deepseek-chat@2",
         "-n", "6", "--seed", "77", "--memory-off", "2",
+        "--supervisor", "claude:opus",
         "--run-budget", "12.5", "--quiescence-timeout", "45",
         "--root", short_root, "--run-id", "same", "--prompt", "one prompt",
     ]
@@ -160,6 +161,14 @@ def test_the_tui_and_the_cli_build_the_same_spec_from_the_same_words(short_root)
     tui, _ = fleet_mod.spec_from_argv(words, cwd="/repo/from-session")
 
     assert cli.pool == tui.pool
+    # Supervisor mode reaches BOTH front ends from the one parser, or the
+    # flag would be a shell-only feature and `/fleet start` a second
+    # grammar that silently ignores it.
+    assert cli.supervisor == tui.supervisor == fleet_mod.ModelSlot(
+        engine="claude", model="opus"
+    )
+    assert cli.mode == tui.mode == fleet_mod.MODE_SUPERVISOR
+    assert cli.session_count == tui.session_count == 7
     assert (cli.n, cli.seed) == (tui.n, tui.seed) == (6, 77)
     assert cli.memory.resolved(6) == tui.memory.resolved(6) == 2
     assert cli.run_budget_usd == tui.run_budget_usd == 12.5
@@ -185,6 +194,22 @@ def test_a_prompt_file_is_the_other_way_to_say_the_same_prompt(tmp_path, short_r
         cwd="/repo",
     )
     assert spec.prompt == "rename foo to bar"
+
+
+def test_the_two_front_ends_agree_that_an_interactive_run_has_no_deadline(
+    short_root,
+):
+    """``--supervisor`` with no prompt is the one shape whose effective
+    deadline is not the default, and both front ends have to reach it
+    through the same resolution -- a TUI run that quietly kept 1800 s
+    would tear itself down mid-afternoon."""
+    words = ["--pool", "claude@1", "--supervisor", "claude:opus", "-n", "2",
+             "--root", short_root]
+    cli, _ = fleet_mod.spec_from_argv(words, cwd="/repo/from-shell")
+    tui, _ = fleet_mod.spec_from_argv(words, cwd="/repo/from-session")
+
+    assert cli.interactive is tui.interactive is True
+    assert cli.quiescence_timeout_s is tui.quiescence_timeout_s is None
 
 
 def test_a_flag_that_does_not_parse_is_a_value_not_an_exit():
@@ -249,7 +274,7 @@ def test_the_tab_renders_a_run_from_a_manifest_and_a_ledger_alone(tmp_path):
     assert "$2.50 per session" in text
     # The assignment table: every column the run is uninterpretable
     # without, including which agent lost its memory and why one failed.
-    assert "slot  engine" in text
+    assert "slot  role" in text and "engine" in text
     assert "claude" in text and "sonnet" in text
     assert "deepseek-chat" in text
     assert "OFF" in text  # memory, per agent
@@ -264,6 +289,113 @@ def test_the_tab_renders_a_run_from_a_manifest_and_a_ledger_alone(tmp_path):
     # And what a run must always be able to say about itself.
     assert "leaked pids: none" in text
     assert str(run_root / "manifest.json") in text
+
+
+def test_the_tab_says_which_slot_holds_the_prompt_and_which_are_workers(
+    tmp_path,
+):
+    """The failure this catches: a supervisor run's tab that looks exactly
+    like a symmetric one.
+
+    In a supervisor run ONE row is the session that received the
+    operator's words and every other row is a session that did not, and a
+    reader who cannot tell which is reading three workers' silence as
+    three failures. The mode line sits above the table for that reason --
+    it changes how the table reads."""
+    run_root = tmp_path / "20260919T090000-aa11"
+    run_root.mkdir()
+    (run_root / "manifest.json").write_text(json.dumps({
+        "run_id": "20260919T090000-aa11",
+        "started_at": "2026-09-19T09:00:00Z",
+        "mode": "supervisor", "interactive": False,
+        "supervisor": {"slot": 0, "session_id": "5upe5upe5upe",
+                       "engine": "claude", "model": "opus",
+                       "cwd": "/run/worktrees/repo-0"},
+        "spec": {"n": 2, "sessions": 3, "cwd": "/repo", "seed": 7,
+                 "memory_off": 0},
+        "dispatch_order": [1, 2, 0], "dispatch_spread_s": 0.5,
+        "quiesced": True, "quiescence_s": 90.0, "live": False,
+        "stopped": False, "ledger": {"path": "x", "messages": 0},
+        "slots": [
+            {"index": 0, "role": "supervisor", "phase": "stopped",
+             "session_id": "5upe5upe5upe", "cwd": "/run/worktrees/repo-0",
+             "assignment": {"index": 0, "engine": "claude", "model": "opus",
+                            "lore": True, "role": "supervisor"}},
+            {"index": 1, "role": "worker", "phase": "stopped",
+             "session_id": "w0rker01aaaa", "cwd": "/run/worktrees/repo-1",
+             "assignment": {"index": 1, "engine": "claude", "model": "sonnet",
+                            "lore": True, "role": "worker"}},
+            {"index": 2, "role": "worker", "phase": "stopped",
+             "session_id": "w0rker02aaaa", "cwd": "/run/worktrees/repo-2",
+             "assignment": {"index": 2, "engine": "claude", "model": "sonnet",
+                            "lore": True, "role": "worker"}},
+        ],
+        "leaked_pids": [],
+    }), encoding="utf-8")
+
+    text = fleetview_mod.render(fleetview_mod.RunSnapshot.read(run_root))
+
+    assert "mode supervisor" in text
+    assert "5upe5upe" in text and "claude:opus" in text
+    assert "2 worker(s)" in text
+    rows = [line for line in text.splitlines() if line.startswith("     ")]
+    assert "supervisor" in rows[0] and "opus" in rows[0]
+    assert rows[1].split()[1] == "worker" and rows[2].split()[1] == "worker"
+
+
+def test_the_tab_tells_an_interactive_run_apart_and_says_how_to_reach_it(
+    tmp_path,
+):
+    """An interactive run does nothing at all until somebody attaches to
+    its supervisor and types. A tab that showed "waiting for quiet" and
+    no more would be a run the operator waits on forever."""
+    run_root = tmp_path / "20260919T091000-bb22"
+    run_root.mkdir()
+    (run_root / "manifest.json").write_text(json.dumps({
+        "run_id": "20260919T091000-bb22",
+        "started_at": "2026-09-19T09:10:00Z",
+        "mode": "supervisor", "interactive": True,
+        "supervisor": {"slot": 0, "session_id": "5upe5upe5upe",
+                       "engine": "claude", "model": "opus", "cwd": None},
+        "spec": {"n": 2, "sessions": 3, "cwd": "/repo", "seed": 7,
+                 "memory_off": 0},
+        "live": True, "quiesced": False, "stopped": False,
+        "ledger": {"path": "x", "messages": 0}, "slots": [], "leaked_pids": [],
+    }), encoding="utf-8")
+
+    text = fleetview_mod.render(fleetview_mod.RunSnapshot.read(run_root))
+
+    assert "interactive" in text
+    assert "/fleet attach 0" in text
+    assert "does NOT end on quiet" in text
+
+
+def test_a_run_from_before_the_modes_reads_as_the_symmetric_one_it_was(
+    tmp_path,
+):
+    """A manifest with no ``mode`` key predates supervisor mode, and every
+    such run was symmetric. Stating that beats painting a column of
+    question marks over a fact that is known."""
+    run_root = tmp_path / "old"
+    run_root.mkdir()
+    (run_root / "manifest.json").write_text(json.dumps({
+        "run_id": "old", "started_at": "2026-09-18T10:00:00Z",
+        "spec": {"n": 1, "cwd": "/repo", "seed": 1, "memory_off": 0},
+        "live": False, "quiesced": True,
+        "ledger": {"path": "x", "messages": 0},
+        "slots": [
+            {"index": 0, "phase": "stopped", "session_id": "aaaabbbbcccc",
+             "assignment": {"index": 0, "engine": "claude", "model": "sonnet",
+                            "lore": True}},
+        ],
+        "leaked_pids": [],
+    }), encoding="utf-8")
+
+    text = fleetview_mod.render(fleetview_mod.RunSnapshot.read(run_root))
+
+    assert "mode symmetric" in text
+    assert "no session directs another" in text
+    assert "worker" in text  # the default role, not a question mark
 
 
 def test_a_run_with_no_manifest_yet_is_a_state_not_an_error(tmp_path):
@@ -339,7 +471,7 @@ async def test_fleet_start_opens_a_tab_that_shows_the_run_to_quiescence(
 
         text = tab.text()
         assert "fleet r1" in text
-        assert "slot  engine" in text and "claude" in text
+        assert "slot  role" in text and "claude" in text
         assert "quiesced" in text
         assert session.report.quiesced
         # The ledger tail, in the run's own time base.
@@ -348,6 +480,89 @@ async def test_fleet_start_opens_a_tab_that_shows_the_run_to_quiescence(
         assert "ledger — last 2 of 2 message(s)" in text
         assert "leaked pids: none" in text
         assert str(run_root / "manifest.json") in text
+
+
+@pytest.mark.asyncio
+async def test_fleet_start_supervisor_runs_through_the_shared_parser(
+    monkeypatch, tmp_path, short_root
+):
+    """``/fleet start --supervisor`` is the same flag ``doxa-fleet`` takes,
+    reaching the same harness -- the failure this catches is supervisor
+    mode landing on the command line and the TUI silently dealing a
+    symmetric fleet from the same words."""
+    monkeypatch.setattr(fleet_mod, "DaemonBackend", FakeBackend)
+    app, _fake = await _app(monkeypatch, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        pane = app.active_pane
+
+        note = await _run(app, pilot, (
+            f"/fleet start --supervisor claude:opus --pool claude:sonnet@1 "
+            f"-n 3 --seed 3 --allow-unbudgeted --quiet-dwell 0 "
+            f"--quiescence-timeout 20 --root {short_root} --run-id sup1 "
+            f"--prompt \"split the work\""
+        ), pane)
+        assert "3 workers + supervisor claude:opus at slot 0" in note
+
+        session = pane._fleet
+        assert session.spec.session_count == 4
+        for _ in range(600):
+            if not session.alive:
+                break
+            await pilot.pause(0.05)
+        assert not session.alive, "the run never finished"
+
+        tab = app.fleet_tabs()[0]
+        tab._refresh()
+        text = tab.text()
+        assert "mode supervisor" in text
+        assert "supervisor" in text and "worker" in text
+        assert session.report.quiesced
+
+
+@pytest.mark.asyncio
+async def test_a_no_prompt_run_prints_the_attach_line_and_waits(
+    monkeypatch, tmp_path, short_root
+):
+    """An interactive run does nothing until the operator attaches to slot
+    0 and types, and it does not end on its own. Both facts have to reach
+    the operator in the block that starts it -- the attach cannot be
+    performed from here, because at this instant no session has spawned
+    and the supervisor has no socket to attach to.
+
+    The run is stopped at the end of this test rather than awaited: not
+    ending on quiet is the property under test."""
+    monkeypatch.setattr(fleet_mod, "DaemonBackend", FakeBackend)
+    app, _fake = await _app(monkeypatch, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        pane = app.active_pane
+
+        note = await _run(app, pilot, (
+            f"/fleet start --supervisor claude:opus --pool claude:sonnet@1 "
+            f"-n 2 --allow-unbudgeted --root {short_root} --run-id sup2"
+        ), pane)
+        assert "/fleet attach 0" in note
+        assert "does not end on quiet" in note
+
+        session = pane._fleet
+        assert session.spec.interactive is True
+        assert session.spec.quiescence_timeout_s is None
+        for _ in range(100):
+            if session.run is not None and session.run.report.dispatch_order:
+                break
+            await pilot.pause(0.05)
+        await pilot.pause(0.2)
+        assert session.alive, "an interactive run ended itself on quiet"
+
+        await _run(app, pilot, "/fleet stop", pane)
+        for _ in range(600):
+            if not session.alive:
+                break
+            await pilot.pause(0.05)
+        assert not session.alive
+        assert session.report.stopped is True
+        assert session.report.quiesced is False
 
 
 @pytest.mark.asyncio

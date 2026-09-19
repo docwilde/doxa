@@ -103,6 +103,13 @@ spend, fake account numbers. See
   `/fleet start` from any session opens the run in a tab; `/mesh` shows the
   graph. What a slot can do depends on its engine:
   [engine capabilities](docs/manual.md#engine-capabilities).
+- **[Or a fleet with a head, for ordinary work.](docs/manual.md#supervisor-mode)**
+  `--supervisor claude:opus` makes one session the only one the prompt
+  reaches: it divides the job, hands the pieces to the workers over peer
+  messages, and integrates what comes back. Each worker already has its
+  own git worktree, so they do not collide. With no `--prompt` the
+  supervisor waits for you to `/fleet attach 0` and type the task, and the
+  run stays up until you stop it.
 - **[Peers on another machine, once you say so.](docs/fleet.md)** A tailnet
   bridge behind `tailscale serve` puts a second box's sessions in the
   roster, refused until `remote_enabled` is on and an allow-list names you.
@@ -320,10 +327,10 @@ from `plugin-api` and is easy to confuse with it — it adopts *your own*
 Claude Code plugins (commands, skills, agents; never hooks or MCP servers)
 into the spawned CLI.
 
-**The fleet is a measurement harness, not an orchestrator.** Nothing
-schedules sessions, assigns work between them or supervises them, and no
-document proposes that it should — the one plan about multi-agent
-structure asks whether structure appears when nobody imposes it
+**The default fleet is a measurement harness, not an orchestrator.**
+Nothing schedules sessions or assigns work between them, and no document
+proposes that it should — the one plan about multi-agent structure asks
+whether structure appears when nobody imposes it
 ([`docs/plans/emergent-organization.md`](docs/plans/emergent-organization.md)).
 What `doxa-fleet` does: spawns N daemons into a `DOXA_HOME` and a peer
 registry of the run's own, hands every one the byte-identical prompt at
@@ -333,6 +340,18 @@ them without memory, arms the peer tools for the run, splits
 `--run-budget` per session, waits for the run to go quiet, tears it all
 down and reports what leaked. The manifest carries the seed, the
 assignment and the dispatch spread; the ledger carries every message.
+
+**`--supervisor` is the other shape, and it is not a measurement.** It
+adds one session at slot 0 which is the only one the operator's prompt
+reaches; the `-n` workers are briefed by the harness — who their
+supervisor is, that tasks arrive as peer messages, how to report back —
+and are told nothing about the job, because dividing it is the
+supervisor's work. Every worker is briefed before the supervisor is
+prompted at all, the order is recorded, and the manifest carries the
+mode, the roles and each session's own worktree. With no `--prompt` the
+run is interactive: the supervisor waits for you to attach to it, and
+does not end on quiet. [The manual has
+it](docs/manual.md#supervisor-mode).
 
 Measured on 1.13.0: `--pool deepseek@1,glm@1,codex@1 -n 5` dealt two
 Codex, two DeepSeek and one GLM slot; all five spawned on their engine,
