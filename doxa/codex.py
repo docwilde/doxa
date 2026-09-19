@@ -213,6 +213,7 @@ from . import mcpserver as mcpserver_mod
 from . import peerdelivery as peerdelivery_mod
 from . import peers as peers_mod
 from . import providers as providers_mod
+from . import worktrees as worktrees_mod
 from .identity import require_session_id
 from .engines import (
     CODEX_ENGINE_ID,
@@ -242,6 +243,24 @@ SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
 #: not mapped onto them. Overridable per install (DOXA_CODEX_SANDBOX); an
 #: unrecognised value falls back HERE rather than being passed through.
 DEFAULT_SANDBOX = "workspace-write"
+
+#: The ``workspace-write`` table's writable-root key, measured against
+#: codex-cli 0.144.4: ``codex exec --strict-config -c
+#: 'sandbox_workspace_write.writable_roots=[...]'`` is accepted, where a
+#: misspelling is rejected outright ("unknown configuration field ... in
+#: -c/--config override"). It rides ``-c`` rather than ``--add-dir``
+#: because ``codex exec resume`` takes no ``--add-dir`` -- the same
+#: measured constraint :meth:`CodexEngine._argv` documents for ``-C`` and
+#: ``-s``, and the same reason the sandbox mode itself rides ``-c``.
+WRITABLE_ROOTS_KEY = "sandbox_workspace_write.writable_roots"
+
+#: The switch for that widening, env/config only (like
+#: ``DOXA_CODEX_SANDBOX`` beside it, and unlike the rows in
+#: doxa.config.SETTINGS). DEFAULT ON: with it off a Codex session in a
+#: worktree cannot commit at all, which is issue #57 exactly.
+#: ``DOXA_CODEX_GIT_WRITE=0`` restores the older, narrower sandbox for an
+#: operator who would rather have the failure than the write.
+GIT_WRITE_ENV = "DOXA_CODEX_GIT_WRITE"
 
 #: The per-session memory switch, read as a DEFAULT only -- the
 #: authoritative answer for one session is :attr:`CodexEngine.lore`, set
@@ -662,6 +681,14 @@ class CodexEngine:
         self.sandbox = wanted if wanted in SANDBOX_MODES else DEFAULT_SANDBOX
         self._exec_factory = exec_factory or asyncio.create_subprocess_exec
 
+        # The git directories a commit in ``self.cwd`` needs and the
+        # sandbox does not grant (issue #57). Computed LAZILY and cached:
+        # it costs a ``git rev-parse`` subprocess, ``self.cwd`` never
+        # changes after construction, and _argv runs once per turn -- so
+        # this is measured on the first turn and free on every later one,
+        # rather than charged to every engine anyone constructs.
+        self._git_roots: "list[str] | None" = None
+
         # Memory, per session. An explicit argument wins; otherwise the
         # config layer's default. NO LONGER swallowed by **_ignored --
         # through v1.12.0 a `lore=False` from the fleet reached this
@@ -1014,12 +1041,53 @@ class CodexEngine:
             "--json",
             "--skip-git-repo-check",
             "-c", 'approval_policy="never"',
-            "-c", f'sandbox_mode="{self.sandbox}"',
         ]
+        argv += self._sandbox_overrides()
         argv += self._mcp_overrides()
         if self.model:
             argv += ["-m", str(self.model)]
         argv.append("-")  # the prompt arrives on stdin
+        return argv
+
+    def _sandbox_overrides(self) -> list[str]:
+        """The ``-c`` overrides that fix what this turn may WRITE --
+        flattened flag/value pairs, ready to splice.
+
+        The mode itself, always; and, in a linked worktree only, the git
+        administrative directories that live outside it (issue #57).
+        Codex's ``workspace-write`` root is the process's cwd, and a
+        worktree's index, object database and branch refs are not under
+        it, so without this a Codex session can edit files and then fails
+        at ``fatal: Unable to create '.../index.lock': Read-only file
+        system`` -- which, under fleet supervisor mode, is the worker's
+        whole delivery mechanism gone. A Claude session never hit it
+        because the ``claude`` CLI DOXA spawns is not sandboxed this way.
+
+        Three guards, each of them the conservative direction:
+
+        * only in ``workspace-write``. ``read-only`` means a session that
+          writes nothing, and widening the write set of a mode that has
+          none would be answering a question nobody asked;
+          ``danger-full-access`` has no sandbox left to widen.
+        * only with :data:`GIT_WRITE_ENV` on (the default), so an operator
+          who prefers the failure to the write can have it.
+        * only what :func:`doxa.worktrees.external_git_roots` returns,
+          which is the per-worktree admin directory plus ``objects``,
+          ``refs`` and ``logs`` -- NEVER the common ``.git`` itself, so
+          ``hooks`` and ``config`` stay unwritable. That function's
+          docstring holds the argument; this method holds the switch.
+
+        An empty list changes nothing: the argv is the one every Codex
+        session already had, which is what makes the fallback for a
+        non-repo cwd, an ordinary checkout or a missing git the SAME
+        behavior as before rather than a new failure mode."""
+        argv = ["-c", f'sandbox_mode="{self.sandbox}"']
+        if self.sandbox != DEFAULT_SANDBOX or not _git_write_enabled():
+            return argv
+        if self._git_roots is None:
+            self._git_roots = worktrees_mod.external_git_roots(self.cwd)
+        if self._git_roots:
+            argv += ["-c", f"{WRITABLE_ROOTS_KEY}={_toml(self._git_roots)}"]
         return argv
 
     def _mcp_overrides(self) -> list[str]:
@@ -1923,6 +1991,20 @@ def lore_root_path() -> str:
     from lore_core.config import ROOT
 
     return str(ROOT)
+
+
+def _git_write_enabled() -> bool:
+    """:data:`GIT_WRITE_ENV` -- may a Codex turn in a linked worktree
+    write the git directories that worktree keeps in the main repository?
+
+    ON unless explicitly turned off, the same posture and the same four
+    negatives as :func:`_lore_enabled_default` and
+    :func:`doxa.worktrees.enabled`. Default ON because the alternative
+    default is a Codex session that cannot commit its own work."""
+    raw = config_mod.raw(GIT_WRITE_ENV).strip()
+    if not raw:
+        return True
+    return raw.lower() not in ("0", "false", "no", "off")
 
 
 def _lore_enabled_default() -> bool:

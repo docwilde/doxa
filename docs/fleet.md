@@ -172,6 +172,16 @@ manifest records each slot's effective `cwd`, read from the registry entry the
 daemon wrote, because nothing outside the run can find those worktrees by
 looking.
 
+That checkout is where a worker's work is delivered from, so a worker has to
+be able to **commit** in it. A Codex slot could not through v1.14.0: Codex
+sandboxes the commands its model runs to the session's own directory, and a
+linked worktree keeps its index in the main repository, outside it. Both
+Codex workers of supervisor run `20260919T160458-539e` created their file,
+failed the commit and reported the failure back over `peer_send` — the run
+itself healthy, the delivery gone. DOXA now grants that turn the four git
+directories a commit needs and no more; see [What a Codex turn may
+write](manual.md#what-a-codex-turn-may-write).
+
 **An interactive run has no prompt, and quiet does not end it.** `--prompt`
 is optional in supervisor mode and only there; a symmetric run without one is
 still refused in the same words. Omitting it starts the fleet, briefs the

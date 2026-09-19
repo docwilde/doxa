@@ -10,7 +10,7 @@ a plan as if it were shipped.
 ## Contents
 
 - [Sessions and the daemon](#sessions-and-the-daemon)
-- [Engines](#engines) — [engine capabilities](#engine-capabilities) and [a Codex session](#a-codex-session)
+- [Engines](#engines) — [engine capabilities](#engine-capabilities), [a Codex session](#a-codex-session) and [what a Codex turn may write](#what-a-codex-turn-may-write)
 - [The spawned CLI](#the-spawned-cli)
 - [The transcript](#the-transcript)
 - [Tabs](#tabs) — and [restoring them](#restoring-tabs)
@@ -206,6 +206,73 @@ a fact about the code's shape rather than about the engine. So the
 in the command list and says the engine has no memory surface rather than
 opening an empty picker. The peer layer has no
 model in it, so the rail, `/msg` and the registry work identically.
+
+#### What a Codex turn may write
+
+Codex runs every command the model issues inside a sandbox of its own, and
+DOXA fixes the policy once per session: `workspace-write` by default, with
+`DOXA_CODEX_SANDBOX` selecting one of Codex's three (`read-only`,
+`workspace-write`, `danger-full-access`) for an install that wants a
+different posture. The mode rides a `-c` config override rather than `-s`,
+because `codex exec resume` rejects `-s` and DOXA keeps one argv shape for
+the first turn and every resume after it.
+
+`workspace-write` means the session's own directory, and — measured
+against codex-cli 0.144.4 — *not* the git directory inside it, which the
+sandbox marks read-only even when everything around it is writable. A
+session can edit files; it cannot touch the repository's index. That is
+sharpest when the session's directory is a **linked worktree**, as it is
+whenever [`worktree_per_session`](#worktrees-and-finalize) is on: git keeps
+a worktree's index, `HEAD` and `COMMIT_EDITMSG` in the MAIN repository
+under `.git/worktrees/<name>/`, with the objects and branch refs one level
+above that, so through v1.14.0 a Codex session could edit files and then
+never commit them:
+
+```text
+fatal: Unable to create '<repo>/.git/worktrees/<name>/index.lock':
+Read-only file system
+```
+
+A Claude session never hit this — the `claude` CLI DOXA spawns is not
+sandboxed this way — and it bit hardest under a fleet's [supervisor
+mode](fleet.md), where committing *is* how a worker delivers its work.
+
+DOXA now asks git where those directories are and hands exactly four of
+them to Codex as `sandbox_workspace_write.writable_roots`:
+
+| added to the writable set | what a commit writes there |
+|---|---|
+| `.git/worktrees/<name>/` | `index`, `index.lock`, `HEAD`, `COMMIT_EDITMSG` |
+| `.git/objects/` | the new blob, tree and commit object |
+| `.git/refs/` | the session branch's new tip |
+| `.git/logs/` | that update's reflog entry |
+
+**The common `.git` itself is not on the list, and that omission is the
+boundary.** `.git/hooks` holds scripts the *user's* own next `git commit`
+runs outside any sandbox, and `.git/config` carries `core.editor`,
+`core.fsmonitor` and credential-helper rows — each an execution channel of
+its own. What a session gains instead can write objects, move refs and
+append reflogs: destructive to history, recoverable from it, and incapable
+of running anything.
+
+Nothing is added outside that case. A cwd that is no repository has no
+such directories, `read-only` is a mode that writes nothing at all, and
+`DOXA_CODEX_GIT_WRITE=0` switches the widening off for an operator who
+would rather have the failure than the write, restoring the v1.14.0
+sandbox exactly.
+
+One measured consequence of stopping at those four: `packed-refs.lock`
+sits in the common directory, so git may warn that it could not take that
+lock. The commit still lands — git writes a loose ref under the granted
+`refs/`, which is the ordinary path anyway — and the warning is the price
+of not handing over the directory that also holds `hooks`.
+
+> **Note:** with `worktree_per_session` **off**, a Codex session still
+> cannot commit, and DOXA does not widen anything to fix it. A plain
+> checkout keeps its index at `.git/index`, so the only grant that would
+> work is `.git` whole — hooks, config and all, which is the grant the
+> paragraph above refuses. The worktree layout is what makes a surgical
+> grant possible at all; the remedy is to leave worktrees on.
 
 ## The spawned CLI
 
@@ -809,6 +876,13 @@ at a mere detach):
 
 With `worktree_per_session` off, every session runs directly in the launch
 directory (the pre-worktree behavior).
+
+A linked worktree keeps its administrative files in the main repository
+rather than in the worktree, which is invisible to a Claude session and was
+fatal to a Codex one: Codex sandboxes the commands its model runs, and a
+commit reaches for an `index.lock` outside the sandbox. See [What a Codex
+turn may write](#what-a-codex-turn-may-write) for the four directories DOXA
+adds to that sandbox, and the one it deliberately does not.
 
 ## Where a session is
 
