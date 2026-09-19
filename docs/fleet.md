@@ -26,6 +26,47 @@ uv run python -m doxa.fleet \
 `--dry-run` prints the capacity arithmetic and the assignment this seed deals,
 and spawns nothing. Run it first.
 
+### The same run, from inside DOXA
+
+`/fleet start` takes the **same flags**, parsed by the same
+`doxa.fleet.build_parser` — there is no second grammar, so a line that works
+in a shell works in a session and the two cannot drift apart. `--cwd` is the
+one thing they differ on, and it is an argument rather than a parser default:
+the shell's is the process's directory, the TUI's is the session's own repo.
+
+```
+/fleet start --pool claude:sonnet@1 -n 4 --run-budget 5 --prompt "…"
+```
+
+The run goes on the TUI's own event loop and opens a **read-only tab** named
+for its run id, which shows the capacity arithmetic and the budget note it
+started under, the assignment table, the dispatch spread, the quiescence state
+with elapsed time, the last thirty ledger lines as `t+s  from → to  body`, and
+at the end the leaked-pid report and the manifest path. The tab reads the run's
+**manifest and ledger** and nothing else — `write_manifest()` is called on a
+heartbeat while the run is live, so the same file `doxa-fleet` prints at the end
+is readable during — which is what keeps a Textual timer away from state the
+orchestration is mutating. A refusal that fires before any manifest exists
+(`check_capacity`, `check_run_budget`, `check_socket_budget`) is the tab's
+first line rather than a traceback.
+
+The other verbs: `/fleet status` prints the same report into the transcript;
+`/fleet stop` ends the run through the same teardown the quiescence deadline
+takes, and the tab keeps the final report; `/fleet runs` lists what has been
+run under the root, read from the manifests themselves; `/fleet attach <slot>`
+opens one slot's session in a live tab — through the run's manifest, because a
+run's peer registry is under its own `DOXA_RUNTIME_DIR` and this machine's
+cannot see it; `/fleet mesh` graphs this run's ledger. Bare `/fleet` lists the
+verbs and says whether a run is live here.
+
+**Closing the tab tears the run down.** A fleet is not a background service: it
+keeps N daemons alive, arms every one of them to be woken by another's message,
+and therefore keeps spending with nobody typing — the same failure
+`check_run_budget` refuses to let an operator reach by forgetting a flag, and it
+must not be reachable by forgetting a tab either. `/fleet detach` is the
+explicit "keep this running" gesture, and the tab's header says which of the two
+states it is in.
+
 ### What makes the start symmetric
 
 The experiment's methodological core is one sentence: *every participant

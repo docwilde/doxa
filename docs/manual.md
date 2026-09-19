@@ -25,7 +25,7 @@ a plan as if it were shipped.
 - [LORE integration](#lore-integration)
 - [Shell escape](#shell-escape)
 - [Images](#images)
-- [Search, resume, and peers](#search-resume-and-peers)
+- [Search, resume, and peers](#search-resume-and-peers) — [fleets from the TUI](#fleets-from-the-tui) and [spend ceilings](#spend-ceilings)
 - [Keyboard protocol](#keyboard-protocol)
 - [Commands](#commands)
 - [Settings](#settings)
@@ -1027,7 +1027,7 @@ bridge exists to pass an identity in.
 
 ## The status bar
 
-**Twenty-one chips** are built in paint order by
+**Twenty-two chips** are built in paint order by
 `doxa/session/chips.py`, and a row never shows all of them: a chip whose
 number is zero, or whose state was never asserted, is omitted rather than
 shown empty, and a chip whose engine cannot report the thing it names is
@@ -1056,6 +1056,7 @@ the plain, non-clickable ones and the git chip's inert `@sha` span.
 | `⌁ session <id>` | this session's reattach handle (only while attached to a daemon) | yes — sessions picker |
 | `peers N (k⌁)` | other DOXA sessions on this repo; `k⌁` is how many are detached | yes — peers picker: each row is the peer, the beginning of its transcript, and tokens consumed so far (self-reported, up to one heartbeat stale) |
 | `↑●` and `↓◌` | **two chips**, the modem lights: one for peer messages sent, one for received. Filled for four seconds after the traffic that lit it, hollow after. They appear as a pair once anything has crossed in either direction and never one at a time, so arriving traffic cannot shift the row sideways as you read it; a session that has never touched a peer carries neither. Counts and the time since are on hover | no |
+| `⌗ mesh :<port>` | the message-graph server is running on loopback for this window (`/mesh`). Hidden at zero, like the peers chip beside it: a loopback server serving full message bodies is a second surface you started and can forget, so it says so while it is up (see [Fleets from the TUI](#fleets-from-the-tui)) | no |
 | `⊘ <tool>` | every tool disabled after two failures this session, space-joined into one chip | no |
 
 A `⧉ N agents` chip is accompanied by a second row under the status bar
@@ -1370,6 +1371,68 @@ a block above itself naming the sender, and carries a `peer-` turn id into
 the ledger — so spend that began with an inbound message has a traceable
 cause.
 
+### Fleets from the TUI
+
+`/fleet start` runs the [fleet harness](fleet.md) from a session, with the
+**same flags** `doxa-fleet` takes — one parser, `doxa.fleet.build_parser`,
+so a line that works in a shell works here and the two cannot drift. The
+only difference is `--cwd`, which defaults to this session's own repo
+rather than to the process's directory.
+
+```
+/fleet start --pool claude:sonnet@1 -n 4 --run-budget 5 --prompt "…"
+```
+
+The run goes on the TUI's event loop and opens a **read-only tab** named
+`fleet <run-id>`: the capacity arithmetic and the budget note it started
+under, the assignment table (slot, engine, model, memory on/off, phase,
+session id, error), the dispatch spread, the quiescence state with elapsed
+time, the last thirty ledger lines as `t+s  from → to  body`, and at the
+end the leaked-pid report and the manifest path. The tab reads the run's
+own **manifest and ledger** and nothing else — the run rewrites its
+manifest on a heartbeat while it is live — so a refresh never touches state
+the orchestration is mutating. A refusal that fires before any manifest
+exists (the capacity arithmetic, a missing run budget, a run root too deep
+for a Unix socket) is the tab's first line rather than a traceback.
+
+| verb | does |
+|---|---|
+| `/fleet` | The verbs, and whether a run is live in this session |
+| `/fleet start …` | Spawn a run and open its tab; `--dry-run` prints the arithmetic and spawns nothing |
+| `/fleet status` | The same report, in the transcript |
+| `/fleet stop` | Tear it down now, through the same teardown the quiescence deadline takes; the tab keeps the final report |
+| `/fleet runs [root]` | Past runs under the root — id, started, n, state, ledger count — read from their manifests |
+| `/fleet attach <slot>` | Open one slot's session in a live tab |
+| `/fleet mesh` | Graph this run's ledger (see below) |
+| `/fleet detach` | Leave the run going when its tab closes |
+
+`/fleet attach` goes through the run's **manifest**, not the peer registry:
+a run gets its own `DOXA_RUNTIME_DIR` precisely so the registry it
+discovers is the fleet and not your own editor session, which means
+`/peers` cannot see one of its sessions at all. The manifest records each
+slot's socket, and that is the handle the attach uses. What you type in
+that tab is a message into the run, and the run's ledger records it like
+any other.
+
+**Closing the fleet tab tears the run down.** A fleet is not a background
+service: it keeps N daemons alive, arms every one of them to be woken by
+another's message, and so keeps spending with nobody typing. `/fleet
+detach` is the explicit "keep this running" gesture — the same distinction
+`/detach` draws for one session — and the tab's header says which of the
+two states it is in.
+
+**`/mesh` draws the graph.** `doxa/meshgraph.py` serves the ledger as a
+live browser view of which session messages which, a graph being the one
+artifact a terminal is honestly bad at. Bare, `/mesh` graphs **this
+machine's** peer ledger; with a run id (or an unambiguous prefix of one) it
+graphs **that run's**, which is a different file because a run gets its own
+`DOXA_HOME`. It binds loopback only, gates every route on a per-process
+token that is never written to disk, and prints its URL — a `⌗ mesh` chip
+sits on the status bar while it is up, and `/mesh stop` ends it and
+releases the port. It opens a browser only when `mesh_open_browser` is on
+(off by default): DOXA runs in terminals that have none — over SSH, in a
+container, on a headless box — and the URL is printed either way.
+
 ### Spend ceilings
 
 Both switches above hand something other than you the ability to spend
@@ -1486,6 +1549,8 @@ commands this session carries, and is omitted entirely when there are none
 | `/cd <path>` | Open that path in a **new** tab; this session stays where it is |
 | `/peers` | Live sessions in this project right now |
 | `/msg <session_prefix> <text>` | Send a message to one same-project peer session |
+| `/fleet start\|status\|stop\|runs\|attach\|mesh` | Start and watch a fleet run — N sessions, one prompt, one instant, in a tab; `detach` leaves it running past its tab ([fleets from the TUI](#fleets-from-the-tui)) |
+| `/mesh [run-id \| stop]` | Graph the message ledger in a browser — this machine's, or one fleet run's; loopback only, token-gated |
 | `/detach` | Close this tab but leave its session running |
 | `/attach [prefix]` | Reattach a live detached session in a new tab |
 | `/rename [name]` | Name this tab; empty restores the automatic one |
@@ -1536,6 +1601,7 @@ parse is refused rather than clobbering it.
 | `spawn_sessions` | `DOXA_SPAWN_SESSIONS` | off | offer the model `spawn_session`, which starts a second session in this repo and gives it a task (see [Session spawn](#session-spawn--off-unless-you-turn-it-on)) — read from this file and the environment only, never from a repository |
 | `session_budget_usd` | `DOXA_SESSION_BUDGET_USD` | off | dollars this session may spend before it stops STARTING turns (see [Spend ceilings](#spend-ceilings)) — a peer-started turn is refused exactly like a typed one |
 | `permission_mode` | `DOXA_PERMISSION_MODE` | `default` | mode new sessions connect in; accepts `default`/`acceptEdits`/`plan` only |
+| `mesh_open_browser` | `DOXA_MESH_OPEN_BROWSER` | off | `/mesh` opens the graph in this machine's browser as well as printing its URL. Off, because DOXA runs in terminals that have none (see [Fleets from the TUI](#fleets-from-the-tui)) |
 | `linger_secs` | `DOXA_LINGER_SECS` | 120 | seconds a daemon outlives its last detached client |
 | `worktree_per_session` | `DOXA_WORKTREE` | on | give each session its own git worktree |
 | `restore_tabs` | `DOXA_RESTORE_TABS` | on | plain `doxa` restores the whole saved tab set |
