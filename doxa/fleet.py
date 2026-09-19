@@ -498,7 +498,25 @@ class FleetSpec:
     quiescence_timeout_s: "float | None" = 1800.0
     quiet_dwell_s: float = 20.0
     poll_interval_s: float = 2.0
+    #: The BUDGET for a session's own graceful shutdown, ack through
+    #: finalize (issue #58): ``DaemonBackend.stop`` -> ``EngineClient.
+    #: stop`` now waits for the daemon to close its socket, which it
+    #: does only once ``engine.finalize()`` -- the LORE review/index for
+    #: a memory-enabled session -- and the worktree decision have both
+    #: run (see ``EngineClient.stop``'s docstring). Measured real
+    #: LORE-enabled finalize is low seconds; 60 s is generous headroom
+    #: above that rather than a number sized to the ack, which is what
+    #: `kill_grace_s` used to be and is why a LORE session's clean-but-
+    #: slow shutdown was mistaken for a wedge. A session that has not
+    #: answered `stop` inside this window is escalated to SIGTERM/SIGKILL.
     stop_timeout_s: float = 60.0
+    #: The window AFTER a successful ``stop`` for the OS to actually
+    #: report the pid gone -- reap latency, not finalize time, now that
+    #: `stop_timeout_s` above is what waits out the finalize itself. A
+    #: pid still alive at this deadline is signalled and the slot's
+    #: phase moves from `stopped` to `killed`, so this must stay short:
+    #: widening it re-opens the mistake `stop_timeout_s` was just fixed
+    #: to avoid, just moved to a second clock.
     kill_grace_s: float = 5.0
 
     # Spawns run concurrently, but not all at once: thirty-two processes
@@ -2054,14 +2072,23 @@ class FleetRun:
         # call returned" and "the process is gone" are different claims and
         # only the second one is the property.
         #
-        # With a GRACE WINDOW first, measured rather than assumed: a daemon
-        # acknowledges `stop` and then runs its own finalize (the LORE
-        # review, the worktree decision, the SDK client's __aexit__) before
-        # exiting, so a liveness check taken in the same tick as the reply
-        # calls every clean shutdown a leak. Observed at N=4: all four.
-        # Waiting is not weakening the assertion -- what is asserted is
-        # still that nothing survives, only now measured after the exit has
-        # had the time a normal exit takes.
+        # With a GRACE WINDOW first, measured rather than assumed -- but a
+        # SHORT one now (issue #58). `one()`'s own `backend.stop()` call,
+        # above, already waited out the daemon's finalize (the LORE review,
+        # the worktree decision, the SDK client's __aexit__): DaemonBackend
+        # .stop -> EngineClient.stop does not return until the daemon has
+        # actually closed the connection, which it does only after that
+        # work is done (see EngineClient.stop's docstring). What is left
+        # for THIS window to cover is the reap tail between "the socket
+        # closed" and "the OS agrees the pid is gone" -- process teardown,
+        # not finalize -- which is why kill_grace_s could stay small while
+        # stop_timeout_s (the real finalize budget now) is generous. Before
+        # that fix, a liveness check taken the same tick as the `stop` ack
+        # called every clean-but-still-finalizing shutdown a leak (observed
+        # at N=4: all four with no grace window at all), which is the
+        # smaller version of the exact defect issue #58 reports at LORE
+        # timescales -- a grace window sized for the ack, not the finalize
+        # it precedes.
         deadline = time.monotonic() + max(self.spec.kill_grace_s, 1.0)
         pending = [s for s in self.slots if s.pid and s.phase == PHASE_STOPPED]
         while pending and time.monotonic() < deadline:
