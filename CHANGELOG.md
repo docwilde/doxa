@@ -4,6 +4,25 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.14.0 — 2026-09-19
+
+**A Codex model sends peer messages; a fleet and its mesh run from the TUI.**
+
+- **`peer_send`** for a Codex model: the MCP sidecar forwards it to `CodexEngine` over a per-session control socket; the engine sends on its own limiter and ledger, attributed to the model's turn. `peer_send_tool` is true for all four.
+- New **`/fleet start <doxa-fleet flags>`** builds the CLI's `FleetSpec` (one parser) and runs it on the TUI loop; a read-only tab shows assignments, dispatch, quiescence, ledger tail and leaks. `/fleet status|stop|runs|attach|mesh|detach`.
+- New **`/mesh [run-id]`** serves the token-gated loopback graph over the machine's or a run's ledger and raises a `⌗ mesh :<port>` chip; `/mesh stop`. `doxa-fleet` is a script entry. Live: three Codex fleets quiesced in 30–44 s, no leak.
+
+**Security audit of 1.13.0: every finding reproduced, fixed, re-probed.**
+
+- **`peers._reap_socket`** unlinks only a socket under the runtime dir whose pid is dead; a planted registry entry can no longer delete an arbitrary file. **`identity.require_session_id`** guards every path built from a session id.
+- The daemon refuses permission-mode escalation over a bare socket: an attached client and an idle session are required. **`_on_can_use_tool`** treats no answer as a denial. A spend ceiling is read once, so a session cannot raise its own.
+- **`vendors`** bounds every read off a vendor socket (four caps); `fleet` signals a pid only while its cmdline is the daemon; peernet ops are scoped to `scope_key`; `cli_isolation` copies the operator's skills instead of linking them.
+
+**Housekeeping.**
+
+- `lore-core` pinned to LORE **v0.57.0**: verify-before-record sync, wider secret scrubbing, listing digests under `pending/.listed`. Suite 2584 on the release tip.
+- Fix: `worktrees` decides unmerged from the recorded branch, not HEAD; a live fleet run no longer claims a ledger total it has not collected; a read-only tab answers palette commands (a silent no-op before).
+
 ## 1.13.0 — 2026-09-19
 
 **Every engine runs in the daemon; a fleet slot runs the engine it was dealt.**
