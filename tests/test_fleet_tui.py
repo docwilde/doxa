@@ -495,6 +495,53 @@ async def test_fleet_runs_lists_what_was_run_under_the_root(
         assert "quiesced" in text and "17" in text
 
 
+@pytest.mark.asyncio
+async def test_fleet_mesh_graphs_this_runs_ledger_and_the_tab_says_so(
+    monkeypatch, tmp_path, short_root
+):
+    """``/fleet mesh`` is ``/mesh`` aimed at the run you are watching --
+    the run's OWN ledger, because a run gets its own DOXA_HOME so its
+    graph contains the run and nothing of the operator's own sessions.
+    The tab shows the URL, but only while the server is serving THAT
+    file: a mesh over this machine's ledger is not a view of this run."""
+    from pathlib import Path
+
+    monkeypatch.setattr(fleet_mod, "DaemonBackend", FakeBackend)
+    app, _fake = await _app(monkeypatch, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        pane = app.active_pane
+        assert "no fleet run in this session" in await _run(
+            app, pilot, "/fleet mesh", pane
+        )
+        run_root = Path(short_root) / "m1"
+        _ledger(run_root, "ready")
+        await _run(app, pilot, (
+            f"/fleet start --pool claude@1 -n 2 --allow-unbudgeted "
+            f"--quiet-dwell 0 --quiescence-timeout 20 --root {short_root} "
+            f"--run-id m1 --prompt \"hello\""
+        ), pane)
+        session = pane._fleet
+        for _ in range(600):
+            if not session.alive:
+                break
+            await pilot.pause(0.05)
+
+        text = await _run(app, pilot, "/fleet mesh", pane)
+        assert "run m1" in text
+        server = app.mesh_server()
+        assert server is not None
+        assert server.path == fleetview_mod.run_ledger_path(run_root)
+
+        tab = app.fleet_tabs()[0]
+        tab._refresh()
+        assert server.url in tab.text()
+
+        await _run(app, pilot, "/mesh stop", pane)
+        tab._refresh()
+        assert "http://" not in tab.text()
+
+
 # =======================================================================
 # The surfaces a command has to appear on
 # =======================================================================
