@@ -159,6 +159,186 @@ def test_a_live_session_reads_as_running_not_as_resumable(tmp_path, monkeypatch)
     assert "still RUNNING" in reason
 
 
+# -- which engine can resume this, and from what (issue #46) ---------------
+#
+# The gate asked ONE question of every session -- "does the claude CLI's
+# own store hold this id?" -- and a Codex session is never written there,
+# so /resume and the boot restore both put every one of them into the
+# read-only view, citing a v0.56.0 id-space change that has nothing to do
+# with Codex. Since #43 a Codex thread IS resumable, from the
+# `<id>.codex.json` record CodexEngine writes beside its transcript. The
+# tests below pin the gate to each engine's OWN artefact, and to the same
+# predicate that engine uses: CodexEngine.start refuses with
+# CodexThreadUnknown exactly when doxa.codex._recorded_thread comes back
+# None, so a record with no thread id in it has to read as "cannot be
+# resumed" HERE too, or the dialog would promise what the engine refuses.
+
+
+@pytest.fixture
+def projects_dir(monkeypatch, tmp_path):
+    """This test's own ``PROJECTS_DIR``, holding one project directory.
+
+    Points lore_core's module attribute rather than the env var: the
+    constant is read from the environment at IMPORT time, so by the time a
+    test runs, setenv is too late -- but doxa.history._beside_transcript
+    imports the name inside the call, which resolves the attribute fresh
+    every time. conftest's suite-wide projects tree is shared, and an
+    artefact seeded there would outlive the test that wrote it."""
+    import lore_core.config as lore_config
+
+    root = tmp_path / "projects"
+    project = root / "-work"
+    project.mkdir(parents=True)
+    monkeypatch.setattr(lore_config, "PROJECTS_DIR", root)
+    return project
+
+
+def _codex_record(projects_dir: Path, session_id: str, thread_id: "str | None"):
+    """What CodexEngine._record_thread writes on ``thread.started`` -- or,
+    with ``thread_id=None``, the same file with the one field that matters
+    missing (a truncated write, a record from some future shape)."""
+    record = {"session_id": session_id, "model": "gpt-5.4", "cwd": "/work"}
+    if thread_id is not None:
+        record["thread_id"] = thread_id
+    path = projects_dir / f"{session_id}.codex.json"
+    path.write_text(json.dumps(record), encoding="utf-8")
+    return path
+
+
+def _vendor_messages(projects_dir: Path, session_id: str, engine: "str | None" = None):
+    """What ChatApiEngine._save_messages writes after every turn: since the
+    envelope, `{"engine": ..., "messages": [...]}`; before it, the bare
+    array (`engine=None` writes that legacy shape)."""
+    path = projects_dir / f"{session_id}.messages.json"
+    messages = [{"role": "user", "content": "hi"}]
+    body = messages if engine is None else {"engine": engine, "messages": messages}
+    path.write_text(json.dumps(body), encoding="utf-8")
+    return path
+
+
+def test_a_codex_session_with_a_recorded_thread_is_resumable(
+    projects_dir, tmp_path
+):
+    """The issue's whole subject. Before this, the answer was NO_HISTORY
+    for every Codex conversation ever recorded."""
+    path = _codex_record(projects_dir, RESUMED_ID, "thr-0199")
+
+    assert history_mod.resumable_engine(RESUMED_ID) == ("codex", path)
+    assert history_mod.resume_state(RESUMED_ID, str(tmp_path)) == (
+        history_mod.RESUME_OK, "",
+    )
+
+
+def test_a_codex_session_with_no_recorded_thread_is_refused_in_codex_words(
+    projects_dir, tmp_path
+):
+    """The gate agrees with the engine instead of second-guessing it: this
+    is the exact state CodexEngine.start raises CodexThreadUnknown for, so
+    it refuses here -- and says CODEX, not a sentence about the claude CLI
+    and an id space Codex was never in."""
+    _codex_record(projects_dir, RESUMED_ID, None)
+
+    engine_id, artefact = history_mod.resumable_engine(RESUMED_ID)
+    assert (engine_id, artefact) == ("codex", None)
+    state, reason = history_mod.resume_state(RESUMED_ID, str(tmp_path))
+    assert state == history_mod.RESUME_NO_HISTORY
+    assert "Codex" in reason
+    assert "thread id" in reason
+    assert "claude CLI" not in reason  # the wrong engine's refusal, verbatim
+    assert "v0.56.0" not in reason
+
+
+def test_a_vendor_session_resumes_from_its_saved_messages(
+    projects_dir, tmp_path
+):
+    """DeepSeek/GLM replay `<id>.messages.json`, so its presence is the
+    whole question, and the envelope's `engine` field is the answer to
+    "which vendor": the two write the same filename, so the file says."""
+    path = _vendor_messages(projects_dir, RESUMED_ID, engine="glm")
+
+    assert history_mod.resumable_engine(RESUMED_ID) == ("glm", path)
+    assert history_mod.resume_state(RESUMED_ID, str(tmp_path)) == (
+        history_mod.RESUME_OK, "",
+    )
+
+
+def test_a_legacy_bare_array_messages_file_stays_unnamed(projects_dir, tmp_path):
+    """A file from before the envelope names no engine; guessing between
+    the two vendors would resume the conversation on the wrong provider,
+    so the caller keeps the engine it already had."""
+    path = _vendor_messages(projects_dir, RESUMED_ID)
+
+    assert history_mod.resumable_engine(RESUMED_ID) == (None, path)
+    assert history_mod.resume_state(RESUMED_ID, str(tmp_path)) == (
+        history_mod.RESUME_OK, "",
+    )
+
+
+def test_the_vendor_engine_writes_and_reads_the_envelope(tmp_path, monkeypatch):
+    """Round trip through the real writer and reader: what
+    ChatApiEngine._save_messages writes, _load_messages replays and
+    saved_engine names."""
+    from doxa.vendors import DEEPSEEK, _load_messages, saved_engine
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    monkeypatch.setenv("LORE_PROJECTS_DIR", str(tmp_path / "projects"))
+    from doxa.vendors import ChatApiEngine
+
+    eng = ChatApiEngine(cwd=str(tmp_path), spec=DEEPSEEK, transport=object())
+    eng.messages.append({"role": "user", "content": "hi"})
+    eng._save_messages()
+    assert saved_engine(eng.messages_path) == "deepseek"
+    assert _load_messages(eng.messages_path) == [{"role": "user", "content": "hi"}]
+
+
+def test_a_claude_session_answers_claude_both_ways(projects_dir, tmp_path):
+    """Unchanged, and pinned as unchanged: the CLI store is still the
+    claude answer, and a session it never knew is still refused in the
+    words the v0.56.0 refusal has always used."""
+    assert history_mod.resumable_engine(OTHER_ID) == ("claude", None)
+
+    path = _cli_history(RESUMED_ID)
+    assert history_mod.resumable_engine(RESUMED_ID) == ("claude", path)
+    assert history_mod.resume_state(RESUMED_ID, str(tmp_path)) == (
+        history_mod.RESUME_OK, "",
+    )
+
+
+def test_running_and_missing_cwd_still_come_before_the_engine_question(
+    projects_dir, tmp_path, monkeypatch
+):
+    """The two cheaper checks keep their order and their answers -- a live
+    Codex session is ATTACHED, not resumed, and a vanished directory is
+    refused whatever engine could have continued the conversation."""
+    _codex_record(projects_dir, RESUMED_ID, "thr-0199")
+    state, reason = history_mod.resume_state(
+        RESUMED_ID, str(tmp_path / "gone-for-good"),
+    )
+    assert state == history_mod.RESUME_NO_CWD
+
+    entry = peers_mod.PeerInfo(
+        session_id=RESUMED_ID, pid=os.getpid(), socket_path="",
+        cwd=str(tmp_path), repo_root=None, title="live one",
+        started_at="", heartbeat_at="", daemon_socket="/tmp/sock",
+    )
+    monkeypatch.setattr(peers_mod, "read_registry", lambda *a, **k: [entry])
+    state, _reason = history_mod.resume_state(RESUMED_ID, str(tmp_path))
+    assert state == history_mod.RESUME_RUNNING
+
+
+def test_an_unreadable_projects_tree_reads_as_not_resumable(
+    monkeypatch, tmp_path
+):
+    """Never raises, same contract resume_state has always had: a state
+    directory that cannot be globbed is "no artefact", not a traceback out
+    of a keystroke."""
+    import lore_core.config as lore_config
+
+    monkeypatch.setattr(lore_config, "PROJECTS_DIR", tmp_path / "nothing-here")
+    assert history_mod.resumable_engine(RESUMED_ID) == ("claude", None)
+    assert history_mod.resumable_engine("") == (None, None)
+
+
 # -- timestamps on every row the popup shows -------------------------------
 
 

@@ -552,6 +552,138 @@ async def test_start_refuses_when_the_codex_cli_is_absent(tmp_path, monkeypatch)
         await CodexEngine(cwd=str(tmp_path)).start()
 
 
+# -- /resume: DOXA's session id is not Codex's thread id (issue #43) ----
+#
+# `spawn_daemon(resume=<doxa session id>)` hands that id to CodexEngine,
+# which used it as the thread id -- so the first turn of every resumed
+# session ran `codex exec resume <a-doxa-uuid>` against an id Codex never
+# issued. The translation between the two is a per-session record beside
+# the transcript, written the moment `thread.started` names a thread.
+
+
+async def _run_one_turn(engine, prompt: str = "go") -> list:
+    return [event async for event in engine.send(prompt)]
+
+
+@pytest.mark.asyncio
+async def test_the_thread_id_is_recorded_when_codex_names_it(tmp_path):
+    """The record IS the fix: without it nothing that outlives this
+    process knows which Codex thread this DOXA session is."""
+    engine = _engine(tmp_path, session_id="s-a", exec_factory=_factory([], [
+        _script({"type": "thread.started", "thread_id": "th-1"},
+                {"type": "turn.completed", "usage": {}}),
+    ]))
+    await _run_one_turn(engine)
+    assert engine.thread_path.name == "s-a.codex.json"
+    record = json.loads(engine.thread_path.read_text(encoding="utf-8"))
+    assert record["thread_id"] == "th-1"
+    assert record["session_id"] == "s-a"
+    assert record["cwd"] == str(tmp_path)
+    assert record["recorded"]
+
+
+@pytest.mark.asyncio
+async def test_the_record_is_rewritten_when_codex_renames_the_thread(tmp_path):
+    """map_event's own docstring says that frame means the id CHANGED, so
+    a record written once and never again would go stale silently."""
+    engine = _engine(tmp_path, session_id="s-b", exec_factory=_factory([], [
+        _script({"type": "thread.started", "thread_id": "th-1"},
+                {"type": "thread.started", "thread_id": "th-2"},
+                {"type": "turn.completed", "usage": {}}),
+    ]))
+    await _run_one_turn(engine)
+    assert engine.thread_id == "th-2"
+    record = json.loads(engine.thread_path.read_text(encoding="utf-8"))
+    assert record["thread_id"] == "th-2"
+
+
+@pytest.mark.asyncio
+async def test_a_resume_with_a_record_makes_the_first_turn_a_resume(tmp_path):
+    """The whole point: the SECOND process's FIRST turn continues the
+    thread the first process started."""
+    first = _engine(tmp_path, session_id="s-c", exec_factory=_factory([], [
+        _script({"type": "thread.started", "thread_id": "th-7"},
+                {"type": "turn.completed", "usage": {}}),
+    ]))
+    await _run_one_turn(first, "hello")
+
+    # What doxa.daemon.spawn_daemon does on /resume: one string, passed as
+    # both session_id and resume (a resume keeps its id).
+    calls: list = []
+    resumed = _engine(
+        tmp_path, session_id="s-c", resume="s-c",
+        exec_factory=_factory(calls, [_script(
+            {"type": "thread.started", "thread_id": "th-7"},
+            {"type": "turn.completed", "usage": {}},
+        )]),
+    )
+    assert resumed.thread_id == "th-7"
+    await _run_one_turn(resumed, "again")
+    argv, _kwargs = calls[0]
+    assert argv[1:4] == ["exec", "resume", "th-7"]
+
+
+@pytest.mark.asyncio
+async def test_a_resume_without_a_record_refuses_to_start(tmp_path, monkeypatch):
+    """Starting anyway would open a NEW Codex thread under an id the user
+    was told carried their conversation."""
+    monkeypatch.setattr("doxa.codex.shutil.which", lambda _name: "/usr/bin/codex")
+    engine = _engine(tmp_path, session_id="s-d", resume="s-d")
+    assert engine.thread_id is None
+    with pytest.raises(codex_mod.CodexThreadUnknown, match=r"no recorded Codex thread"):
+        await engine.start()
+    # And it says what the operator can still do with the session.
+    with pytest.raises(codex_mod.CodexThreadUnknown, match=r"transcript"):
+        await engine.start()
+
+
+@pytest.mark.asyncio
+async def test_the_doxa_session_id_is_never_placed_after_resume(tmp_path):
+    """The defect, stated as an invariant over every argv this engine can
+    build: whatever follows `resume` is Codex's id, never DOXA's."""
+    first = _engine(tmp_path, session_id="s-e", exec_factory=_factory([], [
+        _script({"type": "thread.started", "thread_id": "th-3"},
+                {"type": "turn.completed", "usage": {}}),
+    ]))
+    await _run_one_turn(first)
+
+    calls: list = []
+    resumed = _engine(
+        tmp_path, session_id="s-e", resume="s-e",
+        exec_factory=_factory(calls, [
+            _script({"type": "turn.completed", "usage": {}}),
+            _script({"type": "turn.completed", "usage": {}}),
+        ]),
+    )
+    await _run_one_turn(resumed, "one")
+    await _run_one_turn(resumed, "two")
+    # A session with NO record never builds a resume argv at all -- it
+    # cannot start, and its argv would carry no id to misplace either.
+    no_record = _engine(tmp_path, session_id="s-f", resume="s-f")
+    argvs = [argv for argv, _kwargs in calls]
+    argvs += [no_record._argv(True), no_record._argv(False)]
+    for argv in argvs:
+        for index, token in enumerate(argv):
+            if token == "resume":
+                assert argv[index + 1] not in ("s-e", "s-f")
+                assert argv[index + 1] == "th-3"
+    assert sum(argv.count("resume") for argv in argvs) == 2
+
+
+@pytest.mark.asyncio
+async def test_finalize_keeps_the_thread_record(tmp_path):
+    """A finalized session is exactly what /resume comes back for."""
+    engine = _engine(tmp_path, session_id="s-g", exec_factory=_factory([], [
+        _script({"type": "thread.started", "thread_id": "th-4"},
+                {"type": "turn.completed", "usage": {}}),
+    ]))
+    await _run_one_turn(engine)
+    await engine.finalize()
+    assert json.loads(engine.thread_path.read_text(encoding="utf-8"))[
+        "thread_id"
+    ] == "th-4"
+
+
 @pytest.mark.asyncio
 async def test_permission_mode_is_refused_by_name_not_faked(tmp_path):
     engine = _engine(tmp_path)

@@ -256,8 +256,11 @@ class WindowTabsMixin:
         """:meth:`resume_session`'s own fallback (v0.93.0), for the two
         states :func:`history.resume_state` answers when resuming truly
         cannot happen: ``RESUME_NO_CWD`` (the directory is gone) and
-        ``RESUME_NO_HISTORY`` (a pre-v0.56.0 conversation the CLI's own
-        store never learned this id under). Through v0.91.0 both landed
+        ``RESUME_NO_HISTORY`` (nothing on disk holds what this session's
+        OWN engine would resume from -- since issue #46 that is the
+        Claude CLI's store for a claude session and a recorded Codex
+        thread id for a codex one, and the reason says which).
+        Through v0.91.0 both landed
         here as a bare refusal string -- "cannot resume ... — <reason>" --
         an error where a real answer was sitting on disk the whole time:
         DOXA's OWN transcript (:mod:`doxa.transcript`, the same

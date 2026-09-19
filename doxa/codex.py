@@ -21,6 +21,16 @@ every claim below was run, not read):
   long-lived process the way ``ClaudeSDKClient`` is. That is the single
   biggest structural difference and it is why :meth:`CodexEngine.send`
   spawns, streams and reaps inside one call.
+* a resumed run OPENS WITH ``thread.started`` CARRYING THE ID IT WAS
+  RESUMED WITH -- measured against 0.144.4, two engines in one process
+  over one thread: turn 1 ``codex exec`` -> ``thread.started
+  01a0b976-…``, answer "alpha"; turn 2, from a second ``CodexEngine``
+  built with ``resume=<DOXA session id>``, ``codex exec resume
+  01a0b976-…`` -> the SAME ``thread.started``, 35808 input tokens against
+  turn 1's 17893, and the model answered "alpha" to "what word did you
+  reply with before?". So the frame is an identity, not a rename, on a
+  resume -- which is why the record :meth:`CodexEngine._record_thread`
+  keeps is rewritten only when the id CHANGES.
 * the prompt goes in on STDIN (``-`` as the prompt argument), never in
   argv: a pasted prompt can be megabytes and ``ARG_MAX`` is not.
 
@@ -143,6 +153,7 @@ import sys
 import time
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any, Callable
 
 from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see that module
@@ -228,6 +239,14 @@ LORE_PREAMBLE_HEADER = (
 #: The line that closes the snapshot, so the model can tell where DOXA's
 #: text ends and the operator's prompt begins.
 LORE_PREAMBLE_FOOTER = "[END OF MEMORY]"
+
+#: What names a session's Codex-thread record, appended to DOXA's session
+#: id in the transcript directory (``<session id>.codex.json``). Issue
+#: #43: ``/resume`` knows only DOXA's id, and ``codex exec resume`` takes
+#: only Codex's, so the translation between them has to survive the
+#: process that learned it. The same place and the same per-session shape
+#: doxa.vendors.ChatApiEngine keeps ``<session id>.messages.json`` in.
+THREAD_SUFFIX = ".codex.json"
 
 #: How long a turn's process may run before it is killed. A turn that
 #: never ends would hold the pane's exclusive worker forever; the number
@@ -511,6 +530,17 @@ class CodexUnavailable(RuntimeError):
     """The Codex CLI is not installed or not runnable."""
 
 
+class CodexThreadUnknown(RuntimeError):
+    """This session was asked to resume, and no Codex thread id was ever
+    recorded for it (issue #43).
+
+    A sibling of :class:`CodexUnavailable` and raised from the same place
+    for the same reason: both are fatal preconditions of STARTING, so they
+    fail where the daemon still turns them into "this session could not
+    start" with the reason attached, rather than one turn later as a
+    ``codex exec resume`` against an id Codex never issued."""
+
+
 class CodexEngine:
     """One Codex session. Satisfies :class:`doxa.engines.Engine`.
 
@@ -594,7 +624,13 @@ class CodexEngine:
         # names the transcript, the registry entry and the /search row and
         # is minted before Codex has ever run. Two ids for two things, and
         # neither is derived from the other.
-        self.thread_id: "str | None" = resume or None
+        #
+        # It used to be initialised to ``resume`` -- DOXA's session id --
+        # which made the first turn of every resumed session
+        # ``codex exec resume <a-doxa-uuid>`` and fail, because that id
+        # names nothing in Codex's store (issue #43). A resume reads the
+        # RECORDED thread id instead, below, beside the transcript.
+        self.thread_id: "str | None" = None
 
         # Status-bar parity with SessionEngine/EngineClient. Every one of
         # these is read UNGUARDED mid-render by doxa.session.chips, so they
@@ -668,6 +704,24 @@ class CodexEngine:
         transcript_dir = PROJECTS_DIR / self.slug
         transcript_dir.mkdir(parents=True, exist_ok=True)
         self.transcript_path = transcript_dir / f"{self.session_id}.jsonl"
+        #: Codex's conversation id, beside the transcript, under DOXA's
+        #: session id -- the one file that translates the id DOXA resumes
+        #: by into the id ``codex exec resume`` takes. Same shape and same
+        #: place as doxa.vendors.ChatApiEngine's ``<id>.messages.json``,
+        #: which is that engine's answer to the same question, and same
+        #: permissions as it (none set: the transcript sitting next to it
+        #: holds the conversation itself and is written the same way).
+        self.thread_path = transcript_dir / f"{self.session_id}{THREAD_SUFFIX}"
+        if self.resume:
+            # A resume READS the record written under the id it is
+            # resuming -- normally this same file, since DOXA resumes a
+            # session under its own id (daemon.spawn_daemon passes one
+            # string as both session_id and resume). Missing means no
+            # ``thread.started`` was ever recorded for it, and start()
+            # refuses rather than inventing an id; see CodexThreadUnknown.
+            self.thread_id = _recorded_thread(
+                transcript_dir / f"{self.resume}{THREAD_SUFFIX}"
+            )
 
     # -- persistence ---------------------------------------------------
 
@@ -682,6 +736,44 @@ class CodexEngine:
             # A transcript that cannot be written must not take the turn
             # down: the session is still usable, it just will not be
             # indexed. Same posture SessionEngine takes for its review.
+            pass
+
+    def _record_thread(self) -> None:
+        """Write the Codex conversation id this session is running under,
+        so a later process can resume it (issue #43).
+
+        Called from :meth:`map_event` the moment a ``thread.started``
+        frame names an id different from the one in hand -- which is the
+        first turn of a fresh session, and again at any later turn where
+        Codex hands back a different id (that frame's own contract; see
+        map_event's docstring). Whole-file, not appended: it is one small
+        object and a half-written one is not a thread id.
+
+        Only ``thread_id`` is ever read back (:func:`_recorded_thread`).
+        The rest is provenance for whoever is reading the directory, and
+        can be stale on a resumed session that has since changed model --
+        which is why nothing resolves anything from it.
+
+        Never deleted by :meth:`finalize`. A finalized session is exactly
+        what ``/resume`` comes back for, and a record cleaned up at the
+        end would turn every resume into :class:`CodexThreadUnknown`.
+
+        A write that fails is swallowed, the same posture
+        :meth:`_persist` takes: the turn is running and losing it to an
+        unwritable state directory would be a worse failure than a
+        session that cannot be resumed later."""
+        try:
+            self.thread_path.write_text(
+                json.dumps({
+                    "thread_id": self.thread_id,
+                    "session_id": self.session_id,
+                    "model": self.model,
+                    "cwd": self.cwd,
+                    "recorded": _iso_now(),
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError:
             pass
 
     def _persist_user_text(self, text: str) -> None:
@@ -720,6 +812,21 @@ class CodexEngine:
             raise CodexUnavailable(
                 f"{CODEX_BIN!r} is not on PATH -- install the Codex CLI, or "
                 "start this session on the claude engine"
+            )
+        if self.resume and not self.thread_id:
+            # Issue #43. The alternative -- starting anyway -- is a
+            # session that looks resumed and is not: its first turn would
+            # run `codex exec` with no `resume`, opening a NEW Codex
+            # thread under an id the user was told carried their
+            # conversation. Refusing here is the only answer that does not
+            # lie, and it costs nothing that was not already lost.
+            raise CodexThreadUnknown(
+                f"session {self.resume[:8]} has no recorded Codex thread, so "
+                "there is no conversation for `codex exec resume` to "
+                "continue -- it was recorded before DOXA kept the thread id, "
+                "or the record beside its transcript is gone. Its transcript "
+                "is still readable and searchable; open it read-only, or "
+                "start a new Codex session"
             )
         self._started = True
         try:
@@ -1292,8 +1399,10 @@ class CodexEngine:
         ``thread.started``   the engine's conversation id changed. There is
                              no "the engine renamed itself" event and there
                              should not be -- it is consumed here, into
-                             ``self.thread_id``, which is what makes the
-                             NEXT turn a resume.
+                             ``self.thread_id`` (which is what makes the
+                             NEXT turn a resume) and into the record beside
+                             the transcript (which is what makes the next
+                             PROCESS able to resume it -- issue #43).
         ``item.updated``     progress on an open call. EngineEvent has no
                              progress kind, so it is emitted as a
                              ``tool_result`` on the SAME id: the chip
@@ -1311,8 +1420,14 @@ class CodexEngine:
         kind = str(frame.get("type") or "")
         if kind == "thread.started":
             thread = frame.get("thread_id")
-            if isinstance(thread, str) and thread:
+            if isinstance(thread, str) and thread and thread != self.thread_id:
                 self.thread_id = thread
+                # ...and beside the transcript, so the NEXT PROCESS can
+                # resume it too, not just the next turn of this one
+                # (issue #43). Written on change rather than on every
+                # frame: a resume that is handed back the id it asked for
+                # rewrites nothing.
+                self._record_thread()
             return []
         if kind == "turn.started":
             return []
@@ -1638,6 +1753,31 @@ class CodexEngineProvider:
 
 
 # -- small shared helpers ----------------------------------------------
+
+
+def _recorded_thread(path: Path) -> "str | None":
+    """The Codex thread id recorded for a session, or ``None``.
+
+    ``None`` for every way the answer can be missing -- no file, an
+    unreadable one, a truncated write, a record from some future shape
+    that carries no ``thread_id`` -- because they all mean the same thing
+    to the one caller: there is no id to resume with, and
+    :meth:`CodexEngine.start` refuses.
+
+    Deliberately NOT doxa.vendors._load_messages' posture, which returns
+    an empty conversation and starts fresh. That engine replays history it
+    owns, so a missing file costs context and nothing else; this one hands
+    an id to another program, and starting fresh here would open a NEW
+    Codex thread while the tab, the transcript and the registry all say
+    the old conversation was reopened."""
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(loaded, dict):
+        return None
+    thread = loaded.get("thread_id")
+    return thread if isinstance(thread, str) and thread else None
 
 
 def _iso_now() -> str:
