@@ -447,7 +447,7 @@ async def test_engine_with_no_argument_lists_every_registered_engine(
 async def test_engine_listing_shows_the_capability_difference(
     monkeypatch, tmp_path
 ):
-    """The four engines differ sharply -- 18 of 18 fields for claude, 4
+    """The four engines differ sharply -- 18 of 18 fields for claude, 6
     for codex, 10 for each vendor. A list that showed them as
     interchangeable would be lying, and the numbers are read off
     EngineCapabilities rather than written here, so a new field cannot
@@ -465,7 +465,11 @@ async def test_engine_listing_shows_the_capability_difference(
     assert len(counts) > 1, "the listing must not show four identical engines"
     # And the missing half, by field name, so the difference is legible
     # rather than only countable.
-    assert "mcp_tools" in text  # codex has no tool surface DOXA drives
+    # NAMED FIELDS the listing must show as missing somewhere. ``mcp_tools``
+    # used to be this line's example; it stopped being one when codex got
+    # doxa.mcpserver and every engine's map turned it True -- a field no
+    # engine lacks proves nothing about a listing of what engines lack.
+    assert "permission_modes" in text  # codex and the vendors have one posture
     assert "context_window" in text  # neither codex nor the vendors report one
 
 
