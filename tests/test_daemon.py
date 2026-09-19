@@ -39,7 +39,7 @@ from doxa import worktrees as worktrees_mod
 from doxa.client import EngineClient, EngineClientError
 from doxa.daemon import PROTOCOL_VERSION, EventRing, SessionDaemon
 from doxa.engine import EngineEvent, SessionEngine
-from tests.fakes import factory_with_script
+from tests.fakes import FakeClient, factory_with_script
 
 TURN_SCRIPT = [
     StreamEvent(
@@ -2018,3 +2018,94 @@ def test_spawn_daemon_appends_the_engine_only_when_it_says_something(
     glm = _spawn_argv(monkeypatch, tmp_path, engine="glm")
     assert glm[len(baseline):] == ["--engine", "glm"]
     assert glm[:len(baseline)] == baseline
+
+
+# -- running/queued truthfulness (the review defect) --------------------
+
+
+class _GatedClient(FakeClient):
+    """A FakeClient whose turn does not finish until the test says so, so
+    "a turn is running right now" is a state the test can observe rather
+    than a race it has to win."""
+
+    gate: "asyncio.Event | None" = None
+
+    async def receive_response(self):
+        for message in self.script[:-1]:
+            yield message
+        if self.gate is not None:
+            await self.gate.wait()
+        yield self.script[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_peer_started_turn_is_reported_running_and_its_queue_is_visible(
+    tmp_path, monkeypatch,
+):
+    """The defect this fixes: doxa.daemon's `running` read only the turns
+    the DAEMON started, and `queued` only the daemon's own FIFO. A turn
+    started by an arriving peer message runs on the engine's own task, and
+    a prompt submitted while it runs lands in the ENGINE's queue -- so a
+    session busy answering another agent reported running=false, queued=0,
+    and doxa.fleet's is_quiet called it idle."""
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setenv(peers.PEER_INBOUND_TURNS_ENV, "1")
+    gate = asyncio.Event()
+    created: "list[_GatedClient]" = []
+
+    def factory(options):
+        client = _GatedClient(options, script=list(TURN_SCRIPT))
+        client.gate = gate
+        created.append(client)
+        return client
+
+    daemon = SessionDaemon(
+        cwd=str(tmp_path), linger_secs=30.0,
+        engine_factory=lambda cwd, sid, dsock: SessionEngine(
+            cwd=cwd, session_id=sid, client_factory=factory, daemon_socket=dsock,
+        ),
+    )
+    serve_task = asyncio.create_task(daemon.serve())
+    await asyncio.wait_for(daemon.ready.wait(), 10)
+    try:
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        assert (await client.refresh_status())["running"] is False
+
+        # A DIRECT peer message, with inbound turn-starting armed: the
+        # engine starts a turn of its own, and the daemon's _turn_task
+        # knows nothing about it.
+        daemon.engine._on_peer_frame({
+            "from": "abcd1234", "from_title": "peer", "body": "ping",
+            "kind": "direct",
+        })
+        assert daemon._turn_task is None
+        for _ in range(50):
+            if daemon.engine.turn_running:
+                break
+            await asyncio.sleep(0.01)
+        status = await client.refresh_status()
+        assert status["running"] is True, "a peer-started turn is a running turn"
+
+        # A prompt submitted meanwhile lands in the ENGINE's queue.
+        reply = await client._prompt("while you are up")
+        assert reply.get("ok") is True
+        for _ in range(50):
+            if daemon.engine.queued_count():
+                break
+            await asyncio.sleep(0.01)
+        status = await client.refresh_status()
+        assert status["queued"] == 1
+        queued = await client.list_queue()
+        assert [row["text"] for row in queued] == ["while you are up"]
+
+        # And it can be cancelled through the same /queue call.
+        assert await client.cancel_queued(queued[0]["id"]) is True
+        assert (await client.list_queue()) == []
+        assert (await client.refresh_status())["queued"] == 0
+    finally:
+        gate.set()
+        if not serve_task.done():
+            with contextlib.suppress(Exception):
+                await daemon._shutdown("test teardown")
+                await asyncio.wait_for(serve_task, 5)

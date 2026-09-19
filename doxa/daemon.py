@@ -1284,25 +1284,43 @@ class SessionDaemon:
             # order. Small and bounded (PROMPT_QUEUE_MAXLEN), unlike the
             # beliefs/pending pagers just above, so it needs none of
             # their paging.
+            #
+            # BOTH queues, since issue #39: a prompt that arrived while a
+            # peer-started turn was running is in the ENGINE's queue (see
+            # _queued_count), and a /queue that listed only this one told
+            # the user their prompt had vanished. This daemon's items
+            # first -- they are the ones this class will dequeue first.
             await self._reply(
-                writer, req_id, ok=True, queue=self._prompt_queue.snapshot(),
+                writer, req_id, ok=True,
+                queue=self._prompt_queue.snapshot() + await self._engine_queue(),
             )
         elif method == "cancel_queued":
             # `/queue`'s cancel half. The SAME "everyone learns it" rule
             # prompt_queued above follows: every attached client sees the
             # cancellation, not just whichever one asked for it.
             item = self._prompt_queue.cancel(str(params.get("id") or ""))
-            if item is None:
-                await self._reply(
-                    writer, req_id, ok=False,
-                    error="no such queued prompt (already started, "
-                          "cancelled, or discarded)",
-                )
+            if item is not None:
+                self._publish(None, EngineEvent("prompt_cancelled", {
+                    "id": item.id, "text": item.text,
+                }))
+                await self._reply(writer, req_id, ok=True)
                 return
-            self._publish(None, EngineEvent("prompt_cancelled", {
-                "id": item.id, "text": item.text,
-            }))
-            await self._reply(writer, req_id, ok=True)
+            # Not ours: the id may name a prompt in the ENGINE's queue,
+            # which /queue now lists. SessionEngine.cancel_queued
+            # publishes its own prompt_cancelled onto the out-of-band
+            # stream _peer_pump already fans out, so nothing is published
+            # here -- doing it too would draw the cancellation twice.
+            canceller = getattr(self.engine, "cancel_queued", None)
+            if canceller is not None and await canceller(
+                str(params.get("id") or "")
+            ):
+                await self._reply(writer, req_id, ok=True)
+                return
+            await self._reply(
+                writer, req_id, ok=False,
+                error="no such queued prompt (already started, "
+                      "cancelled, or discarded)",
+            )
         elif method == "stop":
             # Worktree cleanup runs BEFORE the ack (fast, git-only) so a
             # "kept" note can ride in the SAME reply -- unlike
@@ -1315,6 +1333,57 @@ class SessionDaemon:
         else:
             await self._reply(writer, req_id, ok=False,
                               error=f"unknown method: {method!r}")
+
+    def _running(self) -> bool:
+        """Is ANY turn running in this session -- this daemon's or the
+        engine's own.
+
+        Two turn sources, one answer. The daemon starts a turn per
+        `prompt` frame and holds it in ``_turn_task``; the engine starts
+        one of its own when an arriving peer message wakes the session
+        (``SessionEngine._on_peer_frame``) and when its queue advances,
+        and neither of those passes through this class at all. Reading
+        only ``_turn_task`` reported a session mid-turn as idle, which is
+        what ``doxa.fleet``'s quiescence wait believed.
+
+        ``getattr`` rather than an attribute, because the surface is
+        OPTIONAL: doxa.vendors.ChatApiEngine and doxa.codex.CodexEngine
+        never start a turn of their own (their ``_on_peer_frame`` only
+        queues an event for the pane; nothing in either calls ``send``),
+        so False is the measured answer for them, not a guess."""
+        if self._turn_task is not None and not self._turn_task.done():
+            return True
+        return bool(getattr(self.engine, "turn_running", False))
+
+    def _queued_count(self) -> int:
+        """How many prompts are waiting, across BOTH queues -- see
+        :meth:`_running` for why there are two.
+
+        A prompt reaches the engine's queue rather than this one whenever
+        the engine was already busy with a turn the daemon did not start:
+        a peer message arriving mid-turn queues there, and so does a
+        `prompt` frame that arrives while a peer-started turn is running
+        (the daemon hands it to ``engine.send``, which enqueues it and
+        yields ``prompt_queued``)."""
+        counter = getattr(self.engine, "queued_count", None)
+        engine_queued = int(counter()) if callable(counter) else 0
+        return len(self._prompt_queue) + engine_queued
+
+    async def _engine_queue(self) -> "list[dict[str, str]]":
+        """The ENGINE's own queued prompts, or an empty list for an engine
+        that has no queue. Delegation rather than one shared queue: the
+        two are filled by different code paths (this class's
+        ``_handle_prompt``, and the engine's own peer/advance paths) and
+        merging them would mean rewriting ``SessionEngine.send``'s
+        queueing contract, which is out of scope for a fix that only has
+        to stop `/queue` from hiding half the answer."""
+        lister = getattr(self.engine, "list_queue", None)
+        if lister is None:
+            return []
+        try:
+            return list(await lister())
+        except Exception:  # noqa: BLE001 -- a listing failure hides prompts,
+            return []      # it must never break the RPC that asked
 
     def _status(self) -> dict:
         assert self.engine is not None
@@ -1366,8 +1435,17 @@ class SessionDaemon:
             # to go quiet would call that session idle while it was
             # answering another agent. See doxa.fleet's quiescence wait,
             # which is the caller this exists for.
-            "running": self._turn_task is not None and not self._turn_task.done(),
-            "queued": len(self._prompt_queue),
+            #
+            # BOTH sides, since issue #39, and that is a defect fix: this
+            # daemon's _turn_task is only the turns the daemon started.
+            # A peer-started turn runs on the ENGINE's own task
+            # (SessionEngine._on_peer_frame -> _run_queued_turn), and a
+            # prompt submitted while one is running lands in the ENGINE's
+            # PromptQueue, not this one -- so a session busy answering
+            # another agent used to report running=false, queued=0 and
+            # doxa.fleet's is_quiet called it idle.
+            "running": self._running(),
+            "queued": self._queued_count(),
             # Whether this session has memory. Published for the same
             # reason bypass_armed is: a client cannot work it out for
             # itself (it did not build the argv), and a status bar that
