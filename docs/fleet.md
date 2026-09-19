@@ -123,7 +123,15 @@ reports no cost are not bounded at all.** `codex`, `deepseek` and `glm`
 report token counts and no dollars, so their spend reads as `$0.00` and
 their share is never enforced. `budget_note` names them in the line it
 prints before the run rather than letting the total look like it covers
-the whole pool.
+the whole pool. Since 1.13.0 those slots really do run on their engine
+(the daemon takes `--engine`, and `DaemonBackend.spawn` passes the slot's),
+so the note describes sessions that exist. A slot whose engine refuses to
+start — a vendor key missing from the run's environment — is recorded
+failed with the reason in the manifest and the run goes on. Measured:
+`--pool deepseek@1,glm@1,codex@1 -n 5 --seed 1` dealt 2/2/1, all five
+spawned, 17 messages crossed vendors, quiesced in 37 s, nothing leaked; the
+Codex slots received but did not send, because a Codex model has no
+`peer_send` yet.
 
 ### Nothing hangs, nothing is left behind
 

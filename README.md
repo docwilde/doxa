@@ -95,9 +95,10 @@ spend, fake account numbers. See
   flashed on the status bar. An arriving message *starting* a turn is a
   second switch, also off.
 - **[A fleet, measured rather than managed.](docs/fleet.md)** `doxa-fleet`
-  spawns N sessions on one prompt at one moment, deals models from a pool,
-  runs K without memory, splits a run budget, waits for quiet and tears
-  down. Clean to N=64; every slot still runs the Claude engine (#39).
+  spawns N sessions on one prompt at one moment, deals engines and models
+  from a pool, runs K without memory, splits a run budget, waits for quiet
+  and tears down. Clean to N=64 on Claude; a mixed pool of Codex, DeepSeek
+  and GLM ran, messaged across vendors and quiesced (see [Status](#status)).
 - **[Peers on another machine, once you say so.](docs/fleet.md)** A tailnet
   bridge behind `tailscale serve` puts a second box's sessions in the
   roster, refused until `remote_enabled` is on and an allow-list names you.
@@ -324,20 +325,33 @@ from `plugin-api` and is easy to confuse with it — it adopts *your own*
 Claude Code plugins (commands, skills, agents; never hooks or MCP servers)
 into the spawned CLI.
 
-**Not built, not specified.** No orchestration in any form: nothing
-schedules sessions, assigns work between them or supervises a fleet, and
-no document proposes that it should — the one plan about multi-agent
-structure asks whether structure appears when nobody imposes it. What
-exists instead is a **measurement harness**. `uv run python -m doxa.fleet`
-spawns N sessions, hands every one the byte-identical prompt at the same
-moment, waits for the run to go quiet, collects the ledger and tears it
-all down — into a `DOXA_HOME` and a peer registry of the run's own, so the
-roster and the ledger are the run's rather than the machine's. It deals
-models from a pool, will run K of the N with memory off, and reports the
-residual spread between first and last dispatch rather than claiming
-simultaneity. It assigns nobody anything — [`docs/fleet.md`](docs/fleet.md)
-has the whole of it, including what the harness itself could not do at 128
-sessions.
+**The fleet is a measurement harness, not an orchestrator.** Nothing
+schedules sessions, assigns work between them or supervises them, and no
+document proposes that it should — the one plan about multi-agent
+structure asks whether structure appears when nobody imposes it
+([`docs/plans/emergent-organization.md`](docs/plans/emergent-organization.md)).
+What `doxa-fleet` does: spawns N daemons into a `DOXA_HOME` and a peer
+registry of the run's own, hands every one the byte-identical prompt at
+the same moment, deals each slot an engine and model from `--pool
+engine:model@weight` and runs it on that engine, runs `--memory-off K` of
+them without memory, arms the peer tools for the run, splits
+`--run-budget` per session, waits for the run to go quiet, tears it all
+down and reports what leaked. The manifest carries the seed, the
+assignment and the dispatch spread; the ledger carries every message.
+
+Measured on 1.13.0: `--pool deepseek@1,glm@1,codex@1 -n 5` dealt two
+Codex, two DeepSeek and one GLM slot; all five spawned on their engine,
+exchanged 17 messages (DeepSeek and GLM sent `ready` to every peer and
+`ack` back across vendors; the Codex slots received six and sent none),
+quiesced in 37 s and left no process behind. Three limits, all stated by
+the harness itself: a Codex model has no `peer_send` yet (it reaches
+DOXA's tools through an MCP sidecar that carries no delivery seam), so a
+Codex slot is receive-only; slots on codex, deepseek or glm report no
+dollar figure and are not bounded by `--run-budget` (`--allow-unbudgeted`
+is the switch that admits that); and a run's root must be a short path,
+because every session's socket lives under it and `AF_UNIX` allows 108
+bytes. [`docs/fleet.md`](docs/fleet.md) has the whole of it, including
+what the harness could not do at 128 sessions.
 
 **`/msg` is no longer the only way a message is sent — this README said
 otherwise until now.** A human typing `/msg` was the whole mechanism, and
