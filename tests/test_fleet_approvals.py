@@ -523,3 +523,34 @@ def test_the_peer_allowlist_is_pinned_to_the_names_the_model_actually_sees():
     known = set(operators_mod.OPERATORS) | set(operators_mod.WRITE_OPERATORS)
     for name in fleet_mod.PEER_TOOLS:
         assert operators_mod.registry_name(name) in known
+
+
+async def test_a_shell_run_writes_the_parked_ask_out_while_it_is_still_parked(
+    short_root,
+):
+    """The TUI has a manifest heartbeat; ``doxa-fleet`` from a shell writes
+    the manifest once, at the end. Without a write when an ask parks, a run
+    blocked on one would be unreadable from outside for exactly as long as
+    it was blocked -- the window a reader needs it most. So the quiescence
+    loop writes on CHANGE, and this is the file a watcher then reads."""
+    asks = {0: [_permission_ask("r1", "Bash")]}
+    backend = ScriptedBackend(asks)
+    spec = _spec(
+        short_root, approval_grace_s=30.0, quiescence_timeout_s=10.0,
+    )
+    run = fleet_mod.FleetRun(spec, backend, force=True)
+    task = asyncio.ensure_future(run.run())
+    try:
+        text = ""
+        for _ in range(200):
+            await asyncio.sleep(0.05)
+            snapshot = fleetview_mod.RunSnapshot.read(spec.run_root)
+            text = fleetview_mod.render(snapshot)
+            if "WAITING ON YOU" in text:
+                break
+        assert "WAITING ON YOU" in text, text
+        assert "Bash" in text
+        assert "/fleet attach 0" in text
+    finally:
+        run.request_stop()
+        await task

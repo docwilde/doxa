@@ -2522,6 +2522,11 @@ class FleetRun:
         deadline = None if timeout is None else time.monotonic() + timeout
         quiet_since: "float | None" = None
         started = time.monotonic()
+        # None, not the current signature: an ask can be parked before
+        # this phase is even entered (the drain runs from arm time), and
+        # seeding with it would make that ask the baseline -- never a
+        # change, never written out, invisible for as long as it blocks.
+        parked: "tuple[tuple[int, str], ...] | None" = None
         while deadline is None or time.monotonic() < deadline:
             if self.stopping():
                 # An operator's stop is NOT a quiescence: the run ends
@@ -2561,6 +2566,19 @@ class FleetRun:
             elif time.monotonic() - quiet_since >= self.spec.quiet_dwell_s:
                 self.report.quiesced = True
                 break
+            # A PARKED ASK IS NEWS, and this is the only loop running
+            # while it happens. The TUI has its own manifest heartbeat
+            # (doxa.fleetsession), but `doxa-fleet` from a shell writes
+            # the manifest once, at the end -- so without this a run
+            # blocked on a permission ask would be unreadable from
+            # outside for exactly as long as it was blocked, which is the
+            # window a reader needs it most. Written only when the set
+            # CHANGES, so a quiet run still writes the file once.
+            changed = self._parked_signature()
+            if changed != parked:
+                parked = changed
+                with contextlib.suppress(Exception):
+                    self.write_manifest()
             if await self._sleep_or_stop(self.spec.poll_interval_s):
                 break
         else:
@@ -2578,6 +2596,17 @@ class FleetRun:
                 slot.phase = PHASE_QUIET
         self.report.quiescence_s = time.monotonic() - started
         return self.report.quiesced
+
+    def _parked_signature(self) -> "tuple[tuple[int, str], ...]":
+        """Which asks are open, right now, across the run.
+
+        A value rather than a count: an ask answered and another parked in
+        the same poll interval is a change a count would miss."""
+        return tuple(
+            (slot.index, req_id)
+            for slot in self.slots
+            for req_id in sorted(slot.pending_asks)
+        )
 
     # -- phase 5: teardown ---------------------------------------------
 
