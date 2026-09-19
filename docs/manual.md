@@ -132,9 +132,11 @@ long-lived process for the whole session; a Codex session is **one `codex
 exec --json` process per turn**, the first starting a thread and every
 later one running `codex exec resume <id>`. The prompt goes in on stdin
 rather than argv, because a pasted prompt can be megabytes and `ARG_MAX`
-is not. Because no daemon hosts it, a Codex session lives in the TUI
-process: there is nothing to detach from, the `⌁ session` chip is absent,
-and `ctrl+q` ends the session rather than detaching it.
+is not. Since v1.13.0 the daemon hosts it like any other engine
+(`doxa.daemon --engine codex`), so a Codex session detaches, reattaches
+with `doxa attach` and survives the terminal closing. `doxa --in-process
+--engine codex` still runs it inside the TUI, and there `ctrl+q` ends the
+session rather than detaching it.
 
 What Codex does not report, DOXA does not paint. Measured against
 codex-cli 0.144.4:

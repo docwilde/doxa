@@ -21,7 +21,7 @@ Protocol (all frames are single JSON lines, <= MAX_FRAME_BYTES):
 
 server -> client
   {"type": "hello", "proto": 1, "doxa": <version>, "session_id", "model",
-   "cwd", "next_seq"}                       -- version-stamped, sent on connect
+   "engine", "cwd", "next_seq"}             -- version-stamped, sent on connect
   {"type": "event", "seq": N, "turn": <id|null>,
    "event": {"type": ..., "data": {...}}}   -- one EngineEvent, live or replayed
   {"type": "reply", "id": N, "ok": bool, ...}  -- response to prompt/call
@@ -93,6 +93,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
+from . import engines as engines_mod
 from . import notify as notify_mod
 from . import worktrees as worktrees_mod
 from .engine import (
@@ -119,6 +120,38 @@ RING_CAPACITY = 512
 TURN_EVENT_TYPES = frozenset(
     {"turn_started", "text_delta", "reasoning_delta", "tool_call", "tool_result", "turn_done"}
 )
+
+#: The RPCs that need a memory surface only ``doxa.engine.SessionEngine``
+#: has, mapped to the engine member each one calls.
+#:
+#: MEASURED (issue #39), by building a ChatApiEngine and a CodexEngine and
+#: asking ``hasattr`` for every member this module calls: these nine are
+#: exactly the ones neither has. Everything else the daemon reaches for --
+#: including ``belief_count`` and ``last_ctx_percentage``, which the
+#: pickers' absence might suggest are missing too -- exists on all three
+#: engines, so the RPCs that use them need no guard and have none.
+#:
+#: doxa.engines' own module docstring explains WHY the gap exists: these
+#: are lore_core queries with no engine in them, living on SessionEngine
+#: because that is where they were written. ``EngineCapabilities.
+#: lore_pickers`` is the declaration; this table is what the daemon does
+#: about it -- a typed reply the client turns into a message, never an
+#: AttributeError out of a dispatch arm.
+MEMORY_RPC_MEMBERS: "dict[str, str]" = {
+    "beliefs": "list_beliefs",
+    "belief_evidence": "belief_evidence",
+    "belief_action_state": "belief_action_state",
+    "belief_outcome": "record_belief_outcome",
+    "retract_belief": "retract_belief",
+    "lore_write": "lore_write_state",
+    "approve_pending": "approve_pending",
+    "reject_pending": "reject_pending",
+    "pending": "list_pending",
+}
+
+#: What an engine without that surface answers with. One sentence, naming
+#: the engine, so the picker that prints it says which session it asked.
+NO_MEMORY_SURFACE = "engine has no memory surface"
 
 
 class EventRing:
@@ -309,11 +342,18 @@ def daemon_socket_path(session_id: str) -> Path:
 
 
 class SessionDaemon:
-    """One detachable session: hosts the SessionEngine, serves the socket.
+    """One detachable session: hosts an engine, serves the socket.
 
     ``engine_factory(cwd, session_id, daemon_socket)`` builds the engine --
     injectable so the test suite runs the whole daemon over a fake SDK
-    client. The default builds a real SessionEngine.
+    client. The default is :meth:`_build_engine`, which builds whichever
+    engine ``engine_id`` names through the :mod:`doxa.engines` registry.
+
+    NOT a SessionEngine host specifically, since v1.13.0 (issue #39). The
+    RPC surface below is still the one SessionEngine grew, and a second
+    engine does not implement all of it -- see :data:`MEMORY_RPC_MEMBERS`,
+    which answers the calls it cannot serve with a typed error instead of
+    an AttributeError.
     """
 
     def __init__(
@@ -322,7 +362,7 @@ class SessionDaemon:
         model: str | None = None,
         session_id: str | None = None,
         linger_secs: float = DEFAULT_LINGER_SECS,
-        engine_factory: Callable[[str, str, str], SessionEngine] | None = None,
+        engine_factory: "Callable[[str, str, str], Any] | None" = None,
         ring_capacity: int = RING_CAPACITY,
         base_branch: str | None = None,
         resume: str | None = None,
@@ -330,6 +370,7 @@ class SessionDaemon:
         parent_session_id: str | None = None,
         task: str | None = None,
         lore: "bool | None" = None,
+        engine_id: "str | None" = None,
     ) -> None:
         self.cwd = str(cwd or os.getcwd())
         self.model = model
@@ -375,17 +416,19 @@ class SessionDaemon:
         # message ledger cannot see, and the experiment's whole
         # measurement is the communication structure.
         self.lore = lore
+        # WHICH engine this daemon hosts (issue #39). Argv-borne like
+        # everything above it, and for the same mechanical reason: a
+        # daemon is a separate process and its command line is the only
+        # channel that reaches this constructor. Normalised here so
+        # `--engine ""` and `--engine "  "` both mean "the operator named
+        # nothing", exactly as doxa.engines.get reads them.
+        self.engine_id = (
+            (engine_id or "").strip().lower() or engines_mod.DEFAULT_ENGINE_ID
+        )
         self.linger_secs = linger_secs
         self.socket_path = daemon_socket_path(self.session_id)
-        self._engine_factory = engine_factory or (
-            lambda cwd, sid, dsock: SessionEngine(
-                cwd=cwd, model=self.model, session_id=sid, daemon_socket=dsock,
-                resume=self.resume, spawn_depth=self.spawn_depth,
-                parent_session_id=self.parent_session_id,
-                lore=self.lore,
-            )
-        )
-        self.engine: SessionEngine | None = None
+        self._engine_factory = engine_factory or self._build_engine
+        self.engine: Any = None
         self.ring = EventRing(ring_capacity)
         self.ready = asyncio.Event()
         self._done = asyncio.Event()
@@ -416,6 +459,49 @@ class SessionDaemon:
         self._worktree_done = False
 
     # -- lifecycle ---------------------------------------------------
+
+    def _build_engine(self, cwd: str, sid: str, dsock: str) -> Any:
+        """The default ``engine_factory``: whichever engine
+        :attr:`engine_id` names.
+
+        Claude keeps its LITERAL construction rather than going through
+        the registry's ``new_session``, and that is deliberate: this call
+        is the one place ``daemon_socket``, ``resume``, ``spawn_depth``,
+        ``parent_session_id`` and ``lore`` all reach a SessionEngine, and
+        routing it through a ``**kwargs`` hop would make losing one of
+        them a silent behaviour change rather than a TypeError.
+
+        A second engine is built through :func:`doxa.engines.get`, with
+        the same session vocabulary. Every provider's ``new_session``
+        takes keyword arguments only and ignores what its engine has no
+        use for (:class:`doxa.engines.EngineProvider`), so the argument
+        list is DOXA's, not any one engine's -- but two of them are
+        ignored by the vendor engines rather than honoured, and pretending
+        otherwise is what this comment exists to prevent:
+
+        * ``lore`` -- doxa.vendors.ChatApiEngine and doxa.codex.CodexEngine
+          have no memory switch at all, so ``--no-lore`` does not reach
+          them. They always have the belief store; :meth:`_status`
+          therefore reports ``lore: true`` for them, which is what the
+          session actually does.
+        * ``daemon_socket`` -- threaded, and load-bearing: the registry
+          entry's ``daemon_socket`` field IS how :func:`spawn_daemon`
+          learns this daemon is ready and how ``doxa attach`` finds it.
+          An engine that dropped it would register as a session nothing
+          could ever attach to."""
+        if self.engine_id == engines_mod.DEFAULT_ENGINE_ID:
+            return SessionEngine(
+                cwd=cwd, model=self.model, session_id=sid, daemon_socket=dsock,
+                resume=self.resume, spawn_depth=self.spawn_depth,
+                parent_session_id=self.parent_session_id,
+                lore=self.lore,
+            )
+        return engines_mod.get(self.engine_id).new_session(
+            cwd=cwd, model=self.model, session_id=sid, daemon_socket=dsock,
+            resume=self.resume, spawn_depth=self.spawn_depth,
+            parent_session_id=self.parent_session_id,
+            lore=self.lore,
+        )
 
     def _apply_worktree(self) -> None:
         """Substitute ``self.cwd`` for its own worktree BEFORE the engine
@@ -470,6 +556,21 @@ class SessionDaemon:
         self.engine = self._engine_factory(
             self.cwd, self.session_id, str(self.socket_path)
         )
+        # --no-lore on an engine that has no memory switch. Said out loud,
+        # in the one channel a headless session always has, rather than
+        # swallowed: doxa.vendors.ChatApiEngine and doxa.codex.CodexEngine
+        # carry no `lore` attribute and always have the belief store, so
+        # the flag reaches them and does nothing. _status therefore reports
+        # lore: true for such a session -- which is what it does -- and a
+        # fleet manifest that says an agent ran with memory off must be
+        # read against this line.
+        if self.lore is False and not hasattr(self.engine, "lore"):
+            print(
+                f"doxa: --no-lore has no effect on the "
+                f"{engines_mod.engine_id_of(self.engine)} engine -- it has "
+                f"no memory switch; this session has memory",
+                file=sys.stderr,
+            )
         await self.engine.start()
         if self.engine.peer_host is None:
             # The registry entry IS this daemon's discoverability -- without
@@ -751,6 +852,16 @@ class SessionDaemon:
             "doxa": __version__,
             "session_id": self.session_id,
             "model": self.engine.model,
+            # WHICH engine is behind this socket (issue #39). Beside
+            # "model" because it is the same kind of answer and needed at
+            # the same moment: a client that painted the belief pickers
+            # for a session whose engine has none would be offering a
+            # surface the daemon answers with NO_MEMORY_SURFACE. Read off
+            # the live handle (doxa.engines.engine_id_of), not off this
+            # daemon's argv -- an injected engine_factory is what the
+            # suite uses, and the handle is the thing that is actually
+            # here.
+            "engine": engines_mod.engine_id_of(self.engine),
             # Beside "model" for the same reason it is: both are answers
             # the client needs before it paints, and EngineClient.attach
             # runs its first status refresh under contextlib.suppress --
@@ -905,6 +1016,23 @@ class SessionDaemon:
         req_id = frame.get("id")
         method = frame.get("method")
         params = frame.get("params") or {}
+        # The memory surface, checked ONCE here rather than nine times
+        # below: every arm in MEMORY_RPC_MEMBERS calls a member only
+        # SessionEngine has, and an engine that lacks it gets a typed
+        # reply -- the same {"ok": false, "error": ...} shape a refused
+        # peer send or a bad mode name already produces, which every
+        # EngineClient wrapper for these calls already turns into an
+        # EngineClientError or an error string. `status` is deliberately
+        # NOT in that table: it must answer for every engine.
+        member = MEMORY_RPC_MEMBERS.get(str(method))
+        if member is not None and getattr(self.engine, member, None) is None:
+            await self._reply(
+                writer, req_id, ok=False,
+                error=f"{NO_MEMORY_SURFACE}: "
+                      f"{engines_mod.engine_id_of(self.engine)} has no "
+                      f"{member}()",
+            )
+            return
         if method == "status":
             await self._reply(writer, req_id, ok=True, status=self._status())
         elif method == "peers":
@@ -1193,6 +1321,10 @@ class SessionDaemon:
         return {
             "session_id": self.session_id,
             "model": self.engine.model,
+            # Same field, same source, as the hello frame's -- a client
+            # that reconnects to a daemon mid-life learns it from here
+            # rather than only at connect.
+            "engine": engines_mod.engine_id_of(self.engine),
             # v0.42.0: a REATTACHING client has to be told the truth about
             # this one before it paints anything. Every other field here is
             # a number that is merely stale until the next refresh; a mode
@@ -1213,7 +1345,7 @@ class SessionDaemon:
             "account": getattr(self.engine, "account", None) or {},
             "lore_root": getattr(self.engine, "lore_root", None),
             "total_cost_usd": self.engine.total_cost_usd,
-            "ctx_percentage": self.engine.last_ctx_percentage,
+            "ctx_percentage": getattr(self.engine, "last_ctx_percentage", None),
             # Item X (ctx absolute): the absolute halves of that same
             # reading, so a reattaching client's very first status refresh
             # has them without waiting for a turn to end.
@@ -1267,6 +1399,7 @@ def spawn_daemon(
     task: str | None = None,
     env: "dict[str, str] | None" = None,
     lore: bool = True,
+    engine: "str | None" = None,
 ) -> "tuple[str, str]":
     """Spawn a detached daemon for ``cwd`` and wait for its registry entry.
 
@@ -1299,6 +1432,15 @@ def spawn_daemon(
     before v1.3.0, which is the same discipline the bypass arming flag
     follows -- a new capability must not change the command line of every
     session that does not use it.
+
+    ``engine`` (issue #39) names which engine the daemon hosts, and is
+    appended ONLY when it says something other than the default -- the
+    same rule every flag above it follows, so a Claude session's argv is
+    byte-identical to the one this function built before the daemon could
+    host anything else. The id is NOT validated here: the child validates
+    it through :func:`doxa.engines.get` and exits 2 with the registry's
+    listing, and a second copy of that check in this process would be a
+    second place for the registry's contents to be described.
 
     ``env`` replaces the child's whole environment instead of inheriting
     this process's, and exists for :mod:`doxa.fleet`: a fleet run gives
@@ -1347,6 +1489,10 @@ def spawn_daemon(
     # capability existed.
     if not lore:
         cmd += ["--no-lore"]
+    # Same discipline, same reason (see the docstring): the default
+    # engine adds nothing to the command line.
+    if engine and engine.strip().lower() != engines_mod.DEFAULT_ENGINE_ID:
+        cmd += ["--engine", engine.strip().lower()]
     with open(log_path, "ab") as log:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
@@ -1409,6 +1555,7 @@ async def _amain(args: argparse.Namespace) -> int:
         parent_session_id=args.parent_session_id,
         lore=args.lore,
         task=args.task,
+        engine_id=args.engine,
     )
     install_signal_handlers(daemon)
     await daemon.serve()
@@ -1460,7 +1607,20 @@ def main(argv: "list[str] | None" = None) -> int:
                              "by itself, before anyone attaches. The "
                              "provenance marker is prepended by the daemon, "
                              "not by whoever passed this")
+    parser.add_argument("--engine", default=engines_mod.DEFAULT_ENGINE_ID,
+                        help="issue #39: which engine this daemon hosts "
+                             "(doxa.engines; default %(default)s). Omitted "
+                             "means the default, which is what every "
+                             "session got before the daemon could host a "
+                             "second engine")
     args = parser.parse_args(argv)
+    try:
+        engines_mod.get(args.engine)
+    except KeyError as exc:
+        # parser.error, not a print-and-return: an unknown engine is a
+        # USAGE error, it exits 2 like every other one, and the message
+        # carries the registry's own listing rather than a copy of it.
+        parser.error(str(exc.args[0]))
     return asyncio.run(_amain(args))
 
 

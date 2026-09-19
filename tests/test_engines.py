@@ -161,7 +161,8 @@ def test_codex_capability_map_is_the_measured_one():
     assert caps.mcp_tools is False        # verified reachable, not taken
     assert caps.permission_modes is False
     assert caps.tool_gate is False
-    assert caps.detachable is False
+    # True since issue #39: the daemon takes --engine and hosts this one.
+    assert caps.detachable is True
     assert caps.peer_messaging is True    # DOXA's own layer, engine-free
 
 

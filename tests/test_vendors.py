@@ -594,11 +594,17 @@ async def test_permission_modes_is_false_and_the_setter_refuses_by_name(tmp_path
     assert VENDOR_CAPABILITIES.permission_modes is False
 
 
-async def test_detachable_is_false_on_the_handle_as_well_as_the_map(tmp_path):
-    """The attach chip reads the attribute, not the map, so both have to
-    agree -- no daemon hosts this engine."""
+async def test_the_handle_is_not_detachable_but_the_engine_is(tmp_path):
+    """Two different claims, and after issue #39 they differ.
+
+    The MAP says the daemon can host this engine -- it takes an --engine
+    now. The HANDLE's attribute is the attach chip's predicate and is about
+    this object: a ChatApiEngine the TUI holds directly is one running
+    in-process, and there is nothing to detach from it. (When a daemon
+    hosts it, the TUI holds an EngineClient instead, which carries
+    detachable = True.)"""
     assert engine(tmp_path).detachable is False
-    assert VENDOR_CAPABILITIES.detachable is False
+    assert VENDOR_CAPABILITIES.detachable is True
 
 
 def test_lore_pickers_is_false_and_the_methods_are_genuinely_absent(tmp_path):

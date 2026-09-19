@@ -38,7 +38,7 @@ from doxa import daemon as daemon_mod
 from doxa import worktrees as worktrees_mod
 from doxa.client import EngineClient, EngineClientError
 from doxa.daemon import PROTOCOL_VERSION, EventRing, SessionDaemon
-from doxa.engine import SessionEngine
+from doxa.engine import EngineEvent, SessionEngine
 from tests.fakes import factory_with_script
 
 TURN_SCRIPT = [
@@ -1685,3 +1685,336 @@ async def test_belief_actions_cross_the_socket_one_belief_at_a_time(
             assert reply.get("ok") is False
             assert "unknown method" in str(reply.get("error")), method
         await client.finalize()
+
+
+# =======================================================================
+# Issue #39 -- the daemon hosts any registered engine, not only Claude
+# =======================================================================
+
+
+class _StubHost:
+    """Just enough peers.PeerHost for SessionDaemon.serve(): a presence
+    entry it can count clients against and stop. The daemon treats a None
+    peer_host as fatal (the registry entry IS the session's
+    discoverability), so a stub engine has to have one."""
+
+    def __init__(self) -> None:
+        self.clients = 0
+        self.stopped = False
+
+    def set_client_count(self, n: int) -> None:
+        self.clients = n
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+    def list_peers(self) -> list:
+        return []
+
+
+class _StubEngine:
+    """A second engine, reduced to what doxa.daemon actually calls.
+
+    Deliberately WITHOUT the nine members in
+    ``daemon_mod.MEMORY_RPC_MEMBERS`` -- that absence is the thing under
+    test, and it is the same absence doxa.vendors.ChatApiEngine and
+    doxa.codex.CodexEngine were measured to have."""
+
+    engine_id = "deepseek"
+
+    def __init__(self, *, cwd, model=None, session_id=None, daemon_socket=None,
+                 **_ignored):
+        self.cwd = cwd
+        self.model = model or "deepseek-chat"
+        self.session_id = session_id
+        self.daemon_socket = daemon_socket
+        self.total_cost_usd = 0.0
+        self.last_ctx_percentage = None
+        self.peer_host = None
+        self.peer_error = None
+        self.started = False
+        self._oob: asyncio.Queue = asyncio.Queue()
+
+    async def start(self):
+        self.started = True
+        self.peer_host = _StubHost()
+        return EngineEvent("session_started", {
+            "session_id": self.session_id, "model": self.model, "cwd": self.cwd,
+        })
+
+    async def finalize(self):
+        return EngineEvent("session_done", {"indexed": 0})
+
+    async def send(self, prompt):
+        yield EngineEvent("turn_started", {"prompt": prompt})
+        yield EngineEvent("turn_done", {"is_error": False})
+
+    async def peer_events(self):
+        while True:
+            yield await self._oob.get()
+
+    async def set_model(self, model):
+        self.model = model
+        return self.model
+
+    async def set_permission_mode(self, mode):
+        raise RuntimeError("the deepseek engine has no permission modes")
+
+    async def answer_needs_input(self, req_id, answer):
+        return False
+
+    async def context_usage(self):
+        return None
+
+    async def send_peer_message(self, target_prefix, text):
+        raise RuntimeError("no peers here")
+
+    def usage_summary(self):
+        return {"input_tokens": 0, "output_tokens": 0}
+
+    def belief_count(self):
+        return 3
+
+    def disabled_tools(self):
+        return []
+
+    def list_peers(self):
+        return []
+
+
+class _StubProvider:
+    """An EngineProvider registered for the duration of one test, so the
+    daemon really does resolve its engine through doxa.engines rather than
+    through an injected factory."""
+
+    def engine_id(self) -> str:
+        return "deepseek"
+
+    def engine_display_name(self) -> str:
+        return "DeepSeek (stub)"
+
+    def supports(self):
+        from doxa.vendors import VENDOR_CAPABILITIES
+
+        return VENDOR_CAPABILITIES
+
+    def new_session(self, **kwargs):
+        return _StubEngine(**kwargs)
+
+
+@pytest.fixture
+def stub_deepseek(monkeypatch):
+    """Put a stub provider in the registry under the real `deepseek` id and
+    put the real one back afterwards -- no network, no credential, and the
+    daemon's own lookup path is what is exercised."""
+    from doxa import engines as engines_mod
+
+    engines_mod.available()  # force the lazy built-in registration first
+    saved = dict(engines_mod._REGISTRY)
+    engines_mod.register(_StubProvider())
+    yield
+    engines_mod._REGISTRY.clear()
+    engines_mod._REGISTRY.update(saved)
+
+
+@contextlib.asynccontextmanager
+async def running_vendor_daemon(tmp_path, monkeypatch, engine_id="deepseek"):
+    """A served SessionDaemon whose engine came from the REGISTRY -- no
+    engine_factory injected, so _build_engine's non-Claude arm is the code
+    under test."""
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    daemon = SessionDaemon(
+        cwd=str(tmp_path), linger_secs=30.0, engine_id=engine_id,
+    )
+    serve_task = asyncio.create_task(daemon.serve())
+    await asyncio.wait_for(daemon.ready.wait(), 10)
+    try:
+        yield daemon, serve_task
+    finally:
+        if not serve_task.done():
+            with contextlib.suppress(Exception):
+                await daemon._shutdown("test teardown")
+                await asyncio.wait_for(serve_task, 5)
+
+
+@pytest.mark.asyncio
+async def test_a_daemon_started_on_a_second_engine_hosts_that_engine(
+    tmp_path, monkeypatch, stub_deepseek,
+):
+    """The headline of issue #39: --engine deepseek really runs deepseek.
+
+    Before this, doxa.daemon built a SessionEngine unconditionally and a
+    fleet slot dealt `deepseek:...` ran Claude with a deepseek model name.
+    """
+    async with running_vendor_daemon(tmp_path, monkeypatch) as (daemon, _):
+        assert isinstance(daemon.engine, _StubEngine)
+        assert daemon.engine.started
+        # The socket is threaded through, which is what puts the
+        # daemon_socket marker on the registry entry `doxa attach` reads.
+        assert daemon.engine.daemon_socket == str(daemon.socket_path)
+
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        # The hello frame names the engine, so a client knows before it
+        # paints anything.
+        assert client.engine_id == "deepseek"
+        assert client.engine_capabilities.lore_pickers is False
+        assert client.engine_capabilities.detachable is True
+
+        status = await client.refresh_status()
+        assert status["engine"] == "deepseek"
+        assert status["model"] == "deepseek-chat"
+        assert status["running"] is False
+        assert status["queued"] == 0
+        assert status["lore"] is True
+        assert status["belief_count"] == 3
+        await client.finalize()
+
+
+@pytest.mark.asyncio
+async def test_no_lore_on_an_engine_without_a_memory_switch_says_so(
+    tmp_path, monkeypatch, stub_deepseek, capsys,
+):
+    """--no-lore reaches an engine that has no memory switch and does
+    nothing. Said out loud in the daemon's log rather than swallowed, and
+    the status reply still reports what the session actually has."""
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    daemon = SessionDaemon(
+        cwd=str(tmp_path), linger_secs=30.0, engine_id="deepseek", lore=False,
+    )
+    serve_task = asyncio.create_task(daemon.serve())
+    await asyncio.wait_for(daemon.ready.wait(), 10)
+    try:
+        assert "--no-lore has no effect" in capsys.readouterr().err
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        assert (await client.refresh_status())["lore"] is True
+        await client.finalize()
+    finally:
+        if not serve_task.done():
+            with contextlib.suppress(Exception):
+                await daemon._shutdown("test teardown")
+                await asyncio.wait_for(serve_task, 5)
+
+
+@pytest.mark.asyncio
+async def test_a_turn_runs_on_the_second_engine(tmp_path, monkeypatch, stub_deepseek):
+    async with running_vendor_daemon(tmp_path, monkeypatch) as (daemon, _):
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        types = [ev.type async for ev in client.send("hello")]
+        assert types == ["turn_started", "turn_done"]
+        await client.finalize()
+
+
+@pytest.mark.asyncio
+async def test_a_lore_rpc_an_engine_cannot_serve_answers_with_a_typed_error(
+    tmp_path, monkeypatch, stub_deepseek,
+):
+    """Every one of the nine, as an ok=False reply naming the member --
+    never an AttributeError out of a dispatch arm, and never an empty list
+    that reads as "this session has no beliefs"."""
+    async with running_vendor_daemon(tmp_path, monkeypatch) as (daemon, _):
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        for method, member in daemon_mod.MEMORY_RPC_MEMBERS.items():
+            reply = await client._call(method)
+            assert reply.get("ok") is False, method
+            assert daemon_mod.NO_MEMORY_SURFACE in str(reply.get("error")), method
+            assert member in str(reply.get("error")), method
+        # And the client wrappers turn that into an error the picker
+        # prints, rather than an empty picker.
+        with pytest.raises(EngineClientError, match=r"no memory surface"):
+            await client.list_beliefs()
+        with pytest.raises(EngineClientError, match=r"no memory surface"):
+            await client.list_pending()
+        assert "no memory surface" in str(await client.approve_pending("p1"))
+        await client.finalize()
+
+
+@pytest.mark.asyncio
+async def test_status_still_answers_for_an_engine_without_the_pickers(
+    tmp_path, monkeypatch, stub_deepseek,
+):
+    """The other half of the guard: `status` is NOT in the table, because
+    every client refreshes it every few seconds and a session that could
+    not report its model would be unusable."""
+    async with running_vendor_daemon(tmp_path, monkeypatch) as (daemon, _):
+        assert "status" not in daemon_mod.MEMORY_RPC_MEMBERS
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        for _ in range(3):
+            status = await client.refresh_status()
+            assert status["session_id"] == daemon.session_id
+        await client.finalize()
+
+
+def test_an_unknown_engine_exits_two_with_the_registrys_listing(capsys):
+    """One usage line, exit 2 -- the same shape every other bad flag gets,
+    and the message is doxa.engines' own listing rather than a copy."""
+    with pytest.raises(SystemExit) as excinfo:
+        daemon_mod.main(["--engine", "nonsense"])
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "unknown engine 'nonsense'" in err
+    assert "claude" in err and "deepseek" in err
+
+
+def test_the_default_engine_is_claude_and_needs_no_flag():
+    daemon = SessionDaemon(cwd="/tmp")
+    assert daemon.engine_id == "claude"
+    assert SessionDaemon(cwd="/tmp", engine_id="  ").engine_id == "claude"
+    assert SessionDaemon(cwd="/tmp", engine_id="CODEX").engine_id == "codex"
+
+
+# -- the argv, byte-identical for a session that does not use the flag --
+
+
+def _spawn_argv(monkeypatch, tmp_path, **kwargs) -> list:
+    """Run spawn_daemon far enough to capture the command line, without
+    letting a real daemon start."""
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    captured: list = []
+
+    class _Proc:
+        returncode = 0
+
+        def poll(self):
+            # "exited during startup" is the fastest way back out of the
+            # poll loop, and this test is about the argv, not the wait.
+            return 0
+
+    import subprocess as _subprocess
+
+    def fake_popen(cmd, **_kw):
+        captured.append(list(cmd))
+        return _Proc()
+
+    monkeypatch.setattr(_subprocess, "Popen", fake_popen)
+    with contextlib.suppress(RuntimeError):
+        daemon_mod.spawn_daemon(cwd=str(tmp_path), wait_secs=0.1, **kwargs)
+    assert captured, "spawn_daemon never built a command line"
+    argv = captured[0]
+    # The session id is minted per call, so two runs of the same arguments
+    # differ in exactly that one value and in nothing else. Normalised
+    # here so "byte-identical" means what it says about the FLAGS.
+    argv[argv.index("--session-id") + 1] = "<sid>"
+    return argv
+
+
+def test_spawn_daemon_appends_the_engine_only_when_it_says_something(
+    monkeypatch, tmp_path,
+):
+    """The same discipline --no-lore, --task and --spawn-depth follow: a
+    session that does not use the capability produces the argv this
+    function built before the capability existed."""
+    baseline = _spawn_argv(monkeypatch, tmp_path)
+    assert "--engine" not in baseline
+
+    assert _spawn_argv(monkeypatch, tmp_path, engine=None) == baseline
+    assert _spawn_argv(monkeypatch, tmp_path, engine="claude") == baseline
+    assert _spawn_argv(monkeypatch, tmp_path, engine="  CLAUDE  ") == baseline
+
+    glm = _spawn_argv(monkeypatch, tmp_path, engine="glm")
+    assert glm[len(baseline):] == ["--engine", "glm"]
+    assert glm[:len(baseline)] == baseline
