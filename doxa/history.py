@@ -397,14 +397,14 @@ def resumable_engine(session_id: str) -> "tuple[str | None, Path | None]":
     and it cannot be resumed", and the gate and the engine agree by
     construction instead of by coincidence.
 
-    The vendor answer names no engine id, and that is honest rather than
-    lazy: ``deepseek`` and ``glm`` write the same file under the same name
-    and nothing inside it says which wrote it. Guessing one would be this
-    issue's own bug with a different engine on the receiving end. So
-    ``(None, path)`` means "resumable, by a vendor engine this cannot
-    name" and the caller keeps whatever engine it already had; ``(None,
-    None)`` -- only from an empty id -- means there is nothing to go on at
-    all.
+    The vendor answer names the engine the file itself records
+    (``doxa.vendors.saved_engine``): ``deepseek`` and ``glm`` write the same
+    filename, so the envelope carries an ``engine`` field and the gate
+    reads it rather than guessing. A bare-array file from before the
+    envelope stays unnamed: ``(None, path)`` means "resumable, by a vendor
+    engine this cannot name" and the caller keeps whatever engine it
+    already had; ``(None, None)`` -- only from an empty id -- means there
+    is nothing to go on at all.
 
     Never raises, same contract as its caller: every question that cannot
     be answered is answered "not resumable"."""
@@ -424,7 +424,12 @@ def resumable_engine(session_id: str) -> "tuple[str | None, Path | None]":
         return engines_mod.CODEX_ENGINE_ID, None
     messages = _beside_transcript(sid, VENDOR_MESSAGES_SUFFIX)
     if messages:
-        return None, messages[0]
+        # A file written since the envelope names its engine; a bare array
+        # from an earlier release does not, and stays unnamed rather than
+        # guessed (see above).
+        from . import vendors as vendors_mod
+
+        return vendors_mod.saved_engine(messages[0]), messages[0]
     return engines_mod.CLAUDE_ENGINE_ID, cli_isolation_mod.cli_session_file(sid)
 
 

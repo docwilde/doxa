@@ -1129,9 +1129,19 @@ class ChatApiEngine:
         conversation. It is small (one turn's prose, not a transcript) and
         a turn already costs a network round trip, so the write is
         invisible beside it."""
+        # An envelope, not the bare array: the ``engine`` field is what
+        # lets ``doxa.history.resumable_engine`` reopen a DeepSeek session
+        # on DeepSeek rather than on whatever engine the window launched
+        # with -- the two vendors write the same filename and nothing else
+        # on disk tells them apart. ``_load_messages`` still reads the
+        # bare-array files earlier releases wrote.
         try:
             self.messages_path.write_text(
-                json.dumps(self.messages, ensure_ascii=False), encoding="utf-8"
+                json.dumps(
+                    {"engine": self.spec.engine_id, "messages": self.messages},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
             )
         except OSError:
             pass
@@ -2056,9 +2066,25 @@ def _load_messages(path: Path) -> "list[dict]":
         loaded = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError):
         return []
+    if isinstance(loaded, dict):  # the envelope, with its engine field
+        loaded = loaded.get("messages")
     if not isinstance(loaded, list):
         return []
     return [m for m in loaded if isinstance(m, dict) and m.get("role")]
+
+
+def saved_engine(path: Path) -> "str | None":
+    """The engine id a saved conversation names, or None for a bare-array
+    file from before the envelope (or an unreadable one). Read by
+    :func:`doxa.history.resumable_engine`, which must not guess between
+    the two vendors."""
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if isinstance(loaded, dict) and isinstance(loaded.get("engine"), str):
+        return loaded["engine"] or None
+    return None
 
 
 def _iso_now() -> str:

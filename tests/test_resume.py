@@ -205,12 +205,14 @@ def _codex_record(projects_dir: Path, session_id: str, thread_id: "str | None"):
     return path
 
 
-def _vendor_messages(projects_dir: Path, session_id: str):
-    """What ChatApiEngine._save_messages writes after every turn."""
+def _vendor_messages(projects_dir: Path, session_id: str, engine: "str | None" = None):
+    """What ChatApiEngine._save_messages writes after every turn: since the
+    envelope, `{"engine": ..., "messages": [...]}`; before it, the bare
+    array (`engine=None` writes that legacy shape)."""
     path = projects_dir / f"{session_id}.messages.json"
-    path.write_text(
-        json.dumps([{"role": "user", "content": "hi"}]), encoding="utf-8"
-    )
+    messages = [{"role": "user", "content": "hi"}]
+    body = messages if engine is None else {"engine": engine, "messages": messages}
+    path.write_text(json.dumps(body), encoding="utf-8")
     return path
 
 
@@ -250,15 +252,43 @@ def test_a_vendor_session_resumes_from_its_saved_messages(
     projects_dir, tmp_path
 ):
     """DeepSeek/GLM replay `<id>.messages.json`, so its presence is the
-    whole question. The engine ID stays unnamed on purpose: both vendors
-    write that file under that name and nothing in it says which did, and
-    guessing one would be this issue's own bug pointed at the other."""
+    whole question, and the envelope's `engine` field is the answer to
+    "which vendor": the two write the same filename, so the file says."""
+    path = _vendor_messages(projects_dir, RESUMED_ID, engine="glm")
+
+    assert history_mod.resumable_engine(RESUMED_ID) == ("glm", path)
+    assert history_mod.resume_state(RESUMED_ID, str(tmp_path)) == (
+        history_mod.RESUME_OK, "",
+    )
+
+
+def test_a_legacy_bare_array_messages_file_stays_unnamed(projects_dir, tmp_path):
+    """A file from before the envelope names no engine; guessing between
+    the two vendors would resume the conversation on the wrong provider,
+    so the caller keeps the engine it already had."""
     path = _vendor_messages(projects_dir, RESUMED_ID)
 
     assert history_mod.resumable_engine(RESUMED_ID) == (None, path)
     assert history_mod.resume_state(RESUMED_ID, str(tmp_path)) == (
         history_mod.RESUME_OK, "",
     )
+
+
+def test_the_vendor_engine_writes_and_reads_the_envelope(tmp_path, monkeypatch):
+    """Round trip through the real writer and reader: what
+    ChatApiEngine._save_messages writes, _load_messages replays and
+    saved_engine names."""
+    from doxa.vendors import DEEPSEEK, _load_messages, saved_engine
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    monkeypatch.setenv("LORE_PROJECTS_DIR", str(tmp_path / "projects"))
+    from doxa.vendors import ChatApiEngine
+
+    eng = ChatApiEngine(cwd=str(tmp_path), spec=DEEPSEEK, transport=object())
+    eng.messages.append({"role": "user", "content": "hi"})
+    eng._save_messages()
+    assert saved_engine(eng.messages_path) == "deepseek"
+    assert _load_messages(eng.messages_path) == [{"role": "user", "content": "hi"}]
 
 
 def test_a_claude_session_answers_claude_both_ways(projects_dir, tmp_path):
