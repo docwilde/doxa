@@ -1786,12 +1786,15 @@ headlessly from the real app by
 [`scripts/screenshot.py`](../scripts/screenshot.py) and
 [`scripts/record_gif.py`](../scripts/record_gif.py) — a scripted session,
 no spend, fake account numbers — and each still keeps its source SVG
-committed beside its PNG. **Thirty-two images, each named exactly once**
-— the [README](../README.md#gallery) captions fourteen of them, counting
-the hero, and the other eighteen are catalogued below so that **no
-rendered asset is left unnamed by any document**. That is the exact
+committed beside its PNG. `mesh.png` is the one exception on both counts:
+it is a browser page, so [`scripts/mesh_shot.py`](../scripts/mesh_shot.py)
+drives Chrome over a real graph server instead, and it has no SVG twin.
+**Thirty-four images, each named exactly once** — the
+[README](../README.md#gallery) captions sixteen of them, counting the
+hero, and the other eighteen are catalogued below so that **no rendered
+asset is left unnamed by any document**. That is the exact
 condition `beliefs-browser.png` needed to sit wrong for eighteen releases
-before v0.87.0 deleted it. All thirty-two are 3068x1734, but they are not
+before v0.87.0 deleted it. All thirty-four are 3068x1734, but they are not
 all from one pass: an image that still matches the feature it shows is
 left alone rather than re-rendered, so the gallery sits at mixed versions
 by design.
@@ -1800,10 +1803,11 @@ Every scene renders the app inside **the checkout the script runs from**,
 so the identity block, the tab labels and the `repo ⎇ branch` chip carry
 that checkout's own branch and path. Capture from `main`, on a clean tree
 — a throwaway clone is the reliable way to have both — or a working branch
-name ends up baked into eighteen of the nineteen stills, and an
+name ends up baked into nineteen of the twenty-one stills, and an
 uncommitted edit paints a `diff` chip that belongs to the capture, not to
-the feature. `folder-chip` is the one still that carries neither, because
-its whole subject is a session that is not in a repository.
+the feature. Two stills carry neither: `folder-chip`, whose whole subject
+is a session that is not in a repository, and `mesh`, which is a browser
+page with no identity block to carry one.
 
 | asset | shows |
 |---|---|
