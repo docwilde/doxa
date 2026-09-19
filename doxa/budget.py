@@ -63,13 +63,25 @@ repository DOXA happens to have open is not one of those doors, and must
 not become one -- a repo that could raise its own session's spend ceiling
 would be a repo that raises its own spend ceiling.
 
-Read PER TURN rather than captured at connect, which is what makes "raise
-it and continue" work: a session stopped at its ceiling is stopped, not
-finished. Change the number (Ctrl+, -> Session, the config file, or the
-environment of a session yet to start) and the very next prompt goes
-through. ``doxa.config.load`` caches on (path, mtime, size) and
-``doxa.config.save`` invalidates, so the modal's write is visible to the
-next turn without a restart.
+CAPTURED AT SESSION START, not re-read per turn. That is a deliberate
+reversal: it used to be read on every turn, so that raising the number
+mid-session (Ctrl+, -> Session, or the config file) let a stopped session
+continue. But ``~/.doxa/config.toml`` is an ordinary same-user file, and
+the session being capped is a session with file tools -- so "the very
+next prompt goes through" was also available to the capped agent, by
+writing its own ceiling. A limit a limited party can raise is not a limit.
+
+:func:`SessionEngine.budget_ceiling` therefore snapshots this ONCE, at
+construction. Env is resolved before the file at that moment, exactly as
+:func:`doxa.config.raw` always did, and the fleet's per-run environment
+still beats the file for a session it is about to spawn. Raising a
+RUNNING session's ceiling now takes a new session -- which is a real cost,
+and the smaller of the two.
+
+This function itself still reads live, because its other callers are
+DISPLAY (the settings modal's warning row, the start note): what the
+number is configured to be is a different question from what this session
+is enforcing, and only the second one has to be immovable.
 """
 
 from __future__ import annotations
@@ -128,10 +140,17 @@ def usd(text: "str | float | None") -> "float | None":
 
 
 def session_ceiling() -> "float | None":
-    """This session's ceiling in dollars, or None when there is none.
+    """The CONFIGURED ceiling in dollars right now, or None when there is
+    none.
 
     Default OFF: an unset knob returns None and nothing anywhere changes
-    for anyone who has not asked for a ceiling."""
+    for anyone who has not asked for a ceiling.
+
+    A live read, and the module docstring says which callers may use it:
+    the display ones. What a running session ENFORCES is the snapshot
+    :meth:`doxa.engine.SessionEngine.budget_ceiling` took at
+    construction -- a ceiling re-read per turn is one the capped session
+    can raise by writing the same config file."""
     return usd(config_mod.raw(SESSION_BUDGET_ENV))
 
 

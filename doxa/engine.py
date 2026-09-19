@@ -1448,6 +1448,10 @@ class SessionEngine:
         self.session_id = (
             require_session_id(session_id) if session_id else str(uuid.uuid4())
         )
+        # The spend ceiling, RESOLVED ONCE, here -- see budget_ceiling for
+        # why a per-turn read was a ceiling the capped session could raise
+        # by writing the config file it was read from.
+        self._budget_ceiling: "float | None" = budget_mod.session_ceiling()
         # v0.56.0 (session resume): the id of the conversation this engine
         # CONTINUES rather than starts. Not a second id -- a resumed
         # session keeps the id it is resuming (see _build_options), so
@@ -3161,12 +3165,20 @@ class SessionEngine:
     def budget_ceiling(self) -> "float | None":
         """This session's spend ceiling in dollars, or None for none.
 
-        Read through :func:`doxa.budget.session_ceiling` on every call
-        rather than captured at connect, and that is what makes "raise it
-        and continue" true: a session stopped at its ceiling is stopped,
-        not finished, so a new number in the environment or the config file
-        reaches the very next prompt without restarting anything."""
-        return budget_mod.session_ceiling()
+        THE SNAPSHOT taken in ``__init__``, not a fresh read. It used to
+        be read on every call, which made "raise it and continue" true --
+        and made it true for the capped session too: ``~/.doxa/config.toml``
+        is an ordinary same-user file and this session has file tools, so
+        a ceiling re-read per turn is a ceiling its own subject can raise
+        between turns, silently, with no record anywhere but the file's
+        mtime. A limit a limited party can lift is not a limit.
+
+        Env still beat the file when the snapshot was taken (that is
+        :func:`doxa.config.raw`'s own order), so the fleet's per-run
+        environment still sets a ceiling for the sessions it spawns.
+        Raising a RUNNING session's ceiling now costs a new session. See
+        :mod:`doxa.budget`'s "CAPTURED AT SESSION START" paragraph."""
+        return self._budget_ceiling
 
     def _budget_refusal(self, prompt: str) -> "dict[str, Any] | None":
         """The ``turn_refused`` payload for a turn that must not start, or

@@ -196,23 +196,57 @@ async def test_a_session_at_its_ceiling_still_answers_the_user(
 
 
 @pytest.mark.asyncio
-async def test_raising_the_ceiling_lets_the_very_next_prompt_through(
+async def test_a_running_sessions_ceiling_cannot_be_raised_under_it(
     tmp_path, monkeypatch,
 ):
-    """"Raise it and continue" with no restart. This is why the ceiling is
-    read per turn instead of being captured at connect: a session stopped
-    at its ceiling is stopped, not finished."""
+    """The reversal of "raise it and continue" (panel finding 4).
+
+    The ceiling used to be read on every turn, so a stopped session could
+    be let through by writing a bigger number. That door is not the
+    operator's alone: ``~/.doxa/config.toml`` is an ordinary same-user
+    file and the capped session has file tools, so the party being limited
+    could lift its own limit between turns, silently. The value is taken
+    once, at construction, and neither the config file nor the environment
+    moves it afterwards."""
     engine, created = await _engine(tmp_path, monkeypatch, ceiling="1.0", cost=1.5)
     try:
         assert [ev.type for ev in await _collect(engine, "no")] == ["turn_refused"]
+        assert engine.budget_ceiling() == pytest.approx(1.0)
 
-        monkeypatch.setenv(budget_mod.SESSION_BUDGET_ENV, "10")
-        types = [ev.type for ev in await _collect(engine, "yes")]
+        # What a capped agent with file tools can actually do.
+        config_mod.save({"session_budget_usd": "10000"})
+        monkeypatch.setenv(budget_mod.SESSION_BUDGET_ENV, "")
+        assert budget_mod.session_ceiling() == pytest.approx(10000.0), (
+            "the configured value really did change -- or this proves nothing"
+        )
 
-        assert "turn_started" in types and "turn_refused" not in types
-        assert created[0].queried, "the turn still never reached the model"
+        assert engine.budget_ceiling() == pytest.approx(1.0)
+        assert [ev.type for ev in await _collect(engine, "yes")] == ["turn_refused"]
+        assert not created[0].queried, "the turn reached the model anyway"
     finally:
         await engine.finalize()
+
+
+@pytest.mark.asyncio
+async def test_a_new_session_picks_up_the_raised_ceiling(tmp_path, monkeypatch):
+    """The other half, and what "raise it" costs now: a NEW session reads
+    the new number, so the knob still works -- it takes a session start
+    rather than a turn."""
+    engine, _created = await _engine(tmp_path, monkeypatch, ceiling="1.0", cost=1.5)
+    await engine.finalize()
+
+    monkeypatch.setenv(budget_mod.SESSION_BUDGET_ENV, "10")
+    factory, created = factory_with_script([_result(0.0)])
+    fresh = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+    await fresh.start()
+    fresh.total_cost_usd = 1.5
+    try:
+        assert fresh.budget_ceiling() == pytest.approx(10.0)
+        types = [ev.type for ev in await _collect(fresh, "yes")]
+        assert "turn_started" in types and "turn_refused" not in types
+        assert created[0].queried
+    finally:
+        await fresh.finalize()
 
 
 @pytest.mark.asyncio
