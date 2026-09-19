@@ -94,11 +94,17 @@ channel would be a regression the operator caught before this shipped:
 skills reached DOXA sessions only because the (unisolated) spawned CLI
 happened to read the user's real ``~/.claude``, and closing that channel
 without an explicit carry would make them silently vanish.
-:func:`ensure_skills_link` symlinks ``<cli_config_dir>/skills`` at the
-user's real skills directory (same base as :func:`user_credentials_path`)
--- one store, no divergence: an approval recorded through either carrier
-(the LORE plugin's own judge loop, or a future DOXA-side one) lands in both
-immediately, because there is only one directory, not a copy of it. Ships
+:func:`ensure_skills_snapshot` COPIES the user's real skills directory
+(same base as :func:`user_credentials_path`) into
+``<cli_config_dir>/skills`` at each spawn. It used to symlink, and a
+symlink there is a WRITE channel: the spawned CLI reads
+``<CLAUDE_CONFIG_DIR>/skills``, so with a link that path was the
+operator's own ``~/.claude/skills``, and a model editing a ``SKILL.md``
+inside a session edited the skill set every future session on the machine
+loads. The old reasoning was "one store, no divergence"; the divergence is
+now deliberate and one-directional -- an approval recorded elsewhere
+reaches a session at its next START rather than mid-session, and nothing a
+session writes reaches the operator's directory. Ships
 ALL skills in that directory, not a lore-tagged subset: on this measured
 install every entry under ``~/.claude/skills`` already IS lore-learned, and
 a user's own hand-written Claude Code skill vanishing inside DOXA is the
@@ -126,7 +132,7 @@ this module's own defect note made necessary reading first): the skills
 carried above are only the ones that reached ``~/.claude/skills`` directly
 (learned skills, on this machine all LORE's). A skill or command BUNDLED
 INSIDE a plugin (``~/.claude/plugins/cache/<name>/.../skills/``,
-``commands/``) is not reached by :func:`ensure_skills_link` at all, and
+``commands/``) is not reached by :func:`ensure_skills_snapshot` at all, and
 is not carried by this module. ``doxa.claude_plugins`` decides that
 question on its own, per capability rather than per plugin (commands/
 skills/agents adopted, hooks/MCP servers refused unconditionally --
@@ -259,31 +265,62 @@ def isolated_skills_path() -> Path:
     return cli_config_dir() / SKILLS_NAME
 
 
-def ensure_skills_link() -> bool:
-    """Symlink the isolated dir's ``skills`` at the user's real skills
-    directory (see the module docstring's "SKILLS CARRY THROUGH" note).
-    Idempotent: leaves a correct link alone, replaces a stale or wrong one,
-    creates nothing when the user has no skills directory yet (a dangling
-    symlink is worse than no symlink -- the CLI would report a broken
-    path instead of simply finding zero skill-dir commands). Returns
-    whether a real, valid link is in place after this call."""
+#: Written at the root of the skills snapshot, so a later call can tell a
+#: directory DOXA built from one the operator put there by hand. The old
+#: symlink version answered that question with ``is_symlink()``; a real
+#: directory needs a real marker, and "never delete what DOXA did not
+#: create" is the rule being preserved, not the mechanism.
+SKILLS_SNAPSHOT_MARK = ".doxa-skills-snapshot"
+
+
+def ensure_skills_snapshot() -> bool:
+    """Copy the user's real skills directory into the isolated one, whole,
+    at spawn -- a SNAPSHOT, one direction only (see the module docstring's
+    "SKILLS CARRY THROUGH" note).
+
+    This used to be a symlink, and the symlink was a write channel. The
+    spawned CLI reads ``<CLAUDE_CONFIG_DIR>/skills``; with a link there,
+    that path WAS ``~/.claude/skills``, so a model editing a ``SKILL.md``
+    inside its own session was editing the operator's own skill set --
+    which every future session of every tool on the machine then loads.
+    The reasoning for the link was "one store, no divergence", and
+    divergence is the price now paid deliberately: an approval recorded
+    elsewhere reaches a session at its next start rather than instantly,
+    and nothing a session does reaches the operator's directory at all.
+
+    Rebuilt from scratch on each call rather than diffed -- the same
+    discipline :func:`doxa.claude_plugins._copy_sanitized` keeps, for the
+    same reason: a stale skill surviving a rename is worse than a few
+    hundred KB recopied at session start. Symlinks inside the source are
+    FOLLOWED and their content copied (``symlinks=False``), so no path
+    inside the snapshot can lead back out of it.
+
+    Returns whether a usable snapshot is in place. False, changing
+    nothing, when the user has no skills directory yet, when something
+    DOXA did not create already sits at the destination, or when the copy
+    fails -- a session with no skills is a smaller loss than a session
+    that deleted a directory it did not own."""
     source = user_skills_path()
     if not source.is_dir():
         return False
-    link = isolated_skills_path()
+    dest = isolated_skills_path()
     try:
-        link.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(link.parent, 0o700)
-        if link.is_symlink():
-            if link.resolve() == source.resolve():
-                return True
-            link.unlink()
-        elif link.exists():
-            # Something real (not a symlink) already sits there -- never
-            # delete a directory DOXA didn't create; leave it and report
-            # "not linked" rather than destroy unknown content.
-            return False
-        link.symlink_to(source, target_is_directory=True)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(dest.parent, 0o700)
+        if dest.is_symlink():
+            dest.unlink()  # an older build's link -- this is the fix
+        elif dest.is_dir():
+            if not (dest / SKILLS_SNAPSHOT_MARK).exists():
+                # Something real that DOXA did not build. Never delete a
+                # directory DOXA didn't create; report "no snapshot".
+                return False
+            shutil.rmtree(dest)
+        elif dest.exists():
+            return False  # a plain file there is not ours to remove either
+        shutil.copytree(
+            source, dest, symlinks=False, ignore_dangling_symlinks=True,
+        )
+        (dest / SKILLS_SNAPSHOT_MARK).write_text("", encoding="utf-8")
     except OSError:
         return False
     return True
@@ -335,7 +372,7 @@ def spawn_env() -> dict[str, str]:
     turn would notice."""
     ensure_cli_config_dir()
     sync_credentials()
-    ensure_skills_link()
+    ensure_skills_snapshot()
     return {
         "CLAUDE_CONFIG_DIR": str(cli_config_dir()),
         "LORE_SKIP": "1",

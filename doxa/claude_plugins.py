@@ -32,7 +32,7 @@ THE ADOPT/REFUSE LINE, decided per capability rather than per plugin:
   when the model reaches for it, an agent spawns only through a Task-tool
   call the running permission mode still gates. None of the three executes
   anything at session start. Skills specifically are the SAME risk class
-  ``cli_isolation.ensure_skills_link`` already carries wholesale for the
+  ``cli_isolation.ensure_skills_snapshot`` already carries wholesale for the
   user's own ``~/.claude/skills`` -- this module only widens the source to
   include the skills a PLUGIN bundles (``~/.claude/plugins/cache/.../
   skills/``), which that symlink never reached.

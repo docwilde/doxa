@@ -221,6 +221,14 @@ of the Claude Code plugins installed on your machine — none of their
 hooks, commands, skills, agents or MCP servers — load into a DOXA session
 unasked.
 
+Your own **learned skills** (`~/.claude/skills`) do carry through — they
+are approved artifacts, and losing them inside DOXA would be a surprise.
+They are **copied** into that config directory at each session start, not
+linked: the copy is a one-directional snapshot, so a session editing a
+`SKILL.md` changes only its own copy and your skill set is never written
+to from inside a session. The cost of that is timing — a skill approved
+while a session is running reaches it at its next start, not mid-session.
+
 `/plugins` shows what DOXA found on the machine and what it did with it:
 discovered, adopted, or refused with the reason. `/reload-plugins`
 re-scans; adoption is read at spawn, so a re-scan reaches new
