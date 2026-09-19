@@ -99,14 +99,29 @@ from . import worktrees as worktrees_mod
 from .engine import (
     BELIEF_EVIDENCE_LIMIT,
     BELIEF_LIST_LIMIT,
+    GATED_MODES,
+    PERMISSION_MODES,
     PENDING_LIST_LIMIT,
     EngineEvent,
     SessionEngine,
+    available_modes,
 )
 from .peers import MAX_FRAME_BYTES, registry_dir, runtime_dir
 from .promptqueue import PromptQueue, PromptQueueFull
 
 from .events import PROTOCOL_VERSION  # noqa: F401 -- re-exported
+#: The modes this daemon will not let a socket client ESCALATE into
+#: without both of the conditions in
+#: :meth:`SessionDaemon._gated_mode_refusal`. Derived, never spelled out:
+#: ``GATED_MODES`` is what the TUI puts behind a confirmation dialog, and
+#: the difference between every mode and the modes an UNARMED session may
+#: hold is what launch-time arming exists to withhold
+#: (``bypassPermissions``). A mode added to either set is covered here the
+#: day it is added.
+GATED_SOCKET_MODES = frozenset(GATED_MODES) | (
+    frozenset(PERMISSION_MODES) - frozenset(available_modes(False))
+)
+
 DEFAULT_LINGER_SECS = 120.0
 # A freshly spawned daemon that NO client has attached to yet gets this
 # claim window (>= spawn_daemon's own wait) before giving up, regardless of
@@ -1069,19 +1084,20 @@ class SessionDaemon:
             # no reconnect and nothing in the ring disturbed.
             #
             # The DAEMON owns the operation; the client sends a name.
-            # SessionEngine.set_permission_mode validates it here rather
-            # than trusting the caller, which matters more on this path
-            # than on the in-process one: a socket is reachable by
-            # something that is not this TUI. That validation is NOT the
-            # confirmation gate, though -- the confirmation is a UI act
-            # and lives with the UI (``_cmd_mode``). A daemon cannot show
-            # a dialog, and pretending otherwise by refusing gated modes
-            # here would only mean a detached session could never reach
-            # one at all.
+            # SessionEngine.set_permission_mode validates the NAME; this
+            # method decides whether THIS connection, right now, may
+            # escalate into a gated one -- see _gated_mode_refusal. A
+            # daemon still cannot show a confirmation dialog, so it does
+            # not pretend to: it narrows the gated modes to the two
+            # conditions under which the confirmation the TUI showed is
+            # the only explanation for the request.
+            wanted = str(params.get("mode") or "")
+            refusal = self._gated_mode_refusal(wanted, writer)
+            if refusal is not None:
+                await self._reply(writer, req_id, ok=False, error=refusal)
+                return
             try:
-                mode = await self.engine.set_permission_mode(
-                    str(params.get("mode") or "")
-                )
+                mode = await self.engine.set_permission_mode(wanted)
             except Exception as exc:  # noqa: BLE001 -- the client shows it
                 await self._reply(writer, req_id, ok=False,
                                   error=f"{type(exc).__name__}: {exc}")
@@ -1332,6 +1348,52 @@ class SessionDaemon:
         else:
             await self._reply(writer, req_id, ok=False,
                               error=f"unknown method: {method!r}")
+
+    def _gated_mode_refusal(
+        self, wanted: str, writer: asyncio.StreamWriter
+    ) -> "str | None":
+        """Why this connection may not escalate into ``wanted`` right now,
+        or None when it may.
+
+        Two conditions, both of which an escalation into
+        :data:`GATED_SOCKET_MODES` must satisfy:
+
+        * **The connection completed the attach handshake.** A client is in
+          ``_clients`` only after it sent an ``attach`` frame
+          (``_handle_frame``), which is what ``EngineClient.start`` does
+          before it can call anything. A bare connection that reads the
+          hello and issues a ``call`` has skipped it, and a gated mode is
+          the one operation where "some process on this machine opened the
+          socket" is not a good enough account of who asked.
+        * **No turn is running and none is queued.** The model runs only
+          inside a turn, so a session that is mid-turn is exactly the
+          window in which a request to stop asking about tool calls did
+          not come from the person at the keyboard. A user who wants the
+          mode changed can change it when the turn ends; a turn cannot
+          wait for the user, which is why the refusal goes this way round.
+
+        Neither condition applies to a DE-escalation or to a no-op: the
+        gate is on entering a gated mode, and getting out of one must
+        never be the operation that is hard to perform. Nothing here is
+        the confirmation dialog -- that is a UI act and still lives in
+        ``doxa.session.commands._cmd_mode``; this is what makes the dialog
+        the only remaining way a gated mode gets chosen.
+        """
+        if wanted not in GATED_SOCKET_MODES:
+            return None
+        if wanted == getattr(self.engine, "permission_mode", None):
+            return None  # already there: not an escalation
+        if writer not in self._clients:
+            return (
+                f"{wanted} needs an attached client; this connection never "
+                "sent an attach frame"
+            )
+        if self._running() or self._queued_count():
+            return (
+                f"{wanted} cannot be set while a turn is running or queued; "
+                "let the session go idle and ask again"
+            )
+        return None
 
     def _running(self) -> bool:
         """Is ANY turn running in this session -- this daemon's or the

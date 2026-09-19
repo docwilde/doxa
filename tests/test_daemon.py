@@ -2109,3 +2109,130 @@ async def test_a_peer_started_turn_is_reported_running_and_its_queue_is_visible(
             with contextlib.suppress(Exception):
                 await daemon._shutdown("test teardown")
                 await asyncio.wait_for(serve_task, 5)
+
+
+# =======================================================================
+# Gated permission modes over the socket (audit finding 2)
+# =======================================================================
+
+
+@pytest.mark.asyncio
+async def test_a_bare_socket_client_cannot_arm_a_gated_mode(tmp_path, monkeypatch):
+    """Mirrors probe_bypass_mode.py: a connection that reads the hello and
+    issues a `call` without ever sending an `attach` frame -- what a
+    `python3 -c` one-liner under the model's own Bash tool can open --
+    used to flip a bypass-armed session into bypassPermissions with no
+    confirmation shown anywhere."""
+    monkeypatch.setenv("DOXA_ALLOW_BYPASS", "1")
+    config_mod.invalidate()
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, created, _):
+        assert daemon.engine.bypass_armed
+        reader, writer = await asyncio.open_unix_connection(str(daemon.socket_path))
+        hello = json.loads(await asyncio.wait_for(reader.readline(), 5))
+        assert hello["type"] == "hello"
+        writer.write((json.dumps({
+            "type": "call", "id": 1, "method": "set_permission_mode",
+            "params": {"mode": "bypassPermissions"},
+        }) + "\n").encode())
+        await writer.drain()
+        reply = json.loads(await asyncio.wait_for(reader.readline(), 5))
+
+        assert reply["ok"] is False
+        assert "attach" in reply["error"]
+        assert daemon.engine.permission_mode == "default"
+        assert created[0].permission_modes == []  # the SDK seam never saw it
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_an_attached_client_can_still_arm_a_gated_mode_when_idle(
+    tmp_path, monkeypatch,
+):
+    """The other half: shift+tab from the attached TUI reaches
+    bypassPermissions on an idle session exactly as before. The gate is on
+    who is asking and when, not on the mode existing."""
+    monkeypatch.setenv("DOXA_ALLOW_BYPASS", "1")
+    config_mod.invalidate()
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, created, _):
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        assert await client.set_permission_mode("bypassPermissions") == (
+            "bypassPermissions"
+        )
+        assert daemon.engine.permission_mode == "bypassPermissions"
+        assert created[0].permission_modes == ["bypassPermissions"]
+        await client.finalize()
+
+
+@pytest.mark.asyncio
+async def test_a_gated_mode_is_refused_mid_turn_and_allowed_once_idle(
+    tmp_path, monkeypatch,
+):
+    """The condition that closes the MODEL as an attacker: a model acts
+    only inside a turn, so an escalation request arriving while a turn is
+    running did not come from the person at the keyboard. De-escalation is
+    never refused, and the same request succeeds once the turn ends."""
+    monkeypatch.setenv("DOXA_ALLOW_BYPASS", "1")
+    config_mod.invalidate()
+    gate = asyncio.Event()
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    slow = _slow_script_client_factory(gate)
+
+    class SlowSwitchable(slow):
+        """_slow_script_client_factory's client plus the one control
+        request this test is about -- the shared helper has no mode
+        setter, and SessionEngine refuses rather than pretending."""
+
+        async def set_permission_mode(self, mode):
+            return None
+
+    daemon = SessionDaemon(
+        cwd=str(tmp_path), linger_secs=30.0,
+        engine_factory=lambda cwd, sid, dsock: SessionEngine(
+            cwd=cwd, session_id=sid, client_factory=SlowSwitchable,
+            daemon_socket=dsock,
+        ),
+    )
+    serve_task = asyncio.create_task(daemon.serve())
+    await asyncio.wait_for(daemon.ready.wait(), 10)
+    try:
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        runner = asyncio.create_task(
+            _collect(client.send("slow one"))
+        )
+        for _ in range(200):
+            if daemon._running():
+                break
+            await asyncio.sleep(0.01)
+        assert daemon._running()
+
+        with pytest.raises(EngineClientError, match="turn is running or queued"):
+            await client.set_permission_mode("bypassPermissions")
+        assert daemon.engine.permission_mode == "default"
+
+        # Narrowing is never blocked, even mid-turn.
+        assert await client.set_permission_mode("plan") == "plan"
+
+        gate.set()
+        await asyncio.wait_for(runner, 5)
+        for _ in range(200):
+            if not daemon._running():
+                break
+            await asyncio.sleep(0.01)
+
+        assert await client.set_permission_mode("bypassPermissions") == (
+            "bypassPermissions"
+        )
+        await client.finalize()
+    finally:
+        if not serve_task.done():
+            with contextlib.suppress(Exception):
+                await daemon._shutdown("test teardown")
+                await asyncio.wait_for(serve_task, 5)
+
+
+async def _collect(agen):
+    return [ev async for ev in agen]

@@ -3517,11 +3517,28 @@ class SessionEngine:
         is refused rather than forwarded, since the CLI's own reaction to
         an invalid mode is not something DOXA should be discovering
         mid-session. **Refusing is not the security boundary** -- every
-        one of the six is accepted here, gated or not. The boundary is
-        that nothing reaches this method with a gated mode except a path
-        that has already shown the user a confirmation naming what stops
-        happening; see :func:`next_cycle_mode` for the hotkey's half of
-        that and ``_cmd_mode`` for the command's.
+        one of the six is accepted here, gated or not.
+
+        The boundary is what each CALLER is allowed to hand this method.
+        In-process, that is a path which has already shown the user a
+        confirmation naming what stops happening: see
+        :func:`next_cycle_mode` for the hotkey's half and ``_cmd_mode``
+        for the command's. Over the daemon socket, a dialog is not
+        available, so ``SessionDaemon._gated_mode_refusal`` substitutes
+        the two conditions under which the dialog is the only account of
+        the request: the caller completed the attach handshake, and no
+        turn is running or queued. The second is what keeps a MODEL out --
+        a model acts only inside a turn, and a turn is exactly when the
+        socket is refused.
+
+        What stays inside the boundary, by construction and not by
+        oversight: a process running as the same user, on an idle
+        session, through an attached client. The socket is 0600 in a 0700
+        runtime dir, so that process already has the user's uid -- it can
+        read the session's transcript, sign its git commits and write its
+        ssh config. Same-user idle-time access is the boundary every 0600
+        socket has; nothing here narrows it further and nothing here
+        pretends to.
 
         Returns the mode now in force. Raises RuntimeError when the
         session cannot switch (not connected, or a client without the
