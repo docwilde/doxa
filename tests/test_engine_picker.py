@@ -390,8 +390,15 @@ def test_the_models_request_carries_the_key_and_the_vendors_own_url():
     seen: dict = {}
 
     class _Response:
-        def read(self):
-            return b'{"data": [{"id": "glm-5.3-flash"}]}'
+        # ``read(amt=None)``, mirroring http.client.HTTPResponse -- which
+        # is what urllib actually hands fetch_models, and which
+        # fetch_models calls with a byte cap (vendors.CATALOGUE_BODY_MAX).
+        # A double that only accepted read() turned that cap into a
+        # TypeError inside the broad except, so the catalogue read as
+        # empty and the test proved the fallback rather than the fetch.
+        def read(self, amt=None):
+            body = b'{"data": [{"id": "glm-5.3-flash"}]}'
+            return body if amt is None or amt < 0 else body[:amt]
 
         def close(self):
             pass
