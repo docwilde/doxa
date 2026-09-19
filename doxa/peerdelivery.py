@@ -24,7 +24,8 @@ rule :mod:`doxa.operators` follows for the seam this class hands it.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable, Sequence
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING
 
 from . import peerledger as peerledger_mod
 from . import peers as peers_mod

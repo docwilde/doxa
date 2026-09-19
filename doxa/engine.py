@@ -2832,8 +2832,8 @@ class SessionEngine:
     # site per engine each remembering to do all three is one chance per
     # engine to ship a send nobody can see.
     #
-    # The four methods below are the seam DOXA already had; the body they
-    # used to hold now lives in that module, so the vendor and Codex
+    # The members below are the seam DOXA already had; the bodies they
+    # used to hold now live in that module, so the vendor and Codex
     # engines run the identical path instead of a second, thinner one of
     # their own (docwilde/doxa#39).
 
