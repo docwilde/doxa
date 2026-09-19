@@ -54,13 +54,14 @@ def _spies(monkeypatch):
     attached_calls = []
     spawn_calls = []
 
-    def fake_restored(resolved, cwd, model, linger):
+    def fake_restored(resolved, cwd, model, linger, engine=None):
         restored_calls.append(resolved)
 
-    def fake_attached(socket_path, cwd, model, linger):
+    def fake_attached(socket_path, cwd, model, linger, engine=None):
         attached_calls.append(socket_path)
 
-    def fake_spawn(cwd, model=None, linger_secs=120.0, base_branch=None):
+    def fake_spawn(cwd, model=None, linger_secs=120.0, base_branch=None,
+                   engine=None, **_rest):
         spawn_calls.append(cwd)
         return "spawned-session-id", "/tmp/spawned.sock"
 
@@ -203,7 +204,8 @@ def _spy_spawn_only(monkeypatch):
     dependencies (spawn_daemon, DoxaApp)."""
     spawn_calls = []
 
-    def fake_spawn(cwd, model=None, linger_secs=120.0, base_branch=None):
+    def fake_spawn(cwd, model=None, linger_secs=120.0, base_branch=None,
+                   engine=None, **_rest):
         spawn_calls.append(cwd)
         return "spawned-session-id", "/tmp/spawned.sock"
 

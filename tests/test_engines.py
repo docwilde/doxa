@@ -628,22 +628,49 @@ def test_cli_refuses_an_unknown_engine_with_the_real_list(capsys):
     assert "claude, codex" in err
 
 
-def test_cli_engine_codex_runs_in_process_with_a_codex_factory(monkeypatch, tmp_path):
-    """No daemon hosts a Codex session -- doxa.daemon's RPC surface is
-    SessionEngine's -- so the flag takes the in-process door and the
-    factory it installs builds a CodexEngine."""
+def test_cli_engine_codex_takes_the_daemon_path(monkeypatch, tmp_path):
+    """Issue #39: the daemon hosts any registered engine, so --engine no
+    longer diverts the session into the TUI process. The spawn carries the
+    engine id, and every door onto a LATER session carries it too -- a
+    Ctrl+T tab on a Codex window must not open a Claude one."""
+    from doxa import cli as cli_mod
+
+    spawned = []
+
+    def fake_spawn(cwd, **kwargs):
+        spawned.append({"cwd": cwd, **kwargs})
+        return "sid", "/tmp/nope.sock"
+
+    attached = {}
+
+    def fake_run_attached(socket_path, cwd, model, linger, engine=None):
+        attached["engine"] = engine
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_mod, "spawn_daemon", fake_spawn)
+    monkeypatch.setattr(cli_mod, "_run_attached", fake_run_attached)
+    _RecordingApp.last = None
+    assert cli_mod.main(["new", "--engine", "codex"]) == 0
+    assert _RecordingApp.last is None  # nothing was built in this process
+    assert [c["engine"] for c in spawned] == ["codex"]
+    assert attached["engine"] == "codex"
+
+
+def test_cli_engine_codex_in_process_still_builds_a_codex_factory(
+    monkeypatch, tmp_path
+):
+    """--in-process is the one door left that builds an engine in the TUI,
+    and it works for any engine."""
     from doxa import cli as cli_mod
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli_mod, "DoxaApp", _RecordingApp)
     _RecordingApp.last = None
-    assert cli_mod.main(["--engine", "codex"]) == 0
+    assert cli_mod.main(["--engine", "codex", "--in-process"]) == 0
     kwargs = _RecordingApp.last
     assert kwargs is not None
     engine = kwargs["engine_factory"]()
     assert isinstance(engine, CodexEngine)
-    # And every other door the app has onto a new session is the same
-    # engine -- a Ctrl+T tab on a Codex window must not open a Claude one.
     assert isinstance(kwargs["new_session_factory"](), CodexEngine)
     assert isinstance(kwargs["new_session_factory_at"](str(tmp_path)), CodexEngine)
     assert isinstance(

@@ -95,12 +95,21 @@ def _resolve(entries: list[peers.PeerInfo], prefix: str | None) -> peers.PeerInf
 
 
 def _run_attached(
-    socket_path: str, cwd: str, model: str | None, linger: float
+    socket_path: str, cwd: str, model: str | None, linger: float,
+    engine: "str | None" = None,
 ) -> None:
+    """Drive an already-running daemon, and spawn later tabs beside it.
+
+    ``engine`` (issue #39) is what a LATER spawn from this window uses --
+    Ctrl+T, the repo picker, /resume. It says nothing about the session
+    being attached to here: that daemon already chose its engine when it
+    started, and this process reads which one from its hello frame."""
     from .client import EngineClient
 
     def new_session_factory() -> EngineClient:
-        _sid, dsock = _spawn_daemon(cwd, model=model, linger_secs=linger)
+        _sid, dsock = _spawn_daemon(
+            cwd, model=model, linger_secs=linger, engine=engine,
+        )
         return EngineClient(dsock)
 
     def new_session_factory_at(path: str) -> EngineClient:
@@ -108,7 +117,9 @@ def _run_attached(
         # DoxaApp.open_tab_at): the SAME spawn_daemon call above, just
         # parametrized by an operator-chosen path instead of this
         # process's own launch cwd -- not a second daemon-spawning path.
-        _sid, dsock = _spawn_daemon(path, model=model, linger_secs=linger)
+        _sid, dsock = _spawn_daemon(
+            path, model=model, linger_secs=linger, engine=engine,
+        )
         return EngineClient(dsock)
 
     def resume_session_factory(path: str, session_id: str) -> EngineClient:
@@ -121,6 +132,7 @@ def _run_attached(
         # module so /resume is daemon-backed wherever the TUI is.
         _sid, dsock = _spawn_daemon(
             path, model=model, linger_secs=linger, resume=session_id,
+            engine=engine,
         )
         return EngineClient(dsock)
 
@@ -235,7 +247,8 @@ def ended_tab_spec(
 
 
 def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
-                   model: "str | None", linger: float) -> None:
+                   model: "str | None", linger: float,
+                   engine: "str | None" = None) -> None:
     """Item D: open every LIVE resolved tab (doxa.tabsets.resolve already
     cross-checked each saved session id against the peer registry), in
     saved order, with saved pinned names, landing on the saved active tab.
@@ -267,7 +280,9 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
         # a tab opened from the picker during a RESTORED launch is a real
         # daemon-backed session like every other tab in the window, not a
         # silent fallback to an in-process one (DoxaApp's own default).
-        _sid, dsock = _spawn_daemon(path, model=model, linger_secs=linger)
+        _sid, dsock = _spawn_daemon(
+            path, model=model, linger_secs=linger, engine=engine,
+        )
         return EngineClient(dsock)
 
     def resume_session_factory(path: str, session_id: str) -> EngineClient:
@@ -280,16 +295,21 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
         # module so /resume is daemon-backed wherever the TUI is.
         _sid, dsock = _spawn_daemon(
             path, model=model, linger_secs=linger, resume=session_id,
+            engine=engine,
         )
         return EngineClient(dsock)
 
     if not resolved.tabs and not resolved.archived:
-        _sid, dsock = _spawn_daemon(launch_cwd, model=model, linger_secs=linger)
+        _sid, dsock = _spawn_daemon(
+            launch_cwd, model=model, linger_secs=linger, engine=engine,
+        )
         app = DoxaApp(
             cwd=launch_cwd, model=model,
             engine_factory=lambda: EngineClient(dsock),
             new_session_factory=lambda: EngineClient(
-                _spawn_daemon(launch_cwd, model=model, linger_secs=linger)[1]
+                _spawn_daemon(
+                    launch_cwd, model=model, linger_secs=linger, engine=engine,
+                )[1]
             ),
             new_session_factory_at=new_session_factory_at,
             resume_session_factory=resume_session_factory,
@@ -307,7 +327,9 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
     app_cwd = resolved.tabs[0][1].cwd if resolved.tabs else launch_cwd
 
     def new_session_factory() -> EngineClient:
-        _sid, dsock = _spawn_daemon(app_cwd, model=model, linger_secs=linger)
+        _sid, dsock = _spawn_daemon(
+            app_cwd, model=model, linger_secs=linger, engine=engine,
+        )
         return EngineClient(dsock)
 
     specs = []
@@ -350,7 +372,9 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
         # compose() adds ONE fresh session beside the archives so the
         # window is usable, and this is what it spawns against.
         engine_factory=lambda: EngineClient(
-            _spawn_daemon(app_cwd, model=model, linger_secs=linger)[1]
+            _spawn_daemon(
+                app_cwd, model=model, linger_secs=linger, engine=engine,
+            )[1]
         ),
         new_session_factory=new_session_factory,
         new_session_factory_at=new_session_factory_at,
@@ -423,15 +447,18 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument("--model", default=config.model())
     parser.add_argument("--engine", default=config.engine(),
                         help="which engine drives the session "
-                             "(doxa.engines; default %(default)s). A "
-                             "non-default engine runs IN-PROCESS -- no "
-                             "daemon hosts it, so there is nothing to "
-                             "detach from and Ctrl+Q ends the session")
+                             "(doxa.engines; default %(default)s). Every "
+                             "engine is hosted by a daemon, so every "
+                             "session detaches and reattaches the same "
+                             "way -- use --in-process to run one inside "
+                             "the TUI instead")
     parser.add_argument("--linger", type=float, default=config.linger_secs(),
                         help="seconds a spawned daemon outlives its last "
                              "client before finalizing (default %(default)s)")
     parser.add_argument("--in-process", action="store_true",
-                        help="Phase 1 mode: engine inside the TUI, no daemon")
+                        help="Phase 1 mode: engine inside the TUI, no "
+                             "daemon. Works for any --engine; nothing to "
+                             "detach from and Ctrl+Q ends the session")
     parser.add_argument("--branch", default=None,
                         help="item S: fork the new session's worktree from "
                              "this ref instead of the launch cwd's own "
@@ -467,12 +494,23 @@ def main(argv: "list[str] | None" = None) -> int:
         print(f"doxa: {exc.args[0]}", file=sys.stderr)
         return 2
 
-    if provider.engine_id() != engines_mod.DEFAULT_ENGINE_ID:
-        # A second engine has no daemon: doxa.daemon hosts a SessionEngine
-        # specifically (its RPC surface is that class's), so a Codex
-        # session lives in the TUI process. That is reported, not hidden --
-        # `supports().detachable` is False and the attach chip is absent.
-        #
+    engine_id = provider.engine_id()
+
+    if args.in_process:
+        # The ONE branch that still builds an engine in the TUI process,
+        # and since issue #39 it is the only one -- a second engine used
+        # to land here whether or not it was asked for, because
+        # doxa.daemon hosted a SessionEngine specifically. It takes an
+        # --engine now, so every session below is daemon-backed and
+        # detaches like any other; this flag is what a user types when
+        # they want the Phase 1 shape deliberately.
+        if engine_id == engines_mod.DEFAULT_ENGINE_ID:
+            # Claude in-process goes through DoxaApp's own default
+            # factory, which resolves SessionEngine through `doxa.app`'s
+            # module attribute so the suite's monkeypatch.setattr(
+            # doxa.app, "SessionEngine", ...) keeps working.
+            DoxaApp(cwd=cwd, model=args.model).run()
+            return 0
         # `asyncio.to_thread` is what the pane does with this factory
         # (SessionPane._build_and_boot, and v1.2.1's probes assert it), so
         # a factory that blocks is a factory that blocks a THREAD. This one
@@ -495,14 +533,6 @@ def main(argv: "list[str] | None" = None) -> int:
                 session_id=session_id, resume=session_id,
             ),
         ).run()
-        return 0
-
-    if args.in_process:
-        # Unchanged: the Claude in-process path still goes through
-        # DoxaApp's own default factory, which resolves SessionEngine
-        # through `doxa.app`'s module attribute so the suite's
-        # monkeypatch.setattr(doxa.app, "SessionEngine", ...) keeps working.
-        DoxaApp(cwd=cwd, model=args.model).run()
         return 0
 
     if args.command == "launcher":
@@ -535,7 +565,11 @@ def main(argv: "list[str] | None" = None) -> int:
 
     if args.command == "attach":
         entry = _resolve(peers.list_daemons(), args.prefix)
-        _run_attached(entry.daemon_socket, entry.cwd, args.model, args.linger)
+        # --engine says nothing about the session being attached to --
+        # it already chose one when its daemon started -- but it IS what
+        # a later Ctrl+T in this window spawns with, so it is threaded.
+        _run_attached(entry.daemon_socket, entry.cwd, args.model, args.linger,
+                      engine=engine_id)
         return 0
 
     if args.command is None:
@@ -557,14 +591,16 @@ def main(argv: "list[str] | None" = None) -> int:
         if tabsets.enabled():
             resolved = tabsets.resolve(scope)
             if resolved is not None:
-                _run_restored(resolved, cwd, args.model, args.linger)
+                _run_restored(resolved, cwd, args.model, args.linger,
+                              engine=engine_id)
                 return 0
         live = peers.list_daemons(scope_key=scope)
         if live:
             entry = live[0]
             print(f"attaching to {entry.title} ({entry.session_id[:8]})…",
                   file=sys.stderr)
-            _run_attached(entry.daemon_socket, entry.cwd, args.model, args.linger)
+            _run_attached(entry.daemon_socket, entry.cwd, args.model,
+                          args.linger, engine=engine_id)
             return 0
 
     # `doxa new`, or plain `doxa` with nothing live in this scope.
@@ -573,8 +609,9 @@ def main(argv: "list[str] | None" = None) -> int:
         return 2
     _sid, dsock = _spawn_daemon(
         cwd, model=args.model, linger_secs=args.linger, base_branch=base_branch,
+        engine=engine_id,
     )
-    _run_attached(dsock, cwd, args.model, args.linger)
+    _run_attached(dsock, cwd, args.model, args.linger, engine=engine_id)
     return 0
 
 
