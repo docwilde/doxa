@@ -1258,12 +1258,18 @@ over matching snippets. `enter` on a snippet inserts its excerpt into the
 prompt; `enter` on a session header offers to resume that conversation.
 
 `/resume [session-id]` reopens a past conversation in a **new tab** with
-its history reloaded — bare, it lists recent conversations to pick from.
-It refuses, in words, before spawning anything: if the conversation is
-still running (attaches instead), if its directory is gone, or if it
-predates v0.56.0 (before DOXA and the `claude` CLI shared one session id,
-so the CLI has no history to resume from — such a conversation stays
-searchable and readable, never resumable).
+its history reloaded, on the engine it originally ran on — bare, it lists
+recent conversations to pick from. It refuses, in words, before spawning
+anything, and the question it asks is the one that session's OWN engine
+would ask: if the conversation is still running (attaches instead); if its
+directory is gone; if it is a `claude` conversation predating v0.56.0
+(before DOXA and the `claude` CLI shared one session id, so the CLI has no
+history to resume from); or if it is a Codex conversation with no recorded
+thread id. Such a conversation stays searchable and readable, never
+resumable. One case gets past that gate and refuses at the engine instead,
+after the daemon process has started: a Codex conversation whose thread
+record the engine cannot find where it looks for it (beside the transcript
+of the directory the tab is being reopened in).
 
 `/attach [prefix]` reattaches a live detached session in a new tab; bare,
 it attaches the one detached session in scope, or opens a picker when
