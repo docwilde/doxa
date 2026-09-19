@@ -4,6 +4,31 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.15.0 — 2026-09-19
+
+**A fleet can have a head: one session takes the prompt and hands out the work.**
+
+- **`--supervisor <engine[:model]>`** puts one session at slot 0 that alone receives the operator's prompt; `-n` counts workers, drawn from `--pool` by the same seeded assignment. Capacity and budget count n+1.
+- The harness composes both briefings and dispatches them as turns: every worker is briefed before the supervisor is prompted, and told nothing about the job. The manifest records mode, roles and every worktree.
+- A run with no `--prompt` is interactive: no quiet dwell, an optional deadline, ending on `/fleet stop` or when every session has died. Live: a supervisor split a two-file task over two workers, each file on its own branch, 459 s, no leak.
+
+**Three defects a real supervisor run exposed, each reproduced before it was fixed.**
+
+- A fleet slot parked forever on a permission ask nobody answered. New **`ApprovalDesk`** answers within a bounded window under **`--approve {none|peer|all}`**, default `none`, recorded per slot. A run that sat 160 s now finishes in 25 s.
+- The default **refuses** rather than allows, naming the flag that would have permitted the call; a question to the operator and a session spawn are never auto-approved. A parked ask shows in the fleet tab with the line that answers it.
+- **`worktrees.external_git_roots`** gives a Codex session the four git paths a commit in a linked worktree needs. The common git directory is never granted, so `hooks` and `config` stay unwritable. `DOXA_CODEX_GIT_WRITE=0` reverts it.
+
+**Teardown stops guessing how long a clean shutdown takes.**
+
+- **`EngineClient.stop`** waits for the daemon's own close, which follows `finalize`, instead of returning on the ack. Bounded by `stop_timeout_s`; `kill_grace_s` covers only the reap tail. A LORE slot ends `stopped`, not `killed`.
+- Fix found on the way: a session genuinely wedged inside finalize was reported `stopped` and never revisited. It now ends `killed` and is named in the manifest.
+- Fix: `/fleet start` opened its tab and bounced back to the session one message-pump turn later, because the focus branch never named `FleetTab`.
+
+**The gallery shows the fleet and its mesh.**
+
+- New `fleet` and `mesh` stills, the second from **`scripts/mesh_shot.py`** driving a real graph server through Chrome, since a Textual pilot cannot photograph a browser page. Thirty-four images, sixteen captioned.
+- Known, not fixed: the mesh panel counts directed pairs and labels them peers (#60). Suite 2665 on the release tip.
+
 ## 1.14.0 — 2026-09-19
 
 **A Codex model sends peer messages; a fleet and its mesh run from the TUI.**
