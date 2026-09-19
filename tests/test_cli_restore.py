@@ -335,6 +335,17 @@ def test_a_restored_codex_tab_is_resumed_on_codex(
     assert len(resume_calls) == 1
     assert resume_calls[0]["engine"] == "codex"
 
+    # The OTHER caller, same closure: DoxaApp._resume_session_factory is
+    # what doxa.appwindow.tabs.resume_session (the /resume popup) calls,
+    # and it is handed this exact function -- so the popup's spawn is the
+    # boot restore's spawn, engine and all.
+    _RecordingApp.instances[0].kwargs["resume_session_factory"](
+        str(tmp_path), CODEX_SID,
+    )
+    resume_calls = [c for c in calls if c.get("resume") == CODEX_SID]
+    assert len(resume_calls) == 2
+    assert resume_calls[1]["engine"] == "codex"
+
 
 def test_a_restored_claude_tab_is_resumed_on_claude_in_a_codex_window(
     monkeypatch, tmp_path, _projects_dir
