@@ -198,3 +198,85 @@ async def test_decision_reason_alone_is_enough_to_surface_a_permission_request(t
     await engine.answer_needs_input(ev.data["id"], {"decision": "deny"})
     await task
     await engine._peer_queue.get()
+
+
+# =======================================================================
+# No answer is a denial, never an allow (panel finding 1)
+# =======================================================================
+
+
+@pytest.mark.asyncio
+async def test_a_permission_request_that_raises_denies_rather_than_allows(
+    tmp_path, monkeypatch,
+):
+    """The branch runs ONLY for a call the CLI itself would have stopped
+    to ask a human about, so an exception on the way to the answer -- the
+    client gone, the pane dead, a cancelled wait -- means the human was
+    not asked. It used to return PermissionResultAllow, so the tool ran
+    unapproved. The reason travels in the message, where the model and
+    the transcript both see it."""
+    engine = SessionEngine(cwd=str(tmp_path))
+    engine._build_options()
+
+    async def boom(*_a, **_kw):
+        raise ConnectionResetError("the client went away")
+
+    monkeypatch.setattr(engine, "_request_permission", boom)
+    result = await engine._on_can_use_tool(
+        "Bash", {"command": "rm -rf /"}, _ctx(title="Claude wants to run rm -rf /"),
+    )
+    assert isinstance(result, PermissionResultDeny)
+    assert "no answer" in result.message
+    assert "ConnectionResetError" in result.message
+    assert result.interrupt is False
+
+
+@pytest.mark.asyncio
+async def test_an_ask_user_question_that_raises_denies_rather_than_allows(
+    tmp_path, monkeypatch,
+):
+    """The same rule on the other asking branch, so the two cannot drift."""
+    engine = SessionEngine(cwd=str(tmp_path))
+    engine._build_options()
+
+    async def boom(*_a, **_kw):
+        raise TimeoutError("nobody answered")
+
+    monkeypatch.setattr(engine, "_ask_user_question", boom)
+    result = await engine._on_can_use_tool(
+        "AskUserQuestion", {"questions": []}, _ctx(),
+    )
+    assert isinstance(result, PermissionResultDeny)
+    assert "no answer" in result.message
+    assert "TimeoutError" in result.message
+
+
+@pytest.mark.asyncio
+async def test_cancellation_still_propagates_rather_than_becoming_a_deny(
+    tmp_path, monkeypatch,
+):
+    """CancelledError is a BaseException and deliberately NOT converted: a
+    session tearing down must cancel this coroutine, not receive a
+    synthesised tool result from it. The SDK's own behaviour for a
+    callback that raises is to fail the tool call, which is the same
+    closed direction."""
+    engine = SessionEngine(cwd=str(tmp_path))
+    engine._build_options()
+
+    async def cancelled(*_a, **_kw):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(engine, "_request_permission", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await engine._on_can_use_tool("Bash", {}, _ctx(title="t"))
+
+
+@pytest.mark.asyncio
+async def test_a_call_the_cli_had_no_question_about_is_still_a_bare_allow(tmp_path):
+    """The fix must not turn the common case into a denial: nothing in
+    ``context`` populated is the CLI saying it had nothing to ask, not an
+    answer this callback failed to get."""
+    engine = SessionEngine(cwd=str(tmp_path))
+    engine._build_options()
+    result = await engine._on_can_use_tool("Read", {"file_path": "x.py"}, _ctx())
+    assert isinstance(result, PermissionResultAllow)

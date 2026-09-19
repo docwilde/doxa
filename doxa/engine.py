@@ -46,9 +46,13 @@ Boundaries used, and why:
   already denied) returns a bare allow, unchanged from today's silent
   pass-through -- the callback is invoked for every tool call the PreToolUse
   hook didn't deny, so defaulting to allow is what keeps this addition
-  zero-regression rather than a new prompt on every tool call. See
-  ``_on_can_use_tool`` below and the queue item 5 task report for the
-  exact SDK source this reads (installed ``claude_agent_sdk`` package,
+  zero-regression rather than a new prompt on every tool call. A call
+  that DID reach one of the two asking branches and could not get an
+  answer is DENIED, never allowed -- "the human was not asked" is not
+  "the human said yes"; see ``_on_can_use_tool``. Every OTHER call
+  reaching this callback returns a bare allow. See ``_on_can_use_tool``
+  below and the queue item 5 task report for the exact SDK source this
+  reads (installed ``claude_agent_sdk`` package,
   ``_internal/query.py``/``types.py``).
 * Native tools -- ``doxa.operators``' registry, projected to an IN-PROCESS
   SDK MCP server (``create_sdk_mcp_server``, PHASE0 SS6: the SDK's own
@@ -376,6 +380,30 @@ def bypass_arming_enabled() -> bool:
     can retrofit it."""
     raw = config_mod.raw("DOXA_ALLOW_BYPASS").strip()
     return bool(raw) and raw.lower() not in ("0", "false", "no", "off")
+
+
+def _no_answer_deny(exc: BaseException) -> "PermissionResultDeny":
+    """The refusal :meth:`SessionEngine._on_can_use_tool` returns when it
+    could not obtain the user's decision.
+
+    Its own function so the two asking branches cannot drift apart, and so
+    the reason reaches the model rather than only the log: the message is
+    what the CLI hands back as the tool result, and a refused call whose
+    stated reason is "no answer" is something the model can act on --
+    ask again in words, or do something else -- where a bare denial is
+    not. The exception's TYPE and text are included; the class name alone
+    would not distinguish a dead client from a dialog bug.
+
+    Only ``Exception`` reaches here. ``CancelledError`` is a
+    ``BaseException`` and stays uncaught on purpose: a session tearing
+    down must be able to cancel the coroutine awaiting the answer, not
+    receive a synthesised tool result from it. The SDK's own behaviour for
+    a callback that raises is to fail the tool call -- the same closed
+    direction this function takes deliberately."""
+    reason = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    return PermissionResultDeny(
+        message=f"no answer: {reason}", interrupt=False,
+    )
 
 
 def available_modes(armed: bool) -> "tuple[str, ...]":
@@ -1947,16 +1975,36 @@ class SessionEngine:
     ) -> PermissionResult:
         """The ``can_use_tool`` callback -- see the module docstring's
         "Interactive permission" bullet for the two cases this actually
-        handles and why every other call defaults to allow. Never denies
-        via a raised exception: a bug in here must degrade to "let the
-        call through" (the SDK's own default when the callback errors is
-        to fail the tool call outright, which would turn a UI bug into a
-        stuck session), so both branches are wrapped."""
+        handles and why every other call defaults to allow.
+
+        **A call that reaches one of the two asking branches is never
+        allowed without an answer.** Those branches run only for a call
+        the CLI itself would have stopped to ask a human about, so an
+        exception on the way to the answer -- the client gone, the pane
+        dead, a bug in the dialog, ``_wait_for_answer`` cancelled -- means
+        the human was not asked, and "not asked" is not "approved". The
+        failure returns :class:`PermissionResultDeny` naming the reason.
+
+        This replaces an earlier allow-on-exception, whose stated worry
+        was that a UI bug would turn into a stuck session. It does not: a
+        deny is an ordinary tool result. The model reads the refusal and
+        carries on, exactly as it does for the decline path
+        ``_ask_user_question`` already returns, and the reason travels in
+        the message so the failure is visible in the transcript rather
+        than silent. A wedged session and an unapproved tool call are not
+        equally bad outcomes, and only one of them is recoverable by the
+        person watching.
+
+        The third branch -- nothing in ``context`` populated, which is the
+        common case -- still returns a bare allow. That is the CLI saying
+        it had nothing to ask about, not an answer this callback failed to
+        get."""
         if tool_name == "AskUserQuestion":
             try:
                 return await self._ask_user_question(tool_input, context)
-            except Exception:
-                return PermissionResultAllow()
+            except Exception as exc:  # noqa: BLE001 -- see the docstring:
+                # no answer is a denial, never an allow.
+                return _no_answer_deny(exc)
         if context.title or context.display_name or context.decision_reason:
             # The CLI only populates these for a call it would genuinely
             # have shown its own interactive permission prompt for --
@@ -1965,8 +2013,8 @@ class SessionEngine:
             # that flows through silently today gains a new prompt.
             try:
                 return await self._request_permission(tool_name, tool_input, context)
-            except Exception:
-                return PermissionResultAllow()
+            except Exception as exc:  # noqa: BLE001 -- same rule.
+                return _no_answer_deny(exc)
         return PermissionResultAllow()
 
     async def _wait_for_answer(self, kind: str, data: dict) -> dict:
