@@ -503,12 +503,17 @@ class FleetSpec:
     #: stop`` now waits for the daemon to close its socket, which it
     #: does only once ``engine.finalize()`` -- the LORE review/index for
     #: a memory-enabled session -- and the worktree decision have both
-    #: run (see ``EngineClient.stop``'s docstring). Measured real
-    #: LORE-enabled finalize is low seconds; 60 s is generous headroom
-    #: above that rather than a number sized to the ack, which is what
-    #: `kill_grace_s` used to be and is why a LORE session's clean-but-
-    #: slow shutdown was mistaken for a wedge. A session that has not
-    #: answered `stop` inside this window is escalated to SIGTERM/SIGKILL.
+    #: run (see ``EngineClient.stop``'s docstring). Measured against a
+    #: real spawned Claude/sonnet daemon, a trivial single-turn finalize
+    #: is well under a second (0.018s observed); it scales with
+    #: transcript size and with whether a deriver LLM is configured, and
+    #: the issue's own report (a longer, tool-using transcript) is the
+    #: case that exceeded the OLD 5s ``kill_grace_s``. 60s is generous
+    #: headroom above either, rather than a number sized to the ack,
+    #: which is what `kill_grace_s` used to be and is why a LORE
+    #: session's clean-but-slow shutdown was mistaken for a wedge. A
+    #: session that has not answered `stop` inside this window is
+    #: escalated to SIGTERM/SIGKILL.
     stop_timeout_s: float = 60.0
     #: The window AFTER a successful ``stop`` for the OS to actually
     #: report the pid gone -- reap latency, not finalize time, now that

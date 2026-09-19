@@ -244,8 +244,13 @@ class EngineClient:
         like a wedge to :meth:`doxa.fleet.FleetRun.teardown`: the fixed
         grace window it timed the pid's disappearance against was sized
         for the ack, never for the finalize that follows it. Measured
-        real LORE-enabled finalize (see the PR for issue #58): low
-        seconds -- comfortably inside ``FleetSpec.stop_timeout_s`` (60 s
+        against a real spawned Claude/sonnet daemon (see the PR for issue
+        #58): a trivial single-turn transcript finalizes in well under a
+        second (0.018s observed), and the LORE review/index this waits on
+        scales with transcript size and with whether a deriver LLM is
+        configured -- the issue's own report (a longer, tool-using
+        transcript) is the case that exceeded the OLD 5s window. Either
+        way this sits comfortably inside ``FleetSpec.stop_timeout_s`` (60s
         default), which is what now bounds this wait instead of a
         separate guess. A daemon that never closes -- genuinely wedged,
         not merely slow -- leaves this call pending until THAT caller's
