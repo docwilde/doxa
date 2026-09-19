@@ -123,6 +123,28 @@ GATED_SOCKET_MODES = frozenset(GATED_MODES) | (
     frozenset(PERMISSION_MODES) - frozenset(available_modes(False))
 )
 
+#: How many bytes may sit unsent in ONE client's socket buffer before the
+#: daemon stops treating it as a client.
+#:
+#: ``_publish`` writes without ``drain()``, deliberately -- it is called
+#: from the turn's own event loop and awaiting one slow reader would stall
+#: the turn for every other client and for the engine. The cost of not
+#: awaiting is that a client which stops reading has its frames buffered
+#: in the daemon's memory forever: an attached TUI whose process is
+#: SIGSTOPped, a detached client on a dead network, a script that opened
+#: the socket and walked away. Unbounded, that is the daemon's memory as a
+#: function of somebody else's inattention.
+#:
+#: The bound is read off the transport's OWN write buffer rather than kept
+#: in a second queue in front of it: the transport already counts exactly
+#: this, and a queue of our own would only move the same bytes one layer
+#: up while adding a pump task that can reorder them. Past the bound the
+#: client is DROPPED (``_drop_client``, which closes it and re-arms the
+#: linger) -- a client this far behind has already lost the stream's
+#: ordering guarantee, and the replay ring is how it catches up when it
+#: reattaches.
+CLIENT_WRITE_BUFFER_MAX = 8 * 1024 * 1024
+
 DEFAULT_LINGER_SECS = 120.0
 # A freshly spawned daemon that NO client has attached to yet gets this
 # claim window (>= spawn_daemon's own wait) before giving up, regardless of
@@ -355,6 +377,24 @@ def daemon_socket_path(session_id: str) -> Path:
     prefix + pid, and readers never derive it -- they read it verbatim from
     the registry entry's daemon_socket field."""
     return runtime_dir() / f"daemon-{session_id[:8]}-{os.getpid()}.sock"
+
+
+def _write_buffer_size(writer: asyncio.StreamWriter) -> int:
+    """How many bytes are queued but unsent for this client, or 0 when the
+    transport cannot say.
+
+    0 on an unknown transport rather than a large number: this value gates
+    a DROP, and a transport that does not report its buffer is not evidence
+    that a client is misbehaving. Test doubles and non-socket transports
+    land here."""
+    transport = getattr(writer, "transport", None)
+    sizer = getattr(transport, "get_write_buffer_size", None)
+    if not callable(sizer):
+        return 0
+    try:
+        return int(sizer())
+    except Exception:  # noqa: BLE001 -- a transport mid-close counts as 0
+        return 0
 
 
 class SessionDaemon:
@@ -846,6 +886,12 @@ class SessionDaemon:
             if writer is exclude:
                 continue
             try:
+                if _write_buffer_size(writer) > CLIENT_WRITE_BUFFER_MAX:
+                    # Not reading, and far enough behind that continuing to
+                    # buffer for it is this daemon's memory rather than
+                    # that client's problem. See CLIENT_WRITE_BUFFER_MAX.
+                    self._drop_client(writer)
+                    continue
                 writer.write(payload)
             except Exception:
                 self._drop_client(writer)

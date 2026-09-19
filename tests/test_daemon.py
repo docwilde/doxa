@@ -2255,3 +2255,109 @@ async def test_the_daemon_refuses_a_session_id_that_is_a_path(tmp_path, monkeypa
         cwd=str(tmp_path), session_id="4f8e2a91-77bc-4c1d-9a01-000000000000"
     ).session_id == "4f8e2a91-77bc-4c1d-9a01-000000000000"
     assert SessionDaemon(cwd=str(tmp_path)).session_id
+
+
+# =======================================================================
+# Closing during a turn, and a client that stops reading (panel finding 9)
+# =======================================================================
+
+
+@pytest.mark.asyncio
+async def test_closing_during_a_turn_ends_send_instead_of_hanging_it(
+    tmp_path, monkeypatch,
+):
+    """`_close()` failed the pending RPCs and ended `peer_events`, and left
+    `_turn_queue` alone -- so a `send()` parked on it mid-turn waited for a
+    `turn_done` that a closed socket can never deliver. The one caller it
+    hung is the one a user is watching."""
+    gate = asyncio.Event()
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    daemon = SessionDaemon(
+        cwd=str(tmp_path), linger_secs=30.0,
+        engine_factory=lambda cwd, sid, dsock: SessionEngine(
+            cwd=cwd, session_id=sid, client_factory=_slow_script_client_factory(gate),
+            daemon_socket=dsock,
+        ),
+    )
+    serve_task = asyncio.create_task(daemon.serve())
+    await asyncio.wait_for(daemon.ready.wait(), 10)
+    try:
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+
+        async def run():
+            return [ev async for ev in client.send("slow one")]
+
+        task = asyncio.create_task(run())
+        for _ in range(200):
+            if daemon._running():
+                break
+            await asyncio.sleep(0.01)
+        assert daemon._running()
+
+        client._close()  # the socket goes while the turn is still running
+
+        with pytest.raises(EngineClientError, match=r"closed mid-turn"):
+            await asyncio.wait_for(task, 5)
+    finally:
+        gate.set()
+        if not serve_task.done():
+            with contextlib.suppress(Exception):
+                await daemon._shutdown("test teardown")
+                await asyncio.wait_for(serve_task, 5)
+
+
+@pytest.mark.asyncio
+async def test_next_turn_event_returns_none_once_the_client_closes(
+    tmp_path, monkeypatch,
+):
+    """The other consumer of that queue -- doxa.fleet's dispatch/drain
+    half -- must be woken too, and its own contract is None, not a raise."""
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, _created, _):
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        waiter = asyncio.create_task(client.next_turn_event())
+        await asyncio.sleep(0.05)
+        client._close()
+        assert await asyncio.wait_for(waiter, 5) is None
+
+
+@pytest.mark.asyncio
+async def test_a_client_that_stops_reading_is_dropped_not_buffered_forever(
+    tmp_path, monkeypatch,
+):
+    """`_publish` writes without `drain()` on purpose -- awaiting one slow
+    reader would stall the turn for everyone. The cost was that a client
+    which stops reading had its frames buffered in the daemon's memory
+    without limit: an attached TUI that was SIGSTOPped, a detached client
+    on a dead network. Past the bound it is dropped."""
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, _created, _):
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        for _ in range(200):
+            if daemon._clients:
+                break
+            await asyncio.sleep(0.01)
+        writer = next(iter(daemon._clients))
+
+        # Under the bound: still a client, and it still gets the frame.
+        daemon._publish(None, EngineEvent("peer_message", {"body": "one"}))
+        assert writer in daemon._clients
+
+        class _Stuffed:
+            """A transport whose write buffer is over the cap."""
+
+            def get_write_buffer_size(self):
+                return daemon_mod.CLIENT_WRITE_BUFFER_MAX + 1
+
+        monkeypatch.setattr(type(writer), "transport", property(lambda _s: _Stuffed()))
+        daemon._publish(None, EngineEvent("peer_message", {"body": "two"}))
+
+        assert writer not in daemon._clients
+        # The ring still carries what it missed, which is how it catches
+        # up if it ever reattaches.
+        assert any(
+            f["event"]["data"].get("body") == "two" for f in daemon.ring.since(None)
+        )
+        with contextlib.suppress(Exception):
+            await client.finalize()
