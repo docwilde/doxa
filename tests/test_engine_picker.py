@@ -447,8 +447,8 @@ async def test_engine_with_no_argument_lists_every_registered_engine(
 async def test_engine_listing_shows_the_capability_difference(
     monkeypatch, tmp_path
 ):
-    """The four engines differ sharply -- 17 of 17 fields for claude, 4
-    for codex, 9 for each vendor. A list that showed them as
+    """The four engines differ sharply -- 18 of 18 fields for claude, 4
+    for codex, 10 for each vendor. A list that showed them as
     interchangeable would be lying, and the numbers are read off
     EngineCapabilities rather than written here, so a new field cannot
     make this text wrong without making this assertion fail."""

@@ -164,13 +164,16 @@ def test_peer_send_is_absent_again_when_its_switch_is_off(monkeypatch):
 
 
 def test_an_engine_with_no_outbound_path_is_not_offered_the_send_tool(monkeypatch):
-    """The setting alone is not enough, and the case is real rather than
-    hypothetical: doxa.vendors' engine (DeepSeek, GLM) hosts a PeerHost
-    and RECEIVES peer messages, but has no outbound path and names no
-    peer_send seam. With the switch on it would otherwise be offered a
-    tool whose only possible answer is "this session has no outbound peer
-    channel" -- a soft, safe refusal, and still exactly the defect the
-    configuredness filter exists to prevent."""
+    """The setting alone is not enough: a session that cannot send must
+    not be offered a tool whose only possible answer is "this session has
+    no outbound peer channel" -- a soft, safe refusal that still burns a
+    step, and exactly the defect the configuredness filter exists to
+    prevent.
+
+    Every engine DOXA ships today DOES name the seam (docwilde/doxa#39
+    gave doxa.vendors one), so the case this fixes in place is the ctx
+    built without it: a session whose tool surface failed to import, or a
+    future engine that hosts no PeerHost."""
     monkeypatch.setenv("DOXA_AGENT_PEER_SEND", "1")
     no_seam = {"belief_store": object(), "lore_root": "/tmp/lore"}
 

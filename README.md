@@ -234,7 +234,8 @@ uv run doxa --engine glm          # or GLM (Z.ai), on ZAI_API_KEY
 | cost and context-window chips | yes | no | no | no |
 | `/msg` to a peer | yes | yes | yes | yes |
 | `peer_list`, `peer_history` tools for the model | yes | no | yes | yes |
-| `peer_send` tool, budgets, `Task` spawns | yes | no | no | no |
+| `peer_send` tool for the model | yes | no | yes | yes |
+| budgets, `Task` spawns | yes | no | no | no |
 | fleet slot | yes | not yet (#39) | not yet (#39) | not yet (#39) |
 
 The rows are `doxa.engines.get(<id>).supports()` read off the registry, not
@@ -246,7 +247,7 @@ DOXA session on something other than the `claude` CLI, and
 each one declares what it can actually do rather than inheriting Claude's
 list. `codex` (v1.4.0) drives the Codex CLI. `deepseek` and `glm`
 (v1.10.0) are two third-party chat-completions APIs behind one
-implementation and one capability map — nine of seventeen fields true —
+implementation and one capability map — ten of eighteen fields true —
 so a run can mix vendors without also mixing what the terminal supports.
 Both are billed on their own API key, not on your Claude subscription, and
 refuse to start without it.

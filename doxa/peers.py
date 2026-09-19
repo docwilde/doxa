@@ -1187,3 +1187,24 @@ def frame_for_model(frames: list[dict]) -> str:
         parts.append(str(f.get("body", "")))
     parts.append("--- end of peer messages ---")
     return "\n".join(parts)
+
+
+def peer_origin_line(prompt: str) -> "str | None":
+    """The ``--- peer message ... ---`` header out of a peer-started
+    turn's prompt, or None when there is not one.
+
+    :func:`frame_for_model` above writes exactly one such line per frame
+    and a peer-started turn carries exactly one frame, so the first match
+    is the answer. It lives beside the function whose output it reads
+    because every engine that can be woken by a peer needs it -- Claude's
+    SessionEngine and the vendor engines alike -- and two copies of a
+    parser for one format is how the label starts naming the wrong
+    sender. None rather than a guess if the shape ever changes: an
+    unlabelled peer turn still SAYS it is a peer turn (the prompt's own
+    first paragraph does that, and the TUI has the boolean), it just
+    cannot name who sent it -- a smaller failure than naming the wrong
+    one."""
+    for line in prompt.splitlines():
+        if line.startswith("--- peer message"):
+            return line.strip("- ").strip()
+    return None

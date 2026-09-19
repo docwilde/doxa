@@ -74,6 +74,12 @@ def fake_keys(monkeypatch, request):
     for name, value in FAKE_ENV.items():
         monkeypatch.setenv(name, value)
     monkeypatch.delenv("DOXA_VENDOR_EFFORT", raising=False)
+    # Explicitly OFF rather than inherited. Since docwilde/doxa#39 this
+    # engine wires a peer_send seam, so the user's switch is the only
+    # thing deciding whether the tool is projected -- a suite that read
+    # the developer's own environment for it would pass or fail by
+    # machine. tests/test_peer_delivery.py is where it is turned on.
+    monkeypatch.delenv("DOXA_AGENT_PEER_SEND", raising=False)
 
 
 # -- the stub transport ------------------------------------------------
@@ -393,24 +399,25 @@ async def test_mcp_tools_is_true_because_the_operators_reach_the_model(tmp_path)
     # lore_remember only STAGES a proposal for the review gate. A narrower
     # surface would be a capability difference the map does not record.
     #
-    # peer_send is the ONE documented subtraction, and it is a capability
-    # difference the engine really has rather than a gap: this engine
-    # hosts a PeerHost and receives peer messages, but has no outbound
-    # path and wires no peer_send seam, so the operator's is_configured
-    # (which requires the seam as well as the user's setting) leaves it
-    # out. Spelled as a set difference rather than a hardcoded list, so
-    # adding a sixth read operator does not have to touch this line.
+    # peer_send is the ONE subtraction, and since docwilde/doxa#39 it is
+    # the USER's switch rather than a missing seam: this engine now holds
+    # a doxa.peerdelivery.PeerDelivery and names it in the ctx, so with
+    # DOXA_AGENT_PEER_SEND set the tool is offered and really sends (see
+    # tests/test_peer_delivery.py). The fixture above clears that
+    # variable, so what this line measures is the default install.
+    # Spelled as a set difference rather than a hardcoded list, so adding
+    # a sixth read operator does not have to touch it.
     assert offered == (set(OPERATORS) | set(WRITE_OPERATORS)) - {"peer_send"}
     assert "lore_belief_search" in offered
     assert "lore_remember" in offered
     assert "peer_list" in offered, (
-        "peer DISCOVERY needs no seam -- it reads two files this process "
-        "can open -- so a vendor session keeps it"
+        "peer DISCOVERY is gated on neither the seam nor the switch -- it "
+        "reads two files this process can open -- so a vendor session has "
+        "it either way"
     )
     assert "peer_send" not in offered, (
-        "an offered tool that can only answer 'this session has no "
-        "outbound peer channel' is exactly what the configuredness filter "
-        "exists to prevent"
+        "with the switch off the send tool is not refused, it is not "
+        "OFFERED: a tool the model cannot see is a tool it cannot call"
     )
     assert transport.last_body["tool_choice"] == "auto"
     assert VENDOR_CAPABILITIES.mcp_tools is True
