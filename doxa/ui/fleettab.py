@@ -60,9 +60,18 @@ class FleetTab(TabPane):
         self,
         session: Any,
         *,
+        owner: Any = None,
         id: "str | None" = None,
     ) -> None:
         self.session = session
+        #: The ``SessionPane`` whose ``/fleet start`` opened this, the same
+        #: back-reference :class:`doxa.ui.transcript.SubagentTranscriptTab`
+        #: carries and for a sharper reason: this tab is not a session, so
+        #: ``DoxaApp.active_pane`` is None while it is the active tab --
+        #: and a palette entry that ran a slash command would then reach
+        #: nobody. It is how "Fleet: status" still works from the tab the
+        #: run is IN.
+        self.owner = owner
         self.run_id = str(getattr(session, "run_id", "") or "?")
         self.base_label = f"fleet {self.run_id}"
         self.body = Static("", classes="fleet-body")

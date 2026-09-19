@@ -394,7 +394,9 @@ class WindowTabsMixin:
         as "tabs with a session behind them"."""
         return list(self.query(FleetTab))
 
-    async def open_fleet_tab(self, session: "Any") -> "FleetTab":
+    async def open_fleet_tab(
+        self, session: "Any", owner: "Any" = None,
+    ) -> "FleetTab":
         """A read-only tab watching one fleet run.
 
         Opened by ``/fleet start`` in the group the command was typed in,
@@ -402,7 +404,7 @@ class WindowTabsMixin:
         just asked for, and a tab that opened behind the one they are in
         would be a run happening out of sight."""
         tabbed = self._strip()
-        tab = FleetTab(session, id=f"fleet-{session.run_id}")
+        tab = FleetTab(session, owner=owner, id=f"fleet-{session.run_id}")
         await tabbed.add_pane(tab)
         self._activate_tab(tab)
         self._focus_tab(tab)

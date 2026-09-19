@@ -624,10 +624,35 @@ class WindowActionsMixin:
 
     def _cmd_run_slash(self, name: str) -> None:
         """Palette -> the ACTIVE pane's slash handler. One dispatch path for
-        both surfaces: the palette never reimplements a command."""
-        pane = self.active_pane
+        both surfaces: the palette never reimplements a command.
+
+        ``active_pane`` is SessionPane-only and is therefore None whenever
+        a READ-ONLY tab is the active one -- an archived transcript, a
+        subagent's activity, a fleet run. Through v1.14.0 that made every
+        palette command a no-op in those tabs, which is the "documented
+        action that silently does nothing" failure this house treats as a
+        defect rather than a rough edge; the two tab kinds that know which
+        pane they belong to (``owner``) supply one, so "Fleet: status"
+        works from the tab the run is in."""
+        pane = self.active_pane or self._owner_of_active_tab()
         if pane is not None:
             pane.run_worker(pane._run_command(name), group="command")
+
+    def _owner_of_active_tab(self) -> "object | None":
+        """The SessionPane a read-only active tab belongs to, or None.
+
+        Reads ``owner`` off whatever tab is active rather than asking each
+        tab kind by type: a tab that declares an owner is declaring that a
+        command typed "here" means that pane, and a tab that does not
+        (an archived transcript -- its session is gone) truthfully has
+        nobody to answer for it."""
+        from ..session.pane import SessionPane
+
+        active: "object | None" = None
+        with contextlib.suppress(Exception):
+            active = self._strip().active_pane
+        owner = getattr(active, "owner", None)
+        return owner if isinstance(owner, SessionPane) else None
 
     def _cmd_prefill(self, text: str) -> None:
         pane = self.active_pane

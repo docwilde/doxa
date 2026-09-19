@@ -1896,7 +1896,7 @@ class PaneCommandsMixin:
         session = fleetsession_mod.FleetSession(spec, force=parsed.force)
         self._fleet = session
         session.start()
-        await self.app.open_fleet_tab(session)
+        await self.app.open_fleet_tab(session, owner=self)
         await self._system(
             f"fleet {session.run_id} starting — n={spec.n}, root "
             f"{spec.run_root}. Its tab shows the run; closing that tab "
