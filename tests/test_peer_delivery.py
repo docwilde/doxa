@@ -288,3 +288,184 @@ async def test_a_vendor_msg_that_the_limit_refuses_raises_the_error_msg_handles(
     finally:
         await eng.finalize()
 
+
+
+# -- inbound: a message that starts a turn -----------------------------
+
+
+async def test_an_arriving_message_starts_a_turn_on_a_vendor_session(
+    tmp_path, monkeypatch,
+):
+    """The other half of the mesh. A DeepSeek session used to append every
+    frame to a pending list and wait for a human to type something; with
+    the switch armed it now wakes, exactly as a Claude session does, and
+    the model is asked in the same words."""
+    eng, transport = await _vendor(tmp_path, monkeypatch, inbound=True)
+    try:
+        eng._on_peer_frame({
+            "from_id": "waker", "from_title": "waker", "sent_at": "now",
+            "body": "can you take the parser?", "from_repo": "/repo/waker",
+            "kind": "direct",
+        })
+        assert eng._turn_running is True, (
+            "set synchronously, before the task's first step -- otherwise a "
+            "prompt submitted in that window starts a second turn"
+        )
+        assert eng._queued_turn_task is not None
+        await eng._queued_turn_task
+
+        sent = transport.last_body["messages"][-1]["content"]
+        assert sent.startswith(peers.PEER_TURN_INTRO)
+        assert "can you take the parser?" in sent
+        assert peers.PEER_UNTRUSTED_INTRO in sent, (
+            "a peer-started turn's body still crosses the untrusted marker"
+        )
+        assert eng._pending_peer_frames == [], (
+            "a frame that started a turn must not ALSO ride the next one -- "
+            "that is the same message delivered twice"
+        )
+    finally:
+        await eng.finalize()
+
+
+async def test_a_peer_started_vendor_turn_is_attributable(tmp_path, monkeypatch):
+    """Spend needs a traceable cause on every engine, not only the one
+    that can price it. The turn says so in the same three places a Claude
+    peer-started turn does, all three derived from one string: the prompt
+    the model read, the event the transcript renders, and the turn id
+    every ledger record written during that turn carries."""
+    eng, _transport = await _vendor(tmp_path, monkeypatch, inbound=True)
+    try:
+        eng._on_peer_frame({
+            "from_id": "cause01", "from_title": "the cause", "sent_at": "t0",
+            "body": "please look at the parser", "from_repo": "/repo/cause",
+            "kind": "direct",
+        })
+        await eng._queued_turn_task
+
+        started = [ev for ev in _drain(eng._peer_queue) if ev.type == "turn_started"]
+        assert started, "no turn_started reached the transcript"
+        data = started[0].data
+        assert data["peer_started"] is True
+        assert "the cause" in str(data["peer_origin"])
+        assert "cause01" in str(data["peer_origin"])
+        assert str(data["turn_id"]).startswith("peer-"), (
+            "the ledger's half of the attribution: every record written in "
+            "this turn carries this id, so an inbound cause is readable "
+            "without a second record type"
+        )
+    finally:
+        await eng.finalize()
+
+
+async def test_an_arriving_message_queues_when_a_vendor_turn_is_running(
+    tmp_path, monkeypatch,
+):
+    """Into the EXISTING bounded FIFO, as a second producer. A parallel
+    queue would disagree with this one about order the first time both had
+    something waiting, and the bound would stop being a bound."""
+    eng, transport = await _vendor(tmp_path, monkeypatch, inbound=True)
+    try:
+        eng._turn_running = True
+        eng._on_peer_frame({
+            "from_id": "patient", "from_title": "patient", "sent_at": "now",
+            "body": "when you get a moment", "from_repo": "/repo/patient",
+            "kind": "direct",
+        })
+
+        assert len(eng._prompt_queue) == 1
+        queued = eng._prompt_queue.snapshot()[0]["text"]
+        assert queued.startswith(peers.PEER_TURN_INTRO), (
+            "the attribution rides the TEXT, which is what makes it survive "
+            "the queue -- PromptQueue carries an id and a string, nothing else"
+        )
+        assert transport.requests == [], "the running turn was not interrupted"
+        assert eng._pending_peer_frames == []
+        queued_event = [
+            ev for ev in _drain(eng._peer_queue) if ev.type == "prompt_queued"
+        ]
+        assert queued_event, "nothing told the user a peer message is waiting"
+        assert queued_event[0].data["peer_started"] is True
+        assert "patient" in str(queued_event[0].data["peer_origin"]), (
+            "the queue line is the only thing shown between arrival and the "
+            "turn starting, and a queue line shows the prompt's first 120 "
+            "characters -- boilerplate identical on every one of these"
+        )
+    finally:
+        eng._turn_running = False
+        await eng.finalize()
+
+
+async def test_an_arriving_message_starts_no_vendor_turn_while_the_switch_is_off(
+    tmp_path, monkeypatch,
+):
+    """The default, and the behaviour this engine has always had.
+    Receiving and being woken are different grants."""
+    eng, transport = await _vendor(tmp_path, monkeypatch, inbound=False)
+    try:
+        eng._on_peer_frame({
+            "from_id": "quiet", "from_title": "quiet", "sent_at": "now",
+            "body": "no rush", "from_repo": "/repo/quiet", "kind": "direct",
+        })
+
+        assert eng._turn_running is False
+        assert len(eng._prompt_queue) == 0
+        assert eng._queued_turn_task is None
+        assert transport.requests == []
+        assert len(eng._pending_peer_frames) == 1, (
+            "it is not dropped either -- it rides the next turn the user "
+            "starts"
+        )
+    finally:
+        await eng.finalize()
+
+
+async def test_a_broadcast_never_wakes_a_vendor_session(tmp_path, monkeypatch):
+    """The one rule docs/plans/emergent-organization.md states before it
+    states anything else, and it has to hold on every engine: at N=32 a
+    broadcast that started turns would wake the entire fleet in a single
+    step, and a reply-broadcast round is 992 messages."""
+    eng, transport = await _vendor(tmp_path, monkeypatch, inbound=True)
+    try:
+        eng._on_peer_frame({
+            "from_id": "loud", "from_title": "loud", "sent_at": "now",
+            "body": "everyone please respond", "from_repo": "/repo/loud",
+            "kind": "broadcast",
+        })
+
+        assert eng._turn_running is False, "a broadcast must never wake a session"
+        assert len(eng._prompt_queue) == 0, "not even into the queue"
+        assert transport.requests == [], "nothing was sent to the model"
+        assert len(eng._pending_peer_frames) == 1, (
+            "it is not dropped either -- it rides the next turn the user "
+            "starts, which is exactly what it did before any of this"
+        )
+    finally:
+        await eng.finalize()
+
+
+async def test_a_typed_prompt_queues_behind_a_peer_started_vendor_turn(
+    tmp_path, monkeypatch,
+):
+    """The consequence of a peer being able to start a turn: "a turn is
+    already running" is no longer a state only the human could have
+    created, so send() has to queue rather than race. Before this the
+    vendor engine had no such check at all."""
+    eng, _transport = await _vendor(tmp_path, monkeypatch, inbound=True)
+    try:
+        eng._turn_running = True
+
+        events = [ev async for ev in eng.send("meanwhile, from the human")]
+
+        assert [ev.type for ev in events] == ["prompt_queued"]
+        assert events[0].data["position"] == 1
+        assert await eng.list_queue() == [
+            {"id": events[0].data["id"], "text": "meanwhile, from the human"},
+        ]
+        assert await eng.cancel_queued(events[0].data["id"]) is True
+        assert await eng.cancel_queued(events[0].data["id"]) is False, (
+            "a stale id is not an error"
+        )
+    finally:
+        eng._turn_running = False
+        await eng.finalize()

@@ -136,6 +136,7 @@ from .engines import (
     EngineCapabilities,
 )
 from .events import EngineEvent
+from .promptqueue import PromptQueue, PromptQueueFull
 from .providers import DEEPSEEK_PROVIDER_ID, ZAI_PROVIDER_ID
 
 
@@ -981,6 +982,22 @@ class ChatApiEngine:
         # whichever turn happened to run last.
         self._turn_id: "str | None" = None
 
+        # Whether a turn is running right now, and the bounded FIFO a
+        # second prompt goes into while one is. The SAME class
+        # SessionEngine uses (doxa.promptqueue.PromptQueue), because a
+        # peer message that can start a turn needs somewhere to wait when
+        # the session is busy, and an ad-hoc list here would drift from
+        # the one the Claude engine bounds and announces. Set and read
+        # with no ``await`` in between, so two concurrent send() calls
+        # cannot race each other's decision.
+        self._turn_running = False
+        self._prompt_queue = PromptQueue()
+        # The queued turn currently running in the background, if any.
+        # Held because the event loop keeps only a weak reference to a
+        # task: one collected mid-turn is a turn that simply stops, with
+        # no event to say so.
+        self._queued_turn_task: "asyncio.Task | None" = None
+
         # THE outbound peer path, the same object a Claude session holds
         # (doxa/peerdelivery.py). Before this a vendor session called
         # peers.send_message directly: no rate limit, no ledger row, no
@@ -1225,19 +1242,111 @@ class ChatApiEngine:
         }
 
     async def send(self, prompt: str) -> AsyncIterator[EngineEvent]:
-        """Public entry point for a typed prompt.
+        """Public entry point for a typed prompt: start a turn, or -- when
+        one is already running -- enqueue it behind that one (bounded
+        FIFO, see doxa.promptqueue.PromptQueue) instead of racing it.
 
-        Thin on purpose: it exists so the turn id minted below is cleared
-        on EVERY exit, a cancelled turn included. A turn id that outlived
-        its turn would attribute the next idle send to a turn that has
-        ended -- in the peer ledger and in the rate limit's per-turn
-        bucket alike, which is the same failure
-        :meth:`doxa.engine.SessionEngine.send` clears it for."""
+        The shape :meth:`doxa.engine.SessionEngine.send` already had, and
+        it is here for the same reason it is there: an arriving peer
+        message may now start a turn on this engine, so "a turn is already
+        running" stopped being a state only a human could create. No
+        ``await`` runs between the busy check and either branch's commit,
+        so two concurrent calls cannot race the decision.
+
+        The turn id is cleared on EVERY exit, cancellation included. One
+        that outlived its turn would attribute the next idle send to a
+        turn that has ended -- in the peer ledger and in the rate limit's
+        per-turn bucket alike."""
+        if self._turn_running:
+            item = self._prompt_queue.enqueue(prompt)  # may raise PromptQueueFull
+            position = self._prompt_queue.position(item.id) or len(self._prompt_queue)
+            # Yielded to THIS caller rather than put on the out-of-band
+            # queue: in-process there is only ever one caller of send(),
+            # and publishing it out of band as well would have the pane
+            # render the same acknowledgement twice.
+            yield EngineEvent("prompt_queued", {
+                "id": item.id, "text": prompt, "position": position,
+            })
+            return
+        self._turn_running = True
+        cancelled = False
         try:
             async for event in self._send_turn(prompt):
                 yield event
+        except (GeneratorExit, asyncio.CancelledError):
+            # Cancelled from outside (pane teardown, app shutdown): the
+            # queue must NOT advance. Starting another turn on an engine
+            # on its way down is worse than the wait this queue exists to
+            # end.
+            cancelled = True
+            raise
         finally:
+            self._turn_running = False
             self._turn_id = None
+            if not cancelled:
+                self._advance_queue()
+
+    def _advance_queue(self) -> None:
+        """The moment a turn ends NORMALLY, the next queued prompt -- if
+        any -- becomes the next turn, with no client action required.
+
+        Fired as a background task rather than awaited: send() has already
+        returned control to whoever called it for THIS turn, and the
+        queued turn's events have nobody directly awaiting them. They
+        reach the same out-of-band stream a queued acknowledgement and a
+        peer-driven turn already use, which the pane's existing
+        peer_events() renderer draws with no changes of its own."""
+        item = self._prompt_queue.pop_next()
+        if item is None:
+            return
+        self._peer_queue.put_nowait(EngineEvent("prompt_dequeued", {
+            "id": item.id, "text": item.text,
+        }))
+        self._queued_turn_task = asyncio.ensure_future(
+            self._run_queued_turn(item.text)
+        )
+
+    async def _run_queued_turn(self, prompt: str) -> None:
+        """One dequeued prompt's turn, run and published as
+        :meth:`_advance_queue` describes -- the same shape send() takes,
+        minus the direct caller send() has and this does not."""
+        self._turn_running = True
+        try:
+            async for event in self._send_turn(prompt):
+                self._peer_queue.put_nowait(event)
+        except asyncio.CancelledError:
+            self._turn_running = False
+            self._turn_id = None
+            raise
+        except Exception as exc:  # noqa: BLE001 -- a background turn's failure must reach the pane
+            # Nobody awaits this task, so an exception escaping here would
+            # surface only as "Task exception was never retrieved" at
+            # interpreter exit -- and the pane's block would tick forever.
+            self._peer_queue.put_nowait(EngineEvent("turn_done", {
+                "is_error": True,
+                "error": f"{type(exc).__name__}: {_scrub(str(exc))}",
+                "session_cost_usd": None,
+            }))
+        self._turn_running = False
+        self._turn_id = None
+        self._advance_queue()
+
+    async def list_queue(self) -> "list[dict[str, str]]":
+        """Engine parity for ``/queue``'s bare listing. Async even though
+        nothing below awaits, so a pane can call either engine through the
+        same ``await``."""
+        return self._prompt_queue.snapshot()
+
+    async def cancel_queued(self, item_id: str) -> bool:
+        """Engine parity for ``/queue``'s cancel. False -- never an
+        exception -- for an id already started, cancelled or discarded."""
+        item = self._prompt_queue.cancel(item_id)
+        if item is None:
+            return False
+        self._peer_queue.put_nowait(EngineEvent("prompt_cancelled", {
+            "id": item.id, "text": item.text,
+        }))
+        return True
 
     async def _send_turn(self, prompt: str) -> AsyncIterator[EngineEvent]:
         """One turn: as many model calls as the model's tool use needs.
@@ -1282,13 +1391,30 @@ class ChatApiEngine:
         # Whose turn this is, and what it is called. Read by two things
         # that must agree: the rate limit's per-turn bucket and every peer
         # ledger record a send made during this turn writes.
-        self._turn_id = uuid.uuid4().hex[:12]
+        # Whose turn this is, and what it is called. A peer-started turn
+        # is recognised by the marker inside the PROMPT the model reads,
+        # never by a flag carried beside it -- the same rule
+        # SessionEngine._send_turn follows, and the reason the label
+        # cannot drift from the text: the turn may have waited minutes in
+        # the queue before getting here. Its id takes a "peer-" prefix,
+        # which is the whole of its ledger attribution -- no new record
+        # type, and a reader counting spend can separate turns a human
+        # asked for from turns that arrived.
+        peer_started = prompt.startswith(peers_mod.PEER_TURN_INTRO)
+        self._turn_id = ("peer-" if peer_started else "") + uuid.uuid4().hex[:12]
         yield EngineEvent("turn_started", {
             "prompt": prompt, "peer_context": prompt_out is not prompt,
             # The transcript's half of the same attribution: the id on
             # this event and the id on every ledger record written during
             # the turn are one string, so a reader can join them.
             "turn_id": self._turn_id,
+            "peer_started": peer_started,
+            # The one header line naming who woke this session, lifted out
+            # of the prompt rather than carried beside it -- a label
+            # derived from the text the model read cannot disagree with it.
+            "peer_origin": (
+                peers_mod.peer_origin_line(prompt) if peer_started else None
+            ),
         })
 
         started = time.monotonic()
@@ -1652,8 +1778,92 @@ class ChatApiEngine:
     # -- peers ---------------------------------------------------------
 
     def _on_peer_frame(self, frame: dict) -> None:
-        self._pending_peer_frames.append(dict(frame))
+        """A received peer frame (already scrubbed by PeerHost's receive
+        path). The TUI is told immediately and unconditionally; what
+        happens to the MODEL's copy is the decision this method makes, and
+        it is the same decision -- and the same three outcomes --
+        :meth:`doxa.engine.SessionEngine._on_peer_frame` makes:
+
+        * **starts a turn** when inbound turn-starting is armed
+          (:func:`peers.peer_inbound_turns_enabled`), the message is
+          direct, and no turn is running. The prompt carries
+          :data:`peers.PEER_TURN_INTRO`, so the transcript and the ledger
+          both say what woke this session.
+        * **queues** on the same conditions when a turn IS running --
+          through the one bounded FIFO a mid-turn typed prompt uses. A
+          peer is a SECOND producer into that queue, never a parallel one.
+        * **waits for the next user turn** -- the behaviour this engine
+          has always had -- when the switch is off, when the message is a
+          BROADCAST (never, at any setting), or when the queue is full.
+
+        No spend check stands here, and that is a measurement rather than
+        an omission: :func:`doxa.budget.enforceable_for` is False for this
+        engine because it reports token counts and no dollars, so the
+        ceiling SessionEngine enforces at this point would read $0.00
+        forever and refuse nothing. A peer-started turn on a vendor
+        session is bounded by the switch and by the sender's rate limit,
+        not by a budget.
+
+        Never raises. A frame that cannot be turned into a turn falls back
+        to the pending list, which is what this method did before inbound
+        turn-starting existed and loses nothing."""
         self._peer_queue.put_nowait(EngineEvent("peer_message", dict(frame)))
+
+        if not self._peer_frame_may_start_a_turn(frame):
+            self._pending_peer_frames.append(dict(frame))
+            return
+
+        prompt = peers_mod.PEER_TURN_INTRO + "\n\n" + peers_mod.frame_for_model([frame])
+
+        if self._turn_running:
+            try:
+                item = self._prompt_queue.enqueue(prompt)
+            except PromptQueueFull:
+                # The bound is the bound. A message that cannot be queued
+                # is not dropped -- it falls back to riding the next user
+                # turn, which is where it would have gone with the switch
+                # off anyway.
+                self._pending_peer_frames.append(dict(frame))
+                return
+            self._peer_queue.put_nowait(EngineEvent("prompt_queued", {
+                "id": item.id, "text": prompt,
+                "position": self._prompt_queue.position(item.id) or len(self._prompt_queue),
+                # Both, because the queue line is the ONLY thing the user
+                # sees between the message arriving and the turn starting,
+                # and a queue line shows the prompt's first 120 characters
+                # -- PEER_TURN_INTRO's boilerplate, identical on every one
+                # of these.
+                "peer_started": True,
+                "peer_origin": peers_mod.peer_origin_line(prompt),
+            }))
+            return
+
+        # Idle: start now. _turn_running is set HERE, synchronously,
+        # rather than inside the task -- between creating a task and its
+        # first step the loop can run send(), and two turns that each
+        # thought they were the only one is the exact race the flag exists
+        # to prevent.
+        self._turn_running = True
+        self._queued_turn_task = asyncio.ensure_future(
+            self._run_queued_turn(prompt)
+        )
+
+    def _peer_frame_may_start_a_turn(self, frame: dict) -> bool:
+        """May this frame wake the session? See :meth:`_on_peer_frame`.
+
+        The broadcast check reads a field the SENDER wrote, which is
+        untrusted like every other field in a frame. What it buys is
+        stated in :func:`peers.send_message`: a sender that lied and
+        called a broadcast "direct" gains nothing it could not get by
+        sending N direct messages, so the field is not a defence against a
+        hostile peer -- it is how DOXA's own broadcast avoids waking the
+        fleet. The defence against a hostile peer is the switch below,
+        which is this session's own."""
+        if self.peer_host is None:
+            return False
+        if not peers_mod.peer_inbound_turns_enabled():
+            return False
+        return frame.get("kind") != "broadcast"
 
     def _on_peer_joined(self, info: "peers_mod.PeerInfo") -> None:
         self._peer_queue.put_nowait(EngineEvent("peer_joined", {

@@ -1382,21 +1382,13 @@ def _permission_summary(tool_name: str, tool_input: dict) -> str:
     return f"{tool_name} {raw}" if raw not in ("{}", "") else tool_name
 
 
-def _peer_origin_line(prompt: str) -> "str | None":
-    """The ``--- peer message ... ---`` header out of a peer-started
-    turn's prompt, or None when there is not one.
-
-    ``peers.frame_for_model`` writes exactly one such line per frame and a
-    peer-started turn carries exactly one frame, so the first match is the
-    answer. None rather than a guess if the shape ever changes: an
-    unlabelled peer turn still SAYS it is a peer turn (the prompt's own
-    first paragraph does that, and the TUI has the boolean), it just
-    cannot name the sender -- which is a smaller failure than naming the
-    wrong one."""
-    for line in prompt.splitlines():
-        if line.startswith("--- peer message"):
-            return line.strip("- ").strip()
-    return None
+#: The ``--- peer message ... ---`` header out of a peer-started turn's
+#: prompt, or None. Moved to :mod:`doxa.peers` -- beside the function
+#: whose output it parses -- once the vendor engines gained peer-started
+#: turns too: two copies of a parser for one format is how the label
+#: starts naming the wrong sender. Kept under this name because it is
+#: read three times below.
+_peer_origin_line = peers_mod.peer_origin_line
 
 
 class SessionEngine:
