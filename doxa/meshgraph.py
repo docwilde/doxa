@@ -16,14 +16,17 @@ whole-graph mermaid view came out 1188x13814, readable at no zoom. The
 page is not a second UI for DOXA; it is one view of one file, opened on
 demand and closed again.
 
-WHAT IT READS. ``doxa/peerledger.py`` -- written in parallel with this
-module -- appends one JSON object per line, append-only, the shape
-documented on :func:`parse_record`. **This module does not import that
-one.** The whole coupling is :func:`ledger_path` and :func:`parse_record`;
-when the writer lands, those are the two functions that change and
-nothing else in this file or the page has to know. Reading a file nobody
-has written yet is not an error here: an absent ledger is an empty graph,
-which is the truthful picture of a fleet that has not said anything.
+WHAT IT READS. ``doxa/peerledger.py`` appends one JSON object per line,
+append-only, the shape documented on :func:`parse_record`. **This module
+does not import that one AT MODULE LEVEL.** ``doxa.peerledger`` pulls in
+``lore_core.scrub`` to do its own scrubbing, which this view has no
+reason to load just to serve a page; :func:`ledger_path` imports it
+lazily, inside the function, the same way it already deferred
+``doxa.config``. The whole coupling is :func:`ledger_path` and
+:func:`parse_record`, and nothing else in this file or the page has to
+know which. Reading a file nobody has written yet is not an error here:
+an absent ledger is an empty graph, which is the truthful picture of a
+fleet that has not said anything.
 
 THE SECURITY POSTURE IS ``doxa.beliefgraph``'S, FOR A SHARPER REASON.
 That module serves rendered belief pages over a loopback-only HTTP server
@@ -118,33 +121,41 @@ MAX_LINE_BYTES = 1 << 20
 # -- the ledger, behind the seam ------------------------------------------
 #
 # Everything this module knows about how the ledger is stored lives in the
-# three functions below. doxa/peerledger.py is being written in parallel;
-# when it lands, ledger_path() delegates to it and parse_record() is
-# checked against its emitter, and no other line in this file or in
-# assets/mesh/ has to move.
+# three functions below. ledger_path() delegates to doxa.peerledger, and
+# parse_record() has been checked against its emitter (doxa.peerledger's
+# Message.to_obj()) field for field -- see parse_record's own docstring
+# for the shape both sides now agree on. No other line in this file or in
+# assets/mesh/ has to move if peerledger's storage changes again.
 
 
 def ledger_path() -> Path:
     """The append-only ledger this view reads.
 
-    ``$DOXA_HOME/peers/ledger.jsonl`` by default -- DOXA's durable state
-    home, deliberately NOT the runtime dir the peer registry uses.
-    ``doxa.peers`` puts presence files under ``$XDG_RUNTIME_DIR``, which
-    is correct for presence (it SHOULD evaporate when the machine
-    reboots, because the sessions did) and wrong for this: the emergence
-    experiment's whole output is the ledger, collected after a run of 640
-    agent-sessions has finished and torn itself down. A record that
-    vanishes on reboot cannot be the measurement.
+    :data:`LEDGER_ENV` overrides first, which is how a test points this
+    at a fixture and how this view would follow the writer to a
+    different home if ``doxa.peerledger`` ever chose one. Absent that,
+    this DELEGATES to :func:`doxa.peerledger.ledger_path` --
+    ``$DOXA_HOME/peers/messages.jsonl``, DOXA's durable state home,
+    deliberately NOT the runtime dir the peer registry uses. ``doxa.peers``
+    puts presence files under ``$XDG_RUNTIME_DIR``, which is correct for
+    presence (it SHOULD evaporate when the machine reboots, because the
+    sessions did) and wrong for this: the emergence experiment's whole
+    output is the ledger, collected after a run of 640 agent-sessions has
+    finished and torn itself down. A record that vanishes on reboot
+    cannot be the measurement.
 
-    :data:`LEDGER_ENV` overrides, which is how a test points this at a
-    fixture and how this view follows the writer if it chooses another
-    home."""
+    ``doxa.peerledger`` offers no env override of its own, so
+    :data:`LEDGER_ENV` is not a precedence question -- it is honoured
+    here, before the delegation, and peerledger is never even asked."""
     override = os.environ.get(LEDGER_ENV, "").strip()
     if override:
         return Path(override)
-    from . import config as config_mod
+    # Deferred, not at module level: doxa.peerledger pulls in
+    # lore_core.scrub to do its own scrubbing on write, which this
+    # read-only view has no reason to load just to compute a path.
+    from . import peerledger as peerledger_mod
 
-    return config_mod.doxa_home() / "peers" / "ledger.jsonl"
+    return peerledger_mod.ledger_path()
 
 
 def parse_record(line: str) -> "dict[str, Any] | None":
@@ -465,6 +476,13 @@ class MeshServer:
 
         with MeshServer() as mesh:
             webbrowser.open(mesh.url)
+
+    With no ``path``, this serves :func:`ledger_path`'s default -- this
+    MACHINE's own peer ledger, the same file ``/mesh`` with no argument
+    serves. Every other caller in this codebase (``/mesh <run-id>``, the
+    fleet tab, a test) has a specific ledger in mind and passes ``path=``
+    explicitly rather than relying on the default; do the same unless
+    "this machine's own traffic" is actually what is wanted.
     """
 
     def __init__(
