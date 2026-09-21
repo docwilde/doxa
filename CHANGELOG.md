@@ -4,6 +4,31 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
 not written from memory.
 
+## 1.16.0 — 2026-09-21
+
+**A fleet can bound what its vendor slots spend.**
+
+- New **`doxa/prices.py`**: 17 model rows, each carrying the vendor page it was read from and the date. Where a vendor publishes tiers the row takes the highest, so a session stops at or before its share, never after.
+- **`budget.enforcement_basis(engine, model)`** answers `reported`, `priced` or `none`, per MODEL, because a fleet deals models. A model with no row is reported unbounded BY NAME, never treated as free.
+- `EngineCapabilities.cost` stays false for codex, deepseek and glm: it means the stream carries dollars, so the cost chip claims only billed spend. Live: a Codex session refused its second turn at a $0.005 ceiling having spent $0.0681.
+
+**A pane can no longer boot without its opening block.**
+
+- **`_boot`** sampled `#block-list` once and returned silently when it was not mounted yet, costing the banner, the identity block, the key notice, the budget note, the restore report, and the mid-restore persistence guard.
+- Fix: the container is waited for under a bounded budget, a give-up is reported through the error surface, and a banner that cannot mount costs only the banner. A restored tab losing its head also lost the saved tab set.
+- `tests/test_banner.py` built real-engine apps, which is why it failed alone and passed in a full run. It brings its own fake engine now.
+
+**The mesh page is tested by running it, not by grepping it.**
+
+- New **`tests/test_mesh_page.py`**: 26 tests drive the shipped page in Chrome over CDP. Hostile bodies are proved inert at runtime, the content policy proved ENFORCED rather than merely sent, the token gate checked on every route.
+- Also covered: the panel's counters through `meshgraph.edges_for`, a broadcast drawn as one fan, the controls, degenerate ledgers and live update over the event stream. ~38 s in the default run; a run without Chrome says so loudly.
+- The CDP client moved to **`scripts/cdp.py`**, shared with `mesh_shot.py`, fixing a latent shell bug there: a two-digit file descriptor broke the fd hop.
+
+**Two mesh defects, both found while writing the above.**
+
+- **`meshgraph.ledger_path()`** named `peers/ledger.jsonl`, a file nothing writes; it now delegates to `peerledger`. Latent: every real caller passed an explicit path.
+- The panel counted directed pairs and called them peers, so a nine-session graph read 15 where 8 is the maximum. The gallery still is re-rendered. Suite 2719 on the release tip.
+
 ## 1.15.0 — 2026-09-19
 
 **A fleet can have a head: one session takes the prompt and hands out the work.**
