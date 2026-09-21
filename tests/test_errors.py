@@ -33,7 +33,8 @@ from textual.widgets import Static
 
 from doxa import errors
 from doxa.app import DoxaApp, ErrorBlock, SystemBlock
-from tests.wait_stable import wait_stable_ticking
+from tests.fakes import FakeEngine
+from tests.wait_stable import wait_stable, wait_stable_ticking
 
 # tests/conftest.py's _errors_must_be_claimed guard: every OTHER module in
 # the suite fails if it quietly produced an error block, because a surface
@@ -351,6 +352,51 @@ async def test_a_failed_worker_produces_a_visible_block(tmp_path):
         # The app is still usable -- that is the whole claim.
         assert app.is_running
         assert app.active_pane is not None
+
+
+@pytest.mark.asyncio
+async def test_a_banner_that_cannot_mount_costs_only_the_banner(tmp_path):
+    """Issue #71's other half: the opening block degrades, it does not
+    vanish.
+
+    The boot banner is decoration; the identity block is the session
+    saying who and where it is. Mounting them used to be one unguarded
+    run of statements, so anything the mark raised took the identity block
+    -- and every notice under it -- with it, and the pane ended up with a
+    blank transcript head. Now the mark is guarded on its own: it costs
+    the mark, it is REPORTED (a decoration that quietly stops appearing is
+    the defect that issue opened with), and the session still introduces
+    itself."""
+    from doxa.session import runtime as runtime_mod
+
+    class UnmountableBanner:
+        def __init__(self) -> None:
+            raise RuntimeError("the mark could not be drawn")
+
+    def make() -> FakeEngine:
+        return FakeEngine([], cwd=str(tmp_path))
+
+    app = DoxaApp(cwd=str(tmp_path), engine_factory=make, new_session_factory=make)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runtime_mod, "BootBanner", UnmountableBanner)
+        async with app.run_test(size=(100, 30)) as pilot:
+            # The precondition is "this pane finished booting", not "N
+            # frames went by" -- the lesson issue #71 was actually about.
+            # The error block lands BEFORE the identity block (the mark
+            # mounts first), so waiting on the identity block waits for
+            # both, and wait_stable rather than a first-true poll because
+            # every assertion below reads region height.
+            await wait_stable(pilot, lambda: bool(app.query("#identity-block")))
+            # The session still says what it is.
+            identity = app.query_one("#identity-block", SystemBlock)
+            assert identity.region.height > 0
+            # And the mark's failure is a thing someone can read, not an
+            # absence nobody can account for.
+            blocks = _blocks(app)
+            assert len(blocks) == 1
+            assert blocks[0].region.height > 0
+            assert "the mark could not be drawn" in blocks[0].title
+            assert app.is_running
 
 
 @pytest.mark.asyncio
