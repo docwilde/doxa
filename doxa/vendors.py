@@ -1989,8 +1989,8 @@ class ChatApiEngine:
             self.total_cost_usd, ceiling, peer_started=peer_started
         )
         message += (
-            f" This engine reports no dollars of its own, so that figure "
-            f"is DOXA's own arithmetic over its price sheet ({self.cost_basis})."
+            " This engine reports no dollars of its own, so that figure is "
+            f"DOXA's own arithmetic over its price sheet ({self.cost_basis})."
         )
         if self.unpriced_models:
             message += (

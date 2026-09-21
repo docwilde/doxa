@@ -1124,10 +1124,16 @@ def budget_note(spec: "FleetSpec") -> str:
         basis = budget_mod.enforcement_basis(engine, model)
         if basis == budget_mod.BASIS_REPORTED:
             continue
-        label = f"{engine}:{prices_mod.resolve_model(engine, model)}" if (
-            basis == budget_mod.BASIS_PRICED
-        ) else (f"{engine}:{model}" if model else engine)
-        (priced if basis == budget_mod.BASIS_PRICED else blind).append(label)
+        if basis == budget_mod.BASIS_PRICED:
+            # The RESOLVED model, because that is the one the rate belongs
+            # to: `deepseek` bounded as `deepseek:deepseek-flash` tells the
+            # operator which row of the sheet they are trusting.
+            priced.append(f"{engine}:{prices_mod.resolve_model(engine, model)}")
+        else:
+            # What the operator WROTE, because that is what they have to
+            # change. Resolving here would name a model the pool does not
+            # mention and the sheet does not carry either.
+            blind.append(f"{engine}:{model}" if model else engine)
     if priced:
         note += (
             " -- these report no dollars of their own and are BOUNDED by "
