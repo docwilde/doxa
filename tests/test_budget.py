@@ -1094,7 +1094,11 @@ def test_the_budget_note_separates_the_bounded_slots_from_the_unbounded(
         _spec(short_root, pool=MIXED_PRICED_POOL, run_budget_usd=12.0)
     )
 
-    assert "BOUNDED" in note
+    assert "are BOUNDED by DOXA's own arithmetic" in note, (
+        "asserted as the whole clause on purpose: 'BOUNDED' is a substring "
+        "of 'UNBOUNDED', so the short form passes on a note that says the "
+        "exact opposite"
+    )
     assert "deepseek:deepseek-flash" in note
     assert "glm:glm-5.3-flash" in note
     assert prices_mod.sheet_read_on() in note, (
@@ -1128,7 +1132,7 @@ def test_a_wholly_priced_pool_names_nothing_as_unbounded(short_root):
         _spec(short_root, pool=pool, run_budget_usd=6.0)
     )
     assert "UNBOUNDED" not in note
-    assert "BOUNDED" in note
+    assert "are BOUNDED by DOXA's own arithmetic" in note
     for label in ("deepseek:deepseek-flash", "glm:glm-5.3-flash",
                   "codex:gpt-5.3-codex"):
         assert label in note
@@ -1148,7 +1152,8 @@ def test_check_run_budget_still_refuses_an_unbudgeted_self_waking_run(
     note = fleet_mod.check_run_budget(
         _spec(short_root, pool=MIXED_PRICED_POOL, run_budget_usd=12.0)
     )
-    assert "BOUNDED" in note and "UNBOUNDED" in note
+    assert "are BOUNDED by DOXA's own arithmetic" in note
+    assert "UNBOUNDED" in note and "glm:glm-5-turbo" in note
 
 
 def test_the_manifest_records_which_price_data_bounded_the_run(short_root):
