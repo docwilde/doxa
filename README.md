@@ -432,7 +432,23 @@ first. A Codex or vendor session resumes from the record its own engine
 kept beside the transcript, and refuses in the same words when there is
 none.
 
-Run the suite with `uv run pytest`.
+Run the suite with `uv run pytest`. One part of it needs something the
+machine may not have: `tests/test_mesh_page.py` loads `assets/mesh/` —
+the peer-mesh page, DOXA's only browser surface — in a real headless
+Chrome against a real graph server, and asks the page what it rendered
+rather than reading its source. It finds Chrome at `/usr/bin/google-chrome`
+or on `PATH`; `DOXA_CHROME` overrides that, and pointing it at a path
+that does not exist is how to see what a machine without a browser sees:
+
+```bash
+uv run pytest tests/test_mesh_page.py    # the browser suite alone, ~38s
+DOXA_CHROME=/nowhere uv run pytest       # every browser test skipped
+```
+
+Without a browser the eighteen tests that need one skip rather than fail
+— the other eight check the server side of the same claims and run
+anywhere — and the run says so in a marked line in its summary, because a
+suite that never executed the page must not read like one that did.
 
 ## Non-goals
 

@@ -1950,6 +1950,11 @@ no spend, fake account numbers — and each still keeps its source SVG
 committed beside its PNG. `mesh.png` is the one exception on both counts:
 it is a browser page, so [`scripts/mesh_shot.py`](../scripts/mesh_shot.py)
 drives Chrome over a real graph server instead, and it has no SVG twin.
+The browser itself is driven by [`scripts/cdp.py`](../scripts/cdp.py), the
+repository's one DevTools-protocol client — shared with
+`tests/test_mesh_page.py`, which loads the same page in the same way and
+asserts on what it renders, so the driver behind the picture is the
+driver the suite exercises.
 **Thirty-four images, each named exactly once** — the
 [README](../README.md#gallery) captions sixteen of them, counting the
 hero, and the other eighteen are catalogued below so that **no rendered
