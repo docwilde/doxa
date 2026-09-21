@@ -138,7 +138,8 @@ and glm 11). A fleet slot dealt an engine has exactly that engine's row.
 | `/msg` to a peer | yes | yes | yes | yes |
 | `peer_list`, `peer_history` tools for the model | yes | yes | yes | yes |
 | `peer_send` tool for the model | yes | yes | yes | yes |
-| budgets, `Task` spawns | yes | no | no | no |
+| spend ceilings | yes, from the vendor's own figure | priced models only | priced models only | priced models only |
+| `Task` spawns | yes | no | no | no |
 | fleet slot | yes | yes | yes | yes |
 | `--no-lore` honoured | yes | yes | yes | yes |
 
@@ -146,9 +147,13 @@ and glm 11). A fleet slot dealt an engine has exactly that engine's row.
 Two rows deserve a sentence. *LORE tools and the tool gate* reach Codex
 through the stdio MCP server `CodexEngine` registers on every turn, and
 the gate lives in that server's process, so the two-strikes disable lasts
-one turn. *Budgets* need a dollar figure, which only the Claude engine
-reports; a slot on any other engine is unbounded and `doxa-fleet` says so
-before it starts.
+one turn. *Spend ceilings* need a dollar figure, and only the Claude
+engine reports one; the other three report token counts, which DOXA
+converts using the per-model price table in `doxa/prices.py`. A session
+on a model that table covers is bounded exactly as a Claude one is; a
+session on a model it does not cover is unbounded, and both `/usage` and
+`doxa-fleet` name the model rather than showing `$0.00`. See
+[Spend ceilings](#spend-ceilings).
 
 ### A Codex session
 
@@ -1693,25 +1698,56 @@ unset, nothing about any session changes.
 
 Set it and the session stops **starting** turns once it has spent that
 much. It says so in the transcript, naming what it spent, what the
-ceiling is and how to lift it; every command still answers; and raising
-the number (Ctrl+, → Session, the config file, or the environment) lets
-the very next prompt through with no restart — the ceiling is read per
-turn, not captured at connect. A turn an **arriving peer message** would
-have started is refused the same way, which is the path it exists for,
-and the message is not lost: it rides the next turn that runs.
+ceiling is and how to lift it; and every command still answers. The
+ceiling is **captured once, when the session starts**, and raising it
+therefore takes a new session: `~/.doxa/config.toml` is an ordinary
+same-user file and the session being capped has file tools, so a limit
+re-read each turn is one its own subject can lift. A turn an **arriving
+peer message** would have started is refused the same way, which is the
+path it exists for, and the message is not lost: it rides the next turn
+that runs.
 
 Two things it does not do, both on purpose:
 
-- **It bounds starting a turn, not a turn in flight.** The only dollar
-  figure that exists arrives with the message that *ends* a turn, so a
-  session can exceed its ceiling by the price of the one turn that
-  crosses it. DOXA will not multiply tokens by a price sheet it would
-  have to maintain in order to pretend otherwise.
-- **It cannot be enforced on an engine that reports no cost.** `codex`
-  and both API vendors report token counts and no dollars, so their spend
-  reads as `$0.00` and a ceiling compared against it would never fire.
-  The settings row says so when you set it, and a session that starts
-  under such a ceiling says so too, rather than looking like a control.
+- **It bounds starting a turn, not a turn in flight.** A turn already
+  running is never interrupted, so a session can exceed its ceiling by
+  the price of the one turn that crosses it.
+- **It cannot be enforced on a model nobody has priced.** See below.
+
+#### On an engine that reports no dollars
+
+`codex`, `deepseek` and `glm` report token counts and nothing else —
+there is no dollar figure anywhere in their streams. Until 1.15.0 that
+made the ceiling inert on those engines: their spend read as `$0.00` and
+a comparison against it never fired.
+
+Since 1.16.0 DOXA converts the tokens itself, using `doxa/prices.py` — a
+table of per-model rates where **every row carries the vendor pricing
+page it was read from and the date it was read**. A session on a model
+that table covers stops at its ceiling exactly as a Claude session does.
+The figure is labelled wherever it appears: `/usage` prints it as
+`derived — doxa.prices <date>: <engine>:<model>`, the refusal in the
+transcript says the same, and the cost chip stays hidden because its
+hover text claims actual billed spend and this is not that.
+
+A model the table does not cover has **no price at all** — not a
+default, not a sibling's rate, not zero. The ceiling cannot fire, so it
+does not, and the model is named where the number is set and where the
+session starts. `glm-5-turbo` is the live example: Z.ai offers the model
+and does not publish a rate for it. A `codex` session started without
+`-m` is the other: `codex exec` picks a model from your own
+`~/.codex/config.toml` and never reports which, so DOXA cannot price it.
+Name the model to bind the ceiling.
+
+Where a vendor publishes several rates for one model — OpenAI's fast
+tier, DeepSeek's peak/off-peak clock — the table carries the **highest**,
+because DOXA cannot observe which one a turn was billed at. A session
+therefore stops at or *before* its ceiling, never after.
+
+> **Note:** the table goes stale. `doxa.prices.sheet_note()` reports its
+> date and age, a fleet manifest records both, and a table older than 60
+> days is labelled `STALE` wherever it is printed. It is a warning and
+> never a refusal — an old rate bounds better than no rate.
 
 For a fleet, set the run-wide total instead — `doxa-fleet --run-budget`,
 divided into a per-session ceiling, because thirty-two individually
@@ -1850,7 +1886,7 @@ parse is refused rather than clobbering it.
 | `adopt_plugins` | `DOXA_ADOPT_PLUGINS` | off | load commands/skills/agents from your OWN installed Claude Code plugins into new sessions — never their hooks or MCP servers, never LORE (see [docs/plans/plugins.md](plans/plugins.md)) |
 | `auto_diff` | `DOXA_AUTO_DIFF` | off | open the live diff by itself the first time a session edits its worktree — once per session (see [The live diff](#the-live-diff)) |
 | `spawn_sessions` | `DOXA_SPAWN_SESSIONS` | off | offer the model `spawn_session`, which starts a second session in this repo and gives it a task (see [Session spawn](#session-spawn--off-unless-you-turn-it-on)) — read from this file and the environment only, never from a repository |
-| `session_budget_usd` | `DOXA_SESSION_BUDGET_USD` | off | dollars this session may spend before it stops STARTING turns (see [Spend ceilings](#spend-ceilings)) — a peer-started turn is refused exactly like a typed one |
+| `session_budget_usd` | `DOXA_SESSION_BUDGET_USD` | off | dollars this session may spend before it stops STARTING turns (see [Spend ceilings](#spend-ceilings)) — a peer-started turn is refused exactly like a typed one, and on an engine that reports no dollars the spend is derived from `doxa/prices.py` |
 | `permission_mode` | `DOXA_PERMISSION_MODE` | `default` | mode new sessions connect in; accepts `default`/`acceptEdits`/`plan` only |
 | `mesh_open_browser` | `DOXA_MESH_OPEN_BROWSER` | off | `/mesh` opens the graph in this machine's browser as well as printing its URL. Off, because DOXA runs in terminals that have none (see [Fleets from the TUI](#fleets-from-the-tui)) |
 | `linger_secs` | `DOXA_LINGER_SECS` | 120 | seconds a daemon outlives its last detached client |
