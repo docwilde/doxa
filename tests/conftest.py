@@ -234,3 +234,43 @@ def _errors_must_be_claimed(request):
             "tolerate it (set EXPECTS_FAILURES = True in the module and "
             "assert on the block)"
         )
+
+
+# -- v1.16.0: a browser suite that skipped is not a browser suite that
+# passed ---------------------------------------------------------------
+#
+# tests/test_mesh_page.py loads the real assets/mesh/ page in a real
+# headless Chrome. A machine without one must not go red for it -- that
+# is why the eighteen tests there that need a browser skip rather than
+# fail, the way the Node test they replaced skipped without Node. The
+# other eight (the token-gate sweep, the response headers, the fixture's
+# own scope) need no browser and run everywhere.
+#
+# But a skip is invisible. `pytest -q` prints an 's' per test and a
+# tally; CI runs `-q -rf`, which reports failures and nothing else. So a
+# run in which DOXA's only browser surface was never executed looks
+# exactly like a run in which it was, and the difference is the whole
+# point of having written it. This says so in the summary, where the
+# result is read.
+
+MESH_WEB_SKIP = "no browser on this machine (doxa mesh web suite)"
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Name the browser tests that did not run, in the summary."""
+    skipped = [
+        report for report in terminalreporter.stats.get("skipped", [])
+        # A skip's longrepr is (path, lineno, "Skipped: <reason>"); the
+        # reason is the only part test_mesh_page.py controls, so it
+        # carries the sentinel rather than this matching on a filename
+        # that a later rename would quietly break.
+        if MESH_WEB_SKIP in str(getattr(report, "longrepr", ""))
+    ]
+    if not skipped:
+        return
+    terminalreporter.write_sep(
+        "!",
+        f"{len(skipped)} mesh web tests SKIPPED: no Chrome. "
+        "assets/mesh/ was NOT executed by this run",
+        red=True, bold=True,
+    )
