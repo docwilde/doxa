@@ -931,12 +931,25 @@ class PaneCommandsMixin:
         # into bug reports, so the absence is spelled out in words rather
         # than rendered as a zero.
         reported_cost = summary.get("total_cost_usd")
+        # v1.16.0: an engine that reports no dollars of its own can still
+        # have a figure, derived from its token counts and doxa.prices'
+        # sheet. That is a different claim from the vendor's own number
+        # and it is labelled as one here -- a row that showed both
+        # identically would be the confident-wrong-number failure the
+        # sheet was built to avoid, moved into the UI.
+        basis = summary.get("cost_basis")
+        unpriced = summary.get("unpriced_models") or []
         if reported_cost is None:
             rows.append(("cost", "not reported by this engine"))
         elif tier:
             rows.append(
                 ("plan", f"{tier}  (≈${float(reported_cost):.4f} if API)")
             )
+        elif basis:
+            derived = f"${float(reported_cost):.4f}  (derived — {basis})"
+            if unpriced:
+                derived += f"; unpriced models also answered: {', '.join(unpriced)}"
+            rows.append(("cost", derived))
         else:
             rows.append(("cost", f"${float(reported_cost):.4f}"))
         lines = [f"{label:<12} {value}" for label, value in rows]

@@ -305,21 +305,87 @@ before the run and kept in the manifest:
   The true worst case is therefore `total + N x (one turn)` — at N=32,
   thirty-two turns of slack.
 
-And one that is not a limit but a hole: **slots dealt an engine that
-reports no cost are not bounded at all.** `codex`, `deepseek` and `glm`
-report token counts and no dollars, so their spend reads as `$0.00` and
-their share is never enforced. `budget_note` names them in the line it
-prints before the run rather than letting the total look like it covers
-the whole pool. Since 1.13.0 those slots really do run on their engine
-(the daemon takes `--engine`, and `DaemonBackend.spawn` passes the slot's),
-so the note describes sessions that exist. A slot whose engine refuses to
-start — a vendor key missing from the run's environment — is recorded
-failed with the reason in the manifest and the run goes on. Measured:
-`--pool deepseek@1,glm@1,codex@1 -n 5 --seed 1` dealt 2/2/1, all five
-spawned, 17 messages crossed vendors, quiesced in 37 s, nothing leaked; the
-Codex slots received but did not send, because at 1.13.0 a Codex model had
-no `peer_send`. Since 1.14.0 it has one, forwarded from the MCP sidecar to
-the engine and sent on the session's own limiter and ledger.
+#### What bounds a slot that is not on Claude
+
+Until 1.15.0 this was a hole rather than a limit: **slots dealt an engine
+that reports no cost were not bounded at all.** `--run-budget` divided a
+total across N sessions and bound only the Claude ones. `budget_note`
+said so, and the manifest kept the sentence, but a stated limit is not an
+enforced one.
+
+Since 1.16.0 that hole is mostly closed, and the part that remains is
+named rather than absorbed. `codex`, `deepseek` and `glm` still report no
+dollars — nothing in their streams carries one — but all three report
+input, cached-input, output and reasoning token counts, which is the
+other half of a price. `doxa/prices.py` supplies the first half: a table
+of per-model rates, each row carrying **the vendor pricing page it was
+read from and the date it was read**. A session on a model the table
+covers charges every call at that model's rate and stops at its share the
+way a Claude session does.
+
+Three properties of that table matter more than the feature it enables,
+because a ceiling enforced against a confident wrong number is worse than
+no ceiling — it is believed.
+
+* **A model with no row gets no price.** Not a default, not a sibling's
+  rate, not zero. `doxa.prices.price_for` returns `None`, the session's
+  spend stays unconvertible, and the slot is reported **unbounded by
+  name**. `glm-5-turbo` is the live example: `doxa.vendors.GLM` offers
+  it, the Z.ai pricing page does not carry it, so the table does not
+  either.
+* **Where a vendor publishes several rates for one model, the table
+  carries the highest.** DOXA cannot see which service tier a `codex exec`
+  ran at (that lives in the operator's own `~/.codex/config.toml`) or
+  which side of DeepSeek's peak/off-peak clock a turn landed on. An
+  over-estimate stops a session at or *before* its share; an
+  under-estimate lets it run past. Only one of those is a ceiling. Each
+  row's `note` records the cheaper rate it was chosen over.
+* **Enforceability is a fact about a model, not an engine.**
+  `doxa.budget.enforcement_basis(engine, model)` answers `reported` (the
+  engine hands DOXA dollars — Claude, and only Claude), `priced` (the
+  table covers this model) or `none`. `glm:glm-5.3-flash` is bounded and
+  `glm:glm-5-turbo` is not, and no engine-level flag could have said both.
+
+`budget_note` splits the pool along that line before the run starts:
+which entries the ceiling binds against DOXA's own arithmetic, which it
+does not bind at all, and how old the table is. A pool entry that names
+no model is resolved to the engine's default first — `--pool deepseek@1`
+runs `deepseek-flash`, which is priced. Codex is the exception: `codex
+exec` with no `-m` picks a model out of the operator's config and never
+names what answered, so a bare `codex` entry is honestly unpriceable.
+Name the model (`--pool codex:gpt-5.3-codex@1`) to bind it.
+
+The manifest keeps the evidence in a `prices` block beside `budget`:
+
+```json
+"prices": {
+  "sheet_read_on": "2026-09-21",
+  "age_days": 0,
+  "stale": false,
+  "sources": ["https://api-docs.deepseek.com/quick_start/pricing", "..."],
+  "entries": [{"engine": "deepseek", "model": "deepseek-flash",
+               "input_usd_per_mtok": 0.3, "cached_input_usd_per_mtok": 0.006,
+               "output_usd_per_mtok": 1.2, "source": "...",
+               "read_on": "2026-09-21", "note": "peak rate; off-peak is half"}],
+  "unpriced": ["glm:glm-5-turbo"]
+}
+```
+
+Two runs with an identical `run_budget_usd` bound different amounts of
+work if the table moved between them, so the rows in force are part of
+the run's record and the arithmetic can be redone from it. A table older
+than `doxa.prices.STALE_AFTER_DAYS` (60) reports `"stale": true` and
+`budget_note` says so in words — a warning, never a refusal, because an
+old rate still bounds better than no rate.
+
+A slot whose engine refuses to start — a vendor key missing from the
+run's environment — is recorded failed with the reason in the manifest
+and the run goes on. Measured on 1.13.0: `--pool deepseek@1,glm@1,codex@1
+-n 5 --seed 1` dealt 2/2/1, all five spawned, 17 messages crossed
+vendors, quiesced in 37 s, nothing leaked; the Codex slots received but
+did not send, because at 1.13.0 a Codex model had no `peer_send`. Since
+1.14.0 it has one, forwarded from the MCP sidecar to the engine and sent
+on the session's own limiter and ledger.
 
 ### What a run may approve
 

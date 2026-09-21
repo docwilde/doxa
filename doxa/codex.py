@@ -47,10 +47,16 @@ WHAT CODEX DOES NOT REPORT, AND WHAT DOXA THEREFORE SAYS.
   size nobody reported, and this codebase has refused that once already
   (see ``doxa.ui.labels.ctx_absolute_text``: an unknown limit is ``?``,
   never a substituted 200000).
-* **No dollars.** No cost field anywhere in the stream, so
-  ``total_cost_usd`` stays 0.0 and ``cost=False`` omits the chip -- a
-  ``$0.0000`` chip reads as "this session is free", which is a different
-  claim from "nobody said".
+* **No dollars.** No cost field anywhere in the stream, so ``cost=False``
+  omits the chip -- a ``$0.0000`` chip reads as "this session is free",
+  which is a different claim from "nobody said". Since 1.16.0
+  ``total_cost_usd`` is nevertheless a real number when the session was
+  told which model to run: :mod:`doxa.prices` carries a sourced, dated
+  price per model and :meth:`CodexEngine._charge` multiplies the usage
+  block by it, which is what lets a spend ceiling fire here at all. It is
+  DOXA's arithmetic and never Codex's, it is labelled as such everywhere
+  it is shown, and a session left to pick its own default model has no
+  price and says so by name rather than being charged a guess.
 * **No streamed text.** ``agent_message`` arrives whole on
   ``item.completed``; there are no content deltas in this stream. It is
   still a ``text_delta`` -- just one of them per message -- because
@@ -208,10 +214,12 @@ from lore_core import store as lore_store
 from lore_core.config import PROJECTS_DIR, project_slug
 from lore_core.scrub import scrub_secrets
 
+from . import budget as budget_mod
 from . import config as config_mod
 from . import mcpserver as mcpserver_mod
 from . import peerdelivery as peerdelivery_mod
 from . import peers as peers_mod
+from . import prices as prices_mod
 from . import providers as providers_mod
 from . import worktrees as worktrees_mod
 from .identity import require_session_id
@@ -388,6 +396,14 @@ CODEX_CAPABILITIES = EngineCapabilities(
     resolved_model=False,
     context_window=False,
     token_usage=True,
+    # FALSE, and still true of the STREAM: `codex exec --json` carries no
+    # cost field anywhere, so the cost chip stays omitted rather than
+    # painting a $0.0000 that reads as "free". What changed in 1.16.0 is
+    # a second, different question -- "can a spend ceiling be enforced
+    # here" -- which doxa.prices answers per MODEL, because that is what a
+    # price is attached to. A codex session told which model to run is
+    # bounded by the sheet (see CodexEngine._charge); one left to pick its
+    # own default is not, and says so by name.
     cost=False,
     # No reasoning items in `codex exec --json` on this build: the usage
     # block counts reasoning_output_tokens, the stream carries no
@@ -716,7 +732,20 @@ class CodexEngine:
         # Status-bar parity with SessionEngine/EngineClient. Every one of
         # these is read UNGUARDED mid-render by doxa.session.chips, so they
         # exist from construction rather than from the first turn.
+        # DERIVED, not reported: the Codex stream has no cost field, so
+        # every turn is charged against doxa.prices' sheet in _charge
+        # below. It stays 0.0 for the life of a session whose model the
+        # sheet does not carry -- and cost_basis stays None, which is how
+        # every reader tells "this session cost nothing" apart from
+        # "nobody could say".
         self.total_cost_usd = 0.0
+        #: Which price row the figure above was built from, or None when
+        #: no turn has ever been priced.
+        self.cost_basis: "str | None" = None
+        #: Models that ran with no price row -- including the unnamed
+        #: default, which is the common case here. Named in usage_summary
+        #: and in the refusal, so a total is never mistaken for complete.
+        self.unpriced_models: "set[str]" = set()
         self.last_ctx_percentage: "float | None" = None
         self.last_ctx_tokens: "int | None" = None
         self.last_ctx_max_tokens: "int | None" = None
@@ -733,6 +762,14 @@ class CodexEngine:
         self.effort: "str | None" = None
         self.num_turns = 0
         self.usage_totals: "dict[str, int]" = {}
+
+        # THE SPEND CEILING, snapshotted ONCE at construction -- see
+        # budget_ceiling below, and doxa.budget's "CAPTURED AT SESSION
+        # START" paragraph for why a per-turn read is a ceiling the capped
+        # session can raise. Env beat the file at this moment, so a
+        # fleet's per-run DOXA_SESSION_BUDGET_USD still binds the sessions
+        # it spawns.
+        self._budget_ceiling: "float | None" = budget_mod.session_ceiling()
 
         self.peer_host: "peers_mod.PeerHost | None" = None
         self.peer_error: "str | None" = None
@@ -1334,6 +1371,22 @@ class CodexEngine:
         being replaced) does not leave a Codex process behind --
         ``tests/conftest.py`` reaps leaked agent subprocesses per test and
         would say so if it did."""
+        # THE SPEND CEILING, at the choke point every turn crosses -- a
+        # typed prompt, one that waited in the mid-turn queue, and one an
+        # arriving peer message started all arrive here. Ahead of every
+        # side effect: nothing is persisted, no peer title is set, no
+        # pending frames are drained (they stay pending for a turn that
+        # actually runs) and no `codex exec` is spawned. The refusal is
+        # the turn's only event.
+        #
+        # BEFORE the turn, never during it: doxa.budget's docstring says
+        # why mid-turn is not available and what it costs -- at most one
+        # turn of overshoot, which here is one whole `codex exec` process.
+        refusal = self._budget_refusal(prompt)
+        if refusal is not None:
+            yield EngineEvent("turn_refused", refusal)
+            return
+
         if self._pending_peer_frames:
             frames, self._pending_peer_frames = self._pending_peer_frames, []
             prompt_out = peers_mod.frame_for_model(frames) + "\n\n" + prompt
@@ -1686,14 +1739,26 @@ class CodexEngine:
         return []
 
     def _absorb_usage(self, usage: Any) -> None:
-        """Accumulate ``turn.completed.usage`` into the session totals.
+        """Accumulate ``turn.completed.usage`` into the session totals, and
+        charge it against the price sheet.
 
-        Tokens only. Nothing here touches ``last_ctx_*``: input_tokens is
+        Tokens first. Nothing here touches ``last_ctx_*``: input_tokens is
         what one sampling call was charged for, not what is resident in a
         window whose size nobody reported, and reading it as the latter is
-        exactly the fabricated percentage this engine refuses to print."""
+        exactly the fabricated percentage this engine refuses to print.
+
+        Dollars second, per turn rather than over the running totals, so a
+        session whose model changed between turns is charged at each
+        turn's own rate instead of having every earlier turn silently
+        re-billed at the current one."""
         if not isinstance(usage, dict):
             return
+        # The four-key shape doxa.prices is priced against, shared with
+        # doxa.vendors. Both meanings are recorded there and both matter
+        # here: `input_tokens` INCLUDES `cached_input_tokens` and
+        # `output_tokens` INCLUDES `reasoning_output_tokens`, so the
+        # arithmetic subtracts rather than adds.
+        counts: "dict[str, int]" = {}
         for source, target in (
             ("input_tokens", "input_tokens"),
             ("output_tokens", "output_tokens"),
@@ -1702,12 +1767,106 @@ class CodexEngine:
         ):
             value = usage.get(source)
             if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                counts[target] = value
                 self.usage_totals[target] = self.usage_totals.get(target, 0) + value
+        self._charge(counts)
         if self.peer_host is not None and self.usage_totals:
             try:
                 self.peer_host.update_usage(sum(self.usage_totals.values()))
             except Exception:  # noqa: BLE001
                 pass
+
+    def _charge(self, counts: "dict[str, int]") -> None:
+        """Convert one turn's tokens to dollars, or record that nobody
+        can.
+
+        The model charged is ``self.model`` -- what was ASKED for -- and
+        that is the honest limit of this engine rather than a shortcut.
+        ``codex exec --json`` never names the model that answered, which
+        is why :data:`CODEX_CAPABILITIES` declares
+        ``resolved_model=False``; there is no second, better name to
+        prefer the way :mod:`doxa.vendors` prefers ``resolved_model``.
+
+        A session started with NO model is therefore unpriceable, and
+        that is the common case: ``codex exec`` with no ``-m`` picks a
+        default out of the operator's own ``~/.codex/config.toml``, which
+        DOXA neither reads nor is told. It is recorded by name in
+        :attr:`unpriced_models` and reported as unbounded everywhere a
+        ceiling is shown -- never charged at some plausible rate, which
+        would be the invented number this whole path exists to refuse."""
+        model = self.model
+        charged = prices_mod.cost_of(CODEX_ENGINE_ID, model, counts)
+        if charged is None:
+            self.unpriced_models.add(
+                str(model or "(no model named; codex chose its own default)")
+            )
+            return
+        self.total_cost_usd += charged
+        self.cost_basis = (
+            f"doxa.prices {prices_mod.sheet_read_on()}: "
+            f"{CODEX_ENGINE_ID}:{model}"
+        )
+
+    # -- the spend ceiling ---------------------------------------------
+
+    def budget_ceiling(self) -> "float | None":
+        """This session's spend ceiling in dollars, or None for none.
+
+        The snapshot taken in ``__init__``, never a fresh read -- the same
+        rule, for the same reason, as
+        :meth:`doxa.engine.SessionEngine.budget_ceiling`: this session has
+        file tools and ``~/.doxa/config.toml`` is an ordinary same-user
+        file, so a limit re-read per turn is one its own subject can
+        raise."""
+        return self._budget_ceiling
+
+    def _budget_refusal(self, prompt: str) -> "dict[str, Any] | None":
+        """The ``turn_refused`` payload for a turn that must not start, or
+        None when it may.
+
+        Compared against :attr:`total_cost_usd`, which on this engine is
+        DOXA's own arithmetic over :mod:`doxa.prices` rather than a figure
+        Codex reported -- the stream has no cost field in it at all -- and
+        the refusal says so, because an operator reconciling this against
+        a bill is entitled to know which number stopped them.
+
+        A session with no priced turn yet (:attr:`cost_basis` is None) is
+        never refused: 0.0 there means "nothing could be converted", not
+        "nothing was spent, and refusing on it would be the mirror of the
+        bug this replaces."""
+        ceiling = self.budget_ceiling()
+        if self.cost_basis is None:
+            return None
+        if not budget_mod.exhausted(self.total_cost_usd, ceiling):
+            return None
+        assert ceiling is not None  # exhausted() is False for None
+        peer_started = prompt.startswith(peers_mod.PEER_TURN_INTRO)
+        message = budget_mod.refusal_text(
+            self.total_cost_usd, ceiling, peer_started=peer_started
+        )
+        message += (
+            " Codex reports no dollars of its own, so that figure is "
+            f"DOXA's own arithmetic over its price sheet ({self.cost_basis})."
+        )
+        if self.unpriced_models:
+            message += (
+                " It is a FLOOR, not a total: "
+                + ", ".join(sorted(self.unpriced_models))
+                + " also ran in this session and the sheet carries no price "
+                "for them."
+            )
+        return {
+            "reason": "budget",
+            "message": message,
+            "spent_usd": self.total_cost_usd,
+            "ceiling_usd": ceiling,
+            "cost_basis": self.cost_basis,
+            "peer_started": peer_started,
+            "peer_origin": (
+                peers_mod.peer_origin_line(prompt) if peer_started else None
+            ),
+            "prompt": prompt,
+        }
 
     # -- the settable surface ------------------------------------------
 
@@ -1758,7 +1917,15 @@ class CodexEngine:
             "model": self.model,
             "num_turns": self.num_turns,
             # None, never 0.0 -- /usage omits what is absent.
-            "total_cost_usd": None,
+            # The DERIVED figure when a turn has been priced, and None --
+            # never 0.0 -- when none has. `cost_basis` rides beside it so
+            # /usage can say whose arithmetic it is, and is None exactly
+            # when the figure is.
+            "total_cost_usd": (
+                self.total_cost_usd if self.cost_basis is not None else None
+            ),
+            "cost_basis": self.cost_basis,
+            "unpriced_models": sorted(self.unpriced_models),
             "ctx_percentage": None,
             "ctx_tokens": None,
             "ctx_max_tokens": None,
@@ -1811,11 +1978,19 @@ class CodexEngine:
         makes this possible at all: waking the session costs a spawn, not
         a mid-flight injection into a conversation DOXA does not hold.
 
-        No spend check stands here, and that is a measurement rather than
-        an omission: :func:`doxa.budget.enforceable_for` is False for this
-        engine because it reports token counts and no dollars, so the
-        ceiling SessionEngine enforces at this point would read $0.00
-        forever and refuse nothing.
+        The spend ceiling stands here too, since 1.16.0. Its absence used
+        to be a measurement rather than an omission: this engine reported
+        token counts and no dollars, so a ceiling compared against its
+        spend would have read $0.00 forever and refused nothing.
+        :mod:`doxa.prices` supplies the missing half for a model it
+        carries, so the check is now real -- and on a model it does NOT
+        carry it still refuses nothing, which :meth:`_budget_refusal`
+        makes explicit rather than accidental.
+
+        Checking HERE as well as in :meth:`_send_turn` buys what that
+        check cannot: a refused frame falls back to
+        ``_pending_peer_frames`` instead of evaporating, so the message is
+        not LOST by being refused -- it rides the next turn that runs.
 
         Never raises. A frame that cannot be turned into a turn falls back
         to the pending list, which is what this method did before inbound
@@ -1827,6 +2002,12 @@ class CodexEngine:
             return
 
         prompt = peers_mod.PEER_TURN_INTRO + "\n\n" + peers_mod.frame_for_model([frame])
+
+        refusal = self._budget_refusal(prompt)
+        if refusal is not None:
+            self._pending_peer_frames.append(dict(frame))
+            self._peer_queue.put_nowait(EngineEvent("turn_refused", refusal))
+            return
 
         if self._turn_running:
             try:

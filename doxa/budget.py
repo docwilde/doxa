@@ -35,25 +35,44 @@ A turn already running is never interrupted -- see
 :meth:`doxa.engine.SessionEngine._send_turn`, where the check sits ahead
 of every side effect that turn would have.
 
-WHAT A CEILING CANNOT DO
+WHAT A CEILING CAN BE ENFORCED AGAINST, AND ON WHAT GROUNDS
 
-**An engine that does not report cost cannot be held to one.**
-:data:`doxa.engines.EngineCapabilities.cost` is False for ``codex`` (its
-JSON stream carries token counts and no dollars) and for both API vendors
-(no response field from either carries a dollar figure; DeepSeek's
-``GET /user/balance`` is per ACCOUNT, and in the very experiment those
-engines exist for, 32 sessions share one key). Their ``total_cost_usd``
-stays 0.0 for the life of the session, so a ceiling compared against it
-would never fire -- silently, forever, while the settings modal showed a
-number.
+Two grounds, never conflated, and :func:`enforcement_basis` returns which
+one is in force for a given engine and model:
 
-The answer is NOT to check anyway and hope. A check that can never fire is
-the failure mode this module exists to prevent, one layer up. The answer is
-:func:`enforceable_for` and :func:`unenforceable_note`, which say so at the
-moment the ceiling is SET -- in the settings modal's own row, and in the
-fleet's pre-flight -- so nobody sets a number believing it does something.
-No price sheet is invented here, and none should be added later without
-re-reading :mod:`doxa.vendors`' own paragraph on why.
+* ``"reported"`` -- the engine itself carries a dollar figure.
+  :data:`doxa.engines.EngineCapabilities.cost` is True for exactly one
+  engine, ``claude``, whose ``ResultMessage.total_cost_usd`` comes from
+  the party doing the billing. Nothing beats that and nothing here tries
+  to.
+* ``"priced"`` -- the engine reports TOKEN COUNTS and
+  :mod:`doxa.prices` carries a sourced, dated price for the model that
+  produced them. ``codex`` and both API vendors are in this case:
+  their streams have no dollars in them (no response field from either
+  vendor carries one; DeepSeek's ``GET /user/balance`` is per ACCOUNT,
+  and in the very experiment those engines exist for, 32 sessions share
+  one key) but every one of them reports input, cached-input, output and
+  reasoning tokens, which is the other half of a price.
+
+Until 1.15.0 the second ground did not exist, and this docstring argued
+it should not: "a hardcoded price that drifts produces a confident wrong
+number, and a ceiling enforced against a confident wrong number is worse
+than no ceiling, because it is believed". That argument is unchanged and
+:mod:`doxa.prices` is built to satisfy it rather than to overrule it --
+every row names the vendor page it was read from and the date it was
+read, the sheet's age is readable by the operator and recorded in the
+fleet manifest, and a model the sheet does not carry gets NO price. Not a
+default, not a nearest sibling, not zero.
+
+**A model with no price still cannot be held to a ceiling**, and that is
+now the whole of what "unenforceable" means -- a property of the MODEL,
+not of the engine, because a price is attached to a model. A ``glm`` slot
+dealt ``glm-5.3-flash`` is bounded; one dealt a model nobody has priced
+is not, and no engine-level flag could say both. The answer is still not
+to check anyway and hope: :func:`enforceable_for` and
+:func:`unenforceable_note` say so at the moment the ceiling is SET -- in
+the settings modal's own row, and in the fleet's pre-flight -- naming the
+MODEL, so nobody sets a number believing it does something.
 
 WHERE THE VALUE COMES FROM
 
@@ -87,20 +106,35 @@ is enforcing, and only the second one has to be immovable.
 from __future__ import annotations
 
 from . import config as config_mod
+from . import prices as prices_mod
 
 __all__ = [
+    "BASIS_NONE",
+    "BASIS_PRICED",
+    "BASIS_REPORTED",
     "SESSION_BUDGET_ENV",
     "configured_warning",
     "enforceable_for",
+    "enforcement_basis",
     "exhausted",
     "format_usd",
     "per_session_share",
+    "priced_note",
     "refusal_text",
     "session_ceiling",
     "start_note",
     "unenforceable_note",
     "usd",
 ]
+
+#: The engine hands DOXA a dollar figure of its own. Claude, and only
+#: Claude -- see the module docstring's two grounds.
+BASIS_REPORTED = "reported"
+#: The engine hands DOXA token counts and :mod:`doxa.prices` carries a
+#: sourced price for the model that produced them.
+BASIS_PRICED = "priced"
+#: Neither. The ceiling is inert and every surface that shows it says so.
+BASIS_NONE = "none"
 
 #: The per-session ceiling's environment variable. Its config-file twin is
 #: the ``session_budget_usd`` row in :data:`doxa.config.SETTINGS`, and
@@ -205,24 +239,109 @@ def refusal_text(
 # -- can this ceiling be enforced at all? -----------------------------
 
 
-def enforceable_for(engine_id: "str | None") -> bool:
-    """Does the engine behind `engine_id` report a dollar figure?
+def enforcement_basis(
+    engine_id: "str | None",
+    model: "str | None" = None,
+    *,
+    reports_cost: "bool | None" = None,
+) -> str:
+    """On what grounds this ceiling can be enforced for that engine and
+    model: :data:`BASIS_REPORTED`, :data:`BASIS_PRICED` or
+    :data:`BASIS_NONE`.
 
-    Asked of the registry (:func:`doxa.engines.get`) rather than of a live
-    handle, because the question is asked at SETTING time, when there may
-    be no session yet. An unknown id answers True: a ceiling on an engine
-    DOXA does not recognise must not be reported as broken on the strength
-    of a typo, and :func:`doxa.engines.get` already refuses unknown ids by
-    name at the one place that matters."""
-    from . import engines as engines_mod
+    PER MODEL, because that is what a price is attached to, and the
+    single most important thing this function does is refuse to answer
+    the question at engine level. ``deepseek`` is not bounded or
+    unbounded; ``deepseek:deepseek-flash`` is bounded, and a deepseek
+    slot dealt a model the sheet has never seen is not.
 
-    try:
-        return bool(engines_mod.get(engine_id).supports().cost)
-    except Exception:  # noqa: BLE001 -- an engine that cannot be asked is not evidence
-        return True
+    Asked of the registry (:func:`doxa.engines.get`) rather than of a
+    live handle, because the question is asked at SETTING time, when
+    there may be no session yet. An unknown id answers
+    :data:`BASIS_REPORTED`: a ceiling on an engine DOXA does not
+    recognise must not be reported as broken on the strength of a typo,
+    and :func:`doxa.engines.get` already refuses unknown ids by name at
+    the one place that matters.
+
+    A bare `model` is RESOLVED rather than refused -- a pool entry that
+    names no model still runs one, and
+    :func:`doxa.prices.resolve_model` knows which for every engine whose
+    default DOXA can know. Codex's it cannot (that default lives in the
+    operator's own ``~/.codex/config.toml`` and the stream never names
+    what answered), so a bare codex slot honestly answers
+    :data:`BASIS_NONE` rather than being priced as something.
+
+    `reports_cost` is the escape hatch a LIVE caller uses: a running
+    session asks its own handle (:func:`doxa.engines.capabilities_of`)
+    rather than the registry, because a handle is believed about itself
+    and what an engine can actually do beats what a registry entry says
+    it would be. Left None, the registry is asked."""
+    if reports_cost is None:
+        from . import engines as engines_mod
+
+        try:
+            reports_cost = bool(engines_mod.get(engine_id).supports().cost)
+        except Exception:  # noqa: BLE001 -- an engine that cannot be asked is not evidence
+            return BASIS_REPORTED
+    if reports_cost:
+        return BASIS_REPORTED
+    resolved = prices_mod.resolve_model(engine_id, model)
+    if prices_mod.priced(engine_id, resolved):
+        return BASIS_PRICED
+    return BASIS_NONE
 
 
-def unenforceable_note(engine_label: str) -> str:
+def enforceable_for(
+    engine_id: "str | None", model: "str | None" = None
+) -> bool:
+    """Can a ceiling actually fire for that engine and model?
+
+    The boolean shorthand for :func:`enforcement_basis`, kept under its
+    old name because every caller that only has to decide "warn or not"
+    should not have to learn which of the two grounds applies. What
+    changed is the second argument: the answer is a fact about a MODEL
+    now, and a caller that passes none gets the engine's default model
+    resolved rather than a guess about the engine."""
+    return enforcement_basis(engine_id, model) != BASIS_NONE
+
+
+def _engine_id_in(engine_label: str) -> str:
+    """The engine id inside a label a caller built for display.
+
+    The two callers phrase it differently -- the settings modal says
+    ``engine 'codex'``, a starting session says ``codex`` -- and the
+    notes below want to list that engine's priced models rather than
+    none. Best effort by construction: a label this cannot read yields an
+    empty id, the model list is then omitted, and the sentence still says
+    the thing it exists to say."""
+    cleaned = engine_label.strip().replace("'", " ").replace('"', " ")
+    parts = cleaned.split()
+    return parts[-1].lower() if parts else ""
+
+
+def priced_note(engine_label: str, model: "str | None") -> str:
+    """The sentence a ceiling enforced against DOXA's OWN price sheet is
+    entitled to.
+
+    A ceiling on this ground is real, and it is not the vendor's
+    arithmetic. A surface that showed it identically to Claude's would be
+    hiding the one difference that matters when a bill disagrees with a
+    manifest, so this names the model being priced, the sheet's date, and
+    the direction the estimate errs in."""
+    named = (model or "").strip() or "this session's model"
+    return (
+        f"ENFORCED on {engine_label} against DOXA's own price sheet: "
+        f"{named} reports token counts and no dollars, so spend is the "
+        "sheet's per-model rates multiplied by the tokens the engine "
+        f"reported ({prices_mod.sheet_note()}). Where a vendor publishes "
+        "several rates for one model the sheet carries the HIGHEST, so a "
+        "session stops at or before its ceiling, never after."
+    )
+
+
+def unenforceable_note(
+    engine_label: str, model: "str | None" = None
+) -> str:
     """The sentence a ceiling that cannot fire is entitled to.
 
     Always returns text -- WHEN to show it is the caller's decision, and
@@ -231,39 +350,66 @@ def unenforceable_note(engine_label: str) -> str:
     live handle). One sentence, so the two surfaces cannot drift into two
     different accounts of the same limitation.
 
-    It names the engine, because a warning that says "your engine" to
-    someone running three of them is a warning they cannot act on."""
+    It names the engine AND the model, because since 1.16.0 the
+    limitation is the MODEL's: the same engine is bounded on a priced
+    model and unbounded on this one. A warning that said only "your
+    engine" would be one the reader cannot act on -- the action is to
+    name a model the sheet carries, and those are listed."""
+    named = (model or "").strip()
+    known = prices_mod.models_for(_engine_id_in(engine_label))
+    which = f"model {named!r}" if named else "the model it would run"
+    covered = (
+        " Priced models for this engine: " + ", ".join(known) + "."
+        if known else ""
+    )
     return (
         f"NOT ENFORCEABLE on {engine_label}: it reports token counts but no "
-        "dollar figure, so its spend reads as $0.00 to DOXA and this "
-        "ceiling would never fire. DOXA will not multiply tokens by a "
-        "price sheet it would have to maintain — see doxa.vendors — so the "
-        "honest answer is that this number does nothing here. It applies "
-        "to claude sessions."
+        f"dollar figure, and DOXA's price sheet carries no entry for "
+        f"{which}, so those tokens cannot be converted to dollars and this "
+        "ceiling would never fire. DOXA will not guess a price -- an "
+        "invented rate produces a ceiling that is believed and wrong, "
+        f"which is worse than no ceiling at all.{covered} A claude session "
+        "is bounded by the figure the vendor itself reports."
     )
 
 
 def configured_warning() -> "str | None":
     """What the settings modal shows under the ceiling row, or None.
 
-    None whenever there is nothing to warn about: no ceiling set, or a
-    configured engine that does report cost. Both halves are resolved
-    through the same precedence every other row uses, so the warning
-    appears exactly when the value the user is looking at is inert."""
+    None whenever there is nothing to say: no ceiling set, or a ceiling
+    on an engine that reports its own dollars (where the number means
+    exactly what it looks like it means). The two other cases both get a
+    sentence, because both are things a person setting a number is
+    entitled to know before they trust it:
+
+    * :data:`BASIS_NONE` -- the number is inert, and
+      :func:`unenforceable_note` names the model it has no price for.
+    * :data:`BASIS_PRICED` -- the number is real but it is DOXA's
+      arithmetic over its own sheet rather than the vendor's, and
+      :func:`priced_note` says so with the sheet's date on it.
+
+    Engine and model are both resolved through the same precedence every
+    other row uses, so this describes the session the operator would
+    actually get."""
     ceiling = session_ceiling()
     if ceiling is None:
         return None
     engine_id = config_mod.engine()
-    if enforceable_for(engine_id):
+    model = prices_mod.resolve_model(engine_id, config_mod.model())
+    basis = enforcement_basis(engine_id, model)
+    if basis == BASIS_REPORTED:
         return None
-    return unenforceable_note(f"engine {engine_id!r}")
+    if basis == BASIS_PRICED:
+        return priced_note(f"engine {engine_id!r}", model)
+    return unenforceable_note(f"engine {engine_id!r}", model)
 
 
 def start_note(
     ceiling: "float | None",
     *,
-    reports_cost: bool = True,
+    basis: str = BASIS_REPORTED,
     engine_label: str = "this session's engine",
+    model: "str | None" = None,
 ) -> "str | None":
     """One line for a session that starts WITH a ceiling, or None.
 
@@ -272,16 +418,29 @@ def start_note(
     first appearance in the transcript is the moment it fires is a limit
     the user finds out about by being stopped.
 
-    `reports_cost` is asked of the LIVE handle by the caller
-    (:func:`doxa.engines.capabilities_of`) rather than looked up here from
-    an id, because by start time the session has an engine and what that
-    engine can actually do beats what the config file says it would be."""
+    `basis` is computed by the caller from the LIVE handle
+    (:func:`doxa.engines.capabilities_of` plus the model it is actually
+    running) rather than looked up here from an id, because by start time
+    the session has an engine and what that engine can actually do beats
+    what the config file says it would be. It replaced a bare
+    ``reports_cost`` boolean in 1.16.0: there are three outcomes now, not
+    two, and a session bounded by DOXA's own price sheet says something
+    different from one bounded by the vendor's own figure."""
     if ceiling is None:
         return None
-    if not reports_cost:
+    if basis == BASIS_NONE:
         return (
             f"spend ceiling {format_usd(ceiling)} is set — "
-            + unenforceable_note(engine_label)
+            + unenforceable_note(engine_label, model)
+        )
+    if basis == BASIS_PRICED:
+        return (
+            f"spend ceiling {format_usd(ceiling)} for this session, "
+            + priced_note(engine_label, model)
+            + " No turn will START once that much has been spent, "
+            "including a turn an arriving peer message would otherwise "
+            f"have started. Raise or clear it with {SESSION_BUDGET_ENV} "
+            "or the session_budget_usd row (Ctrl+, → Session)."
         )
     return (
         f"spend ceiling {format_usd(ceiling)} for this session: no turn "
