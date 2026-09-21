@@ -575,17 +575,34 @@ async def test_context_window_is_false_and_nothing_invents_a_percentage(tmp_path
     assert VENDOR_CAPABILITIES.context_window is False
 
 
-async def test_cost_is_false_and_nothing_paints_a_zero_dollar_figure(tmp_path):
-    """No response field from either vendor carries dollars. 0.0 would
-    read as "this session is free", which is a different claim from
-    "nobody said" -- so the chip is omitted and the turn reports None."""
+async def test_cost_is_false_and_nothing_paints_a_vendor_figure_it_never_got(
+    tmp_path,
+):
+    """No response field from either vendor carries dollars, and that has
+    not changed: ``cost`` is False, the cost CHIP is omitted rather than
+    painting `$0.0000` (which reads as "this session is free", a
+    different claim from "nobody said"), and the per-turn ``cost_usd`` is
+    None because no turn was ever told what it cost.
+
+    What 1.16.0 added is a second, separately labelled figure: the engine
+    multiplies the token counts it already parses by doxa.prices' sourced
+    per-model sheet, which is what lets a spend ceiling fire here at all.
+    It travels with a ``cost_basis`` naming the sheet and the model, so no
+    surface can show it as the vendor's own arithmetic."""
     eng = engine(tmp_path, transport=StubTransport(prose_script()))
     await eng.start()
     events = await run_turn(eng)
-    assert eng.total_cost_usd == 0.0          # the attribute the chip reads
-    assert eng.usage_summary()["total_cost_usd"] is None
-    assert of_type(events, "turn_done")[0].data["cost_usd"] is None
     assert VENDOR_CAPABILITIES.cost is False
+    assert of_type(events, "turn_done")[0].data["cost_usd"] is None
+
+    summary = eng.usage_summary()
+    assert eng.total_cost_usd > 0.0, "the derived figure is the enforceable one"
+    assert summary["total_cost_usd"] == pytest.approx(eng.total_cost_usd)
+    assert "doxa.prices" in (summary["cost_basis"] or ""), (
+        "a derived figure that does not say it is derived is the confident "
+        "wrong number this engine spent two releases refusing"
+    )
+    assert summary["unpriced_models"] == []
 
 
 async def test_permission_modes_is_false_and_the_setter_refuses_by_name(tmp_path):

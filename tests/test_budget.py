@@ -41,6 +41,7 @@ from doxa import budget as budget_mod
 from doxa import config as config_mod
 from doxa import fleet as fleet_mod
 from doxa import peers as peers_mod
+from doxa import prices as prices_mod
 from doxa.app import DoxaApp, TurnBlock
 from doxa.engine import EngineEvent, SessionEngine
 from tests.fakes import FakeEngine, factory_with_script
@@ -433,17 +434,26 @@ async def test_a_turn_already_running_is_never_interrupted_by_the_ceiling(
         await engine.finalize()
 
 
-def test_an_engine_that_reports_no_cost_is_not_bounded_by_a_ceiling_at_all():
-    """Stated as a test because it is the largest hole in this feature.
+def test_a_model_with_no_price_is_not_bounded_by_a_ceiling_at_all():
+    """Stated as a test because it is what is LEFT of the largest hole in
+    this feature.
 
-    codex and both API vendors report token counts and no dollars, so
-    their spend reads as $0.00 and any ceiling compared against it would
-    never fire. DOXA does not check anyway and hope, and it does not
-    invent a price sheet; it says so where the number is set."""
-    assert budget_mod.enforceable_for("claude") is True
-    assert budget_mod.enforceable_for("codex") is False
-    assert budget_mod.enforceable_for("deepseek") is False
-    assert budget_mod.enforceable_for("glm") is False
+    codex and both API vendors report token counts and no dollars. Since
+    1.16.0 doxa.prices supplies the other half for models it carries, so
+    a ceiling fires on those exactly as it does on Claude. For a model it
+    does NOT carry, spend still reads as $0.00 and a ceiling compared
+    against it would never fire -- so DOXA does not check anyway and
+    hope, and it does not invent a rate; it says so, by model, where the
+    number is set."""
+    assert budget_mod.enforceable_for("claude", "sonnet") is True
+    assert budget_mod.enforceable_for("deepseek", "deepseek-flash") is True
+    assert budget_mod.enforceable_for("deepseek", "deepseek-chat") is False
+    assert budget_mod.enforceable_for("glm", "glm-5-turbo") is False
+    assert budget_mod.enforceable_for("codex") is False, (
+        "a codex session that was told no model cannot be priced: the "
+        "default lives in the operator's own ~/.codex/config.toml and the "
+        "stream never names what answered"
+    )
     assert budget_mod.enforceable_for("a-engine-that-does-not-exist") is True, (
         "an unknown id is not evidence of anything -- doxa.engines.get is "
         "the one place an unknown engine is refused, and by name"
@@ -519,12 +529,25 @@ def test_a_session_starting_under_an_unenforceable_ceiling_says_so():
     its own engine cannot honour. A limit whose first appearance is the
     moment it fires is one the user learns about by being stopped -- and
     one that can NEVER fire would otherwise never appear at all."""
-    enforced = budget_mod.start_note(5.0, reports_cost=True)
+    enforced = budget_mod.start_note(5.0, basis=budget_mod.BASIS_REPORTED)
     assert enforced is not None and "$5.0000" in enforced
     assert "NOT ENFORCEABLE" not in enforced
 
-    blind = budget_mod.start_note(5.0, reports_cost=False, engine_label="codex")
+    blind = budget_mod.start_note(
+        5.0, basis=budget_mod.BASIS_NONE, engine_label="codex",
+    )
     assert blind is not None and "NOT ENFORCEABLE" in blind and "codex" in blind
+
+    # The third outcome, which did not exist before 1.16.0: a real
+    # ceiling, enforced against DOXA's own sheet rather than the vendor's
+    # figure, and saying which of the two it is.
+    priced = budget_mod.start_note(
+        5.0, basis=budget_mod.BASIS_PRICED, engine_label="glm",
+        model="glm-5.3-flash",
+    )
+    assert priced is not None and "$5.0000" in priced
+    assert "ENFORCED" in priced and "NOT ENFORCEABLE" not in priced
+    assert "glm-5.3-flash" in priced
 
     assert budget_mod.start_note(None) is None, (
         "a session with no ceiling says nothing -- off by default means "
@@ -798,3 +821,367 @@ def test_the_cli_offers_both_flags_and_prints_the_arithmetic_on_a_dry_run():
     printed = buf.getvalue()
     assert "run budget $20.0000" in printed
     assert "$5.0000 per session" in printed
+
+
+# -- the engines that report tokens and no dollars ----------------------
+#
+# Issue #67: until 1.16.0 a --run-budget divided a total across N sessions
+# and bound only the Claude ones. These are the tests that say it now
+# binds the rest, and -- just as importantly -- that it still refuses to
+# bind a model nobody has priced instead of pretending to.
+
+from tests.test_vendors import (  # noqa: E402 -- the measured stream shapes
+    FAKE_ENV,
+    StubTransport,
+    prose_script,
+)
+
+
+@pytest.fixture
+def vendor_keys(monkeypatch):
+    """Both vendors' keys, so the stubbed engines below get past
+    ``credential()``. Values are fake and never leave the process."""
+    for name, value in FAKE_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("DOXA_AGENT_PEER_SEND", raising=False)
+
+
+def _vendor_engine(tmp_path, monkeypatch, *, model, ceiling, scripts):
+    from doxa.vendors import DEEPSEEK, ChatApiEngine
+
+    monkeypatch.setenv("DOXA_HOME", str(tmp_path / "home"))
+    if ceiling:
+        monkeypatch.setenv(budget_mod.SESSION_BUDGET_ENV, ceiling)
+    else:
+        monkeypatch.delenv(budget_mod.SESSION_BUDGET_ENV, raising=False)
+    config_mod.invalidate()
+    return ChatApiEngine(
+        cwd=str(tmp_path), spec=DEEPSEEK, model=model,
+        transport=StubTransport(*scripts),
+    )
+
+
+async def test_a_vendor_turn_is_charged_at_the_rate_of_the_model_that_answered(
+    tmp_path, monkeypatch, vendor_keys,
+):
+    """The conversion the whole feature rests on, end to end through the
+    engine's own parser: the measured usage block becomes dollars at the
+    sheet's published rate for deepseek-flash, and the arithmetic is
+    reproducible from the page.
+
+    USAGE is the measured shape: prompt_tokens 33 (of which 4 cached),
+    completion_tokens 29 (of which 26 reasoning). So 29 fresh input, 4
+    cached input, 29 output -- the reasoning is INSIDE the completion
+    count and is not a fourth term."""
+    eng = _vendor_engine(
+        tmp_path, monkeypatch, model="deepseek-flash", ceiling="",
+        scripts=[prose_script()],
+    )
+    await eng.start()
+    try:
+        [e async for e in eng.send("hi")]
+    finally:
+        await eng.finalize()
+
+    expected = (29 * 0.3 + 4 * 0.006 + 29 * 1.2) / 1_000_000
+    assert eng.total_cost_usd == pytest.approx(expected)
+    assert eng.usage_totals["reasoning_output_tokens"] == 26, (
+        "the reasoning count is still reported -- it is not charged twice, "
+        "which is a different claim from it not existing"
+    )
+    assert eng.cost_basis and "deepseek-flash" in eng.cost_basis
+    assert eng.unpriced_models == set()
+    assert eng.usage_summary()["total_cost_usd"] == pytest.approx(expected)
+
+
+async def test_a_vendor_session_stops_at_its_ceiling_the_way_a_claude_one_does(
+    tmp_path, monkeypatch, vendor_keys,
+):
+    """The acceptance criterion from issue #67, at session scale: a
+    deepseek session handed a ceiling its first turn crosses starts no
+    second turn, and the refusal says which number stopped it and whose
+    arithmetic that number is."""
+    eng = _vendor_engine(
+        tmp_path, monkeypatch, model="deepseek-flash", ceiling="0.00001",
+        scripts=[prose_script(), prose_script()],
+    )
+    await eng.start()
+    try:
+        first = [e async for e in eng.send("spend something")]
+        assert [e for e in first if e.type == "turn_done"], (
+            "the first turn must RUN -- the check is on STARTING, and a "
+            "session refused before it ever spent is a different bug"
+        )
+        assert eng.total_cost_usd > 0.00001
+
+        second = [e async for e in eng.send("spend more")]
+    finally:
+        await eng.finalize()
+
+    refused = [e for e in second if e.type == "turn_refused"]
+    assert len(refused) == 1 and len(second) == 1, (
+        "the refusal is the turn's only event -- nothing persisted, no "
+        "request built"
+    )
+    payload = refused[0].data
+    assert payload["reason"] == "budget"
+    assert payload["ceiling_usd"] == pytest.approx(0.00001)
+    assert "price sheet" in payload["message"], (
+        "an operator reconciling this against a bill is entitled to know "
+        "the figure is DOXA's arithmetic and not the vendor's"
+    )
+    assert eng.num_turns == 1, "the refused turn was not counted as a turn"
+
+
+async def test_a_vendor_session_on_an_unpriced_model_is_never_refused(
+    tmp_path, monkeypatch, vendor_keys,
+):
+    """The other half, and the one that keeps this honest: a model the
+    sheet does not carry produces no dollars, so the ceiling cannot fire
+    -- and it does NOT fire, rather than firing on a 0.0 that would stop
+    the session at its first turn for no reason.
+
+    `deepseek-chat` is exactly this case: a real name DeepSeek answers
+    with a different model, which the sheet refuses to price."""
+    eng = _vendor_engine(
+        tmp_path, monkeypatch, model="deepseek-chat", ceiling="0.00000001",
+        scripts=[prose_script(model="deepseek-chat"),
+                 prose_script(model="deepseek-chat")],
+    )
+    await eng.start()
+    try:
+        for prompt in ("one", "two"):
+            events = [e async for e in eng.send(prompt)]
+            assert not [e for e in events if e.type == "turn_refused"]
+    finally:
+        await eng.finalize()
+
+    assert eng.total_cost_usd == 0.0
+    assert eng.cost_basis is None, (
+        "0.0 with no basis is 'nobody could say', not 'this was free' -- "
+        "every reader has to be able to tell them apart"
+    )
+    assert eng.unpriced_models == {"deepseek-chat"}
+    assert eng.usage_summary()["total_cost_usd"] is None
+    assert eng.usage_totals["input_tokens"] > 0, (
+        "the tokens still arrived -- what is missing is only the price"
+    )
+
+
+async def test_a_codex_session_told_which_model_to_run_is_charged_for_it(
+    tmp_path, monkeypatch,
+):
+    """Codex's own usage shape, which differs in every field name from the
+    OpenAI-shaped one, converted through the same sheet.
+
+    And the case DOXA cannot price: `codex exec` with no -m picks a model
+    out of the operator's own config, the stream never names what
+    answered (resolved_model=False), so that session is unpriceable and
+    says so by name instead of being charged a plausible rate."""
+    from doxa.codex import CodexEngine
+
+    monkeypatch.setenv("DOXA_HOME", str(tmp_path / "home"))
+    usage = {
+        "input_tokens": 12_000, "cached_input_tokens": 9_000,
+        "output_tokens": 800, "reasoning_output_tokens": 700,
+    }
+
+    named = CodexEngine(cwd=str(tmp_path), model="gpt-5.6-sol")
+    named._absorb_usage(dict(usage))
+    expected = (3_000 * 8.0 + 9_000 * 0.8 + 800 * 40.0) / 1_000_000
+    assert named.total_cost_usd == pytest.approx(expected)
+    assert named.cost_basis and "gpt-5.6-sol" in named.cost_basis
+    assert named.usage_totals["cache_read_input_tokens"] == 9_000
+
+    bare = CodexEngine(cwd=str(tmp_path))
+    bare._absorb_usage(dict(usage))
+    assert bare.total_cost_usd == 0.0
+    assert bare.cost_basis is None
+    assert bare.unpriced_models and all(
+        "no model named" in m for m in bare.unpriced_models
+    ), "the unpriceable case is recorded BY NAME, never as an empty total"
+
+
+def test_enforceability_is_a_fact_about_a_model_not_about_an_engine():
+    """What replaced the old engine-level answer. The same engine is
+    bounded on a model the sheet carries and unbounded on one it does
+    not, so no single answer for "deepseek" could have been right."""
+    assert budget_mod.enforcement_basis("claude") == budget_mod.BASIS_REPORTED
+    assert budget_mod.enforcement_basis("deepseek", "deepseek-flash") == (
+        budget_mod.BASIS_PRICED
+    )
+    assert budget_mod.enforcement_basis("deepseek", "deepseek-chat") == (
+        budget_mod.BASIS_NONE
+    )
+    assert budget_mod.enforcement_basis("glm", "glm-5.3-flash") == (
+        budget_mod.BASIS_PRICED
+    )
+    assert budget_mod.enforcement_basis("glm", "glm-5-turbo") == (
+        budget_mod.BASIS_NONE
+    )
+
+    assert budget_mod.enforceable_for("deepseek") is True, (
+        "a bare pool entry runs the engine's DEFAULT model, which is a "
+        "knowable fact rather than an unknown one"
+    )
+    assert budget_mod.enforceable_for("codex") is False, (
+        "codex's default lives in the operator's own config and its stream "
+        "never names what answered -- unknowable, and said so"
+    )
+    assert budget_mod.enforceable_for("codex", "gpt-5.6-sol") is True
+    assert budget_mod.enforceable_for("a-engine-that-does-not-exist") is True, (
+        "an unknown id is not evidence of anything -- doxa.engines.get is "
+        "the one place an unknown engine is refused, and by name"
+    )
+
+
+def test_an_unpriced_model_is_named_in_the_warning_and_a_way_out_is_offered():
+    """A warning a reader cannot act on is a warning they route around.
+    The action here is to name a model the sheet carries, so the note
+    lists them."""
+    note = budget_mod.unenforceable_note("engine 'glm'", "glm-5-turbo")
+    assert "NOT ENFORCEABLE" in note
+    assert "glm-5-turbo" in note
+    assert "glm-5.3-flash" in note, "the priced models are the way out"
+    assert "price sheet" in note
+
+    priced = budget_mod.priced_note("engine 'glm'", "glm-5.3-flash")
+    assert "ENFORCED" in priced and "NOT ENFORCEABLE" not in priced
+    assert prices_mod.sheet_read_on() in priced, (
+        "a ceiling enforced against a sheet must carry the sheet's date"
+    )
+
+
+def test_the_settings_row_says_a_priced_ceiling_is_doxas_own_arithmetic(
+    monkeypatch, tmp_path,
+):
+    """The moment the number is SET is the moment to say whose arithmetic
+    will enforce it. A row that showed a priced ceiling exactly like
+    Claude's would hide the one difference that matters when a bill
+    disagrees with a manifest."""
+    monkeypatch.setenv("DOXA_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(budget_mod.SESSION_BUDGET_ENV, "5")
+    monkeypatch.setenv("DOXA_ENGINE", "deepseek")
+    monkeypatch.delenv("DOXA_MODEL", raising=False)
+    config_mod.invalidate()
+
+    warning = budget_mod.configured_warning()
+    assert warning is not None
+    assert "ENFORCED" in warning and "NOT ENFORCEABLE" not in warning
+    assert "deepseek-flash" in warning
+    assert prices_mod.sheet_read_on() in warning
+
+
+# -- the fleet, over a mixed pool --------------------------------------
+
+
+MIXED_PRICED_POOL = (
+    fleet_mod.ModelSlot(engine="claude", model="sonnet"),
+    fleet_mod.ModelSlot(engine="deepseek", model="deepseek-flash"),
+    fleet_mod.ModelSlot(engine="glm", model="glm-5.3-flash"),
+    fleet_mod.ModelSlot(engine="glm", model="glm-5-turbo"),
+)
+
+
+def test_the_budget_note_separates_the_bounded_slots_from_the_unbounded(
+    short_root,
+):
+    """The refusal path stays honest: the note names which slots the
+    ceiling binds by MEASUREMENT (claude), which by DOXA's own price
+    sheet, and which not at all -- by model, because that is where the
+    answer lives."""
+    note = fleet_mod.budget_note(
+        _spec(short_root, pool=MIXED_PRICED_POOL, run_budget_usd=12.0)
+    )
+
+    assert "BOUNDED" in note
+    assert "deepseek:deepseek-flash" in note
+    assert "glm:glm-5.3-flash" in note
+    assert prices_mod.sheet_read_on() in note, (
+        "the note is what the manifest keeps -- a bound with no date on "
+        "its price data cannot be audited later"
+    )
+
+    unbounded = note.split("EXCEPT")[-1]
+    assert "glm:glm-5-turbo" in unbounded
+    assert "UNBOUNDED" in note
+    assert "claude" not in unbounded, (
+        "claude reports its own dollars and must not be listed among the "
+        "unbounded"
+    )
+    assert "glm:glm-5.3-flash" not in unbounded, (
+        "a priced glm model must not be tarred with its unpriced sibling "
+        "-- the whole point of answering per model"
+    )
+
+
+def test_a_wholly_priced_pool_names_nothing_as_unbounded(short_root):
+    """The acceptance criterion from issue #67 at pool scale: a run whose
+    every slot is either self-reporting or priced has no unbounded slots
+    left to name."""
+    pool = (
+        fleet_mod.ModelSlot(engine="deepseek"),
+        fleet_mod.ModelSlot(engine="glm"),
+        fleet_mod.ModelSlot(engine="codex", model="gpt-5.3-codex"),
+    )
+    note = fleet_mod.budget_note(
+        _spec(short_root, pool=pool, run_budget_usd=6.0)
+    )
+    assert "UNBOUNDED" not in note
+    assert "BOUNDED" in note
+    for label in ("deepseek:deepseek-flash", "glm:glm-5.3-flash",
+                  "codex:gpt-5.3-codex"):
+        assert label in note
+
+
+def test_check_run_budget_still_refuses_an_unbudgeted_self_waking_run(
+    short_root,
+):
+    """Pricing the vendors does not soften the guard: a run that can wake
+    its own sessions and names no total is still refused, and a budgeted
+    mixed pool still returns the note rather than raising."""
+    with pytest.raises(fleet_mod.BudgetRefused, match=r"no run budget is set"):
+        fleet_mod.check_run_budget(
+            _spec(short_root, pool=MIXED_PRICED_POOL)
+        )
+
+    note = fleet_mod.check_run_budget(
+        _spec(short_root, pool=MIXED_PRICED_POOL, run_budget_usd=12.0)
+    )
+    assert "BOUNDED" in note and "UNBOUNDED" in note
+
+
+def test_the_manifest_records_which_price_data_bounded_the_run(short_root):
+    """Issue #67's third acceptance criterion. Two runs with an identical
+    run_budget_usd can bound very different amounts of work if the sheet
+    moved between them, so the rows in force are part of the run's
+    record -- with their sources, so the arithmetic can be redone."""
+    spec = _spec(
+        short_root, n=4, pool=MIXED_PRICED_POOL, run_budget_usd=12.0,
+    )
+    run = fleet_mod.FleetRun(spec, backend=object())
+    run.prepare()
+
+    manifest = json.loads(run.write_manifest().read_text(encoding="utf-8"))
+    block = manifest["prices"]
+
+    assert block["sheet_read_on"] == prices_mod.sheet_read_on()
+    assert block["stale"] is False
+    assert isinstance(block["age_days"], int)
+    assert any("deepseek" in url for url in block["sources"])
+
+    rows = {(e["engine"], e["model"]): e for e in block["entries"]}
+    assert ("deepseek", "deepseek-flash") in rows
+    assert ("glm", "glm-5.3-flash") in rows
+    assert ("claude", "sonnet") not in rows, (
+        "claude is bounded by the figure it reports itself -- a row for it "
+        "would be a second, worse answer"
+    )
+    for row in rows.values():
+        assert row["source"].startswith("https://")
+        assert row["read_on"]
+
+    assert "glm:glm-5-turbo" in block["unpriced"], (
+        "a model nobody priced is recorded BY NAME, not omitted -- an "
+        "absent entry reads as 'nothing to say' and this has plenty"
+    )
