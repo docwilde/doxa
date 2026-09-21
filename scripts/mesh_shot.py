@@ -52,7 +52,11 @@ killed.
 
 So the browser is driven over the DevTools protocol instead, on the PIPE
 transport, which needs no dependency: Chrome reads CDP on fd 3 and writes
-it on fd 4, one JSON message per NUL byte. The click is
+it on fd 4, one JSON message per NUL byte. That client lives in
+`scripts/cdp.py` -- it was written here and moved out when
+`tests/test_mesh_page.py` needed the same four operations against the
+same page, because two copies of a transport are two places a timeout is
+tuned and one place it is fixed. The click is
 ``Input.dispatchMouseEvent`` -- a real browser-level input event that
 becomes a real `pointerdown` in the renderer, the same event a mouse
 produces and the one `assets/mesh/mesh.js` actually listens for. Nothing
@@ -67,11 +71,9 @@ Chrome profile and the port all go away with the process.
 """
 from __future__ import annotations
 
-import base64
 import io
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import time
@@ -96,11 +98,10 @@ os.environ.setdefault("DOXA_RUNTIME_DIR", str(_tmp / "runtime"))
 os.environ.setdefault("XDG_CONFIG_HOME", str(_tmp / "xdg"))
 
 from doxa.meshgraph import MeshServer  # noqa: E402
+from scripts import cdp  # noqa: E402
 
 SHOTS = ROOT / "assets" / "shots"
 OUT = SHOTS / "mesh.png"
-
-CHROME = "/usr/bin/google-chrome"
 
 #: CSS pixels, doubled by the device scale factor to land on the
 #: gallery's own 3068x1734. See the module docstring.
@@ -199,8 +200,28 @@ def _stamp(epoch: float) -> str:
     )
 
 
-def write_ledger(path: Path, *, now: "float | None" = None) -> int:
-    """Write the synthetic ledger and return how many records it holds.
+def ledger_records(
+    *,
+    now: "float | None" = None,
+    sessions: "list | None" = None,
+    traffic: "list | None" = None,
+    running: "set | None" = None,
+    first: int = 0,
+) -> "list[dict]":
+    """The ledger as objects, in the exact on-the-wire shape
+    ``doxa/peerledger.py`` writes and :func:`doxa.meshgraph.parse_record`
+    documents.
+
+    Parameterised over the tables above rather than closed over them, so
+    that ``tests/test_mesh_page.py`` can build a two-session graph, a
+    hostile body or a ledger of nothing but broadcasts WITHOUT inventing a
+    second fixture format. One writer means one shape: a test cannot
+    accidentally assert against a record the real page would never see,
+    and a change to the record shape lands in one place.
+
+    ``first`` numbers the message ids, so a record appended to a ledger
+    the page has already read cannot collide with one already ingested --
+    ``ingest()`` dedupes by id and would silently drop it.
 
     Anchored to NOW rather than to a date written here, and that is not
     cosmetic: the page fades an edge toward its resting weight over the
@@ -208,35 +229,54 @@ def write_ledger(path: Path, *, now: "float | None" = None) -> int:
     graph in which nothing has happened recently -- a true picture of a
     dead file and a useless picture of the view."""
     now = time.time() if now is None else now
+    sessions = _SESSIONS if sessions is None else sessions
+    traffic = _TRAFFIC if traffic is None else traffic
+    running = _RUNNING if running is None else running
+
+    out = []
+    for offset, (ago, sender, targets, body) in enumerate(traffic):
+        index = first + offset
+        recipients = (
+            [s[0] for i, s in enumerate(sessions) if i != sender]
+            if targets is None
+            else [sessions[i][0] for i in targets]
+        )
+        session, title, repo, engine = sessions[sender]
+        out.append({
+            "v": 1,
+            "id": f"m{index:04d}",
+            "ts": _stamp(now - ago),
+            "from": {
+                "session": session, "title": title, "repo": repo,
+                "model": None, "engine": engine,
+            },
+            "to": recipients,
+            "kind": "broadcast" if targets is None else "direct",
+            "in_reply_to": None,
+            "body": body,
+            "body_sha256": f"{index:064x}",
+            "latency_ms": 900 + index * 37,
+            "turn": {
+                "id": None,
+                "state": "running" if sender in running else "idle",
+            },
+        })
+    return out
+
+
+def ledger_lines(**kwargs) -> "list[str]":
+    """:func:`ledger_records`, one JSON object per line, newline included
+    -- the bytes the writer appends."""
+    return [json.dumps(record) + "\n" for record in ledger_records(**kwargs)]
+
+
+def write_ledger(path: Path, **kwargs) -> int:
+    """Write the synthetic ledger and return how many records it holds."""
+    lines = ledger_lines(**kwargs)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
-        for index, (ago, sender, targets, body) in enumerate(_TRAFFIC):
-            recipients = (
-                [s[0] for i, s in enumerate(_SESSIONS) if i != sender]
-                if targets is None
-                else [_SESSIONS[i][0] for i in targets]
-            )
-            session, title, repo, engine = _SESSIONS[sender]
-            handle.write(json.dumps({
-                "v": 1,
-                "id": f"m{index:04d}",
-                "ts": _stamp(now - ago),
-                "from": {
-                    "session": session, "title": title, "repo": repo,
-                    "model": None, "engine": engine,
-                },
-                "to": recipients,
-                "kind": "broadcast" if targets is None else "direct",
-                "in_reply_to": None,
-                "body": body,
-                "body_sha256": f"{index:064x}",
-                "latency_ms": 900 + index * 37,
-                "turn": {
-                    "id": None,
-                    "state": "running" if sender in _RUNNING else "idle",
-                },
-            }) + "\n")
-    return len(_TRAFFIC)
+        handle.writelines(lines)
+    return len(lines)
 
 
 def check_served(url: str, expected: int) -> None:
@@ -271,154 +311,10 @@ def check_served(url: str, expected: int) -> None:
 
 
 # -- the browser -----------------------------------------------------------
-
-
-class Chrome:
-    """Headless Chrome over the CDP PIPE transport, on the standard
-    library alone.
-
-    No websocket client and no automation package, because the pipe
-    transport needs neither: Chrome reads commands on fd 3 and writes
-    replies and events on fd 4, each message a JSON object followed by a
-    NUL byte. This class is the four operations this script needs -- go
-    somewhere, ask the page a question, click, take the frame."""
-
-    def __init__(self, url: str, profile: Path) -> None:
-        self.session = ""
-        to_chrome_r, to_chrome_w = os.pipe()
-        from_chrome_r, from_chrome_w = os.pipe()
-        # There is no subprocess argument for "put this pipe on fd 3", and
-        # doing it in a preexec_fn is a trap: `os.pipe` sets FD_CLOEXEC,
-        # `dup2` onto the SAME number is a no-op that leaves the flag set,
-        # and Chrome then exits with "Remote debugging pipe file
-        # descriptors are not open" over descriptors that are plainly
-        # open (measured, twice). A one-line shell does the move with its
-        # own redirections, which clear the flag, and execs Chrome in the
-        # same process.
-        script = f'exec 3<&{to_chrome_r} 4>&{from_chrome_w}; exec "$@"'
-        self._proc = subprocess.Popen(
-            [
-                "/bin/sh", "-c", script, "sh", CHROME,
-                "--headless=new", "--remote-debugging-pipe", "--disable-gpu",
-                "--hide-scrollbars", "--no-first-run",
-                "--no-default-browser-check", "--disable-extensions",
-                "--disable-background-networking",
-                # A throwaway profile: a screenshot script may not read or
-                # write the browser session of whoever is running it, and
-                # headless Chrome otherwise uses the default one.
-                f"--user-data-dir={profile}",
-                f"--window-size={WINDOW[0]},{WINDOW[1]}",
-                "about:blank",
-            ],
-            pass_fds=(to_chrome_r, from_chrome_w),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        os.close(to_chrome_r)
-        os.close(from_chrome_w)
-        self._write, self._read = to_chrome_w, from_chrome_r
-        self._buffer = b""
-        self._next = 0
-
-        page = next(
-            target for target in self.call("Target.getTargets")["targetInfos"]
-            if target["type"] == "page"
-        )
-        self.session = self.call(
-            "Target.attachToTarget",
-            {"targetId": page["targetId"], "flatten": True},
-        )["sessionId"]
-        self.call("Runtime.enable")
-        self.call("Page.enable")
-        # The viewport is set here rather than left to the window, so the
-        # frame is exactly the gallery's geometry whatever a window
-        # manager, a screen, or the absence of both would have made it.
-        self.call("Emulation.setDeviceMetricsOverride", {
-            "width": WINDOW[0], "height": WINDOW[1],
-            "deviceScaleFactor": SCALE, "mobile": False,
-        })
-        self.call("Page.navigate", {"url": url})
-
-    # -- transport --
-
-    def call(self, method: str, params: "dict | None" = None,
-             timeout: float = 30.0) -> dict:
-        self._next += 1
-        message: "dict" = {"id": self._next, "method": method,
-                           "params": params or {}}
-        if self.session:
-            message["sessionId"] = self.session
-        os.write(self._write, json.dumps(message).encode("utf-8") + b"\0")
-        deadline = time.time() + timeout
-        while True:
-            reply = self._recv(deadline)
-            # Events stream down the same pipe; anything that is not the
-            # answer to this command is not this script's business.
-            if reply.get("id") != self._next:
-                continue
-            if "error" in reply:
-                raise SystemExit(f"{method}: {reply['error']}")
-            return reply.get("result", {})
-
-    def _recv(self, deadline: float) -> dict:
-        while b"\0" not in self._buffer:
-            if time.time() > deadline:
-                raise SystemExit("chrome stopped answering")
-            chunk = os.read(self._read, 1 << 16)
-            if not chunk:
-                raise SystemExit("chrome closed the devtools pipe")
-            self._buffer += chunk
-        raw, self._buffer = self._buffer.split(b"\0", 1)
-        return json.loads(raw)
-
-    # -- the page --
-
-    def ask(self, expression: str):
-        """One JavaScript expression, evaluated in the page, by value."""
-        result = self.call("Runtime.evaluate", {
-            "expression": expression, "returnByValue": True,
-        })
-        return result.get("result", {}).get("value")
-
-    def until(self, expression: str, what: str, timeout: float = 20.0) -> None:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if self.ask(expression):
-                return
-            time.sleep(0.05)
-        raise SystemExit(f"the page never reached: {what}")
-
-    def click(self, x: float, y: float) -> None:
-        """A real pointer press and release, at CSS-pixel coordinates.
-
-        `assets/mesh/mesh.js` selects on `pointerdown` and ends its drag
-        on `pointerup`, and both arrive from this because Chrome turns a
-        dispatched mouse event into the same pointer events a mouse does.
-        No movement in between, so a press on the background pans by
-        nothing and a press on a node pins it for exactly as long as the
-        button is down."""
-        for kind in ("mousePressed", "mouseReleased"):
-            self.call("Input.dispatchMouseEvent", {
-                "type": kind, "x": x, "y": y, "button": "left",
-                "buttons": 1 if kind == "mousePressed" else 0,
-                "clickCount": 1, "pointerType": "mouse",
-            })
-
-    def hover(self, x: float, y: float) -> None:
-        self.call("Input.dispatchMouseEvent", {
-            "type": "mouseMoved", "x": x, "y": y, "pointerType": "mouse",
-        })
-
-    def frame(self) -> bytes:
-        return base64.b64decode(
-            self.call("Page.captureScreenshot", {"format": "png"})["data"]
-        )
-
-    def close(self) -> None:
-        try:
-            self.call("Browser.close", timeout=5)
-        except SystemExit:
-            self._proc.kill()
-        self._proc.wait(timeout=10)
+#
+# scripts/cdp.py. The class was here until tests/test_mesh_page.py needed
+# the same transport against the same page; see this file's docstring and
+# that module's for why it moved rather than being copied.
 
 
 # -- what the frame has to show -------------------------------------------
@@ -471,7 +367,7 @@ def _measure(png: bytes) -> "tuple[float, float, int]":
     )
 
 
-def wait_for_layout(chrome: Chrome, timeout: float = 25.0) -> None:
+def wait_for_layout(chrome: cdp.Chrome, timeout: float = 25.0) -> None:
     """Hold until the force layout has stopped folding itself open.
 
     The page gives no signal for this -- the simulation's own energy lives
@@ -495,7 +391,7 @@ def wait_for_layout(chrome: Chrome, timeout: float = 25.0) -> None:
     raise SystemExit("the layout never settled")
 
 
-def select_session(chrome: Chrome, title: str) -> "tuple[float, float]":
+def select_session(chrome: cdp.Chrome, title: str) -> "tuple[float, float]":
     """Click sessions until the panel is the one this shot wants.
 
     A node is drawn on a canvas, so there is no element to click and no
@@ -537,7 +433,7 @@ def select_session(chrome: Chrome, title: str) -> "tuple[float, float]":
     )
 
 
-def check_panel(chrome: Chrome, title: str) -> None:
+def check_panel(chrome: cdp.Chrome, title: str) -> None:
     """The panel is open, on the right session, with traffic in it.
 
     Asserted through the page's own DOM rather than off the pixels,
@@ -568,10 +464,13 @@ def main() -> None:
     ledger = _tmp / "peers" / "ledger.jsonl"
     written = write_ledger(ledger)
     server = MeshServer(path=ledger)
-    chrome: "Chrome | None" = None
+    chrome: "cdp.Chrome | None" = None
     try:
         check_served(server.url, written)
-        chrome = Chrome(server.url, _tmp / "chrome-profile")
+        chrome = cdp.Chrome(
+            _tmp / "chrome-profile",
+            url=server.url, window=WINDOW, scale=SCALE,
+        )
         # The page's OWN ready signals, in the order it reaches them: the
         # snapshot has been folded in (the header counts every session),
         # and the stream behind it is open (the connection chip says so).
@@ -609,4 +508,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # A browser that refuses, errors or stops answering is a message and
+    # an exit status here, not a traceback -- which is what this script
+    # did when the transport raised SystemExit from inside it. The class
+    # moved to scripts/cdp.py and raises an ordinary exception there, so
+    # a test can fail on it properly; the translation happens at the one
+    # place that is a command line.
+    try:
+        main()
+    except cdp.CdpError as exc:
+        raise SystemExit(str(exc)) from None
