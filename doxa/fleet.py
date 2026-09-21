@@ -133,6 +133,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from . import budget as budget_mod
+from . import prices as prices_mod
 from . import peerledger as peerledger_mod
 from . import peers as peers_mod
 
@@ -170,6 +171,7 @@ __all__ = [
     "default_root",
     "check_capacity",
     "check_run_budget",
+    "price_record",
     "may_auto_approve",
     "run_fleet",
     "spec_from_args",
@@ -1028,13 +1030,77 @@ class BudgetRefused(RuntimeError):
     has not said anything about the other."""
 
 
+def _pool_models(spec: "FleetSpec") -> "tuple[tuple[str, str | None], ...]":
+    """Every ``(engine, model)`` this run could deal, the supervisor
+    included.
+
+    The supervisor is in the list because it SPENDS -- the same reason
+    :attr:`FleetSpec.session_budget_usd` divides by ``session_count``
+    rather than by ``n``. A note that had described the workers' engines
+    and left the head out would be describing a bound that is not the one
+    in force."""
+    slots = list(spec.pool)
+    if spec.supervisor is not None:
+        slots.append(spec.supervisor)
+    seen: "list[tuple[str, str | None]]" = []
+    for slot in slots:
+        pair = (slot.engine, slot.model)
+        if pair not in seen:
+            seen.append(pair)
+    return tuple(seen)
+
+
+def price_record(spec: "FleetSpec") -> "dict[str, Any]":
+    """Which price data would bound this run, for the manifest.
+
+    The manifest is the only record of what a run was allowed to spend,
+    and until 1.16.0 it recorded the ceiling without recording what the
+    ceiling was measured AGAINST. For every slot that is bounded by
+    DOXA's own arithmetic that omission was the whole question: two runs
+    with identical ``run_budget_usd`` can bound very different amounts of
+    work if the sheet moved between them.
+
+    So this writes the sheet's date, its age, whether it is stale, the
+    vendor pages it was read from, the exact rows in force for this run's
+    pool, and -- by name -- every pool entry the sheet cannot price.
+    A reader auditing a bill against a run can redo the arithmetic from
+    this block alone."""
+    entries: "list[dict[str, Any]]" = []
+    unpriced: "list[str]" = []
+    for engine, model in _pool_models(spec):
+        basis = budget_mod.enforcement_basis(engine, model)
+        if basis == budget_mod.BASIS_REPORTED:
+            continue
+        resolved = prices_mod.resolve_model(engine, model)
+        row = prices_mod.price_for(engine, resolved)
+        if row is None:
+            unpriced.append(f"{engine}:{model}" if model else engine)
+        elif row.to_obj() not in entries:
+            entries.append(row.to_obj())
+    return {
+        "sheet_read_on": prices_mod.sheet_read_on(),
+        "age_days": prices_mod.sheet_age_days(),
+        "stale": prices_mod.stale(),
+        "sources": list(prices_mod.sources()),
+        "note": prices_mod.sheet_note(),
+        "entries": entries,
+        "unpriced": unpriced,
+    }
+
+
 def budget_note(spec: "FleetSpec") -> str:
     """One sentence of arithmetic for this run's ceiling, for the operator
     to read before spawning and for the manifest to keep afterwards.
 
     Same job :func:`capacity_note` does for memory, and the same reason:
-    an estimate nobody reads is not a control. This one also names the
-    engines in the pool that cannot be held to it at all."""
+    an estimate nobody reads is not a control. This one also says, per
+    POOL ENTRY, which slots the ceiling actually binds and on what
+    grounds -- and names the ones it does not bind at all.
+
+    PER ENTRY, not per engine, because since 1.16.0 that is where the
+    answer lives: ``glm:glm-5.3-flash`` is bounded by :mod:`doxa.prices`
+    and ``glm:glm-5-turbo`` is not, and one line about "glm" could only
+    have been wrong about one of them."""
     if spec.run_budget_usd is None:
         return (
             "no run budget: nothing bounds what this run may spend"
@@ -1052,16 +1118,30 @@ def budget_note(spec: "FleetSpec") -> str:
         "turns at its share, so the run spends at most the total plus one "
         "turn of overshoot per session"
     )
-    blind = sorted({
-        slot.engine for slot in spec.pool
-        if not budget_mod.enforceable_for(slot.engine)
-    })
+    priced: "list[str]" = []
+    blind: "list[str]" = []
+    for engine, model in _pool_models(spec):
+        basis = budget_mod.enforcement_basis(engine, model)
+        if basis == budget_mod.BASIS_REPORTED:
+            continue
+        label = f"{engine}:{prices_mod.resolve_model(engine, model)}" if (
+            basis == budget_mod.BASIS_PRICED
+        ) else (f"{engine}:{model}" if model else engine)
+        (priced if basis == budget_mod.BASIS_PRICED else blind).append(label)
+    if priced:
+        note += (
+            " -- these report no dollars of their own and are BOUNDED by "
+            "DOXA's own arithmetic over its price sheet instead: "
+            + ", ".join(sorted(set(priced)))
+            + f" ({prices_mod.sheet_note()})"
+        )
     if blind:
         note += (
-            " -- EXCEPT on " + ", ".join(blind) + ", which report no dollar "
-            "figure at all, so slots dealt those engines are UNBOUNDED and "
-            "their share is not enforced (doxa.vendors: DOXA will not "
-            "multiply tokens by a price sheet it would have to maintain)"
+            " -- EXCEPT on " + ", ".join(sorted(set(blind))) + ", which "
+            "report no dollar figure and have no entry in DOXA's price "
+            "sheet either, so slots dealt them are UNBOUNDED and their "
+            "share is not enforced (doxa.prices: a model nobody priced is "
+            "named, never guessed at and never treated as free)"
         )
     return note
 
@@ -2147,6 +2227,13 @@ class RunReport:
             "capacity": self.capacity,
             "forced": self.forced,
             "budget": self.budget,
+            # WHICH PRICE DATA BOUNDED THIS RUN. The ceiling above is a
+            # number; for every slot not on Claude it is a number compared
+            # against DOXA's own arithmetic, and a manifest that recorded
+            # the ceiling without recording the rates would be recording
+            # half a control. Rows, sources, dates, staleness, and the
+            # pool entries no rate covers -- see fleet.price_record.
+            "prices": price_record(self.spec),
             "unbudgeted": self.unbudgeted,
             # WHAT THIS RUN WAS ALLOWED TO SAY YES TO, beside what it was
             # allowed to spend and for the same reason: a bill and a
