@@ -7,13 +7,15 @@ return the right value" -- they are properties that would be broken by a
 plausible later edit and would then fail silently, in production, in the
 one direction that matters.
 
-THE FIXTURES ARE LEDGER LINES, NOT OBJECTS. ``doxa/peerledger.py`` is
-being written in parallel and this module deliberately does not import
-it; :func:`record` reproduces the agreed on-the-wire shape byte for byte,
-so if the writer lands emitting something else, these tests are the thing
-that notices. The coupling under test is a file format, and a fixture
-built by calling the writer's own constructor would test nothing about
-it.
+THE FIXTURES ARE LEDGER LINES, NOT OBJECTS. Almost nothing here imports
+``doxa/peerledger.py``; :func:`record` reproduces the agreed on-the-wire
+shape byte for byte, so if the writer ever emits something else, these
+tests are the thing that notices. The coupling under test is a file
+format, and a fixture built by calling the writer's own constructor
+would test nothing about it. The one exception is the path-agreement
+test below, which imports ``doxa.peerledger`` on purpose: THAT coupling
+-- the two modules resolving to the same file -- can only be tested by
+asking both.
 
 FOUR OF THE FIVE REQUIRED PROPERTIES ARE SECURITY OR LIVENESS, and they
 pull in opposite directions, which is why they are pinned together:
@@ -701,21 +703,36 @@ def test_the_sender_side_fields_are_named_for_whose_they_are(ledger):
 # -- the reader seam -------------------------------------------------------
 
 
-def test_the_ledger_path_is_overridable_without_importing_the_writer(
-    tmp_path, monkeypatch
-):
-    """``doxa/peerledger.py`` is written in parallel and is deliberately
-    not imported here: the entire coupling is this path and the record
-    shape. The override is what lets the view follow the writer if it
-    settles somewhere else, and what lets a test point at a fixture."""
+def test_the_ledger_path_is_overridable(tmp_path, monkeypatch):
+    """:data:`meshgraph.LEDGER_ENV` still wins over everything else,
+    including the delegation to ``doxa.peerledger`` below -- it is how a
+    test points this at a fixture and how this view would follow the
+    writer to a different home if peerledger ever chose one. peerledger
+    offers no env override of its own, so there is no precedence
+    question: the override short-circuits before peerledger is even
+    asked."""
     monkeypatch.setenv(meshgraph.LEDGER_ENV, str(tmp_path / "elsewhere.jsonl"))
     assert meshgraph.ledger_path() == tmp_path / "elsewhere.jsonl"
 
-    monkeypatch.delenv(meshgraph.LEDGER_ENV)
+
+def test_the_ledger_path_agrees_with_the_writer(tmp_path, monkeypatch):
+    """The pair this module's own comment promised: ``meshgraph``'s
+    default MUST be the file ``doxa.peerledger`` actually writes, not a
+    placeholder name coined while the writer was still being built. If
+    the two ever drift again, a view that reads one file while the
+    fleet appends to another goes quietly dark -- no error, just an
+    empty graph -- which is exactly the failure this test exists to
+    catch before it reaches an operator."""
+    from doxa import peerledger
+
+    monkeypatch.delenv(meshgraph.LEDGER_ENV, raising=False)
     monkeypatch.setenv("DOXA_HOME", str(tmp_path / "home"))
+
+    resolved = meshgraph.ledger_path()
+    assert resolved == peerledger.ledger_path()
     # Durable state, NOT the runtime dir the peer registry uses: the
     # experiment's whole output is this file, collected after the run.
-    assert meshgraph.ledger_path() == tmp_path / "home" / "peers" / "ledger.jsonl"
+    assert resolved == tmp_path / "home" / "peers" / "messages.jsonl"
 
 
 def test_a_recipient_with_no_identity_still_becomes_a_node(server, ledger):
