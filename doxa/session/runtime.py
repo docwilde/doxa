@@ -30,6 +30,7 @@ from .. import banner as banner_mod
 from .. import budget as budget_mod
 from .. import diff as diff_mod
 from .. import engines as engines_mod
+from .. import errors as errors_mod
 from .. import identity as identity_mod
 from .. import keyboard as keyboard_mod
 from .. import lore_sync as lore_sync_mod
@@ -71,6 +72,25 @@ EVENT_RENDERERS: "dict[str, str]" = {
     "tool_result": "_render_tool_result",
     "turn_done": "_render_turn_done",
 }
+
+#: How many times :meth:`PaneRuntimeMixin._opening_container` looks for a
+#: pane's transcript container before it gives up and SAYS so, and how
+#: long it waits between looks -- ten seconds at 0.02s, the same interval
+#: every polling helper in this codebase and its suite converged on
+#: independently (see ``tests/wait_stable.py``'s ``DEFAULT_INTERVAL``).
+#:
+#: The window this closes is frames wide, not permanent: a restore mounts
+#: several panes at once and ``_boot`` runs from a worker, so it can reach
+#: a pane whose ``#block-list`` is not in the DOM yet -- or is in the DOM
+#: and not yet MOUNTED, which is a second window with a different symptom
+#: (see :meth:`_opening_container`). One or two polls is the normal cost.
+#: The ceiling is not a timing budget to tune, it is the line past which a
+#: pane that is still alive and still cannot hold a widget has stopped
+#: being late and started being broken -- and the point of having one at
+#: all is that ``_boot`` MUST reach its tail (``_note_pane_booted``)
+#: rather than wait on this forever.
+OPENING_BLOCK_TRIES = 500
+OPENING_BLOCK_INTERVAL = 0.02
 
 
 class PaneRuntimeMixin:
@@ -253,20 +273,100 @@ class PaneRuntimeMixin:
         # grows a second trigger; until then a per-turn refresh would be
         # SQLite reads paid on every turn to be told the same number.
         self.schedule_sync_state()
-        # Initial identity block: who/where this session actually is --
-        # only fields the CLI/config really reported, never guesses.
+        # The opening block: the mark, then who and where this session
+        # actually is (only fields the CLI/config really reported, never
+        # guesses), then the notices that belong under it.
         #
-        # The block list may not be mounted yet. _boot runs as a worker and
-        # a restore mounts several panes at once, so this can reach a pane
-        # Textual has not composed. query_one raises NoMatches there, from a
-        # background task with no caller of ours to catch it, and the error
-        # surface turns it into a visible block -- a failure report for a
-        # frame nobody could have painted. Same shape and same reason as the
-        # #status-bar guard in doxa.session.chips (v0.70.0); measured under
-        # test_restore_view's saved-active-tab case, which mounts three.
-        try:
-            block_list = self.query_one("#block-list", VerticalScroll)
-        except NoMatches:
+        # Its own method since issue #71, because every line of it used to
+        # be able to take the REST of this boot down with it -- and
+        # ``_note_pane_booted`` at the end of this one is the casualty
+        # that made that expensive rather than merely ugly. It is what
+        # releases DoxaApp's mid-restore persistence guard
+        # (appwindow/restore.py), so a pane that quietly lost its
+        # transcript head also cost the user their saved tab set for the
+        # rest of the run. Mounting the head is allowed to fail; finishing
+        # the boot is not allowed to fail with it.
+        await self._mount_opening_block(git_cwd)
+        if self._resume_from:
+            # v0.56.0 (/resume): a resumed session must SHOW what it
+            # remembers. The model comes back holding the whole
+            # conversation (the CLI reloaded it from --resume), and
+            # drawing an empty pane over that would leave the user typing
+            # into a context they cannot see and have no way to audit --
+            # which for a tool whose premise is auditable memory is the
+            # wrong failure to ship. So it reuses v0.32.0's machinery
+            # outright: same transcript reader, same mount_transcript,
+            # same render caps, same on-screen honesty when they bite.
+            #
+            # The id it reads is THIS session's id, because a resume keeps
+            # its id rather than forking a new one (engine._build_options)
+            # -- the file being drawn is the file this session is about to
+            # go on appending to.
+            resume_id, self._resume_from = self._resume_from, None
+            with contextlib.suppress(Exception):
+                await self._restore_transcript(
+                    resume_id, git_cwd, require_backlog_skip=False,
+                )
+        if self._restore_transcript_wanted:
+            self._restore_transcript_wanted = False
+            # Suppressed here as well as inside: _note_pane_booted below is
+            # what releases DoxaApp's mid-restore persistence guard, so a
+            # scrollback that failed to draw must not also cost the user
+            # their saved tab set on the NEXT launch.
+            with contextlib.suppress(Exception):
+                await self._restore_transcript(session_id, git_cwd)
+        # Deferred: doxa.app imports this package, so the arrow only
+        # points back at call time -- the pane never needs the app
+        # class before there is an app.
+        from ..app import DoxaApp
+
+        app = self.app
+        if isinstance(app, DoxaApp):
+            app._note_pane_booted(self)
+
+    async def _mount_opening_block(self, git_cwd: str) -> None:
+        """Draw the head of this pane's transcript -- and never silently
+        skip it.
+
+        **The defect this closes (issue #71).** Through v1.16.0 the whole
+        of this lived inline in :meth:`_boot` behind one sampled guard::
+
+            try:
+                block_list = self.query_one("#block-list", VerticalScroll)
+            except NoMatches:
+                return
+
+        That ``return`` is reachable in production, not only in theory:
+        ``_boot`` runs from a worker and a restore mounts several panes at
+        once, so it lands on panes Textual has not composed yet -- the
+        guard's own comment measured it under ``test_restore_view``'s
+        saved-active-tab case. What it cost, every time it fired, was the
+        banner AND the identity block AND the key notice AND the budget
+        note AND the restore report AND ``_note_pane_booted``, for the
+        life of that pane, with nothing anywhere saying so. A restored tab
+        showing a blank transcript head is the visible half; the saved tab
+        set never being written again that run (``_note_pane_booted``
+        releases the mid-restore guard in :mod:`doxa.appwindow.restore`)
+        is the half a user would never connect to it.
+
+        Two windows make it reachable, and they need different answers:
+
+        * ``#block-list`` not in the DOM yet -- ``query_one`` raises
+          ``NoMatches``.
+        * ``#block-list`` in the DOM and not yet MOUNTED -- ``query_one``
+          SUCCEEDS and ``mount`` is what raises (``MountError: Can't mount
+          widget(s) before VerticalScroll(id='block-list') is mounted``).
+          The same second condition :meth:`SessionPane._system` already
+          carries, for the same window, on the same pane.
+
+        So this WAITS for a container it can actually mount into rather
+        than sampling one once (:meth:`_opening_container`), reports if
+        the wait runs out on a live pane, and keeps the banner's own
+        failure away from the identity block's. A pane closed while the
+        wait was running is not a failure and is not reported -- there is
+        nobody left to draw for."""
+        block_list = await self._opening_container()
+        if block_list is None:
             return
         # The banner introduces the identity block, so it mounts first and
         # only where there was nothing before it -- switch_engine re-runs
@@ -276,8 +376,18 @@ class PaneRuntimeMixin:
         # dropped the raster form and the terminal-mode probe that used
         # to pick between it and the drawn one), so this costs nothing
         # boot-critical either way.
+        #
+        # Guarded ON ITS OWN (issue #71): the mark is decoration and the
+        # identity block is the session saying what it is, so a mark that
+        # cannot draw must cost the mark and nothing else. It is still
+        # REPORTED -- a decoration that quietly stops appearing is exactly
+        # the defect that issue opened with, and one that reports itself
+        # cannot be mistaken for a machine-specific flake again.
         if banner_mod.enabled() and not block_list.children:
-            await block_list.mount(BootBanner())
+            try:
+                await block_list.mount(BootBanner())
+            except Exception as exc:  # noqa: BLE001 -- reported, never raised
+                self._report_opening_gap("mounting the boot banner", error=exc)
         # Staged-proposal count for the `lore` line (v0.56.0). A socket
         # round trip, and affordable exactly HERE and nowhere else: the
         # opening block is drawn once, before the first prompt, on a pane
@@ -289,6 +399,11 @@ class PaneRuntimeMixin:
             lister = getattr(self.engine, "list_pending", None)
             if lister is not None:
                 self._pending_count = len(await lister())
+        # NOT guarded, unlike the banner above: a pane that cannot mount
+        # its identity block has no opening block at all, and the right
+        # answer to that is the failure report _boot's own caller paints
+        # (Textual funnels a failed worker through DoxaApp's overridden
+        # _handle_exception), not a quieter transcript.
         identity = SystemBlock(self._identity_text(git_cwd))
         identity.id = "identity-block"
         await block_list.mount(identity)
@@ -343,42 +458,108 @@ class PaneRuntimeMixin:
             await block_list.mount(SystemBlock(self._boot_report))
             self._boot_report = None
         self.scroll_transcript_to_end(block_list)
-        if self._resume_from:
-            # v0.56.0 (/resume): a resumed session must SHOW what it
-            # remembers. The model comes back holding the whole
-            # conversation (the CLI reloaded it from --resume), and
-            # drawing an empty pane over that would leave the user typing
-            # into a context they cannot see and have no way to audit --
-            # which for a tool whose premise is auditable memory is the
-            # wrong failure to ship. So it reuses v0.32.0's machinery
-            # outright: same transcript reader, same mount_transcript,
-            # same render caps, same on-screen honesty when they bite.
-            #
-            # The id it reads is THIS session's id, because a resume keeps
-            # its id rather than forking a new one (engine._build_options)
-            # -- the file being drawn is the file this session is about to
-            # go on appending to.
-            resume_id, self._resume_from = self._resume_from, None
-            with contextlib.suppress(Exception):
-                await self._restore_transcript(
-                    resume_id, git_cwd, require_backlog_skip=False,
-                )
-        if self._restore_transcript_wanted:
-            self._restore_transcript_wanted = False
-            # Suppressed here as well as inside: _note_pane_booted below is
-            # what releases DoxaApp's mid-restore persistence guard, so a
-            # scrollback that failed to draw must not also cost the user
-            # their saved tab set on the NEXT launch.
-            with contextlib.suppress(Exception):
-                await self._restore_transcript(session_id, git_cwd)
-        # Deferred: doxa.app imports this package, so the arrow only
-        # points back at call time -- the pane never needs the app
-        # class before there is an app.
+
+    async def _opening_container(self) -> "VerticalScroll | None":
+        """This pane's transcript container, once it can actually hold a
+        widget -- or ``None`` when there will never be one to hold it.
+
+        Two conditions, not one: in the DOM (``query_one``) AND mounted.
+        :meth:`SessionPane._system` documents why the second is needed --
+        since v0.89.0 a leaf is born inside a pre-made box, so
+        ``#block-list`` composes strictly later than it did when a pane
+        WAS the tab, and there is a window where the node exists and
+        ``mount`` still raises.
+
+        ``None`` means one of two different things and the difference is
+        the whole point of this method:
+
+        * The pane is stopped or unmounted -- closed while we waited.
+          Nothing to draw on and nobody to draw for, so nothing is
+          reported. This is an ordinary outcome, not a failure.
+        * :data:`OPENING_BLOCK_TRIES` polls went by on a pane that is
+          still alive. That is not lateness any more, and it is reported
+          through the one door (:meth:`_report_opening_gap`) so the
+          missing opening block is a thing someone can read rather than an
+          absence nobody can account for.
+
+        Polling rather than awaiting a Textual signal is deliberate:
+        there is no "this widget is now mountable" event to await -- the
+        Mount message is dispatched a pump cycle after ``mount`` registers
+        the child (see ``DoxaApp.report_failure``'s own ``is_attached``
+        note), and subscribing to it would mean holding a handler on every
+        pane forever to catch a window two frames wide. The normal cost
+        here is one poll that succeeds immediately."""
+        for _ in range(OPENING_BLOCK_TRIES):
+            if self._stopped or not self.is_mounted:
+                return None
+            try:
+                block_list = self.query_one("#block-list", VerticalScroll)
+            except NoMatches:
+                block_list = None
+            if block_list is not None and block_list.is_mounted:
+                return block_list
+            await asyncio.sleep(OPENING_BLOCK_INTERVAL)
+        if self._stopped or not self.is_mounted:
+            return None
+        self._report_opening_gap(
+            "this session booted without its opening block",
+            detail=(
+                "the pane's transcript container (#block-list) never became "
+                f"mountable: {OPENING_BLOCK_TRIES} checks over "
+                f"{OPENING_BLOCK_TRIES * OPENING_BLOCK_INTERVAL:.0f}s on a "
+                "pane that is still mounted. The banner, the identity block "
+                "and the notices under them are not on screen for this "
+                "session, and will not be."
+            ),
+        )
+        return None
+
+    def _report_opening_gap(
+        self,
+        summary: str,
+        *,
+        error: "BaseException | None" = None,
+        detail: str = "",
+    ) -> None:
+        """Say -- through the one door -- that this pane's opening block
+        is missing or incomplete.
+
+        ``summary`` is the one line a user reads. Given an ``error`` it
+        becomes that report's CONTEXT ("what DOXA was doing" --
+        :class:`doxa.errors.Failure` has a field for exactly that) and the
+        exception supplies the summary itself; without one it IS the
+        summary, of a policy failure: nothing raised, a promise was simply
+        not kept.
+
+        ``DoxaApp.report_failure`` is the door, and it records and LOGS
+        the failure before it tries to paint a block for it. That ordering
+        is what makes this safe to call from exactly the situation that
+        provokes it: the surface the app picks to paint into may be the
+        very container that could not be mounted, and a mount that fails
+        there costs the visible copy of the report, never the record in
+        ``app.failures`` or the line in the failure log. Suppressing that
+        is therefore not a swallow -- it is declining to fail a boot over
+        the second copy of a trace that is already written.
+
+        If NO pane in the window can hold a block, ``report_failure``
+        prints the report to the terminal and exits -- its own documented
+        contract, not a new decision here, and the honest end for a window
+        that cannot paint a transcript anywhere.
+
+        A pane not in a :class:`DoxaApp` (a bare widget under test) has no
+        such door and gets none of this."""
         from ..app import DoxaApp
 
         app = self.app
-        if isinstance(app, DoxaApp):
-            app._note_pane_booted(self)
+        if not isinstance(app, DoxaApp):
+            return
+        with contextlib.suppress(Exception):
+            if error is not None:
+                app.report_exception(error, context=summary)
+            else:
+                app.report_failure(
+                    errors_mod.policy_failure(errors_mod.DOXA, summary, detail)
+                )
 
     async def _peer_pump(self) -> None:
         """Consume the engine's out-of-band stream for the life of the pane:

@@ -18,6 +18,8 @@ import pytest
 
 from doxa import banner, images
 from doxa.app import _DrawnMark, BootBanner, DoxaApp, ImageShowcaseBlock, SystemBlock
+from tests.fakes import FakeEngine
+from tests.wait_stable import wait_stable
 
 # A realistic terminal size for scenes that just need room -- the default
 # run_test size (80x24) is fine for the banner itself (v0.70.0: it is the
@@ -29,6 +31,50 @@ WIDE = (120, 34)
 async def _settle(pilot, tries: int = 60) -> None:
     for _ in range(tries):
         await pilot.pause(0.02)
+
+
+def _app(tmp_path) -> DoxaApp:
+    """A DoxaApp whose session is a FAKE one -- this module's own
+    isolation block, and the reason issue #71's "flake" was never a flake.
+
+    Every app here used to be a bare ``DoxaApp(cwd=...)``, which is the
+    REAL ``SessionEngine``: it connects a ``claude_agent_sdk`` client,
+    which spawns the bundled ``claude`` CLI and handshakes with it, and
+    ``_boot`` cannot mount the opening block until that returns. Measured
+    on a developer machine: 1.02-1.23s for the connect, on top of ~0.80s
+    to import ``doxa.engine`` at all -- the app defers that import into
+    the engine factory, so running THIS MODULE ALONE pays it on the boot
+    path, where a full-suite run has long since paid it at collection
+    (``tests/test_app.py`` imports ``doxa.engine`` and sorts before this
+    file). Two seconds of real subprocess against a 1.2s wait, and the
+    assertions ran on a pane that had not finished booting.
+
+    That is the same leak ``scripts/screenshot.py``'s own isolation block
+    exists to close for the two status chips that read this machine's real
+    lore store: a test that inherits ambient state passes or fails on
+    facts about the machine rather than on the thing it names. A banner
+    test has no business spawning an agent, so it does not -- no
+    subprocess, no handshake, no import deferred onto the boot path, and
+    the opening block appears in the first frame or two on any machine.
+    """
+    def make() -> FakeEngine:
+        return FakeEngine([], cwd=str(tmp_path))
+
+    return DoxaApp(cwd=str(tmp_path), engine_factory=make, new_session_factory=make)
+
+
+async def _opened(pilot, app) -> None:
+    """Wait until this pane's opening block is on screen AND settled.
+
+    A frame count is not a precondition, it is a guess about how long a
+    machine takes -- issue #71's whole shape. The precondition every test
+    below actually has is "the pane finished booting", and the thing that
+    says so is the identity block: ``_boot`` mounts it on every path that
+    draws an opening block at all, banner on or off. ``wait_stable``
+    rather than a first-true poll for the reason its own module documents
+    -- these tests go straight on to assert REGION GEOMETRY, and Textual
+    reports provisional sizes mid-layout."""
+    await wait_stable(pilot, lambda: bool(app.query("#identity-block")))
 
 
 def _banner(app):
@@ -349,9 +395,9 @@ async def test_every_tier_gets_the_drawn_mark_never_a_raster(tmp_path, monkeypat
     monkeypatch.delenv("DOXA_BOOT_BANNER", raising=False)
     for mode in ("kgp", "sixel", "halfblock", "text"):
         _unforced(monkeypatch, mode)
-        app = DoxaApp(cwd=str(tmp_path))
+        app = _app(tmp_path)
         async with app.run_test(size=WIDE) as pilot:
-            await _settle(pilot)
+            await _opened(pilot, app)
             block = _banner(app)
             assert block is not None
             assert not block.query(".banner-image"), f"{mode} drew the raster"
@@ -364,10 +410,57 @@ async def test_every_tier_gets_the_drawn_mark_never_a_raster(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_banner_sits_above_the_identity_block(tmp_path):
-    app = DoxaApp(cwd=str(tmp_path))
+async def test_a_late_transcript_container_still_gets_its_opening_block(
+    tmp_path, monkeypatch
+):
+    """Issue #71's product half: a pane whose ``#block-list`` is not in
+    the DOM yet when ``_boot`` reaches it must still get its opening
+    block, not lose it for the life of the pane.
+
+    That window is real -- ``_boot`` runs from a worker and a restore
+    mounts several panes at once -- and through v1.16.0 the code sampled
+    the container ONCE and returned on ``NoMatches``, which cost the pane
+    its banner, its identity block, every notice under them and
+    ``_note_pane_booted`` (the call that releases DoxaApp's mid-restore
+    tab-set persistence guard), silently. The fix waits for a container it
+    can actually mount into, so the only thing lateness costs is a frame.
+
+    The window is forced here rather than raced for: the first three
+    lookups of ``#block-list`` raise, exactly as Textual does before the
+    node is composed, and the assertion that the budget ran out is what
+    stops this passing for the trivial reason that it was never late."""
+    from textual.css.query import NoMatches
+
+    from doxa.session.pane import SessionPane
+
+    original = SessionPane.query_one
+    late = {"lookups": 3}
+
+    def query_one(self, selector, *args, **kwargs):
+        if selector == "#block-list" and late["lookups"]:
+            late["lookups"] -= 1
+            raise NoMatches("#block-list has not composed yet")
+        return original(self, selector, *args, **kwargs)
+
+    monkeypatch.setattr(SessionPane, "query_one", query_one)
+
+    app = _app(tmp_path)
     async with app.run_test(size=WIDE) as pilot:
-        await _settle(pilot)
+        await _opened(pilot, app)
+        assert late["lookups"] == 0, "the container was never actually late"
+        block = _banner(app)
+        assert block is not None, "a late container cost the pane its banner"
+        assert block.query_one(".banner-wordmark").region.height == banner.FULL_ROWS
+        identity = app.query_one("#identity-block", SystemBlock)
+        assert identity.region.height > 0
+        assert block.region.y < identity.region.y
+
+
+@pytest.mark.asyncio
+async def test_banner_sits_above_the_identity_block(tmp_path):
+    app = _app(tmp_path)
+    async with app.run_test(size=WIDE) as pilot:
+        await _opened(pilot, app)
         identity = app.query_one("#identity-block", SystemBlock)
         block = _banner(app)
         assert block is not None
@@ -379,9 +472,9 @@ async def test_text_tier_shows_the_wordmark_and_never_the_fallback_line(tmp_path
     """conftest forces the text tier suite-wide, so this is the default
     headless path. `[image: doxa logo]` as the first line of every session
     is the thing this feature must not ship."""
-    app = DoxaApp(cwd=str(tmp_path))
+    app = _app(tmp_path)
     async with app.run_test(size=WIDE) as pilot:
-        await _settle(pilot)
+        await _opened(pilot, app)
         block = _banner(app)
         assert block is not None
         assert block.region.height > 0
@@ -414,9 +507,9 @@ async def test_a_mid_width_terminal_shows_mark_and_wordmark_never_an_image(
     unconditionally now (v0.70.0), never the raster."""
     monkeypatch.setenv("DOXA_IMAGE_MODE", "halfblock")
     width = (banner.DRAWN_MARK_COLUMNS + banner.DRAWN_FULL_COLUMNS) // 2 + 4
-    app = DoxaApp(cwd=str(tmp_path))
+    app = _app(tmp_path)
     async with app.run_test(size=(width, 24)) as pilot:
-        await _settle(pilot)
+        await _opened(pilot, app)
         block = _banner(app)
         assert block is not None
         drawn = block.query_one(".banner-wordmark")
@@ -428,9 +521,9 @@ async def test_a_mid_width_terminal_shows_mark_and_wordmark_never_an_image(
 
 
 async def _identity_top(tmp_path) -> int:
-    app = DoxaApp(cwd=str(tmp_path))
+    app = _app(tmp_path)
     async with app.run_test(size=WIDE) as pilot:
-        await _settle(pilot)
+        await _opened(pilot, app)
         return app.query_one("#identity-block", SystemBlock).region.y
 
 
@@ -445,9 +538,9 @@ async def test_the_setting_genuinely_removes_it(tmp_path, monkeypatch):
 
     monkeypatch.setenv("DOXA_BOOT_BANNER", "0")
     assert banner.enabled() is False
-    app = DoxaApp(cwd=str(tmp_path))
+    app = _app(tmp_path)
     async with app.run_test(size=WIDE) as pilot:
-        await _settle(pilot)
+        await _opened(pilot, app)
         assert not app.query(BootBanner)
         identity = app.query_one("#identity-block", SystemBlock)
         block_list = app.query_one("#block-list")
@@ -544,9 +637,9 @@ def test_cell_size_is_none_headless_and_settles_once(monkeypatch):
 @pytest.mark.asyncio
 async def test_bare_img_renders_the_showcase_with_visible_samples(tmp_path, monkeypatch):
     monkeypatch.setenv("DOXA_IMAGE_MODE", "halfblock")
-    app = DoxaApp(cwd=str(tmp_path))
+    app = _app(tmp_path)
     async with app.run_test(size=(120, 60)) as pilot:
-        await _settle(pilot)
+        await _opened(pilot, app)
         app.query_one("#prompt-input").value = "/img"
         await pilot.press("enter")
         await _settle(pilot, 100)
@@ -570,9 +663,9 @@ async def test_img_with_a_path_is_unchanged(tmp_path, monkeypatch):
     monkeypatch.setenv("DOXA_IMAGE_MODE", "halfblock")
     target = tmp_path / "pic.png"
     target.write_bytes(banner.asset_path().read_bytes())
-    app = DoxaApp(cwd=str(tmp_path))
+    app = _app(tmp_path)
     async with app.run_test(size=WIDE) as pilot:
-        await _settle(pilot)
+        await _opened(pilot, app)
         app.query_one("#prompt-input").value = f"/img {target}"
         await pilot.press("enter")
         await _settle(pilot, 100)
@@ -627,9 +720,9 @@ async def test_half_block_terminal_gets_the_wordmark_not_the_raster(
     """What the user actually sees on the terminal they filed from."""
     monkeypatch.delenv("DOXA_BOOT_BANNER", raising=False)
     _unforced(monkeypatch, "halfblock")
-    app = DoxaApp(cwd=str(tmp_path))
+    app = _app(tmp_path)
     async with app.run_test(size=WIDE) as pilot:
-        await _settle(pilot)
+        await _opened(pilot, app)
         block = _banner(app)
         assert block is not None
         assert not block.query(".banner-image"), "raster drawn on half-block"
@@ -652,9 +745,9 @@ async def test_the_drawn_banner_is_legible_at_eighty_columns(tmp_path, monkeypat
     Greek word and the strapline are all present, and no row overflows."""
     monkeypatch.delenv("DOXA_BOOT_BANNER", raising=False)
     _unforced(monkeypatch, "halfblock")
-    app = DoxaApp(cwd=str(tmp_path))
+    app = _app(tmp_path)
     async with app.run_test(size=(80, 24)) as pilot:
-        await _settle(pilot)
+        await _opened(pilot, app)
         block = _banner(app)
         drawn = block.query_one(".banner-wordmark")
         lines = _plain_lines(drawn)
@@ -693,9 +786,9 @@ async def test_narrow_terminal_never_overflows_the_glyph_art(tmp_path, monkeypat
     58) at least once."""
     _unforced(monkeypatch, "text")
     for width in (20, 30, 40, 56, 80, 120):
-        app = DoxaApp(cwd=str(tmp_path))
+        app = _app(tmp_path)
         async with app.run_test(size=(width, 24)) as pilot:
-            await _settle(pilot)
+            await _opened(pilot, app)
             block = _banner(app)
             drawn = block.query_one(".banner-wordmark")
             assert drawn.region.height > 0
@@ -712,9 +805,9 @@ async def test_a_terminal_too_narrow_for_the_glyphs_drops_to_the_name(
     tmp_path, monkeypatch
 ):
     _unforced(monkeypatch, "text")
-    app = DoxaApp(cwd=str(tmp_path))
+    app = _app(tmp_path)
     async with app.run_test(size=(20, 24)) as pilot:
-        await _settle(pilot)
+        await _opened(pilot, app)
         block = _banner(app)
         drawn = block.query_one(".banner-wordmark")
         assert drawn.region.height == 1
