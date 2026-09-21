@@ -35,6 +35,7 @@ from .. import keyboard as keyboard_mod
 from .. import lore_sync as lore_sync_mod
 from .. import naming as naming_mod
 from .. import notify as notify_mod
+from .. import prices as prices_mod
 from ..events import EngineEvent
 from ..history import SessionSearch
 from ..ui.dialogs import NeedsInputPopup
@@ -311,9 +312,25 @@ class PaneRuntimeMixin:
         # settings row is the first) where "this number does nothing here"
         # is said out loud instead of being discovered from a bill.
         # Nothing is mounted when no ceiling is set, which is the default.
+        # Asked of the LIVE handle, and of the model it is actually
+        # running: since 1.16.0 "can this ceiling fire" is a fact about a
+        # MODEL (doxa.prices), so a glm session on a priced model says
+        # "enforced" where one on a model nobody priced still says
+        # "NOT ENFORCEABLE" and names it.
+        engine_id = engines_mod.engine_id_of(self.engine)
+        live_model = (
+            getattr(self.engine, "resolved_model", None)
+            or getattr(self.engine, "model", None)
+        )
         ceiling_note = budget_mod.start_note(
             budget_mod.session_ceiling(),
-            reports_cost=engines_mod.capabilities_of(self.engine).cost,
+            basis=budget_mod.enforcement_basis(
+                engine_id,
+                live_model,
+                reports_cost=engines_mod.capabilities_of(self.engine).cost,
+            ),
+            engine_label=engine_id,
+            model=prices_mod.resolve_model(engine_id, live_model),
         )
         if ceiling_note:
             budget_block = SystemBlock(ceiling_note)

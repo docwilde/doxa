@@ -97,7 +97,14 @@ part worth more than a clean report.
   live key by value.
 * DeepSeek has ``GET /user/balance`` (measured: a real USD figure). GLM
   has no balance, billing or quota endpoint at all. Neither is a
-  per-session dollar figure -- see ``cost=False``.
+  per-session dollar figure -- see ``cost=False``. Since 1.16.0 a session
+  on a model :mod:`doxa.prices` carries nevertheless HAS a per-session
+  figure, built by multiplying the usage block this engine already parses
+  by a sourced, dated per-model rate (:meth:`ChatApiEngine._charge`). It
+  is DOXA's arithmetic, never the vendor's, it is labelled as such
+  wherever it is shown, and a model the sheet does not carry gets no
+  figure and is named rather than charged a guess. That is what lets a
+  spend ceiling fire on this engine at all.
 
 EVERY READ OFF THE WIRE IS BOUNDED. A vendor endpoint is a remote party
 DOXA does not control, and an unbounded read from one is memory the
@@ -140,8 +147,10 @@ from lore_core import store as lore_store
 from lore_core.config import PROJECTS_DIR, project_slug
 from lore_core.scrub import scrub_secrets
 
+from . import budget as budget_mod
 from . import peerdelivery as peerdelivery_mod
 from . import peers as peers_mod
+from . import prices as prices_mod
 from .identity import require_session_id
 from .engines import (
     DEEPSEEK_ENGINE_ID,
@@ -288,14 +297,25 @@ VENDOR_CAPABILITIES = EngineCapabilities(
     # stream_options.include_usage: prompt, completion, cached and
     # reasoning token counts, measured on both.
     token_usage=True,
-    # FALSE, and deliberately not fudged. No response field from either
-    # vendor carries a dollar figure; DOXA would have to multiply tokens
-    # by a price sheet it maintains itself, and a hardcoded price that
-    # drifts prints a CONFIDENT WRONG number, which is worse than no chip.
-    # DeepSeek's GET /user/balance is a real reported dollar figure, but
-    # it is per ACCOUNT, not per session -- and in the very experiment
-    # this module exists for, 32 sessions share one key, so a balance
-    # delta would attribute the whole fleet's spend to each of them.
+    # FALSE, and still the honest answer: no response field from either
+    # vendor carries a dollar figure. DeepSeek's GET /user/balance is a
+    # real reported figure, but it is per ACCOUNT, not per session -- and
+    # in the very experiment this module exists for, 32 sessions share one
+    # key, so a balance delta would attribute the whole fleet's spend to
+    # each of them.
+    #
+    # This flag means "THE ENGINE reports dollars", which is a property of
+    # the protocol, and the protocol has not changed. What changed in
+    # 1.16.0 is a second, different question -- "can a spend ceiling be
+    # enforced here" -- which is a property of the MODEL, because that is
+    # what a price is attached to. doxa.prices answers it per model, this
+    # engine charges each call against that sheet (see _charge), and a
+    # ceiling therefore fires on a priced model exactly as it does on
+    # Claude. A model the sheet does not carry is still unbounded and is
+    # reported so BY NAME. The cost CHIP stays off this engine for the
+    # same reason it always was: the chip's own hover text says "actual
+    # API spend billed for this session", and a figure DOXA derived is
+    # not that. /usage carries the derived figure with its basis instead.
     cost=False,
     # TRUE. delta.reasoning_content, measured streaming on both.
     reasoning=True,
@@ -1059,7 +1079,24 @@ class ChatApiEngine:
         # Status-bar parity with SessionEngine/EngineClient. Every one of
         # these is read UNGUARDED mid-render by doxa.session.chips, so they
         # exist from construction rather than from the first turn.
+        #
+        # total_cost_usd is DERIVED here, not reported: no field in either
+        # vendor's response carries dollars, so every call is charged
+        # against doxa.prices' sheet in _charge below. It stays 0.0 for
+        # the life of a session whose model the sheet does not carry --
+        # and cost_basis stays None, which is how every reader tells "this
+        # session cost nothing" apart from "nobody could say".
         self.total_cost_usd = 0.0
+        #: Which price row the figure above was built from, or None when
+        #: no call has ever been priced. Read by usage_summary and by the
+        #: budget refusal, so a stopped session can say what stopped it.
+        self.cost_basis: "str | None" = None
+        #: Models that ANSWERED a call and had no price row. Kept as a
+        #: set, named in usage_summary, and the reason total_cost_usd is
+        #: reported as a floor rather than a total when it is non-empty:
+        #: a session that switched models mid-way may have spent money
+        #: this sheet cannot see, and saying so is the whole discipline.
+        self.unpriced_models: "set[str]" = set()
         self.last_ctx_percentage: "float | None" = None
         self.last_ctx_tokens: "int | None" = None
         self.last_ctx_max_tokens: "int | None" = None
@@ -1083,6 +1120,15 @@ class ChatApiEngine:
         self.lore_snapshot_chars: "int | None" = None
         self.num_turns = 0
         self.usage_totals: "dict[str, int]" = {}
+
+        # THE SPEND CEILING, snapshotted ONCE at construction, for exactly
+        # the reason doxa.engine.SessionEngine.budget_ceiling gives: this
+        # session has file tools and ~/.doxa/config.toml is an ordinary
+        # same-user file, so a ceiling re-read per turn is one its own
+        # subject can raise between turns. Env beat the file at this
+        # moment (doxa.config.raw's own order), so the fleet's per-run
+        # DOXA_SESSION_BUDGET_USD still binds the sessions it spawns.
+        self._budget_ceiling: "float | None" = budget_mod.session_ceiling()
         #: The model that last ANSWERED, which is not always the one that
         #: was asked for. Published rather than folded into self.model so
         #: the two stay distinguishable: self.model is the request.
@@ -1505,6 +1551,25 @@ class ChatApiEngine:
         :data:`TURN_TIMEOUT_SECS`, so a model that will not stop calling
         tools ends as a failed turn that says so rather than as a pane
         whose worker never comes back."""
+        # THE SPEND CEILING, at the choke point every turn crosses -- a
+        # typed prompt, one that waited in the mid-turn queue, and one an
+        # arriving peer message started all arrive here. Ahead of every
+        # side effect the turn would have: nothing is persisted, no peer
+        # title is set, no pending frames are drained (they stay pending
+        # for a turn that actually runs) and no request is built. The
+        # refusal is the turn's only event.
+        #
+        # BEFORE the turn, never during it, for the reason doxa.budget's
+        # docstring gives and at the cost it names: a session can exceed
+        # its ceiling by the price of the one turn that crosses it. On
+        # this engine a "turn" is a LOOP of model calls, so that one turn
+        # is the larger overshoot of the two -- stated rather than hidden,
+        # because MAX_TOOL_STEPS bounds it and nothing else does.
+        refusal = self._budget_refusal(prompt)
+        if refusal is not None:
+            yield EngineEvent("turn_refused", refusal)
+            return
+
         if self._pending_peer_frames:
             frames, self._pending_peer_frames = self._pending_peer_frames, []
             prompt_out = peers_mod.frame_for_model(frames) + "\n\n" + prompt
@@ -1803,13 +1868,23 @@ class ChatApiEngine:
         }))
 
     def _absorb_usage(self, usage: Any) -> None:
-        """Accumulate one call's ``usage`` into the session totals.
+        """Accumulate one call's ``usage`` into the session totals, and
+        charge it against the price sheet.
 
-        Tokens only. Nothing here touches ``last_ctx_*``: ``prompt_tokens``
-        is exactly what was resident in the window for that call, but the
-        window's SIZE is unreported, and a percentage needs both. Reading
-        one as the other is the fabricated figure ``context_window=False``
-        exists to refuse."""
+        Tokens first. Nothing here touches ``last_ctx_*``:
+        ``prompt_tokens`` is exactly what was resident in the window for
+        that call, but the window's SIZE is unreported, and a percentage
+        needs both. Reading one as the other is the fabricated figure
+        ``context_window=False`` exists to refuse.
+
+        Dollars second, and PER CALL rather than over the running totals,
+        which is the only way to be right about a session that changed
+        model half way through: each call is charged at the rate of the
+        model that ANSWERED it (``resolved_model``, not ``self.model`` --
+        DeepSeek substitutes, see the module docstring), and the charges
+        add. Re-pricing the accumulated totals under whatever model is
+        current would silently re-bill every earlier call at the new
+        model's rate."""
         if not isinstance(usage, dict):
             return
         details = usage.get("completion_tokens_details")
@@ -1821,6 +1896,13 @@ class ChatApiEngine:
         # the one the totals are keyed on.
         if usage.get("prompt_cache_hit_tokens") is not None:
             cached = usage.get("prompt_cache_hit_tokens")
+        # This call's counts, in the four-key shape doxa.prices priced
+        # against and doxa.codex normalises into as well. Both meanings
+        # matter and both are recorded there: `prompt_tokens` INCLUDES the
+        # cached part (DeepSeek publishes prompt_cache_hit_tokens beside
+        # prompt_cache_miss_tokens, and the two sum to prompt_tokens), and
+        # `completion_tokens` INCLUDES the reasoning part.
+        counts: "dict[str, int]" = {}
         for value, target in (
             (usage.get("prompt_tokens"), "input_tokens"),
             (usage.get("completion_tokens"), "output_tokens"),
@@ -1828,12 +1910,107 @@ class ChatApiEngine:
             (reasoning, "reasoning_output_tokens"),
         ):
             if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                counts[target] = value
                 self.usage_totals[target] = self.usage_totals.get(target, 0) + value
+        self._charge(counts)
         if self.peer_host is not None and self.usage_totals:
             try:
                 self.peer_host.update_usage(sum(self.usage_totals.values()))
             except Exception:  # noqa: BLE001
                 pass
+
+    def _charge(self, counts: "dict[str, int]") -> None:
+        """Convert one call's tokens to dollars, or record that nobody
+        can.
+
+        The model charged is the one that ANSWERED
+        (:attr:`resolved_model`), falling back to the one that was asked
+        for only when no answer has named itself yet. That order is not
+        cosmetic: DeepSeek answers a request for ``deepseek-chat`` with
+        ``deepseek-flash`` and says so only in the response's own model
+        field, so charging the REQUEST would price one model at another's
+        rate.
+
+        No entry, no charge, and the model's name is kept. A session that
+        cannot be priced must read as unpriceable everywhere -- the
+        ceiling, /usage and the fleet's note all consult
+        :attr:`cost_basis` and :attr:`unpriced_models` rather than
+        inferring anything from a total of 0.0, which is what "never
+        silently treated as free" means in code."""
+        model = self.resolved_model or self.model
+        charged = prices_mod.cost_of(self.spec.engine_id, model, counts)
+        if charged is None:
+            self.unpriced_models.add(str(model or "(no model named)"))
+            return
+        self.total_cost_usd += charged
+        self.cost_basis = (
+            f"doxa.prices {prices_mod.sheet_read_on()}: "
+            f"{self.spec.engine_id}:{model}"
+        )
+
+    # -- the spend ceiling ---------------------------------------------
+
+    def budget_ceiling(self) -> "float | None":
+        """This session's spend ceiling in dollars, or None for none.
+
+        The snapshot taken in ``__init__``, never a fresh read. Same
+        method, same name and same argument as
+        :meth:`doxa.engine.SessionEngine.budget_ceiling`: a limit a
+        limited party can raise is not a limit, and this session has file
+        tools."""
+        return self._budget_ceiling
+
+    def _budget_refusal(self, prompt: str) -> "dict[str, Any] | None":
+        """The ``turn_refused`` payload for a turn that must not start, or
+        None when it may.
+
+        Compared against :attr:`total_cost_usd`, which on this engine is
+        DOXA's own arithmetic over :mod:`doxa.prices` rather than a figure
+        the vendor reported -- and the refusal says so, because an
+        operator reconciling this against a bill is entitled to know which
+        number stopped them.
+
+        A session with no priced call yet (:attr:`cost_basis` is None) is
+        never refused: its spend is not 0.0 because it spent nothing, it
+        is 0.0 because nothing could be converted, and refusing on that
+        would be the mirror of the bug this replaces."""
+        ceiling = self.budget_ceiling()
+        if self.cost_basis is None:
+            return None
+        if not budget_mod.exhausted(self.total_cost_usd, ceiling):
+            return None
+        assert ceiling is not None  # exhausted() is False for None
+        # A peer-started turn is recognised the same way _send_turn does:
+        # by the marker inside the prompt the model reads, never by a flag
+        # carried beside it, so the refusal names the right cause however
+        # the prompt got here.
+        peer_started = prompt.startswith(peers_mod.PEER_TURN_INTRO)
+        message = budget_mod.refusal_text(
+            self.total_cost_usd, ceiling, peer_started=peer_started
+        )
+        message += (
+            f" This engine reports no dollars of its own, so that figure "
+            f"is DOXA's own arithmetic over its price sheet ({self.cost_basis})."
+        )
+        if self.unpriced_models:
+            message += (
+                " It is a FLOOR, not a total: "
+                + ", ".join(sorted(self.unpriced_models))
+                + " also answered in this session and the sheet carries no "
+                "price for them."
+            )
+        return {
+            "reason": "budget",
+            "message": message,
+            "spent_usd": self.total_cost_usd,
+            "ceiling_usd": ceiling,
+            "cost_basis": self.cost_basis,
+            "peer_started": peer_started,
+            "peer_origin": (
+                peers_mod.peer_origin_line(prompt) if peer_started else None
+            ),
+            "prompt": prompt,
+        }
 
     # -- the settable surface ------------------------------------------
 
@@ -1893,8 +2070,17 @@ class ChatApiEngine:
             "model": self.model,
             "resolved_model": self.resolved_model,
             "num_turns": self.num_turns,
-            # None, never 0.0 -- /usage omits what is absent.
-            "total_cost_usd": None,
+            # The DERIVED figure when a call has been priced, and None --
+            # never 0.0 -- when none has. /usage prints what is absent as
+            # words rather than as a zero, because `$0.0000` is the claim
+            # that this session was free and nobody made it. `cost_basis`
+            # rides beside the number so the surface can say whose
+            # arithmetic it is; it is None exactly when the figure is.
+            "total_cost_usd": (
+                self.total_cost_usd if self.cost_basis is not None else None
+            ),
+            "cost_basis": self.cost_basis,
+            "unpriced_models": sorted(self.unpriced_models),
             "ctx_percentage": None,
             "ctx_tokens": None,
             "ctx_max_tokens": None,
@@ -1941,13 +2127,21 @@ class ChatApiEngine:
           has always had -- when the switch is off, when the message is a
           BROADCAST (never, at any setting), or when the queue is full.
 
-        No spend check stands here, and that is a measurement rather than
-        an omission: :func:`doxa.budget.enforceable_for` is False for this
-        engine because it reports token counts and no dollars, so the
-        ceiling SessionEngine enforces at this point would read $0.00
-        forever and refuse nothing. A peer-started turn on a vendor
-        session is bounded by the switch and by the sender's rate limit,
-        not by a budget.
+        The spend ceiling stands here too, since 1.16.0. It used to be
+        absent, and the absence was a measurement rather than an
+        omission: this engine reported token counts and no dollars, so a
+        ceiling compared against its spend would have read $0.00 forever
+        and refused nothing. :mod:`doxa.prices` supplies the missing half
+        for a model it carries, so the check is now real -- and on a
+        model it does NOT carry it still refuses nothing, which
+        :meth:`_budget_refusal` makes explicit rather than accidental.
+
+        Checking HERE as well as in :meth:`_send_turn` buys the thing
+        that check cannot, exactly as it does on
+        :meth:`doxa.engine.SessionEngine._on_peer_frame`: a refused frame
+        falls back to ``_pending_peer_frames`` instead of evaporating, so
+        the message is not LOST by being refused. It rides the next turn
+        that does run.
 
         Never raises. A frame that cannot be turned into a turn falls back
         to the pending list, which is what this method did before inbound
@@ -1959,6 +2153,12 @@ class ChatApiEngine:
             return
 
         prompt = peers_mod.PEER_TURN_INTRO + "\n\n" + peers_mod.frame_for_model([frame])
+
+        refusal = self._budget_refusal(prompt)
+        if refusal is not None:
+            self._pending_peer_frames.append(dict(frame))
+            self._peer_queue.put_nowait(EngineEvent("turn_refused", refusal))
+            return
 
         if self._turn_running:
             try:
