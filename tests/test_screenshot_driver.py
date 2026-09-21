@@ -34,7 +34,10 @@ surface it showed had been removed and its scene deleted with it.
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import struct
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -157,6 +160,7 @@ async def test_activate_leaves_the_window_idle(tmp_path):
 # =======================================================================
 
 SHOTS = Path(screenshot.ROOT) / "assets" / "shots"
+MESH_JS = Path(screenshot.ROOT) / "assets" / "mesh" / "mesh.js"
 
 
 def _png_size(path: Path) -> "tuple[int, int]":
@@ -413,3 +417,101 @@ def test_the_mesh_graph_has_an_edge_that_crosses_vendors():
             if pair[0] != pair[1]:
                 crossings.add(pair)
     assert len(crossings) >= 4, crossings
+
+
+def _run_render_panel_peer_block(pairs: "list[tuple[str, str]]", selected: str) -> int:
+    """`renderPanel`'s own peer-counting statements, run unmodified, over
+    a `pairs` map built the way `ingest()` builds it.
+
+    ``assets/mesh/mesh.js`` has no test harness of its own: the repo
+    commits no ``package.json`` and nothing else executes it as
+    JavaScript, on purpose -- the file's own header explains why it
+    carries no dependency and no build step, and that is worth keeping
+    true for the file itself. But reimplementing the peer-counting
+    algorithm in Python would pin what THIS TEST believes the algorithm
+    does, not what ``renderPanel`` actually computes -- and issue #60 is
+    exactly a case where those two quietly diverged (``sent``/``received``
+    were right; ``peers`` was not, and nothing caught it).
+
+    So the real statements are extracted from the real file between two
+    anchor lines that bound the block and have nothing to do with peer
+    counting (``el.selMeta.textContent = meta || node.id;`` before it,
+    ``el.selOut.textContent = String(node.out);`` after), and run in
+    Node -- present on every machine this repo already assumes can drive
+    a headless Chrome (``scripts/mesh_shot.py``), and on GitHub's own
+    runners. Nothing here touches a DOM: ``pairs`` and ``selected`` are
+    the whole of what the extracted block reads, and it leaves a
+    ``peers`` binding behind for this harness to print, exactly as
+    ``renderPanel`` leaves one for the line after it to render."""
+    if shutil.which("node") is None:
+        pytest.skip("node is not on PATH")
+
+    source = MESH_JS.read_text(encoding="utf-8")
+    match = re.search(
+        r"el\.selMeta\.textContent = meta \|\| node\.id;\n"
+        r"(?P<block>.*?)\n\s*"
+        r"el\.selOut\.textContent = String\(node\.out\);",
+        source,
+        re.S,
+    )
+    assert match, (
+        "renderPanel no longer has the anchor lines this test extracts "
+        "the peer-counting block between -- update the anchors above"
+    )
+
+    values = json.dumps([{"from": frm, "to": to} for frm, to in pairs])
+    script = (
+        f"const values = {values};\n"
+        "const pairs = new Map(values.map((v, i) => [i, v]));\n"
+        f"const selected = {json.dumps(selected)};\n"
+        f"{match.group('block')}\n"
+        "process.stdout.write(String(peers));\n"
+    )
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode == 0, result.stderr
+    return int(result.stdout.strip())
+
+
+def test_the_mesh_panel_reports_distinct_peers_not_directed_pairs():
+    """Issue #60, pinned on the exact ledger `scripts/mesh_shot.py` writes
+    for the committed `assets/shots/mesh.png`.
+
+    `pairs` is keyed directionally (`doxa.meshgraph.edges_for`, folded
+    into `pairs` by `ingest()` the same way for the real page): 'release
+    notes' broadcasts to the other eight sessions at least once, so it
+    has 8 pairs with itself as `from`; seven of the other eight sessions
+    also address it directly or by their own broadcast (every sender
+    except 'schema sweep', which never sends to it), for 7 more pairs
+    with itself as `to`. Counting pair-map ENTRIES touching the session,
+    the way the panel used to, reads 8 + 7 = 15 -- the exact wrong number
+    the issue measured. The true count is distinct endpoints: the same 8
+    sessions appear on both sides, so the honest maximum for a
+    nine-session ledger is 8, one shy of every other session in it."""
+    from doxa import meshgraph as meshgraph_mod
+
+    pairs: "set[tuple[str, str]]" = set()
+    for _ago, sender, targets, _body in mesh_shot._TRAFFIC:
+        session = mesh_shot._SESSIONS[sender][0]
+        recipients = (
+            [s[0] for i, s in enumerate(mesh_shot._SESSIONS) if i != sender]
+            if targets is None
+            else [mesh_shot._SESSIONS[i][0] for i in targets]
+        )
+        kind = "broadcast" if targets is None else "direct"
+        for edge in meshgraph_mod.edges_for(session, recipients, kind):
+            pairs.add((edge["from"], edge["to"]))
+
+    selected = next(
+        s[0] for s in mesh_shot._SESSIONS if s[1] == mesh_shot._SELECT
+    )
+    directed_hits = sum(1 for frm, to in pairs if frm == selected or to == selected)
+    assert directed_hits == 15, (
+        f"the fixture ledger's directed-pair count touching "
+        f"{mesh_shot._SELECT!r} changed ({directed_hits}, not 15) -- "
+        "update this number, README.md's alt text and the issue "
+        "reference together"
+    )
+
+    assert _run_render_panel_peer_block(sorted(pairs), selected) == 8

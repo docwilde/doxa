@@ -762,10 +762,21 @@ function renderPanel() {
     .filter(Boolean).join("  ·  ");
   el.selMeta.textContent = meta || node.id;
 
-  let peers = 0;
+  // Distinct endpoints, not pair-map entries. `pairs` is keyed
+  // directionally (see the comment on the map's declaration above), so a
+  // session that both sent to and received from the same peer holds TWO
+  // entries here -- (selected, other) and (other, selected) -- and
+  // counting entries counted that peer twice. A session is never its own
+  // peer: no self-edge reaches this data today (doxa/meshgraph.py's
+  // edges_for drops self-delivery before a record is ever served), but
+  // the `!== selected` guards keep that true even if that upstream
+  // contract ever changes, rather than trusting it silently.
+  const peerIds = new Set();
   for (const pair of pairs.values()) {
-    if (pair.from === selected || pair.to === selected) peers++;
+    if (pair.from === selected && pair.to !== selected) peerIds.add(pair.to);
+    else if (pair.to === selected && pair.from !== selected) peerIds.add(pair.from);
   }
+  const peers = peerIds.size;
   el.selOut.textContent = String(node.out);
   el.selIn.textContent = String(node.in);
   el.selPeers.textContent = String(peers);
