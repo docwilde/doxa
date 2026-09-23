@@ -94,6 +94,21 @@ def _resolve(entries: list[peers.PeerInfo], prefix: str | None) -> peers.PeerInf
     return entries[0]
 
 
+def _fresh_selection(
+    app: DoxaApp, launch_engine: str | None, launch_model: str | None,
+) -> tuple[str | None, str | None]:
+    """The engine/model for a *new* session in this window.
+
+    A CLI flag governs new tabs until an in-app /engine or settings change.
+    Once that happens, use the selected engine's own model preference; the
+    model of the already-running session may belong to another provider.
+    """
+    selected = getattr(app, "_new_session_engine_override", None)
+    if selected is None:
+        return launch_engine, launch_model
+    return selected, config.model(selected)
+
+
 def _run_attached(
     socket_path: str, cwd: str, model: str | None, linger: float,
     engine: "str | None" = None,
@@ -107,8 +122,9 @@ def _run_attached(
     from .client import EngineClient
 
     def new_session_factory() -> EngineClient:
+        fresh_engine, fresh_model = _fresh_selection(app, engine, model)
         _sid, dsock = _spawn_daemon(
-            cwd, model=model, linger_secs=linger, engine=engine,
+            cwd, model=fresh_model, linger_secs=linger, engine=fresh_engine,
         )
         return EngineClient(dsock)
 
@@ -117,8 +133,9 @@ def _run_attached(
         # DoxaApp.open_tab_at): the SAME spawn_daemon call above, just
         # parametrized by an operator-chosen path instead of this
         # process's own launch cwd -- not a second daemon-spawning path.
+        fresh_engine, fresh_model = _fresh_selection(app, engine, model)
         _sid, dsock = _spawn_daemon(
-            path, model=model, linger_secs=linger, engine=engine,
+            path, model=fresh_model, linger_secs=linger, engine=fresh_engine,
         )
         return EngineClient(dsock)
 
@@ -299,8 +316,9 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
         # a tab opened from the picker during a RESTORED launch is a real
         # daemon-backed session like every other tab in the window, not a
         # silent fallback to an in-process one (DoxaApp's own default).
+        fresh_engine, fresh_model = _fresh_selection(app, engine, model)
         _sid, dsock = _spawn_daemon(
-            path, model=model, linger_secs=linger, engine=engine,
+            path, model=fresh_model, linger_secs=linger, engine=fresh_engine,
         )
         return EngineClient(dsock)
 
@@ -334,14 +352,19 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
         _sid, dsock = _spawn_daemon(
             launch_cwd, model=model, linger_secs=linger, engine=engine,
         )
+
+        def new_session_factory() -> EngineClient:
+            fresh_engine, fresh_model = _fresh_selection(app, engine, model)
+            _sid, fresh_socket = _spawn_daemon(
+                launch_cwd, model=fresh_model, linger_secs=linger,
+                engine=fresh_engine,
+            )
+            return EngineClient(fresh_socket)
+
         app = DoxaApp(
             cwd=launch_cwd, model=model,
             engine_factory=lambda: EngineClient(dsock),
-            new_session_factory=lambda: EngineClient(
-                _spawn_daemon(
-                    launch_cwd, model=model, linger_secs=linger, engine=engine,
-                )[1]
-            ),
+            new_session_factory=new_session_factory,
             new_session_factory_at=new_session_factory_at,
             resume_session_factory=resume_session_factory,
             restore_report=report,
@@ -358,8 +381,10 @@ def _run_restored(resolved: "tabsets.ResolvedRestore", launch_cwd: str,
     app_cwd = resolved.tabs[0][1].cwd if resolved.tabs else launch_cwd
 
     def new_session_factory() -> EngineClient:
+        fresh_engine, fresh_model = _fresh_selection(app, engine, model)
         _sid, dsock = _spawn_daemon(
-            app_cwd, model=model, linger_secs=linger, engine=engine,
+            app_cwd, model=fresh_model, linger_secs=linger,
+            engine=fresh_engine,
         )
         return EngineClient(dsock)
 
@@ -541,35 +566,49 @@ def main(argv: "list[str] | None" = None) -> int:
         # --engine now, so every session below is daemon-backed and
         # detaches like any other; this flag is what a user types when
         # they want the Phase 1 shape deliberately.
+        def fresh_in_process(path: str):
+            fresh_engine, fresh_model = _fresh_selection(app, engine_id, args.model)
+            if fresh_engine == engines_mod.DEFAULT_ENGINE_ID:
+                # Preserve the in-process Claude seam DoxaApp itself uses:
+                # tests and embedders may replace doxa.app.SessionEngine.
+                from . import app as app_mod
+
+                return app_mod.SessionEngine(cwd=path, model=fresh_model)
+            return engines_mod.get(fresh_engine).new_session(
+                cwd=path, model=fresh_model,
+            )
+
         if engine_id == engines_mod.DEFAULT_ENGINE_ID:
             # Claude in-process goes through DoxaApp's own default
             # factory, which resolves SessionEngine through `doxa.app`'s
             # module attribute so the suite's monkeypatch.setattr(
             # doxa.app, "SessionEngine", ...) keeps working.
-            DoxaApp(cwd=cwd, model=args.model).run()
+            app = DoxaApp(
+                cwd=cwd, model=args.model,
+                new_session_factory=lambda: fresh_in_process(cwd),
+                new_session_factory_at=fresh_in_process,
+            )
+            app.run()
             return 0
         # `asyncio.to_thread` is what the pane does with this factory
         # (SessionPane._build_and_boot, and v1.2.1's probes assert it), so
         # a factory that blocks is a factory that blocks a THREAD. This one
         # does not block at all: CodexEngine.__init__ makes a directory and
         # CodexEngine.start() runs shutil.which.
-        DoxaApp(
+        app = DoxaApp(
             cwd=cwd,
             model=args.model,
             engine_factory=lambda: provider.new_session(
                 cwd=cwd, model=args.model,
             ),
-            new_session_factory=lambda: provider.new_session(
-                cwd=cwd, model=args.model,
-            ),
-            new_session_factory_at=lambda path: provider.new_session(
-                cwd=path, model=args.model,
-            ),
+            new_session_factory=lambda: fresh_in_process(cwd),
+            new_session_factory_at=fresh_in_process,
             resume_session_factory=lambda path, session_id: provider.new_session(
                 cwd=path, model=args.model,
                 session_id=session_id, resume=session_id,
             ),
-        ).run()
+        )
+        app.run()
         return 0
 
     if args.command == "launcher":

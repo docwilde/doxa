@@ -503,6 +503,8 @@ class PaneCommandsMixin:
             return
         chosen = provider.engine_id()
         config_mod.save({"engine": chosen})
+        if not config_mod.overridden_by_env("DOXA_ENGINE"):
+            self.app._new_session_engine_override = chosen
         lines = [
             f"engine: new sessions will use {chosen} "
             f"({provider.engine_display_name()}) — this session keeps "

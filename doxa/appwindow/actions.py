@@ -679,10 +679,14 @@ class WindowActionsMixin:
         from .. import engines as engines_mod
         from ..settings import SettingsScreen
 
+        previous_engine = config_mod.engine()
+
         def _saved(saved: "bool | None") -> None:
             if not saved:
                 return
             config_mod.invalidate()
+            if config_mod.engine() != previous_engine:
+                self._new_session_engine_override = config_mod.engine()
             notify_mod.sync_lore_notify_env()
             for pane in self.panes():
                 pane._refresh_status()
