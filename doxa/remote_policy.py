@@ -31,12 +31,11 @@ why) a bridge actually needs to act on.
 re-litigates:**
 
 * Remote listening is OFF by default (:func:`remote_enabled`).
-* The ``Tailscale-User-Login`` header is trusted ONLY on the loopback
-  listener ``tailscale serve`` forwards to -- never on a public one. This
-  module never touches the header itself (that is the bridge's job, once
-  it exists); it takes ``from_loopback`` as an explicit boolean from the
-  caller and refuses identity outright when it is false, REGARDLESS of
-  what the caller claims the login was. See :func:`identity_decision`.
+* The ``Tailscale-User-Login`` header is trusted only after the transport
+  attests the local proxy. This module never touches the header itself;
+  the bridge passes ``from_loopback`` as its historical boolean name only
+  after checking its Unix peer credentials. A plain loopback TCP address
+  does not pass that check and is refused regardless of the claimed login.
 * DOXA keeps its OWN allow-list on top of the tailnet's -- defence in
   depth, :func:`allowed_logins`. An EMPTY allow-list refuses everyone; it
   does not fall back to permitting everyone, which is the direction every
@@ -196,15 +195,12 @@ def identity_decision(
 ) -> Decision:
     """Pure form of "is this identity allowed to drive this session".
 
-    ``from_loopback`` is the load-bearing argument: the owner's decision
-    is that the ``Tailscale-User-Login`` header is trusted ONLY on the
-    loopback listener ``tailscale serve`` forwards to, NEVER on a public
-    listener -- so a caller reports False here whenever the request did
-    not arrive on that loopback listener, and this function refuses
-    UNCONDITIONALLY in that case, before even looking at ``login`` or
-    ``allow_list``. A header that arrived on the wrong listener is not
-    "an identity DOXA hasn't allow-listed yet" -- it is an identity DOXA
-    must not believe at all, because nothing vouched for it.
+    ``from_loopback`` is the historical name of the load-bearing
+    transport-attestation boolean. The peer bridge sets it only after
+    Linux ``SO_PEERCRED`` identifies a Unix-socket client as tailscaled;
+    plain loopback TCP is false because any local process can forge an
+    HTTP header. When false, this function refuses before looking at
+    ``login`` or ``allow_list``.
 
     ``allow_list`` empty refuses EVERY login, including a real,
     loopback-verified one -- the defence-in-depth rule: DOXA's own list

@@ -83,9 +83,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import errno
+import fcntl
 import json
 import os
 import signal
+import subprocess
 import sys
 import uuid
 from collections import deque
@@ -518,6 +521,14 @@ class SessionDaemon:
         # touches this one, which is the whole point of it existing.
         self._shutdown_task: asyncio.Task | None = None
         self._pump_task: asyncio.Task | None = None
+        # The cross-machine peer bridge is deliberately separate from this
+        # daemon's AF_UNIX client protocol.  The first daemon starts a small
+        # runtime process which stays alive through that daemon's exit while
+        # another registry entry remains, so no single session owns a
+        # machine-wide listener.
+        self.peer_net: Any = None
+        self.peer_net_process: subprocess.Popen | None = None
+        self.peer_net_error: str | None = None
         self._stopping = False
         # Worktree-per-session (#3, doxa.worktrees): computed once, before
         # the engine is built, so the engine (and everything downstream --
@@ -651,6 +662,7 @@ class SessionDaemon:
             raise RuntimeError(
                 f"daemon presence entry failed: {self.engine.peer_error}"
             )
+        await self._start_peer_net()
         self._server = await asyncio.start_unix_server(
             self._handle_client, path=str(self.socket_path),
             limit=MAX_FRAME_BYTES,
@@ -665,6 +677,85 @@ class SessionDaemon:
             await self._done.wait()
         finally:
             await self._teardown()
+
+    async def _start_peer_net(self) -> None:
+        """Start the optional machine peer bridge without weakening startup.
+
+        A bridge is useful only when remote listening is explicitly armed;
+        otherwise :meth:`PeerNetServer.start` returns its normal refusal and
+        no socket is created.  A second local daemon can find the bridge
+        socket already owned by the first one.  It remains a fully usable
+        bridge for that daemon too because its handlers read the shared peer
+        registry at request time, rather than a daemon-private roster.
+        """
+        from . import peernet as peernet_mod
+
+        decision = peernet_mod.listen_decision()
+        if not decision.allowed:
+            return
+        socket_path = peernet_mod.runtime_socket_path()
+        lock_path = socket_path.with_name("peernet-start.lock")
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            # flock is deliberately non-blocking: two daemons can start in
+            # one event loop, and a blocking flock while the owner awaits
+            # the child socket would deadlock that loop. The kernel releases
+            # the lock if an owner crashes.
+            while True:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    await asyncio.sleep(0.02)
+            if socket_path.exists():
+                try:
+                    _reader, writer = await asyncio.wait_for(
+                        asyncio.open_unix_connection(str(socket_path)), timeout=0.2,
+                    )
+                    writer.close()
+                    with contextlib.suppress(Exception):
+                        await writer.wait_closed()
+                    return
+                except asyncio.TimeoutError:
+                    # A slow bridge is live enough to own its pathname. Never
+                    # unlink a socket merely because a health probe timed out.
+                    return
+                except OSError as exc:
+                    if exc.errno != errno.ECONNREFUSED:
+                        # Permission and transient errors cannot prove that
+                        # the endpoint is stale. Preserve it and fail safely.
+                        self.peer_net_error = str(exc)
+                        return
+                    # ECONNREFUSED is the definitive stale Unix-socket case:
+                    # a filesystem node exists but no listener owns it.
+                    with contextlib.suppress(OSError):
+                        socket_path.unlink()
+            try:
+                # Detached by design: this daemon might be the first registry
+                # entry to leave, while another remains.  The bridge polls the
+                # shared registry and performs its own idle shutdown.
+                self.peer_net_process = subprocess.Popen(
+                    [sys.executable, "-m", "doxa.peernet", "--serve-runtime-bridge"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                self.peer_net_error = str(exc)
+                return
+            # Do not block daemon readiness on an optional service, but record
+            # whether our child managed to claim the socket for diagnostics and
+            # tests. The lock prevents another daemon from racing this window.
+            for _ in range(10):
+                if socket_path.exists():
+                    self.peer_net = socket_path
+                    return
+                await asyncio.sleep(0.02)
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
 
     def _initial_task_prompt(self) -> str:
         """The spawned session's first prompt: the provenance marker, then
@@ -722,6 +813,11 @@ class SessionDaemon:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
+        # peer_net is a detached runtime process and is intentionally not
+        # stopped here: another daemon may still be represented in the
+        # shared registry.  It exits itself after BRIDGE_IDLE_SECS with no
+        # live entries.
+        self.peer_net = None
         if self._server is not None:
             self._server.close()
             with contextlib.suppress(Exception):

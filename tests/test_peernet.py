@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 import pytest
 
@@ -83,7 +84,13 @@ def _server(**kw) -> peernet_mod.PeerNetServer:
         peernet_mod.OP_DELIVER: lambda body: {"delivered_to": "whoever"},
         peernet_mod.OP_HISTORY: lambda body: {"messages": []},
     }
-    return peernet_mod.PeerNetServer(handlers, host="127.0.0.1", port=0, **kw)
+    # A test proxy is the explicit trust seam.  Production does not use it:
+    # it accepts headers only from a Unix peer whose kernel UID is
+    # tailscaled's UID.
+    return peernet_mod.PeerNetServer(
+        handlers, host="127.0.0.1", port=0,
+        trusted_proxy=lambda writer: True, **kw,
+    )
 
 
 # =======================================================================
@@ -126,20 +133,31 @@ def test_the_bind_address_is_loopback_with_no_configuration():
     assert peernet_mod.loopback(peernet_mod.bind_host()) is True
 
 
+def test_proxy_uid_cannot_be_the_unprivileged_doxa_users_own_uid(monkeypatch):
+    """A socket owned by DOXA's user cannot distinguish another process of
+    that user.  The proxy must be a privileged or separate service account."""
+    monkeypatch.setattr(peernet_mod.os, "getuid", lambda: 1000)
+    monkeypatch.setenv("DOXA_REMOTE_PROXY_UID", "1000")
+    assert peernet_mod.proxy_uid() == -1
+    monkeypatch.setenv("DOXA_REMOTE_PROXY_UID", "0")
+    assert peernet_mod.proxy_uid() == 0
+    monkeypatch.setattr(peernet_mod.os, "getuid", lambda: 0)
+    assert peernet_mod.proxy_uid() == 0
+
+
 def test_no_remote_endpoint_is_configured_with_no_configuration():
     """DOXA looks on this machine only until somebody names another one."""
     assert peernet_mod.endpoints() == ()
 
 
-def test_moving_the_bind_off_loopback_is_said_out_loud(monkeypatch):
-    """Not refused -- an operator may have a reason -- but never silent.
-    The reason names the consequence, which is that the identity header is
-    then believed on no path at all."""
+def test_a_tcp_bind_setting_cannot_change_the_unix_runtime_contract(monkeypatch):
+    """The production bridge does not bind TCP at all, so changing an old
+    TCP setting cannot create a path that trusts a forgeable header."""
     _permissive(monkeypatch)
     monkeypatch.setenv("DOXA_REMOTE_BIND", "0.0.0.0")
     decision = peernet_mod.listen_decision()
     assert decision.allowed is True
-    assert "NOT loopback" in decision.reason
+    assert "enabled" in decision.reason
 
 
 @pytest.mark.parametrize(
@@ -223,24 +241,118 @@ async def test_the_identity_header_is_refused_when_it_did_not_arrive_on_loopback
     assert "loopback" in payload["reason"]
 
 
-async def test_the_listener_computes_loopback_from_the_socket_not_the_request(
+async def test_a_plain_loopback_tcp_client_cannot_forge_a_tailscale_login(
     monkeypatch,
 ):
-    """The failure this catches: believing a client that says it is local.
-    Nothing in the body can move ``from_loopback`` -- it comes from the
-    kernel's idea of who connected."""
+    """Loopback is not an identity boundary: arbitrary local processes can
+    connect there and write a Tailscale header.  Only the Unix proxy backend
+    can attest its peer UID, so TCP rejects this otherwise allow-listed
+    request."""
     _permissive(monkeypatch)
-    server = _server()
+    server = peernet_mod.PeerNetServer(
+        {peernet_mod.OP_ROSTER: lambda body: {"peers": []}},
+        host="127.0.0.1", port=0,
+    )
     await server.start()
     try:
-        answer = await peernet_mod.request(
-            peernet_mod.Endpoint("self", "127.0.0.1", server.port_in_use),
-            {"op": peernet_mod.OP_ROSTER, "from_loopback": True, "login": "root"},
-            login=LOGIN,
-        )
-        assert answer["ok"] is True
+        with pytest.raises(peernet_mod.RemoteRefused, match=r"loopback"):
+            await peernet_mod.fetch_roster(
+                peernet_mod.Endpoint("self", "127.0.0.1", server.port_in_use),
+                login=LOGIN,
+            )
     finally:
         await server.stop()
+
+
+async def test_unix_proxy_backend_accepts_a_kernel_attested_proxy_seam(
+    monkeypatch, tmp_path,
+):
+    """The usable path is a Unix socket, where production substitutes
+    SO_PEERCRED for this test seam.  The same allow-listed request that TCP
+    rejected reaches the handler once its proxy identity is attested."""
+    _permissive(monkeypatch)
+    server = peernet_mod.PeerNetServer(
+        {peernet_mod.OP_ROSTER: lambda body: {"peers": [], "count": 0}},
+        socket_path=tmp_path / "peernet.sock", trusted_proxy=lambda writer: True,
+    )
+    await server.start()
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(server.socket_path))
+        request = (
+            b"POST /peers HTTP/1.1\r\nContent-Length: 15\r\n"
+            b"Tailscale-User-Login: operator@example.com\r\n\r\n"
+            b'{"op":"roster"}'
+        )
+        writer.write(request)
+        await writer.drain()
+        response = await reader.read()
+        assert b"200 OK" in response
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await server.stop()
+
+
+async def test_unix_socket_rejects_a_client_whose_kernel_uid_is_not_proxy_uid(
+    monkeypatch, tmp_path,
+):
+    """The header alone is insufficient even on the private socket.  This
+    uses a deliberately different UID from the test process, so it asserts
+    the production SO_PEERCRED path rather than the injected test seam."""
+    _permissive(monkeypatch)
+    monkeypatch.setenv("DOXA_REMOTE_PROXY_UID", str(os.getuid() + 1))
+    server = peernet_mod.PeerNetServer(
+        {peernet_mod.OP_ROSTER: lambda body: {"peers": []}},
+        socket_path=tmp_path / "peernet.sock",
+    )
+    await server.start()
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(server.socket_path))
+        writer.write(
+            b"POST /peers HTTP/1.1\r\nContent-Length: 15\r\n"
+            b"Tailscale-User-Login: operator@example.com\r\n\r\n"
+            b'{"op":"roster"}'
+        )
+        await writer.drain()
+        response = await reader.read()
+        assert b"403 Forbidden" in response
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await server.stop()
+
+
+async def test_runtime_bridge_rechecks_registry_under_shutdown_lock(monkeypatch, tmp_path):
+    """A session that arrives after the idle observation but before the
+    locked shutdown recheck keeps the machine bridge alive."""
+    _permissive(monkeypatch)
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setattr(peernet_mod, "BRIDGE_IDLE_SECS", 0.0)
+    monkeypatch.setattr(peernet_mod, "BRIDGE_POLL_SECS", 0.01)
+    reads = 0
+
+    def _registry(*, probe):
+        nonlocal reads
+        reads += 1
+        # First empty observation starts idle; second reaches the expiry;
+        # third is the recheck made after acquiring peernet-start.lock.
+        return [] if reads < 3 else [object()]
+
+    monkeypatch.setattr(peernet_mod.peers_mod, "read_registry", _registry)
+    task = asyncio.create_task(peernet_mod.serve_runtime_bridge())
+    socket_path = peernet_mod.runtime_socket_path()
+    try:
+        for _ in range(30):
+            if reads >= 3:
+                break
+            await asyncio.sleep(0.01)
+        assert reads >= 3
+        assert not task.done()
+        assert socket_path.exists()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
 
 async def test_a_refusal_crosses_the_wire_as_a_refusal_with_its_reason(monkeypatch):
@@ -348,7 +460,9 @@ async def test_a_fetched_peer_is_marked_remote_and_cannot_claim_otherwise(monkey
         "title": "looks-local",
     }
     handlers = {peernet_mod.OP_ROSTER: lambda body: {"peers": [liar]}}
-    server = peernet_mod.PeerNetServer(handlers, host="127.0.0.1", port=0)
+    server = peernet_mod.PeerNetServer(
+        handlers, host="127.0.0.1", port=0, trusted_proxy=lambda writer: True,
+    )
     await server.start()
     endpoint = peernet_mod.Endpoint("workstation", "127.0.0.1", server.port_in_use)
     try:
@@ -371,7 +485,9 @@ async def test_the_combined_roster_marks_local_and_remote_rows_differently(monke
         peers_mod, "read_registry", lambda **kw: [_peer("local-1")]
     )
     handlers = {peernet_mod.OP_ROSTER: lambda body: {"peers": [vars(_peer("remote-1"))]}}
-    server = peernet_mod.PeerNetServer(handlers, host="127.0.0.1", port=0)
+    server = peernet_mod.PeerNetServer(
+        handlers, host="127.0.0.1", port=0, trusted_proxy=lambda writer: True,
+    )
     await server.start()
     endpoint = peernet_mod.Endpoint("workstation", "127.0.0.1", server.port_in_use)
     try:
@@ -550,7 +666,9 @@ async def test_fetch_roster_refuses_a_socket_path_the_reply_supplied(monkeypatch
     monkeypatch.setattr(peers_mod, "read_registry", lambda **kw: [])
     leaky = dict(vars(_peer("remote-1", daemon_socket="/run/theirs.sock")))
     handlers = {peernet_mod.OP_ROSTER: lambda body: {"peers": [leaky]}}
-    server = peernet_mod.PeerNetServer(handlers, host="127.0.0.1", port=0)
+    server = peernet_mod.PeerNetServer(
+        handlers, host="127.0.0.1", port=0, trusted_proxy=lambda writer: True,
+    )
     await server.start()
     endpoint = peernet_mod.Endpoint("workstation", "127.0.0.1", server.port_in_use)
     try:
