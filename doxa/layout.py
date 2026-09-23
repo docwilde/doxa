@@ -763,15 +763,16 @@ def split_refusal(width: int, height: int, orientation: str) -> "str | None":
     performed into an unusable sliver: the spec's own requirement, and the
     only kind of refusal a layout system can make that the user can act
     on. The arithmetic is halving, because a split always divides the pane
-    it is aimed at in two."""
+    it is aimed at in two. The first half also spends one cell on the
+    draggable divider, so it needs one more cell than the content floor."""
     if orientation == ROW:
-        if width // 2 < MIN_LEAF_WIDTH:
+        if width // 2 < MIN_LEAF_WIDTH + 1:
             return (
                 f"not enough width to split: each pane needs "
                 f"{MIN_LEAF_WIDTH} columns and this one has {width}"
             )
     elif orientation == COLUMN:
-        if height // 2 < MIN_LEAF_HEIGHT:
+        if height // 2 < MIN_LEAF_HEIGHT + 1:
             return (
                 f"not enough height to split: each pane needs "
                 f"{MIN_LEAF_HEIGHT} rows and this one has {height}"

@@ -49,10 +49,12 @@ widget shape the gesture would have made.
 from __future__ import annotations
 
 import contextlib
+import math
 from typing import Any, Callable
 
 from textual.app import ComposeResult
 from textual.containers import Container
+from textual import events
 from textual.widgets import Static, TabbedContent, TabPane
 
 from .. import layout as layout_mod
@@ -82,6 +84,10 @@ class SplitBox(Container):
         #: One weight per child, summing to 1.0 -- see
         #: :func:`doxa.layout.normalise`. Empty while unused.
         self.weights: "tuple[float, ...]" = ()
+        self._drag_boundary: "int | None" = None
+        self._drag_from: "float | None" = None
+        self._drag_changed = False
+        self._hot_boundary: "int | None" = -1
 
     @property
     def is_used(self) -> bool:
@@ -95,6 +101,8 @@ class SplitBox(Container):
 
     #: Smallest proportional share a child of a split may hold.
     MIN_WEIGHT = 0.15
+    DIVIDER_COLOR = "#3A3429"
+    DIVIDER_HOT_COLOR = "#D8CDBB"
 
     def divide(self, orientation: str) -> None:
         """Take this box from unused to used (or record one more child on
@@ -103,6 +111,9 @@ class SplitBox(Container):
         awaits the mount and then calls this once."""
         self.orientation = orientation
         self.weights = layout_mod.normalise((), max(len(self.children), 1))
+        # The border cache describes the previous child list. A used box
+        # can gain another child, so repaint even if hover did not change.
+        self._hot_boundary = -1
         self._apply()
 
     def set_weights(self, weights: "tuple[float, ...]") -> None:
@@ -115,22 +126,45 @@ class SplitBox(Container):
         anything moved -- ``False`` at the floor, which is what lets a
         keyboard handler stay silent rather than pretend.
 
-        The floor is a fraction rather than a cell count on purpose: this
-        node does not know how many cells it has been given, and a divider
-        checked only against the CURRENT terminal size would let a drag on
-        a wide monitor persist a ratio that is a sliver on a laptop.
-        :data:`MIN_WEIGHT` is the smallest share a pane may hold anywhere;
-        the CELL floors (:data:`doxa.layout.MIN_LEAF_WIDTH` /
-        :data:`~doxa.layout.MIN_LEAF_HEIGHT`) are enforced where cells are
-        actually known -- at split time."""
+        The fractional floor protects layouts restored at a different size;
+        the cell floor protects every visible child at the current size,
+        including children that contain another split."""
         if not self.is_used:
             return False
         weights = list(layout_mod.normalise(self.weights, len(self.children)))
         if not (0 <= index < len(weights) - 1):
             return False
+        extent = (
+            self.region.width if self.orientation == layout_mod.ROW
+            else self.region.height
+        )
+        floor = (
+            layout_mod.MIN_LEAF_WIDTH if self.orientation == layout_mod.ROW
+            else layout_mod.MIN_LEAF_HEIGHT
+        )
+        # A child can itself contain several panes along this axis. Its
+        # minimum is the sum of those leaves, not one leaf's minimum.
+        def minimum(node: Any) -> int:
+            if isinstance(node, SplitBox):
+                sizes = [minimum(child) for child in node.children]
+                if node.is_used and node.orientation == self.orientation:
+                    weights = layout_mod.normalise(node.weights, len(sizes))
+                    return math.ceil(max(
+                        (size + (i < len(sizes) - 1)) / weight
+                        for i, (size, weight) in enumerate(zip(sizes, weights))
+                    ))
+                return max(sizes, default=floor)
+            return floor
+
+        kids = list(self.children)
+        minimums = (
+            [max(self.MIN_WEIGHT, (minimum(child) + (i < len(kids) - 1)) / extent)
+             for i, child in enumerate(kids)]
+            if extent else [self.MIN_WEIGHT] * len(weights)
+        )
         room = (
-            weights[index + 1] - self.MIN_WEIGHT if delta > 0
-            else weights[index] - self.MIN_WEIGHT
+            weights[index + 1] - minimums[index + 1] if delta > 0
+            else weights[index] - minimums[index]
         )
         move = min(abs(delta), max(0.0, room))
         if move <= 1e-9:
@@ -140,6 +174,88 @@ class SplitBox(Container):
         weights[index + 1] -= step
         self.set_weights(tuple(weights))
         return True
+
+    def _boundary_at(self, x: float, y: float) -> "int | None":
+        """Return the visible border under a screen cell."""
+        if not self.is_used:
+            return None
+        row = self.orientation == layout_mod.ROW
+        cross = y if row else x
+        start = self.region.y if row else self.region.x
+        span = self.region.height if row else self.region.width
+        if not start <= cross < start + span:
+            return None
+        position = x if row else y
+        kids = list(self.children)
+        for index, child in enumerate(kids[:-1]):
+            edge = child.region.right if row else child.region.bottom
+            # Only the painted border is a handle; the next cell belongs
+            # to the adjacent pane and keeps its own click behavior.
+            if position == edge - 1:
+                return index
+        return None
+
+    def _paint_divider(self, index: "int | None", *, hot: bool = False) -> None:
+        if not self.is_used:
+            return
+        selected = index if hot else None
+        if selected == self._hot_boundary:
+            return
+        self._hot_boundary = selected
+        row = self.orientation == layout_mod.ROW
+        kids = list(self.children)
+        for i, child in enumerate(kids):
+            if i == len(kids) - 1:
+                child.styles.clear_rule("border_right" if row else "border_bottom")
+                continue
+            color = self.DIVIDER_HOT_COLOR if hot and i == index else self.DIVIDER_COLOR
+            if row:
+                child.styles.border_right = ("solid", color)
+            else:
+                child.styles.border_bottom = ("solid", color)
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        if event.button != 1 or event.screen_x is None or event.screen_y is None:
+            return
+        boundary = self._boundary_at(event.screen_x, event.screen_y)
+        if boundary is None:
+            return
+        event.stop()
+        self._drag_boundary = boundary
+        self._drag_from = event.screen_x if self.orientation == layout_mod.ROW else event.screen_y
+        self._drag_changed = False
+        self._paint_divider(boundary, hot=True)
+        self.capture_mouse()
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        if self._drag_boundary is None or self._drag_from is None:
+            if event.screen_x is not None and event.screen_y is not None:
+                self._paint_divider(self._boundary_at(event.screen_x, event.screen_y), hot=True)
+            return
+        event.stop()
+        position = event.screen_x if self.orientation == layout_mod.ROW else event.screen_y
+        if position is None:
+            return
+        extent = self.region.width if self.orientation == layout_mod.ROW else self.region.height
+        if extent and self.nudge(self._drag_boundary, (position - self._drag_from) / extent):
+            self._drag_changed = True
+            self._drag_from = position
+
+    def on_leave(self) -> None:
+        if self._drag_boundary is None:
+            self._paint_divider(None)
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        if self._drag_boundary is None:
+            return
+        event.stop()
+        self._drag_boundary = None
+        self._drag_from = None
+        self.release_mouse()
+        self._paint_divider(None)
+        if self._drag_changed:
+            self._drag_changed = False
+            self.app._persist_tabset()
 
     def _apply(self) -> None:
         """Write orientation and weights onto the children as styles.
@@ -156,6 +272,9 @@ class SplitBox(Container):
             for kid in kids:
                 kid.styles.width = "1fr"
                 kid.styles.height = "1fr"
+                kid.styles.clear_rule("border_right")
+                kid.styles.clear_rule("border_bottom")
+            self._hot_boundary = -1
             return
         weights = layout_mod.normalise(self.weights, len(kids))
         self.weights = weights
@@ -169,6 +288,7 @@ class SplitBox(Container):
             else:
                 kid.styles.height = share
                 kid.styles.width = "1fr"
+        self._paint_divider(self._drag_boundary, hot=self._drag_boundary is not None)
 
     # -- tree walking -------------------------------------------------
 
@@ -836,10 +956,12 @@ async def prune_boxes(box: "SplitBox | None") -> None:
                 # split into again.
                 box.orientation = None
                 box.weights = ()
+            box._hot_boundary = -1
             box._apply()
         else:
             with contextlib.suppress(Exception):
                 await box.remove()
         if parent_box is not None:
+            parent_box._hot_boundary = -1
             parent_box._apply()
         box = parent_box

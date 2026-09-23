@@ -620,8 +620,10 @@ async def test_a_narrow_group_renders_its_strip_compactly(tmp_path, monkeypatch)
         await app.action_new_tab()
         assert await _wait(pilot, lambda: len(other.tabs()) == 2)
         await pilot.pause()
-        for group in app.groups():
-            assert group.region.width == 50
+        groups = app.groups()
+        assert sorted(group.region.width for group in groups) == [49, 50]
+        assert sum(group.region.width for group in groups) + 1 == 100
+        for group in groups:
             assert not group.has_class("-strip-compact")
             assert not group.has_class("-strip-hidden")
 
