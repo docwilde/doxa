@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """doxa.providers -- model-catalog seam: ONE Protocol between the UI (the
 model picker, doxa/session/chips.py) and however a provider's catalog gets
-resolved, so a second provider (DeepSeek, Codex -- the vault addendum 6 multi-
-provider engines) is a new Protocol implementation later, never a UI
-change now. This module does ONLY model listing -- nothing about running
+resolved, so each engine's catalogue satisfies one Protocol without a UI
+branch. This module does ONLY model listing -- nothing about running
 turns, spawning engines, or anything else the name might tempt it to grow
 into; if the seam wants more than that, it should stop here and grow a
 second module instead.
@@ -31,9 +30,14 @@ authoritative first --
    own process env is untouched by cli_isolation.py, which isolates only
    the SPAWNED engine subprocess's env -- see that module's docstring),
    this tier fires for real; on the documented OAuth-only posture it is
-   skipped without ever attempting the call, and the picker says so (see
-   ``ModelInfo.source`` / the picker's "static fallback" note).
-2. Whatever the installed ``claude_agent_sdk`` package advertises. CHECKED
+   skipped without ever attempting the call. The picker labels whichever
+   later tier supplies its list.
+2. The installed Claude CLI's account-scoped model cache, when it matches
+   the active subscription organization and is recent enough to be useful.
+   It is labelled with its fetch time and staleness, never described as a
+   live subscription query. ``doxa.claude_catalog`` validates the cache
+   without reading any OAuth token.
+3. Whatever the installed ``claude_agent_sdk`` package advertises. CHECKED
    (this repo's own venv, the pinned ``claude-agent-sdk``): no MODEL/
    MODELS constant anywhere in ``types.py`` / ``__init__.py`` / the client
    module, and ``ClaudeSDKClient.set_model`` accepts an arbitrary string
@@ -42,7 +46,7 @@ authoritative first --
    resolution order in code matches the order in this docstring exactly,
    and a future SDK release that DOES advertise a catalog only has to fill
    in one method body.
-3. A small STATIC fallback, clearly marked as such (``ModelInfo.source ==
+4. A small STATIC fallback, clearly marked as such (``ModelInfo.source ==
    "fallback"``) -- the same four aliases ``doxa.ui.labels.MODEL_ALIASES``
    already used before this feature (``haiku``, ``sonnet``, ``opus``,
    ``fable``), sourced from the installed ``claude`` CLI's own ``--model``
@@ -58,10 +62,10 @@ into every install for a tier that is structurally unreachable for DOXA's
 primary (subscription/OAuth) audience; an operator who genuinely wants
 tier 1 live can ``pip install anthropic`` into this venv themselves.
 
-Cached on the instance for the life of one provider (one built per
-``SessionPane`` per ENGINE, on first use) -- the picker opens on every
-click and must never re-probe the network, or re-run the same guarded-away
-skip, each time.
+Catalogues are cached on the instance for one minute (one provider is built
+per ``SessionPane`` per engine), then refreshed so an account or CLI cache
+change reaches a pane left open all day. Codex discovery failures are
+retryable on a later picker opening.
 
 A SECOND AND THIRD PROVIDER (v1.12.0). ``ModelProvider``'s own docstring
 below said a second provider "is a new class satisfying this Protocol,
@@ -91,19 +95,22 @@ never answered. So neither tier here ever contains a name DOXA made up --
 tier 1 is the vendor's own answer, and tier 2 is the tuple that was read
 off tier 1 on the date in ``VendorSpec.models``' comment.
 
+Codex lists the models available to the signed-in CLI account through the
+app-server's ``model/list`` method. The CLI may use its own cache; this is
+its account-scoped catalogue, not a promise of a fresh network fetch.
+
 WHICH ENGINE GETS WHICH CATALOGUE is :func:`model_provider`, keyed on the
-ENGINE ids ``doxa.engines`` registers rather than on provider ids, so the
-question "does every engine DOXA offers have a catalogue?" has one place
-to be asked and one place to be answered -- including the answer "no, and
-here is why", which is :data:`CATALOG_EXEMPT_ENGINES`.
+ENGINE ids ``doxa.engines`` registers rather than on provider ids.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol
 
 from .engines import (
     CLAUDE_ENGINE_ID,
@@ -127,6 +134,7 @@ if TYPE_CHECKING:  # the spec is a doxa.vendors type, and importing that
 # static-fallback tier, and also doxa.ui.labels.MODEL_ALIASES's one source
 # (see that name's own comment).
 FALLBACK_MODEL_ALIASES: tuple[str, ...] = ("haiku", "sonnet", "opus", "fable")
+CATALOG_CACHE_TTL = 60.0
 
 
 # The short provider id for the provider DOXA was built on. ONE string,
@@ -146,10 +154,8 @@ CLAUDE_PROVIDER_ID = "claude"
 # ``doxa.engines.CODEX_ENGINE_ID``; a provider and an engine are different
 # questions, which is precisely why PeerInfo carries both fields).
 #
-# No ``CodexProvider(ModelProvider)`` ships beside it: this module lists
-# MODELS, and enumerating Codex's catalog is a second measurement nobody
-# has made. The picker keeps saying what it can source; it does not learn
-# to guess for a second vendor.
+# CodexProvider below gets its catalogue from the signed-in Codex CLI's
+# app-server, without handling the account's credentials itself.
 CODEX_PROVIDER_ID = "openai"
 
 # The third and fourth provider ids, the two chat-completions vendors.
@@ -169,14 +175,17 @@ class ModelInfo:
     ``id`` is what actually gets handed to `/model` / `engine.set_model`
     -- an alias from the fallback tier, or the API's own canonical model
     id when that tier is live. ``source`` is which resolution tier
-    produced this entry ("api" or "fallback") -- the same value for every
+    produced this entry ("api", "cli", "cache", or "fallback") -- the same value for every
     entry in one ``list_models()`` call, carried per-entry only so the
     caller doesn't need a second return channel to ask "which tier was
-    this?"."""
+    this?". ``as_of`` and ``stale`` describe a dated CLI cache entry when
+    ``source == "cache"``."""
 
     id: str
     display_name: str
     source: str
+    as_of: str | None = None
+    stale: bool = False
 
 
 class ModelProvider(Protocol):
@@ -221,8 +230,8 @@ class ModelProvider(Protocol):
         what was resolved rather than a flag the provider remembers: the
         picker must render a provider's caveat without knowing whose it is
         (this module's rule -- "never a branch inside the picker's own
-        code"), and the caveats genuinely differ. Claude's fallback means
-        an OAuth posture that cannot reach the Models API; a vendor's means
+        code"), and the caveats genuinely differ. Claude's cache carries
+        a last-seen timestamp; a vendor's static fallback means
         its ``GET /models`` was not answered, which is a different fact and
         deserves different words."""
         ...
@@ -236,6 +245,7 @@ class ClaudeProvider:
 
     def __init__(self) -> None:
         self._cache: "list[ModelInfo] | None" = None
+        self._cache_at = 0.0
 
     def provider_id(self) -> str:
         return CLAUDE_PROVIDER_ID
@@ -247,9 +257,11 @@ class ClaudeProvider:
         return None  # "default": whatever the CLI's own --model default is
 
     async def list_models(self) -> list[ModelInfo]:
-        if self._cache is not None:
+        if self._cache is not None and time.monotonic() - self._cache_at < CATALOG_CACHE_TTL:
             return self._cache
         models = await self._try_api()
+        if models is None:
+            models = await self._try_cli_cache()
         if models is None:
             models = self._try_sdk_catalog()
         if models is None:
@@ -258,9 +270,16 @@ class ClaudeProvider:
                 for alias in FALLBACK_MODEL_ALIASES
             ]
         self._cache = models
+        self._cache_at = time.monotonic()
         return models
 
     def catalog_note(self, models: list[ModelInfo]) -> str:
+        if models and models[0].source == "cache":
+            state = "stale" if models[0].stale else "cached"
+            return (
+                f"model catalog: Claude CLI {state} list, last seen "
+                f"{models[0].as_of}; availability may have changed"
+            )
         if models and models[0].source == "fallback":
             return (
                 "model catalog: static fallback -- the Anthropic Models "
@@ -304,10 +323,196 @@ class ClaudeProvider:
 
         return await asyncio.to_thread(_fetch)
 
+    async def _try_cli_cache(self) -> list[ModelInfo] | None:
+        """Use a dated account-matched Claude CLI snapshot, never OAuth secrets."""
+        from .claude_catalog import read_cached_catalog
+
+        try:
+            catalog = await asyncio.to_thread(read_cached_catalog)
+        except Exception:  # noqa: BLE001 -- cache inspection is optional
+            return None
+        if catalog is None:
+            return None
+        as_of = catalog.fetched_at.strftime("%Y-%m-%d %H:%M UTC")
+        return [
+            ModelInfo(
+                id=model.id,
+                display_name=(
+                    f"{model.display_name} (requires usage credits)"
+                    if model.notice and "requires usage credits" in model.notice.casefold()
+                    else model.display_name
+                ),
+                source="cache",
+                as_of=as_of,
+                stale=catalog.is_stale,
+            )
+            for model in catalog.models
+        ] or None
+
     def _try_sdk_catalog(self) -> "list[ModelInfo] | None":
-        """Tier 2 -- see the module docstring: checked, currently always
+        """Tier 3 -- see the module docstring: checked, currently always
         None."""
         return None
+
+
+CODEX_CATALOG_TIMEOUT = 8.0
+_CODEX_CATALOG_PAGE_LIMIT = 100
+_CODEX_CATALOG_MAX_PAGES = 20
+
+
+async def _list_codex_models(
+    command: tuple[str, ...] = ("codex", "app-server", "--stdio"),
+    *,
+    timeout: float = CODEX_CATALOG_TIMEOUT,
+) -> list[ModelInfo]:
+    """Ask the installed Codex CLI for picker-visible account models.
+
+    The app-server protocol is line-delimited JSON-RPC. This connection
+    only performs the required handshake and ``model/list`` pagination;
+    it never starts a thread or a model turn. A timeout, missing CLI,
+    error response, or malformed catalogue means no verified models.
+    """
+    from . import __version__
+
+    proc: asyncio.subprocess.Process | None = None
+
+    async def _send(message: dict[str, Any]) -> None:
+        assert proc is not None and proc.stdin is not None
+        proc.stdin.write((json.dumps(message) + "\n").encode())
+        await proc.stdin.drain()
+
+    async def _response(request_id: int) -> dict[str, Any]:
+        assert proc is not None and proc.stdout is not None
+        # Notifications may be interleaved, but a server that never answers
+        # must not make us consume an unbounded stream.
+        for _ in range(256):
+            line = await proc.stdout.readline()
+            if not line:
+                raise ValueError("Codex app-server closed the catalogue stream")
+            message = json.loads(line)
+            if not isinstance(message, dict):
+                raise ValueError("Invalid Codex app-server response")
+            if message.get("id") == request_id:
+                if "error" in message or not isinstance(message.get("result"), dict):
+                    raise ValueError("Codex app-server refused the catalogue request")
+                return message["result"]
+        raise ValueError("Too many Codex app-server notifications")
+
+    try:
+        async with asyncio.timeout(timeout):
+            proc = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                limit=1024 * 1024,
+            )
+            await _send({
+                "id": 0,
+                "method": "initialize",
+                "params": {"clientInfo": {
+                    "name": "doxa", "title": "DOXA", "version": __version__,
+                }},
+            })
+            await _response(0)
+            await _send({"method": "initialized", "params": {}})
+
+            models: list[ModelInfo] = []
+            seen_ids: set[str] = set()
+            seen_cursors: set[str] = set()
+            cursor: str | None = None
+            for request_id in range(1, _CODEX_CATALOG_MAX_PAGES + 1):
+                params: dict[str, Any] = {
+                    "limit": _CODEX_CATALOG_PAGE_LIMIT,
+                    "includeHidden": False,
+                }
+                if cursor is not None:
+                    params["cursor"] = cursor
+                await _send({"id": request_id, "method": "model/list", "params": params})
+                result = await _response(request_id)
+                data = result.get("data")
+                if not isinstance(data, list):
+                    raise ValueError("Invalid Codex model/list data")
+                for entry in data:
+                    if not isinstance(entry, dict):
+                        raise ValueError("Invalid Codex model/list entry")
+                    model_id = entry.get("id")
+                    if not isinstance(model_id, str) or not model_id:
+                        raise ValueError("Codex model has no id")
+                    if entry.get("hidden") is True or model_id in seen_ids:
+                        continue
+                    seen_ids.add(model_id)
+                    display = entry.get("displayName")
+                    models.append(ModelInfo(
+                        id=model_id,
+                        display_name=display if isinstance(display, str) and display else model_id,
+                        source="cli",
+                    ))
+                next_cursor = result.get("nextCursor")
+                if next_cursor is None:
+                    return models
+                if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
+                    raise ValueError("Invalid Codex model/list cursor")
+                seen_cursors.add(next_cursor)
+                cursor = next_cursor
+            raise ValueError("Codex model/list exceeded the page limit")
+    except Exception:  # noqa: BLE001 -- all discovery failures mean unavailable
+        return []
+    finally:
+        if proc is not None:
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            try:
+                # communicate closes stdin and drains stdout as well as
+                # reaping the child; wait() alone leaves pipe transports
+                # attached to a pytest event loop after it closes.
+                await asyncio.wait_for(proc.communicate(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+
+
+class CodexProvider:
+    """The signed-in Codex CLI's picker-visible model catalogue."""
+
+    def __init__(
+        self,
+        fetch: Callable[[], Awaitable[list[ModelInfo]]] | None = None,
+    ) -> None:
+        self._fetch = fetch or _list_codex_models
+        self._cache: list[ModelInfo] | None = None
+        self._cache_at = 0.0
+
+    def provider_id(self) -> str:
+        return CODEX_PROVIDER_ID
+
+    def provider_display_name(self) -> str:
+        return "Codex (OpenAI)"
+
+    def default_model(self) -> str | None:
+        return None  # Codex applies its own configured default.
+
+    async def list_models(self) -> list[ModelInfo]:
+        if self._cache is not None and time.monotonic() - self._cache_at < CATALOG_CACHE_TTL:
+            return self._cache
+        try:
+            models = await self._fetch()
+        except Exception:  # noqa: BLE001 -- an unavailable CLI is no catalogue
+            return []
+        if models:
+            self._cache = models
+            self._cache_at = time.monotonic()
+        return models
+
+    def catalog_note(self, models: list[ModelInfo]) -> str:
+        if not models:
+            return (
+                "model catalog: unavailable from the signed-in Codex CLI "
+                "(app-server model/list); /model <id> still works"
+            )
+        return "model catalog: signed-in Codex CLI (may use its cache)"
 
 
 class VendorModelProvider:
@@ -418,31 +623,20 @@ class VendorModelProvider:
 # non-Claude session before this existed.
 
 
-#: Engines that deliberately publish no catalogue, and why.
-#:
-#: ``codex``: the reason doxa.providers has carried since v1.4.0 in
-#: CODEX_PROVIDER_ID's own comment -- this module lists MODELS, and
-#: enumerating the Codex CLI's catalogue is a measurement nobody has made.
-#: ``codex exec --model`` takes an arbitrary string with nothing
-#: enumerated behind it, exactly as ``ClaudeSDKClient.set_model`` does, and
-#: the four Claude aliases are not Codex's. So the picker says so and
-#: ``/model <id>`` still works -- the CLI remains the authority, and DOXA
-#: does not guess on its behalf.
-CATALOG_EXEMPT_ENGINES: "frozenset[str]" = frozenset({CODEX_ENGINE_ID})
+#: Known engines without a catalogue implementation. Codex is no longer
+#: exempt: its app-server exposes the account's picker-visible model list.
+CATALOG_EXEMPT_ENGINES: "frozenset[str]" = frozenset()
 
 
 def no_catalog_text(engine_id: str) -> str:
     """What a surface says instead of listing models for an engine in
     :data:`CATALOG_EXEMPT_ENGINES`.
 
-    Written once, here, beside the exemption itself: the sentence and the
-    reason for it are the same fact, and a caller that composed its own
-    would be free to say something the exemption does not mean."""
+    An unknown or future engine may not have a catalogue provider yet."""
     return (
-        f"model: the {engine_id} engine publishes no model catalogue -- its "
-        "CLI takes an arbitrary --model string with nothing enumerated "
-        "behind it, so DOXA lists nothing rather than guessing. `/model "
-        "<id>` still sets one."
+        f"model: no catalogue is available for the {engine_id} engine; "
+        "DOXA lists nothing rather than borrowing another engine's models. "
+        "`/model <id>` still sets one."
     )
 
 
@@ -462,6 +656,7 @@ def _vendor_catalog(engine_id: str) -> "ModelProvider":
 #: that cache process-wide and outlive the test that filled it.
 _CATALOG_BUILDERS: "dict[str, Callable[[], ModelProvider]]" = {
     CLAUDE_ENGINE_ID: ClaudeProvider,
+    CODEX_ENGINE_ID: CodexProvider,
     DEEPSEEK_ENGINE_ID: lambda: _vendor_catalog(DEEPSEEK_ENGINE_ID),
     GLM_ENGINE_ID: lambda: _vendor_catalog(GLM_ENGINE_ID),
 }

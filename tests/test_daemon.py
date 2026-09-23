@@ -1035,11 +1035,21 @@ async def test_needs_input_parks_and_replays_on_reattach_with_no_client(
         ev = next(e for e in events if e.type == "needs_input")
         assert ev.data["kind"] == "permission"
 
-        await client.answer_needs_input(ev.data["id"], {"decision": "deny"})
+        # The browser restores its transcript and skips ring replay. It
+        # needs the still-open request in status even on that attach path.
+        browser = EngineClient(str(daemon.socket_path), skip_backlog=True)
+        await browser.start()
+        status = await browser.refresh_status()
+        assert status["pending_inputs"] == [ev.data]
+
+        await browser.answer_needs_input(ev.data["id"], {"decision": "deny"})
         from claude_agent_sdk import PermissionResultDeny
 
         result = await asyncio.wait_for(task, 5)
         assert isinstance(result, PermissionResultDeny)
+        await _drain_oob(browser, "needs_input_resolved")
+        assert (await browser.refresh_status())["pending_inputs"] == []
+        await browser.finalize()
         await client.finalize()
 
 

@@ -116,6 +116,10 @@ spend, fake account numbers. See
 - **[Peers on another machine, once you say so.](docs/fleet.md)** A tailnet
   bridge behind `tailscale serve` puts a second box's sessions in the
   roster, refused until `remote_enabled` is on and an allow-list names you.
+- **[Your local sessions in a browser.](docs/plans/remote.md)** The optional
+  `doxa-remote` bridge shows daemon sessions, their transcripts and live
+  turns through Tailscale Serve. It can send prompts and answer pending
+  questions. The agent and its tools keep running on this machine.
 - **[Memory is a setting, not a premise.](docs/manual.md#lore-integration)**
   `doxa --no-lore` gives a session no snapshot, no writes and no `lore_*`
   tools; the fleet flips it per agent. With [LORE](https://github.com/docwilde/LORE)
@@ -285,6 +289,21 @@ door that still hosts an engine inside the TUI.
 `doxa.engines.get("deepseek").supports()` is the whole map for any of
 them.
 
+**Model lists and preferences.** A Codex session asks the signed-in Codex
+CLI's app-server for its account's picker-visible models (`model/list`);
+that CLI may serve a cached list. A Claude subscription session uses the
+installed Claude CLI's account-matched catalogue cache, labelled with its
+fetch time and whether it is stale. This is a dated snapshot, not a live
+subscription Models API. If that cache is unavailable, Claude shows its
+four static aliases with a fallback note. `/model` and the model chip list
+models for the current session's engine. A successful `/model <id>` switch
+also saves that engine's preference: Claude keeps the top-level `model`
+setting, while Codex, DeepSeek and GLM use their own entries in `[models]`.
+`DOXA_MODEL` and `--model` remain explicit overrides for a new session.
+Use `doxa new --engine codex` to start a Codex session; plain `doxa` may
+reattach an existing Claude session in the project, whose picker will
+correctly continue to show Claude models.
+
 `launcher install` points at **the DOXA you ran it from**, by absolute
 path, and prints that path and version — so a shortcut that would start
 something unexpected shows up now, not in a month. It names any other
@@ -294,6 +313,35 @@ A daemon finalizes once every client has been detached for `--linger`
 seconds (120 by default), or at once on `doxa stop`. `doxa --in-process`
 runs the engine inside the TUI: no daemon, no detach, quitting finalizes
 on the spot.
+
+**Remote browser (optional).** From a checkout, set these values in
+`~/.doxa/config.toml`, replacing the login with your own Tailscale login:
+
+```toml
+remote_enabled = true
+remote_allowed_logins = "you@example.com"
+```
+
+Start a normal daemon-backed DOXA session, then run the bridge and Tailscale
+Serve in separate terminals:
+
+```sh
+uv run doxa new
+uv run --extra remote doxa-remote
+tailscale serve --bg 47601
+tailscale serve status    # prints the private tailnet URL
+```
+
+The bridge binds `127.0.0.1:47601` and refuses to start while remote access
+is off or the allow-list is empty. It trusts `Tailscale-User-Login` only on
+that loopback connection. Use **Serve**, never public Funnel: [Tailscale's
+identity headers](https://tailscale.com/docs/features/tailscale-serve#identity-headers)
+are provided for tailnet Serve traffic. The browser controls sessions that
+remain on this machine; it does not move a worktree, daemon or model run to
+the remote device. The local status bar names an attached browser driver
+with an `◎ remote:<login>` chip. `tailscale serve off` stops sharing. See the
+[remote plan](docs/plans/remote.md) for the current surface and remaining
+work.
 
 Then type a prompt and press enter. `ctrl+p` opens the palette, `ctrl+t` a
 tab, `ctrl+r` searches past sessions, `shift+tab` cycles the permission
@@ -317,13 +365,11 @@ lines — but two of those headers now lag their own code, so read them
 against this list rather than instead of it. **Five have nothing behind
 them:** `plugin-api` (no loader exists — v0.34.0 shipped only the seams one
 could bind to), `mermaid`, `code-graph`, `sandbox`, `model-registry`.
-**One is part-built:** `remote`. v1.8.0 shipped `doxa/remote_policy.py`,
-the decision layer that refuses by default, and `doxa/peernet.py` has
-since added the one transport that asks it — peer traffic between
-machines, bound to loopback behind `tailscale serve`, refused until
-`remote_enabled` is on and an allow-list names you. There is still no
-remote driver and no second renderer. `remote.md`'s own header reads
-"Nothing implemented", which is now two releases behind. **One is an
+**One is part-built:** `remote`. `doxa/remote_policy.py` refuses by default,
+`doxa/peernet.py` bridges peer traffic between machines, and the optional
+`doxa-remote` process now provides an initial browser renderer for local
+daemon sessions behind Tailscale Serve. The richer renderer and other parts
+of the [remote plan](docs/plans/remote.md) remain open. **One is an
 experiment nobody has run:** `emergent-organization`, whose header calls
 its messaging substrate unbuilt — that substrate is precisely what
 shipped, while the experiment did not.

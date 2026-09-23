@@ -475,10 +475,14 @@ def main(argv: "list[str] | None" = None) -> int:
                         help="session id or title prefix (attach/stop)")
     # Flag > env > config file > default: argparse supplies the flag layer,
     # doxa.config supplies the two beneath it (see doxa/config.py).
-    parser.add_argument("--model", default=config.model())
+    # Resolve this after --engine has been validated. A top-level Claude
+    # preference must never become the default for a Codex session.
+    parser.add_argument("--model", default=None)
     parser.add_argument("--engine", default=config.engine(),
-                        help="which engine drives the session "
-                             "(doxa.engines; default %(default)s). Every "
+                        help="engine for new sessions "
+                             "(doxa.engines; default %(default)s); use "
+                             "`doxa new --engine ...` to start one even "
+                             "when plain `doxa` would restore or attach. Every "
                              "engine is hosted by a daemon, so every "
                              "session detaches and reattaches the same "
                              "way -- use --in-process to run one inside "
@@ -526,6 +530,8 @@ def main(argv: "list[str] | None" = None) -> int:
         return 2
 
     engine_id = provider.engine_id()
+    if args.model is None:
+        args.model = config.model(engine_id)
 
     if args.in_process:
         # The ONE branch that still builds an engine in the TUI process,
@@ -628,7 +634,8 @@ def main(argv: "list[str] | None" = None) -> int:
         live = peers.list_daemons(scope_key=scope)
         if live:
             entry = live[0]
-            print(f"attaching to {entry.title} ({entry.session_id[:8]})…",
+            print(f"attaching to {entry.title} ({entry.session_id[:8]}, "
+                  f"{entry.engine or 'engine unknown'})…",
                   file=sys.stderr)
             _run_attached(entry.daemon_socket, entry.cwd, args.model,
                           args.linger, engine=engine_id)

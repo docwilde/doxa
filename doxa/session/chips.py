@@ -598,8 +598,7 @@ class PaneChipsMixin:
         # guarantee, and this is the one chip that answers "is somebody
         # else steering this session right now" -- exactly the fact a
         # silent second driver would otherwise hide. Plain, not clickable:
-        # there is nothing to open yet (no bridge exists in this track),
-        # only a fact to state. Hidden at zero, same as the peers chip
+        # there is nothing to open here, only a fact to state. Hidden at zero, same as the peers chip
         # below -- see remote_driver_chip's own docstring for why there is
         # no companion "local" chip.
         remote = remote_driver_chip(getattr(engine, "remote_driver", None))

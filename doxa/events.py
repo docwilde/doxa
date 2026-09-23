@@ -77,7 +77,8 @@ class EngineEvent:
     v0.25.0: the model's own summarized reasoning, routed like text_delta
     -- see doxa.app.ReasoningSection and show_reasoning() above) -- plus
     peer_joined, peer_left,
-    peer_message, tool_disabled, needs_input and needs_input_resolved,
+    peer_message, tool_disabled, needs_input, needs_input_resolved and
+    remote_driver_changed,
     which arrive out-of-band on the same EngineEvent type via
     :meth:`SessionEngine.peer_events` (a turn generator can only yield
     while a turn runs; peer activity doesn't wait for one, and a

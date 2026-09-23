@@ -364,11 +364,10 @@ class PaneCommandsMixin:
     async def _cmd_model(self, args: str) -> None:
         """/model -- switch the model for subsequent turns, in place.
 
-        The SDK's set_model is a control request, so this is genuinely a
-        switch and not a restart: the transcript, the daemon, the replay
-        ring and every hook survive it untouched. The chosen model is also
-        written to the settings file, because the settings modal's `model`
-        row and this command are the SAME state -- one source of truth.
+        The engine's ``set_model`` switches subsequent turns in this
+        session without a restart: the transcript and daemon survive it.
+        The chosen model is also written to this engine's model preference
+        in the settings file.
 
         The bare listing is THIS SESSION'S engine's catalogue (v1.12.0),
         the same one the model chip's picker opens onto -- through
@@ -416,12 +415,12 @@ class PaneCommandsMixin:
         except Exception as exc:  # noqa: BLE001 -- a refusal is information
             await self._system(f"model: {type(exc).__name__}: {exc}")
             return
-        config_mod.save({"model": wanted})
+        config_mod.save_model(engines_mod.engine_id_of(engine), wanted)
         self._refresh_status()
         self._refresh_identity()
         await self._system(
             f"model: {current} → {resolved}  ·  transcript and session kept "
-            "(SDK control request, no reconnect)"
+            "(no reconnect)"
         )
 
     async def _cmd_engine(self, args: str) -> None:

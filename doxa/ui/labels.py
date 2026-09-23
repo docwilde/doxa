@@ -22,13 +22,16 @@ place that knows is the module that asked the terminal.
 from __future__ import annotations
 
 import contextlib
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from textual.widgets import TabbedContent
 
 from .. import commands as commands_mod
 from .. import config as config_mod
 from .. import providers as providers_mod
+
+if TYPE_CHECKING:
+    from .transcript import ToolChip
 
 
 # Model aliases the installed CLI documents for --model ("provide an alias
@@ -2777,9 +2780,9 @@ def remote_driver_chip(identity: "str | None") -> "tuple[str, str] | None":
     the status bar, the way the worktree and branch are shown. A silent
     second driver is the thing a user cannot detect and cannot consent
     to." No bridge exists yet (that is a later track) to ever pass a
-    real identity here -- this function, and the ``remote_driver``
-    attribute it reads off the engine, are the wiring that track lands
-    on, not a promise that anything is listening today."""
+    real identity here until the browser bridge attaches. That bridge
+    registers its verified Tailscale login on the daemon's local socket,
+    and the daemon broadcasts changes to all attached clients."""
     identity = (identity or "").strip()
     if not identity:
         return None
