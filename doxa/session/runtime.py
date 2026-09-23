@@ -1062,8 +1062,9 @@ class PaneRuntimeMixin:
         # THE TICK for the live diff (v0.92.0). Not a file watcher: DOXA
         # has a documented no-timer, no-per-frame rule and
         # docs/plans/code-graph.md already refused a watcher for the same
-        # reason -- a second lifecycle to get wrong. An edit landing IS
-        # the event, and this is where an edit lands.
+        # reason -- a second lifecycle to get wrong. A tool result that
+        # might have edited the tree is the event; git decides whether it
+        # actually did before auto_diff opens anything.
         #
         # The tool INPUT is not on the result event (only the 280-char
         # result summary is), which is why the predicate reads it off the
@@ -1089,10 +1090,11 @@ class PaneRuntimeMixin:
            invisible until you already knew to press F2;
         2. the diff leaf, if one is open, exactly as before;
         3. and, when no leaf is open and the ``auto_diff`` setting says
-           so, the one automatic open this session gets."""
+           so, the one automatic open this session gets -- but only after
+           git confirms that this tick left a nonempty diff."""
         if not tool_name or not diff_mod.is_tick(tool_name, tool_input):
             return
-        self.schedule_diff_counts()
+        self.schedule_diff_counts(auto_open=True)
         app = getattr(self, "app", None)
         finder = getattr(app, "diff_pane_for", None)
         if finder is None:
@@ -1106,11 +1108,10 @@ class PaneRuntimeMixin:
             self._auto_diff_done = True
             pane.schedule_refresh()
             return
-        self._maybe_auto_open_diff()
 
     # -- the diff chip (v1.0.1) ---------------------------------------
 
-    def schedule_diff_counts(self) -> None:
+    def schedule_diff_counts(self, *, auto_open: bool = False) -> None:
         """Recompute the status chip's ``git diff --numstat``, off the
         loop, at most one in flight.
 
@@ -1134,10 +1135,11 @@ class PaneRuntimeMixin:
         if not self.is_mounted:
             return
         self.run_worker(
-            self._refresh_diff_counts(), exclusive=True, group="diff-counts",
+            self._refresh_diff_counts(auto_open=auto_open),
+            exclusive=True, group="diff-counts",
         )
 
-    async def _refresh_diff_counts(self) -> None:
+    async def _refresh_diff_counts(self, *, auto_open: bool = False) -> None:
         """Read the counts and repaint the bar.
 
         ``asyncio.to_thread`` for the reason :meth:`DiffPane.refresh_diff`
@@ -1155,6 +1157,13 @@ class PaneRuntimeMixin:
             )
         self._diff_counts = result
         self._refresh_status()
+        # Bash is deliberately an over-inclusive tick: "make build" may
+        # write, but often does not. The count is already being measured
+        # for the chip, so use that actual answer for auto-open instead of
+        # treating the tool name as evidence of an edit. Boot calls this
+        # with auto_open=False so an existing diff never opens on restore.
+        if auto_open and result.status == diff_mod.STATUS_OK and result.files > 0:
+            self._maybe_auto_open_diff()
 
     # -- the sync chip (sync.md's "## DOXA" item 3) -------------------
 
@@ -1204,8 +1213,8 @@ class PaneRuntimeMixin:
         """The ``auto_diff`` setting's ONE open, or nothing at all.
 
         Off by default (:func:`doxa.diff.auto_open_enabled`), so the
-        ordinary session's first edit does exactly what it did before
-        this release: nothing.
+        ordinary session's first measured edit does exactly what it did
+        before this release: nothing.
 
         The flag is set BEFORE the worker starts, not after it finishes.
         A turn that lands two edits in quick succession ticks twice, and
@@ -1218,6 +1227,12 @@ class PaneRuntimeMixin:
             return
         app = getattr(self, "app", None)
         if app is None or not hasattr(app, "toggle_diff_pane"):
+            return
+        finder = getattr(app, "diff_pane_for", None)
+        if finder is not None and finder(self._session_id) is not None:
+            # The user may have opened it while the count ran on a thread.
+            # Auto-toggle would otherwise CLOSE that manual pane.
+            self._auto_diff_done = True
             return
         self._auto_diff_done = True
         self.run_worker(self._auto_open_diff(), group="diff-auto")
@@ -1247,6 +1262,8 @@ class PaneRuntimeMixin:
           That was already true for F2 (a diff is something you look at
           while you keep typing); it is load-bearing for an open the
           user did not ask for at all, mid-sentence."""
+        if self.app.diff_pane_for(self._session_id) is not None:
+            return  # A manual open won the gap before this worker ran.
         note = await self.app.toggle_diff_pane(self)
         if note:
             self.app.notify(
