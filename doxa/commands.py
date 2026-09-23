@@ -529,7 +529,7 @@ REGISTRY: tuple[SlashCommand, ...] = (
     SlashCommand(
         name="/update",
         group="Maintenance",
-        summary="Fast-forward this DOXA checkout from origin (never merges)",
+        summary="Update a clean DOXA checkout or main-tracking uv tool install",
         usage="/update [--restart]",
         palette="Update DOXA",
     ),

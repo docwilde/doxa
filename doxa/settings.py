@@ -225,7 +225,7 @@ class SettingsScreen(ModalScreen["bool"]):
         # itself for a bug report. Two surfaces, one pointer, rather than
         # two half-answers to "what am I running".
         yield Static(
-            "Run /update to pull and apply the latest release; /about "
+            "Run /update to refresh a checkout or uv tool install; /about "
             "reports the full build (sha, Python, Textual, Agent SDK, LORE, "
             "platform, config path) and copies itself for a bug report.",
             classes="setting-help",

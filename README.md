@@ -173,6 +173,12 @@ safe and never touches an existing `~/.doxa/config.toml`. Add `sh -s --
 v1.11.1` to pin a tag instead of tracking `main`. Read it first if you
 would rather not pipe a stranger's script into `sh`.
 
+For the default install that tracks `main`, `/update` refreshes the uv tool
+copy and reports the installed version and Git revision before and after.
+`/update --restart` also closes this window's sessions and relaunches DOXA.
+A tag-pinned install stays pinned; reinstall that tag explicitly to change it.
+DOXA checks the running copy's uv receipt and installed wheel before updating.
+
 Or run from a checkout:
 
 ```sh

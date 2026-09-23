@@ -22,6 +22,7 @@ tests that are ABOUT the switch set it themselves.
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 
 import pytest
@@ -100,7 +101,179 @@ def test_the_version_line_shows_a_sha_only_when_it_adds_something(monkeypatch):
 def test_update_refuses_a_non_repo(tmp_path):
     report = update_mod.update(root=tmp_path, run=FakeGit({}))
     assert report.status == "refused"
-    assert "not a git checkout" in report.message
+    assert "not a supported uv tool install" in report.message
+
+
+def _tool_copy(tmp_path, monkeypatch, source="https://github.com/docwilde/doxa"):
+    """A wheel, receipt and running prefix shaped like uv's real Git install."""
+    tools = tmp_path / "tools"
+    prefix = tools / "doxa"
+    package = prefix / "lib/python3.12/site-packages/doxa"
+    package.mkdir(parents=True)
+    module_file = package / "update.py"
+    module_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(update_mod, "__file__", str(module_file))
+    monkeypatch.setattr(update_mod.sys, "prefix", str(prefix))
+    (prefix / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [{ name = "doxa", git = "'
+        + source + '" }]\n',
+        encoding="utf-8",
+    )
+    return tools, prefix
+
+
+def _tool_wheel(prefix, version="1.16.0", sha="a" * 40):
+    site = prefix / "lib/python3.12/site-packages"
+    for old in site.glob("doxa-*.dist-info"):
+        old.rename(site / (old.name + ".old"))
+    info = site / f"doxa-{version}.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text(
+        f"Name: doxa\nVersion: {version}\n", encoding="utf-8"
+    )
+    (info / "direct_url.json").write_text(json.dumps({
+        "url": "https://github.com/docwilde/doxa",
+        "vcs_info": {"vcs": "git", "commit_id": sha},
+    }), encoding="utf-8")
+
+
+def _uv_run(tools, prefix, *, after=None, error=""):
+    calls = []
+
+    def run(cmd, cwd, timeout):
+        calls.append((list(cmd), cwd, timeout))
+        if cmd == ["uv", "tool", "dir"]:
+            return subprocess.CompletedProcess(cmd, 0, str(tools) + "\n", "")
+        assert cmd == ["uv", "tool", "upgrade", "--reinstall", "doxa"]
+        assert cwd == prefix
+        if error:
+            return subprocess.CompletedProcess(cmd, 1, "", error)
+        if after:
+            _tool_wheel(prefix, *after)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    return run, calls
+
+
+def test_update_refreshes_the_running_main_tracking_uv_tool(tmp_path, monkeypatch):
+    tools, prefix = _tool_copy(tmp_path, monkeypatch)
+    _tool_wheel(prefix)
+    run, calls = _uv_run(tools, prefix, after=("1.17.0", "b" * 40))
+
+    report = update_mod.update(root=tmp_path, run=run)
+
+    assert report.status == "updated"
+    assert "1.16.0 (aaaaaaa) → 1.17.0 (bbbbbbb)" in report.message
+    assert "1.16.0 → 1.17.0" in report.text()
+    assert calls == [
+        (["uv", "tool", "dir"], prefix, update_mod.CHECK_TIMEOUT_SECS),
+        (["uv", "tool", "upgrade", "--reinstall", "doxa"],
+         prefix, update_mod.SYNC_TIMEOUT_SECS),
+    ]
+
+
+def test_update_accepts_explicit_main_and_reports_same_revision(tmp_path, monkeypatch):
+    tools, prefix = _tool_copy(
+        tmp_path, monkeypatch,
+        "https://github.com/docwilde/doxa?rev=main",
+    )
+    _tool_wheel(prefix)
+    run, _calls = _uv_run(tools, prefix)
+    report = update_mod.update(root=tmp_path, run=run)
+    assert report.status == "up-to-date"
+    assert "1.16.0 (aaaaaaa)" in report.message
+
+
+def test_dependency_refresh_requires_restart_even_if_doxa_commit_is_same(
+    tmp_path, monkeypatch,
+):
+    tools, prefix = _tool_copy(tmp_path, monkeypatch)
+    _tool_wheel(prefix)
+    site = prefix / "lib/python3.12/site-packages"
+    old = site / "textual-5.0.dist-info"
+    old.mkdir()
+    (old / "METADATA").write_text(
+        "Name: textual\nVersion: 5.0\n", encoding="utf-8"
+    )
+    base_run, _calls = _uv_run(tools, prefix)
+
+    def run(cmd, cwd, timeout):
+        result = base_run(cmd, cwd, timeout)
+        if cmd == ["uv", "tool", "upgrade", "--reinstall", "doxa"]:
+            new = site / "textual-5.1.dist-info"
+            old.rename(new)
+            (new / "METADATA").write_text(
+                "Name: textual\nVersion: 5.1\n", encoding="utf-8"
+            )
+        return result
+
+    report = update_mod.update(root=tmp_path, run=run)
+    assert report.status == "updated"
+    assert "refreshed dependencies" in report.message
+    assert "1.16.0 (aaaaaaa)" in report.message
+
+
+def test_update_refuses_pinned_uv_tool_without_invoking_upgrade(tmp_path, monkeypatch):
+    tools, prefix = _tool_copy(
+        tmp_path, monkeypatch,
+        "https://github.com/docwilde/doxa?rev=v1.16.0",
+    )
+    _tool_wheel(prefix)
+    run, calls = _uv_run(tools, prefix)
+    report = update_mod.update(root=tmp_path, run=run)
+    assert report.status == "refused"
+    assert "pinned to 'v1.16.0'" in report.message
+    assert len(calls) == 1
+
+
+def test_update_refuses_a_different_uv_tool_source(tmp_path, monkeypatch):
+    tools, prefix = _tool_copy(
+        tmp_path, monkeypatch, "https://github.com/someone/doxa"
+    )
+    _tool_wheel(prefix)
+    run, calls = _uv_run(tools, prefix)
+    report = update_mod.update(root=tmp_path, run=run)
+    assert report.status == "refused"
+    assert "different Git source" in report.message
+    assert len(calls) == 1
+
+
+def test_update_refuses_when_wheel_provenance_disagrees_with_receipt(
+    tmp_path, monkeypatch,
+):
+    tools, prefix = _tool_copy(tmp_path, monkeypatch)
+    _tool_wheel(prefix)
+    info = next(prefix.glob("lib/python*/site-packages/doxa-*.dist-info"))
+    direct = json.loads((info / "direct_url.json").read_text(encoding="utf-8"))
+    direct["url"] = "https://github.com/someone/doxa"
+    (info / "direct_url.json").write_text(json.dumps(direct), encoding="utf-8")
+    run, calls = _uv_run(tools, prefix)
+    report = update_mod.update(root=tmp_path, run=run)
+    assert report.status == "refused"
+    assert "no verifiable Git revision" in report.message
+    assert len(calls) == 1
+
+
+def test_update_refuses_a_tool_other_than_the_running_copy(tmp_path, monkeypatch):
+    tools, prefix = _tool_copy(tmp_path, monkeypatch)
+    _tool_wheel(prefix)
+    monkeypatch.setattr(update_mod, "__file__", str(tmp_path / "other/update.py"))
+    run, calls = _uv_run(tools, prefix)
+    report = update_mod.update(root=tmp_path, run=run)
+    assert report.status == "refused"
+    assert "outside that tool" in report.message
+    assert len(calls) == 1
+
+
+def test_update_reports_uv_failure_and_keeps_running_copy(tmp_path, monkeypatch):
+    tools, prefix = _tool_copy(tmp_path, monkeypatch)
+    _tool_wheel(prefix)
+    run, calls = _uv_run(tools, prefix, error="network unavailable")
+    report = update_mod.update(root=tmp_path, run=run)
+    assert report.status == "refused"
+    assert "before 1.16.0 (aaaaaaa), now 1.16.0 (aaaaaaa)" in report.message
+    assert "network unavailable" in report.message
+    assert len(calls) == 2
 
 
 def test_update_refuses_a_dirty_tree(tmp_path):

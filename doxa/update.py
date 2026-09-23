@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""doxa.update -- ``/update``: fast-forward this checkout, and say what moved.
+"""doxa.update -- ``/update`` for a checkout or the documented uv tool install.
 
 Deliberately narrow. It runs ``git pull --ff-only`` from ``origin`` and
 nothing else: no merge, no rebase, no force, no history rewritten, ever. A
@@ -7,9 +7,12 @@ tree that cannot fast-forward is a tree with local work in it, and a
 terminal that quietly resolves that for you is a terminal that will one day
 lose something.
 
-Refusals come FIRST and are explicit -- a dirty tree, or a copy that is not
-a git checkout at all (installed from a wheel, where `git pull` is
-meaningless). Both name what to do instead.
+An installed copy is updated only when its running interpreter is DOXA's
+uv-tool environment and its receipt and wheel metadata both name this
+project's Git source. An unpinned receipt (the installer default) or an
+explicit main ref may advance; a pinned tag/branch/commit never silently
+becomes main. ``uv tool upgrade --reinstall`` refreshes the Git source and
+keeps the receipt's extras and other requirements.
 
 When the pull moves ``pyproject.toml`` or ``uv.lock``, the dependencies
 changed and ``uv sync`` RUNS -- printing "run uv sync yourself" is how a
@@ -28,9 +31,14 @@ the uv-sync path) without a network or a second repository.
 from __future__ import annotations
 
 import os
+import json
 import subprocess
+import sys
+import tomllib
 from dataclasses import dataclass, field
+from email.parser import Parser
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from . import version as version_mod
 
@@ -55,6 +63,169 @@ pull" that has not answered in ten seconds has already missed the moment
 it was for."""
 
 SYNC_TIMEOUT_SECS = 600.0
+
+
+@dataclass(frozen=True)
+class ToolInstall:
+    prefix: Path
+    version: str
+    revision: str
+    packages: tuple[tuple[str, str, str], ...]
+
+
+def _doxa_git_url(value: str) -> bool:
+    """Accept only DOXA's public Git source, without credentials or ports."""
+    url = urlsplit(value)
+    return (
+        url.scheme == "https" and url.netloc == "github.com"
+        and url.path.rstrip("/") in ("/docwilde/doxa", "/docwilde/doxa.git")
+        and not url.fragment
+    )
+
+
+def _tool_install(run) -> "tuple[ToolInstall | None, str]":
+    """Identify the *running* uv tool from its receipt and wheel provenance.
+
+    A mere ``uv tool list`` entry could be a different DOXA from the one
+    this process loaded. The prefix, uv's tool directory, loaded module,
+    receipt and installed wheel must all point to the same copy before
+    ``/update`` is allowed to mutate anything.
+    """
+    prefix = Path(sys.prefix).resolve()
+    try:
+        listed = run(["uv", "tool", "dir"], prefix, CHECK_TIMEOUT_SECS)
+        tool_dir = Path(listed.stdout.strip()).resolve()
+        if listed.returncode or not listed.stdout.strip():
+            raise ValueError("uv tool dir did not return a directory")
+        if prefix != (tool_dir / "doxa").resolve():
+            raise ValueError("the running Python is not uv's DOXA tool")
+        if not Path(__file__).resolve().is_relative_to(prefix):
+            raise ValueError("the running DOXA package is outside that tool")
+
+        receipt = tomllib.loads(
+            (prefix / "uv-receipt.toml").read_text(encoding="utf-8")
+        )
+        requirements = receipt["tool"]["requirements"]
+        sources = [r for r in requirements if r.get("name") == "doxa"]
+        if len(sources) != 1 or not isinstance(sources[0].get("git"), str):
+            raise ValueError("the uv receipt has no single DOXA Git source")
+        source = sources[0]["git"]
+        if not _doxa_git_url(source):
+            raise ValueError("the uv receipt names a different Git source")
+        query = parse_qs(urlsplit(source).query, keep_blank_values=True)
+        if query not in ({}, {"rev": ["main"]}):
+            ref = query.get("rev", ["a custom ref"])[0]
+            raise ValueError(
+                f"this uv tool install is pinned to {ref!r}; "
+                "reinstall that ref explicitly to update it"
+            )
+
+        # uv records the resolved commit in PEP 610 direct_url.json. The
+        # receipt alone describes intent; this file proves what is on disk.
+        state = _tool_state(prefix)
+        if state is None:
+            raise ValueError("the installed DOXA wheel has no verifiable Git revision")
+        return state, ""
+    except (
+        OSError, ValueError, KeyError, TypeError, AttributeError, IndexError,
+        subprocess.SubprocessError,
+    ) as exc:
+        return None, str(exc)
+
+
+def _tool_state(prefix: Path) -> "ToolInstall | None":
+    infos = list(prefix.glob("lib/python*/site-packages/doxa-*.dist-info"))
+    infos += list(prefix.glob("Lib/site-packages/doxa-*.dist-info"))
+    if len(infos) != 1:
+        return None
+    try:
+        metadata = Parser().parsestr(
+            (infos[0] / "METADATA").read_text(encoding="utf-8"), headersonly=True
+        )
+        version = metadata.get("Version", "").strip()
+        direct = json.loads(
+            (infos[0] / "direct_url.json").read_text(encoding="utf-8")
+        )
+        vcs = direct.get("vcs_info") or {}
+        revision = vcs.get("commit_id", "")
+        if (
+            not version or not _doxa_git_url(direct.get("url", ""))
+            or vcs.get("vcs") != "git" or not isinstance(revision, str)
+            or len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision.lower())
+        ):
+            return None
+        packages = []
+        for info in infos[0].parent.glob("*.dist-info"):
+            data = Parser().parsestr(
+                (info / "METADATA").read_text(encoding="utf-8"),
+                headersonly=True,
+            )
+            name = data.get("Name", "").strip().lower()
+            found_version = data.get("Version", "").strip()
+            if not name or not found_version:
+                return None
+            url_file = info / "direct_url.json"
+            direct_revision = ""
+            if url_file.is_file():
+                source = json.loads(url_file.read_text(encoding="utf-8"))
+                direct_revision = (source.get("vcs_info") or {}).get("commit_id", "")
+            packages.append((name, found_version, direct_revision))
+        return ToolInstall(prefix, version, revision, tuple(sorted(packages)))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def _update_tool(run) -> "UpdateReport":
+    before, reason = _tool_install(run)
+    if before is None:
+        return UpdateReport(
+            status="refused",
+            message=(
+                "update: this DOXA is not a supported uv tool install — "
+                f"{reason or 'reinstall it the way you installed it'}"
+            ),
+        )
+    try:
+        upgraded = run(
+            ["uv", "tool", "upgrade", "--reinstall", "doxa"],
+            before.prefix, SYNC_TIMEOUT_SECS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        upgraded = subprocess.CompletedProcess([], 1, "", str(exc))
+    after = _tool_state(before.prefix)
+    old = f"{before.version} ({before.revision[:7]})"
+    new = f"{after.version} ({after.revision[:7]})" if after else "unverified"
+    if upgraded.returncode:
+        detail = (upgraded.stderr or upgraded.stdout).strip()
+        return UpdateReport(
+            status="refused",
+            message=f"update: uv tool upgrade failed; before {old}, now {new}\n{detail}",
+        )
+    if after is None:
+        return UpdateReport(
+            status="updated",
+            message=("update: uv tool upgrade completed, but the installed "
+                     f"revision could not be verified; before {old}"),
+        )
+    if (
+        before.revision == after.revision and before.version == after.version
+        and before.packages == after.packages
+    ):
+        return UpdateReport(
+            status="up-to-date",
+            message=f"update: uv tool install already up to date ({new})",
+        )
+    if before.revision == after.revision and before.version == after.version:
+        return UpdateReport(
+            status="updated",
+            message=f"update: uv tool refreshed dependencies; DOXA remains {new}",
+        )
+    return UpdateReport(
+        status="updated",
+        message=f"update: uv tool upgraded DOXA {old} → {new}",
+        version_before=before.version,
+        version_after=after.version,
+    )
 
 
 @dataclass
@@ -166,17 +337,10 @@ def check_for_update(root: "Path | None" = None, run=None) -> bool:
 
 
 def update(root: "Path | None" = None, run=_run) -> UpdateReport:
-    """Fast-forward the checkout DOXA is running from and report on it."""
+    """Advance the running checkout or verified uv tool install."""
     root = root or version_mod.source_root()
     if root is None or not (Path(root) / ".git").exists():
-        return UpdateReport(
-            status="refused",
-            message=(
-                "update: this DOXA is not a git checkout (installed copy) — "
-                "reinstall it the way you installed it; /update only "
-                "fast-forwards a checkout"
-            ),
-        )
+        return _update_tool(run)
     root = Path(root)
 
     try:

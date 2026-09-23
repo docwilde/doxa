@@ -1668,8 +1668,9 @@ class PaneCommandsMixin:
         )
 
     async def _cmd_update(self, args: str) -> None:
-        """/update -- fast-forward the checkout DOXA runs from, and say what
-        moved. `--restart` is the explicit opt-in that stops THIS window's
+        """/update -- advance the checkout or verified uv tool install.
+
+        `--restart` is the explicit opt-in that stops THIS window's
         sessions afterwards and relaunches; without it nothing running is
         touched, because a terminal that restarts your work to update
         itself has its priorities backwards."""
