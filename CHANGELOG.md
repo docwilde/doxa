@@ -22,6 +22,7 @@ not written from memory.
 **Isolated Claude authentication recovers.**
 
 - When Claude clears the OAuth tokens in DOXA's isolated credentials, DOXA recopies a usable source credential even if the isolated file is newer. A newer isolated copy with valid tokens remains untouched.
+- `/update` now upgrades a verified `uv tool` install that tracks DOXA `main`, as well as a clean source checkout. It reports the installed revision and refuses to change pinned refs; `/update --restart` remains explicit.
 
 ## 1.16.0 — 2026-09-21
 
