@@ -676,6 +676,7 @@ class WindowActionsMixin:
         (the status line's branch glyph and the plan chip are the two that
         show without a new session); knobs the ENGINE reads take effect on
         its next read, which is per turn by construction."""
+        from .. import engines as engines_mod
         from ..settings import SettingsScreen
 
         def _saved(saved: "bool | None") -> None:
@@ -694,6 +695,10 @@ class WindowActionsMixin:
         self.push_screen(
             SettingsScreen(
                 session_model=getattr(engine, "model", None),
+                session_engine=(
+                    engines_mod.engine_id_of(engine) if engine is not None
+                    else config_mod.engine()
+                ),
                 account=getattr(engine, "account", None) or {},
             ),
             callback=_saved,

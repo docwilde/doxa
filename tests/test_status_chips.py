@@ -1195,8 +1195,10 @@ async def test_chip_order_preserved_after_tooltip_wiring(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_claude_provider_falls_back_without_an_api_key(monkeypatch):
     from doxa.providers import ClaudeProvider
+    from doxa import claude_catalog
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(claude_catalog, "read_cached_catalog", lambda: None)
     provider = ClaudeProvider()
     models = await provider.list_models()
     assert [m.id for m in models] == ["haiku", "sonnet", "opus", "fable"]
