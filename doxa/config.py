@@ -32,10 +32,14 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 import tomllib
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+
+import fcntl
 
 
 @dataclass(frozen=True)
@@ -1354,6 +1358,29 @@ def _coerce(setting: Setting, value: str) -> "Any | None":
     return value
 
 
+@contextmanager
+def _write_lock():
+    """Serialize the read-modify-replace sequence for ``config.toml``.
+
+    Atomic replacement only protects readers from a partial file.  Two
+    settings windows in separate processes could still both read the same
+    old file and each atomically replace it, losing whichever change landed
+    first.  The adjacent lock file survives replacement of config.toml, so
+    the lock covers both the seed read and the final rename.
+    """
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    lock_path = path.with_name(f".{path.name}.lock")
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def _write_stored(stored: dict[str, Any]) -> Path:
     """The shared tail of every writer: render ``stored`` as TOML and
     replace the file atomically, clamped to 0600 -- it is user
@@ -1392,10 +1419,20 @@ def _write_stored(stored: dict[str, Any]) -> Path:
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)  # DOXA's state home is the user's alone
-    tmp = path.with_suffix(".toml.tmp")
-    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent,
+    )
+    tmp = Path(tmp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     invalidate()
     return path
 
@@ -1459,28 +1496,29 @@ def save(values: dict[str, str], *, model_engine: str = "claude") -> Path:
     but unreadable or malformed -- a missing file is NOT that case, and
     seeds an empty, fresh save exactly as before.
     """
-    stored = _seed_for_write()
-    for setting in SETTINGS:
-        if not setting.key or setting.read_only or setting.key not in values:
-            continue
-        coerced = _coerce(setting, values[setting.key])
-        if setting.key == "model" and model_engine != "claude":
-            models = stored.get("models")
-            models = dict(models) if isinstance(models, dict) else {}
+    with _write_lock():
+        stored = _seed_for_write()
+        for setting in SETTINGS:
+            if not setting.key or setting.read_only or setting.key not in values:
+                continue
+            coerced = _coerce(setting, values[setting.key])
+            if setting.key == "model" and model_engine != "claude":
+                models = stored.get("models")
+                models = dict(models) if isinstance(models, dict) else {}
+                if coerced is None:
+                    models.pop(model_engine, None)
+                else:
+                    models[model_engine] = coerced
+                if models:
+                    stored["models"] = models
+                else:
+                    stored.pop("models", None)
+                continue
             if coerced is None:
-                models.pop(model_engine, None)
+                stored.pop(setting.key, None)
             else:
-                models[model_engine] = coerced
-            if models:
-                stored["models"] = models
-            else:
-                stored.pop("models", None)
-            continue
-        if coerced is None:
-            stored.pop(setting.key, None)
-        else:
-            stored[setting.key] = coerced
-    return _write_stored(stored)
+                stored[setting.key] = coerced
+        return _write_stored(stored)
 
 
 def save_model(engine_id: str, value: str) -> Path:
@@ -1499,6 +1537,7 @@ def save_lore_root(path: str) -> Path:
     Shares :func:`save`'s refusal on a present-but-broken file (see
     :class:`ConfigSaveRefused`) -- this writer amplifies a malformed file
     into total data loss exactly the same way :func:`save` used to."""
-    stored = _seed_for_write()
-    stored["lore_root"] = path
-    return _write_stored(stored)
+    with _write_lock():
+        stored = _seed_for_write()
+        stored["lore_root"] = path
+        return _write_stored(stored)

@@ -234,7 +234,7 @@ class UpdateReport:
     """What happened, in the words the block will print."""
 
     status: str
-    """refused | up-to-date | updated"""
+    """refused | up-to-date | updated | partial"""
 
     message: str
     """One line for the headline -- always set, always the first thing."""
@@ -243,6 +243,7 @@ class UpdateReport:
     version_before: str = ""
     version_after: str = ""
     synced: bool = False
+    sync_failed: bool = False
     sync_output: str = ""
 
     def text(self) -> str:
@@ -264,6 +265,10 @@ class UpdateReport:
         if self.synced:
             lines.append("")
             lines.append("dependencies changed — uv sync:")
+            lines += [f"  {line}" for line in self.sync_output.splitlines()]
+        elif self.sync_failed:
+            lines.append("")
+            lines.append("dependencies changed — uv sync FAILED:")
             lines += [f"  {line}" for line in self.sync_output.splitlines()]
         if self.status == "updated":
             lines.append("")
@@ -409,6 +414,13 @@ def update(root: "Path | None" = None, run=_run) -> UpdateReport:
     )
     if any(name in DEPENDENCY_FILES for name in names):
         sync = run(["uv", "sync"], root, SYNC_TIMEOUT_SECS)
-        report.synced = True
+        report.synced = sync.returncode == 0
+        report.sync_failed = sync.returncode != 0
         report.sync_output = (sync.stdout + sync.stderr).strip() or "(no output)"
+        if report.sync_failed:
+            report.status = "partial"
+            report.message = (
+                f"update: source fast-forwarded {before[:7]} → {after[:7]}, "
+                "but dependency sync failed"
+            )
     return report

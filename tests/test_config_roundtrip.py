@@ -24,9 +24,34 @@ Two verified defects, fixed here:
 
 from __future__ import annotations
 
+import multiprocessing
+import os
+
 import pytest
 
 from doxa import config
+
+
+def _save_after_seed(home, values, seeded, release, result):
+    """One process in the lost-update reproduction below."""
+    os.environ["DOXA_HOME"] = home
+    config.invalidate()
+    original = config._seed_for_write
+
+    def delayed_seed():
+        stored = original()
+        if seeded is not None:
+            seeded.set()
+            if not release.wait(5):
+                raise TimeoutError("test did not release the first config writer")
+        return stored
+
+    config._seed_for_write = delayed_seed
+    try:
+        config.save(values)
+        result.put(None)
+    except BaseException as exc:
+        result.put(repr(exc))
 
 
 @pytest.fixture(autouse=True)
@@ -180,3 +205,34 @@ def test_save_with_no_file_creates_one():
     path = config.save({"model": "sonnet"})
     assert path.exists() is True
     assert config.load()["model"] == "sonnet"
+
+
+def test_concurrent_saves_merge_their_independent_changes(tmp_path):
+    """A writer that read before another writer saved must wait and re-read,
+    rather than atomically replacing the other setting with its stale copy."""
+    context = multiprocessing.get_context("fork")
+    home = str(tmp_path / "doxa-home")
+    seeded = context.Event()
+    release = context.Event()
+    result = context.Queue()
+    first = context.Process(
+        target=_save_after_seed,
+        args=(home, {"model": "sonnet"}, seeded, release, result),
+    )
+    first.start()
+    assert seeded.wait(5), "the first writer never reached its seed read"
+    second = context.Process(
+        target=_save_after_seed,
+        args=(home, {"engine": "codex"}, None, release, result),
+    )
+    second.start()
+    release.set()
+    first.join(10)
+    second.join(10)
+    assert first.exitcode == 0 and second.exitcode == 0
+    assert result.get(timeout=1) is None
+    assert result.get(timeout=1) is None
+
+    config.invalidate()
+    assert config.load()["model"] == "sonnet"
+    assert config.load()["engine"] == "codex"

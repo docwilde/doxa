@@ -1072,6 +1072,26 @@ def test_the_settings_row_says_a_priced_ceiling_is_doxas_own_arithmetic(
     assert prices_mod.sheet_read_on() in warning
 
 
+def test_configured_warning_uses_the_active_engines_configured_model(
+    monkeypatch, tmp_path,
+):
+    """Each engine has its own saved model.  Looking up model() without the
+    active engine silently selected Claude's preference for a Codex warning."""
+    monkeypatch.setenv("DOXA_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(budget_mod.SESSION_BUDGET_ENV, "5")
+    monkeypatch.setenv("DOXA_ENGINE", "codex")
+    monkeypatch.delenv("DOXA_MODEL", raising=False)
+    config_mod.invalidate()
+    config_mod.save_model("claude", "claude-unpriced-for-codex")
+    config_mod.save_model("codex", "gpt-6-astra")
+    config_mod.invalidate()
+
+    warning = budget_mod.configured_warning()
+    assert warning is not None
+    assert "ENFORCED" in warning and "NOT ENFORCEABLE" not in warning
+    assert "gpt-6-astra" in warning
+
+
 # -- the fleet, over a mixed pool --------------------------------------
 
 
