@@ -245,9 +245,19 @@ class ClaudeProvider:
     empirical finding, and doxa.ui.labels.PROVIDER_GLYPHS' own one-row
     comment for the parallel note on the tab-label side."""
 
+    _catalog_generation = 0
+    _startup_cli_ok: bool | None = None
+
+    @classmethod
+    def startup_catalog_checked(cls, cli_ok: bool) -> None:
+        """Make existing pane providers reread Claude's cache after startup."""
+        cls._catalog_generation += 1
+        cls._startup_cli_ok = cli_ok
+
     def __init__(self) -> None:
         self._cache: "list[ModelInfo] | None" = None
         self._cache_at = 0.0
+        self._seen_generation = type(self)._catalog_generation
 
     def provider_id(self) -> str:
         return CLAUDE_PROVIDER_ID
@@ -259,7 +269,9 @@ class ClaudeProvider:
         return None  # "default": whatever the CLI's own --model default is
 
     async def list_models(self) -> list[ModelInfo]:
-        if self._cache is not None and time.monotonic() - self._cache_at < CATALOG_CACHE_TTL:
+        generation = type(self)._catalog_generation
+        if (self._cache is not None and self._seen_generation == generation
+                and time.monotonic() - self._cache_at < CATALOG_CACHE_TTL):
             return self._cache
         models = await self._try_api()
         if models is None:
@@ -273,6 +285,7 @@ class ClaudeProvider:
             ]
         self._cache = models
         self._cache_at = time.monotonic()
+        self._seen_generation = generation
         return models
 
     def catalog_note(self, models: list[ModelInfo]) -> str:
@@ -290,10 +303,15 @@ class ClaudeProvider:
                 f"{models[0].as_of}; availability may have changed"
             )
         if models and models[0].source == "fallback":
-            return (
+            note = (
                 "model catalog: static fallback -- the Anthropic Models "
                 "API is not reachable under this session's OAuth auth"
             )
+            if type(self)._startup_cli_ok is False:
+                note += "; Claude CLI startup refresh unavailable"
+            elif type(self)._startup_cli_ok is True:
+                note += "; Claude CLI provided no matching cached list"
+            return note
         return ""
 
     async def _try_api(self) -> "list[ModelInfo] | None":

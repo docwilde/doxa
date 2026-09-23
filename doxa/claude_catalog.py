@@ -14,9 +14,12 @@ closed so the provider can use its fallback.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import os
 import re
+import signal
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -180,11 +183,19 @@ def _read_one(
         return None
     if not isinstance(data, dict):
         return None
-    if (
-        data.get("version") != 2
-        or data.get("resolution") != "token_org"
-        or data.get("organizationUuid") != org
-    ):
+    if data.get("version") != 2:
+        return None
+    # Recent Claude Code stores its subscription catalogue as
+    # <organization>-<account>-cc.json. The older ccd cache records the
+    # organization inside the JSON instead. Never accept an unscoped cc file.
+    legacy = data.get("resolution") == "token_org" and data.get("organizationUuid") == org
+    current = (
+        "organizationUuid" not in data
+        and "resolution" not in data
+        and path.name.startswith(f"{org}-")
+        and path.name.endswith("-cc.json")
+    )
+    if not legacy and not current:
         return None
     fetched_at = _timestamp(data.get("fetchedAt"))
     stale_at = _timestamp(data.get("staleAt"))
@@ -197,10 +208,11 @@ def _read_one(
     ):
         return None
     catalog = data.get("catalog")
-    if not isinstance(catalog, dict) or catalog.get("surface") != "ccd":
+    surface = "ccd" if legacy else "cc"
+    if not isinstance(catalog, dict) or catalog.get("surface") != surface:
         return None
     config = catalog.get("config")
-    if not isinstance(config, dict) or config.get("id") != "ccd":
+    if not isinstance(config, dict) or config.get("id") != surface:
         return None
     models = _model_rows(config.get("models"), cli_version)
     if not models:
@@ -235,3 +247,39 @@ def read_cached_catalog(
     candidates = (_read_one(path, org, version, instant, offline) for path in paths)
     return max((item for item in candidates if item is not None),
                key=lambda item: item.fetched_at, default=None)
+
+
+async def warm_cli_catalog(*, cli: str = "claude", timeout: float = 8.0) -> bool:
+    """Start Claude once without sending a prompt so it can refresh its cache.
+
+    Stream input stays open during initialization. No model request is sent;
+    the subprocess is stopped after a fixed window. This uses the operator's
+    ordinary CLI profile, just as :func:`read_cached_catalog` does.
+    """
+    try:
+        process = await asyncio.create_subprocess_exec(
+            cli, "--print", "--verbose", "--input-format", "stream-json",
+            "--output-format", "stream-json", stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return False
+    try:
+        await asyncio.wait_for(process.wait(), timeout)
+        return process.returncode == 0
+    except asyncio.TimeoutError:
+        # An idle stream-json session normally waits for input indefinitely.
+        return True
+    finally:
+        if process.stdin is not None:
+            process.stdin.close()
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGTERM)
+            try:
+                await asyncio.wait_for(process.wait(), 1.0)
+            except asyncio.TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                await process.wait()

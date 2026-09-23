@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -113,6 +114,27 @@ def test_fresh_cache_is_still_a_cache(tmp_path, monkeypatch):
     assert [m.id for m in result.models] == ["claude-sonnet-5", "claude-fable-5-1"]
 
 
+def test_current_cc_cache_is_scoped_by_account_filename(tmp_path, monkeypatch):
+    _cli(monkeypatch, version="2.1.281")
+    path = _cache(tmp_path, fetched=NOW - timedelta(minutes=5),
+                  stale=NOW + timedelta(minutes=55))
+    data = json.loads(path.read_text())
+    data.pop("resolution")
+    data.pop("organizationUuid")
+    data["catalog"]["surface"] = "cc"
+    data["catalog"]["config"]["id"] = "cc"
+    path.unlink()
+    scoped = path.with_name("current-org-account-cc.json")
+    scoped.write_text(json.dumps(data))
+
+    result = claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW)
+    assert result is not None
+    assert [model.id for model in result.models] == ["claude-sonnet-5", "claude-fable-5-1"]
+
+    scoped.rename(path.with_name("other-org-account-cc.json"))
+    assert claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW) is None
+
+
 def test_other_account_and_logged_out_never_get_cached_models(tmp_path, monkeypatch):
     _cache(tmp_path, org="previous-org")
     _cli(monkeypatch, org="current-org")
@@ -215,3 +237,55 @@ def test_preserves_account_specific_billing_notice(tmp_path, monkeypatch):
     result = claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW)
     assert result is not None
     assert result.models[0].notice == "Requires usage credits: Billed separately"
+
+
+async def test_startup_cli_warmup_sends_no_prompt_and_stops_on_deadline(monkeypatch):
+    calls = []
+    stopped = asyncio.Event()
+
+    class Input:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    class Process:
+        pid = 12345
+        returncode = None
+        stdin = Input()
+
+        async def wait(self):
+            await stopped.wait()
+            return self.returncode
+
+    process = Process()
+
+    async def spawn(*args, **kwargs):
+        calls.append((args, kwargs))
+        return process
+
+    def killpg(pid, signum):
+        calls.append((pid, signum))
+        process.returncode = -signum
+        stopped.set()
+
+    monkeypatch.setattr(claude_catalog.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(claude_catalog.os, "killpg", killpg)
+
+    assert await claude_catalog.warm_cli_catalog(timeout=0.01) is True
+    args, kwargs = calls[0]
+    assert args == (
+        "claude", "--print", "--verbose", "--input-format", "stream-json",
+        "--output-format", "stream-json",
+    )
+    assert kwargs["stdin"] == asyncio.subprocess.PIPE
+    assert process.stdin.closed
+    assert len(calls) == 2
+
+
+async def test_missing_cli_warmup_fails_cleanly(monkeypatch):
+    async def missing(*args, **kwargs):
+        raise FileNotFoundError("claude")
+
+    monkeypatch.setattr(claude_catalog.asyncio, "create_subprocess_exec", missing)
+    assert await claude_catalog.warm_cli_catalog(timeout=0.01) is False

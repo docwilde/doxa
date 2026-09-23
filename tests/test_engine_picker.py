@@ -801,6 +801,26 @@ async def test_claude_catalogue_rechecks_the_cli_cache_after_a_minute(monkeypatc
     assert [m.id for m in await provider.list_models()] == ["claude-opus-4-5"]
 
 
+async def test_startup_cli_warmup_invalidates_existing_claude_picker_cache(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    models = ["claude-sonnet-4-5"]
+
+    def cache():
+        return claude_catalog_mod.ClaudeCatalog(
+            models=(claude_catalog_mod.ClaudeCatalogModel(models[-1], "Claude"),),
+            fetched_at=datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc),
+            stale_at=datetime(2026, 9, 23, 13, 0, tzinfo=timezone.utc),
+            is_stale=False,
+        )
+
+    monkeypatch.setattr(claude_catalog_mod, "read_cached_catalog", cache)
+    provider = providers_mod.ClaudeProvider()
+    assert [m.id for m in await provider.list_models()] == ["claude-sonnet-4-5"]
+    models.append("claude-opus-4-5")
+    providers_mod.ClaudeProvider.startup_catalog_checked(True)
+    assert [m.id for m in await provider.list_models()] == ["claude-opus-4-5"]
+
+
 # -- the live tier, skipped cleanly without a credential ---------------
 
 requires_deepseek = pytest.mark.skipif(

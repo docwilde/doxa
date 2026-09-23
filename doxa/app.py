@@ -1018,6 +1018,8 @@ class DoxaApp(
         # One-shot "has this run already told you about an update" latch --
         # the background checker in on_mount fires at most once per launch.
         self._update_notified = False
+        self._interactive_run = False
+        self._claude_catalog_warmup_started = False
         # Item Z (/about): what that SAME boot check found, kept so the
         # about dialog can say "update available" without running a second
         # `git fetch` of its own -- reuse, not a duplicate checker. Three
@@ -1515,6 +1517,7 @@ class DoxaApp(
         captured output would be measuring its own harness."""
         from . import window as window_mod
 
+        self._interactive_run = True
         try:
             with window_mod.terminal_title(window_mod.title_for(self.cwd)):
                 return super().run(*args, **kwargs)
@@ -1544,6 +1547,22 @@ class DoxaApp(
         self.run_worker(
             self._check_for_update(), exclusive=True, group="update-check"
         )
+        if self._interactive_run and not self._claude_catalog_warmup_started:
+            self._claude_catalog_warmup_started = True
+            self.run_worker(
+                self._warm_claude_catalog(), exclusive=True,
+                group="claude-catalog-warmup",
+            )
+
+    async def _warm_claude_catalog(self) -> None:
+        """Give the local Claude CLI one bounded chance to update its list."""
+        from . import claude_catalog, providers
+
+        try:
+            cli_ok = await claude_catalog.warm_cli_catalog()
+        except Exception:  # noqa: BLE001 -- optional startup catalogue
+            cli_ok = False
+        providers.ClaudeProvider.startup_catalog_checked(cli_ok)
 
     async def _check_for_update(self) -> None:
         """Boot-time "is there something to pull" check -- see
