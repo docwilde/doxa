@@ -117,6 +117,9 @@ def test_codex_status_uses_only_explicit_unambiguous_effort(tmp_path, monkeypatc
     (project / ".codex").mkdir()
     (project / ".codex" / "config.toml").write_text('model_reasoning_effort = "low"\n')
     assert codex_mod.configured_reasoning_effort(str(project)) is None
+    nested = project / "nested"
+    nested.mkdir()
+    assert codex_mod.configured_reasoning_effort(str(nested)) is None
 
 
 def test_stop_is_not_in_the_protocol():

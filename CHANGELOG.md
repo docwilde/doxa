@@ -22,6 +22,8 @@ not written from memory.
 **Isolated Claude authentication recovers.**
 
 - When Claude clears the OAuth tokens in DOXA's isolated credentials, DOXA recopies a usable source credential even if the isolated file is newer. A newer isolated copy with valid tokens remains untouched.
+- `/login claude|codex` and `/logout claude|codex` now run each provider CLI through an asynchronous terminal bridge. The TUI reports the browser URL or device code and completion; Codex device auth is available with `/login codex --device-auth`. Claude logout blocks automatic reimport of the old isolated credential until an explicit login.
+- The installer allows missing or signed-out provider CLIs, so users can install DOXA before authenticating. Existing sessions may retain their connection after an account change; start a new session to use the new login.
 - `/update` now upgrades a verified `uv tool` install that tracks DOXA `main`, as well as a clean source checkout. It reports the installed revision and refuses to change pinned refs; `/update --restart` remains explicit.
 
 ## 1.16.0 — 2026-09-21

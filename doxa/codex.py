@@ -255,7 +255,16 @@ def configured_reasoning_effort(cwd: str) -> str | None:
             data = tomllib.load(handle)
     except (OSError, tomllib.TOMLDecodeError):
         return None
-    if data.get("profile") or (Path(cwd) / ".codex" / "config.toml").exists():
+    global_config = (config_home / "config.toml").resolve()
+    project = Path(cwd).resolve()
+    project_configs = (
+        directory / ".codex" / "config.toml"
+        for directory in (project, *project.parents)
+    )
+    if data.get("profile") or any(
+        candidate.exists() and candidate.resolve() != global_config
+        for candidate in project_configs
+    ):
         return None
     value = data.get("model_reasoning_effort")
     if not isinstance(value, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,15}", value):
