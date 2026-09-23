@@ -200,9 +200,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import time
+import tomllib
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -238,6 +240,27 @@ from .promptqueue import PromptQueue, PromptQueueFull
 #: CLI has to fail as a session that could not start, with the reason,
 #: rather than as a traceback from a spawn.
 CODEX_BIN = "codex"
+
+
+def configured_reasoning_effort(cwd: str) -> str | None:
+    """Read an explicit Codex effort only when its config source is clear.
+
+    Codex chooses its own model-dependent default when this key is absent.
+    Profiles and project config add precedence that this local read cannot
+    establish, so in those cases the status bar leaves effort unnamed.
+    """
+    config_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    try:
+        with (config_home / "config.toml").open("rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    if data.get("profile") or (Path(cwd) / ".codex" / "config.toml").exists():
+        return None
+    value = data.get("model_reasoning_effort")
+    if not isinstance(value, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,15}", value):
+        return None
+    return value
 
 #: Codex's three sandbox policies, verbatim from ``codex exec --help``.
 #: An ALLOW-list, not a passthrough: ``self.sandbox`` is interpolated into
@@ -766,7 +789,9 @@ class CodexEngine:
         # the same field doxa.engine and doxa.vendors carry, read the same
         # way by the /context breakdown, so nothing special-cases codex.
         self.lore_snapshot_chars: "int | None" = None
-        self.effort: "str | None" = None
+        # Codex does not report effort in `exec --json`. Show only an
+        # explicit, unambiguous CLI config value, never a guessed default.
+        self.effort: "str | None" = configured_reasoning_effort(self.cwd)
         self.num_turns = 0
         self.usage_totals: "dict[str, int]" = {}
 
@@ -1079,6 +1104,8 @@ class CodexEngine:
         ``-c`` is accepted by ``codex exec`` AND by ``codex exec resume``
         (both help screens list it; ``-C``/``-s`` are the ones resume
         rejects), so the overrides cost the one-shape property nothing."""
+        # Each turn starts a fresh Codex CLI process, which re-reads config.
+        self.effort = configured_reasoning_effort(self.cwd)
         argv = [CODEX_BIN, "exec"]
         if not first_turn and self.thread_id:
             argv += ["resume", self.thread_id]

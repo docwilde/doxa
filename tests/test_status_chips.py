@@ -397,6 +397,18 @@ async def test_unavailable_effort_keeps_model_chip_without_bracket(monkeypatch, 
         assert picker.is_open and picker.border_title == "model"
 
 
+@pytest.mark.asyncio
+async def test_codex_effort_is_shown_without_claude_picker(monkeypatch, tmp_path):
+    fake = FakeEngine([], model="gpt-6-sol", effort="xhigh")
+    fake.engine_id = "codex"
+    app, _engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test() as pilot:
+        assert await _wait_status(pilot, app, "gpt-6-sol [xhigh]")
+        bar = app.query_one("#status-bar", StatusBar)
+        assert "open_effort_picker" not in str(bar.renderable)
+        assert "open_model_picker" in str(bar.renderable)
+
+
 # -- ACTIONABLE tier: peers -> a roster picker, ctx% -> /compact ---------
 #
 # v0.79.0: the peers chip stops shortcutting to `/sessions` (pinned

@@ -611,19 +611,30 @@ class PaneChipsMixin:
         )
         effort = getattr(engine, "effort", None)
         if effort:
-            # One compact model chip, with separate click targets: the
-            # bracket reports THIS session's connect-time choice, while
-            # its picker changes only the default for NEW sessions.
+            # Claude's bracket opens its connect-time default picker.
+            # Codex reads its own config; a Claude picker there would
+            # silently change the wrong engine, so its bracket is plain.
             effort_text = f"[{effort}]"
+            codex_effort = (
+                engines_mod.engine_id_of(engine) == engines_mod.CODEX_ENGINE_ID
+            )
+            effort_markup = (
+                _escape_markup(effort_text) if codex_effort
+                else _chip_span(effort_text, 'open_effort_picker')
+            )
+            effort_hint = (
+                "Codex CLI configured reasoning effort; edit its config "
+                "to change future turns" if codex_effort else
+                "reasoning effort for NEW sessions only (connect-time) -- "
+                "click to change the default; this session keeps its own"
+            )
             chips.append(StatusChip.raw(
                 f"{model} {effort_text}",
                 f"{_chip_span(model, 'open_model_picker')} "
-                f"{_chip_span(effort_text, 'open_effort_picker')}",
+                f"{effort_markup}",
                 (
                     (model, model_hint),
-                    (effort_text, "reasoning effort for NEW sessions only "
-                     "(connect-time) -- click to change the default; "
-                     "this session keeps its own"),
+                    (effort_text, effort_hint),
                 ),
             ))
         else:

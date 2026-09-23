@@ -96,6 +96,29 @@ def test_codex_engine_satisfies_the_protocol(tmp_path):
     assert isinstance(CodexEngine(cwd=str(tmp_path)), Engine)
 
 
+def test_codex_status_uses_only_explicit_unambiguous_effort(tmp_path, monkeypatch):
+    config_home = tmp_path / "codex-home"
+    config_home.mkdir()
+    config = config_home / "config.toml"
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(config_home))
+
+    config.write_text('model_reasoning_effort = "xhigh"\n')
+    engine = CodexEngine(cwd=str(project), exec_factory=lambda *a, **kw: None)
+    assert engine.effort == "xhigh"
+    config.write_text('model_reasoning_effort = "high"\n')
+    engine._argv(True)  # a new Codex process re-reads configuration
+    assert engine.effort == "high"
+
+    config.write_text('profile = "custom"\nmodel_reasoning_effort = "high"\n')
+    assert codex_mod.configured_reasoning_effort(str(project)) is None
+    config.write_text('model_reasoning_effort = "high"\n')
+    (project / ".codex").mkdir()
+    (project / ".codex" / "config.toml").write_text('model_reasoning_effort = "low"\n')
+    assert codex_mod.configured_reasoning_effort(str(project)) is None
+
+
 def test_stop_is_not_in_the_protocol():
     """SessionEngine has no ``stop`` -- it is EngineClient's "finalize the
     daemon NOW" verb. A Protocol carrying it would have been written
