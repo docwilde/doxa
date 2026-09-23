@@ -604,6 +604,12 @@ class PaneChipsMixin:
         remote = remote_driver_chip(getattr(engine, "remote_driver", None))
         if remote is not None:
             chips.append(StatusChip.plain(*remote))
+        running_engine = engines_mod.engine_id_of(engine)
+        chips.append(StatusChip.clickable(
+            running_engine, "open_engine_picker",
+            "engine running this session -- click to choose the engine "
+            "for NEW sessions; this session keeps its engine",
+        ))
         model = engine.model or "default"
         model_hint = (
             "model handling this session's turns -- click to switch "
@@ -770,47 +776,8 @@ class PaneChipsMixin:
                 ))
             else:
                 chips.append(StatusChip.plain(sync_text, sync_hint))
-        # Subscription-aware cost: on subscription auth the session costs
-        # no dollars, so a bare $ figure is misleading -- show the tier,
-        # with the (already-computed) list-price figure demoted to an
-        # explicit what-if. API-key auth keeps the real $ estimate.
-        account = getattr(engine, "account", None) or {}
-        tier = (
-            identity_mod.account_tier(account)
-            if engines_mod.engine_id_of(engine) == engines_mod.CLAUDE_ENGINE_ID
-            else None
-        )
-        if not caps.cost:
-            # Nothing said, so nothing shown. `$0.0000` is not the absence
-            # of a cost, it is the CLAIM that this session was free -- and
-            # an engine whose event stream has no cost field in it has not
-            # made that claim. Same rule the usage chip below already
-            # follows ("only when real numbers exist").
-            pass
-        elif tier:
-            # The "if API" words were dropped from the CHIP (they cost row
-            # width, which is the scarcest thing in the status bar) but NOT
-            # the meaning: `sub:` already says this session bills no
-            # dollars, and `≈` marks the figure as an estimate. The full
-            # statement stays one hover away, where there is room for it --
-            # the same split /usage keeps, which spells it out in prose.
-            chips.append(StatusChip.plain(
-                f"sub:{tier} (≈${engine.total_cost_usd:.4f})",
-                f"subscription plan ({tier}) -- no API dollars are actually "
-                "spent; the ≈$ figure is the list-price what-if, i.e. what "
-                "this session WOULD have cost on API pricing",
-            ))
-        else:
-            chips.append(StatusChip.plain(
-                f"${engine.total_cost_usd:.4f}",
-                "actual API spend billed for this session so far",
-            ))
-        if self._usage_chip:  # only when real numbers exist
-            chips.append(StatusChip.plain(
-                self._usage_chip,
-                "subscription utilization cached by the claude CLI -- "
-                "session (5h) and weekly limits used so far",
-            ))
+        # Keep ctx ahead of cost so the new engine chip does not push its
+        # compact action past the edge of an 80-column terminal.
         # ctx% is ACTIONABLE (click -> confirm, then /compact -- item 1)
         # but its own markup is already trusted, code-generated pressure
         # coloring (ctx_chip's amber/red escalation) -- wrapping it through
@@ -861,6 +828,47 @@ class PaneChipsMixin:
                     "compact (asks first: compacting summarizes and "
                     "discards earlier detail)",
                 ),),
+            ))
+        # Subscription-aware cost: on subscription auth the session costs
+        # no dollars, so a bare $ figure is misleading -- show the tier,
+        # with the (already-computed) list-price figure demoted to an
+        # explicit what-if. API-key auth keeps the real $ estimate.
+        account = getattr(engine, "account", None) or {}
+        tier = (
+            identity_mod.account_tier(account)
+            if engines_mod.engine_id_of(engine) == engines_mod.CLAUDE_ENGINE_ID
+            else None
+        )
+        if not caps.cost:
+            # Nothing said, so nothing shown. `$0.0000` is not the absence
+            # of a cost, it is the CLAIM that this session was free -- and
+            # an engine whose event stream has no cost field in it has not
+            # made that claim. Same rule the usage chip below already
+            # follows ("only when real numbers exist").
+            pass
+        elif tier:
+            # The "if API" words were dropped from the CHIP (they cost row
+            # width, which is the scarcest thing in the status bar) but NOT
+            # the meaning: `sub:` already says this session bills no
+            # dollars, and `≈` marks the figure as an estimate. The full
+            # statement stays one hover away, where there is room for it --
+            # the same split /usage keeps, which spells it out in prose.
+            chips.append(StatusChip.plain(
+                f"sub:{tier} (≈${engine.total_cost_usd:.4f})",
+                f"subscription plan ({tier}) -- no API dollars are actually "
+                "spent; the ≈$ figure is the list-price what-if, i.e. what "
+                "this session WOULD have cost on API pricing",
+            ))
+        else:
+            chips.append(StatusChip.plain(
+                f"${engine.total_cost_usd:.4f}",
+                "actual API spend billed for this session so far",
+            ))
+        if self._usage_chip:  # only when real numbers exist
+            chips.append(StatusChip.plain(
+                self._usage_chip,
+                "subscription utilization cached by the claude CLI -- "
+                "session (5h) and weekly limits used so far",
             ))
         # The belief COUNT is the project's, not the engine's -- one
         # SELECT against the shared store -- so every engine shows the real
@@ -1161,6 +1169,25 @@ class PaneChipsMixin:
             rows, current_id,
             lambda chosen: self.run_worker(self._cmd_model(chosen), group="command"),
             note=note, title="model",
+        )
+
+    async def open_engine_picker(self) -> None:
+        """Choose the engine for new sessions through the /engine path."""
+        if self.engine is None:
+            return
+        running = engines_mod.engine_id_of(self.engine)
+        rows = [
+            (
+                engine_id,
+                f"{engine_id}  ·  {engines_mod.get(engine_id).engine_display_name()}",
+            )
+            for engine_id in engines_mod.available()
+        ]
+        self._open_chip_picker(
+            rows, config_mod.engine(),
+            lambda chosen: self.run_worker(self._cmd_engine(chosen), group="command"),
+            note=f"NEW sessions only -- this session keeps {running}",
+            title="engine",
         )
 
     async def open_branch_picker(self) -> None:

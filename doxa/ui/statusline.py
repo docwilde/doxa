@@ -546,7 +546,7 @@ class StatusBar(Static):
     pane.
 
     v0.24.0 widened the tiers the release-notes' "for every chip?" answer
-    drew: model/branch/effort/the repo name (item 4 -- overrides v0.22.0's
+    drew: engine/model/branch/effort/the repo name (item 4 -- overrides v0.22.0's
     "repo name is INERT") open the shared :class:`ChipPicker`; peers/ctx%/
     the session handle/beliefs are ACTIONABLE (peers -> a picker roster
     since v0.79.0 (through v0.78.0: /sessions), ctx% -> a confirm THEN
@@ -659,6 +659,9 @@ class StatusBar(Static):
 
     async def action_open_model_picker(self) -> None:
         await self.pane.open_model_picker()
+
+    async def action_open_engine_picker(self) -> None:
+        await self.pane.open_engine_picker()
 
     async def action_open_branch_picker(self) -> None:
         await self.pane.open_branch_picker()
