@@ -150,6 +150,26 @@ async def test_hello_frame_is_version_stamped(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_client_effort_is_daemon_sessions_connect_time_choice(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOXA_EFFORT", "high")
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+        reader, writer = await asyncio.open_unix_connection(str(daemon.socket_path))
+        hello = json.loads(await asyncio.wait_for(reader.readline(), 5))
+        assert hello["effort"] == "high"
+        writer.close()
+        await writer.wait_closed()
+
+        client = EngineClient(str(daemon.socket_path))
+        await client.start()
+        assert client.effort == "high"
+        monkeypatch.setenv("DOXA_EFFORT", "low")
+        status = await client.refresh_status()
+        assert status["effort"] == "high"
+        assert client.effort == "high"
+        await client.finalize()
+
+
+@pytest.mark.asyncio
 async def test_replay_from_cursor_after_detach(tmp_path, monkeypatch):
     """Detach after a turn, reattach: cursor=None replays the whole ring;
     a mid-stream cursor replays only what that client has not yet seen."""

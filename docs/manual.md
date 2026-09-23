@@ -1860,7 +1860,7 @@ commands this session carries, and is omitted entirely when there are none
 | command | does |
 |---|---|
 | `/compact` | Ask the CLI to compact the transcript (runs LORE's review first); passthrough, not intercepted |
-| `/update [--restart]` | Fast-forward this DOXA checkout from origin (never merges) |
+| `/update [--restart]` | Fast-forward a clean DOXA checkout, or refresh the verified uv tool install tracking `main`; `--restart` relaunches after an update. Pinned refs require explicit reinstall. |
 | `/help` | Every command and key binding, generated from this registry |
 | `/about` | Version, dependencies, platform and config path — what a bug report needs |
 

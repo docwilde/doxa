@@ -10,9 +10,8 @@
 </p>
 
 > [!WARNING]
-> **Beta.** DOXA reached `1.0` and still moves fast: 112 releases took it from
-> `0.1.0` to `1.11.1` between 23 August and 18 September 2026. Config keys, the
-> socket protocol and on-disk formats can still change between minor versions,
+> **Beta.** DOXA moves fast. Config keys, the socket protocol and on-disk
+> formats can still change between minor versions,
 > with no migration path.
 > It runs an agent that edits your files and a shell with your privileges.
 > The suite gates every release, but the project has one author and most
@@ -26,7 +25,7 @@ through the Codex CLI on whatever it is signed into (a ChatGPT subscription
 or an API key), and **DeepSeek** and **GLM** on their own API keys. Pick one
 per session with `--engine` or `/engine`; the manual's
 [engine capabilities](docs/manual.md#engine-capabilities) table says what
-each can do. A Claude session runs in a **daemon** of its own:
+each can do. Each session runs in a **daemon** of its own:
 close the terminal, `doxa attach` an hour later, and the transcript picks up
 where it stopped. No tmux involved.
 
@@ -55,79 +54,30 @@ spend, fake account numbers. See
 
 ## What you get
 
-- **[Sessions outlive the window.](docs/manual.md#sessions-and-the-daemon)**
-  Each is a daemon behind a `0600` socket; closing the terminal detaches,
-  and `doxa` restores the repo's tab set.
-- **[Reasoning and tool calls on the record.](docs/manual.md#the-transcript)**
-  Markdown under a collapsed reasoning fold; each `⚒ Tool calls (N)` chip
-  opens to its arguments and result.
-- **[Pane groups own their tabs.](docs/manual.md#pane-groups)** `ctrl+n`
-  splits side by side, `ctrl+o` stacked; `ctrl+←/→` cycles one group and
-  leaves the rest alone.
-- **[A live diff you can reject one hunk of.](docs/manual.md#the-live-diff)**
-  `f2` opens it beside the session, live. A rejected hunk reverts and the
-  agent is told why.
-- **[Type while it works.](docs/manual.md#typing-while-a-turn-runs)** A
-  prompt submitted mid-turn is queued, never refused, and starts when the
-  running turn ends. `/queue` lists what waits and cancels one.
-- **[Memory stays inert until it earns influence.](docs/manual.md#lore-integration)**
-  `lore_core` runs in-process; nothing new reaches the model until a human
-  approves a staged row.
-- **[A shell the model cannot reach.](docs/manual.md#shell-escape)** A `!`
-  line runs in this session's worktree, with your privileges, outside the
-  model's context.
-- **[Worktrees, never auto-merged.](docs/manual.md#worktrees-and-finalize)**
-  Each session gets its own worktree and branch. A clean one vanishes;
-  real work waits for you.
-- **[A permission mode you can see and change.](docs/manual.md#permission-modes)**
-  `shift+tab` cycles it; the chip leads the bar, and the modes that stop
-  asking are amber or red.
-- **[A tool gate that counts strikes.](docs/manual.md#containment)** Every
-  call passes `PreToolUse`; a tool failing hard twice is disabled for the
-  session.
-- **[Numbers that were measured.](docs/manual.md#the-status-bar)**
-  Twenty-one tooltipped chips and a `/context` the CLI itself counted. A
-  chip an engine cannot answer for is hidden, never painted blank.
-- **[Pictures, or a straight answer why not.](docs/manual.md#images)**
-  kitty graphics → sixel → half-block → text, settled by one probe.
-- **[Sessions talk to each other.](docs/manual.md#search-resume-and-peers)**
-  Same-repo sessions exchange `/msg`. The model's own send tool is off by
-  default; on, every message is rate limited, ledgered with its body and
-  flashed on the status bar. An arriving message *starting* a turn is a
-  second switch, also off.
-- **[A fleet, measured rather than managed.](docs/fleet.md)** `doxa-fleet`
-  — a real script entry since 1.14.0, not a name the prose used for
-  `python -m doxa.fleet` — spawns N sessions on one prompt at one moment,
-  deals engines and models from a pool, runs K without memory, splits a run
-  budget, waits for quiet and tears down. Clean to N=64 on Claude; a mixed
-  pool of Codex, DeepSeek and GLM ran, messaged across vendors and quiesced
-  (see [Status](#status)). `/fleet start|status|stop|runs|attach|mesh|detach`
-  runs the same harness from a session you are working in and watches it in
-  a read-only tab, and `/mesh [run-id]` graphs that run's ledger in a
-  browser. What a slot can do depends on its engine:
-  [engine capabilities](docs/manual.md#engine-capabilities).
-- **[Or a fleet with a head, for ordinary work.](docs/manual.md#supervisor-mode)**
-  `--supervisor claude:opus` makes one session the only one the prompt
-  reaches: it divides the job, hands the pieces to the workers over peer
-  messages, and integrates what comes back. Each worker already has its
-  own git worktree, so they do not collide. With no `--prompt` the
-  supervisor waits for you to `/fleet attach 0` and type the task, and the
-  run stays up until you stop it.
-- **[Peers on another machine, once you say so.](docs/fleet.md)** A tailnet
-  bridge behind `tailscale serve` puts a second box's sessions in the
-  roster, refused until `remote_enabled` is on and an allow-list names you.
-- **[Your local sessions in a browser.](docs/plans/remote.md)** The optional
-  `doxa-remote` bridge shows daemon sessions, their transcripts and live
-  turns through Tailscale Serve. It can send prompts and answer pending
-  questions. The agent and its tools keep running on this machine.
-- **[Memory is a setting, not a premise.](docs/manual.md#lore-integration)**
-  `doxa --no-lore` gives a session no snapshot, no writes and no `lore_*`
-  tools; the fleet flips it per agent. With [LORE](https://github.com/docwilde/LORE)
-  sync on, a `⇅ sync` chip shows staleness, unpushed ops and conflicts;
-  off, no chip.
-- **[An isolated CLI config.](docs/manual.md#the-spawned-cli)** Spawned
-  `claude` processes use a config directory DOXA owns, not your
-  `~/.claude`; your plugins load only if you opt in.
+- **[Persistent sessions.](docs/manual.md#sessions-and-the-daemon)** Close the
+  terminal and reattach later; `doxa` restores the repository's tabs.
+- **[Inspectable turns.](docs/manual.md#the-transcript)** Expand reasoning,
+  tool calls and their results from the transcript.
+- **[Independent panes and worktrees.](docs/manual.md#worktrees-and-finalize)**
+  Split the view; each session has its own branch, and work is never auto-merged.
+- **[A live diff.](docs/manual.md#the-live-diff)** Review changes beside the
+  session and reject individual hunks.
+- **[A prompt queue.](docs/manual.md#typing-while-a-turn-runs)** Type during
+  a turn; `/queue` shows and cancels prompts waiting to run.
+- **[Auditable memory.](docs/manual.md#lore-integration)** LORE stages new
+  beliefs for review; `--no-lore` disables memory for a session.
+- **[Visible permissions.](docs/manual.md#permission-modes)** Switch modes
+  with `shift+tab`; a tool gate checks calls, while `!` runs outside the model.
+- **[Measured status.](docs/manual.md#the-status-bar)** Chips show available
+  engine metrics; images fall back to formats your terminal supports.
+- **[Peer messages.](docs/manual.md#search-resume-and-peers)** Sessions in
+  one repository can exchange messages; model sends require opt-in.
+- **[Fleets.](docs/fleet.md)** Run mixed-engine pools with budgets, or give
+  one supervisor the job of coordinating workers in separate worktrees.
+- **[Access from another device.](docs/plans/remote.md)** Opt-in Tailscale
+  bridges expose peer sessions and browser control of local sessions.
+- **[Isolated Claude config.](docs/manual.md#the-spawned-cli)** Spawned Claude
+  processes use a DOXA-owned config; plugins require opt-in.
 
 A `Task` subagent also gets a status row and a live read-only tab, and
 `/dir` says [where a session is](docs/manual.md#where-a-session-is)
@@ -212,16 +162,36 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 ```
 
 It checks Python 3.11+, [`uv`](https://docs.astral.sh/uv/) (offering to
-install it), `git`, and the
-[`claude` CLI](https://docs.claude.com/en/docs/claude-code) signed in —
-DOXA authenticates through that CLI's OAuth session, never through
+install it), and `git`. Missing or signed-out provider CLIs produce a
+warning; you can install and sign in to
+[`claude`](https://docs.claude.com/en/docs/claude-code) or `codex`
+later. In DOXA, `/login claude` and `/login codex` start their CLI's
+browser sign-in while the TUI stays usable; `/logout claude` and
+`/logout codex` sign out. DOXA authenticates through each CLI's own
+OAuth session, never through
 `ANTHROPIC_API_KEY`, which it reads for one thing only: listing the model
 catalogue in the picker when a key happens to be in the environment —
 then runs `uv tool install
 git+https://github.com/docwilde/doxa`. DOXA is not on PyPI. Re-running is
 safe and never touches an existing `~/.doxa/config.toml`. Add `sh -s --
-v1.11.1` to pin a tag instead of tracking `main`. Read it first if you
+v1.17.0` to pin a tag instead of tracking `main`. Read it first if you
 would rather not pipe a stranger's script into `sh`.
+
+For the default install that tracks `main`, `/update` refreshes the uv tool
+copy and reports the installed version and Git revision before and after.
+`/update --restart` also closes this window's sessions and relaunches DOXA.
+A tag-pinned install stays pinned; reinstall that tag explicitly to change it.
+DOXA checks the running copy's uv receipt and installed wheel before updating.
+
+The login command shows the CLI's authorization URL or device code and
+completion status in DOXA. It uses the CLI's existing `CLAUDE_CONFIG_DIR`
+or `CODEX_HOME` profile. A successful Claude login synchronizes that CLI's
+credentials into DOXA's isolated Claude session directory. A successful
+Claude logout clears the isolated credential and blocks its automatic
+reimport until the next explicit `/login claude`. Existing engine sessions
+may retain their connection; open a new session after changing accounts.
+Use `/login codex --device-auth` when the Codex device flow is enabled
+for your account.
 
 Or run from a checkout:
 
@@ -353,11 +323,10 @@ and key — marking any your terminal cannot send.
 Beta, and a working daily driver for its author. Everything in
 [What you get](#what-you-get) and in the [manual](docs/manual.md) is on
 `main` and behaves as described; [CHANGELOG.md](CHANGELOG.md) has the
-history. `main` is what the install script tracks by default, and `v1.12.0`
-names it: the model's send tool, the cross-machine peer bridge, the fleet
-harness, session and run budgets and the engine picker are all in the
-newest tag, so a pinned install has them. Config keys, socket protocol and
-command names can still change between minor versions.
+history. `main` is what the install script tracks by default; `v1.17.0`
+pins this release, including remote browser control of local sessions and
+engine-specific model choices. Config keys, socket protocol and command
+names can still change between minor versions.
 
 **Specified, not built.** Seventeen documents sit in
 [`docs/plans/`](docs/plans/) and each states its own status in its opening

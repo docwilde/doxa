@@ -605,29 +605,47 @@ class PaneChipsMixin:
         if remote is not None:
             chips.append(StatusChip.plain(*remote))
         model = engine.model or "default"
-        chips.append(StatusChip.clickable(
-            model,
-            "open_model_picker",
+        model_hint = (
             "model handling this session's turns -- click to switch "
-            "(takes effect on the NEXT turn, transcript kept)",
-        ))
+            "(takes effect on the NEXT turn, transcript kept)"
+        )
+        effort = getattr(engine, "effort", None)
+        if effort:
+            # Claude's bracket opens its connect-time default picker.
+            # Codex reads its own config; a Claude picker there would
+            # silently change the wrong engine, so its bracket is plain.
+            effort_text = f"[{effort}]"
+            codex_effort = (
+                engines_mod.engine_id_of(engine) == engines_mod.CODEX_ENGINE_ID
+            )
+            effort_markup = (
+                _escape_markup(effort_text) if codex_effort
+                else _chip_span(effort_text, 'open_effort_picker')
+            )
+            effort_hint = (
+                "Codex CLI configured reasoning effort; edit its config "
+                "to change future turns" if codex_effort else
+                "reasoning effort for NEW sessions only (connect-time) -- "
+                "click to change the default; this session keeps its own"
+            )
+            chips.append(StatusChip.raw(
+                f"{model} {effort_text}",
+                f"{_chip_span(model, 'open_model_picker')} "
+                f"{effort_markup}",
+                (
+                    (model, model_hint),
+                    (effort_text, effort_hint),
+                ),
+            ))
+        else:
+            chips.append(StatusChip.clickable(
+                model, "open_model_picker", model_hint,
+            ))
         if self.needs_input:  # visible only while a question or permission
             # request is actually pending on THIS pane.
             chips.append(StatusChip.plain(
                 "⚑ needs input",
                 "a question or permission request is waiting on this session",
-            ))
-        effort = getattr(engine, "effort", None)
-        if effort:  # omitted when the CLI default is in force (no level
-            # asserted at connect). A SELECTOR too, but its picker can only
-            # ever affect a FUTURE session (connect-time only, same as
-            # /effort) -- the picker itself says so rather than silently
-            # no-opping.
-            chips.append(StatusChip.clickable(
-                f"effort:{effort}",
-                "open_effort_picker",
-                "reasoning effort for NEW sessions only (connect-time) -- "
-                "click to change the default; this session keeps its own",
             ))
         git_chip = self._git.render(clickable=True) if self._git is not None else None
         if git_chip:  # ONE painted chip with several hint rows inside it --
@@ -757,7 +775,11 @@ class PaneChipsMixin:
         # with the (already-computed) list-price figure demoted to an
         # explicit what-if. API-key auth keeps the real $ estimate.
         account = getattr(engine, "account", None) or {}
-        tier = identity_mod.account_tier(account)
+        tier = (
+            identity_mod.account_tier(account)
+            if engines_mod.engine_id_of(engine) == engines_mod.CLAUDE_ENGINE_ID
+            else None
+        )
         if not caps.cost:
             # Nothing said, so nothing shown. `$0.0000` is not the absence
             # of a cost, it is the CLAIM that this session was free -- and
@@ -1030,6 +1052,9 @@ class PaneChipsMixin:
         for what events tell it, and a status chip is not worth a tick.
         API-key auth has no such cache and shows nothing here -- the plain
         $ tally next to it is already the honest figure for that case."""
+        if engines_mod.engine_id_of(self.engine) != engines_mod.CLAUDE_ENGINE_ID:
+            self._usage_chip = None
+            return
         try:
             snapshot = identity_mod.usage()
         except Exception:  # noqa: BLE001 -- a chip must degrade to silence
@@ -1168,8 +1193,7 @@ class PaneChipsMixin:
         )
 
     async def open_effort_picker(self) -> None:
-        """The effort chip -- only ever reachable when the chip itself is
-        showing (hide-at-zero, same as the status bar's own convention),
+        """The model chip's effort bracket -- only shown when a level is known,
         i.e. a connect-time effort was actually asserted on THIS session.
         Selecting a level here does exactly what ``/effort <level>`` does:
         saves it for NEW sessions and says, honestly, that this one keeps

@@ -553,8 +553,8 @@ class StatusBar(Static):
     /compact -- see :class:`CompactConfirm`, the session handle -> a
     sessions picker, beliefs -> a beliefs picker); cost, sha and usage
     headroom stay plain -- INERT never meant "unexplained", see
-    :meth:`set_chip_hints` below. One action per chip rather than a single
-    dispatcher taking an argument: simpler markup (no `json.dumps`-escaped
+    :meth:`set_chip_hints` below. One action per clickable span rather than
+    a single dispatcher taking an argument: simpler markup (no `json.dumps`-escaped
     action params to get wrong), and every action here is a fixed, known
     operation anyway.
 

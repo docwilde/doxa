@@ -99,6 +99,9 @@ class EngineClient:
         self.backlog_skipped: "int | None" = None
         self.session_id: str | None = None
         self.model: str | None = None
+        # The daemon's engine captures connect-time effort. None means it
+        # made no explicit choice, so the status bar must not invent one.
+        self.effort: str | None = None
         # Permission mode (v0.42.0), engine parity: SessionEngine carries
         # the same attribute name, so the status chip reads whichever
         # object this pane has without knowing which side of the socket it
@@ -199,6 +202,7 @@ class EngineClient:
             )
         self.session_id = hello.get("session_id")
         self.model = hello.get("model")
+        self.effort = hello.get("effort")
         if hello.get("permission_mode"):
             self.permission_mode = str(hello["permission_mode"])
         self.bypass_armed = bool(hello.get("bypass_armed"))
@@ -653,6 +657,8 @@ class EngineClient:
         status = reply.get("status") or {}
         if status.get("model"):
             self.model = status["model"]
+        if "effort" in status:
+            self.effort = status["effort"]
         self.remote_driver = str(status.get("remote_driver") or "") or None
         if status.get("permission_mode"):
             self.permission_mode = str(status["permission_mode"])

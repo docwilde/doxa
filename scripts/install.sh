@@ -133,14 +133,17 @@ main() {
   fi
   _info "$(uv --version 2>/dev/null) OK"
 
-  # -- claude CLI: present AND authenticated -----------------------------
+  # -- provider CLIs can be installed and signed in from DOXA later -----
   if ! _need claude; then
-    _fail "the claude CLI is required -- doxa authenticates through it and never reads ANTHROPIC_API_KEY. Fix: install it -- https://docs.claude.com/en/docs/claude-code -- then run: claude auth login"
+    _warn "claude CLI not found; Claude sessions need it. Install it, then use /login claude in DOXA."
+  elif ! claude auth status >/dev/null 2>&1; then
+    _warn "claude CLI is signed out; use /login claude in DOXA when ready."
+  else
+    _info "claude CLI present and authenticated"
   fi
-  if ! claude auth status >/dev/null 2>&1; then
-    _fail "claude auth login"
+  if ! _need codex; then
+    _warn "codex CLI not found; Codex sessions need it. Install it, then use /login codex in DOXA."
   fi
-  _info "claude CLI present and authenticated"
 
   # -- install --------------------------------------------------------
   # git+URL only, deliberately: doxa is not on PyPI, and `uv tool install

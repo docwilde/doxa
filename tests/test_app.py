@@ -108,7 +108,7 @@ async def test_status_bar_effort_chip_shows_asserted_level(monkeypatch, tmp_path
     async with app.run_test() as pilot:
         await pilot.pause()
         status = str(app.query_one("#status-bar").renderable)
-        assert "effort:xhigh" in status
+        assert "[xhigh]" in Content.from_markup(status).plain
 
 
 @pytest.mark.asyncio

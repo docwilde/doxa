@@ -781,6 +781,10 @@ class DoxaApp(
         self._bindings.key_to_bindings.pop("ctrl+c", None)
         self.cwd = cwd or os.getcwd()
         self.model = model
+        # A CLI window keeps its launch-time --engine choice for fresh tabs
+        # until /engine (or the settings row) explicitly changes it here.
+        # Its first, already-connected pane is never affected.
+        self._new_session_engine_override: str | None = None
         # The daemon-split seam: engine_factory builds whatever the first
         # tab drives (in-process SessionEngine by default; an EngineClient
         # when doxa.cli attached us to a daemon). new_session_factory builds

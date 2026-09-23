@@ -67,6 +67,57 @@ def test_sync_credentials_copies_from_the_real_user_config(tmp_path):
     assert oct(dest.stat().st_mode)[-3:] == "600"
 
 
+def test_logout_prevents_old_source_from_silently_reauthenticating():
+    source = iso_mod.user_credentials_path()
+    source.write_text('{"claudeAiOauth": {"accessToken": "old"}}')
+    assert iso_mod.sync_credentials()
+    assert iso_mod.isolated_credentials_path().exists()
+
+    iso_mod.mark_logged_out()
+    assert not iso_mod.isolated_credentials_path().exists()
+    assert iso_mod.sync_credentials() is False
+    iso_mod.spawn_env()
+    assert not iso_mod.isolated_credentials_path().exists()
+    # A CLI login backed only by a keychain may leave this source untouched.
+    # Keep the guard instead of copying the previous account's credential.
+    assert iso_mod.mark_logged_in() is False
+    assert (iso_mod.cli_config_dir() / iso_mod.LOGGED_OUT_MARK).exists()
+    assert not iso_mod.isolated_credentials_path().exists()
+
+    source.write_text('{"claudeAiOauth": {"accessToken": "new"}}')
+    assert iso_mod.mark_logged_in() is True
+    assert iso_mod.isolated_credentials_path().exists()
+    assert not (iso_mod.cli_config_dir() / iso_mod.LOGGED_OUT_MARK).exists()
+
+
+def test_login_preserves_a_newer_valid_isolated_credential():
+    source = iso_mod.user_credentials_path()
+    source.write_text('{"claudeAiOauth": {"accessToken": "host-old"}}')
+    assert iso_mod.sync_credentials()
+    dest = iso_mod.isolated_credentials_path()
+    dest.write_text('{"claudeAiOauth": {"accessToken": "isolated-new"}}')
+    later = source.stat().st_mtime + 5
+    os.utime(dest, (later, later))
+
+    assert iso_mod.mark_logged_in() is True
+    assert json.loads(dest.read_text())["claudeAiOauth"]["accessToken"] == "isolated-new"
+
+
+def test_login_after_logout_can_keep_a_fresh_isolated_credential():
+    source = iso_mod.user_credentials_path()
+    source.write_text('{"claudeAiOauth": {"accessToken": "host-old"}}')
+    assert iso_mod.sync_credentials()
+    iso_mod.mark_logged_out()
+    dest = iso_mod.isolated_credentials_path()
+    dest.write_text('{"claudeAiOauth": {"accessToken": "isolated-new"}}')
+    later = (iso_mod.cli_config_dir() / iso_mod.LOGGED_OUT_MARK).stat().st_mtime + 5
+    os.utime(dest, (later, later))
+
+    assert iso_mod.mark_logged_in() is True
+    assert json.loads(dest.read_text())["claudeAiOauth"]["accessToken"] == "isolated-new"
+    assert not (iso_mod.cli_config_dir() / iso_mod.LOGGED_OUT_MARK).exists()
+
+
 def test_sync_credentials_is_a_noop_with_no_source(tmp_path):
     assert iso_mod.sync_credentials() is False
     assert not iso_mod.isolated_credentials_path().exists()

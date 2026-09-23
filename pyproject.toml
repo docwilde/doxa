@@ -1,7 +1,7 @@
 [project]
 name = "doxa"
-version = "1.16.0"
-description = "A terminal for working with a Claude agent whose memory you can audit."
+version = "1.17.0"
+description = "A terminal for coding agents with auditable memory."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "AGPL-3.0-only"

@@ -755,6 +755,29 @@ async def test_claude_subscription_cache_is_labelled_last_seen(monkeypatch):
     assert "last seen" in note and "live" not in note
 
 
+async def test_logged_out_claude_snapshot_populates_picker_with_sign_in_notice(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    catalog = claude_catalog_mod.ClaudeCatalog(
+        models=(claude_catalog_mod.ClaudeCatalogModel("claude-sonnet-5", "Sonnet 5"),),
+        fetched_at=datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc),
+        stale_at=datetime(2026, 9, 23, 13, 0, tzinfo=timezone.utc),
+        is_stale=True,
+        offline=True,
+    )
+    monkeypatch.setattr(claude_catalog_mod, "read_cached_catalog", lambda: catalog)
+    app, _fake = await _app(monkeypatch, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        text = await _run(app, pilot, "/model")
+    assert "Sonnet 5" in text
+    assert "signed out" in text and "sign-in required" in text
+    assert "model availability unverified" in text
+    assert "last seen 2026-09-23 12:00 UTC" in text
+    assert "static fallback" not in text
+
+
 async def test_claude_catalogue_rechecks_the_cli_cache_after_a_minute(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     now = [100.0]

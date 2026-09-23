@@ -288,7 +288,7 @@ REGISTRY: tuple[SlashCommand, ...] = (
         name="/login",
         group="Tools & config",
         summary="Sign in through a provider's own auth CLI (default: claude)",
-        usage="/login [provider]",
+        usage="/login [claude|codex] [--device-auth (codex only)]",
         palette="Auth: login",
     ),
     SlashCommand(
@@ -529,7 +529,7 @@ REGISTRY: tuple[SlashCommand, ...] = (
     SlashCommand(
         name="/update",
         group="Maintenance",
-        summary="Fast-forward this DOXA checkout from origin (never merges)",
+        summary="Update a clean DOXA checkout or main-tracking uv tool install",
         usage="/update [--restart]",
         palette="Update DOXA",
     ),

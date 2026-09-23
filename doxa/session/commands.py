@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import textwrap
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Callable
@@ -32,6 +31,8 @@ from textual.containers import VerticalScroll
 
 from .. import auth as auth_mod
 from .. import config as config_mod
+from .. import cli_isolation as cli_isolation_mod
+from .. import engines as engines_mod
 from .. import history as history_mod
 from .. import identity as identity_mod
 from .. import layout as layout_mod
@@ -503,6 +504,8 @@ class PaneCommandsMixin:
             return
         chosen = provider.engine_id()
         config_mod.save({"engine": chosen})
+        if not config_mod.overridden_by_env("DOXA_ENGINE"):
+            self.app._new_session_engine_override = chosen
         lines = [
             f"engine: new sessions will use {chosen} "
             f"({provider.engine_display_name()}) — this session keeps "
@@ -924,7 +927,13 @@ class PaneCommandsMixin:
         if ctx_bits:
             rows.append(("context", "  ".join(ctx_bits)))
         account = getattr(engine, "account", None) or {}
-        tier = identity_mod.account_tier(account)
+        engine_id = engines_mod.engine_id_of(engine)
+        tier = (
+            identity_mod.account_tier(account)
+            if engine_id == engines_mod.CLAUDE_ENGINE_ID else None
+        )
+        if engine_id == engines_mod.CODEX_ENGINE_ID and account.get("planType"):
+            rows.append(("plan", f"ChatGPT {account['planType']}"))
         # v1.4.0: `$0.0000` is a claim, and an engine whose stream carries
         # no cost field has not made it. /usage is a surface people paste
         # into bug reports, so the absence is spelled out in words rather
@@ -953,6 +962,8 @@ class PaneCommandsMixin:
             rows.append(("cost", f"${float(reported_cost):.4f}"))
         lines = [f"{label:<12} {value}" for label, value in rows]
 
+        if engine_id != engines_mod.CLAUDE_ENGINE_ID:
+            return "usage\n" + "\n".join(lines)
         usage = identity_mod.usage()
         if usage is None:
             lines.append("")
@@ -1657,8 +1668,9 @@ class PaneCommandsMixin:
         )
 
     async def _cmd_update(self, args: str) -> None:
-        """/update -- fast-forward the checkout DOXA runs from, and say what
-        moved. `--restart` is the explicit opt-in that stops THIS window's
+        """/update -- advance the checkout or verified uv tool install.
+
+        `--restart` is the explicit opt-in that stops THIS window's
         sessions afterwards and relaunches; without it nothing running is
         touched, because a terminal that restarts your work to update
         itself has its priorities backwards."""
@@ -2190,38 +2202,78 @@ class PaneCommandsMixin:
         return ""
 
     async def _cmd_auth(self, verb: str, args: str) -> None:
-        """/login [provider] and /logout [provider].
-
-        DOXA holds no credential and runs no auth logic: it suspends the
-        TUI (App.suspend -- the supported way to hand the terminal over),
-        execs the provider's OWN interactive auth CLI from the data table
-        in doxa/auth.py, and on return re-reads identity so the block and
-        the status chips reflect whoever is signed in NOW."""
+        """Run the provider's auth CLI on a private PTY, leaving the TUI live."""
+        words = args.split()
         try:
-            provider = auth_mod.resolve(args.split()[0] if args.split() else None)
+            provider = auth_mod.resolve(words[0] if words else None)
         except auth_mod.AuthError as exc:
             await self._system(f"{verb}: {exc}")
             return
         cmd = provider.command_for(verb)
-        try:
-            with self.app.suspend():
-                code = auth_mod.run_auth_command(cmd)
-        except Exception as exc:  # noqa: BLE001 -- SuspendNotSupported and
-            # friends must surface as an ordinary block, not a crashed TUI.
-            await self._system(
-                f"{verb}: cannot hand the terminal to {provider.binary} here "
-                f"({exc}) — run `{' '.join(cmd)}` in another terminal instead"
-            )
+        extra = words[1:]
+        if extra:
+            if verb == "login" and provider.name == "codex" and extra == ["--device-auth"]:
+                cmd += ("--device-auth",)
+            else:
+                await self._system(
+                    f"{verb}: unsupported option — use /{verb} [claude|codex]"
+                    + (" [--device-auth]" if verb == "login" else "")
+                )
+                return
+        if auth_mod.AUTH_LOCK.locked():
+            await self._system("auth: another login or logout is already running")
             return
-        # The CLI may have rewritten its config within one mtime tick.
+        suffix = " — follow the browser sign-in" if verb == "login" else ""
+        await self._system(f"{verb}: starting {' '.join(cmd)}{suffix}")
+        shown: set[str] = set()
+
+        async def progress(message: str) -> None:
+            if message not in shown:
+                shown.add(message)
+                await self._system(f"{provider.name}: {message}")
+
+        try:
+            async with auth_mod.AUTH_LOCK:
+                code = await auth_mod.run_auth_command(cmd, progress)
+        except Exception as exc:  # noqa: BLE001 -- an auth CLI failure is UI data
+            await self._system(f"{verb}: {provider.binary} failed ({exc})")
+            return
+        if code == 0 and provider.name == "claude":
+            try:
+                if verb == "logout":
+                    cli_isolation_mod.mark_logged_out()
+                else:
+                    if not cli_isolation_mod.mark_logged_in():
+                        await self._system(
+                            "Claude login succeeded, but its credential file "
+                            "was not available to DOXA's isolated session; "
+                            "check /doctor before starting a Claude turn"
+                        )
+            except OSError as exc:
+                await self._system(f"{verb}: Claude CLI succeeded, but isolated auth update failed ({exc})")
+                return
+        # The CLI may have rewritten its config within one mtime tick. Drop
+        # model providers too, so the next picker fetches the new account's
+        # catalogue instead of keeping a pre-login snapshot.
         identity_mod.invalidate()
-        self._refresh_identity()
-        self._refresh_status()
+        for pane in self.app.query(type(self)):
+            pane._model_providers.clear()
+            pane._refresh_identity()
+            pane._refresh_status()
         shown = " ".join(cmd)
         if code == 0:
-            await self._system(f"{shown} — done; identity re-read")
+            await self._system(f"{shown} — done; account and model catalogue refreshed")
+            if provider.name == "codex" and verb == "logout" and (
+                os.environ.get("CODEX_ACCESS_TOKEN") or os.environ.get("OPENAI_API_KEY")
+            ):
+                await self._system(
+                    "Codex CLI stored login was removed; environment credentials "
+                    "are still present in this DOXA process"
+                )
+        elif code == 124:
+            await self._system(f"{shown} — timed out after 15 minutes; account re-read")
         else:
-            await self._system(f"{shown} — exited {code}; identity re-read")
+            await self._system(f"{shown} — exited {code}; account re-read")
 
     def _identity_text(self, cwd: str) -> str:
         """The session-start identity summary. Every line renders a REAL
@@ -2234,7 +2286,11 @@ class PaneCommandsMixin:
         subscription can end up reading as somebody's "team subscription"."""
         engine = self.engine
         account = getattr(engine, "account", None) or {}
-        local = identity_mod.local_account()
+        engine_id = engines_mod.engine_id_of(engine)
+        local = (
+            identity_mod.local_account()
+            if engine_id == engines_mod.CLAUDE_ENGINE_ID else {}
+        )
         # Version first: the one line that says WHICH DOXA this is. Its sha
         # is shown only when it differs from the sha the git chip below
         # already carries (or when the checkout is dirty, which the chip
@@ -2246,12 +2302,21 @@ class PaneCommandsMixin:
             lines.append(f"account  {account['email']}")
         elif local.get("emailAddress"):
             lines.append(f"account  {local['emailAddress']}")
-        plan_line = self._plan_line(account, local)
+        if engine_id == engines_mod.CLAUDE_ENGINE_ID:
+            plan_line = self._plan_line(account, local)
+        elif engine_id == engines_mod.CODEX_ENGINE_ID:
+            plan_type = account.get("planType")
+            plan_line = f"ChatGPT {plan_type}" if plan_type else None
+        else:
+            plan_line = None
         if plan_line:
             lines.append(f"plan     {plan_line}")
-        org = identity_mod.organization(account, local)
+        org = (
+            identity_mod.organization(account, local)
+            if engine_id == engines_mod.CLAUDE_ENGINE_ID else account.get("organization")
+        )
         if org:
-            role = local.get("organizationRole")
+            role = local.get("organizationRole") if local else None
             lines.append(f"org      {org}" + (f" ({role})" if role else ""))
         lines.append(f"model    {getattr(engine, 'model', None) or 'default'}")
         lines.append(f"cwd      {cwd}")

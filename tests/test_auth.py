@@ -1,22 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""/login and /logout: the provider table, and the suspend-exec-resume path.
-
-DOXA never handles a credential -- it suspends the TUI and runs the
-provider's own auth CLI. So what is worth testing is exactly: the table
-resolves (and refuses, informatively, when it can't), the TUI really is
-suspended around the exec, the exec is the row's command and nobody else's,
-and identity is re-read on return. The exec itself is mocked throughout: no
-test may open a browser or touch a real account.
-"""
+"""/login and /logout delegate to provider CLIs while the TUI stays live."""
 
 from __future__ import annotations
 
-import contextlib
+import asyncio
 import json
+import sys
 
 import pytest
 
-from doxa import auth, commands, identity
+from doxa import auth, cli_isolation, commands, config, identity
 from doxa.app import DoxaApp, SystemBlock
 from tests.fakes import FakeEngine
 
@@ -69,33 +62,46 @@ def test_resolve_absent_cli_says_which_providers_are_installed(monkeypatch):
     assert "codex" in message and "claude" in message
 
 
-def test_run_auth_command_survives_a_missing_binary(monkeypatch):
-    def boom(_cmd):
-        raise OSError("no such file")
+@pytest.mark.asyncio
+async def test_auth_bridge_only_relays_public_browser_progress():
+    output = []
+    script = (
+        "print('Visit https://auth.openai.com/oauth/authorize?state=example'); "
+        "print('Device code: ABCD-1234'); "
+        "print('access_token=secret-do-not-show')"
+    )
+    code = await auth.run_auth_command(
+        (sys.executable, "-c", script), lambda line: _record(output, line),
+    )
+    assert code == 0
+    assert any("auth.openai.com" in line for line in output)
+    assert "Device code: ABCD-1234" in output
+    assert all("secret-do-not-show" not in line for line in output)
 
-    monkeypatch.setattr(auth.subprocess, "call", boom)
-    assert auth.run_auth_command(("nope", "login")) == 127
+
+@pytest.mark.asyncio
+async def test_auth_bridge_times_out_and_stops_a_stuck_cli():
+    code = await auth.run_auth_command(
+        (sys.executable, "-c", "import time; time.sleep(30)"),
+        lambda line: _record([], line),
+        timeout=0.1,
+    )
+    assert code == 124
+
+
+def test_auth_progress_rejects_token_urls_and_unrelated_output():
+    assert auth.public_progress(
+        "https://auth.openai.com/callback?code=secret"
+    ) is None
+    assert auth.public_progress("refresh_token=secret") is None
+    assert auth.public_progress("https://example.org/login") is None
+
+
+async def _record(output, line):
+    output.append(line)
 
 
 # -- the TUI path ---------------------------------------------------------
-
-
-class _SuspendRecorder:
-    """Stands in for App.suspend(): records that the TUI was suspended, and
-    that the exec happened INSIDE the suspension (never around it)."""
-
-    def __init__(self) -> None:
-        self.entered = 0
-        self.inside = False
-
-    @contextlib.contextmanager
-    def __call__(self):
-        self.entered += 1
-        self.inside = True
-        try:
-            yield
-        finally:
-            self.inside = False
 
 
 async def _boot(app, pilot):
@@ -111,11 +117,13 @@ def _system_texts(app) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_login_suspends_the_tui_and_execs_the_provider_cli(
+async def test_login_keeps_tui_live_and_refreshes_identity(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setenv("DOXA_HOME", str(tmp_path / "doxa"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    config.invalidate()
     identity.invalidate()
     monkeypatch.setattr(auth.shutil, "which", lambda _b: "/usr/bin/stub")
 
@@ -124,13 +132,14 @@ async def test_login_suspends_the_tui_and_execs_the_provider_cli(
     monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: fake)
 
     execs: list[tuple] = []
-    recorder = _SuspendRecorder()
+    started = asyncio.Event()
+    finish = asyncio.Event()
 
-    def fake_exec(cmd):
-        # The exec must happen while the app is suspended -- otherwise the
-        # child and the TUI fight over the terminal.
-        assert recorder.inside is True
+    async def fake_exec(cmd, progress):
         execs.append(tuple(cmd))
+        await progress("Open in your browser: https://claude.ai/oauth/authorize")
+        started.set()
+        await finish.wait()
         # The auth flow "signs in": a config with the precise tier appears.
         (tmp_path / ".claude.json").write_text(
             json.dumps({"oauthAccount": {
@@ -146,23 +155,29 @@ async def test_login_suspends_the_tui_and_execs_the_provider_cli(
     app = DoxaApp(cwd=str(tmp_path))
     async with app.run_test() as pilot:
         await _boot(app, pilot)
-        monkeypatch.setattr(type(app), "suspend", lambda _self: recorder())
 
         app.query_one("#prompt-input").value = "/login"
         await pilot.press("enter")
+        await asyncio.wait_for(started.wait(), 2)
+        assert "browser" in "\n".join(_system_texts(app))
+        # Auth is still waiting, but the prompt and event loop remain usable.
+        app.query_one("#prompt-input").value = "still responsive"
+        await pilot.pause(0.02)
+        assert app.query_one("#prompt-input").value == "still responsive"
+        finish.set()
         for _ in range(200):
-            if execs and _system_texts(app):
+            if "done" in "\n".join(_system_texts(app)):
                 break
             await pilot.pause(0.02)
 
         assert execs == [("claude", "auth", "login")]
-        assert recorder.entered == 1
 
         # Identity was re-read: the precise tier now shows in BOTH surfaces.
         identity_text = app.query_one("#identity-block", SystemBlock).text
         assert "max 20x" in identity_text
         assert "max 20x" in str(app.query_one("#status-bar").renderable)
     identity.invalidate()
+    config.invalidate()
 
 
 @pytest.mark.asyncio
@@ -170,50 +185,117 @@ async def test_logout_uses_the_logout_row_and_reports_a_nonzero_exit(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setenv("DOXA_HOME", str(tmp_path / "doxa"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty"))
+    config.invalidate()
     identity.invalidate()
     monkeypatch.setattr(auth.shutil, "which", lambda _b: "/usr/bin/stub")
     monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([]))
 
     execs: list[tuple] = []
-    recorder = _SuspendRecorder()
-    monkeypatch.setattr(
-        auth, "run_auth_command", lambda cmd: (execs.append(tuple(cmd)), 3)[1]
-    )
 
+    async def fake_exec(cmd, _progress):
+        execs.append(tuple(cmd))
+        return 3
+
+    monkeypatch.setattr(auth, "run_auth_command", fake_exec)
     app = DoxaApp(cwd=str(tmp_path))
     async with app.run_test() as pilot:
         await _boot(app, pilot)
-        monkeypatch.setattr(type(app), "suspend", lambda _self: recorder())
-
         app.query_one("#prompt-input").value = "/logout codex"
         await pilot.press("enter")
         for _ in range(200):
-            if _system_texts(app):
+            if "exited 3" in "\n".join(_system_texts(app)):
                 break
             await pilot.pause(0.02)
-
         assert execs == [("codex", "logout")]
-        assert "exited 3" in _system_texts(app)[0]
+        assert "exited 3" in "\n".join(_system_texts(app))
     identity.invalidate()
 
 
 @pytest.mark.asyncio
-async def test_unknown_provider_never_suspends_or_execs(monkeypatch, tmp_path):
+async def test_successful_claude_logout_blocks_isolated_reimport(monkeypatch, tmp_path):
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setenv("DOXA_HOME", str(tmp_path / "doxa"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "real-claude"))
+    (tmp_path / "real-claude").mkdir()
+    config.invalidate()
+    identity.invalidate()
+    source = cli_isolation.user_credentials_path()
+    source.write_text('{"claudeAiOauth": {"accessToken": "old"}}')
+    assert cli_isolation.sync_credentials()
+    monkeypatch.setattr(auth.shutil, "which", lambda _b: "/usr/bin/stub")
+    monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([]))
+
+    async def fake_exec(cmd, _progress):
+        assert cmd == ("claude", "auth", "logout")
+        return 0
+
+    monkeypatch.setattr(auth, "run_auth_command", fake_exec)
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test() as pilot:
+        await _boot(app, pilot)
+        app.query_one("#prompt-input").value = "/logout claude"
+        await pilot.press("enter")
+        for _ in range(200):
+            if "done" in "\n".join(_system_texts(app)):
+                break
+            await pilot.pause(0.02)
+        assert "done" in "\n".join(_system_texts(app))
+        assert not cli_isolation.isolated_credentials_path().exists()
+        assert cli_isolation.sync_credentials() is False
+    config.invalidate()
+    identity.invalidate()
+
+
+@pytest.mark.asyncio
+async def test_codex_device_auth_is_explicit_and_other_flags_are_rejected(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([]))
+    monkeypatch.setattr(auth.shutil, "which", lambda _b: "/usr/bin/stub")
+    commands_run = []
+
+    async def fake_exec(cmd, progress):
+        commands_run.append(cmd)
+        await progress("Device code: ABCD-1234")
+        return 0
+
+    monkeypatch.setattr(auth, "run_auth_command", fake_exec)
+    app = DoxaApp(cwd=str(tmp_path))
+    async with app.run_test() as pilot:
+        await _boot(app, pilot)
+        app.query_one("#prompt-input").value = "/login codex --with-api-key"
+        await pilot.press("enter")
+        for _ in range(50):
+            if "unsupported option" in "\n".join(_system_texts(app)):
+                break
+            await pilot.pause(0.02)
+        assert commands_run == []
+
+        app.query_one("#prompt-input").value = "/login codex --device-auth"
+        await pilot.press("enter")
+        for _ in range(100):
+            if commands_run and "Device code" in "\n".join(_system_texts(app)):
+                break
+            await pilot.pause(0.02)
+        assert commands_run == [("codex", "login", "--device-auth")]
+        assert "Device code: ABCD-1234" in "\n".join(_system_texts(app))
+
+
+@pytest.mark.asyncio
+async def test_unknown_provider_never_execs(monkeypatch, tmp_path):
     monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([]))
 
-    recorder = _SuspendRecorder()
-    monkeypatch.setattr(
-        auth, "run_auth_command",
-        lambda cmd: pytest.fail("no exec may happen for an unknown provider"),
-    )
+    async def no_exec(_cmd, _progress):
+        pytest.fail("no exec may happen for an unknown provider")
+    monkeypatch.setattr(auth, "run_auth_command", no_exec)
 
     app = DoxaApp(cwd=str(tmp_path))
     async with app.run_test() as pilot:
         await _boot(app, pilot)
-        monkeypatch.setattr(type(app), "suspend", lambda _self: recorder())
-
         app.query_one("#prompt-input").value = "/login gemini"
         await pilot.press("enter")
         for _ in range(200):
@@ -223,7 +305,6 @@ async def test_unknown_provider_never_suspends_or_execs(monkeypatch, tmp_path):
 
         text = _system_texts(app)[0]
         assert "gemini" in text and "claude" in text
-        assert recorder.entered == 0
 
 
 # -- registry closure -----------------------------------------------------

@@ -288,21 +288,22 @@ def test_python_too_old_stops_with_a_fix(tmp_path):
     assert not (tmp_path / "home" / ".doxa").exists()
 
 
-def test_missing_claude_cli_stops_with_a_fix(tmp_path):
+def test_missing_claude_cli_warns_and_allows_codex_only_install(tmp_path):
     bindir = _fakebin(tmp_path, claude_present=False)
     proc = _run(tmp_path, bindir)
-    assert proc.returncode == 1
-    assert "claude auth login" in proc.stderr
-    assert "docs.claude.com" in proc.stderr
-    assert not (tmp_path / "home" / ".doxa").exists()
+    assert proc.returncode == 0
+    assert "claude CLI not found" in proc.stderr
+    assert "/login claude" in proc.stderr
+    assert (tmp_path / "home" / ".doxa").exists()
 
 
-def test_claude_present_but_not_authenticated_prints_exact_fix(tmp_path):
+def test_claude_present_but_signed_out_warns_and_installs(tmp_path):
     bindir = _fakebin(tmp_path, claude_authed=False)
     proc = _run(tmp_path, bindir)
-    assert proc.returncode == 1
-    assert proc.stderr.strip().endswith("claude auth login")
-    assert not (tmp_path / "home" / ".doxa").exists()
+    assert proc.returncode == 0
+    assert "signed out" in proc.stderr
+    assert "/login claude" in proc.stderr
+    assert (tmp_path / "home" / ".doxa").exists()
 
 
 def test_uv_missing_headless_defaults_to_installing_it(tmp_path):
@@ -409,7 +410,7 @@ def test_truncated_pipe_never_runs_a_partial_install(tmp_path, fraction):
         "PATH": f"{bindir}:{_utildir(tmp_path)}",
         "DOXA_HOME": str(home / ".doxa"),
     }
-    proc = subprocess.run(
+    subprocess.run(
         ["sh"],
         cwd=str(tmp_path),
         env=env,

@@ -4,32 +4,58 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import datetime, timedelta, timezone
 
-from doxa import claude_catalog
+import pytest
+
+from doxa import claude_catalog, identity
 
 
 NOW = datetime(2026, 9, 23, 21, 0, tzinfo=timezone.utc)
 
 
-def _cli(monkeypatch, *, org="current-org", authenticated=True, version="2.1.222"):
+@pytest.fixture(autouse=True)
+def _isolated_claude_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    identity.invalidate()
+    yield
+    identity.invalidate()
+
+
+def _cli(
+    monkeypatch, *, org="current-org", authenticated=True,
+    auth_method=None, version="2.1.222",
+):
     commands = []
+
+    def status(cli):
+        commands.append([cli, "auth", "status", "--json"])
+        return {
+            "loggedIn": authenticated,
+            "authMethod": auth_method or ("claude.ai" if authenticated else "none"),
+            "orgId": org if authenticated else None,
+            "secret": "not-a-real-secret",
+        }
 
     def output(args):
         commands.append(args)
-        if args[1:] == ["auth", "status", "--json"]:
-            return json.dumps({
-                "loggedIn": authenticated,
-                "authMethod": "claude.ai",
-                "orgId": org,
-                "secret": "not-a-real-secret",
-            })
         if args[1:] == ["--version"]:
             return f"{version} (Claude Code)"
         raise AssertionError(args)
 
+    monkeypatch.setattr(claude_catalog, "_auth_status", status)
     monkeypatch.setattr(claude_catalog, "_cli_output", output)
     return commands
+
+
+def _profile(base, org="current-org"):
+    (base / ".claude.json").write_text(json.dumps({
+        "oauthAccount": {"organizationUuid": org},
+    }))
+    identity.invalidate()
 
 
 def _cache(base, *, org="current-org", fetched=None, stale=None, models=None, **updates):
@@ -93,6 +119,66 @@ def test_other_account_and_logged_out_never_get_cached_models(tmp_path, monkeypa
     assert claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW) is None
     _cli(monkeypatch, org="previous-org", authenticated=False)
     assert claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW) is None
+
+
+def test_logged_out_cli_can_show_only_its_matching_last_profile_snapshot(
+    tmp_path, monkeypatch,
+):
+    _cache(tmp_path)
+    _profile(tmp_path)
+    _cli(monkeypatch, authenticated=False)
+
+    result = claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW)
+
+    assert result is not None
+    assert result.offline is True
+    assert result.is_stale is True
+    assert [model.id for model in result.models] == ["claude-sonnet-5"]
+    assert "not-a-real-secret" not in repr(result)
+
+
+def test_logged_out_snapshot_rejects_wrong_account_api_key_and_unknown_auth(
+    tmp_path, monkeypatch,
+):
+    _cache(tmp_path)
+    _profile(tmp_path, org="other-org")
+    _cli(monkeypatch, authenticated=False)
+    assert claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW) is None
+
+    _profile(tmp_path)
+    _cli(monkeypatch, authenticated=False, auth_method="api_key")
+    assert claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW) is None
+    _cli(monkeypatch, authenticated=False, auth_method="mystery")
+    assert claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW) is None
+    _cli(monkeypatch, authenticated=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "not-a-real-key")
+    assert claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW) is None
+    _cli(monkeypatch, authenticated=True)
+    assert claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW) is None
+
+
+def test_cli_explicit_signed_out_status_is_parsed_despite_exit_code_one(monkeypatch):
+    def run(args, **kwargs):
+        assert args == ["claude", "auth", "status", "--json"]
+        assert kwargs["timeout"] == 4
+        return subprocess.CompletedProcess(args, 1, json.dumps({
+            "loggedIn": False, "authMethod": "none", "apiProvider": "firstParty",
+        }))
+
+    monkeypatch.setattr(claude_catalog.subprocess, "run", run)
+    assert claude_catalog._auth_status("claude") == {
+        "loggedIn": False, "authMethod": "none", "apiProvider": "firstParty",
+    }
+
+
+def test_cli_error_is_not_mistaken_for_signed_out(monkeypatch):
+    monkeypatch.setattr(
+        claude_catalog.subprocess, "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(
+            args, 2, json.dumps({"loggedIn": False, "authMethod": "none"}),
+        ),
+    )
+    assert claude_catalog._auth_status("claude") is None
 
 
 def test_too_old_or_unrecognized_cache_uses_fallback(tmp_path, monkeypatch):

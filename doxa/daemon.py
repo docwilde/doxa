@@ -947,6 +947,7 @@ class SessionDaemon:
             "doxa": __version__,
             "session_id": self.session_id,
             "model": self.engine.model,
+            "effort": getattr(self.engine, "effort", None),
             # WHICH engine is behind this socket (issue #39). Beside
             # "model" because it is the same kind of answer and needed at
             # the same moment: a client that painted the belief pickers
@@ -1544,6 +1545,7 @@ class SessionDaemon:
         return {
             "session_id": self.session_id,
             "model": self.engine.model,
+            "effort": getattr(self.engine, "effort", None),
             # Same field, same source, as the hello frame's -- a client
             # that reconnects to a daemon mid-life learns it from here
             # rather than only at connect.

@@ -367,6 +367,51 @@ async def test_the_chip_paints_added_green_and_removed_red(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_noop_bash_waits_for_a_real_first_edit_before_auto_open(
+    tmp_path, monkeypatch,
+):
+    """A Bash command may write, but only the measured tree can say it did.
+
+    A no-op command in a clean session must neither split the screen nor
+    spend the one automatic open. A later tracked edit must still open it.
+    """
+    monkeypatch.setenv("DOXA_AUTO_DIFF", "1")
+    config_mod.invalidate()
+    work = _repo(tmp_path, dirty=False)
+    measured: list[diff_mod.DiffCounts] = []
+    real_counts = diff_mod.counts
+
+    def counting(cwd):
+        result = real_counts(cwd)
+        measured.append(result)
+        return result
+
+    monkeypatch.setattr(diff_mod, "counts", counting)
+    app, _ = _app(work)
+    async with app.run_test(size=(160, 48)) as pilot:
+        pane = app.active_pane
+        assert await _settled(pilot, app)
+        before = len(measured)
+        pane._tick_diff("Bash", {"command": "make build"})
+        assert await _wait(pilot, lambda: len(measured) > before)
+        await pilot.pause()
+        assert measured[-1].status == diff_mod.STATUS_OK
+        assert measured[-1].files == 0
+        assert not list(app.query(DiffPane))
+        assert not pane._auto_diff_done
+
+        (work / "f.py").write_text("changed by first edit\n")
+        pane._tick_diff("Edit", {"file_path": "f.py"})
+        assert await _wait(
+            pilot,
+            lambda: bool(list(app.query(DiffPane)))
+            and list(app.query(DiffPane))[0].region.width > 0,
+        )
+        assert pane._auto_diff_done
+        assert diff_mod.compute(str(work)).files
+
+
+@pytest.mark.asyncio
 async def test_by_default_an_edit_opens_nothing(tmp_path):
     """The default IS the feature's main claim: an app nobody configured
     behaves exactly as v0.92.0 did."""
