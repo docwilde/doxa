@@ -1,8 +1,25 @@
 # Changelog
 
 Newest first. Versions are annotated git tags on the commit that shipped
-them (`v0.1.0` … `v0.15.0`); the ranges below are derived from that history,
+them (`v0.1.0` … `v1.17.0`); the ranges below are derived from that history,
 not written from memory.
+
+## 1.17.0 — 2026-09-23
+
+**Control local sessions from another device.**
+
+- The optional `doxa-remote` browser bridge lists local daemon sessions and transcripts, streams turns, sends prompts, and answers questions and approvals through Tailscale Serve. Access requires explicit remote enablement and an allowed Tailscale login; the local status bar shows the remote login.
+- Existing sockets close when access is revoked. Remote prompts in bypass mode require a separate opt-in. This first browser view does not yet render rich diffs or images, send push notifications, or replay an exact event cursor. A second-device Tailscale connection has not yet been tested.
+
+**Model choices follow the selected engine.**
+
+- Codex reads the signed-in CLI's paginated app-server `model/list`. Catalogue failure reports an unavailable Codex list rather than showing Claude aliases.
+- Claude subscription choices come from an account-matched CLI cache, labelled with their fetch time and staleness; static aliases remain a labelled fallback. Claude Code does not expose a documented live subscription model-list endpoint.
+- Preferences are saved per engine. The legacy `model` key still belongs to Claude, while `DOXA_MODEL` and `--model` retain explicit precedence. The CLI also clarifies when plain `doxa` reattaches an existing session.
+
+**Isolated Claude authentication recovers.**
+
+- When Claude clears the OAuth tokens in DOXA's isolated credentials, DOXA recopies a usable source credential even if the isolated file is newer. A newer isolated copy with valid tokens remains untouched.
 
 ## 1.16.0 — 2026-09-21
 
