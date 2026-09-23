@@ -26,11 +26,16 @@ tests/test_lore_sync.py skips without an op log.
 from __future__ import annotations
 
 import os
+import json
+import sys
+import textwrap
+from datetime import datetime, timezone
 
 import pytest
 
 from doxa import commands as commands_mod
 from doxa import config as config_mod
+from doxa import claude_catalog as claude_catalog_mod
 from doxa import engines as engines_mod
 from doxa import providers as providers_mod
 from doxa import vendors as vendors_mod
@@ -206,8 +211,110 @@ def test_a_fifth_engine_with_no_catalogue_fails_the_closure_test(fifth_engine):
 
 def test_each_engine_gets_its_OWN_catalogue_not_the_default_one():
     assert providers_mod.model_provider("claude").provider_id() == "claude"
+    assert providers_mod.model_provider("codex").provider_id() == "openai"
     assert providers_mod.model_provider("deepseek").provider_id() == "deepseek"
     assert providers_mod.model_provider("glm").provider_id() == "zai"
+
+
+async def test_codex_catalogue_uses_the_cli_list_and_caches_success():
+    calls = []
+
+    async def _fetch():
+        calls.append("model/list")
+        return [ModelInfo("gpt-6-sol", "GPT-6 Sol", "cli")]
+
+    provider = providers_mod.CodexProvider(fetch=_fetch)
+    assert provider.default_model() is None
+    first = await provider.list_models()
+    assert await provider.list_models() == first
+    assert calls == ["model/list"]
+    assert [m.id for m in first] == ["gpt-6-sol"]
+    assert "signed-in Codex CLI" in provider.catalog_note(first)
+
+
+async def test_codex_catalogue_refreshes_after_the_account_can_change(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(providers_mod.time, "monotonic", lambda: now[0])
+    account_models = [[ModelInfo("gpt-6-sol", "Sol", "cli")]]
+
+    async def _fetch():
+        return account_models[-1]
+
+    provider = providers_mod.CodexProvider(fetch=_fetch)
+    assert [m.id for m in await provider.list_models()] == ["gpt-6-sol"]
+    account_models.append([ModelInfo("gpt-6-astra", "Astra", "cli")])
+    assert [m.id for m in await provider.list_models()] == ["gpt-6-sol"]
+    now[0] += providers_mod.CATALOG_CACHE_TTL + 1
+    assert [m.id for m in await provider.list_models()] == ["gpt-6-astra"]
+
+
+async def test_codex_catalogue_unavailable_is_honest_and_retryable():
+    calls = []
+
+    async def _fetch():
+        calls.append("model/list")
+        return []
+
+    provider = providers_mod.CodexProvider(fetch=_fetch)
+    assert await provider.list_models() == []
+    assert await provider.list_models() == []
+    assert calls == ["model/list", "model/list"]
+    assert "unavailable" in provider.catalog_note([])
+    assert "sonnet" not in provider.catalog_note([])
+
+
+async def test_codex_app_server_handshake_and_paginated_model_list(tmp_path):
+    script = tmp_path / "codex-catalog-server.py"
+    log = tmp_path / "requests.jsonl"
+    script.write_text(textwrap.dedent("""
+        import json
+        import sys
+
+        log = open(sys.argv[1], "w")
+        for line in sys.stdin:
+            request = json.loads(line)
+            log.write(json.dumps(request) + "\\n")
+            log.flush()
+            if request.get("method") == "initialize":
+                print(json.dumps({"id": request["id"], "result": {}}), flush=True)
+            elif request.get("method") == "model/list":
+                cursor = request["params"].get("cursor")
+                result = (
+                    {"data": [
+                        {"id": "gpt-6-sol", "displayName": "GPT-6 Sol"},
+                        {"id": "hidden-model", "hidden": True},
+                    ], "nextCursor": "page-2"}
+                    if cursor is None else
+                    {"data": [
+                        {"id": "gpt-6-sol", "displayName": "duplicate"},
+                        {"id": "gpt-6-luna"},
+                    ], "nextCursor": None}
+                )
+                print(json.dumps({"id": request["id"], "result": result}), flush=True)
+    """))
+    models = await providers_mod._list_codex_models(
+        (sys.executable, "-u", str(script), str(log)), timeout=2.0,
+    )
+    assert [(m.id, m.display_name, m.source) for m in models] == [
+        ("gpt-6-sol", "GPT-6 Sol", "cli"),
+        ("gpt-6-luna", "gpt-6-luna", "cli"),
+    ]
+    requests = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [r["method"] for r in requests] == [
+        "initialize", "initialized", "model/list", "model/list",
+    ]
+    assert requests[0]["params"]["clientInfo"]["name"] == "doxa"
+    assert requests[2]["params"]["includeHidden"] is False
+    assert requests[3]["params"]["cursor"] == "page-2"
+
+
+async def test_codex_app_server_timeout_offers_no_guessed_models(tmp_path):
+    script = tmp_path / "slow-codex-server.py"
+    script.write_text("import time\ntime.sleep(2)\n")
+    models = await providers_mod._list_codex_models(
+        (sys.executable, "-u", str(script)), timeout=0.05,
+    )
+    assert models == []
 
 
 def test_a_handle_that_declares_nothing_is_read_as_claude():
@@ -590,16 +697,21 @@ async def test_model_lists_the_vendors_own_catalogue_on_a_vendor_session(
         assert alias not in text
 
 
-async def test_model_on_an_exempt_engine_says_so_rather_than_borrowing(
+async def test_model_on_codex_uses_its_own_catalogue_rather_than_borrowing(
     monkeypatch, tmp_path
 ):
+    async def _catalogue():
+        return [ModelInfo("gpt-6-sol", "GPT-6 Sol", "cli")]
+
+    monkeypatch.setattr(providers_mod, "_list_codex_models", _catalogue)
     fake = FakeEngine([], model="gpt-5-codex")
     fake.engine_id = "codex"
     app, fake = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test() as pilot:
         await pilot.pause()
         text = await _run(app, pilot, "/model")
-    assert "no model catalogue" in text
+    assert "GPT-6 Sol" in text
+    assert "signed-in Codex CLI" in text
     for alias in providers_mod.FALLBACK_MODEL_ALIASES:
         assert alias not in text
 
@@ -607,7 +719,8 @@ async def test_model_on_an_exempt_engine_says_so_rather_than_borrowing(
 async def test_model_still_lists_claudes_aliases_on_a_claude_session(
     monkeypatch, tmp_path
 ):
-    """The control: nothing about the Claude path changed."""
+    """When the CLI has no usable account cache, its aliases remain."""
+    monkeypatch.setattr(claude_catalog_mod, "read_cached_catalog", lambda: None)
     fake = FakeEngine([], model="claude-sonnet-4-5")
     app, fake = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test() as pilot:
@@ -615,6 +728,54 @@ async def test_model_still_lists_claudes_aliases_on_a_claude_session(
         text = await _run(app, pilot, "/model")
     assert "▸ sonnet" in text
     assert "haiku" in text and "opus" in text
+
+
+async def test_claude_subscription_cache_is_labelled_last_seen(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    catalog = claude_catalog_mod.ClaudeCatalog(
+        models=(
+            claude_catalog_mod.ClaudeCatalogModel("claude-sonnet-4-5", "Claude Sonnet 4.5"),
+            claude_catalog_mod.ClaudeCatalogModel(
+                "claude-fable-5", "Claude Fable 5", "Requires usage credits: billed separately"
+            ),
+        ),
+        fetched_at=datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc),
+        stale_at=datetime(2026, 9, 23, 13, 0, tzinfo=timezone.utc),
+        is_stale=True,
+    )
+    monkeypatch.setattr(claude_catalog_mod, "read_cached_catalog", lambda: catalog)
+    provider = providers_mod.ClaudeProvider()
+    models = await provider.list_models()
+    assert [(m.id, m.source) for m in models] == [
+        ("claude-sonnet-4-5", "cache"), ("claude-fable-5", "cache"),
+    ]
+    assert "requires usage credits" in models[1].display_name
+    note = provider.catalog_note(models)
+    assert "stale" in note and "2026-09-23 12:00 UTC" in note
+    assert "last seen" in note and "live" not in note
+
+
+async def test_claude_catalogue_rechecks_the_cli_cache_after_a_minute(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    now = [100.0]
+    monkeypatch.setattr(providers_mod.time, "monotonic", lambda: now[0])
+    models = ["claude-sonnet-4-5"]
+
+    def cache():
+        return claude_catalog_mod.ClaudeCatalog(
+            models=(claude_catalog_mod.ClaudeCatalogModel(models[-1], "Claude"),),
+            fetched_at=datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc),
+            stale_at=datetime(2026, 9, 23, 13, 0, tzinfo=timezone.utc),
+            is_stale=False,
+        )
+
+    monkeypatch.setattr(claude_catalog_mod, "read_cached_catalog", cache)
+    provider = providers_mod.ClaudeProvider()
+    assert [m.id for m in await provider.list_models()] == ["claude-sonnet-4-5"]
+    models.append("claude-opus-4-5")
+    assert [m.id for m in await provider.list_models()] == ["claude-sonnet-4-5"]
+    now[0] += providers_mod.CATALOG_CACHE_TTL + 1
+    assert [m.id for m in await provider.list_models()] == ["claude-opus-4-5"]
 
 
 # -- the live tier, skipped cleanly without a credential ---------------
