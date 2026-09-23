@@ -33,10 +33,11 @@ authoritative first --
    skipped without ever attempting the call. The picker labels whichever
    later tier supplies its list.
 2. The installed Claude CLI's account-scoped model cache, when it matches
-   the active subscription organization and is recent enough to be useful.
-   It is labelled with its fetch time and staleness, never described as a
-   live subscription query. ``doxa.claude_catalog`` validates the cache
-   without reading any OAuth token.
+   the active subscription organization, or the last local organization
+   while the CLI explicitly reports signed out. It is labelled with its
+   fetch time and staleness, never described as a live subscription query.
+   The signed-out path also says sign-in is needed to verify availability.
+   ``doxa.claude_catalog`` validates the cache without reading an OAuth token.
 3. Whatever the installed ``claude_agent_sdk`` package advertises. CHECKED
    (this repo's own venv, the pinned ``claude-agent-sdk``): no MODEL/
    MODELS constant anywhere in ``types.py`` / ``__init__.py`` / the client
@@ -175,11 +176,12 @@ class ModelInfo:
     ``id`` is what actually gets handed to `/model` / `engine.set_model`
     -- an alias from the fallback tier, or the API's own canonical model
     id when that tier is live. ``source`` is which resolution tier
-    produced this entry ("api", "cli", "cache", or "fallback") -- the same value for every
-    entry in one ``list_models()`` call, carried per-entry only so the
+    produced this entry ("api", "cli", "cache", "offline-cache", or
+    "fallback") -- the same value for every entry in one ``list_models()``
+    call, carried per-entry only so the
     caller doesn't need a second return channel to ask "which tier was
     this?". ``as_of`` and ``stale`` describe a dated CLI cache entry when
-    ``source == "cache"``."""
+    ``source`` is "cache" or "offline-cache"."""
 
     id: str
     display_name: str
@@ -274,6 +276,13 @@ class ClaudeProvider:
         return models
 
     def catalog_note(self, models: list[ModelInfo]) -> str:
+        if models and models[0].source == "offline-cache":
+            state = "stale" if models[0].stale else "cached"
+            return (
+                f"model catalog: Claude CLI offline {state} snapshot, last seen "
+                f"{models[0].as_of}; Claude is signed out — sign-in required; "
+                "model availability unverified"
+            )
         if models and models[0].source == "cache":
             state = "stale" if models[0].stale else "cached"
             return (
@@ -342,7 +351,7 @@ class ClaudeProvider:
                     if model.notice and "requires usage credits" in model.notice.casefold()
                     else model.display_name
                 ),
-                source="cache",
+                source="offline-cache" if catalog.offline else "cache",
                 as_of=as_of,
                 stale=catalog.is_stale,
             )

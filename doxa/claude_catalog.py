@@ -6,8 +6,10 @@ picker (https://code.claude.com/docs/en/model-config); it does not expose
 a documented subscription model-list command.
 Its own cache is useful as a *dated snapshot*, never as a live API response.
 This module reads only model names and timestamps from that private cache;
-it never reads, stores, or passes along a credential. Unknown cache formats,
-accounts and CLI versions fail closed so the provider can use its fallback.
+it never reads, stores, or passes along a credential. An explicitly signed-out
+CLI may show a dated snapshot only when its local profile names the same
+organization. Unknown auth, accounts, cache formats and CLI versions fail
+closed so the provider can use its fallback.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ class ClaudeCatalog:
     fetched_at: datetime
     stale_at: datetime
     is_stale: bool
+    offline: bool = False
 
 
 def _cli_output(args: list[str]) -> str | None:
@@ -52,20 +55,55 @@ def _cli_output(args: list[str]) -> str | None:
     return result.stdout if result.returncode == 0 else None
 
 
-def _active_subscription_org(cli: str) -> str | None:
-    output = _cli_output([cli, "auth", "status", "--json"])
-    if output is None:
+def _auth_status(cli: str) -> dict[str, Any] | None:
+    """Ask Claude itself; signed-out status exits 1 but still emits JSON."""
+    try:
+        result = subprocess.run(
+            [cli, "auth", "status", "--json"],
+            capture_output=True, text=True, timeout=4, check=False,
+        )
+    except (OSError, UnicodeError, subprocess.TimeoutExpired):
         return None
     try:
-        status = json.loads(output)
+        status = json.loads(result.stdout)
     except ValueError:
         return None
     if not isinstance(status, dict):
         return None
-    if status.get("loggedIn") is not True or status.get("authMethod") != "claude.ai":
+    # A transport failure or a changed CLI contract is not a login state.
+    expected_code = 0 if status.get("loggedIn") is True else 1
+    if result.returncode != expected_code:
         return None
-    org = status.get("orgId")
-    return org if isinstance(org, str) and org else None
+    return status
+
+
+def _catalog_identity(cli: str) -> tuple[str, bool] | None:
+    """(organization, offline), never an account guessed from credentials."""
+    status = _auth_status(cli)
+    if status is None:
+        return None
+    # An API key, auth token or alternate endpoint can change the model
+    # universe independently of this Claude.ai subscription snapshot.
+    if any(os.environ.get(name) for name in (
+        "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    )):
+        return None
+    if status.get("loggedIn") is True and status.get("authMethod") == "claude.ai":
+        org = status.get("orgId")
+        return (org, False) if isinstance(org, str) and org else None
+    if (
+        status.get("loggedIn") is not False
+        or status.get("authMethod") != "none"
+        or status.get("orgId") not in (None, "")
+    ):
+        return None
+    # The CLI is explicitly signed out. Its old profile is metadata, not
+    # proof of current entitlement; it serves only to reject other accounts'
+    # caches. The caller labels availability as unverified and sign-in needed.
+    from . import identity
+
+    org = identity.local_account().get("organizationUuid")
+    return (org, True) if isinstance(org, str) and org else None
 
 
 def _cli_version(cli: str) -> tuple[int, int, int] | None:
@@ -131,7 +169,8 @@ def _model_rows(raw: Any, cli_version: tuple[int, int, int]) -> tuple[ClaudeCata
 
 
 def _read_one(
-    path: Path, org: str, cli_version: tuple[int, int, int], now: datetime
+    path: Path, org: str, cli_version: tuple[int, int, int], now: datetime,
+    offline: bool,
 ) -> ClaudeCatalog | None:
     try:
         if path.is_symlink() or path.stat().st_size > _MAX_CACHE_BYTES:
@@ -166,23 +205,26 @@ def _read_one(
     models = _model_rows(config.get("models"), cli_version)
     if not models:
         return None
-    return ClaudeCatalog(models, fetched_at, stale_at, now >= stale_at)
+    return ClaudeCatalog(models, fetched_at, stale_at, now >= stale_at, offline)
 
 
 def read_cached_catalog(
     *, config_dir: Path | None = None, cli: str = "claude", now: datetime | None = None
 ) -> ClaudeCatalog | None:
-    """Return the current subscription's dated CLI cache, if trustworthy.
+    """Return a dated CLI snapshot matched to the active or last local org.
 
     ``None`` asks the caller to use another source. A stale (but at most
     seven-day-old) cache is returned with ``is_stale=True`` so a picker can
-    offer its last-seen models with an honest provenance note. This does not
-    refresh the cache or contact Anthropic's model API.
+    offer its last-seen models with an honest provenance note. ``offline``
+    means Claude is explicitly signed out, so availability is unverified and
+    sign-in is required before using a model. This does not refresh the cache
+    or contact Anthropic's model API.
     """
-    org = _active_subscription_org(cli)
-    version = _cli_version(cli) if org else None
-    if org is None or version is None:
+    identity = _catalog_identity(cli)
+    version = _cli_version(cli) if identity else None
+    if identity is None or version is None:
         return None
+    org, offline = identity
     base = config_dir or Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
     cache_dir = base / "cache" / "model-catalog"
     try:
@@ -190,6 +232,6 @@ def read_cached_catalog(
     except OSError:
         return None
     instant = now or datetime.now(timezone.utc)
-    candidates = (_read_one(path, org, version, instant) for path in paths)
+    candidates = (_read_one(path, org, version, instant, offline) for path in paths)
     return max((item for item in candidates if item is not None),
                key=lambda item: item.fetched_at, default=None)
