@@ -392,6 +392,36 @@ def test_a_dependency_change_runs_uv_sync(tmp_path, monkeypatch):
     assert "Installed 2 packages" in report.text()
 
 
+def test_a_failed_dependency_sync_is_reported_as_failed(tmp_path, monkeypatch):
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(version_mod, "resolve_version", lambda: "0.4.0")
+    shas = iter(["aaaaaaa", "bbbbbbb"])
+
+    def run(cmd, cwd, timeout):
+        key = " ".join(cmd[:2])
+        if key == "git rev-parse":
+            return subprocess.CompletedProcess(cmd, 0, next(shas), "")
+        replies = {
+            "git status": ("", "", 0),
+            "git pull": ("Fast-forward", "", 0),
+            "git log": ("bbbbbbb chore: dependency bump\n", "", 0),
+            "git diff": ("uv.lock\n", "", 0),
+            "uv sync": ("", "uv: failed to build a dependency", 1),
+        }
+        stdout, stderr, code = replies[key]
+        return subprocess.CompletedProcess(cmd, code, stdout, stderr)
+
+    report = update_mod.update(root=tmp_path, run=run)
+    assert report.status == "partial", "the source update landed, but deps did not"
+    assert report.synced is False
+    assert report.sync_failed is True
+    assert "source fast-forwarded" in report.message
+    assert "dependency sync failed" in report.message
+    assert "uv sync FAILED" in report.text()
+    assert "failed to build a dependency" in report.text()
+    assert "/update --restart" not in report.text()
+
+
 # -- the command surface --------------------------------------------------
 
 
@@ -429,6 +459,37 @@ async def test_the_restart_flag_is_opt_in(monkeypatch, tmp_path):
                 break
             await pilot.pause(0.02)
         assert app.restart_requested is True
+
+
+@pytest.mark.asyncio
+async def test_a_partial_update_does_not_restart(monkeypatch, tmp_path):
+    """A source fast-forward with failed dependencies is not a runnable
+    update, so `--restart` must leave the current working window alone."""
+    from doxa.app import DoxaApp, SystemBlock
+    from tests.fakes import FakeEngine
+
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setattr(
+        update_mod, "update",
+        lambda *a, **k: update_mod.UpdateReport(
+            status="partial",
+            message="update: source fast-forwarded aaa → bbb, but dependency sync failed",
+            sync_failed=True,
+            sync_output="uv: failed to build a dependency",
+        ),
+    )
+    engine = FakeEngine([])
+    app = DoxaApp(cwd=str(tmp_path), engine_factory=lambda: engine,
+                  new_session_factory=lambda: engine)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        pane = app.active_pane
+        await pane._cmd_update("--restart")
+        await pilot.pause()
+        assert app.restart_requested is False
+        blocks = [b.text for b in pane.query(SystemBlock) if "update:" in b.text]
+        assert "dependency sync failed" in blocks[-2]
+        assert "nothing to restart" in blocks[-1]
 
 
 # -- boot-time update check (git level) -------------------------------------

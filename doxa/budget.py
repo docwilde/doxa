@@ -395,7 +395,7 @@ def configured_warning() -> "str | None":
     if ceiling is None:
         return None
     engine_id = config_mod.engine()
-    model = prices_mod.resolve_model(engine_id, config_mod.model())
+    model = prices_mod.resolve_model(engine_id, config_mod.model(engine_id))
     basis = enforcement_basis(engine_id, model)
     if basis == BASIS_REPORTED:
         return None
