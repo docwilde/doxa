@@ -497,10 +497,14 @@ class SessionDaemon:
         self._engine_factory = engine_factory or self._build_engine
         self.engine: Any = None
         self.ring = EventRing(ring_capacity)
+        # A reconnecting renderer skips the event ring when it restores the
+        # persisted transcript, but still needs any unanswered approval.
+        self._pending_remote_inputs: dict[str, dict] = {}
         self.ready = asyncio.Event()
         self._done = asyncio.Event()
         self._server: asyncio.AbstractServer | None = None
         self._clients: set[asyncio.StreamWriter] = set()
+        self._remote_clients: dict[asyncio.StreamWriter, str] = {}
         self._had_client = False
         self._turn_task: asyncio.Task | None = None
         # Mid-turn prompt queue (see doxa.promptqueue): ONE FIFO per
@@ -880,6 +884,12 @@ class SessionDaemon:
         unconditionally and would render a second time. Every OTHER
         attached client has no such reply to read and depends entirely
         on this broadcast, so it is never skipped for them."""
+        if event.type == "needs_input":
+            request_id = event.data.get("id")
+            if isinstance(request_id, str):
+                self._pending_remote_inputs[request_id] = dict(event.data)
+        elif event.type == "needs_input_resolved":
+            self._pending_remote_inputs.pop(event.data.get("id"), None)
         frame = self.ring.append(turn_id, event)
         payload = encode_frame(frame)
         for writer in list(self._clients):
@@ -904,9 +914,22 @@ class SessionDaemon:
             with contextlib.suppress(Exception):
                 host.set_client_count(len(self._clients))
 
+    def _remote_identity(self) -> str | None:
+        """Status-bar label for attached browser drivers, bounded in width."""
+        identities = sorted(set(self._remote_clients.values()))
+        if not identities:
+            return None
+        shown = ", ".join(identities[:3])
+        return shown + f" (+{len(identities) - 3})" if len(identities) > 3 else shown
+
     def _drop_client(self, writer: asyncio.StreamWriter) -> None:
         self._clients.discard(writer)
+        remote_left = self._remote_clients.pop(writer, None)
         self._sync_client_count()
+        if remote_left is not None:
+            self._publish(None, EngineEvent("remote_driver_changed", {
+                "identity": self._remote_identity(),
+            }))
         with contextlib.suppress(Exception):
             writer.close()
         if not self._clients and self._had_client and not self._stopping:
@@ -982,12 +1005,24 @@ class SessionDaemon:
             # what guarantees replay-then-tail with no gap and no overlap.
             replay = self.ring.since(cursor)
             self._clients.add(writer)
+            remote_login = frame.get("remote_login")
+            if (
+                isinstance(remote_login, str)
+                and 0 < len(remote_login) <= 256
+                and remote_login.strip()
+                and not any(ord(char) < 32 for char in remote_login)
+            ):
+                self._remote_clients[writer] = remote_login.strip()
             self._had_client = True
             self._sync_client_count()
             self._cancel_linger()
             for f in replay:
                 writer.write(encode_frame(f))
             await writer.drain()
+            if writer in self._remote_clients:
+                self._publish(None, EngineEvent("remote_driver_changed", {
+                    "identity": self._remote_identity(),
+                }))
         elif ftype == "prompt":
             await self._handle_prompt(frame, writer)
         elif ftype == "call":
@@ -1546,6 +1581,8 @@ class SessionDaemon:
             "disabled_tools": self.engine.disabled_tools(),
             "peers": [vars(p) for p in self.engine.list_peers()],
             "clients": len(self._clients),
+            "remote_driver": self._remote_identity(),
+            "pending_inputs": list(self._pending_remote_inputs.values()),
             # Is a turn running RIGHT NOW, and how many are waiting. The
             # daemon is the only thing that knows: a client can see the
             # turn IT dispatched, but a turn started by an arriving peer
