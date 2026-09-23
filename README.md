@@ -285,6 +285,21 @@ door that still hosts an engine inside the TUI.
 `doxa.engines.get("deepseek").supports()` is the whole map for any of
 them.
 
+**Model lists and preferences.** A Codex session asks the signed-in Codex
+CLI's app-server for its account's picker-visible models (`model/list`);
+that CLI may serve a cached list. A Claude subscription session uses the
+installed Claude CLI's account-matched catalogue cache, labelled with its
+fetch time and whether it is stale. This is a dated snapshot, not a live
+subscription Models API. If that cache is unavailable, Claude shows its
+four static aliases with a fallback note. `/model` and the model chip list
+models for the current session's engine. A successful `/model <id>` switch
+also saves that engine's preference: Claude keeps the top-level `model`
+setting, while Codex, DeepSeek and GLM use their own entries in `[models]`.
+`DOXA_MODEL` and `--model` remain explicit overrides for a new session.
+Use `doxa new --engine codex` to start a Codex session; plain `doxa` may
+reattach an existing Claude session in the project, whose picker will
+correctly continue to show Claude models.
+
 `launcher install` points at **the DOXA you ran it from**, by absolute
 path, and prints that path and version — so a shortcut that would start
 something unexpected shows up now, not in a month. It names any other
