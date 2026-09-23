@@ -52,7 +52,6 @@ from doxa import config as config_mod
 from doxa import tabsets
 from doxa import transcript as transcript_mod
 from doxa.app import (
-    ArchivedSessionTab,
     DoxaApp,
     RestoreTabSpec,
     SystemBlock,
@@ -224,6 +223,29 @@ def test_an_over_long_answer_is_cut_and_MARKED_never_silently(tmp_path):
     turn = transcript_mod.read("sid-huge", str(tmp_path)).turns[0]
     assert len(turn.text) == transcript_mod.MAX_TEXT_CHARS
     assert turn.text_truncated is True
+
+
+def test_restore_reads_only_a_bounded_tail_of_a_huge_transcript(tmp_path):
+    """A large damaged prefix cannot make restoring this tab read it all."""
+    path = transcript_mod.transcript_path("sid-tail", str(tmp_path))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        b"x" * (transcript_mod.MAX_TRANSCRIPT_BYTES + 1)
+        + b"\n"
+        + (json.dumps({
+            "type": "user", "message": {"content": "recent prompt"},
+        }) + "\n").encode()
+        + (json.dumps({
+            "type": "assistant", "message": {"content": [
+                {"type": "text", "text": "recent answer"},
+            ]},
+        }) + "\n").encode()
+    )
+
+    snapshot = transcript_mod.read("sid-tail", str(tmp_path))
+    assert [(turn.prompt, turn.text) for turn in snapshot.turns] == [
+        ("recent prompt", "recent answer"),
+    ]
 
 
 # -- the headline: a restored tab RENDERS its prior conversation --------

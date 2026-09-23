@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -1280,6 +1281,53 @@ async def test_a_turn_that_never_ends_is_killed_and_reported(monkeypatch, tmp_pa
     assert events[-1].data["is_error"] is True
     assert "limit" in events[-1].data["error"]
     assert "killed" in events[-1].data["error"]
+
+
+@pytest.mark.asyncio
+async def test_timeout_kills_the_codex_process_group(monkeypatch, tmp_path):
+    """A timeout must also reap a command Codex left running."""
+    monkeypatch.setattr(codex_mod, "TURN_TIMEOUT_SECS", 0.3)
+    child_pid = tmp_path / "child.pid"
+    script = tmp_path / "fake_codex.py"
+    script.write_text(
+        "import pathlib, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+
+    async def make(*_argv, **kwargs):
+        return await asyncio.create_subprocess_exec(
+            sys.executable, str(script), **kwargs
+        )
+
+    engine = _engine(tmp_path, exec_factory=make)
+    await asyncio.wait_for(_collect(engine.send("go")), timeout=10)
+    pid = int(child_pid.read_text(encoding="utf-8"))
+    for _ in range(100):
+        try:
+            state = (Path(f"/proc/{pid}/stat").read_text().split()[2])
+        except FileNotFoundError:
+            break
+        if state == "Z":  # killed and waiting for init to reap
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("timeout left the Codex descendant running")
+
+
+@pytest.mark.asyncio
+async def test_turn_cleanup_never_derives_a_group_from_an_exited_parent(tmp_path):
+    """An exited pid can be recycled, so only a verified live group is safe."""
+    proc = _FakeProc([])
+    proc.pid = 12345
+    proc.returncode = 0
+    engine = _engine(tmp_path)
+    engine._proc = proc
+    engine._proc_group = None
+    await engine._kill_turn()
+    assert proc.killed is False
 
 
 @pytest.mark.asyncio

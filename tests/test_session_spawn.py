@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import multiprocessing
 import os
 import socket
 import subprocess
@@ -105,6 +106,21 @@ def _ctx(tmp_path, depth=0, confirm=None, session_id="parent-1"):
         spawn_depth=depth,
         spawn_confirm=_allow if confirm is None else confirm,
     )
+
+
+def _wait_for_spawn_approval(cwd: str, ready, result) -> None:
+    """Child-process half of the cross-daemon reservation regression."""
+    async def confirm(_payload):
+        ready.put("waiting")
+        await asyncio.Event().wait()
+
+    async def run() -> None:
+        out = spawn_mod.SESSION_OPERATORS["spawn_session"].fn(
+            task="delegate", op_ctx=_ctx(Path(cwd), confirm=confirm),
+        )
+        result.put(await out)
+
+    asyncio.run(run())
 
 
 @pytest.fixture
@@ -307,6 +323,67 @@ def test_rate_cap_refuses_strictly_before_the_count_cap_would(tmp_path, armed,
     finally:
         for fake in old:
             fake.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_confirmations_reserve_the_spawn_capacity(
+    tmp_path, armed, runtime, recorded_spawn,
+):
+    """Only one pending approval may consume this scope's rate allowance."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def confirm(_payload):
+        entered.set()
+        await release.wait()
+        return {"decision": "allow"}
+
+    first = spawn_mod.SESSION_OPERATORS["spawn_session"].fn(
+        task="first", op_ctx=_ctx(tmp_path, confirm=confirm),
+    )
+    second = spawn_mod.SESSION_OPERATORS["spawn_session"].fn(
+        task="second", op_ctx=_ctx(tmp_path, confirm=confirm),
+    )
+    first_task = asyncio.create_task(first)
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    second_out = await asyncio.wait_for(second, timeout=2)
+    assert "awaiting approval" in second_out["error"]
+
+    release.set()
+    first_out = await asyncio.wait_for(first_task, timeout=2)
+    assert first_out["session_id"] == "child-session-id"
+    assert len(recorded_spawn) == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="flock reservation is Unix-only")
+def test_a_pending_spawn_in_another_process_blocks_approval(
+    tmp_path, armed, runtime,
+):
+    """The reservation must cover separate daemon processes, not one loop."""
+    mp = multiprocessing.get_context("fork")
+    ready, result = mp.Queue(), mp.Queue()
+    first = mp.Process(
+        target=_wait_for_spawn_approval,
+        args=(str(tmp_path), ready, result),
+    )
+    first.start()
+    try:
+        assert ready.get(timeout=5) == "waiting"
+
+        async def allow(_payload):
+            return {"decision": "allow"}
+
+        second = spawn_mod.SESSION_OPERATORS["spawn_session"].fn(
+            task="second", op_ctx=_ctx(tmp_path, confirm=allow),
+        )
+        out = asyncio.run(second)
+        assert "awaiting approval" in out["error"]
+    finally:
+        first.terminate()
+        first.join(timeout=5)
+        if first.is_alive():
+            first.kill()
+            first.join(timeout=5)
 
 
 def test_the_rate_window_is_the_registry_staleness_window(tmp_path):

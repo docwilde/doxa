@@ -83,6 +83,12 @@ MAX_TEXT_CHARS = 20_000
 # Turn.tools_dropped counts what did not get a chip.
 MAX_TOOLS_PER_TURN = 30
 
+# Restore is a UI operation.  A corrupted or unexpectedly large transcript
+# must not make opening a tab allocate and parse an unbounded file before the
+# existing turn and prose caps get a chance to run.
+MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024
+MAX_TRANSCRIPT_LINES = 20_000
+
 
 @dataclass
 class ToolRecord:
@@ -153,17 +159,32 @@ def _records(path: Path) -> "list[dict]":
     raised -- one lost record costs the last few words of a transcript,
     an exception would cost the whole restore."""
     try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - MAX_TRANSCRIPT_BYTES))
+            raw = fh.read(MAX_TRANSCRIPT_BYTES)
     except OSError:
         return []
+
+    # Starting in the file's tail can land in the middle of a JSON line.
+    # Drop only that incomplete prefix; every later line remains complete.
+    if size > MAX_TRANSCRIPT_BYTES:
+        _prefix, separator, raw = raw.partition(b"\n")
+        if not separator:
+            return []
     out: "list[dict]" = []
-    for line in raw.splitlines():
+    # Keep only the newest bounded number of lines.  A transcript containing
+    # millions of tiny records is just as hostile to restore as one giant
+    # record, even though its byte size fits the tail budget.
+    lines = raw.splitlines()[-MAX_TRANSCRIPT_LINES:]
+    for line in lines:
         line = line.strip()
         if not line:
             continue
         try:
-            record = json.loads(line)
-        except ValueError:
+            record = json.loads(line.decode("utf-8", "replace"))
+        except (UnicodeError, ValueError):
             continue
         if isinstance(record, dict):
             out.append(record)
