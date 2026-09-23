@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -38,6 +39,7 @@ def _cli(
             "loggedIn": authenticated,
             "authMethod": auth_method or ("claude.ai" if authenticated else "none"),
             "orgId": org if authenticated else None,
+            "email": "current@example.org" if authenticated else None,
             "secret": "not-a-real-secret",
         }
 
@@ -52,9 +54,13 @@ def _cli(
     return commands
 
 
-def _profile(base, org="current-org"):
+def _profile(base, org="current-org", account="current-account", email="current@example.org"):
     (base / ".claude.json").write_text(json.dumps({
-        "oauthAccount": {"organizationUuid": org},
+        "oauthAccount": {
+            "organizationUuid": org,
+            "accountUuid": account,
+            "emailAddress": email,
+        },
     }))
     identity.invalidate()
 
@@ -116,6 +122,7 @@ def test_fresh_cache_is_still_a_cache(tmp_path, monkeypatch):
 
 def test_current_cc_cache_is_scoped_by_account_filename(tmp_path, monkeypatch):
     _cli(monkeypatch, version="2.1.281")
+    _profile(tmp_path)
     path = _cache(tmp_path, fetched=NOW - timedelta(minutes=5),
                   stale=NOW + timedelta(minutes=55))
     data = json.loads(path.read_text())
@@ -124,7 +131,8 @@ def test_current_cc_cache_is_scoped_by_account_filename(tmp_path, monkeypatch):
     data["catalog"]["surface"] = "cc"
     data["catalog"]["config"]["id"] = "cc"
     path.unlink()
-    scoped = path.with_name("current-org-account-cc.json")
+    account_hash = hashlib.sha256(b"current-account").hexdigest()[:12]
+    scoped = path.with_name(f"current-org-{account_hash}-cc.json")
     scoped.write_text(json.dumps(data))
 
     result = claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW)
@@ -132,6 +140,26 @@ def test_current_cc_cache_is_scoped_by_account_filename(tmp_path, monkeypatch):
     assert [model.id for model in result.models] == ["claude-sonnet-5", "claude-fable-5-1"]
 
     scoped.rename(path.with_name("other-org-account-cc.json"))
+    assert claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW) is None
+
+
+def test_current_cc_cache_rejects_other_account_in_same_org(tmp_path, monkeypatch):
+    _cli(monkeypatch, version="2.1.281")
+    _profile(tmp_path)
+    path = _cache(tmp_path)
+    data = json.loads(path.read_text())
+    data.pop("resolution")
+    data.pop("organizationUuid")
+    data["catalog"]["surface"] = "cc"
+    data["catalog"]["config"]["id"] = "cc"
+    path.unlink()
+    other_hash = hashlib.sha256(b"other-account").hexdigest()[:12]
+    path.with_name(f"current-org-{other_hash}-cc.json").write_text(json.dumps(data))
+    assert claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW) is None
+
+    own_hash = hashlib.sha256(b"current-account").hexdigest()[:12]
+    path.with_name(f"current-org-{own_hash}-cc.json").write_text(json.dumps(data))
+    _profile(tmp_path, email="other@example.org")
     assert claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW) is None
 
 
@@ -275,7 +303,7 @@ async def test_startup_cli_warmup_sends_no_prompt_and_stops_on_deadline(monkeypa
     assert await claude_catalog.warm_cli_catalog(timeout=0.01) is True
     args, kwargs = calls[0]
     assert args == (
-        "claude", "--print", "--verbose", "--input-format", "stream-json",
+        "claude", "--safe-mode", "--print", "--verbose", "--input-format", "stream-json",
         "--output-format", "stream-json",
     )
     assert kwargs["stdin"] == asyncio.subprocess.PIPE
