@@ -356,22 +356,45 @@ async def test_branch_switch_refusal_surfaces_for_a_dirty_worktree(
         )
 
 
-# -- effort: a SELECTOR, but honest that it cannot touch THIS session ----
+# -- effort: beside the model, but fixed for THIS session ----------------
 
 
 @pytest.mark.asyncio
 async def test_effort_picker_notes_it_cannot_change_this_session(monkeypatch, tmp_path):
-    fake = FakeEngine([], effort="high")
+    fake = FakeEngine([], model="claude-sonnet-4-5", effort="high")
     app, engines = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test() as pilot:
-        assert await _wait_status(pilot, app, "effort:high")
-        pane = app.active_pane
-        await pane.open_effort_picker()
-        await pilot.pause()
+        assert await _wait_status(pilot, app, "claude-sonnet-4-5 [high]")
+        assert "effort:high" not in _status_plain(app)
         picker = app.query_one("#chip-picker", ChipPicker)
+
+        # The model and bracket remain distinct actions inside one chip.
+        await pilot.click("#status-bar", offset=_offset_of(app, "claude-sonnet-4-5"))
+        await pilot.pause()
+        assert picker.is_open and picker.border_title == "model"
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.click("#status-bar", offset=_offset_of(app, "[high]"))
+        await pilot.pause()
         assert picker.is_open
+        assert picker.border_title == "effort"
         assert "NEW sessions" in picker._note
         assert "high" in picker._note
+
+
+@pytest.mark.asyncio
+async def test_unavailable_effort_keeps_model_chip_without_bracket(monkeypatch, tmp_path):
+    fake = FakeEngine([], model="gpt-6-sol", effort=None)
+    app, _engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test() as pilot:
+        assert await _wait_status(pilot, app, "gpt-6-sol")
+        bar = app.query_one("#status-bar", StatusBar)
+        assert "gpt-6-sol [" not in _status_plain(app)
+        assert "open_effort_picker" not in str(bar.renderable)
+        await pilot.click("#status-bar", offset=_offset_of(app, "gpt-6-sol"))
+        await pilot.pause()
+        picker = app.query_one("#chip-picker", ChipPicker)
+        assert picker.is_open and picker.border_title == "model"
 
 
 # -- ACTIONABLE tier: peers -> a roster picker, ctx% -> /compact ---------
