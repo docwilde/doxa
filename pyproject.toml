@@ -62,6 +62,13 @@ dependencies = [
     "lore-core @ git+https://github.com/docwilde/LORE@v0.57.0",
 ]
 
+[project.optional-dependencies]
+remote = [
+    "starlette>=1,<2",
+    "uvicorn>=0.52,<1",
+    "websockets>=15,<17",
+]
+
 [project.scripts]
 doxa = "doxa.cli:main"
 # The name README.md and docs/fleet.md have used since the harness landed.
@@ -70,6 +77,7 @@ doxa = "doxa.cli:main"
 # doxa.fleet`. Same entry point either way -- doxa/fleet.py's main() is what
 # `python -m doxa.fleet` already calls.
 doxa-fleet = "doxa.fleet:main"
+doxa-remote = "doxa.remote_web:main"
 
 [dependency-groups]
 dev = [

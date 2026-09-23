@@ -1591,14 +1591,9 @@ class SessionEngine:
         self.lore: bool = lore_enabled_default() if lore is None else bool(lore)
         # The identity of a REMOTE driver currently attached to this
         # session, or None while nobody but the keyboard in front of it is
-        # driving (R1, docs/plans/remote.md). No bridge process exists yet
-        # to ever set this to anything but None -- this attribute, and
-        # doxa.ui.labels.remote_driver_chip which paints it, are the
-        # wiring a later track lands its `attach`/`detach` calls on. A
-        # single identity, not a set: the spec is explicit that DOXA is
-        # "not multi-user... one user, several devices", so at most one
-        # remote identity is ever the answer to "who else is driving
-        # this", and the chip is written for exactly that shape.
+        # driving (R1, docs/plans/remote.md). In-process engines have no
+        # browser bridge; daemon-backed clients receive the bridge's
+        # verified identity through status and remote_driver_changed.
         self.remote_driver: "str | None" = None
         # Exact SIZE, in characters, of the LORE snapshot this session
         # appended to its system prompt at connect (_build_options). The
