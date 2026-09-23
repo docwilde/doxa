@@ -32,6 +32,7 @@ from textual.containers import VerticalScroll
 
 from .. import auth as auth_mod
 from .. import config as config_mod
+from .. import engines as engines_mod
 from .. import history as history_mod
 from .. import identity as identity_mod
 from .. import layout as layout_mod
@@ -926,7 +927,13 @@ class PaneCommandsMixin:
         if ctx_bits:
             rows.append(("context", "  ".join(ctx_bits)))
         account = getattr(engine, "account", None) or {}
-        tier = identity_mod.account_tier(account)
+        engine_id = engines_mod.engine_id_of(engine)
+        tier = (
+            identity_mod.account_tier(account)
+            if engine_id == engines_mod.CLAUDE_ENGINE_ID else None
+        )
+        if engine_id == engines_mod.CODEX_ENGINE_ID and account.get("planType"):
+            rows.append(("plan", f"ChatGPT {account['planType']}"))
         # v1.4.0: `$0.0000` is a claim, and an engine whose stream carries
         # no cost field has not made it. /usage is a surface people paste
         # into bug reports, so the absence is spelled out in words rather
@@ -955,6 +962,8 @@ class PaneCommandsMixin:
             rows.append(("cost", f"${float(reported_cost):.4f}"))
         lines = [f"{label:<12} {value}" for label, value in rows]
 
+        if engine_id != engines_mod.CLAUDE_ENGINE_ID:
+            return "usage\n" + "\n".join(lines)
         usage = identity_mod.usage()
         if usage is None:
             lines.append("")
@@ -2236,7 +2245,11 @@ class PaneCommandsMixin:
         subscription can end up reading as somebody's "team subscription"."""
         engine = self.engine
         account = getattr(engine, "account", None) or {}
-        local = identity_mod.local_account()
+        engine_id = engines_mod.engine_id_of(engine)
+        local = (
+            identity_mod.local_account()
+            if engine_id == engines_mod.CLAUDE_ENGINE_ID else {}
+        )
         # Version first: the one line that says WHICH DOXA this is. Its sha
         # is shown only when it differs from the sha the git chip below
         # already carries (or when the checkout is dirty, which the chip
@@ -2248,12 +2261,21 @@ class PaneCommandsMixin:
             lines.append(f"account  {account['email']}")
         elif local.get("emailAddress"):
             lines.append(f"account  {local['emailAddress']}")
-        plan_line = self._plan_line(account, local)
+        if engine_id == engines_mod.CLAUDE_ENGINE_ID:
+            plan_line = self._plan_line(account, local)
+        elif engine_id == engines_mod.CODEX_ENGINE_ID:
+            plan_type = account.get("planType")
+            plan_line = f"ChatGPT {plan_type}" if plan_type else None
+        else:
+            plan_line = None
         if plan_line:
             lines.append(f"plan     {plan_line}")
-        org = identity_mod.organization(account, local)
+        org = (
+            identity_mod.organization(account, local)
+            if engine_id == engines_mod.CLAUDE_ENGINE_ID else account.get("organization")
+        )
         if org:
-            role = local.get("organizationRole")
+            role = local.get("organizationRole") if local else None
             lines.append(f"org      {org}" + (f" ({role})" if role else ""))
         lines.append(f"model    {getattr(engine, 'model', None) or 'default'}")
         lines.append(f"cwd      {cwd}")

@@ -757,7 +757,11 @@ class PaneChipsMixin:
         # with the (already-computed) list-price figure demoted to an
         # explicit what-if. API-key auth keeps the real $ estimate.
         account = getattr(engine, "account", None) or {}
-        tier = identity_mod.account_tier(account)
+        tier = (
+            identity_mod.account_tier(account)
+            if engines_mod.engine_id_of(engine) == engines_mod.CLAUDE_ENGINE_ID
+            else None
+        )
         if not caps.cost:
             # Nothing said, so nothing shown. `$0.0000` is not the absence
             # of a cost, it is the CLAIM that this session was free -- and
@@ -1030,6 +1034,9 @@ class PaneChipsMixin:
         for what events tell it, and a status chip is not worth a tick.
         API-key auth has no such cache and shows nothing here -- the plain
         $ tally next to it is already the honest figure for that case."""
+        if engines_mod.engine_id_of(self.engine) != engines_mod.CLAUDE_ENGINE_ID:
+            self._usage_chip = None
+            return
         try:
             snapshot = identity_mod.usage()
         except Exception:  # noqa: BLE001 -- a chip must degrade to silence

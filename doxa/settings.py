@@ -44,6 +44,7 @@ from textual.widgets import Input, Static, TabbedContent, TabPane
 
 from . import budget as budget_mod
 from . import config as config_mod
+from . import engines as engines_mod
 
 CATEGORIES: tuple[str, ...] = (
     "Session", "Memory", "Appearance", "Notifications", "Remote", "Paths",
@@ -211,7 +212,11 @@ class SettingsScreen(ModalScreen["bool"]):
         from . import __version__
         from . import identity as identity_mod
 
-        local = identity_mod.local_account()
+        engine_id = self._model_engine()
+        local = (
+            identity_mod.local_account()
+            if engine_id == engines_mod.CLAUDE_ENGINE_ID else {}
+        )
         yield Static("version", classes="setting-label")
         yield Static(f"DOXA {__version__}", classes="setting-value")
         # This tab stays about the ACCOUNT (item Z deliberately did not
@@ -229,16 +234,27 @@ class SettingsScreen(ModalScreen["bool"]):
         if email:
             yield Static("account", classes="setting-label")
             yield Static(str(email), classes="setting-value")
-        tier = identity_mod.account_tier(self.account, local)
+        if engine_id == engines_mod.CLAUDE_ENGINE_ID:
+            tier = identity_mod.account_tier(self.account, local)
+        elif engine_id == engines_mod.CODEX_ENGINE_ID:
+            plan_type = self.account.get("planType")
+            tier = f"ChatGPT {plan_type}" if plan_type else None
+        else:
+            tier = None
         if tier:
             yield Static("plan", classes="setting-label")
             yield Static(tier, classes="setting-value")
-            yield Static(
-                "Precise tier from the CLI's own local config when it has "
-                "one; the SDK's subscriptionType otherwise.",
-                classes="setting-help",
-            )
-        org = identity_mod.organization(self.account, local)
+            if engine_id == engines_mod.CLAUDE_ENGINE_ID:
+                yield Static(
+                    "Precise tier from the CLI's own local config when it has "
+                    "one; the SDK's subscriptionType otherwise.",
+                    classes="setting-help",
+                )
+        org = (
+            identity_mod.organization(self.account, local)
+            if engine_id == engines_mod.CLAUDE_ENGINE_ID
+            else self.account.get("organization")
+        )
         if org:
             yield Static("organization", classes="setting-label")
             yield Static(str(org), classes="setting-value")

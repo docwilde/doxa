@@ -215,6 +215,7 @@ from lore_core.config import PROJECTS_DIR, project_slug
 from lore_core.scrub import scrub_secrets
 
 from . import budget as budget_mod
+from . import codex_account as codex_account_mod
 from . import config as config_mod
 from . import mcpserver as mcpserver_mod
 from . import peerdelivery as peerdelivery_mod
@@ -662,6 +663,7 @@ class CodexEngine:
         spawn_depth: int = 0,
         parent_session_id: "str | None" = None,
         exec_factory: "Callable[..., Any] | None" = None,
+        account_fetch: "Callable[[], Any] | None" = None,
         sandbox: "str | None" = None,
         daemon_socket: "str | None" = None,
         lore: "bool | None" = None,
@@ -696,6 +698,11 @@ class CodexEngine:
         wanted = str(sandbox or os.environ.get("DOXA_CODEX_SANDBOX", "")).strip()
         self.sandbox = wanted if wanted in SANDBOX_MODES else DEFAULT_SANDBOX
         self._exec_factory = exec_factory or asyncio.create_subprocess_exec
+        # A scripted turn executor should never open the real account CLI.
+        self._account_fetch = (
+            account_fetch if account_fetch is not None else
+            (codex_account_mod.read_account if exec_factory is None else None)
+        )
 
         # The git directories a commit in ``self.cwd`` needs and the
         # sandbox does not grant (issue #57). Computed LAZILY and cached:
@@ -929,15 +936,11 @@ class CodexEngine:
     # -- lifecycle -----------------------------------------------------
 
     async def start(self) -> EngineEvent:
-        """Check the CLI is there, join the peer registry, and say the
-        session started.
+        """Check the CLI, read its account display fields, join peers, and start.
 
-        Nothing is spawned here. A Codex turn IS a process, so there is no
-        connect step to perform and nothing to hold open between turns --
-        which also means this method cannot block the event loop the way
-        ``spawn_daemon``'s 60-second poll can, and the v1.2.1 probes that
-        assert a factory does not run on the loop thread have nothing to
-        catch."""
+        The short app-server account query uses an async subprocess and
+        leaves nothing running. A Codex turn remains a separate process;
+        there is no persistent turn connection between prompts."""
         if shutil.which(CODEX_BIN) is None:
             raise CodexUnavailable(
                 f"{CODEX_BIN!r} is not on PATH -- install the Codex CLI, or "
@@ -958,6 +961,11 @@ class CodexEngine:
                 "is still readable and searchable; open it read-only, or "
                 "start a new Codex session"
             )
+        if self._account_fetch is not None:
+            try:
+                self.account = await self._account_fetch() or {}
+            except Exception:  # noqa: BLE001 -- account display is optional
+                self.account = {}
         self._started = True
         try:
             self.peer_host = peers_mod.PeerHost(

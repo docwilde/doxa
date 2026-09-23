@@ -1260,7 +1260,11 @@ class PaneRuntimeMixin:
         # Same tier lookup _refresh_status/_usage_text already do --
         # keeps the per-turn figure consistent with both (item T).
         account = getattr(self.engine, "account", None) or {}
-        tier = identity_mod.account_tier(account)
+        tier = (
+            identity_mod.account_tier(account)
+            if engines_mod.engine_id_of(self.engine) == engines_mod.CLAUDE_ENGINE_ID
+            else None
+        )
         await block.mark_done(
             ev.data.get("cost_usd"), ev.data.get("duration_ms"),
             ev.data.get("is_error", False), tier,
