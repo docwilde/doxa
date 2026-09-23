@@ -74,6 +74,7 @@ TOML value:
                              and the peer tools answer accordingly.
 ``DOXA_MCP_CWD``             the session's working directory; the repo
                              root is derived from it (``repo_root_of``).
+``DOXA_MCP_ENGINE``          engine id for memory proposal provenance.
 ``DOXA_MCP_SPAWN_DEPTH``     integer, default 0. On the sidecar, never
                              an argument -- a depth the model could
                              write is not a depth limit.
@@ -167,6 +168,7 @@ SERVER_NAME = "doxa"
 
 ENV_SESSION_ID = "DOXA_MCP_SESSION_ID"
 ENV_CWD = "DOXA_MCP_CWD"
+ENV_ENGINE = "DOXA_MCP_ENGINE"
 ENV_SPAWN_DEPTH = "DOXA_MCP_SPAWN_DEPTH"
 ENV_LORE = "DOXA_MCP_LORE"
 ENV_PEER_SEND = "DOXA_MCP_PEER_SEND"
@@ -182,7 +184,7 @@ ENV_TURN_ID = ENGINE_TURN_ENV
 #: the server that READS them cannot drift -- doxa.codex imports this
 #: rather than spelling the names a second time.
 IDENTITY_ENV = (
-    ENV_SESSION_ID, ENV_CWD, ENV_SPAWN_DEPTH, ENV_LORE, ENV_PEER_SEND,
+    ENV_SESSION_ID, ENV_CWD, ENV_ENGINE, ENV_SPAWN_DEPTH, ENV_LORE, ENV_PEER_SEND,
     ENV_ENGINE_SOCKET, ENV_TURN_ID,
 )
 
@@ -229,6 +231,7 @@ class Identity:
 
     session_id: str
     cwd: str
+    source_engine: str | None = None
     spawn_depth: int = 0
     lore: bool = True
     peer_send: bool = False
@@ -247,6 +250,7 @@ def identity_from_env(
     return Identity(
         session_id=str(env.get(ENV_SESSION_ID) or "").strip(),
         cwd=str(env.get(ENV_CWD) or "").strip() or os.getcwd(),
+        source_engine=str(env.get(ENV_ENGINE) or "").strip() or None,
         spawn_depth=depth,
         lore=_truthy(env.get(ENV_LORE), True) if lore is None else bool(lore),
         peer_send=_truthy(env.get(ENV_PEER_SEND), False),
@@ -301,6 +305,7 @@ class OperatorSurface:
                 cwd=identity.cwd,
                 repo_root=repo_root_of(identity.cwd),
                 belief_store=belief_store,
+                source_engine=identity.source_engine,
                 spawn_depth=identity.spawn_depth,
                 # No human to ask and no spawn from this surface -- Codex
                 # reports spawn_sessions=False and doxa.session_ops is not

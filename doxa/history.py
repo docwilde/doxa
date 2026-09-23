@@ -264,26 +264,32 @@ def with_titles(hits: list[dict]) -> list[dict]:
     ids = [i for i in ids if i]
     if not ids:
         return hits
-    meta: dict[str, tuple[str, str]] = {}
+    meta: dict[str, tuple[str, str, str]] = {}
     try:
         from lore_core.store import db_connect
 
         conn = db_connect()
+        has_engine = any(r[0] == "engine" for r in conn.execute(
+            "SELECT name FROM pragma_table_info('sessions')").fetchall())
         placeholders = ",".join("?" * len(ids))
-        for session_id, title, cwd_col in conn.execute(
-            f"SELECT session_id, title, cwd FROM sessions"
+        for session_id, title, cwd_col, engine in conn.execute(
+            f"SELECT session_id, title, cwd, "
+            f"{'engine' if has_engine else 'NULL'} FROM sessions"
             f" WHERE session_id IN ({placeholders})",
             ids,
         ).fetchall():
             meta[str(session_id)] = (
                 (title or "").strip(), (cwd_col or "").strip(),
+                (engine or "").strip(),
             )
     except Exception:
         return hits
     for hit in hits:
-        title, cwd_col = meta.get(str(hit.get("session_id") or ""), ("", ""))
+        title, cwd_col, engine = meta.get(str(hit.get("session_id") or ""), ("", "", ""))
         hit.setdefault("title", title)
         hit.setdefault("cwd", cwd_col)
+        if engine:
+            hit.setdefault("engine", engine)
     return hits
 
 

@@ -164,6 +164,8 @@ def _slug(op_ctx: "OperatorContext | None") -> str:
 
 def _belief_search(query: str, limit: int = 8, op_ctx: "OperatorContext | None" = None) -> dict:
     conn = _conn(op_ctx)
+    has_engine = any(r[0] == "source_engine" for r in conn.execute(
+        "SELECT name FROM pragma_table_info('beliefs')").fetchall())
     rows: list = []
     # AND first, OR fallback -- same widening lore_core.beliefs.cmd_belief
     # uses, active beliefs only (dormant/superseded stay out uninvited).
@@ -171,7 +173,8 @@ def _belief_search(query: str, limit: int = 8, op_ctx: "OperatorContext | None" 
         if not expr:
             return {"error": "lore_belief_search: empty query"}
         rows = conn.execute(
-            f"SELECT {lore_beliefs.BELIEF_COLS_B} FROM beliefs b"
+            f"SELECT {lore_beliefs.BELIEF_COLS_B}, "
+            f"{'b.source_engine' if has_engine else 'NULL'} FROM beliefs b"
             " JOIN belief_fts f ON b.id = f.belief_id"
             " WHERE belief_fts MATCH ? AND b.status IN ('active')"
             " ORDER BY bm25(belief_fts) LIMIT ?",
@@ -180,13 +183,14 @@ def _belief_search(query: str, limit: int = 8, op_ctx: "OperatorContext | None" 
         if rows:
             break
     beliefs = []
-    for bid, subject, claim, conf, status in rows:
+    for bid, subject, claim, conf, status, source_engine in rows:
         n_ev = conn.execute(
             "SELECT count(*) FROM belief_evidence WHERE belief_id = ?", (bid,)
         ).fetchone()[0]
         beliefs.append({
             "id": bid, "subject": subject, "claim": claim,
             "confidence": round(conf, 2), "status": status, "evidence_count": n_ev,
+            **({"source_engine": source_engine} if source_engine else {}),
         })
     out: dict = {"beliefs": beliefs, "count": len(beliefs)}
     if not beliefs:
@@ -223,18 +227,26 @@ _LORE_BELIEF_SEARCH = Operator(
 
 def _belief_show(belief_id: int) -> dict:
     conn = lore_store.db_connect()
+    belief_engine = any(r[0] == "source_engine" for r in conn.execute(
+        "SELECT name FROM pragma_table_info('beliefs')").fetchall())
+    evidence_engine = any(r[0] == "source_engine" for r in conn.execute(
+        "SELECT name FROM pragma_table_info('belief_evidence')").fetchall())
     row = conn.execute(
-        f"SELECT {lore_beliefs.BELIEF_COLS} FROM beliefs WHERE id = ?", (belief_id,)
+        f"SELECT {lore_beliefs.BELIEF_COLS}, "
+        f"{'source_engine' if belief_engine else 'NULL'} FROM beliefs WHERE id = ?",
+        (belief_id,),
     ).fetchone()
     if not row:
         # single-colon soft error: a bad id is the model's mistake to
         # correct, never a hard failure for the two-strikes tracker.
         return {"error": f"lore_belief_show: no belief with id {belief_id}"}
-    bid, subject, claim, conf, status = row
+    bid, subject, claim, conf, status, source_engine = row
     evidence = [
-        {"session_id": sid, "project": proj, "note": note, "created": created}
-        for sid, proj, note, created in conn.execute(
-            "SELECT session_id, project, note, created FROM belief_evidence"
+        {"session_id": sid, "project": proj, "note": note, "created": created,
+         **({"source_engine": engine} if engine else {})}
+        for sid, proj, note, created, engine in conn.execute(
+            "SELECT session_id, project, note, created, "
+            f"{'source_engine' if evidence_engine else 'NULL'} FROM belief_evidence"
             " WHERE belief_id = ? ORDER BY created", (bid,)
         )
     ]
@@ -266,6 +278,7 @@ def _belief_show(belief_id: int) -> dict:
             "calibrated_confidence": round(
                 lore_beliefs.calibrated_confidence(conf, confirms, contradicts), 2),
             "status": status,
+            **({"source_engine": source_engine} if source_engine else {}),
         },
         "evidence": evidence,
         "outcomes": {"confirmed": confirms, "contradicted": contradicts, "stale": stales},
@@ -559,11 +572,23 @@ def _session_search(query: str, limit: int = 6, op_ctx: "OperatorContext | None"
             params.append(limit)
             rows = conn.execute(sql, params).fetchall()
             if rows:
+                engines: dict[str, str] = {}
+                if any(r[0] == "engine" for r in conn.execute(
+                    "SELECT name FROM pragma_table_info('sessions')").fetchall()):
+                    ids = list(dict.fromkeys(str(r[0]) for r in rows))
+                    placeholders = ",".join("?" * len(ids))
+                    engines = {
+                        str(sid): str(engine) for sid, engine in conn.execute(
+                            f"SELECT session_id, engine FROM sessions"
+                            f" WHERE session_id IN ({placeholders})", ids,
+                        ).fetchall() if engine
+                    }
                 return {
                     "scope": "project" if scope else "all",
                     "hits": [
                         {"session_id": sid, "project": proj, "ts": ts,
-                         "role": role, "snippet": one_line(snip)[:280]}
+                         "role": role, "snippet": one_line(snip)[:280],
+                         **({"engine": engines[str(sid)]} if str(sid) in engines else {})}
                         for sid, proj, ts, role, snip in rows
                     ],
                     "count": len(rows),
@@ -576,7 +601,7 @@ _LORE_SESSION_SEARCH = Operator(
     description=(
         "BM25 full-text search over LORE's index of past sessions "
         "(current project first, then all projects). Returns per-message "
-        "hits with session ids and snippets."
+        "hits with session ids, engine tags when known, and snippets."
     ),
     parameters={
         "type": "object",
@@ -621,6 +646,8 @@ def _remember(text: str, scope: str = "project", op_ctx: "OperatorContext | None
         "text": text, "created": utcnow(), "project": slug,
         "session_id": op_ctx.session_id if op_ctx is not None else None,
         "derived_by": "doxa-tool",
+        **({"source_engine": op_ctx.source_engine}
+           if op_ctx is not None and op_ctx.source_engine else {}),
     }
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     n = 0

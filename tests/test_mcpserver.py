@@ -31,6 +31,7 @@ import pytest
 from doxa import mcpserver as mcpserver_mod
 from doxa.mcpserver import (
     ENV_CWD,
+    ENV_ENGINE,
     ENV_ENGINE_SOCKET,
     ENV_LORE,
     ENV_PEER_SEND,
@@ -113,10 +114,11 @@ def _surface(tmp_path: Path, **kwargs) -> OperatorSurface:
 def test_the_environment_contract_is_read_exactly_as_documented(tmp_path):
     identity = identity_from_env({
         ENV_SESSION_ID: "s-7", ENV_CWD: str(tmp_path),
+        ENV_ENGINE: "codex",
         ENV_SPAWN_DEPTH: "2", ENV_LORE: "0", ENV_PEER_SEND: "1",
     })
     assert identity == Identity(
-        session_id="s-7", cwd=str(tmp_path),
+        session_id="s-7", cwd=str(tmp_path), source_engine="codex",
         spawn_depth=2, lore=False, peer_send=True,
     )
 

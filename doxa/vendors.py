@@ -1217,7 +1217,8 @@ class ChatApiEngine:
         field is already scrubbed by the time it arrives here."""
         try:
             with self.transcript_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                fh.write(json.dumps({**record, "engine": self.spec.engine_id},
+                                    ensure_ascii=False) + "\n")
         except OSError:
             # A transcript that cannot be written must not take the turn
             # down: the session is still usable, it just will not be
@@ -1299,6 +1300,7 @@ class ChatApiEngine:
                     cwd=self.cwd,
                     repo_root=repo_root_of(self.cwd),
                     belief_store=lore_store.db_connect,
+                    source_engine=self.spec.engine_id,
                     spawn_depth=self.spawn_depth,
                     # No channel to ask a human on and no spawn from this
                     # engine -- see spawn_sessions=False.

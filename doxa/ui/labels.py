@@ -1349,7 +1349,11 @@ def belief_provenance(belief: dict) -> str:
     unlabelled belief reads "provenance unknown", which is a statement
     about the ledger, not about the belief."""
     via = str(belief.get("via") or "").strip()
-    return f"via {via}" if via else "provenance unknown"
+    engine = str(belief.get("source_engine") or "").strip()
+    parts = [f"via {via}" if via else "provenance unknown"]
+    if engine and engine != "unknown":
+        parts.append(f"source engine {engine}")
+    return " · ".join(parts)
 
 
 def belief_evidence_rows(rows: "list[dict]") -> "list[str]":
@@ -1401,6 +1405,9 @@ def belief_evidence_rows(rows: "list[dict]") -> "list[str]":
         project = str(row.get("project") or "")
         note = _one_line(str(row.get("note") or ""), 200)
         head = f"    {when}  session {session}"
+        engine = str(row.get("source_engine") or "").strip()
+        if engine and engine != "unknown":
+            head += f"  engine {engine}"
         if project:
             head += f"  [{project}]"
         text = head

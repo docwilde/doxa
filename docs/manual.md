@@ -1173,6 +1173,14 @@ to a tag) rather than shelling out to the Claude Code LORE plugin — one
 memory model, two front ends, one shared SQLite store when both are
 installed on a machine (`/about` names which copy loaded).
 
+User memory, project memory, and user-model beliefs are shared by every
+engine using that store. New memory proposals and belief evidence carry an
+informational source-engine tag (`claude`, `codex`, `deepseek`, or `glm`);
+approval keeps the proposal's original tag even when another engine's
+session approves it. The tag never partitions memory or changes a claim's
+authority. Older entries without a source remain unknown. LORE sync carries
+the tag with the memory and belief ops.
+
 **If a LORE Claude Code plugin checkout is present on the machine, it wins
 over the pinned package** — both write the same `~/.claude/lore` store,
 and the plugin's hook fires on every Claude Code session, so it is the
