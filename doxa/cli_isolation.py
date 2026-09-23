@@ -255,6 +255,25 @@ def isolated_credentials_path() -> Path:
     return cli_config_dir() / CREDENTIALS_NAME
 
 
+def _has_oauth_token(path: Path) -> bool:
+    """Whether a credentials file still contains an OAuth access or refresh token.
+
+    Claude CLI can invalidate its isolated copy by clearing both tokens and
+    setting ``expiresAt`` to zero. That write makes the copy *newer* than
+    the source even though it can no longer authenticate. Inspect only the
+    token fields' presence; never log or return their contents.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+    return isinstance(oauth, dict) and any(
+        isinstance(oauth.get(key), str) and bool(oauth[key].strip())
+        for key in ("accessToken", "refreshToken")
+    )
+
+
 def user_skills_path() -> Path:
     """The real user's learned-skills directory -- see
     :func:`user_config_base`."""
@@ -329,11 +348,11 @@ def ensure_skills_snapshot() -> bool:
 def sync_credentials(force: bool = False) -> bool:
     """Copy the user's OAuth credentials into the isolated directory.
 
-    Copies only when the source is newer than the isolated copy (or the
-    isolated copy doesn't exist yet), unless ``force`` -- so a later boot's
-    opportunistic re-sync never clobbers a fresher token the ISOLATED CLI
-    refreshed on its own (it writes that refresh back to its own copy only,
-    never to the source). Returns whether a copy actually happened; never
+    Copies when the source is newer, the isolated copy is missing, or the
+    isolated CLI has cleared its OAuth tokens while the source still has
+    one. Otherwise a later boot does not clobber a fresher token the
+    isolated CLI refreshed on its own. ``force`` overrides the timestamp.
+    Returns whether a copy actually happened; never
     raises -- a sync DOXA cannot complete costs the isolated session its
     auth, never the host session."""
     source = user_credentials_path()
@@ -347,7 +366,8 @@ def sync_credentials(force: bool = False) -> bool:
     if not force:
         try:
             if dest.stat().st_mtime >= source_stat.st_mtime:
-                return False
+                if _has_oauth_token(dest) or not _has_oauth_token(source):
+                    return False
         except OSError:
             pass  # no isolated copy yet: fall through and make one
     try:

@@ -90,6 +90,31 @@ def test_sync_credentials_does_not_reclobber_a_fresher_isolated_copy(tmp_path):
     assert json.loads(dest.read_text())["tok"] == "refreshed-by-isolated-cli"
 
 
+def test_spawn_repairs_a_newer_copy_whose_oauth_tokens_were_cleared(tmp_path):
+    """Claude can write a logged-out credentials file after a failed refresh.
+    Its newer mtime must not make the next DOXA session stay logged out."""
+    source = iso_mod.user_credentials_path()
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(json.dumps({"claudeAiOauth": {
+        "accessToken": "source-access", "refreshToken": "source-refresh",
+        "expiresAt": 123,
+    }}))
+    dest = iso_mod.isolated_credentials_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps({"claudeAiOauth": {
+        "accessToken": "", "refreshToken": "", "expiresAt": 0,
+    }}))
+    newer = source.stat().st_mtime + 5
+    os.utime(dest, (newer, newer))
+
+    iso_mod.spawn_env()
+
+    restored = json.loads(dest.read_text())["claudeAiOauth"]
+    assert restored["accessToken"] == "source-access"
+    assert restored["refreshToken"] == "source-refresh"
+    assert oct(dest.stat().st_mode)[-3:] == "600"
+
+
 def test_sync_credentials_force_overwrites_regardless_of_mtime(tmp_path):
     source = iso_mod.user_credentials_path()
     source.parent.mkdir(parents=True, exist_ok=True)
