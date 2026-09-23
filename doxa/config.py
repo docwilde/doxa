@@ -158,8 +158,9 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     Setting(
         key="model", env="DOXA_MODEL", label="model", category="Session",
-        help="Model for new sessions (doxa.cli --model default; /model "
-             "switches the live session)",
+        help="Model preference for the active session's engine, used by "
+             "new sessions of that engine (/model switches the live session). "
+             "DOXA_MODEL overrides every engine.",
     ),
     Setting(
         key="effort", env="DOXA_EFFORT", label="effort", category="Session",
@@ -1088,9 +1089,41 @@ def background_mode() -> str:
     return value if value in ("opaque", "transparent") else "opaque"
 
 
-def model() -> "str | None":
-    """The configured model for new sessions, or None for the CLI default."""
-    value = raw("DOXA_MODEL").strip()
+def stored_model(engine_id: str = "claude") -> "str | None":
+    """The file preference for one engine, without the global env override.
+
+    The original top-level ``model`` key remains Claude's preference, so
+    existing config files and the Claude settings row keep their meaning.
+    Other engines have independent entries in ``[models]``. A malformed
+    hand-edited entry is ignored instead of reaching an unrelated engine.
+    """
+    stored = load()
+    if engine_id == "claude":
+        value = stored.get("model")
+    else:
+        models = stored.get("models")
+        value = models.get(engine_id) if isinstance(models, dict) else None
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
+
+
+def model_provenance(engine_id: str = "claude") -> tuple[str, str]:
+    """The effective model and its source for an engine's settings row."""
+    override = os.environ.get("DOXA_MODEL", "").strip()
+    if override:
+        return "env", override
+    stored = stored_model(engine_id)
+    return ("config", stored) if stored else ("default", "")
+
+
+def model(engine_id: str = "claude") -> "str | None":
+    """Model for a new session of ``engine_id``, or the engine default.
+
+    ``DOXA_MODEL`` is an explicit process-wide override. The CLI's
+    ``--model`` takes precedence over this function's answer.
+    """
+    _source, value = model_provenance(engine_id)
     return value or None
 
 
@@ -1410,7 +1443,7 @@ def _seed_for_write() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def save(values: dict[str, str]) -> Path:
+def save(values: dict[str, str], *, model_engine: str = "claude") -> Path:
     """Write the settings file from ``{key: string}`` (the modal's fields).
 
     Keys absent from ``values`` keep whatever the file already had; keys
@@ -1418,7 +1451,9 @@ def save(values: dict[str, str]) -> Path:
     default. Read-only rows are skipped even if present in ``values`` --
     the modal must never be the thing that writes a row it renders with no
     field (see :func:`save_lore_root` for the one row that DOES get
-    written outside the modal).
+    written outside the modal). ``model_engine`` routes only the model
+    field: Claude keeps the legacy top-level key; other engines write into
+    ``[models]`` without touching Claude's preference.
 
     Raises :class:`ConfigSaveRefused` when the existing file is present
     but unreadable or malformed -- a missing file is NOT that case, and
@@ -1429,11 +1464,28 @@ def save(values: dict[str, str]) -> Path:
         if not setting.key or setting.read_only or setting.key not in values:
             continue
         coerced = _coerce(setting, values[setting.key])
+        if setting.key == "model" and model_engine != "claude":
+            models = stored.get("models")
+            models = dict(models) if isinstance(models, dict) else {}
+            if coerced is None:
+                models.pop(model_engine, None)
+            else:
+                models[model_engine] = coerced
+            if models:
+                stored["models"] = models
+            else:
+                stored.pop("models", None)
+            continue
         if coerced is None:
             stored.pop(setting.key, None)
         else:
             stored[setting.key] = coerced
     return _write_stored(stored)
+
+
+def save_model(engine_id: str, value: str) -> Path:
+    """Persist a successful ``/model`` switch for its active engine."""
+    return save({"model": value}, model_engine=engine_id)
 
 
 def save_lore_root(path: str) -> Path:

@@ -87,12 +87,18 @@ class SettingsScreen(ModalScreen["bool"]):
     def __init__(
         self,
         session_model: "str | None" = None,
+        session_engine: "str | None" = None,
         account: "dict | None" = None,
     ) -> None:
         super().__init__()
         self.session_model = session_model
+        self.session_engine = session_engine
         self.account = account or {}
         self.saved = False
+
+    def _model_engine(self) -> str:
+        """The model row follows the active session whose settings opened."""
+        return self.session_engine or config_mod.engine()
 
     # -- composition --------------------------------------------------
 
@@ -127,8 +133,11 @@ class SettingsScreen(ModalScreen["bool"]):
             )
 
     def _row(self, setting: config_mod.Setting) -> ComposeResult:
-        source, _stored = config_mod.provenance(setting.env)
-        value = resolved_value(setting)
+        if setting.key == "model":
+            source, value = config_mod.model_provenance(self._model_engine())
+        else:
+            source, _stored = config_mod.provenance(setting.env)
+            value = resolved_value(setting)
         env_forced = source == "env"
         shown = value or "(unset)"
         label = f"{setting.label}"
@@ -161,6 +170,11 @@ class SettingsScreen(ModalScreen["bool"]):
                 classes="setting-field",
             )
         yield Static(setting.help, classes="setting-help")
+        if setting.key == "model":
+            yield Static(
+                f"This row saves the {self._model_engine()} model preference.",
+                classes="setting-note",
+            )
         if setting.note:
             yield Static(setting.note, classes="setting-note")
         warning = self._row_warning(setting)
@@ -233,8 +247,9 @@ class SettingsScreen(ModalScreen["bool"]):
                 classes="setting-help",
             )
 
-    @staticmethod
-    def _stored_string(setting: config_mod.Setting) -> str:
+    def _stored_string(self, setting: config_mod.Setting) -> str:
+        if setting.key == "model":
+            return config_mod.stored_model(self._model_engine()) or ""
         stored = config_mod.load().get(setting.key, "")
         if isinstance(stored, bool):
             return "1" if stored else ""
@@ -264,7 +279,7 @@ class SettingsScreen(ModalScreen["bool"]):
         """Write, then RE-READ: the panel redraws from the file it just
         wrote, so what it shows afterwards is the new effective value --
         which for an env-shadowed knob still means the env value wins."""
-        config_mod.save(self.values())
+        config_mod.save(self.values(), model_engine=self._model_engine())
         self.saved = True
         self.refresh(recompose=True)
 
