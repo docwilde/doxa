@@ -203,9 +203,10 @@ def _update_tool(run) -> "UpdateReport":
         )
     if after is None:
         return UpdateReport(
-            status="updated",
+            status="refused",
             message=("update: uv tool upgrade completed, but the installed "
-                     f"revision could not be verified; before {old}"),
+                     f"revision could not be verified; before {old}. "
+                     "Inspect the installation before restarting"),
         )
     if (
         before.revision == after.revision and before.version == after.version

@@ -276,6 +276,26 @@ def test_update_reports_uv_failure_and_keeps_running_copy(tmp_path, monkeypatch)
     assert len(calls) == 2
 
 
+def test_update_does_not_auto_restart_when_new_wheel_cannot_be_verified(
+    tmp_path, monkeypatch,
+):
+    tools, prefix = _tool_copy(tmp_path, monkeypatch)
+    _tool_wheel(prefix)
+    base_run, _calls = _uv_run(tools, prefix)
+
+    def run(cmd, cwd, timeout):
+        result = base_run(cmd, cwd, timeout)
+        if cmd == ["uv", "tool", "upgrade", "--reinstall", "doxa"]:
+            next(prefix.glob("lib/python*/site-packages/doxa-*.dist-info")).rename(
+                prefix / "unverified-wheel"
+            )
+        return result
+
+    report = update_mod.update(root=tmp_path, run=run)
+    assert report.status == "refused"
+    assert "could not be verified" in report.message
+
+
 def test_update_refuses_a_dirty_tree(tmp_path):
     (tmp_path / ".git").mkdir()
     git = FakeGit({"git status": (" M doxa/app.py\n?? scratch.py\n", 0)})
