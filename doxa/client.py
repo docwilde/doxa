@@ -80,6 +80,7 @@ class EngineClient:
         cursor: int | None = None,
         *,
         skip_backlog: bool = False,
+        remote_login: str | None = None,
     ) -> None:
         self.socket_path = str(socket_path)
         self.cursor = cursor  # next seq we have NOT seen; None = replay all
@@ -93,6 +94,8 @@ class EngineClient:
         # daemon too old to send one leaves this a no-op and the pane falls
         # back to the v0.31.0 replay-only behavior rather than duplicating.
         self.skip_backlog = bool(skip_backlog)
+        self.remote_login = remote_login
+        self.remote_driver: str | None = None
         self.backlog_skipped: "int | None" = None
         self.session_id: str | None = None
         self.model: str | None = None
@@ -211,7 +214,10 @@ class EngineClient:
             if isinstance(head, int) and head >= 0:
                 self.cursor = head
                 self.backlog_skipped = head
-        self._write_frame({"type": "attach", "cursor": self.cursor})
+        attach = {"type": "attach", "cursor": self.cursor}
+        if self.remote_login:
+            attach["remote_login"] = self.remote_login
+        self._write_frame(attach)
         self._reader_task = asyncio.create_task(self._read_loop())
         with contextlib.suppress(Exception):
             await self.refresh_status()
@@ -414,6 +420,8 @@ class EngineClient:
             # the cached value follows immediately, not at the next status.
             if ev.data.get("model"):
                 self.model = str(ev.data["model"])
+        elif ev.type == "remote_driver_changed":
+            self.remote_driver = str(ev.data.get("identity") or "") or None
         elif ev.type == "permission_mode_changed":
             # v0.42.0, the same shape as model_changed directly above and
             # for a sharper version of its reason: two tabs on one daemon
@@ -645,6 +653,7 @@ class EngineClient:
         status = reply.get("status") or {}
         if status.get("model"):
             self.model = status["model"]
+        self.remote_driver = str(status.get("remote_driver") or "") or None
         if status.get("permission_mode"):
             self.permission_mode = str(status["permission_mode"])
         if "bypass_armed" in status:
