@@ -4,7 +4,7 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v1.17.0`); the ranges below are derived from that history,
 not written from memory.
 
-## 1.17.0 — 2026-09-23
+## 1.17.0 — 2026-09-24
 
 **Control local sessions from another device.**
 
@@ -14,8 +14,10 @@ not written from memory.
 **Model choices follow the selected engine.**
 
 - Codex reads the signed-in CLI's paginated app-server `model/list`. Catalogue failure reports an unavailable Codex list rather than showing Claude aliases.
-- Claude subscription choices come from an account-matched CLI cache, labelled with their fetch time and staleness; static aliases remain a labelled fallback. Claude Code does not expose a documented live subscription model-list endpoint.
+- Claude subscription choices come from an account-matched CLI cache, labelled with their fetch time and staleness. While signed out, a matching local profile can show a dated offline snapshot with a sign-in warning; availability is unverified. Static aliases remain a labelled fallback. Claude Code does not expose a documented live subscription model-list endpoint.
 - Preferences are saved per engine. The legacy `model` key still belongs to Claude, while `DOXA_MODEL` and `--model` retain explicit precedence. The CLI also clarifies when plain `doxa` reattaches an existing session.
+- `/engine claude` and `/engine codex` now apply when a new tab or session opens, including after `/clear`. The welcome banner and account details follow the active engine: Claude shows its own plan and organization; Codex reads its own account plan and omits an unavailable organization.
+- The model chip shows known reasoning effort in brackets. Claude shows its connect-time choice; Codex shows an explicit CLI config value when its source is unambiguous. Automatic diff opening now requires a measured file change.
 
 **Isolated Claude authentication recovers.**
 

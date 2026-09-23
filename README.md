@@ -303,11 +303,10 @@ and key — marking any your terminal cannot send.
 Beta, and a working daily driver for its author. Everything in
 [What you get](#what-you-get) and in the [manual](docs/manual.md) is on
 `main` and behaves as described; [CHANGELOG.md](CHANGELOG.md) has the
-history. `main` is what the install script tracks by default, and `v1.12.0`
-names it: the model's send tool, the cross-machine peer bridge, the fleet
-harness, session and run budgets and the engine picker are all in the
-newest tag, so a pinned install has them. Config keys, socket protocol and
-command names can still change between minor versions.
+history. `main` is what the install script tracks by default; `v1.17.0`
+pins this release, including remote browser control of local sessions and
+engine-specific model choices. Config keys, socket protocol and command
+names can still change between minor versions.
 
 **Specified, not built.** Seventeen documents sit in
 [`docs/plans/`](docs/plans/) and each states its own status in its opening
