@@ -172,6 +172,7 @@ DIR_NAME = "claude-cli"
 OWNED_SETTINGS: dict = {}
 
 CREDENTIALS_NAME = ".credentials.json"
+LOGGED_OUT_MARK = ".doxa-logged-out"
 SETTINGS_NAME = "settings.json"
 SKILLS_NAME = "skills"
 
@@ -253,6 +254,45 @@ def user_credentials_path() -> Path:
 
 def isolated_credentials_path() -> Path:
     return cli_config_dir() / CREDENTIALS_NAME
+
+
+def mark_logged_out() -> None:
+    """Keep a successful /logout from importing the old host credential.
+
+    Some Claude installs keep the source file after CLI logout (for example
+    when a keychain owns the session). Until the next explicit /login, an
+    old source must not silently re-authenticate DOXA's isolated CLI.
+    """
+    base = ensure_cli_config_dir()
+    (base / LOGGED_OUT_MARK).touch(mode=0o600, exist_ok=True)
+    isolated_credentials_path().unlink(missing_ok=True)
+
+
+def mark_logged_in() -> bool:
+    """Allow the isolated CLI to use the freshly signed-in user profile."""
+    marker = cli_config_dir() / LOGGED_OUT_MARK
+    dest = isolated_credentials_path()
+    if marker.exists():
+        try:
+            # A keychain-backed login may succeed without rewriting the
+            # on-disk credentials file. Never copy a file that predates the
+            # explicit logout: it could belong to the previous account.
+            # If the isolated CLI authenticated itself after logout, its
+            # newer valid credential is authoritative and must be kept.
+            marker_time = marker.stat().st_mtime_ns
+            if _has_oauth_token(dest) and dest.stat().st_mtime_ns > marker_time:
+                marker.unlink()
+                return True
+            if user_credentials_path().stat().st_mtime_ns <= marker_time:
+                return False
+        except OSError:
+            return False
+        marker.unlink()
+    # The isolated CLI may have refreshed its token after the host copy was
+    # taken. The normal mtime and token-validity rules preserve that newer
+    # credential; force=True would overwrite it with the host's old token.
+    sync_credentials()
+    return _has_oauth_token(dest)
 
 
 def _has_oauth_token(path: Path) -> bool:
@@ -355,6 +395,8 @@ def sync_credentials(force: bool = False) -> bool:
     Returns whether a copy actually happened; never
     raises -- a sync DOXA cannot complete costs the isolated session its
     auth, never the host session."""
+    if (cli_config_dir() / LOGGED_OUT_MARK).exists():
+        return False
     source = user_credentials_path()
     dest = isolated_credentials_path()
     try:

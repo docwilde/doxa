@@ -162,15 +162,19 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 ```
 
 It checks Python 3.11+, [`uv`](https://docs.astral.sh/uv/) (offering to
-install it), `git`, and the
-[`claude` CLI](https://docs.claude.com/en/docs/claude-code) signed in —
-DOXA authenticates through that CLI's OAuth session, never through
+install it), and `git`. Missing or signed-out provider CLIs produce a
+warning; you can install and sign in to
+[`claude`](https://docs.claude.com/en/docs/claude-code) or `codex`
+later. In DOXA, `/login claude` and `/login codex` start their CLI's
+browser sign-in while the TUI stays usable; `/logout claude` and
+`/logout codex` sign out. DOXA authenticates through each CLI's own
+OAuth session, never through
 `ANTHROPIC_API_KEY`, which it reads for one thing only: listing the model
 catalogue in the picker when a key happens to be in the environment —
 then runs `uv tool install
 git+https://github.com/docwilde/doxa`. DOXA is not on PyPI. Re-running is
 safe and never touches an existing `~/.doxa/config.toml`. Add `sh -s --
-v1.11.1` to pin a tag instead of tracking `main`. Read it first if you
+v1.17.0` to pin a tag instead of tracking `main`. Read it first if you
 would rather not pipe a stranger's script into `sh`.
 
 For the default install that tracks `main`, `/update` refreshes the uv tool
@@ -178,6 +182,16 @@ copy and reports the installed version and Git revision before and after.
 `/update --restart` also closes this window's sessions and relaunches DOXA.
 A tag-pinned install stays pinned; reinstall that tag explicitly to change it.
 DOXA checks the running copy's uv receipt and installed wheel before updating.
+
+The login command shows the CLI's authorization URL or device code and
+completion status in DOXA. It uses the CLI's existing `CLAUDE_CONFIG_DIR`
+or `CODEX_HOME` profile. A successful Claude login synchronizes that CLI's
+credentials into DOXA's isolated Claude session directory. A successful
+Claude logout clears the isolated credential and blocks its automatic
+reimport until the next explicit `/login claude`. Existing engine sessions
+may retain their connection; open a new session after changing accounts.
+Use `/login codex --device-auth` when the Codex device flow is enabled
+for your account.
 
 Or run from a checkout:
 
