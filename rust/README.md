@@ -38,3 +38,19 @@ separate development line, not a DOXA 2.0 release.
 
 No 2.0 release tag is planned until the frontend reaches feature parity and
 passes end-to-end terminal and daemon tests.
+
+## Transcript persistence crate
+
+`doxa-transcript` is a standalone Rust crate for Python 1.19 session JSONL and
+Codex `<session-id>.codex.json` records. It reads a bounded 8 MiB/20,000-line
+tail, appends original JSON objects with the Python `engine` override, and
+retains unknown keys. Writes require a caller-supplied secret scrubber that
+visits every string value. Codex metadata updates merge existing keys and use
+an atomic replacement. Files and the project directory must belong to the
+current user; symlink and hard-link file targets are refused.
+
+Run `cargo test --locked --manifest-path rust/doxa-transcript/Cargo.toml`.
+The crate is not yet wired into the daemon or UI. The caller still supplies
+Python's `project_slug(cwd)` result and the engine's actual scrubber, and must
+decide whether a persistence error affects an active session. The Python
+vendor `.messages.json` replay file is outside this crate's current scope.

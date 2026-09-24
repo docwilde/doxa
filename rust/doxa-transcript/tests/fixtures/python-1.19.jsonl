@@ -1,0 +1,5 @@
+{"type":"user","message":{"role":"user","content":"hello"},"cwd":"/work/project","sessionId":"session-1","timestamp":"2026-09-24T10:00:00Z","engine":"claude","future":{"keep":true}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"},{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"/work/project/README.md"}}]},"sessionId":"session-1","timestamp":"2026-09-24T10:00:01Z","engine":"claude"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"done"}]},"sessionId":"session-1","timestamp":"2026-09-24T10:00:02Z","engine":"claude"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"codex reply"}]},"sessionId":"session-1","timestamp":"2026-09-24T10:00:03Z","engine":"codex"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"vendor reply"}]},"sessionId":"session-1","timestamp":"2026-09-24T10:00:04Z","engine":"deepseek"}

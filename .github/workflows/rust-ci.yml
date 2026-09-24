@@ -23,5 +23,7 @@ jobs:
         run: rustup toolchain install stable --profile minimal
       - name: Test Rust frontend
         run: cargo +stable test --locked --manifest-path rust/doxa-tui/Cargo.toml
+      - name: Test Python-compatible transcript store
+        run: cargo +stable test --locked --manifest-path rust/doxa-transcript/Cargo.toml
       - name: Build release binary
         run: cargo +stable build --locked --release --manifest-path rust/doxa-tui/Cargo.toml
