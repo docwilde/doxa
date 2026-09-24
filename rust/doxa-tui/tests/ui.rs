@@ -217,3 +217,80 @@ fn full_prompt_queue_preserves_draft() {
     assert_eq!(app.input, "next");
     assert!(app.notice.contains("queue full"));
 }
+
+#[test]
+fn permission_requires_explicit_allow_and_preserves_prompt_draft() {
+    let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));
+    app.input = "unfinished prompt".into();
+    app.apply_daemon_frame(&json!({"type":"event", "session_id":"one", "event":{"type":"needs_input", "data":{
+        "id":"req-1", "kind":"permission", "title":"Run shell command?", "input_summary":"rm file"}}}));
+    assert!(screen(&app, 90, 25).contains("Run shell command?"));
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    app.handle(key(KeyCode::Char('a'), KeyModifiers::NONE));
+    assert!(app.take_answers().is_empty());
+    assert_eq!(app.input, "unfinished prompt");
+    app.handle(key(KeyCode::Char('A'), KeyModifiers::SHIFT));
+    assert_eq!(
+        app.take_answers(),
+        vec![("one".into(), "req-1".into(), json!({"decision":"allow"}))]
+    );
+    app.handle(key(KeyCode::Char('A'), KeyModifiers::SHIFT));
+    assert!(app.take_answers().is_empty());
+    app.apply_daemon_frame(
+        &json!({"type":"answer_reply", "session_id":"one", "request_id":"req-1", "ok":false,
+        "uncertain":true, "message":"timeout"}),
+    );
+    assert!(app.input_requests[0].sending);
+    assert!(app.notice.contains("unconfirmed"));
+    app.apply_daemon_frame(&json!({"type":"event", "session_id":"one", "event":{"type":"needs_input_resolved", "data":{"id":"req-1"}}}));
+    assert!(app.input_requests.is_empty());
+    assert_eq!(app.input, "unfinished prompt");
+}
+
+#[test]
+fn question_steps_and_escape_declines() {
+    let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));
+    app.apply_daemon_frame(
+        &json!({"type":"event", "session_id":"one", "event":{"type":"needs_input", "data":{
+        "id":"req-2", "kind":"ask_user", "questions":[
+            {"question":"Color?", "options":[{"label":"Red"},{"label":"Blue"}]},
+            {"question":"Size?", "options":[{"label":"Small"},{"label":"Large"}]}
+        ]}}}),
+    );
+    app.handle(key(KeyCode::Char('2'), KeyModifiers::NONE));
+    assert!(app.take_answers().is_empty());
+    assert!(screen(&app, 90, 25).contains("Size?"));
+    app.handle(key(KeyCode::Char('1'), KeyModifiers::NONE));
+    assert_eq!(
+        app.take_answers(),
+        vec![(
+            "one".into(),
+            "req-2".into(),
+            json!({"answers":{"Color?":"Blue","Size?":"Small"}})
+        )]
+    );
+    app.apply_daemon_frame(&json!({"type":"answer_reply", "session_id":"one", "request_id":"req-2", "ok":false, "message":"stale"}));
+    assert!(!app.input_requests[0].sending);
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.take_answers()[0].2, json!({"declined":true}));
+    app.handle(key(KeyCode::Char('q'), KeyModifiers::CONTROL));
+    assert!(app.should_quit);
+}
+
+#[test]
+fn request_text_is_sanitized_and_spawn_requires_explicit_allow() {
+    let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));
+    app.apply_daemon_frame(&json!({"type":"event", "session_id":"one", "event":{"type":"needs_input", "data":{
+        "id":"spawn-1", "kind":"spawn", "title":"Start child?\u{1b}[31m", "task":"Do work\u{202e} safely"}}}));
+    let rendered = screen(&app, 90, 25);
+    assert!(rendered.contains("Do work"));
+    assert!(!rendered.contains('\u{1b}'));
+    assert!(!rendered.contains('\u{202e}'));
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.take_answers().is_empty());
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.take_answers()[0].2, json!({"decision":"deny"}));
+}
