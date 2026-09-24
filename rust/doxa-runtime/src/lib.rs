@@ -147,6 +147,12 @@ impl Daemon {
 impl DaemonHandle {
     pub fn socket_path(&self) -> &Path { &self.socket_path }
 
+    /// Whether a socket `stop` call has requested shutdown.
+    pub fn is_stopping(&self) -> bool { self.inner.stopping.load(Ordering::Acquire) }
+
+    /// Number of clients that have completed the protocol attach handshake.
+    pub fn attached_clients(&self) -> usize { self.inner.state.lock().unwrap().clients.len() }
+
     /// Publish an out-of-band event (`turn: null`) to the ring and clients.
     pub fn publish(&self, event: Value) { self.inner.publish(None, event); }
 
