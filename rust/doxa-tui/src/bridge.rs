@@ -2,7 +2,7 @@
 
 use std::io;
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -29,14 +29,14 @@ fn as_io_error(error: TransportError) -> io::Error {
     io::Error::new(io::ErrorKind::Other, error)
 }
 
-fn spawn_worker(client: DaemonClient) -> (Receiver<Value>, Sender<Prompt>, JoinHandle<()>) {
-    let (frame_tx, frame_rx) = mpsc::channel();
-    let (prompt_tx, prompt_rx) = mpsc::channel();
+fn spawn_worker(client: DaemonClient) -> (Receiver<Value>, SyncSender<Prompt>, JoinHandle<()>) {
+    let (frame_tx, frame_rx) = mpsc::sync_channel(128);
+    let (prompt_tx, prompt_rx) = mpsc::sync_channel(32);
     let worker = thread::spawn(move || worker_loop(client, frame_tx, prompt_rx));
     (frame_rx, prompt_tx, worker)
 }
 
-fn worker_loop(mut client: DaemonClient, frames: Sender<Value>, prompts: Receiver<Prompt>) {
+fn worker_loop(mut client: DaemonClient, frames: SyncSender<Value>, prompts: Receiver<Prompt>) {
     let session_id = client.hello["session_id"].as_str().unwrap_or_default().to_owned();
     if frames.send(client.hello.clone()).is_err() {
         return;
@@ -47,14 +47,19 @@ fn worker_loop(mut client: DaemonClient, frames: Sender<Value>, prompts: Receive
             match prompts.try_recv() {
                 Ok((id, text)) => {
                     if id != session_id {
-                        if frames.send(json!({"type":"client_notice", "message":"Prompt target is not attached"})).is_err() {
+                        if frames.send(json!({"type":"prompt_rejected", "text":text,
+                            "message":"Prompt target is not attached"})).is_err() {
                             return;
                         }
                         continue;
                     }
                     match client.prompt(&text) {
                         Ok(reply) => {
-                            if frames.send(reply).is_err() {
+                            let frame = if reply["ok"] == false {
+                                json!({"type":"prompt_rejected", "text":text,
+                                    "message":reply["error"].as_str().unwrap_or("Prompt refused")})
+                            } else { reply };
+                            if frames.send(frame).is_err() {
                                 return;
                             }
                         }
@@ -64,7 +69,7 @@ fn worker_loop(mut client: DaemonClient, frames: Sender<Value>, prompts: Receive
                                 TransportError::Timeout => "Daemon did not acknowledge prompt",
                                 _ => "Daemon rejected prompt transport",
                             };
-                            let _ = frames.send(json!({"type":"client_notice", "message":message}));
+                            let _ = frames.send(json!({"type":"prompt_rejected", "text":text, "message":message}));
                             if matches!(error, TransportError::Closed) {
                                 return;
                             }
@@ -141,6 +146,42 @@ mod tests {
         assert_eq!(event["event"]["data"]["text"], "hello");
         prompts.send(("session-1".into(), "next".into())).unwrap();
         assert_eq!(frames.recv_timeout(Duration::from_secs(2)).unwrap()["turn"], "turn-1");
+        drop(prompts);
+        worker.join().unwrap();
+        server.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn daemon_rejection_returns_the_original_prompt_to_ui() {
+        let path = std::env::temp_dir().join(format!(
+            "doxa-rust-bridge-reject-{}-{}.sock",
+            std::process::id(), NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+        ));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            writeln!(socket, "{}", json!({
+                "type":"hello", "proto":1, "session_id":"session-1",
+                "cwd":"/tmp", "model":"test", "engine":"claude", "next_seq":0
+            })).unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap(); // attach
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["text"], "please retry");
+            writeln!(socket, "{}", json!({"type":"reply", "id":request["id"], "ok":false, "error":"queue full"})).unwrap();
+        });
+        let client = DaemonClient::connect(&path, None).unwrap();
+        let (frames, prompts, worker) = spawn_worker(client);
+        frames.recv_timeout(Duration::from_secs(2)).unwrap(); // hello
+        prompts.send(("session-1".into(), "please retry".into())).unwrap();
+        let rejected = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(rejected["type"], "prompt_rejected");
+        assert_eq!(rejected["text"], "please retry");
+        assert_eq!(rejected["message"], "queue full");
         drop(prompts);
         worker.join().unwrap();
         server.join().unwrap();

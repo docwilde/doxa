@@ -1,6 +1,6 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
 use std::io::{self, IsTerminal, Stdout};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -18,6 +18,8 @@ use crate::markdown;
 const MIN_PANE_WIDTH: u16 = 28;
 const MIN_PANE_HEIGHT: u16 = 8;
 const MAX_PENDING_PROMPTS: usize = 32;
+// JSON may expand one input byte to a six-byte Unicode escape.
+const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
 
 fn safe_label(value: &str) -> String {
@@ -71,6 +73,7 @@ pub struct App {
     pub focus: Focus,
     pub input: String,
     pub pending_prompts: Vec<(String, String)>,
+    pub rejected_drafts: Vec<String>,
     pub notice: String,
     pub should_quit: bool,
     pub size: Rect,
@@ -83,7 +86,7 @@ impl Default for App {
             groups: [PaneGroup { tabs: vec![], active: 0, scroll: 0 }, PaneGroup { tabs: vec![], active: 0, scroll: 0 }],
             active_group: 0, split: Split::Vertical, split_percent: 50,
             rail_visible: true, rail_selected: 0, focus: Focus::Prompt,
-            input: String::new(), pending_prompts: Vec::new(), notice: "Disconnected · waiting for daemon".into(),
+            input: String::new(), pending_prompts: Vec::new(), rejected_drafts: Vec::new(), notice: "Disconnected · waiting for daemon".into(),
             should_quit: false, size: Rect::default(),
         }
     }
@@ -168,6 +171,14 @@ impl App {
                     .unwrap_or("Daemon connection unavailable"));
                 true
             }
+            "prompt_rejected" => {
+                let Some(text) = frame.get("text").and_then(|v| v.as_str()) else { return false };
+                if self.input.is_empty() { self.input = text.to_owned(); }
+                else { self.rejected_drafts.push(text.to_owned()); }
+                self.notice = format!("{} · draft retained{}", safe_label(frame.get("message").and_then(|v| v.as_str()).unwrap_or("Prompt refused")),
+                    if self.rejected_drafts.is_empty() { "" } else { " (Alt+Up to restore)" });
+                true
+            }
             _ => false,
         }
     }
@@ -193,6 +204,13 @@ impl App {
             KeyCode::Esc => { self.focus = Focus::Prompt; true }
             KeyCode::Char('h') if alt => { self.split = Split::Horizontal; true }
             KeyCode::Char('v') if alt => { self.split = Split::Vertical; true }
+            KeyCode::Up if alt && self.focus == Focus::Prompt => {
+                if let Some(draft) = self.rejected_drafts.pop() {
+                    let current = std::mem::replace(&mut self.input, draft);
+                    if !current.is_empty() { self.rejected_drafts.push(current); }
+                    true
+                } else { false }
+            }
             KeyCode::Left if alt => self.adjust_split(-5),
             KeyCode::Right if alt => self.adjust_split(5),
             KeyCode::Up if alt => self.adjust_split(-5),
@@ -207,7 +225,10 @@ impl App {
             KeyCode::Left if self.focus == Focus::Transcript => { self.previous_tab(); true }
             KeyCode::Right if self.focus == Focus::Transcript => { self.next_tab(); true }
             KeyCode::Backspace if self.focus == Focus::Prompt => { self.input.pop().is_some() }
-            KeyCode::Char(c) if self.focus == Focus::Prompt && !ctrl && !alt => { self.input.push(c); true }
+            KeyCode::Char(c) if self.focus == Focus::Prompt && !ctrl && !alt => {
+                if self.input.len() + c.len_utf8() <= MAX_INPUT_BYTES { self.input.push(c); true }
+                else { self.notice = "Prompt input limit reached".into(); true }
+            }
             KeyCode::Enter if self.focus == Focus::Prompt => {
                 if !self.input.is_empty() {
                     if let Some(id) = self.groups[self.active_group].active_id() {
@@ -380,14 +401,14 @@ pub fn run_with_frames(receiver: Receiver<serde_json::Value>) -> io::Result<()> 
 /// Prompt tuples contain the target session id and submitted text.
 pub fn run_with_channels(
     frames: Receiver<serde_json::Value>,
-    prompts: Sender<(String, String)>,
+    prompts: SyncSender<(String, String)>,
 ) -> io::Result<()> {
     run_loop(frames, Some(prompts))
 }
 
 fn run_loop(
     receiver: Receiver<serde_json::Value>,
-    mut prompt_sender: Option<Sender<(String, String)>>,
+    mut prompt_sender: Option<SyncSender<(String, String)>>,
 ) -> io::Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(io::Error::new(io::ErrorKind::NotConnected, "DOXA requires an interactive terminal"));
@@ -410,20 +431,66 @@ fn run_loop(
             changed |= app.handle(event::read()?);
         }
         if let Some(sender) = &prompt_sender {
-            let mut failed = Vec::new();
-            for prompt in app.take_prompts() {
-                if let Err(error) = sender.send(prompt) { failed.push(error.0); }
-            }
-            if !failed.is_empty() {
-                app.pending_prompts = failed;
-                app.notice = "Daemon writer unavailable · prompt retained".into();
-                prompt_sender = None;
-                changed = true;
-            }
+            let disconnected = dispatch_prompts(&mut app, sender);
+            if disconnected { prompt_sender = None; changed = true; }
         }
         if changed { terminal.draw(|frame| app.draw(frame))?; }
     }
     drop(terminal);
     drop(guard);
     Ok(())
+}
+
+/// Move only as many prompts as the bounded worker queue can accept, keeping
+/// the rest in their original order for the next UI tick.
+fn dispatch_prompts(app: &mut App, sender: &SyncSender<(String, String)>) -> bool {
+    let mut prompts = app.take_prompts().into_iter();
+    while let Some(prompt) = prompts.next() {
+        match sender.try_send(prompt) {
+            Ok(()) => {}
+            Err(TrySendError::Full(prompt)) => {
+                app.pending_prompts.extend(std::iter::once(prompt).chain(prompts));
+                app.notice = "Daemon writer busy · prompt retained".into();
+                return false;
+            }
+            Err(TrySendError::Disconnected(prompt)) => {
+                app.pending_prompts.extend(std::iter::once(prompt).chain(prompts));
+                app.notice = "Daemon writer unavailable · prompt retained".into();
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn full_worker_queue_keeps_prompts_in_order() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(("s".into(), "first".into())).unwrap();
+        let mut app = App::default();
+        app.pending_prompts = vec![("s".into(), "second".into()), ("s".into(), "third".into())];
+        assert!(!dispatch_prompts(&mut app, &sender));
+        assert_eq!(app.pending_prompts.iter().map(|p| p.1.as_str()).collect::<Vec<_>>(), vec!["second", "third"]);
+        assert_eq!(receiver.recv().unwrap().1, "first");
+        assert!(!dispatch_prompts(&mut app, &sender));
+        assert_eq!(receiver.recv().unwrap().1, "second");
+        assert_eq!(app.pending_prompts[0].1, "third");
+    }
+
+    #[test]
+    fn rejected_prompt_is_editable_and_does_not_replace_current_draft() {
+        let mut app = App::default();
+        app.input = "new draft".into();
+        app.apply_daemon_frame(&json!({"type":"prompt_rejected", "text":"old prompt", "message":"queue full"}));
+        assert_eq!(app.input, "new draft");
+        assert_eq!(app.rejected_drafts, ["old prompt"]);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)));
+        assert_eq!(app.input, "old prompt");
+        assert_eq!(app.rejected_drafts, ["new draft"]);
+    }
 }
