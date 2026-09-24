@@ -1,8 +1,8 @@
 //! Native DOXA protocol host. The fixture remains an explicit test mode.
 mod claude_host;
 mod codex_host;
-mod vendor_host;
 mod peer_host;
+mod vendor_host;
 use claude_host::ClaudeHost;
 use codex_host::CodexHost;
 use doxa_engines::codex_driver::{DriverOptions, SandboxMode};
@@ -225,7 +225,6 @@ fn options() -> io::Result<Options> {
         if codex_bin.is_some()
             || claude_python.is_some()
             || claude_script.is_some()
-            || resume
             || sandbox != SandboxMode::WorkspaceWrite
         {
             return Err(invalid("unsupported option for vendor engine"));
@@ -233,6 +232,9 @@ fn options() -> io::Result<Options> {
         lore_python = Some(executable(
             lore_python.ok_or_else(|| invalid("vendor needs --lore-python"))?,
         )?);
+        if resume && !explicit_session_id {
+            return Err(invalid("vendor resume needs --session-id"));
+        }
         let chosen_model = model.get_or_insert_with(|| vendor.default_model().to_owned());
         let chosen_effort = effort.get_or_insert_with(|| "high".to_owned());
         doxa_vendors::request_body(vendor, chosen_model, &[], chosen_effort)
@@ -484,6 +486,9 @@ fn run() -> io::Result<()> {
                         .lore_python
                         .as_ref()
                         .expect("validated LORE interpreter"),
+                    &options.cwd,
+                    &options.session_id,
+                    options.resume,
                     #[cfg(feature = "local-test-server")]
                     options.vendor_endpoint.clone(),
                 )

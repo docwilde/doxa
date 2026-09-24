@@ -1,6 +1,7 @@
 //! Plain-chat DeepSeek/GLM host. No model tools are advertised or executed.
 use doxa_lore::LoreClient;
 use doxa_runtime::Host;
+use doxa_transcript::TranscriptStore;
 use doxa_vendors::{Error, Vendor, MAX_TURN_DURATION};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -15,6 +16,7 @@ pub struct VendorHost {
     effort: String,
     lore: Mutex<LoreClient>,
     history: Mutex<Vec<Value>>,
+    store: TranscriptStore,
     active: Mutex<Option<watch::Sender<bool>>>,
     turns: AtomicU64,
     closing: AtomicBool,
@@ -29,6 +31,9 @@ impl VendorHost {
         model: String,
         effort: String,
         lore_python: &Path,
+        cwd: &Path,
+        session_id: &str,
+        resume: bool,
         #[cfg(feature = "local-test-server")] endpoint: Option<String>,
     ) -> Result<Self, String> {
         if !std::env::var(vendor.env_var()).is_ok_and(|key| !key.is_empty()) {
@@ -45,12 +50,45 @@ impl VendorHost {
         lore.scrub("DOXA scrub preflight").map_err(|_| {
             "LORE scrub preflight failed; vendor session was not started".to_owned()
         })?;
+        if lore
+            .scrub(&model)
+            .map_err(|_| "LORE scrub failed for vendor model")?
+            != model
+        {
+            return Err("vendor model cannot be stored without redaction".to_owned());
+        }
+        let cwd = cwd.to_string_lossy();
+        let (projects_dir, slug) = lore.transcript_identity(&cwd).map_err(|_| {
+            "LORE transcript identity unavailable; vendor session was not started".to_owned()
+        })?;
+        let store = TranscriptStore::new(&projects_dir, &slug, session_id)
+            .map_err(|_| "vendor transcript directory unavailable".to_owned())?;
+        let saved = store
+            .read_vendor_messages(vendor.engine_id(), &model)
+            .map_err(|_| "vendor messages state is unsafe or mismatched".to_owned())?;
+        if resume && saved.is_none() {
+            return Err("vendor resume requires saved messages state".to_owned());
+        }
+        if !resume && saved.is_some() {
+            return Err("vendor session already has saved messages; use resume".to_owned());
+        }
+        if saved.is_none() && store.transcript_path().exists() {
+            return Err("existing vendor transcript has no messages state".to_owned());
+        }
+        let mut history = saved.unwrap_or_default();
+        for message in &mut history {
+            let content = message["content"].as_str().ok_or("invalid saved message")?;
+            message["content"] = json!(lore
+                .scrub(content)
+                .map_err(|_| { "LORE scrub failed for saved vendor message" })?);
+        }
         Ok(Self {
             vendor,
             model,
             effort,
             lore: Mutex::new(lore),
-            history: Mutex::new(Vec::new()),
+            history: Mutex::new(history),
+            store,
             active: Mutex::new(None),
             turns: AtomicU64::new(0),
             closing: AtomicBool::new(false),
@@ -166,6 +204,19 @@ impl Host for VendorHost {
                     if let Some(last) = history.last_mut() {
                         last["content"] = json!(text);
                     }
+                    let saved = self.store.try_write_vendor_messages(
+                        self.vendor.engine_id(),
+                        &self.model,
+                        &history,
+                        |value| {
+                            self.scrub(value)
+                                .map_err(|_| std::io::Error::other("LORE scrub failed"))
+                        },
+                    );
+                    let Ok(history) = saved else {
+                        emit(done("Vendor history could not be safely saved"));
+                        return;
+                    };
                     *self.history.lock().unwrap() = history;
                     if !reasoning.is_empty() {
                         emit(json!({"type":"reasoning_delta","data":{"text":reasoning}}));

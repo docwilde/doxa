@@ -128,11 +128,16 @@ with `--lore-python /absolute/path/to/python`; the interpreter must have DOXA
 and LORE installed. Keys come only from `DEEPSEEK_API_KEY` or `ZAI_API_KEY` in
 the environment. `--model` and `--effort low|high|max` are optional; DeepSeek
 also accepts `--effort none`. Provider endpoints are fixed in production.
-The host advertises no tools, rejects any provider tool call, and holds bounded
-conversation history only in memory. The full provider response is withheld
-until LORE scrubs it; a scrub failure fails the turn and commits no history.
+The host advertises no tools and rejects any provider tool call. It persists
+bounded plain-chat history beside the Python transcript as
+`<session-id>.messages.json`. Restart with the same `--session-id ID --resume
+true`; missing, corrupt, wrong-engine, or wrong-model state refuses resume.
+Python's engine/messages envelope is readable; newly written envelopes also
+record session ID and model. LORE scrubs every saved string before an atomic
+replacement. The full provider response is withheld until LORE scrubs it; a
+scrub or storage failure fails the turn and commits no history.
 It reports provider model and token usage but no dollar cost. Interrupt and
-stop cancel the in-flight HTTP request. Vendor transcript persistence, resume,
+stop cancel the in-flight HTTP request. Vendor JSONL transcript persistence,
 LORE context, tool execution, pricing, and live-provider validation remain open.
 
 Codex turns use `codex exec --json` and resume subsequent turns using the
@@ -159,8 +164,9 @@ peer frames are not implemented. Treat this as an integration alpha.
 
 ## Transcript persistence crate
 
-`doxa-transcript` is a standalone Rust crate for Python 1.19 session JSONL and
-Codex `<session-id>.codex.json` records. It reads a bounded 8 MiB/20,000-line
+`doxa-transcript` is a standalone Rust crate for Python 1.19 session JSONL,
+Codex `<session-id>.codex.json` records, and vendor `.messages.json` replay.
+It reads a bounded 8 MiB/20,000-line
 tail, appends original JSON objects with the Python `engine` override, and
 retains unknown keys. Writes require a caller-supplied secret scrubber that
 visits every string value. Codex metadata updates merge existing keys and use
@@ -169,5 +175,4 @@ current user; symlink and hard-link file targets are refused.
 
 Run `cargo test --locked --manifest-path rust/doxa-transcript/Cargo.toml`.
 The native Codex host uses this crate. The Rust UI still relies on its existing
-transcript reader. The Python vendor `.messages.json` replay file is outside
-this crate's current scope.
+transcript reader.

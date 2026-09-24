@@ -11,6 +11,8 @@ pub const MAX_TRANSCRIPT_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_TRANSCRIPT_LINES: usize = 20_000;
 pub const MAX_METADATA_BYTES: u64 = 64 * 1024;
 pub const THREAD_SUFFIX: &str = ".codex.json";
+pub const MAX_VENDOR_MESSAGES_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_VENDOR_MESSAGES: usize = 512;
 
 fn invalid() -> io::Error {
     io::Error::new(
@@ -131,6 +133,30 @@ fn try_scrub_value(
     Ok(())
 }
 
+fn validate_vendor_messages(messages: &[Value]) -> io::Result<()> {
+    if messages.len() > MAX_VENDOR_MESSAGES || !messages.len().is_multiple_of(2) {
+        return Err(bad_data());
+    }
+    let mut bytes = 0usize;
+    for (index, message) in messages.iter().enumerate() {
+        let fields = message.as_object().ok_or_else(bad_data)?;
+        if fields.len() != 2
+            || fields.get("role").and_then(Value::as_str)
+                != Some(if index % 2 == 0 { "user" } else { "assistant" })
+            || fields.get("content").and_then(Value::as_str).is_none()
+        {
+            return Err(bad_data());
+        }
+        bytes = bytes
+            .checked_add(serde_json::to_vec(message)?.len())
+            .ok_or_else(bad_data)?;
+        if bytes as u64 > MAX_VENDOR_MESSAGES_BYTES {
+            return Err(bad_data());
+        }
+    }
+    Ok(())
+}
+
 pub struct TranscriptStore {
     dir: PathBuf,
     session_id: String,
@@ -160,6 +186,87 @@ impl TranscriptStore {
     pub fn thread_path(&self) -> PathBuf {
         self.dir
             .join(format!("{}{}", self.session_id, THREAD_SUFFIX))
+    }
+
+    pub fn vendor_messages_path(&self) -> PathBuf {
+        self.dir.join(format!("{}.messages.json", self.session_id))
+    }
+
+    /// Read Python's vendor envelope. Older envelopes omit session_id/model;
+    /// when present those identity fields must match exactly. Bare arrays do
+    /// not identify a vendor and are unsafe to resume.
+    pub fn read_vendor_messages(
+        &self,
+        engine: &str,
+        model: &str,
+    ) -> io::Result<Option<Vec<Value>>> {
+        owned_dir(&self.dir)?;
+        let mut file = match open_read(&self.vendor_messages_path()) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if file.metadata()?.len() > MAX_VENDOR_MESSAGES_BYTES {
+            return Err(bad_data());
+        }
+        let mut raw = Vec::new();
+        file.read_to_end(&mut raw)?;
+        let value: Value = serde_json::from_slice(&raw).map_err(|_| bad_data())?;
+        let fields = value.as_object().ok_or_else(bad_data)?;
+        if fields.get("engine").and_then(Value::as_str) != Some(engine)
+            || fields
+                .get("session_id")
+                .is_some_and(|v| v.as_str() != Some(&self.session_id))
+            || fields
+                .get("model")
+                .is_some_and(|v| v.as_str() != Some(model))
+        {
+            return Err(bad_data());
+        }
+        let messages = fields
+            .get("messages")
+            .and_then(Value::as_array)
+            .ok_or_else(bad_data)?;
+        validate_vendor_messages(messages)?;
+        Ok(Some(messages.clone()))
+    }
+
+    /// Scrub the complete history before creating a private replacement file.
+    pub fn try_write_vendor_messages(
+        &self,
+        engine: &str,
+        model: &str,
+        messages: &[Value],
+        mut scrub: impl FnMut(&str) -> io::Result<String>,
+    ) -> io::Result<Vec<Value>> {
+        owned_dir(&self.dir)?;
+        validate_vendor_messages(messages)?;
+        let clean = messages.to_vec();
+        let mut value = serde_json::json!({"engine":engine,"session_id":self.session_id,
+            "model":model,"messages":clean});
+        try_scrub_value(&mut value, &mut scrub)?;
+        if value["engine"] != engine
+            || value["session_id"] != self.session_id
+            || value["model"] != model
+        {
+            return Err(bad_data());
+        }
+        let clean = value["messages"].as_array().ok_or_else(bad_data)?.clone();
+        validate_vendor_messages(&clean)?;
+        let bytes = serde_json::to_vec(&value)?;
+        if bytes.len() as u64 > MAX_VENDOR_MESSAGES_BYTES {
+            return Err(bad_data());
+        }
+        let mut temp = tempfile::Builder::new()
+            .prefix(&format!(".{}.messages.", self.session_id))
+            .suffix(".tmp")
+            .tempfile_in(&self.dir)?;
+        checked_file(temp.as_file())?;
+        temp.write_all(&bytes)?;
+        temp.as_file().sync_all()?;
+        temp.persist(self.vendor_messages_path())
+            .map_err(|error| error.error)?;
+        Ok(clean)
     }
 
     /// Append one original record with the Python engine override, after scrubbing every string value.
