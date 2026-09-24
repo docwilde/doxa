@@ -72,7 +72,7 @@ impl PeerHost {
             );
         }
         let result = work(guard.as_mut().ok_or("LORE scrub unavailable")?);
-        if result.is_err() {
+        if result.is_err() && guard.as_ref().is_some_and(|client| !client.is_alive()) {
             *guard = None;
         }
         result

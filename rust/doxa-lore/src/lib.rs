@@ -110,6 +110,10 @@ pub struct LoreClient {
 }
 
 impl LoreClient {
+    pub fn is_alive(&self) -> bool {
+        self.alive
+    }
+
     /// Launch the sidecar lazily, only when a session requests LORE.
     /// `python` should point at the environment that installed DOXA and LORE.
     pub fn spawn(python: &Path, timeout: Duration) -> Result<Self, LoreError> {
