@@ -10,6 +10,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::ffi::OsStrExt;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 const MAX_PROJECTS: usize = 128;
 const MAX_FILES: usize = 2048;
@@ -44,7 +45,7 @@ fn open_at(parent: &File, name: &OsStr, flags: i32) -> Option<File> {
     if fd < 0 { None } else { Some(unsafe { File::from_raw_fd(fd) }) }
 }
 
-fn names_in(open_dir: &File, limit: usize) -> Vec<OsString> {
+fn names_in(open_dir: &File, limit: usize, accept: impl Fn(&OsStr) -> bool) -> Vec<OsString> {
     // fdopendir owns its descriptor, so duplicate the pinned directory FD.
     // Names returned by readdir are copied before the next call overwrites
     // its buffer. No pathname is reopened during enumeration.
@@ -60,28 +61,53 @@ fn names_in(open_dir: &File, limit: usize) -> Vec<OsString> {
         return Vec::new();
     }
     let mut names = Vec::new();
-    while names.len() < limit {
+    // Ignore unrelated names without spending the transcript budget, but cap
+    // directory work if a project contains a very large number of junk files.
+    let mut inspected = 0;
+    while names.len() < limit && inspected < limit.saturating_add(MAX_FILES) {
         let entry = unsafe { libc::readdir(dir) };
         if entry.is_null() { break; }
         let raw = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
         if raw == b"." || raw == b".." { continue; }
-        names.push(OsStr::from_bytes(raw).to_os_string());
+        inspected += 1;
+        let name = OsStr::from_bytes(raw);
+        if accept(name) { names.push(name.to_os_string()); }
     }
     unsafe { libc::closedir(dir); }
     names
+}
+
+fn valid_transcript_name(name: &OsStr) -> bool {
+    let path = Path::new(name);
+    path.extension().is_some_and(|ext| ext == "jsonl")
+        && path.file_stem().and_then(|stem| stem.to_str()).is_some_and(crate::discovery::valid_id)
+}
+
+type Candidate = (Option<SystemTime>, String, String, File);
+
+fn candidate_order(a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
+    b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)).then_with(|| a.1.cmp(&b.1))
 }
 
 fn read_offline(mut file: File, uid: u32) -> Option<String> {
     let meta = file.metadata().ok()?;
     if !meta.is_file() || meta.uid() != uid { return None; }
     let start = meta.len().saturating_sub(MAX_FILE_BYTES);
+    let starts_on_line = if start > 0 {
+        file.seek(SeekFrom::Start(start - 1)).ok()?;
+        let mut preceding = [0];
+        file.read_exact(&mut preceding).ok()?;
+        preceding[0] == b'\n'
+    } else { true };
     file.seek(SeekFrom::Start(start)).ok()?;
     let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes).ok()?;
-    if bytes.len() as u64 > MAX_FILE_BYTES { bytes.truncate(MAX_FILE_BYTES as usize); }
-    if start > 0 {
-        let cut = bytes.iter().position(|byte| *byte == b'\n')? + 1;
-        bytes.drain(..cut);
+    file.take(meta.len() - start).read_to_end(&mut bytes).ok()?;
+    if !starts_on_line {
+        if let Some(cut) = bytes.iter().position(|byte| *byte == b'\n') {
+            bytes.drain(..=cut);
+        } else {
+            bytes.clear();
+        }
     }
     Some(render(&TranscriptSnapshot { bytes, earlier_bytes_omitted: start > 0 }))
 }
@@ -97,32 +123,30 @@ fn discover_in(root: &Path) -> Vec<OfflineSession> {
     let uid = unsafe { libc::geteuid() };
     let Ok(root) = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC).open(root) else { return Vec::new(); };
     if !owned_dir(&root, uid) { return Vec::new(); }
-    let projects = names_in(&root, MAX_PROJECTS);
+    let projects = names_in(&root, MAX_PROJECTS, |_| true);
     let mut candidates = Vec::new();
     let mut visited = 0;
     for project in projects {
         let Some(dir) = open_at(&root, &project, libc::O_RDONLY | libc::O_DIRECTORY) else { continue; };
         if !owned_dir(&dir, uid) { continue; }
-        let files = names_in(&dir, MAX_FILES.saturating_sub(visited));
+        let files = names_in(&dir, MAX_FILES.saturating_sub(visited), valid_transcript_name);
         for name in files {
             visited += 1;
             let path = Path::new(&name);
-            if path.extension().is_none_or(|ext| ext != "jsonl") { continue; }
-            let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else { continue; };
-            if !crate::discovery::valid_id(id) { continue; }
+            let id = path.file_stem().and_then(|stem| stem.to_str()).unwrap();
             let Some(open_file) = open_at(&dir, &name, libc::O_RDONLY | libc::O_NONBLOCK) else { continue; };
             let Ok(meta) = open_file.metadata() else { continue; };
             if !meta.is_file() || meta.uid() != uid { continue; }
             let stamp = meta.modified().ok();
             candidates.push((stamp, id.to_owned(), project.to_string_lossy().into_owned(), open_file));
             if candidates.len() > MAX_OFFLINE {
-                candidates.sort_by(|a, b| b.0.cmp(&a.0));
+                candidates.sort_by(candidate_order);
                 candidates.pop();
             }
         }
         if visited == MAX_FILES { break; }
     }
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.sort_by(candidate_order);
     candidates.into_iter().filter_map(|(_, id, project, file)| {
         let markdown = read_offline(file, uid)?;
         Some(OfflineSession { id, project, markdown })
@@ -136,6 +160,12 @@ const MAX_VIEW_BYTES: usize = 480 * 1024;
 #[derive(Default)]
 struct Turn { prompt: String, answer: String, tools: Vec<String> }
 
+fn append_text(target: &mut String, text: &str) {
+    if text.is_empty() { return; }
+    if !target.is_empty() { target.push_str("\n\n"); }
+    target.push_str(text);
+}
+
 pub fn render(snapshot: &TranscriptSnapshot) -> String {
     let mut turns: Vec<Turn> = Vec::new();
     for line in snapshot.bytes.split(|byte| *byte == b'\n') {
@@ -143,10 +173,18 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
         let kind = record["type"].as_str().unwrap_or("");
         let content = &record["message"]["content"];
         if kind == "user" {
-            if let Some(prompt) = content.as_str() {
-                turns.push(Turn { prompt: prompt.to_owned(), ..Turn::default() });
-                continue;
+            let mut prompt = String::new();
+            if let Some(text) = content.as_str() {
+                append_text(&mut prompt, text);
+            } else if let Some(blocks) = content.as_array() {
+                for block in blocks {
+                    if block["type"] == "text" {
+                        append_text(&mut prompt, block["text"].as_str().unwrap_or(""));
+                    }
+                }
             }
+            if !prompt.is_empty() { turns.push(Turn { prompt, ..Turn::default() }); }
+            continue;
         }
         if kind != "assistant" { continue; }
         let Some(blocks) = content.as_array() else { continue };
@@ -154,7 +192,7 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
         let turn = turns.last_mut().unwrap();
         for block in blocks {
             match block["type"].as_str() {
-                Some("text") => turn.answer.push_str(block["text"].as_str().unwrap_or("")),
+                Some("text") => append_text(&mut turn.answer, block["text"].as_str().unwrap_or("")),
                 Some("tool_use") => {
                     let name = block["name"].as_str().unwrap_or("tool");
                     turn.tools.push(format!("Tool: {}", name.replace('\n', " ")));
@@ -212,16 +250,62 @@ mod tests {
     fn restores_prompts_and_assistant_text_without_tool_result_turns() {
         let lines = concat!(
             "{\"type\":\"user\",\"message\":{\"content\":\"first?\"}}\n",
-            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"yes\"},{\"type\":\"tool_use\",\"name\":\"Search\"}]}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"yes\"},{\"type\":\"text\",\"text\":\"indeed\"},{\"type\":\"tool_use\",\"name\":\"Search\"}]}}\n",
             "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"found\"}]}}\n",
-            "{\"type\":\"user\",\"message\":{\"content\":\"second?\"}}\n",
+            "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"second?\"},{\"type\":\"text\",\"text\":\"more detail\"}]}}\n",
         );
         let rendered = render(&TranscriptSnapshot { bytes: lines.as_bytes().to_vec(), earlier_bytes_omitted: false });
         assert!(rendered.contains("first?"));
-        assert!(rendered.contains("yes"));
+        assert!(rendered.contains("yes\n\nindeed"));
         assert!(rendered.contains("[Tool: Search]"));
-        assert!(rendered.contains("second?"));
+        assert!(rendered.contains("second?\n\nmore detail"));
         assert!(!rendered.contains("found"));
+    }
+
+    #[test]
+    fn bounded_tail_keeps_a_complete_first_line() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("session.jsonl");
+        let first = b"discard\n";
+        let second = b"{\"type\":\"user\",\"message\":{\"content\":\"retained\"}}\n";
+        let mut bytes = first.to_vec();
+        bytes.extend_from_slice(second);
+        bytes.resize(first.len() + MAX_FILE_BYTES as usize, b'\n');
+        fs::write(&path, bytes).unwrap();
+        let rendered = read_offline(File::open(path).unwrap(), unsafe { libc::geteuid() }).unwrap();
+        assert!(rendered.contains("retained"));
+        assert!(rendered.contains("Earlier transcript omitted"));
+    }
+
+    #[test]
+    fn bounded_tail_without_newline_still_shows_omission() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("session.jsonl");
+        fs::write(&path, vec![b'x'; MAX_FILE_BYTES as usize + 1]).unwrap();
+        let rendered = read_offline(File::open(path).unwrap(), unsafe { libc::geteuid() }).unwrap();
+        assert!(rendered.contains("Earlier transcript omitted"));
+    }
+
+    #[test]
+    fn filename_budget_counts_only_valid_transcript_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY).open(temp.path()).unwrap();
+        fs::write(temp.path().join("junk.txt"), b"").unwrap();
+        fs::write(temp.path().join("invalid_id.jsonl"), b"").unwrap();
+        fs::write(temp.path().join("valid-1.jsonl"), b"").unwrap();
+        assert_eq!(names_in(&dir, 1, valid_transcript_name), vec![OsString::from("valid-1.jsonl")]);
+    }
+
+    #[test]
+    fn equal_mtime_candidates_have_stable_eviction_order() {
+        let file = tempfile::tempfile().unwrap();
+        let stamp = Some(SystemTime::UNIX_EPOCH);
+        let mut candidates = vec![
+            (stamp, "z".to_owned(), "project".to_owned(), file.try_clone().unwrap()),
+            (stamp, "a".to_owned(), "project".to_owned(), file),
+        ];
+        candidates.sort_by(candidate_order);
+        assert_eq!(candidates[0].1, "a");
     }
 
     #[test]
@@ -269,7 +353,7 @@ mod tests {
         let open_dir = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(&original).unwrap();
         fs::rename(&original, &moved).unwrap();
         symlink(&replacement, &original).unwrap();
-        let names = names_in(&open_dir, 10);
+        let names = names_in(&open_dir, 10, |_| true);
         assert!(names.contains(&OsString::from("original.jsonl")));
         assert!(!names.contains(&OsString::from("replacement.jsonl")));
     }
