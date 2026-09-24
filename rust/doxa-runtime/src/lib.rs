@@ -28,6 +28,8 @@ const MAX_CONNECTIONS: usize = 64;
 pub trait Host: Send + Sync + 'static {
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value));
     fn call(&self, method: &str, params: &Value) -> Result<Value, String>;
+    fn initial_model(&self) -> Option<String> { None }
+    fn initial_permission_mode(&self) -> String { "default".to_owned() }
     /// Text included in queue events. A real host can scrub prompts before
     /// they are sent to other attached clients; internal execution keeps the
     /// original prompt. An error rejects new prompts before queueing.
@@ -54,10 +56,13 @@ struct State {
     prompts: VecDeque<Prompt>,
     next_queue_id: u64,
     next_turn_id: u64,
+    model: Option<String>,
+    permission_mode: String,
 }
 
 struct Inner {
     state: Mutex<State>,
+    controls: Mutex<()>,
     host: Arc<dyn Host>,
     session: Session,
     stopping: AtomicBool,
@@ -92,8 +97,11 @@ impl Daemon {
             session.cwd.is_empty() || session.engine.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid session metadata"));
         }
+        let model = host.initial_model().or_else(|| session.model.clone());
+        let permission_mode = host.initial_permission_mode();
         let hello = json!({"type":"hello","proto":1,"doxa":session.doxa_version,
-            "session_id":session.session_id,"model":session.model,"engine":session.engine,
+            "session_id":session.session_id,"model":model,"engine":session.engine,
+            "permission_mode":permission_mode,"bypass_armed":false,
             "cwd":session.cwd,"next_seq":0});
         if serde_json::to_vec(&hello).map_err(io::Error::other)?.len() + 1 > MAX_FRAME_BYTES {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "hello frame too large"));
@@ -118,7 +126,8 @@ impl Daemon {
             inner: Arc::new(Inner { state: Mutex::new(State {
                 next_seq: 0, ring: VecDeque::new(), clients: HashMap::new(), busy: false,
                 prompts: VecDeque::new(), next_queue_id: 1, next_turn_id: 1,
-            }), host, session, stopping: AtomicBool::new(false), next_client_id: AtomicU64::new(1),
+                model, permission_mode,
+            }), controls: Mutex::new(()), host, session, stopping: AtomicBool::new(false), next_client_id: AtomicU64::new(1),
                 active_connections: AtomicUsize::new(0) }),
             listener, socket_path, socket_ino,
         })
@@ -245,7 +254,8 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             Err(_) => return,
         };
         json!({"type":"hello", "proto":1, "doxa":inner.session.doxa_version,
-            "session_id":inner.session.session_id, "model":inner.session.model,
+            "session_id":inner.session.session_id, "model":state.model,
+            "permission_mode":state.permission_mode, "bypass_armed":false,
             "engine":inner.session.engine, "cwd":inner.session.cwd, "next_seq":state.next_seq,
             "transcript_path":transcript.as_ref().map(|(path, _)| path.to_string_lossy().into_owned()),
             "transcript_bytes":transcript.as_ref().map(|(_, size)| *size)})
@@ -361,11 +371,37 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
     let Some(req_id) = frame["id"].as_u64() else { return; };
     let Some(method) = frame["method"].as_str() else { return; };
     let params = frame.get("params").filter(|v| v.is_object()).cloned().unwrap_or_else(|| json!({}));
-    let result = if method == "status" {
+    let _control_guard = matches!(method, "set_model" | "set_permission_mode")
+        .then(|| inner.controls.lock().unwrap());
+    let (result, changed) = if method == "status" {
         let state = inner.state.lock().unwrap();
-        Ok(json!({"status":{"session_id":inner.session.session_id,"cwd":inner.session.cwd,
-            "model":inner.session.model,"engine":inner.session.engine,"running":state.busy,"queued":state.prompts.len()}}))
-    } else { inner.host.call(method, &params) };
+        (Ok(json!({"status":{"session_id":inner.session.session_id,"cwd":inner.session.cwd,
+            "model":state.model,"permission_mode":state.permission_mode,
+            "engine":inner.session.engine,"running":state.busy,"queued":state.prompts.len()}})), None)
+    } else if matches!(method, "set_model" | "set_permission_mode") {
+        // Serialize control requests with each other and with prompt starts.
+        // The state and broadcast are committed in the same order as the
+        // sidecar control calls, even with two attached clients racing.
+        let mut state = inner.state.lock().unwrap();
+        if method == "set_permission_mode" && params["mode"] == "dontAsk"
+            && state.permission_mode != "dontAsk" && (state.busy || !state.prompts.is_empty()) {
+            (Err("dontAsk requires an idle session with no queued prompts".into()), None)
+        } else {
+            let result = inner.host.call(method, &params);
+            let changed = match (&result, method) {
+                (Ok(extra), "set_model") => extra["model"].as_str().map(|model| {
+                    state.model = if model == "default" { None } else { Some(model.to_owned()) };
+                    json!({"type":"model_changed","data":{"model":model}})
+                }),
+                (Ok(extra), "set_permission_mode") => extra["mode"].as_str().map(|mode| {
+                    state.permission_mode = mode.to_owned();
+                    json!({"type":"permission_mode_changed","data":{"mode":mode}})
+                }),
+                _ => None,
+            };
+            (result, changed)
+        }
+    } else { (inner.host.call(method, &params), None) };
     let stop_ok = method == "stop" && matches!(&result, Ok(value) if value.is_object());
     match result {
         Ok(extra) if extra.is_object() => {
@@ -374,6 +410,7 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
                 if key != "type" && key != "id" && key != "ok" { reply[key] = value.clone(); }
             }
             send(tx, reply);
+            if let Some(event) = changed { inner.publish(None, event); }
         }
         Ok(_) => { send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"host returned invalid reply"})); }
         Err(error) => { send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":error})); }

@@ -230,6 +230,67 @@ class IdentityTests(unittest.TestCase):
         self.assertGreaterEqual(FakeEngine.instance.cancellations, 2)
         self.assertEqual(FakeEngine.instance.finalize_calls, 0)
 
+    def test_live_controls_validate_before_calling_engine(self):
+        class FakeEngine:
+            instance = None
+
+            def __init__(self, **_options):
+                FakeEngine.instance = self
+                self.permission_mode = "default"
+                self._turn_running = False
+                self._prompt_queue = []
+                self.models = []
+                self.modes = []
+
+            async def start(self):
+                return types.SimpleNamespace(type="session_started", data={"model": "opus"})
+
+            async def set_model(self, model):
+                self.models.append(model)
+                return model or "default"
+
+            async def set_permission_mode(self, mode):
+                self.modes.append(mode)
+                self.permission_mode = mode
+                return mode
+
+            async def finalize(self):
+                return types.SimpleNamespace(type="session_done", data={})
+
+            async def peer_events(self):
+                if False:
+                    yield None
+
+        frames = [
+            ("start", {"cwd": str(SIDECAR.parent), "session_id": "controls"}),
+            ("set_model", {"model": "haiku"}),
+            ("set_model", {"model": "bad\nname"}),
+            ("set_permission_mode", {"mode": "plan"}),
+            ("set_permission_mode", {"mode": "bypassPermissions"}),
+            ("finalize", {}),
+        ]
+        requests = iter({"type": "request", "id": i, "method": method, "params": params}
+                        for i, (method, params) in enumerate(frames, 1))
+        replies = []
+
+        async def read_frame(_reader, _limit):
+            try:
+                return json.dumps(next(requests)).encode() + b"\n"
+            except StopIteration:
+                return b""
+
+        engine_module = types.ModuleType("doxa.engine")
+        engine_module.SessionEngine = FakeEngine
+        with mock.patch.dict(sys.modules, {"doxa.engine": engine_module}), \
+             mock.patch.object(sidecar.asyncio, "to_thread", read_frame), \
+             mock.patch.object(sidecar, "emit", replies.append):
+            asyncio.run(sidecar.run())
+        self.assertIn("set_model", replies[0]["capabilities"])
+        self.assertEqual([r["ok"] for r in replies if r["type"] == "reply"],
+                         [True, True, False, True, False, True])
+        self.assertEqual(FakeEngine.instance.models, ["haiku"])
+        self.assertEqual(FakeEngine.instance.modes, ["plan"])
+
 
 if __name__ == "__main__":
     unittest.main()

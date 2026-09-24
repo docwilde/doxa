@@ -41,6 +41,10 @@ pub struct ClaudeHost {
     worker: Mutex<Option<JoinHandle<()>>>,
     active: AtomicBool,
     closing: AtomicBool,
+    model_control: bool,
+    permission_control: bool,
+    initial_model: Option<String>,
+    initial_permission_mode: String,
 }
 
 impl ClaudeHost {
@@ -54,13 +58,15 @@ impl ClaudeHost {
     ) -> Result<Self, String> {
         let mut bridge = Bridge::spawn(python, script)
             .map_err(|_| "Claude sidecar could not start".to_owned())?;
+        let model_control = bridge.supports("set_model");
+        let permission_control = bridge.supports("set_permission_mode");
         let params = json!({"cwd":cwd,"session_id":session_id,
             "resume":if resume { Some(session_id) } else { None }, "model":model});
         let id = bridge
             .request("start", params)
             .map_err(|_| "Claude sidecar start request failed".to_owned())?;
         let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
+        let start = loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err("Claude sidecar start timed out".to_owned());
@@ -70,7 +76,7 @@ impl ClaudeHost {
                     if frame["ok"] != true {
                         return Err("Claude sidecar refused session start".to_owned());
                     }
-                    break;
+                    break frame["result"].clone();
                 }
                 Ok(frame) if frame["type"] == "error" => {
                     return Err("Claude sidecar protocol error".to_owned())
@@ -79,7 +85,13 @@ impl ClaudeHost {
                 Err(Error::Timeout) => {}
                 Err(_) => return Err("Claude sidecar closed during startup".to_owned()),
             }
+        };
+        let initial_model = start["data"]["model"].as_str().map(str::to_owned);
+        let initial_permission_mode = start["permission_mode"].as_str().unwrap_or("default");
+        if !matches!(initial_permission_mode, "default" | "acceptEdits" | "plan" | "auto" | "dontAsk") {
+            return Err("Claude sidecar reported an unavailable initial permission mode".into());
         }
+        let initial_permission_mode = initial_permission_mode.to_owned();
         let (tx, rx) = mpsc::channel();
         let worker = thread::spawn(move || broker(bridge, rx));
         Ok(Self {
@@ -87,6 +99,10 @@ impl ClaudeHost {
             worker: Mutex::new(Some(worker)),
             active: AtomicBool::new(false),
             closing: AtomicBool::new(false),
+            model_control,
+            permission_control,
+            initial_model,
+            initial_permission_mode,
         })
     }
 
@@ -123,6 +139,8 @@ impl ClaudeHost {
 }
 
 impl Host for ClaudeHost {
+    fn initial_model(&self) -> Option<String> { self.initial_model.clone() }
+    fn initial_permission_mode(&self) -> String { self.initial_permission_mode.clone() }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
         if self.closing.load(Ordering::Acquire) {
             emit(done("Claude session is stopping"));
@@ -178,6 +196,36 @@ impl Host for ClaudeHost {
 
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
+            "set_model" => {
+                if !self.model_control {
+                    return Err("Claude sidecar does not support set_model".into());
+                }
+                let model = params.get("model").ok_or("model is required")?;
+                if !model.is_null() && (model.as_str().is_none_or(|s| s.trim().is_empty()
+                    || s.len() > 128 || s.chars().any(char::is_control))) {
+                    return Err("invalid model".into());
+                }
+                let result = self.rpc("set_model", json!({"model":model}))?;
+                let selected = result["model"].as_str().ok_or("invalid model reply")?;
+                Ok(json!({"model":selected}))
+            }
+            "set_permission_mode" => {
+                if !self.permission_control {
+                    return Err("Claude sidecar does not support set_permission_mode".into());
+                }
+                let mode = params["mode"].as_str().ok_or("mode is required")?;
+                if !matches!(mode, "default" | "acceptEdits" | "plan" | "auto" | "dontAsk") {
+                    return Err("invalid or unavailable permission mode".into());
+                }
+                if mode == "dontAsk" && self.active.load(Ordering::Acquire) {
+                    return Err("dontAsk requires an idle Claude turn".into());
+                }
+                let result = self.rpc("set_permission_mode", json!({"mode":mode}))?;
+                if result["mode"] != mode {
+                    return Err("invalid permission mode reply".into());
+                }
+                Ok(json!({"mode":mode}))
+            }
             "answer_needs_input" => {
                 let id = params["id"]
                     .as_str()
