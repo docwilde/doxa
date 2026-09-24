@@ -54,21 +54,15 @@ jobs:
       DOXA_LORE_CORE_PATH: ${{ matrix.lore-plugin && format('{0}/.lore-plugin', github.workspace) || '' }}
 
     strategy:
-      # One leg's failure is worth seeing next to the others' results, and
-      # each leg is ~9 minutes -- not worth re-running to learn the second answer.
+      # Keep the bare install and installed-plugin results independent.
       fail-fast: false
       matrix:
-        # Deliberately three legs, not five, and not one per Python. The
-        # first two are the bare-clone case -- nothing but `uv sync`, which
-        # is the whole point of declaring lore-core: pyproject says
-        # requires-python = ">=3.11", so 3.11 keeps that claim honest, and
-        # .python-version pins 3.12, which is what contributors and releases
-        # actually run. 3.13/3.14 are claimed nowhere in the project metadata
-        # and each leg costs another ~9 runner-minutes.
-        python-version: ["3.11", "3.12"]
+        # Run the pinned contributor and release interpreter. Keep separate
+        # bare-clone and installed-plugin coverage for lore_core precedence.
+        python-version: ["3.12"]
         lore-plugin: [false]
         include:
-          # Third leg: a machine WITH the LORE plugin, i.e. the other branch
+          # Second leg: a machine WITH the LORE plugin, i.e. the other branch
           # of doxa/_lore_bootstrap's precedence and the configuration most
           # real users are in. One Python is enough -- the axis under test
           # here is which lore_core wins, not which interpreter runs it.
