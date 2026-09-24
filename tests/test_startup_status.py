@@ -81,7 +81,7 @@ async def test_startup_cover_waits_for_pane_boot(monkeypatch, tmp_path, restorin
         async with app.run_test() as pilot:
             status = app.query_one("#startup-status", Static)
             assert status.display
-            assert status.renderable == (
+            assert str(status.content) == (
                 "Restoring session…" if restoring else "Loading…"
             )
             gate.set()
@@ -272,7 +272,7 @@ async def test_failed_first_connection_reveals_error(monkeypatch, tmp_path):
                     break
             assert not status.display
             assert any(
-                "connection refused" in str(block.renderable)
+                "connection refused" in str(block.content)
                 for block in app.query(SystemBlock)
             )
     finally:
@@ -305,7 +305,7 @@ async def test_failed_engine_start_reveals_error_after_cover(monkeypatch, tmp_pa
                     break
             assert not status.display
             assert any(
-                "engine start refused" in str(block.renderable)
+                "engine start refused" in str(block.content)
                 for block in app.query(SystemBlock)
             )
     finally:
