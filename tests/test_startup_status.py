@@ -14,7 +14,7 @@ import threading
 import pytest
 from textual.widgets import Static
 
-from doxa.app import DoxaApp, RestoreTabSpec, SystemBlock
+from doxa.app import CloseWithTurnRunning, DoxaApp, RestoreTabSpec, SystemBlock
 from tests.fakes import FakeEngine
 
 
@@ -211,6 +211,41 @@ async def test_cover_blocks_hidden_shell_input_and_later_pane_cannot_clear_it(
                     break
             assert not status.display
             assert not marker.exists()
+    finally:
+        gate.set()
+
+
+@pytest.mark.asyncio
+async def test_visible_modal_accepts_enter_while_pane_is_still_loading(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("DOXA_HOME", str(tmp_path / "doxa-home"))
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "runtime"))
+    gate = threading.Event()
+
+    def engine():
+        gate.wait(timeout=5)
+        return FakeEngine([], cwd=str(tmp_path))
+
+    app = DoxaApp(cwd=str(tmp_path), engine_factory=engine)
+    try:
+        async with app.run_test() as pilot:
+            status = app.query_one("#startup-status", Static)
+            assert status.display
+            chosen = []
+            app.push_screen(CloseWithTurnRunning(), callback=chosen.append)
+            for _ in range(50):
+                await pilot.pause(0.02)
+                if isinstance(app.screen, CloseWithTurnRunning):
+                    break
+            assert isinstance(app.screen, CloseWithTurnRunning)
+            await pilot.press("enter")
+            for _ in range(50):
+                await pilot.pause(0.02)
+                if chosen:
+                    break
+            assert chosen == ["terminate"]
+            assert status.display  # the pane has not booted behind the modal
     finally:
         gate.set()
 

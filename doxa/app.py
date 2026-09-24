@@ -1502,7 +1502,11 @@ class DoxaApp(
         The startup cover also gates keyboard input here: focusing a prompt
         behind the cover must not let an unseen `!` submit run a shell
         command."""
-        if self._startup_pending and isinstance(event, (events.Key, events.Paste)):
+        if (
+            self._startup_pending
+            and isinstance(event, (events.Key, events.Paste))
+            and any(self.screen.query("#startup-status"))
+        ):
             # The prompt is focused behind the cover. A hidden `!` submit
             # could execute a shell command before the pane is ready.
             if isinstance(event, events.Key) and event.key in {"escape", "ctrl+q"}:
