@@ -252,7 +252,7 @@ impl PeerMap {
         let start = self.selected.saturating_sub(visible.saturating_sub(1));
         let shown = &scope.peers[start..(start + visible).min(scope.peers.len())];
         if rows[0].width >= 48 && rows[0].height >= 12 {
-            render_graph(frame, rows[0], shown);
+            render_graph(frame, rows[0], shown, self.selected - start);
         } else {
             let listing = shown
                 .iter()
@@ -311,17 +311,27 @@ fn observe(scope: &mut Scope, id: &str, title: &str, outbound: bool) -> bool {
     true
 }
 
-fn render_graph(frame: &mut Frame, area: Rect, peers: &[Peer]) {
+fn render_graph(frame: &mut Frame, area: Rect, peers: &[Peer], selected: usize) {
     let mut titles = vec!["This session".to_owned()];
     titles.extend(peers.iter().map(|peer| peer.title.clone()));
     let nodes: Vec<_> = titles
         .iter()
-        .map(|title| {
+        .enumerate()
+        .map(|(index, title)| {
+            let color = if index == selected + 1 {
+                Color::Yellow
+            } else if index == 0 {
+                Color::Cyan
+            } else if peers[index - 1].sent > 0 || peers[index - 1].received > 0 {
+                Color::Green
+            } else {
+                Color::DarkGray
+            };
             NodeLayout::new((16, 3))
                 .with_title(title)
                 .with_border_style(
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(color)
                         .add_modifier(Modifier::BOLD),
                 )
         })
