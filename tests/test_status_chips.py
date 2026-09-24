@@ -1348,9 +1348,11 @@ async def test_enter_confirms_the_compact_dialog(monkeypatch, tmp_path):
     fake = FakeEngine([])
     fake.last_ctx_percentage = 88.0
     app, engines = await _app(monkeypatch, tmp_path, fake)
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(80, 24)) as pilot:
         assert await _wait_status(pilot, app, "ctx 88%")
-        await pilot.click("#status-bar", offset=_offset_of(app, "ctx 88%"))
+        ctx_offset = _offset_of(app, "ctx 88%")
+        assert ctx_offset[0] < 80
+        await pilot.click("#status-bar", offset=ctx_offset)
         assert await _wait_for(pilot, lambda: isinstance(app.screen, CompactConfirm))
         await pilot.press("enter")
         assert await _wait_for(

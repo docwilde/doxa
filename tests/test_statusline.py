@@ -385,8 +385,9 @@ def test_git_chip_dedups_when_the_worktree_name_repeats_branch_or_repo(tmp_path)
 
 @pytest.mark.asyncio
 async def test_status_line_chip_order(monkeypatch, tmp_path):
-    """Pinned ORDER: model · repo ⎇ branch sha · cost · headroom · ctx ·
-    beliefs. The sha belongs next to the branch it qualifies."""
+    """Pinned ORDER: engine · model · repo ⎇ branch sha · ctx · cost ·
+    headroom · beliefs. The sha belongs next to the branch it qualifies,
+    and ctx stays reachable ahead of cost on narrow terminals."""
     monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
     identity.invalidate()
@@ -416,11 +417,12 @@ async def test_status_line_chip_order(monkeypatch, tmp_path):
         branch_span = f"[@click=open_branch_picker][{accent}]trunk[/][/]"
         beliefs_span = f"[@click=open_beliefs_picker][{accent}]3 beliefs[/][/]"
         order = [
+            f"[@click=open_engine_picker][{accent}]claude[/][/]",
             f"[@click=open_model_picker][{accent}]{fake.model}[/][/]",
             f"{repo_span} ⎇ {branch_span} @{sha}",
+            f"[@click=compact_now][{accent}]{ctx_chip(74.0)}[/][/]",
             "sub:max",
             "s:9% w:48%",
-            f"[@click=compact_now][{accent}]{ctx_chip(74.0)}[/][/]",
             beliefs_span,
         ]
         positions = [status.index(chunk) for chunk in order]

@@ -39,10 +39,12 @@ from doxa import claude_catalog as claude_catalog_mod
 from doxa import engines as engines_mod
 from doxa import providers as providers_mod
 from doxa import vendors as vendors_mod
-from doxa.app import DoxaApp, SystemBlock
+from doxa.app import ChipPicker, DoxaApp, SystemBlock
 from doxa.engines import EngineCapabilities
 from doxa.providers import ModelInfo, VendorModelProvider
 from tests.fakes import FakeEngine
+from tests.helpers import _chip_offset
+from textual.content import Content
 
 
 @pytest.fixture(autouse=True)
@@ -114,6 +116,44 @@ def fifth_engine(monkeypatch):
 
 
 # -- the settings row is the registry ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_engine_chip_precedes_model_and_selects_new_session_default(
+    monkeypatch, tmp_path,
+):
+    fake = FakeEngine([], model="claude-sonnet-4-5")
+    app, _ = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test() as pilot:
+        for _ in range(200):
+            if app.active_pane.engine is fake:
+                break
+            await pilot.pause(0.02)
+        bar = app.query_one("#status-bar")
+        plain = Content.from_markup(str(bar.renderable)).plain
+        assert plain.index("claude") < plain.index("claude-sonnet-4-5")
+        keys = [chip.key for chip in app.active_pane._status_chips()]
+        assert keys[keys.index("claude") + 1].startswith("claude-sonnet-4-5")
+        assert "open_engine_picker" in str(bar.renderable)
+        await pilot.click("#status-bar", offset=_chip_offset(app, "claude"))
+        await pilot.pause()
+        picker = app.query_one("#chip-picker", ChipPicker)
+        assert picker.is_open and picker.border_title == "engine"
+        assert picker._current_id == config_mod.engine()
+        assert "NEW sessions" in picker._note
+        assert {rid for rid, _ in picker._all_rows} == set(engines_mod.available())
+        picker.select_row(next(
+            index for index, (rid, _) in enumerate(picker._rows)
+            if rid == "codex"
+        ))
+        for _ in range(200):
+            if config_mod.engine() == "codex":
+                break
+            await pilot.pause(0.02)
+        assert config_mod.engine() == "codex"
+        assert engines_mod.engine_id_of(app.active_pane.engine) == "claude"
+        assert app._new_session_engine_override == "codex"
+        assert "claude" in Content.from_markup(str(bar.renderable)).plain
 
 
 def test_the_settings_engine_row_offers_exactly_the_registered_engines():
