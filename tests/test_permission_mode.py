@@ -331,7 +331,11 @@ async def test_chip_renders_with_real_height_and_shows_the_mode(
         bar = app.query_one("#status-bar", StatusBar)
         assert bar.size.height > 0, f"status bar collapsed: {bar.size}"
         assert bar.size.width > 0
-        assert _hit(app, bar) is bar
+        # The loading cover can be hidden before the compositor has painted
+        # the newly exposed status row. Check the settled hit target.
+        assert await _wait_for(pilot, lambda: _hit(app, bar) is bar), (
+            "status bar did not become the hit target"
+        )
 
 
 @pytest.mark.asyncio
