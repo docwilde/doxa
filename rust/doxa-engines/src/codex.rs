@@ -168,14 +168,18 @@ impl CodexJsonlNormalizer {
         let name = if item_kind == "mcp_tool_call" {
             format!("{}/{}", nonempty(item.get("server"), "mcp"), nonempty(item.get("tool"), "tool"))
         } else { item_kind.clone() };
+        // Provider-supplied names and IDs reach chips and transcripts too.
+        // Keep raw IDs only for internal duration correlation.
+        let display_name = (self.scrub)(&name);
+        let display_id = (self.scrub)(&id);
         if event_kind == "item.started" {
             self.started.insert(id.clone(), Instant::now());
-            return vec![EngineEvent::new("tool_call", json!({"id":id,"name":name,"input":self.tool_input(&item_kind,item)}))];
+            return vec![EngineEvent::new("tool_call", json!({"id":display_id,"name":display_name,"input":self.tool_input(&item_kind,item)}))];
         }
         let (summary, is_error) = self.tool_result(&item_kind, item);
         let duration_ms = self.started.get(&id).map(|start| start.elapsed().as_millis() as u64);
         if event_kind == "item.completed" { self.started.remove(&id); }
-        vec![EngineEvent::new("tool_result", json!({"id":id,"name":name,"result_summary":summary,"is_error":is_error,"duration_ms":duration_ms}))]
+        vec![EngineEvent::new("tool_result", json!({"id":display_id,"name":display_name,"result_summary":summary,"is_error":is_error,"duration_ms":duration_ms}))]
     }
 
     fn tool_input(&self, kind: &str, item: &Map<String, Value>) -> Value {

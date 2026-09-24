@@ -60,6 +60,16 @@ fn tool_kinds_keep_codex_names_and_scrub_output() {
 }
 
 #[test]
+fn provider_tool_name_and_id_are_scrubbed_before_display() {
+    let mut parser = parser();
+    parser.begin_turn();
+    let frame = json!({"type":"item.started","item":{"id":"fixture-secret","type":"mcp_tool_call","server":"fixture-secret","tool":"lookup","arguments":{}}});
+    let events = parser.push_bytes(format!("{frame}\n").as_bytes()).unwrap();
+    assert_eq!(events[0].data["id"], "[redacted]");
+    assert_eq!(events[0].data["name"], "[redacted]/lookup");
+}
+
+#[test]
 fn explicit_error_closes_once_and_unknown_frame_does_not() {
     let mut parser = parser();
     parser.begin_turn();
