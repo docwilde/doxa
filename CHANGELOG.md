@@ -19,6 +19,10 @@ the stable 2.0 release has not been cut.
 - Keep live peers during transient socket failures, recover queued turns after
   a display-scrub panic, and signal a replay gap after a long disconnect.
 - Scrub nested pending values before returning them from the LORE sidecar.
+- Retain layout and collection metadata in empty tabsets, keep the newest
+  transcript lines scrollable, use unique thread metadata temporary files,
+  and finalize the Claude sidecar after stdin closes.
+- Run the Python CI matrix on 3.12 while retaining both LORE loading paths.
 
 ## 2.0.0-alpha.2 — Rust development line (unreleased)
 
