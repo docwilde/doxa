@@ -2,11 +2,13 @@
 mod claude_host;
 mod codex_host;
 mod vendor_host;
+mod peer_host;
 use claude_host::ClaudeHost;
 use codex_host::CodexHost;
 use doxa_engines::codex_driver::{DriverOptions, SandboxMode};
 use doxa_runtime::{Daemon, Host, Session};
 use doxa_vendors::Vendor;
+use peer_host::PeerHost;
 use serde_json::{json, Value};
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -491,6 +493,19 @@ fn run() -> io::Result<()> {
             host
         }
     };
+    let scrub_python = match options.engine {
+        Engine::Codex => options.lore_python.as_deref(),
+        Engine::Claude => options.claude_python.as_deref(),
+        Engine::DeepSeek | Engine::Glm => options.lore_python.as_deref(),
+        Engine::Fixture => None,
+    };
+    let host: Arc<dyn Host> = Arc::new(PeerHost::new(
+        host,
+        options.runtime.clone(),
+        &options.cwd,
+        options.session_id.clone(),
+        scrub_python,
+    )?);
     let session = Session {
         session_id: options.session_id.clone(),
         cwd: options.cwd.to_string_lossy().into_owned(),

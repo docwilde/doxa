@@ -4,6 +4,13 @@ Standalone Rust port of local peer presence in `doxa/peers.py`. It reads and wri
 
 A caller must supply a `Scrubber` implementation backed by LORE's secret scrubber before reading records for display. This crate intentionally has no pass-through scrubber. Provider, model, and engine are unverified self descriptions; consumers must never treat them as capabilities or authority. The static fixture in `tests/fixtures/python_peer.json` was emitted from Python `PeerInfo` with `dataclasses.asdict` (omitting local-only `origin`), and the Rust test checks old and future schema compatibility.
 
+`presence::list_scoped_readonly` supplies the daemon's read-only peers RPC. It
+checks owner-private registry paths, live PIDs, heartbeat freshness, and
+owner-private sockets inside the runtime directory. It matches raw project
+scope before a fallible LORE scrub and returns at most 32 session IDs and
+scrubbed titles. A scrub failure rejects the whole result. This query never
+reaps entries or sockets.
+
 `Registry::open` creates owner-private runtime and registry directories. Records are written through 0600 temporary files and atomic rename. Reads are bounded, reject symlinks and foreign-owned files, and remove stale entries. Stale heartbeat with a live PID never removes its socket. A dead PID permits socket removal only when the path resolves within the runtime directory, is a socket owned by this user, and refuses a live connection. Scoped discovery follows Python's main Git checkout key and cwd fallback.
 
 `delivery` adds a local Unix inbox and send path with Python-compatible JSON frames. The inbox requires the same UID through `SO_PEERCRED`, accepts at most 64 KiB per line, and invokes a caller-provided LORE scrubber before returning any field. Empty discovery probes are ignored. The socket is mode 0600 and is removed on drop only if its inode is still the one this inbox bound. An existing socket path is never removed during bind.

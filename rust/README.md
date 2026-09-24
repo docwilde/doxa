@@ -134,7 +134,10 @@ running CLI process group, and `stop` cancels it and closes the daemon. The
 native Codex host does not yet register MCP, integrate LORE context/review/indexing,
 or implement peer messaging. The
 registry reports the selected engine. `status`, `interrupt`, and `stop` are
-supported; Claude also supports `answer_needs_input`. Other calls return an explicit error. The
+supported; Claude also supports `answer_needs_input`. `peers` returns a
+read-only, same-project roster of live peer IDs and LORE-scrubbed titles (up
+to 32). It fails closed when the LORE scrubber is unavailable. Other calls
+return an explicit error. The
 `socket_path` is suitable for local TUI or Python `EngineClient` attach, but
 peer frames are not implemented. Treat this as an integration alpha.
 

@@ -12,6 +12,7 @@ doxa-lore = { path = "../doxa-lore" }
 doxa-transcript = { path = "../doxa-transcript" }
 doxa-claude = { path = "../doxa-claude" }
 doxa-vendors = { path = "../doxa-vendors" }
+doxa-peers = { path = "../doxa-peers" }
 libc = "0.2"
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "time", "sync", "net"] }
