@@ -177,7 +177,8 @@ pub struct Session {
 pub struct PaneGroup {
     pub tabs: Vec<String>,
     pub active: usize,
-    pub scroll: u16,
+    /// Lines above the viewport, measured from the transcript tail.
+    pub scroll: usize,
 }
 
 impl PaneGroup {
@@ -1455,7 +1456,7 @@ impl App {
             .map(|s| s.transcript.as_str())
             .unwrap_or("No session open. Select one in the rail and press Enter.");
         let lines = markdown::render(content, inner[1].width.saturating_sub(2));
-        let (lines, scroll_from_top) = transcript_window(lines, inner[1].height.saturating_sub(2), group.scroll);
+        let (lines, scroll_from_top) = transcript_window(lines, inner[1].height, inner[1].y, group.scroll);
         frame.render_widget(
             Paragraph::new(lines)
                 .scroll((scroll_from_top, 0))
@@ -1471,13 +1472,20 @@ impl App {
     }
 }
 
-fn transcript_window(mut lines: Vec<Line<'static>>, viewport: u16, scroll: u16) -> (Vec<Line<'static>>, u16) {
-    // Paragraph's scroll offset is u16. Keep a tail window whose largest
-    // possible offset fits, so a long transcript always opens at its end.
-    let keep = usize::from(u16::MAX).saturating_add(usize::from(viewport));
-    if lines.len() > keep { lines = lines.split_off(lines.len() - keep); }
-    let max_scroll = lines.len().saturating_sub(usize::from(viewport)) as u16;
-    (lines, max_scroll.saturating_sub(scroll.min(max_scroll)))
+fn transcript_window(lines: Vec<Line<'static>>, viewport: u16, origin_y: u16, scroll: usize) -> (Vec<Line<'static>>, u16) {
+    // Paragraph's internal `area.height + scroll.y` and its buffer row
+    // `area.top() + y` are u16. Reserve the actual height and screen origin
+    // so both calculations fit while moving a bounded window through lines.
+    let viewport = usize::from(viewport);
+    let max_scroll = lines.len().saturating_sub(viewport);
+    let top = max_scroll.saturating_sub(scroll.min(max_scroll));
+    let max_local_scroll = usize::from(u16::MAX)
+        .saturating_sub(viewport)
+        .saturating_sub(usize::from(origin_y));
+    let start = top.saturating_sub(max_local_scroll);
+    let keep = max_local_scroll.saturating_add(viewport);
+    let window = lines.into_iter().skip(start).take(keep).collect();
+    (window, (top - start) as u16)
 }
 
 /// Owns terminal modes so every return path, including I/O errors, restores the screen.
@@ -1711,14 +1719,31 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn long_transcript_window_keeps_newest_lines_reachable() {
+    fn long_transcript_window_reaches_both_ends() {
         let lines: Vec<Line<'static>> = (0..70_000).map(|i| Line::from(i.to_string())).collect();
-        let (window, at_bottom) = transcript_window(lines, 8, 0);
-        assert_eq!(window.len(), u16::MAX as usize + 8);
-        assert_eq!(at_bottom, u16::MAX);
+        let (window, at_bottom) = transcript_window(lines.clone(), 8, 0, 0);
+        assert_eq!(window.len(), u16::MAX as usize);
+        assert_eq!(at_bottom, u16::MAX - 8);
         assert_eq!(window[usize::from(at_bottom) + 7].to_string(), "69999");
-        let (_, at_top) = transcript_window(window, 8, u16::MAX);
+        let (window, at_top) = transcript_window(lines, 8, 0, 69_992);
         assert_eq!(at_top, 0);
+        assert_eq!(window[0].to_string(), "0");
+        assert_eq!(window[7].to_string(), "7");
+    }
+
+    #[test]
+    fn transcript_scroll_crosses_u16_boundary_without_losing_lines() {
+        let lines: Vec<Line<'static>> = (0..70_000).map(|i| Line::from(i.to_string())).collect();
+        for scroll in [0, 1, 4_457, 65_535, 65_536, 69_991, 69_992] {
+            let (window, offset) = transcript_window(lines.clone(), 8, 0, scroll);
+            assert!(window.len() <= u16::MAX as usize);
+            assert_eq!(window[usize::from(offset)].to_string(), (69_992 - scroll).to_string());
+        }
+        let mut app = App::default();
+        app.focus = Focus::Transcript;
+        app.groups[0].scroll = usize::from(u16::MAX);
+        assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))));
+        assert_eq!(app.groups[0].scroll, usize::from(u16::MAX) + 5);
     }
 
     #[test]

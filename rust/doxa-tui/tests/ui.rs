@@ -184,6 +184,20 @@ fn streamed_transcript_is_bounded_without_resetting_user_scroll() {
 }
 
 #[test]
+fn long_transcript_can_render_its_first_and_last_lines() {
+    let mut app = App::default();
+    app.rail_visible = false;
+    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("long", "Work")));
+    let lines: String = (0..70_000).map(|i| format!("{i:05}\n")).collect();
+    assert!(lines.len() < 512 * 1024);
+    app.sessions[0].transcript = format!("```\n{lines}```");
+
+    assert!(screen(&app, 90, 25).contains("69999"));
+    app.groups[0].scroll = usize::MAX;
+    assert!(screen(&app, 90, 25).contains("00000"));
+}
+
+#[test]
 fn structured_events_render_in_target_pane_and_track_status() {
     let mut app = App::default();
     for id in ["one", "two"] {
