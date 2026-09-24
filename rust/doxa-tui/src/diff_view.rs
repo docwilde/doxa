@@ -201,4 +201,16 @@ mod tests {
         assert!(!names.contains("partial"));
         assert!(names.contains("Additional untracked names omitted"));
     }
+
+    #[test]
+    fn bounded_git_reader_drains_output_larger_than_pipe() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(Command::new("git").args(["init", "-q"]).current_dir(dir.path()).status().unwrap().success());
+        for index in 0..512 {
+            std::fs::write(dir.path().join(format!("{index:04}-{}.txt", "long-name".repeat(12))), b"").unwrap();
+        }
+        let (bytes, truncated) = git_output(dir.path(), &["ls-files", "--others", "--exclude-standard", "-z", "--"], 128).unwrap();
+        assert!(truncated);
+        assert_eq!(bytes.len(), 129);
+    }
 }

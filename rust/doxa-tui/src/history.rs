@@ -3,9 +3,12 @@
 
 use serde_json::Value;
 use crate::transport::TranscriptSnapshot;
-use std::fs::{self, OpenOptions};
+use std::ffi::OsStr;
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::ffi::OsStrExt;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 
 const MAX_PROJECTS: usize = 128;
@@ -21,25 +24,35 @@ pub struct OfflineSession {
 }
 
 fn projects_dir() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("LORE_PROJECTS_DIR").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(path));
-    }
-    if let Some(root) = std::env::var_os("LORE_ROOT").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(root).join("projects"));
-    }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude/lore/projects"))
+    projects_dir_from(
+        std::env::var_os("LORE_PROJECTS_DIR").filter(|v| !v.is_empty()).map(PathBuf::from),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
 }
 
-fn owned_dir(path: &Path, uid: u32) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && meta.uid() == uid && !meta.file_type().is_symlink())
+fn projects_dir_from(configured: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    configured.or_else(|| home.map(|home| home.join(".claude/projects")))
 }
 
-fn read_offline(path: &Path, uid: u32) -> Option<String> {
-    let before = fs::symlink_metadata(path).ok()?;
-    if !before.is_file() || before.uid() != uid || before.file_type().is_symlink() { return None; }
-    let mut file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path).ok()?;
+fn owned_dir(file: &File, uid: u32) -> bool {
+    file.metadata().is_ok_and(|meta| meta.is_dir() && meta.uid() == uid)
+}
+
+fn open_at(parent: &File, name: &OsStr, flags: i32) -> Option<File> {
+    let name = std::ffi::CString::new(name.as_bytes()).ok()?;
+    let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    if fd < 0 { None } else { Some(unsafe { File::from_raw_fd(fd) }) }
+}
+
+fn entries_in(open_dir: &File) -> Option<fs::ReadDir> {
+    // The fd remains open for the scan. /proc/self/fd gives read_dir a
+    // stable directory handle even if its original pathname is replaced.
+    fs::read_dir(format!("/proc/self/fd/{}", open_dir.as_raw_fd())).ok()
+}
+
+fn read_offline(mut file: File, uid: u32) -> Option<String> {
     let meta = file.metadata().ok()?;
-    if !meta.is_file() || meta.uid() != uid || meta.ino() != before.ino() || meta.dev() != before.dev() { return None; }
+    if !meta.is_file() || meta.uid() != uid { return None; }
     let start = meta.len().saturating_sub(MAX_FILE_BYTES);
     file.seek(SeekFrom::Start(start)).ok()?;
     let mut bytes = Vec::new();
@@ -61,31 +74,38 @@ pub fn discover() -> Vec<OfflineSession> {
 
 fn discover_in(root: &Path) -> Vec<OfflineSession> {
     let uid = unsafe { libc::geteuid() };
-    if !owned_dir(root, uid) { return Vec::new(); }
-    let Ok(projects) = fs::read_dir(root) else { return Vec::new(); };
+    let Ok(root) = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC).open(root) else { return Vec::new(); };
+    if !owned_dir(&root, uid) { return Vec::new(); }
+    let Some(projects) = entries_in(&root) else { return Vec::new(); };
     let mut candidates = Vec::new();
     let mut visited = 0;
     for project in projects.flatten().take(MAX_PROJECTS) {
-        let dir = project.path();
+        let Some(dir) = open_at(&root, &project.file_name(), libc::O_RDONLY | libc::O_DIRECTORY) else { continue; };
         if !owned_dir(&dir, uid) { continue; }
-        let Ok(files) = fs::read_dir(&dir) else { continue; };
+        let Some(files) = entries_in(&dir) else { continue; };
         for file in files.flatten() {
             if visited == MAX_FILES { break; }
             visited += 1;
-            let path = file.path();
+            let name = file.file_name();
+            let path = Path::new(&name);
             if path.extension().is_none_or(|ext| ext != "jsonl") { continue; }
             let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else { continue; };
             if !crate::discovery::valid_id(id) { continue; }
-            let Ok(meta) = fs::symlink_metadata(&path) else { continue; };
+            let Some(open_file) = open_at(&dir, &name, libc::O_RDONLY | libc::O_NONBLOCK) else { continue; };
+            let Ok(meta) = open_file.metadata() else { continue; };
             if !meta.is_file() || meta.uid() != uid { continue; }
             let stamp = meta.modified().ok();
-            candidates.push((stamp, id.to_owned(), project.file_name().to_string_lossy().into_owned(), path));
+            candidates.push((stamp, id.to_owned(), project.file_name().to_string_lossy().into_owned(), open_file));
+            if candidates.len() > MAX_OFFLINE {
+                candidates.sort_by(|a, b| b.0.cmp(&a.0));
+                candidates.pop();
+            }
         }
         if visited == MAX_FILES { break; }
     }
     candidates.sort_by(|a, b| b.0.cmp(&a.0));
-    candidates.into_iter().take(MAX_OFFLINE).filter_map(|(_, id, project, path)| {
-        let markdown = read_offline(&path, uid)?;
+    candidates.into_iter().filter_map(|(_, id, project, file)| {
+        let markdown = read_offline(file, uid)?;
         Some(OfflineSession { id, project, markdown })
     }).collect()
 }
@@ -159,6 +179,15 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn transcript_root_matches_lore_projects_configuration() {
+        assert_eq!(projects_dir_from(Some(PathBuf::from("/configured/projects")), Some(PathBuf::from("/home/me"))),
+            Some(PathBuf::from("/configured/projects")));
+        assert_eq!(projects_dir_from(None, Some(PathBuf::from("/home/me"))),
+            Some(PathBuf::from("/home/me/.claude/projects")));
+        assert_eq!(projects_dir_from(None, None), None);
+    }
     #[test]
     fn restores_prompts_and_assistant_text_without_tool_result_turns() {
         let lines = concat!(
@@ -188,5 +217,22 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "offline-1");
         assert!(found[0].markdown.contains("saved question"));
+    }
+
+    #[test]
+    fn opened_transcript_survives_path_replacement_without_reading_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(temp.path()).unwrap();
+        let original = temp.path().join("saved.jsonl");
+        let other = temp.path().join("other.jsonl");
+        fs::write(&original, b"{\"type\":\"user\",\"message\":{\"content\":\"original\"}}\n").unwrap();
+        fs::write(&other, b"{\"type\":\"user\",\"message\":{\"content\":\"replacement\"}}\n").unwrap();
+        let file = open_at(&dir, OsStr::new("saved.jsonl"), libc::O_RDONLY).unwrap();
+        fs::remove_file(&original).unwrap();
+        symlink(&other, &original).unwrap();
+        let rendered = read_offline(file, unsafe { libc::geteuid() }).unwrap();
+        assert!(rendered.contains("original"));
+        assert!(!rendered.contains("replacement"));
+        assert!(open_at(&dir, OsStr::new("saved.jsonl"), libc::O_RDONLY).is_none());
     }
 }
