@@ -23,7 +23,9 @@ impl Host for Fixture {
         emit(json!({"type":"turn_done","data":{}}));
     }
     fn call(&self, method: &str, _: &Value) -> Result<Value, String> {
-        if method == "fixture" { Ok(json!({"answer":42})) } else { Err("unknown method".into()) }
+        if method == "fixture" { Ok(json!({"answer":42})) }
+        else if method == "stop" { Ok(json!({})) }
+        else { Err("unknown method".into()) }
     }
 }
 fn session() -> Session { Session { session_id:"test-session".into(), cwd:"/tmp".into(), model:None,
@@ -161,4 +163,21 @@ fn ring_evicts_old_events_and_large_event_keeps_sequence() {
     assert_eq!(last["seq"], 520);
     assert_eq!(last["event"]["type"], "tool_result");
     assert_eq!(last["event"]["data"]["truncated"], true);
+}
+
+#[test]
+fn host_approved_stop_removes_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = Daemon::bind(dir.path(), session(), Arc::new(Fixture::new())).unwrap().start();
+    let path = handle.socket_path().to_path_buf();
+    let (mut reader, mut writer) = connect(&path);
+    recv(&mut reader);
+    send(&mut writer, json!({"type":"attach","cursor":null}));
+    send(&mut writer, json!({"type":"call","id":3,"method":"stop","params":{}}));
+    assert_eq!(recv(&mut reader)["ok"], true);
+    for _ in 0..50 {
+        if !path.exists() { return; }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("stopped daemon left its socket behind");
 }

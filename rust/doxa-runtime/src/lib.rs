@@ -114,6 +114,8 @@ impl Daemon {
 
     pub fn start(self) -> DaemonHandle {
         let inner = self.inner.clone();
+        let socket_path = self.socket_path.clone();
+        let socket_ino = self.socket_ino;
         let accept_thread = thread::spawn(move || {
             while !inner.stopping.load(Ordering::Acquire) {
                 match self.listener.accept() {
@@ -129,6 +131,8 @@ impl Daemon {
                     Err(_) => break,
                 }
             }
+            drop(self.listener);
+            remove_owned_socket(&socket_path, socket_ino);
         });
         DaemonHandle { inner: self.inner, socket_path: self.socket_path, socket_ino: self.socket_ino, accept_thread: Some(accept_thread) }
     }
@@ -144,16 +148,20 @@ impl DaemonHandle {
         self.inner.stopping.store(true, Ordering::Release);
         self.inner.state.lock().unwrap().clients.clear();
         if let Some(thread) = self.accept_thread.take() { let _ = thread.join(); }
-        // Never unlink a different file substituted at this pathname.
-        if let Ok(meta) = fs::symlink_metadata(&self.socket_path) {
-            if meta.file_type().is_socket() && meta.ino() == self.socket_ino {
-                let _ = fs::remove_file(&self.socket_path);
-            }
-        }
+        remove_owned_socket(&self.socket_path, self.socket_ino);
     }
 }
 
 impl Drop for DaemonHandle { fn drop(&mut self) { self.shutdown(); } }
+
+fn remove_owned_socket(path: &Path, inode: u64) {
+    // Never unlink a different file substituted at this pathname.
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_socket() && meta.ino() == inode {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
 
 impl Inner {
     fn publish(&self, turn: Option<&str>, event: Value) {
