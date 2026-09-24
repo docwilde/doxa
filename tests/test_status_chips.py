@@ -987,6 +987,32 @@ async def test_beliefs_chip_never_loads_bodies_on_status_refresh(monkeypatch, tm
 
 
 @pytest.mark.asyncio
+async def test_unchanged_status_refresh_skips_static_update(monkeypatch, tmp_path):
+    fake = FakeEngine([], model="claude-haiku-4-5")
+    app, _engines = await _app(monkeypatch, tmp_path, fake)
+    async with app.run_test() as pilot:
+        assert await _wait_status(pilot, app, "claude-haiku-4-5")
+        pane = app.active_pane
+        bar = app.query_one("#status-bar", StatusBar)
+        original_update = bar.update
+        updates: list[str] = []
+
+        def count_update(markup: str) -> None:
+            updates.append(markup)
+            original_update(markup)
+
+        monkeypatch.setattr(bar, "update", count_update)
+        pane._refresh_status()
+        pane._refresh_status()
+        assert updates == []
+
+        fake.model = "claude-sonnet-4-5"
+        pane._refresh_status()
+        assert len(updates) == 1
+        assert "claude-sonnet-4-5" in _status_plain(app)
+
+
+@pytest.mark.asyncio
 async def test_beliefs_picker_type_to_filter_matches_claim_text(monkeypatch, tmp_path):
     fake = FakeEngine([])
     fake.list_beliefs_result = [
