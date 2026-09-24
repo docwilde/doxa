@@ -54,7 +54,8 @@ without stopping its daemon. `Ctrl+M` opens the read-only peer communications
 map; Up/Down selects a peer, R refreshes the live roster, and Esc closes it.
 The map uses `tui-nodes` 0.9 with the Rust frontend's Ratatui 0.29.
 Lines show observed traffic and the detail row names sent and received counts.
-Native daemons without peer support show an unavailable state. On attach, the frontend restores prompts and
+Native daemons report a same-project, scrubbed peer roster when LORE is
+available; other daemons can report an unavailable state. On attach, the frontend restores prompts and
 assistant text from the daemon's persisted JSONL file, then follows live
 events from the same snapshot boundary. The visible view is limited to the
 latest 40 turns, 20,000 assistant characters per turn, an 8 MiB file tail,
@@ -62,8 +63,8 @@ and the UI's 512 KiB transcript buffer. It marks omitted earlier content;
 the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
-in-flight deltas may be absent. Rich tool cards and clickable links are
-still 2.0 work. The binary version is `2.0.0-alpha.3` for this
+in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
+clickable links are still 2.0 work. The binary version is `2.0.0-alpha.3` for this
 separate development line, not a DOXA 2.0 release.
 
 Alpha tags identify preview snapshots. A stable 2.0 release waits until the

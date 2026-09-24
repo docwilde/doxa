@@ -129,7 +129,9 @@ SHA selects another ref. It requires Git and Cargo, builds a release binary,
 and installs `doxa-rs` in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). If the ref
 contains a native Rust daemon, the installer also installs it as
 `doxa-daemon-rs`. The supported Python `doxa` command is left untouched.
-The Rust frontend is a preview and currently needs an existing DOXA daemon.
+The Rust preview can start its native daemon for Codex, Claude, DeepSeek, and
+GLM sessions, or attach to an existing DOXA daemon. See [the Rust development
+guide](rust/README.md) for current capabilities and setup.
 
 From a checkout:
 
