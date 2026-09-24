@@ -22,12 +22,16 @@ sidecar's process group on write timeout or drop, including SDK CLI children
 that remain in that group. A `Bridge::recv` timeout is an idle poll result and
 leaves the process running. The sidecar deliberately
 does not print SDK exception text. Neither side logs prompts or secrets.
-`Bridge::recv` returns events and replies in arrival order; the host must
-correlate reply IDs and render events. No Rust TUI wiring is claimed here.
+`Bridge::recv` returns events and replies in arrival order. `doxa-daemon`
+owns the bridge through a broker thread with `--engine claude`. It forwards
+turn events over protocol v1, correlates replies, and accepts
+`answer_needs_input` and `interrupt` during a turn. A bounded event queue
+ends the turn if a consumer stalls. Out-of-band peer events are not yet
+published while no turn is active.
 
 ## Parity still required before replacing the Python engine
 
-- Wire the Rust TUI to this crate and map every `EngineEvent` to Rust state.
+- Map every Claude `EngineEvent` to the Rust TUI's full interactive state.
 - Support concurrent prompt queueing, out-of-band peer events and reconnect.
 - Validate interactive `AskUserQuestion` and permission answers against a live
   Claude SDK session, including denial and cancellation.

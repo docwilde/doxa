@@ -10,14 +10,28 @@ grouped sessions and split panes, accepts prompts, handles resize and scroll,
 and restores the terminal on exit. Existing daemon behavior and memory
 authority remain on the Python side.
 
-Build from this repository:
+Build the native frontend and daemon from this repository:
 
 ```sh
 cargo build --manifest-path rust/doxa-tui/Cargo.toml
-rust/doxa-tui/target/debug/doxa-rs --socket /path/to/existing/daemon.sock
-rust/doxa-tui/target/debug/doxa-rs --list
-rust/doxa-tui/target/debug/doxa-rs --session SESSION_ID
+cargo build --manifest-path rust/doxa-daemon/Cargo.toml
+DOXA_DAEMON_BIN="$PWD/rust/doxa-daemon/target/debug/doxa-daemon" \
+  rust/doxa-tui/target/debug/doxa-rs new
 ```
+
+`doxa-rs` now starts a native Codex session when no live sessions exist in the
+current project. `new` always starts one; `attach ID` reattaches, `stop ID`
+finalizes a running session, `list` shows all live sessions, and `doctor`
+checks executable resolution and registry access. `--session ID` and `--socket`
+remain available. A unique session ID prefix works for `attach` and `stop`.
+The daemon executable is located beside `doxa-rs`, then on `PATH`; an absolute
+`DOXA_DAEMON_BIN` overrides that search. The native Codex host needs the
+`codex` and `python3` executables on `PATH`, or explicit `--codex-bin` and
+`--lore-python` paths. The Python interpreter needs DOXA and LORE installed.
+`--model` overrides `DOXA_MODEL` and the Codex entry under `[models]` in
+`$DOXA_HOME/config.toml`; `--linger` overrides `DOXA_LINGER_SECS` and the
+`linger_secs` config value. `--sandbox` sets the native Codex sandbox. Use
+`--engine fixture` only for local integration checks.
 
 Or compile and install the preview from a ref with the POSIX installer:
 
@@ -35,8 +49,15 @@ connect to an existing Python daemon.
 With one live daemon session, `doxa-rs` attaches to it directly. With multiple
 sessions, use `--list` and select one by full ID or unique ID prefix.
 `--socket` remains available for an explicit path. `--demo` opens the shell
-without a connection. `Ctrl+Q` detaches the Rust UI
-without stopping its daemon. On attach, the frontend restores prompts and
+without a connection. `Ctrl+P` opens the action menu; use Up/Down, Enter, and
+Esc to navigate the peer map, tool activity, session rail selection, tabs, and
+panes. `Ctrl+M` and `Ctrl+T` remain direct shortcuts. `Ctrl+Q` detaches the Rust UI
+without stopping its daemon. `Ctrl+M` opens the read-only peer communications
+map; Up/Down selects a peer, R refreshes the live roster, and Esc closes it.
+The map uses `tui-nodes` 0.9 with the Rust frontend's Ratatui 0.29.
+Lines show observed traffic and the detail row names sent and received counts.
+Native daemons report a same-project, scrubbed peer roster when LORE is
+available; other daemons can report an unavailable state. On attach, the frontend restores prompts and
 assistant text from the daemon's persisted JSONL file, then follows live
 events from the same snapshot boundary. The visible view is limited to the
 latest 40 turns, 20,000 assistant characters per turn, an 8 MiB file tail,
@@ -44,13 +65,40 @@ and the UI's 512 KiB transcript buffer. It marks omitted earlier content;
 the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
-in-flight deltas may be absent. Rich tool cards and clickable links are
-still 2.0 work. The binary version is `2.0.0-alpha.3` for this
+in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
+clickable links are still 2.0 work. The binary version is `2.0.0-alpha.4` for this
 separate development line, not a DOXA 2.0 release.
 
 Alpha tags identify preview snapshots. A stable 2.0 release waits until the
 frontend reaches feature parity and passes end-to-end terminal and daemon
 tests.
+
+The Python CI workflow is paused on the Rust development line while native
+features are being built. It must be restored before a stable 2.0 cutover;
+focused Python sidecar and compatibility tests still run locally during this
+preview phase.
+
+Start the native Claude host from the terminal frontend with
+`doxa-rs new --engine claude --claude-python /absolute/path/to/python
+--claude-script /absolute/path/to/claude_sidecar.py`. The Python interpreter
+must have DOXA, LORE, and the Claude Agent SDK installed. Add `--model NAME`
+to choose a model, or `--resume SESSION_ID` to resume that session's Claude
+conversation. `doxa-rs doctor --engine claude` checks the selected Python
+interpreter, sidecar script, daemon, and runtime path.
+
+Start native DeepSeek or GLM plain chat with `doxa-rs new --engine deepseek`
+or `doxa-rs new --engine glm`. Set `DEEPSEEK_API_KEY` or `ZAI_API_KEY` in the
+environment, respectively. `--lore-python` selects the Python interpreter
+used for LORE scrubbing (default `python3`); it must have DOXA and LORE
+installed. `--model` overrides the matching `deepseek` or `glm` entry under
+`[models]` in `$DOXA_HOME/config.toml`. The Codex-only `DOXA_MODEL` setting
+does not select a vendor model. `--effort low|high|max` is optional; DeepSeek
+also accepts `none`. `doxa-rs doctor --engine deepseek|glm` checks the daemon,
+LORE interpreter, provider key presence, and effort value without printing the
+key. Use `doxa-rs new --engine deepseek|glm --resume SESSION_ID` to resume an
+existing vendor session with saved messages. Pass the exact full session ID;
+the vendor and resolved model must match the saved state. Vendor chat has no
+tools in this alpha.
 
 ## Native daemon
 
@@ -78,20 +126,64 @@ the session from starting; a scrub failure during a turn withholds further
 provider events and fails the turn. The Python sidecar is a temporary
 dependency while Rust memory integration is built.
 
+To host Claude, pass `--engine claude --claude-python /absolute/path/to/python
+--claude-script /absolute/path/to/claude_sidecar.py`. This uses DOXA's Python
+`SessionEngine` and Claude Agent SDK in a separate process. `--model` is optional.
+To resume, also pass `--session-id ID --resume true`. The daemon forwards bounded
+events and supports `answer_needs_input`, `interrupt`, and graceful `finalize`
+on exit. The Python SDK remains required in this alpha.
+
+The native plain-chat vendor host accepts `--engine deepseek` or `--engine glm`
+with `--lore-python /absolute/path/to/python`; the interpreter must have DOXA
+and LORE installed. Keys come only from `DEEPSEEK_API_KEY` or `ZAI_API_KEY` in
+the environment. `--model` and `--effort low|high|max` are optional; DeepSeek
+also accepts `--effort none`. Provider endpoints are fixed in production.
+The host advertises no tools and rejects any provider tool call. It persists
+bounded plain-chat history beside the Python transcript as
+`<session-id>.messages.json`. Restart with the same `--session-id ID --resume
+true`; missing, corrupt, wrong-engine, or wrong-model state refuses resume.
+Python's engine/messages envelope is readable; newly written envelopes also
+record session ID and model. LORE scrubs every saved string before an atomic
+replacement. Accepted turns also append Python 1.19-shaped user and assistant
+records to `<session-id>.jsonl`. Resume verifies that JSONL and the replay
+file contain the same turns; a partial two-file write refuses further turns
+and later resume. The full provider response is withheld until LORE scrubs it;
+a scrub or storage failure fails the turn and commits no history.
+It reports provider model and token usage but no dollar cost. Interrupt and
+stop cancel the in-flight HTTP request. Native hello exposes an owner-checked
+JSONL path and byte boundary so the TUI can restore completed vendor and Codex
+turns before attaching to the live event ring. LORE context, tool execution,
+pricing, and live-provider validation remain open.
+
 Codex turns use `codex exec --json` and resume subsequent turns using the
-provider thread ID. `interrupt` cancels the running CLI process group, and
-`stop` cancels it and closes the daemon. The native Codex host does not yet
-persist transcripts or thread IDs across daemon restarts, register MCP,
-integrate LORE context/review/indexing, or implement peer messaging. The
-registry reports the selected engine. Only `status`, `interrupt` (Codex),
-and `stop` are supported; other calls return an explicit error. The
-`socket_path` is suitable for local TUI or Python `EngineClient` attach, but
-peer frames are not implemented. Treat this as an integration alpha.
+provider thread ID. User and assistant text is appended to Python 1.19-shaped
+JSONL under LORE's project directory, and `<session-id>.codex.json` records the
+provider thread for a later daemon started with the same `--session-id`.
+The LORE sidecar supplies the exact project identity and scrubs every persisted
+string; failure to scrub leaves the new record unwritten. An existing transcript
+without a thread ID refuses a fresh Codex thread. `interrupt` cancels the
+running CLI process group, and `stop` cancels it and closes the daemon. The
+native Codex host prepends a LORE snapshot (up to 64 KiB) to the first provider
+turn only, under a memory header and footer. The snapshot is absent from the
+displayed prompt and transcript, and a resumed provider thread receives no
+duplicate. If the snapshot is unavailable or too large, the turn proceeds
+without context; LORE scrubbing remains required for visible and persisted
+text. The host does not yet register MCP or integrate LORE review/indexing. The
+registry reports the selected engine. `status`, `interrupt`, and `stop` are
+supported; Claude also supports `answer_needs_input`. `peers` returns a
+read-only, same-project roster of live peer IDs and LORE-scrubbed titles (up
+to 32). It fails closed when the LORE scrubber is unavailable. Other calls
+return an explicit error. The
+`daemon_socket` is suitable for local TUI or Python `EngineClient` attach.
+`socket_path` identifies the private peer inbox; `msg` sends scoped local peer
+messages. Inbound messages are surfaced as peer events. Remote peer routing and
+automatic turn handling remain open. Treat this as an integration alpha.
 
 ## Transcript persistence crate
 
-`doxa-transcript` is a standalone Rust crate for Python 1.19 session JSONL and
-Codex `<session-id>.codex.json` records. It reads a bounded 8 MiB/20,000-line
+`doxa-transcript` is a standalone Rust crate for Python 1.19 session JSONL,
+Codex `<session-id>.codex.json` records, and vendor `.messages.json` replay.
+It reads a bounded 8 MiB/20,000-line
 tail, appends original JSON objects with the Python `engine` override, and
 retains unknown keys. Writes require a caller-supplied secret scrubber that
 visits every string value. Codex metadata updates merge existing keys and use
@@ -99,7 +191,5 @@ an atomic replacement. Files and the project directory must belong to the
 current user; symlink and hard-link file targets are refused.
 
 Run `cargo test --locked --manifest-path rust/doxa-transcript/Cargo.toml`.
-The crate is not yet wired into the daemon or UI. The caller still supplies
-Python's `project_slug(cwd)` result and the engine's actual scrubber, and must
-decide whether a persistence error affects an active session. The Python
-vendor `.messages.json` replay file is outside this crate's current scope.
+The native Codex host uses this crate. The Rust UI still relies on its existing
+transcript reader.

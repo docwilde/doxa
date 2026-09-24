@@ -7,9 +7,10 @@ use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -54,9 +55,12 @@ fn same_user(stream: &UnixStream) -> io::Result<()> {
     Ok(())
 }
 fn read_frame(stream: &mut UnixStream) -> io::Result<PeerFrame> {
-    stream.set_read_timeout(Some(TIMEOUT))?;
+    let deadline = Instant::now() + TIMEOUT;
     let mut bytes = Vec::new();
     loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return Err(io::Error::new(io::ErrorKind::TimedOut, "peer frame timed out")); }
+        stream.set_read_timeout(Some(remaining))?;
         let mut buf = [0u8; 4096];
         let n = stream.read(&mut buf)?;
         if n == 0 { break; }
@@ -64,6 +68,9 @@ fn read_frame(stream: &mut UnixStream) -> io::Result<PeerFrame> {
         if bytes.len() > MAX_FRAME_BYTES { return Err(invalid("peer frame too large")); }
         if bytes.contains(&b'\n') { break; }
     }
+    parse_frame(&bytes)
+}
+fn parse_frame(bytes: &[u8]) -> io::Result<PeerFrame> {
     if bytes.is_empty() { return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "empty peer probe")); }
     if bytes.last() != Some(&b'\n') || bytes[..bytes.len()-1].contains(&b'\n') { return Err(invalid("peer frame must be one complete line")); }
     let frame: PeerFrame = serde_json::from_slice(&bytes[..bytes.len()-1]).map_err(|_| invalid("invalid peer JSON"))?;
@@ -72,7 +79,8 @@ fn read_frame(stream: &mut UnixStream) -> io::Result<PeerFrame> {
 }
 
 /// A receiving socket is created exclusively. An existing path, even a dead socket, is never unlinked by this API.
-pub struct Inbox { listener: UnixListener, path: PathBuf, inode: u64, device: u64 }
+struct PendingFrame { stream: UnixStream, bytes: Vec<u8>, started: Instant }
+pub struct Inbox { listener: UnixListener, path: PathBuf, inode: u64, device: u64, pending: Mutex<Option<PendingFrame>> }
 impl Inbox {
     pub fn bind(runtime: &Path, session_id: &str) -> io::Result<Self> {
         if session_id.is_empty() || !session_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
@@ -88,10 +96,54 @@ impl Inbox {
         let listener = UnixListener::bind(&path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         let meta = fs::symlink_metadata(&path)?;
-        Ok(Self { listener, path, inode: meta.ino(), device: meta.dev() })
+        Ok(Self { listener, path, inode: meta.ino(), device: meta.dev(), pending: Mutex::new(None) })
     }
     pub fn path(&self) -> &Path { &self.path }
+    /// Poll one connection without blocking daemon shutdown. Partial frames
+    /// are retained across polls; an empty discovery probe has no message.
+    pub fn poll_receive(&self, scrubber: &impl Scrubber) -> io::Result<Option<PeerFrame>> {
+        let mut pending = self.pending.lock().map_err(|_| io::Error::other("peer inbox lock poisoned"))?;
+        if pending.is_none() {
+            self.listener.set_nonblocking(true)?;
+            let (stream, _) = match self.listener.accept() {
+                Ok(value) => value,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            same_user(&stream)?;
+            stream.set_nonblocking(true)?;
+            *pending = Some(PendingFrame { stream, bytes: Vec::new(), started: Instant::now() });
+        }
+        let frame = pending.as_mut().expect("pending peer connection");
+        if frame.started.elapsed() >= TIMEOUT {
+            *pending = None;
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "peer frame timed out"));
+        }
+        loop {
+            let mut buf = [0u8; 4096];
+            let n = match frame.stream.read(&mut buf) {
+                Ok(n) => n,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+                Err(error) => { *pending = None; return Err(error); }
+            };
+            if n > 0 { frame.bytes.extend_from_slice(&buf[..n]); }
+            if frame.bytes.len() > MAX_FRAME_BYTES {
+                *pending = None;
+                return Err(invalid("peer frame too large"));
+            }
+            if n == 0 || frame.bytes.contains(&b'\n') {
+                let bytes = std::mem::take(&mut frame.bytes);
+                *pending = None;
+                return match parse_frame(&bytes) {
+                    Ok(frame) => Ok(Some(frame.scrub(scrubber))),
+                    Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+                    Err(error) => Err(error),
+                };
+            }
+        }
+    }
     pub fn receive(&self, scrubber: &impl Scrubber) -> io::Result<PeerFrame> {
+        self.listener.set_nonblocking(false)?;
         loop {
             let (mut stream, _) = self.listener.accept()?;
             same_user(&stream)?;
@@ -117,7 +169,8 @@ use std::os::unix::ffi::OsStrExt;
 
 pub fn send(path: &Path, frame: &PeerFrame) -> io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
-    if !meta.file_type().is_socket() || meta.uid() != unsafe { libc::geteuid() } { return Err(invalid("unsafe peer socket")); }
+    if !meta.file_type().is_socket() || meta.uid() != unsafe { libc::geteuid() }
+        || meta.permissions().mode() & 0o077 != 0 { return Err(invalid("unsafe peer socket")); }
     let mut bytes = serde_json::to_vec(frame).map_err(io::Error::other)?;
     bytes.push(b'\n');
     if bytes.len() > MAX_FRAME_BYTES { return Err(invalid("peer frame too large")); }
@@ -138,7 +191,7 @@ pub struct Message {
     pub to: Vec<String>, pub kind: String, pub in_reply_to: Option<String>,
     pub body: String, pub body_sha256: String, pub latency_ms: Option<u64>, pub turn: TurnRef,
 }
-pub struct Ledger { path: PathBuf, ceiling: u64 }
+pub struct Ledger { pub(crate) path: PathBuf, pub(crate) ceiling: u64 }
 impl Ledger {
     pub fn new(path: PathBuf) -> Self { Self { path, ceiling: MAX_LEDGER_BYTES } }
     pub fn with_ceiling(path: PathBuf, ceiling: u64) -> Self { Self { path, ceiling } }
@@ -152,7 +205,8 @@ impl Ledger {
         let mut line = serde_json::to_vec(&message).map_err(io::Error::other)?;
         line.push(b'\n');
         let parent = self.path.parent().ok_or_else(|| invalid("ledger has no parent"))?;
-        fs::create_dir_all(parent)?;
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700).create(parent)?;
         let parent_meta = fs::symlink_metadata(parent)?;
         if !parent_meta.file_type().is_dir() || parent_meta.uid() != unsafe { libc::geteuid() } { return Err(invalid("unsafe ledger directory")); }
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
@@ -185,14 +239,16 @@ impl Ledger {
 pub struct SendLimits { pub per_turn: u32, pub per_window: u32, pub window: Duration }
 impl Default for SendLimits { fn default() -> Self { Self { per_turn: 64, per_window: 512, window: Duration::from_secs(60) } } }
 struct Charge { at: Instant, count: u32, turn: Option<String> }
-pub struct RateLimiter { limits: SendLimits, history: VecDeque<Charge> }
+pub struct RateLimiter { limits: SendLimits, history: VecDeque<Charge>, current_turn: Option<String> }
 impl RateLimiter {
-    pub fn new(limits: SendLimits) -> Self { Self { limits, history: VecDeque::new() } }
+    pub fn new(limits: SendLimits) -> Self { Self { limits, history: VecDeque::new(), current_turn: None } }
     pub fn charge(&mut self, turn: Option<&str>, fanout: usize) -> io::Result<()> {
         let count = u32::try_from(fanout).map_err(|_| invalid("fanout too large"))?;
         if count == 0 { return Err(invalid("empty fanout")); }
         let now = Instant::now();
-        self.history.retain(|c| now.duration_since(c.at) < self.limits.window || (turn.is_some() && c.turn.as_deref() == turn));
+        if let Some(turn) = turn { self.current_turn = Some(turn.to_owned()); }
+        let live = self.current_turn.as_deref();
+        self.history.retain(|c| now.duration_since(c.at) < self.limits.window || (live.is_some() && c.turn.as_deref() == live));
         let turn_used: u32 = self.history.iter().filter(|c| turn.is_some() && c.turn.as_deref() == turn).map(|c| c.count).sum();
         let window_used: u32 = self.history.iter().filter(|c| now.duration_since(c.at) < self.limits.window).map(|c| c.count).sum();
         if turn.is_some() && turn_used.saturating_add(count) > self.limits.per_turn { return Err(io::Error::new(io::ErrorKind::WouldBlock, "peer turn send limit")); }
@@ -205,7 +261,7 @@ impl RateLimiter {
 pub struct DeliveryResult { pub delivered: Vec<String>, pub failed: Vec<String>, pub record: Option<Message>, pub ledger_error: Option<String> }
 /// The single local outbound path: scoped discovery, charge, send, then append only successful recipients.
 pub fn deliver(registry: &Registry, sender: &PeerRecord, recipients: &[String], body: &str, kind: &str,
-    turn_id: Option<&str>, limiter: &mut RateLimiter, ledger: &Ledger, scrubber: &impl Scrubber) -> io::Result<DeliveryResult> {
+    turn_id: Option<&str>, limiter: &Mutex<RateLimiter>, ledger: &Ledger, scrubber: &impl Scrubber) -> io::Result<DeliveryResult> {
     if body.trim().is_empty() || body.chars().count() > MAX_BODY_CHARS { return Err(invalid("invalid peer body")); }
     if !matches!(kind, "direct" | "broadcast") { return Err(invalid("invalid peer kind")); }
     let peers = registry.scoped(sender.scope_key(), Some(&sender.session_id), scrubber, true)?;
@@ -214,12 +270,14 @@ pub fn deliver(registry: &Registry, sender: &PeerRecord, recipients: &[String], 
         let peer = peers.iter().find(|p| &p.session_id == id).ok_or_else(|| invalid("recipient is not a live scoped peer"))?;
         if !targets.iter().any(|p: &&PeerRecord| p.session_id == peer.session_id) { targets.push(peer); }
     }
-    limiter.charge(turn_id, targets.len())?;
+    limiter.lock().map_err(|_| io::Error::other("peer rate limiter poisoned"))?
+        .charge(turn_id, targets.len())?;
     let frame = PeerFrame { from_id: sender.session_id.clone(), from_title: sender.title.clone(), sent_at: now(), body: body.to_owned(),
-        from_repo: Some(sender.scope_key().to_owned()), kind: (kind != "direct").then(|| kind.to_owned()) };
+        from_repo: Some(sender.scope_key().to_owned()), kind: (kind != "direct").then(|| kind.to_owned()) }.scrub(scrubber);
     let mut result = DeliveryResult { delivered: Vec::new(), failed: Vec::new(), record: None, ledger_error: None };
     for peer in targets {
-        if send(Path::new(&peer.socket_path), &frame).is_ok() { result.delivered.push(peer.session_id.clone()); }
+        let path = Path::new(&peer.socket_path);
+        if path.parent() == Some(registry.runtime()) && send(path, &frame).is_ok() { result.delivered.push(peer.session_id.clone()); }
         else { result.failed.push(peer.session_id.clone()); }
     }
     if result.delivered.is_empty() { return Err(io::Error::new(io::ErrorKind::NotConnected, "nothing was delivered")); }

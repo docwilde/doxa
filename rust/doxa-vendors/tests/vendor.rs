@@ -1,26 +1,51 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-use doxa_vendors::{request_body, stream_once_local, Accumulator, Delta, Error, SseDecoder, Vendor, STREAM_LINE_MAX};
+use doxa_vendors::{
+    request_body, run_turn_local, stream_once_local, Accumulator, Delta, Error, SseDecoder,
+    ToolCall, ToolGate, Vendor, STREAM_LINE_MAX,
+};
+use futures_util::future::BoxFuture;
 use serde_json::json;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::watch;
+use tokio::sync::{Mutex, MutexGuard};
+
+async fn credential_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().await
+}
 
 fn server(response: Vec<u8>, delay: Duration) -> (String, std::thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/chat/completions", listener.local_addr().unwrap());
     let task = std::thread::spawn(move || {
         let (mut socket, _) = listener.accept().unwrap();
-        socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-        let mut request = Vec::new(); let mut buf = [0; 4096];
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0; 4096];
         loop {
             let n = socket.read(&mut buf).unwrap();
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             request.extend_from_slice(&buf[..n]);
             if let Some(pos) = request.windows(4).position(|x| x == b"\r\n\r\n") {
                 let header = String::from_utf8_lossy(&request[..pos]);
-                let len = header.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length: ").and_then(|n| n.parse::<usize>().ok())).unwrap_or(0);
-                if request.len() >= pos + 4 + len { break; }
+                let len = header
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .and_then(|n| n.parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if request.len() >= pos + 4 + len {
+                    break;
+                }
             }
         }
         std::thread::sleep(delay);
@@ -32,17 +57,299 @@ fn server(response: Vec<u8>, delay: Duration) -> (String, std::thread::JoinHandl
 fn http(status: &str, body: &str, content_type: &str) -> Vec<u8> {
     format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes()
 }
+
+type CapturedRequests = (Vec<serde_json::Value>, Vec<String>);
+
+fn multi_server(bodies: Vec<&'static str>) -> (String, std::thread::JoinHandle<CapturedRequests>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/chat/completions", listener.local_addr().unwrap());
+    let task = std::thread::spawn(move || {
+        let mut requests = Vec::new();
+        let mut auth = Vec::new();
+        for body in bodies {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0; 4096];
+            loop {
+                let n = socket.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+                if let Some(pos) = request.windows(4).position(|x| x == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&request[..pos]);
+                    let len = header
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .and_then(|n| n.parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= pos + 4 + len {
+                        auth.push(
+                            header
+                                .lines()
+                                .find_map(|line| {
+                                    line.strip_prefix("authorization: Bearer ")
+                                        .or_else(|| line.strip_prefix("Authorization: Bearer "))
+                                        .map(|value| value.trim().to_owned())
+                                })
+                                .unwrap_or_default(),
+                        );
+                        requests.push(
+                            serde_json::from_slice(&request[pos + 4..pos + 4 + len]).unwrap(),
+                        );
+                        break;
+                    }
+                }
+            }
+            socket
+                .write_all(&http("200 OK", body, "text/event-stream"))
+                .unwrap();
+        }
+        (requests, auth)
+    });
+    (url, task)
+}
+
+struct LookupGate {
+    calls: Vec<String>,
+}
+
+struct PendingGate;
+struct RotatingGate;
+impl ToolGate for RotatingGate {
+    fn definitions(&self) -> Vec<serde_json::Value> {
+        vec![json!({"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}})]
+    }
+    fn execute<'a>(
+        &'a mut self,
+        _call: &'a ToolCall,
+    ) -> BoxFuture<'a, Result<serde_json::Value, ()>> {
+        Box::pin(async move {
+            std::env::set_var("DEEPSEEK_API_KEY", "replacement-key-9876");
+            Ok(json!({"echo":"original-key-1234"}))
+        })
+    }
+}
+impl ToolGate for PendingGate {
+    fn definitions(&self) -> Vec<serde_json::Value> {
+        vec![json!({"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}})]
+    }
+    fn execute<'a>(
+        &'a mut self,
+        _call: &'a ToolCall,
+    ) -> BoxFuture<'a, Result<serde_json::Value, ()>> {
+        Box::pin(std::future::pending())
+    }
+}
+impl ToolGate for LookupGate {
+    fn definitions(&self) -> Vec<serde_json::Value> {
+        vec![json!({"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}})]
+    }
+    fn execute<'a>(
+        &'a mut self,
+        call: &'a ToolCall,
+    ) -> BoxFuture<'a, Result<serde_json::Value, ()>> {
+        Box::pin(async move {
+            self.calls.push(call.arguments["x"].to_string());
+            Ok(json!({"found":call.arguments["x"]}))
+        })
+    }
+}
+
+#[tokio::test]
+async fn turn_runs_two_gated_tool_steps_and_preserves_history_and_usage() {
+    let _credential_guard = credential_guard().await;
+    std::env::set_var("DEEPSEEK_API_KEY", "test-secret-1234");
+    let tool = |id: &str, x: u64| {
+        format!("data: {{\"choices\":[{{\"finish_reason\":\"tool_calls\",\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{id}\",\"function\":{{\"name\":\"lookup\",\"arguments\":\"{{\\\"x\\\":{x}}}\"}}}}]}}}}],\"usage\":{{\"prompt_tokens\":2,\"completion_tokens\":3}}}}\n\ndata: [DONE]\n\n")
+    };
+    let first = tool("call-1", 1);
+    let second = tool("call-2", 2);
+    let final_body = "data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"done\"}}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":7}}\n\ndata: [DONE]\n\n";
+    let (url, task) = multi_server(vec![
+        Box::leak(first.into_boxed_str()),
+        Box::leak(second.into_boxed_str()),
+        final_body,
+    ]);
+    let mut history = vec![json!({"role":"system","content":"system"})];
+    let mut gate = LookupGate { calls: Vec::new() };
+    let (_, cancel) = watch::channel(false);
+    let result = run_turn_local(
+        Vendor::DeepSeek,
+        &url,
+        "deepseek-flash",
+        "high",
+        &mut history,
+        "question",
+        Some(&mut gate),
+        cancel,
+        Duration::from_secs(3),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let requests = task.join().unwrap().0;
+    assert_eq!(gate.calls, vec!["1", "2"]);
+    assert_eq!(result.requests, 3);
+    assert_eq!(
+        (result.usage.prompt_tokens, result.usage.completion_tokens),
+        (9, 13)
+    );
+    assert_eq!(result.text, "done");
+    assert!(requests
+        .iter()
+        .all(|r| r["tools"][0]["function"]["name"] == "lookup"));
+    assert_eq!(requests[1]["messages"][2]["tool_calls"][0]["id"], "call-1");
+    assert_eq!(requests[1]["messages"][3]["role"], "tool");
+    assert_eq!(requests[2]["messages"][5]["tool_call_id"], "call-2");
+    assert_eq!(history.len(), 7);
+    assert_eq!(history.last().unwrap()["content"], "done");
+}
+
+#[tokio::test]
+async fn tool_call_without_gate_is_rejected_without_committing_history() {
+    let _credential_guard = credential_guard().await;
+    std::env::set_var("ZAI_API_KEY", "test-secret-1234");
+    let body = "data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}\n\ndata: [DONE]\n\n";
+    let (url, task) = multi_server(vec![body]);
+    let mut history = vec![];
+    let (_, cancel) = watch::channel(false);
+    let error = run_turn_local(
+        Vendor::Glm,
+        &url,
+        "glm-5.3-flash",
+        "high",
+        &mut history,
+        "question",
+        None,
+        cancel,
+        Duration::from_secs(3),
+        |_| {},
+    )
+    .await
+    .unwrap_err();
+    let requests = task.join().unwrap().0;
+    assert_eq!(error, Error::UnexpectedToolCall);
+    assert!(requests[0].get("tools").is_none());
+    assert!(history.is_empty());
+}
+
+#[tokio::test]
+async fn turn_freezes_credential_across_tool_steps_and_scrubs_original_key() {
+    let _credential_guard = credential_guard().await;
+    std::env::set_var("DEEPSEEK_API_KEY", "original-key-1234");
+    let first = "data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}\n\ndata: [DONE]\n\n";
+    let second = "data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"original-key-1234\"}}]}\n\ndata: [DONE]\n\n";
+    let (url, task) = multi_server(vec![first, second]);
+    let (_, cancel) = watch::channel(false);
+    let mut history = Vec::new();
+    let mut gate = RotatingGate;
+    let outcome = run_turn_local(
+        Vendor::DeepSeek,
+        &url,
+        "deepseek-flash",
+        "high",
+        &mut history,
+        "question",
+        Some(&mut gate),
+        cancel,
+        Duration::from_secs(3),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let (requests, auth) = task.join().unwrap();
+    assert_eq!(auth, ["original-key-1234", "original-key-1234"]);
+    assert_eq!(outcome.text, "***");
+    assert_eq!(requests[1]["messages"][2]["content"], "{\"echo\":\"***\"}");
+    assert!(!history
+        .iter()
+        .any(|message| message.to_string().contains("original-key-1234")));
+}
+
+#[tokio::test]
+async fn cancellation_and_deadline_cover_tool_execution() {
+    let _credential_guard = credential_guard().await;
+    std::env::set_var("DEEPSEEK_API_KEY", "test-secret-1234");
+    let body = "data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}\n\ndata: [DONE]\n\n";
+    let (url, task) = multi_server(vec![body]);
+    let mut history = vec![];
+    let (sender, cancel) = watch::channel(false);
+    let mut gate = PendingGate;
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        sender.send(true).unwrap();
+    });
+    let error = run_turn_local(
+        Vendor::DeepSeek,
+        &url,
+        "deepseek-flash",
+        "high",
+        &mut history,
+        "question",
+        Some(&mut gate),
+        cancel,
+        Duration::from_secs(2),
+        |_| {},
+    )
+    .await
+    .unwrap_err();
+    task.join().unwrap();
+    assert_eq!(error, Error::Cancelled);
+    assert!(history.is_empty());
+
+    let (url, task) = multi_server(vec![body]);
+    let (_, cancel) = watch::channel(false);
+    let error = run_turn_local(
+        Vendor::DeepSeek,
+        &url,
+        "deepseek-flash",
+        "high",
+        &mut history,
+        "question",
+        Some(&mut gate),
+        cancel,
+        Duration::from_millis(50),
+        |_| {},
+    )
+    .await
+    .unwrap_err();
+    task.join().unwrap();
+    assert_eq!(error, Error::Timeout);
+    assert!(history.is_empty());
+}
 #[test]
 fn provider_bodies_match_measured_contract() {
-    let d = request_body(Vendor::DeepSeek, "deepseek-flash", &[json!({"role":"user","content":"Hi"})], "high").unwrap();
+    let d = request_body(
+        Vendor::DeepSeek,
+        "deepseek-flash",
+        &[json!({"role":"user","content":"Hi"})],
+        "high",
+    )
+    .unwrap();
     let g = request_body(Vendor::Glm, "glm-5.3-flash", &[], "high").unwrap();
-    assert_eq!(d.pointer("/thinking/reasoning_effort"), Some(&json!("high")));
+    assert_eq!(
+        d.pointer("/thinking/reasoning_effort"),
+        Some(&json!("high"))
+    );
     assert_eq!(g.get("reasoning_effort"), Some(&json!("high")));
     assert!(g.pointer("/thinking/reasoning_effort").is_none());
     assert!(d.get("max_tokens").is_none() && g.get("max_tokens").is_none());
     assert!(d.get("tools").is_none()); // gate not integrated
-    assert_eq!(request_body(Vendor::DeepSeek, "x", &[], "none").unwrap()["thinking"]["type"], "disabled");
-    assert_eq!(request_body(Vendor::Glm, "x", &[], "none"), Err(Error::InvalidEffort));
+    assert_eq!(
+        request_body(Vendor::DeepSeek, "x", &[], "none").unwrap()["thinking"]["type"],
+        "disabled"
+    );
+    assert_eq!(
+        request_body(Vendor::Glm, "x", &[], "none"),
+        Err(Error::InvalidEffort)
+    );
 }
 #[test]
 fn fragmented_sse_and_tool_arguments() {
@@ -53,10 +360,24 @@ fn fragmented_sse_and_tool_arguments() {
         "data: {\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":7},\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{}}]}\n\n",
         "data: [DONE]\n\n"
     );
-    let mut decoder = SseDecoder::default(); let mut acc = Accumulator::default(); let mut deltas = Vec::new();
-    for byte in sse.as_bytes().chunks(7) { for p in decoder.push(byte).unwrap() { acc.absorb(&p, "secret", |d| deltas.push(d)).unwrap(); } }
-    assert!(decoder.done()); acc.flush("secret", |d| deltas.push(d)); let out = acc.finish("secret").unwrap();
-    assert_eq!(deltas, vec![Delta::Text("hello".into()), Delta::Reasoning("think".into())]);
+    let mut decoder = SseDecoder::default();
+    let mut acc = Accumulator::default();
+    let mut deltas = Vec::new();
+    for byte in sse.as_bytes().chunks(7) {
+        for p in decoder.push(byte).unwrap() {
+            acc.absorb(&p, "secret", |d| deltas.push(d)).unwrap();
+        }
+    }
+    assert!(decoder.done());
+    acc.flush("secret", |d| deltas.push(d));
+    let out = acc.finish("secret").unwrap();
+    assert_eq!(
+        deltas,
+        vec![
+            Delta::Text("hello".into()),
+            Delta::Reasoning("think".into())
+        ]
+    );
     assert_eq!(out.model.as_deref(), Some("resolved-model"));
     assert_eq!(out.usage.unwrap()["completion_tokens"], 7);
     assert_eq!(out.tool_calls[0].arguments["x"], 1);
@@ -71,18 +392,27 @@ fn provider_metadata_cannot_echo_the_active_key() {
     });
     acc.absorb(&frame.to_string(), key, |_| {}).unwrap();
     let completion = acc.finish(key).unwrap();
-    assert_eq!(completion.usage.unwrap(), json!({
-        "prompt_tokens": 4, "metadata": {"echo": "***"}, "labels": ["***"]
-    }));
+    assert_eq!(
+        completion.usage.unwrap(),
+        json!({
+            "prompt_tokens": 4, "metadata": {"echo": "***"}, "labels": ["***"]
+        })
+    );
     assert_eq!(completion.finish_reason.as_deref(), Some("***"));
 }
 #[test]
 fn bounds_reject_oversized_line_and_arguments() {
     let mut decoder = SseDecoder::default();
-    assert_eq!(decoder.push(&vec![b'a'; STREAM_LINE_MAX+1]), Err(Error::StreamLineTooLarge));
+    assert_eq!(
+        decoder.push(&vec![b'a'; STREAM_LINE_MAX + 1]),
+        Err(Error::StreamLineTooLarge)
+    );
     let mut acc = Accumulator::default();
     let frame = json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"x","arguments":"a".repeat(1024*1024+1)}}]}}]}).to_string();
-    assert_eq!(acc.absorb(&frame,"", |_|{}), Err(Error::ToolArgumentsTooLarge));
+    assert_eq!(
+        acc.absorb(&frame, "", |_| {}),
+        Err(Error::ToolArgumentsTooLarge)
+    );
 }
 
 #[test]
@@ -97,38 +427,110 @@ fn malformed_tool_arguments_cannot_become_empty_arguments() {
 }
 #[tokio::test]
 async fn fake_server_stream_and_scrub() {
+    let _credential_guard = credential_guard().await;
     std::env::set_var("DEEPSEEK_API_KEY", "test-secret-1234");
     let body = "data: {\"model\":\"deepseek-flash\",\"choices\":[{\"delta\":{\"content\":\"hello test-se\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"cret-1234\"}}]}\n\ndata: [DONE]\n\n";
     let (url, task) = server(http("200 OK", body, "text/event-stream"), Duration::ZERO);
-    let (_, cancel) = watch::channel(false); let mut deltas = Vec::new();
-    let result = stream_once_local(Vendor::DeepSeek, &url, json!({"model":"deepseek-flash"}), cancel, Duration::from_secs(3), |d| deltas.push(d)).await.unwrap();
+    let (_, cancel) = watch::channel(false);
+    let mut deltas = Vec::new();
+    let result = stream_once_local(
+        Vendor::DeepSeek,
+        &url,
+        json!({"model":"deepseek-flash"}),
+        cancel,
+        Duration::from_secs(3),
+        |d| deltas.push(d),
+    )
+    .await
+    .unwrap();
     let request = task.join().unwrap();
-    assert!(request.contains("Authorization: Bearer test-secret-1234") || request.contains("authorization: Bearer test-secret-1234"));
+    assert!(
+        request.contains("Authorization: Bearer test-secret-1234")
+            || request.contains("authorization: Bearer test-secret-1234")
+    );
     assert_eq!(result.text, "hello ***");
-    assert_eq!(deltas.iter().filter_map(|d| if let Delta::Text(s)=d {Some(s.as_str())} else {None}).collect::<String>(), "hello ***");
+    assert_eq!(
+        deltas
+            .iter()
+            .filter_map(|d| if let Delta::Text(s) = d {
+                Some(s.as_str())
+            } else {
+                None
+            })
+            .collect::<String>(),
+        "hello ***"
+    );
 }
 #[tokio::test]
 async fn fake_server_error_code_never_exposes_key() {
+    let _credential_guard = credential_guard().await;
     std::env::set_var("ZAI_API_KEY", "test-secret-1234");
     let body = r#"{"error":{"code":"1302","message":"bad test-secret-1234"}}"#;
-    let (url, task) = server(http("429 Too Many Requests", body, "application/json"), Duration::ZERO);
+    let (url, task) = server(
+        http("429 Too Many Requests", body, "application/json"),
+        Duration::ZERO,
+    );
     let (_, cancel) = watch::channel(false);
-    let error = stream_once_local(Vendor::Glm, &url, json!({}), cancel, Duration::from_secs(3), |_|{}).await.unwrap_err();
+    let error = stream_once_local(
+        Vendor::Glm,
+        &url,
+        json!({}),
+        cancel,
+        Duration::from_secs(3),
+        |_| {},
+    )
+    .await
+    .unwrap_err();
     task.join().unwrap();
-    assert_eq!(error, Error::Http { status: 429, code: Some("1302".into()) });
+    assert_eq!(
+        error,
+        Error::Http {
+            status: 429,
+            code: Some("1302".into())
+        }
+    );
     assert!(!format!("{error}").contains("test-secret"));
 }
 #[tokio::test]
 async fn cancellation_and_timeout_abort_request() {
+    let _credential_guard = credential_guard().await;
     std::env::set_var("DEEPSEEK_API_KEY", "test-secret-1234");
-    let (url, task) = server(http("200 OK", "data: [DONE]\n\n", "text/event-stream"), Duration::from_millis(250));
+    let (url, task) = server(
+        http("200 OK", "data: [DONE]\n\n", "text/event-stream"),
+        Duration::from_millis(250),
+    );
     let (sender, cancel) = watch::channel(false);
-    let future = stream_once_local(Vendor::DeepSeek, &url, json!({}), cancel, Duration::from_secs(2), |_|{});
-    tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(40)).await; sender.send(true).unwrap(); });
-    assert_eq!(future.await, Err(Error::Cancelled)); task.join().unwrap();
-    let (url, task) = server(http("200 OK", "data: [DONE]\n\n", "text/event-stream"), Duration::from_millis(250));
+    let future = stream_once_local(
+        Vendor::DeepSeek,
+        &url,
+        json!({}),
+        cancel,
+        Duration::from_secs(2),
+        |_| {},
+    );
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        sender.send(true).unwrap();
+    });
+    assert_eq!(future.await, Err(Error::Cancelled));
+    task.join().unwrap();
+    let (url, task) = server(
+        http("200 OK", "data: [DONE]\n\n", "text/event-stream"),
+        Duration::from_millis(250),
+    );
     let (_, cancel) = watch::channel(false);
-    assert_eq!(stream_once_local(Vendor::DeepSeek, &url, json!({}), cancel, Duration::from_millis(50), |_|{}).await, Err(Error::Timeout));
+    assert_eq!(
+        stream_once_local(
+            Vendor::DeepSeek,
+            &url,
+            json!({}),
+            cancel,
+            Duration::from_millis(50),
+            |_| {}
+        )
+        .await,
+        Err(Error::Timeout)
+    );
     task.join().unwrap();
 }
 
@@ -150,7 +552,8 @@ async fn local_override_rejects_userinfo_and_remote_hosts() {
             cancel,
             Duration::from_millis(50),
             |_| {},
-        ).await;
+        )
+        .await;
         assert_eq!(result, Err(Error::InvalidEndpoint), "{endpoint}");
     }
 }

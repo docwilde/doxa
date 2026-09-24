@@ -1,30 +1,81 @@
+use doxa_state::{legacy_tabset_path, save_tabset, Tab, TabSet};
 use doxa_tui::ui::{App, Split};
 use doxa_tui::ui_state::UiStateStore;
-use doxa_state::{save_tabset, Tab, TabSet};
 use serde_json::{json, Value};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Mutex;
 
 fn seeded(raw: Value) -> (tempfile::TempDir, UiStateStore) {
     let dir = tempfile::tempdir().unwrap();
     let probe = UiStateStore::new(dir.path(), "/repo", "machine").unwrap();
     let data = raw.as_object().unwrap().clone();
-    let tabs = data["tabs"].as_array().unwrap().iter().map(|r| Tab {
-        session_id: r["session_id"].as_str().unwrap().into(),
-        pinned_name: r["pinned_name"].as_str().map(str::to_owned),
-        cwd: r["cwd"].as_str().map(str::to_owned),
-    }).collect();
-    let record = TabSet { scope_key: "/repo".into(), active_session_id: data.get("active_session_id").and_then(Value::as_str).map(str::to_owned), tabs, raw: data };
+    let tabs = data["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| Tab {
+            session_id: r["session_id"].as_str().unwrap().into(),
+            pinned_name: r["pinned_name"].as_str().map(str::to_owned),
+            cwd: r["cwd"].as_str().map(str::to_owned),
+        })
+        .collect();
+    let record = TabSet {
+        scope_key: "/repo".into(),
+        active_session_id: data
+            .get("active_session_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        tabs,
+        raw: data,
+    };
     save_tabset(probe.path(), &record).unwrap();
     let store = UiStateStore::new(dir.path(), "/repo", "machine").unwrap();
     (dir, store)
 }
-fn live(ids: &[&str]) -> Vec<String> { ids.iter().map(|s| (*s).into()).collect() }
+fn live(ids: &[&str]) -> Vec<String> {
+    ids.iter().map(|s| (*s).into()).collect()
+}
+
+#[test]
+fn scope_open_mints_machine_identity_and_adopts_legacy_tabset() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::create_dir(dir.path().join("tabsets")).unwrap();
+    fs::set_permissions(
+        dir.path().join("tabsets"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let legacy = legacy_tabset_path(dir.path(), "/repo");
+    let record = TabSet {
+        scope_key: "/repo".into(),
+        active_session_id: Some("a".into()),
+        tabs: vec![Tab {
+            session_id: "a".into(),
+            pinned_name: None,
+            cwd: None,
+        }],
+        raw: json!({"scope_key":"/repo","tabs":[{"session_id":"a"}],"active_session_id":"a"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    };
+    save_tabset(&legacy, &record).unwrap();
+    let store = UiStateStore::for_scope(dir.path(), "/repo").unwrap();
+    assert!(dir.path().join("machine-id").exists());
+    assert!(store.path().exists());
+    assert!(!legacy.exists());
+    let mut app = App::default();
+    assert!(store.restore(&mut app, &live(&["a"])));
+}
 
 #[test]
 fn incomplete_roster_preserves_existing_tabset_byte_for_byte() {
-    let (_dir, mut store) = seeded(json!({"tabs":[{"session_id":"live"},{"session_id":"temporarily-missing"}],
-        "active_session_id":"temporarily-missing"}));
+    let (_dir, mut store) = seeded(
+        json!({"tabs":[{"session_id":"live"},{"session_id":"temporarily-missing"}],
+        "active_session_id":"temporarily-missing"}),
+    );
     let original = fs::read(store.path()).unwrap();
     let mut app = App::default();
     assert!(store.restore(&mut app, &live(&["live"])));
@@ -35,7 +86,9 @@ fn incomplete_roster_preserves_existing_tabset_byte_for_byte() {
 
 #[test]
 fn flat_legacy_record_keeps_offline_tab_when_live_layout_changes() {
-    let (_dir, mut store) = seeded(json!({"tabs":[{"session_id":"a"},{"session_id":"stale"},{"session_id":"b"}],"active_session_id":"b"}));
+    let (_dir, mut store) = seeded(
+        json!({"tabs":[{"session_id":"a"},{"session_id":"stale"},{"session_id":"b"}],"active_session_id":"b"}),
+    );
     let mut app = App::default();
     assert!(store.restore(&mut app, &live(&["a", "b"])));
     assert_eq!(app.groups[0].tabs, ["a", "b"]);
@@ -76,19 +129,31 @@ fn archived_middle_tab_and_collection_survive_split_mutation() {
     assert!(store.save_if_complete(&app, &Mutex::new(true)).is_err());
     assert_eq!(fs::read(store.path()).unwrap(), original);
     let saved: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
-    assert_eq!(saved["tabs"].as_array().unwrap().iter().map(|row| row["session_id"].as_str().unwrap()).collect::<Vec<_>>(),
-        ["live-a", "archived", "live-b"]);
+    assert_eq!(
+        saved["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["session_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["live-a", "archived", "live-b"]
+    );
     assert_eq!(saved["layout"]["groups"]["tabs"][1]["view"], "diff");
-    assert_eq!(saved["collections"][0]["sessions"], json!(["live-a", "archived", "live-b"]));
+    assert_eq!(
+        saved["collections"][0]["sessions"],
+        json!(["live-a", "archived", "live-b"])
+    );
 }
 
 #[test]
 fn grouped_split_restores_geometry_and_preserves_leaf_metadata() {
-    let (_dir, mut store) = seeded(json!({"tabs":[{"session_id":"a"},{"session_id":"b"},{"session_id":"c"}],"active_session_id":"c",
+    let (_dir, mut store) = seeded(
+        json!({"tabs":[{"session_id":"a"},{"session_id":"b"},{"session_id":"c"}],"active_session_id":"c",
       "layout":{"kind":"tabs","groups":{"kind":"split","orientation":"column","weights":[0.7,0.3],"children":[
         {"kind":"group","active":1,"tabs":[{"kind":"leaf","session_id":"a","view":"diff"},{"kind":"leaf","session_id":"b","prompt_ratio":0.3}]},
         {"kind":"group","active":0,"tabs":[{"kind":"leaf","session_id":"c"}]}
-      ]}},"collections":[{"name":"work","sessions":["a","stale"]}],"future_key":42}));
+      ]}},"collections":[{"name":"work","sessions":["a","stale"]}],"future_key":42}),
+    );
     let mut app = App::default();
     assert!(store.restore(&mut app, &live(&["a", "b", "c"])));
     assert_eq!(app.split, Split::Horizontal);
@@ -103,10 +168,19 @@ fn grouped_split_restores_geometry_and_preserves_leaf_metadata() {
     let saved: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
     assert_eq!(saved["layout"]["groups"]["weights"][0], 0.62);
     assert_eq!(saved["layout"]["groups"]["orientation"], "column");
-    assert_eq!(saved["layout"]["groups"]["children"][0]["tabs"][0]["view"], "diff");
-    assert_eq!(saved["layout"]["groups"]["children"][0]["tabs"][1]["prompt_ratio"], 0.3);
+    assert_eq!(
+        saved["layout"]["groups"]["children"][0]["tabs"][0]["view"],
+        "diff"
+    );
+    assert_eq!(
+        saved["layout"]["groups"]["children"][0]["tabs"][1]["prompt_ratio"],
+        0.3
+    );
     assert_eq!(saved["collections"][0]["sessions"], json!(["a"]));
-    assert_eq!(saved["rust_ui"], json!({"rail_width":33,"rail_visible":false}));
+    assert_eq!(
+        saved["rust_ui"],
+        json!({"rail_width":33,"rail_visible":false})
+    );
     assert_eq!(saved["future_key"], 42);
     let reload = UiStateStore::new(_dir.path(), "/repo", "machine").unwrap();
     let mut again = App::default();
@@ -118,9 +192,11 @@ fn grouped_split_restores_geometry_and_preserves_leaf_metadata() {
 
 #[test]
 fn old_tree_layout_restores_two_panes_and_flat_extra_tabs() {
-    let (_dir, store) = seeded(json!({"tabs":[{"session_id":"a"},{"session_id":"b"},{"session_id":"c"}],"active_session_id":"b",
+    let (_dir, store) = seeded(
+        json!({"tabs":[{"session_id":"a"},{"session_id":"b"},{"session_id":"c"}],"active_session_id":"b",
         "layout":{"kind":"tabs","trees":[{"kind":"split","orientation":"row","weights":[0.4,0.6],"children":[
-        {"kind":"leaf","session_id":"a"},{"kind":"leaf","session_id":"b"}]}]}}));
+        {"kind":"leaf","session_id":"a"},{"kind":"leaf","session_id":"b"}]}]}}),
+    );
     let mut app = App::default();
     assert!(store.restore(&mut app, &live(&["a", "b", "c"])));
     assert_eq!(app.split, Split::Vertical);
@@ -132,12 +208,14 @@ fn old_tree_layout_restores_two_panes_and_flat_extra_tabs() {
 
 #[test]
 fn complex_future_layout_is_readable_but_never_rewritten() {
-    let (_dir, mut store) = seeded(json!({"tabs":[{"session_id":"a"},{"session_id":"b"}],"active_session_id":"a",
+    let (_dir, mut store) = seeded(
+        json!({"tabs":[{"session_id":"a"},{"session_id":"b"}],"active_session_id":"a",
         "layout":{"kind":"tabs","groups":{"kind":"split","orientation":"row","weights":[0.2,0.3,0.5],"children":[
             {"kind":"group","tabs":[{"kind":"leaf","session_id":"a"}]},
             {"kind":"group","tabs":[{"kind":"leaf","session_id":"b"}]},
             {"kind":"group","tabs":[{"kind":"leaf","session_id":"z"}]}
-        ]}}}));
+        ]}}}),
+    );
     let original = fs::read(store.path()).unwrap();
     let mut app = App::default();
     assert!(store.restore(&mut app, &live(&["a", "b"])));
@@ -190,11 +268,13 @@ fn duplicate_session_in_two_panes_cannot_corrupt_group_record() {
 
 #[test]
 fn stale_first_pane_collapses_to_live_second_pane() {
-    let (_dir, store) = seeded(json!({"tabs":[{"session_id":"old"},{"session_id":"live"}],"active_session_id":"live",
+    let (_dir, store) = seeded(
+        json!({"tabs":[{"session_id":"old"},{"session_id":"live"}],"active_session_id":"live",
         "layout":{"kind":"tabs","groups":{"kind":"split","orientation":"row","weights":[0.5,0.5],"children":[
             {"kind":"group","active":0,"tabs":[{"kind":"leaf","session_id":"old"}]},
             {"kind":"group","active":0,"tabs":[{"kind":"leaf","session_id":"live"}]}
-        ]}}}));
+        ]}}}),
+    );
     let mut app = App::default();
     assert!(store.restore(&mut app, &live(&["live"])));
     assert_eq!(app.groups[0].tabs, ["live"]);

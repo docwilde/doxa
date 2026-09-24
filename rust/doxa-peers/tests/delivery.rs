@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use doxa_peers::{delivery::*, now, PeerRecord, Registry};
 use std::fs::{self, OpenOptions};
-use std::io;
+use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,8 +30,8 @@ fn local_delivery_scrubs_receive_and_ledger_but_hashes_raw() -> io::Result<()> {
     let worker = thread::spawn(move || inbox.receive(&|text: &str| text.replace("SECRET", "[redacted]")));
     let ledger_path = temp.path().join("peers/messages.jsonl");
     let ledger = Ledger::new(ledger_path.clone());
-    let mut limiter = RateLimiter::new(SendLimits::default());
-    let result = deliver(&registry, &sender, &["recipient".into()], "SECRET", "direct", Some("turn-1"), &mut limiter, &ledger,
+    let limiter = Mutex::new(RateLimiter::new(SendLimits::default()));
+    let result = deliver(&registry, &sender, &["recipient".into()], "SECRET", "direct", Some("turn-1"), &limiter, &ledger,
         &|text: &str| text.replace("SECRET", "[redacted]"))?;
     let frame = worker.join().unwrap()?;
     assert_eq!(frame.body, "[redacted]");
@@ -46,6 +48,46 @@ fn local_delivery_scrubs_receive_and_ledger_but_hashes_raw() -> io::Result<()> {
 }
 
 #[test]
+fn polling_idle_peer_does_not_stall_and_retains_partial_frame() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let runtime = temp.path().join("runtime");
+    let _registry = Registry::open(&runtime)?;
+    let inbox = Inbox::bind(&runtime, "recipient")?;
+    let mut client = UnixStream::connect(inbox.path())?;
+    let started = Instant::now();
+    assert!(inbox.poll_receive(&|s: &str| s.to_owned())?.is_none());
+    assert!(started.elapsed() < Duration::from_millis(250));
+    let frame = PeerFrame { from_id: "sender".into(), from_title: "test".into(),
+        sent_at: now(), body: "SECRET".into(), from_repo: None, kind: None };
+    let mut bytes = serde_json::to_vec(&frame)?;
+    bytes.push(b'\n');
+    let midpoint = bytes.len() / 2;
+    client.write_all(&bytes[..midpoint])?;
+    assert!(inbox.poll_receive(&|s: &str| s.to_owned())?.is_none());
+    client.write_all(&bytes[midpoint..])?;
+    let received = inbox.poll_receive(&|s: &str| s.replace("SECRET", "[redacted]"))?
+        .expect("complete frame after second poll");
+    assert_eq!(received.body, "[redacted]");
+    Ok(())
+}
+
+#[test]
+fn blocking_receive_still_waits_after_a_poll() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let runtime = temp.path().join("runtime");
+    let _registry = Registry::open(&runtime)?;
+    let inbox = Inbox::bind(&runtime, "recipient")?;
+    assert!(inbox.poll_receive(&|s: &str| s.to_owned())?.is_none());
+    let path = inbox.path().to_owned();
+    let worker = thread::spawn(move || inbox.receive(&|s: &str| s.to_owned()));
+    let frame = PeerFrame { from_id: "sender".into(), from_title: "test".into(),
+        sent_at: now(), body: "hello".into(), from_repo: None, kind: None };
+    send(&path, &frame)?;
+    assert_eq!(worker.join().unwrap()?.body, "hello");
+    Ok(())
+}
+
+#[test]
 fn refuses_cross_scope_before_charge_and_stale_socket_is_not_removed() -> io::Result<()> {
     let temp = tempfile::tempdir()?;
     let runtime = temp.path().join("runtime");
@@ -53,15 +95,15 @@ fn refuses_cross_scope_before_charge_and_stale_socket_is_not_removed() -> io::Re
     let inbox = Inbox::bind(&runtime, "recipient")?;
     registry.write(&peer("recipient", inbox.path(), "/elsewhere"))?;
     let ledger = Ledger::new(temp.path().join("peers/messages.jsonl"));
-    let mut limiter = RateLimiter::new(SendLimits { per_turn: 1, per_window: 1, window: Duration::from_secs(60) });
+    let limiter = Mutex::new(RateLimiter::new(SendLimits { per_turn: 1, per_window: 1, window: Duration::from_secs(60) }));
     let sender = peer("sender", Path::new("/unused"), "/repo");
-    assert!(deliver(&registry, &sender, &["recipient".into()], "hello", "direct", Some("t"), &mut limiter, &ledger, &|s: &str| s.to_owned()).is_err());
+    assert!(deliver(&registry, &sender, &["recipient".into()], "hello", "direct", Some("t"), &limiter, &ledger, &|s: &str| s.to_owned()).is_err());
     assert!(inbox.path().exists());
     // A refused target did not consume the sender's budget.
     let live = Inbox::bind(&runtime, "live")?;
     registry.write(&peer("live", live.path(), "/repo"))?;
     let worker = thread::spawn(move || live.receive(&|s: &str| s.to_owned()));
-    assert!(deliver(&registry, &sender, &["live".into()], "hello", "direct", Some("t"), &mut limiter, &ledger, &|s: &str| s.to_owned()).is_ok());
+    assert!(deliver(&registry, &sender, &["live".into()], "hello", "direct", Some("t"), &limiter, &ledger, &|s: &str| s.to_owned()).is_ok());
     worker.join().unwrap()?;
     Ok(())
 }
@@ -83,6 +125,11 @@ fn rejects_oversize_and_unsafe_paths_and_bounds_budget() -> io::Result<()> {
     assert!(limits.charge(Some("a"), 2).is_ok());
     assert_eq!(limits.charge(Some("a"), 1).err().unwrap().kind(), io::ErrorKind::WouldBlock);
     assert_eq!(limits.charge(Some("b"), 1).err().unwrap().kind(), io::ErrorKind::WouldBlock);
+    let mut long_turn = RateLimiter::new(SendLimits { per_turn: 2, per_window: 3, window: Duration::from_millis(10) });
+    long_turn.charge(Some("long"), 2)?;
+    thread::sleep(Duration::from_millis(20));
+    long_turn.charge(None, 1)?;
+    assert_eq!(long_turn.charge(Some("long"), 1).err().unwrap().kind(), io::ErrorKind::WouldBlock);
     Ok(())
 }
 

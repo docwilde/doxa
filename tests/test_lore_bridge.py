@@ -1,12 +1,79 @@
 """The Rust LORE sidecar wire must never echo untrusted exception text."""
 
 import io
+import hashlib
 import json
+import sqlite3
 import types
 
 import pytest
 
 from doxa import lore_bridge
+
+
+@pytest.fixture(autouse=True)
+def no_optional_read_store(monkeypatch):
+    monkeypatch.setattr(lore_bridge, "_read_ops", lambda: None)
+    monkeypatch.setattr(lore_bridge, "_pending_review_reader", lambda: None)
+
+
+def test_pending_review_v1_uses_lore_snapshot_and_rejects_changed_proposal(monkeypatch, tmp_path):
+    from lore_core import pending as pending_mod
+
+    pending_dir = tmp_path / "pending"
+    pending_dir.mkdir()
+    proposal = pending_dir / "one.json"
+    raw = b'{"scope":"project","project":"this","kind":"sync","op":{"payload":"all bytes"}}\n'
+    proposal.write_bytes(raw)
+    monkeypatch.setattr(pending_mod, "ROOT", tmp_path)
+    monkeypatch.setattr(lore_bridge, "_pending_review_reader",
+                        lambda: (tmp_path, pending_mod._pending_bytes_snapshot))
+    monkeypatch.setattr(lore_bridge, "_lore", lambda: (lambda text: text, lambda cwd, scope: ""))
+    monkeypatch.setattr(lore_bridge, "_extensions", lambda: (
+        lambda cwd: "this", lambda: None, lambda: [], (lambda text: text, lambda: None)))
+    requests = [
+        {"id": 1, "op": "pending_review_v1", "cwd": "/repo", "pid": "one"},
+        {"id": 2, "op": "pending_review_v1", "cwd": "/repo", "pid": "one",
+         "expected": {"sha256": "0" * 64, "inode": 1}},
+        {"id": 3, "op": "pending_review_v1", "cwd": "/repo", "pid": "../one"},
+    ]
+    output = io.BytesIO()
+    monkeypatch.setattr(lore_bridge.sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(
+        b"".join(map(lore_bridge._frame, requests)))))
+    monkeypatch.setattr(lore_bridge.sys, "stdout", types.SimpleNamespace(buffer=output))
+    lore_bridge.serve()
+    frames = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert "pending_review_v1" in frames[0]["capabilities"]
+    review = frames[1]["value"]
+    assert review == {"pid": "one", "raw": raw.decode(),
+                      "sha256": hashlib.sha256(raw).hexdigest(),
+                      "inode": proposal.stat().st_ino, "complete": True}
+    assert frames[2]["error"] == "pending_changed"
+    assert frames[3]["error"] == "invalid_request"
+    proposal.write_bytes(raw + b" ")
+    with pytest.raises(lore_bridge.PendingReviewError) as changed:
+        lore_bridge._pending_review("/repo", "one", lore_bridge._extensions(),
+                                    (tmp_path, pending_mod._pending_bytes_snapshot),
+                                    {"sha256": review["sha256"], "inode": review["inode"]})
+    assert changed.value.code == "pending_changed"
+
+
+def test_pending_review_v1_never_sends_partial_or_other_project(monkeypatch, tmp_path):
+    from lore_core import pending as pending_mod
+
+    pending_dir = tmp_path / "pending"
+    pending_dir.mkdir()
+    (pending_dir / "large.json").write_bytes(b"x" * (lore_bridge._MAX_REVIEW_RAW_BYTES + 1))
+    (pending_dir / "hidden.json").write_text('{"scope":"project","project":"other","secret":"never send"}')
+    monkeypatch.setattr(pending_mod, "ROOT", tmp_path)
+    reader = (tmp_path, pending_mod._pending_bytes_snapshot)
+    ext = (lambda cwd: "this", None, None, None)
+    with pytest.raises(lore_bridge.PendingReviewError) as large:
+        lore_bridge._pending_review("/repo", "large", ext, reader)
+    assert large.value.code == "pending_incomplete"
+    with pytest.raises(lore_bridge.PendingReviewError) as hidden:
+        lore_bridge._pending_review("/repo", "hidden", ext, reader)
+    assert hidden.value.code == "pending_unavailable"
 
 
 def test_sidecar_scrub_snapshot_and_generic_error(monkeypatch):
@@ -83,7 +150,7 @@ def test_pending_sync_and_refresh_are_bounded_and_scoped(monkeypatch):
     monkeypatch.setattr(lore_bridge.sys, "stdout", types.SimpleNamespace(buffer=output))
     lore_bridge.serve()
     frames = [json.loads(line) for line in output.getvalue().splitlines()]
-    assert frames[0]["capabilities"] == ["scrub", "snapshot", "pending", "sync_state", "refresh_interval"]
+    assert frames[0]["capabilities"] == ["scrub", "snapshot", "pending", "sync_state", "refresh_interval", "transcript_identity"]
     assert frames[1]["value"] == [{"pid": "one", "scope": "project", "project": "this",
                                    "subject": "[redacted] subject", "confidence": 0.8,
                                    "subject_unresolved": False, "text": "[redacted] here"}]
@@ -92,6 +159,21 @@ def test_pending_sync_and_refresh_are_bounded_and_scoped(monkeypatch):
     assert frames[4]["value"] == 30
     assert frames[5]["error"] == "operation_failed"
     assert b"SECRET" not in output.getvalue()
+
+
+def test_transcript_identity_uses_lore_project_mapping(monkeypatch):
+    monkeypatch.setattr(lore_bridge, "_lore", lambda: (lambda text: text, lambda cwd, scope: ""))
+    monkeypatch.setattr(lore_bridge, "_extensions", lambda: (
+        lambda cwd: "lore-project", lambda: 30, lambda: [], (lambda text: text, lambda: None)))
+    monkeypatch.setattr(lore_bridge, "_transcript_identity", lambda cwd, ext: {
+        "projects_dir": "/lore/projects", "slug": ext[0](cwd)})
+    output = io.BytesIO()
+    monkeypatch.setattr(lore_bridge.sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(
+        lore_bridge._frame({"id": 1, "op": "transcript_identity", "cwd": "/repo"}))))
+    monkeypatch.setattr(lore_bridge.sys, "stdout", types.SimpleNamespace(buffer=output))
+    lore_bridge.serve()
+    frames = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert frames[1]["value"] == {"projects_dir": "/lore/projects", "slug": "lore-project"}
 
 
 def test_pending_scrubs_nested_allowlisted_values_before_writing(monkeypatch):
@@ -142,3 +224,39 @@ def test_disabled_sync_returns_null(monkeypatch):
     frames = [json.loads(line) for line in output.getvalue().splitlines()]
     assert frames[1]["value"] is None
     assert frames[2]["value"] is None
+
+
+def test_consult_beliefs_and_evidence_are_bounded_scrubbed_and_cite_only(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE beliefs(id INTEGER, subject TEXT, claim TEXT, confidence REAL, status TEXT, updated TEXT)")
+    conn.execute("CREATE TABLE belief_evidence(belief_id INTEGER, session_id TEXT, project TEXT, note TEXT, created TEXT, source_engine TEXT)")
+    conn.execute("CREATE VIRTUAL TABLE belief_fts USING fts5(belief_id UNINDEXED, claim)")
+    conn.execute("INSERT INTO beliefs VALUES(1,'user','SECRET fact',0.8,'active','2026-01-01')")
+    conn.execute("INSERT INTO belief_fts VALUES(1,'SECRET fact')")
+    for n in range(3):
+        conn.execute("INSERT INTO belief_evidence VALUES(1,'SECRET session','project','SECRET note',?, 'claude')", (str(n),))
+    monkeypatch.setattr(lore_bridge, "_lore", lambda: (lambda text: text.replace("SECRET", "[redacted]"), lambda cwd, scope: ""))
+    monkeypatch.setattr(lore_bridge, "_extensions", lambda: None)
+    monkeypatch.setattr(lore_bridge, "_read_ops", lambda: (lambda: conn, lambda text, op: text))
+    requests = [
+        {"id": 1, "op": "consult", "prompt": "fact"},
+        {"id": 2, "op": "beliefs", "offset": 0, "limit": 1},
+        {"id": 3, "op": "evidence", "belief_id": 1, "limit": 2},
+        {"id": 4, "op": "beliefs", "limit": 51},
+        {"id": 5, "op": "consult", "prompt": "SECRET" * 9000},
+    ]
+    output = io.BytesIO()
+    monkeypatch.setattr(lore_bridge.sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"".join(map(lore_bridge._frame, requests)))))
+    monkeypatch.setattr(lore_bridge.sys, "stdout", types.SimpleNamespace(buffer=output))
+    lore_bridge.serve()
+    frames = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert frames[0]["capabilities"] == ["scrub", "snapshot", "consult", "beliefs", "evidence"]
+    assert frames[1]["value"]["citation_status"] == "cite_only"
+    assert frames[1]["value"]["claim"] == "[redacted] fact"
+    assert frames[2]["value"][0]["evidence_count"] == 3
+    assert frames[2]["value"][0]["claim"] == "[redacted] fact"
+    assert len(frames[3]["value"]) == 2
+    assert frames[3]["value"][-1]["trail_truncated"] is True
+    assert frames[3]["value"][0]["session_id"] == "[redacted] session"
+    assert frames[4]["error"] == frames[5]["error"] == "operation_failed"
+    assert b"SECRET" not in output.getvalue()

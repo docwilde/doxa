@@ -49,8 +49,8 @@ jobs:
         env:
           DOXA_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: cargo +stable test --locked --manifest-path rust/doxa-runtime/Cargo.toml
-      - name: Test native daemon and Codex host
-        run: cargo +stable test --locked --manifest-path rust/doxa-daemon/Cargo.toml
+      - name: Test native daemon hosts and peer RPC
+        run: cargo +stable test --locked --features local-test-server --manifest-path rust/doxa-daemon/Cargo.toml
       - name: Build release binary
         run: cargo +stable build --locked --release --manifest-path rust/doxa-tui/Cargo.toml
       - name: Test vendor chat adapter

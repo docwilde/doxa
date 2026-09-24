@@ -1,6 +1,6 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
-use std::io::{self, IsTerminal, Stdout};
 use std::collections::HashMap;
+use std::io::{self, IsTerminal, Stdout};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,7 +21,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
 
-use crate::markdown;
+use crate::{markdown, peer_map::PeerMap};
+
+mod tool_cards;
+use tool_cards::ToolCards;
 
 const MIN_PANE_WIDTH: u16 = 28;
 const MIN_PANE_HEIGHT: u16 = 8;
@@ -31,6 +34,14 @@ const MAX_PENDING_PROMPTS: usize = 32;
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
 const MAX_ANSWER_BYTES: usize = 10 * 1024;
+const ACTIONS: [(&str, &str); 6] = [
+    ("Peer map", "Ctrl+M"),
+    ("Tool activity", "Ctrl+T"),
+    ("Open selected session", "rail selection"),
+    ("Previous tab", "active pane"),
+    ("Next tab", "active pane"),
+    ("Switch pane", "Shift+Tab"),
+];
 
 fn safe_label(value: &str) -> String {
     markdown::sanitize(value)
@@ -359,6 +370,15 @@ pub struct App {
     pub input_requests: Vec<InputRequest>,
     pub pending_answers: Vec<(String, String, serde_json::Value)>,
     pub rejected_drafts: HashMap<String, Vec<String>>,
+    tool_cards: ToolCards,
+    tool_modal: bool,
+    tool_selected: usize,
+    tool_scroll: u16,
+    peer_map: PeerMap,
+    map_modal: bool,
+    action_menu: bool,
+    action_selected: usize,
+    pending_peer_refresh: Option<String>,
     pub notice: String,
     pub should_quit: bool,
     pub size: Rect,
@@ -394,6 +414,15 @@ impl Default for App {
             input_requests: Vec::new(),
             pending_answers: Vec::new(),
             rejected_drafts: HashMap::new(),
+            tool_cards: ToolCards::default(),
+            tool_modal: false,
+            tool_selected: 0,
+            tool_scroll: 0,
+            peer_map: PeerMap::default(),
+            map_modal: false,
+            action_menu: false,
+            action_selected: 0,
+            pending_peer_refresh: None,
             notice: "Disconnected · waiting for daemon".into(),
             should_quit: false,
             size: Rect::default(),
@@ -450,8 +479,12 @@ impl App {
                         .unwrap_or("session"),
                 );
                 let cwd = safe_label(frame.get("cwd").and_then(|v| v.as_str()).unwrap_or(""));
-                let transcript = self.sessions.iter().find(|s| s.id == id)
-                    .map(|s| s.transcript.clone()).unwrap_or_default();
+                let transcript = self
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map(|s| s.transcript.clone())
+                    .unwrap_or_default();
                 self.apply_update(DaemonUpdate::Upsert(Session {
                     id: id.into(),
                     title: model.clone(),
@@ -480,6 +513,10 @@ impl App {
                 let Some(id) = id.map(str::to_owned) else {
                     return false;
                 };
+                if self.sessions.iter().any(|session| session.id == id) {
+                    self.tool_cards.record(&id, event_type, data);
+                    self.peer_map.event(&id, event_type, data);
+                }
                 match event_type {
                     "text_delta" => {
                         let Some(text) = data.get("text").and_then(|v| v.as_str()) else {
@@ -523,6 +560,7 @@ impl App {
                                 .any(|r| r.session_id == id && r.id == request.id)
                             {
                                 self.drag = None;
+                                self.tool_modal = false;
                                 self.input_requests.push(request);
                             }
                         } else {
@@ -566,6 +604,12 @@ impl App {
                     _ => self.append_event(&id, event_type, data),
                 }
             }
+            "peer_roster" => {
+                let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else {
+                    return false;
+                };
+                self.peer_map.roster(id, frame)
+            }
             "reply" => {
                 let ok = frame.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
                 self.notice = if ok {
@@ -585,7 +629,10 @@ impl App {
             }
             "client_notice" => {
                 if let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) {
-                    self.apply_update(DaemonUpdate::Status { id: id.into(), text: "Disconnected".into() });
+                    self.apply_update(DaemonUpdate::Status {
+                        id: id.into(),
+                        text: "Disconnected".into(),
+                    });
                 }
                 self.notice = safe_label(
                     frame
@@ -640,11 +687,17 @@ impl App {
                     return false;
                 };
                 let active = self.groups[self.active_group].active_id().unwrap_or("");
-                let target = frame.get("session_id").and_then(|v| v.as_str()).unwrap_or(active);
+                let target = frame
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(active);
                 if self.input.is_empty() && target == active {
                     self.input = text.to_owned();
                 } else {
-                    self.rejected_drafts.entry(target.into()).or_default().push(text.to_owned());
+                    self.rejected_drafts
+                        .entry(target.into())
+                        .or_default()
+                        .push(text.to_owned());
                 }
                 self.notice = format!(
                     "{} · draft retained{}",
@@ -667,8 +720,14 @@ impl App {
                     return false;
                 };
                 let active = self.groups[self.active_group].active_id().unwrap_or("");
-                let target = frame.get("session_id").and_then(|v| v.as_str()).unwrap_or(active);
-                self.rejected_drafts.entry(target.into()).or_default().push(text.to_owned());
+                let target = frame
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(active);
+                self.rejected_drafts
+                    .entry(target.into())
+                    .or_default()
+                    .push(text.to_owned());
                 self.notice = format!(
                     "{} · check session before Alt+Up retry",
                     safe_label(
@@ -698,7 +757,10 @@ impl App {
     }
 
     pub fn handle(&mut self, event: Event) -> bool {
-        let before = self.groups[self.active_group].active_id().unwrap_or("").to_owned();
+        let before = self.groups[self.active_group]
+            .active_id()
+            .unwrap_or("")
+            .to_owned();
         let changed = match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
@@ -713,9 +775,13 @@ impl App {
             Event::Mouse(mouse) => self.mouse(mouse),
             _ => false,
         };
-        let after = self.groups[self.active_group].active_id().unwrap_or("").to_owned();
+        let after = self.groups[self.active_group]
+            .active_id()
+            .unwrap_or("")
+            .to_owned();
         if before != after {
-            self.input_drafts.insert(before, std::mem::take(&mut self.input));
+            self.input_drafts
+                .insert(before, std::mem::take(&mut self.input));
             self.input = self.input_drafts.remove(&after).unwrap_or_default();
         }
         changed
@@ -730,6 +796,60 @@ impl App {
         }
         if self.active_request_index().is_some() {
             return self.request_key(key);
+        }
+        if self.action_menu {
+            return self.action_key(key);
+        }
+        if self.map_modal {
+            let owner = self.groups[self.active_group]
+                .active_id()
+                .unwrap_or("")
+                .to_owned();
+            return match key.code {
+                KeyCode::Esc | KeyCode::Char('m') if key.code == KeyCode::Esc || ctrl => {
+                    self.map_modal = false;
+                    true
+                }
+                KeyCode::Up => {
+                    self.peer_map.move_selected(&owner, -1);
+                    true
+                }
+                KeyCode::Down => {
+                    self.peer_map.move_selected(&owner, 1);
+                    true
+                }
+                KeyCode::Char('r' | 'R') => {
+                    self.pending_peer_refresh = Some(owner);
+                    true
+                }
+                _ => false,
+            };
+        }
+        if key.code == KeyCode::Char('m') && ctrl {
+            self.map_modal = true;
+            self.peer_map.selected = 0;
+            self.pending_peer_refresh = Some(
+                self.groups[self.active_group]
+                    .active_id()
+                    .unwrap_or("")
+                    .to_owned(),
+            );
+            return true;
+        }
+        if self.tool_modal {
+            return self.tool_key(key);
+        }
+        if key.code == KeyCode::Char('t') && ctrl {
+            self.tool_modal = true;
+            self.tool_scroll = 0;
+            self.tool_selected = self.active_tool_cards().len().saturating_sub(1);
+            return true;
+        }
+        if key.code == KeyCode::Char('p') && ctrl {
+            self.action_menu = true;
+            self.action_selected = 0;
+            self.drag = None;
+            return true;
         }
         match key.code {
             KeyCode::F(3) => {
@@ -762,11 +882,17 @@ impl App {
                 true
             }
             KeyCode::Up if alt && self.focus == Focus::Prompt => {
-                let target = self.groups[self.active_group].active_id().unwrap_or("").to_owned();
+                let target = self.groups[self.active_group]
+                    .active_id()
+                    .unwrap_or("")
+                    .to_owned();
                 if let Some(draft) = self.rejected_drafts.get_mut(&target).and_then(Vec::pop) {
                     let current = std::mem::replace(&mut self.input, draft);
                     if !current.is_empty() {
-                        self.rejected_drafts.entry(target).or_default().push(current);
+                        self.rejected_drafts
+                            .entry(target)
+                            .or_default()
+                            .push(current);
                     }
                     true
                 } else {
@@ -846,6 +972,82 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    fn active_tool_cards(&self) -> &[tool_cards::ToolCard] {
+        self.groups[self.active_group]
+            .active_id()
+            .map(|id| self.tool_cards.for_session(id))
+            .unwrap_or(&[])
+    }
+
+    fn tool_key(&mut self, key: KeyEvent) -> bool {
+        let count = self.active_tool_cards().len();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('t')
+                if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.tool_modal = false;
+            }
+            KeyCode::Up => {
+                self.tool_selected = self.tool_selected.saturating_sub(1);
+                self.tool_scroll = 0;
+            }
+            KeyCode::Down => {
+                self.tool_selected = (self.tool_selected + 1).min(count.saturating_sub(1));
+                self.tool_scroll = 0;
+            }
+            KeyCode::PageUp => self.tool_scroll = self.tool_scroll.saturating_sub(10),
+            KeyCode::PageDown => self.tool_scroll = self.tool_scroll.saturating_add(10),
+            _ => return false,
+        }
+        true
+    }
+
+    fn action_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('p')
+                if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.action_menu = false;
+            }
+            KeyCode::Up => {
+                self.action_selected = (self.action_selected + ACTIONS.len() - 1) % ACTIONS.len();
+            }
+            KeyCode::Down => {
+                self.action_selected = (self.action_selected + 1) % ACTIONS.len();
+            }
+            KeyCode::Enter => {
+                self.action_menu = false;
+                match self.action_selected {
+                    0 => {
+                        self.map_modal = true;
+                        self.peer_map.selected = 0;
+                        self.pending_peer_refresh = Some(
+                            self.groups[self.active_group]
+                                .active_id()
+                                .unwrap_or("")
+                                .to_owned(),
+                        );
+                    }
+                    1 => {
+                        self.tool_modal = true;
+                        self.tool_scroll = 0;
+                        self.tool_selected = self.active_tool_cards().len().saturating_sub(1);
+                    }
+                    2 => self.open_selected(),
+                    3 => self.previous_tab(),
+                    4 => self.next_tab(),
+                    5 => {
+                        self.active_group = 1 - self.active_group;
+                        self.focus = Focus::Prompt;
+                    }
+                    _ => unreachable!("fixed action list"),
+                }
+            }
+            _ => {}
+        }
+        true
     }
 
     fn active_request_index(&self) -> Option<usize> {
@@ -1044,7 +1246,11 @@ impl App {
     fn layout(&self, area: Rect) -> PaneLayout {
         let outer = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(3), Constraint::Length(1)])
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(3),
+                Constraint::Length(1),
+            ])
             .split(area);
         let min_body = if self.split == Split::Vertical {
             MIN_PANE_WIDTH * 2
@@ -1052,8 +1258,10 @@ impl App {
             MIN_PANE_WIDTH
         };
         let rail_width = if self.rail_visible && outer[0].width >= 70 {
-            self.rail_width
-                .clamp(MIN_RAIL_WIDTH, outer[0].width.saturating_sub(min_body).max(MIN_RAIL_WIDTH))
+            self.rail_width.clamp(
+                MIN_RAIL_WIDTH,
+                outer[0].width.saturating_sub(min_body).max(MIN_RAIL_WIDTH),
+            )
         } else {
             0
         };
@@ -1120,7 +1328,11 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
-        if self.active_request_index().is_some() {
+        if self.active_request_index().is_some()
+            || self.tool_modal
+            || self.map_modal
+            || self.action_menu
+        {
             self.drag = None;
             return false;
         }
@@ -1132,18 +1344,22 @@ impl App {
                 }
                 let layout = self.layout(self.size);
                 let in_outer = mouse.row >= layout.outer.y && mouse.row < layout.outer.bottom();
-                if in_outer && layout.rail.is_some_and(|rail| {
-                    mouse.column == rail.right().saturating_sub(1)
-                        || mouse.column == layout.body.x
-                }) {
+                if in_outer
+                    && layout.rail.is_some_and(|rail| {
+                        mouse.column == rail.right().saturating_sub(1)
+                            || mouse.column == layout.body.x
+                    })
+                {
                     self.drag = Some(DragTarget::Rail);
                 } else if let Some([first, second]) = layout.panes {
                     let on_divider = if self.split == Split::Vertical {
-                        mouse.row >= layout.body.y && mouse.row < layout.body.bottom()
+                        mouse.row >= layout.body.y
+                            && mouse.row < layout.body.bottom()
                             && (mouse.column == first.right().saturating_sub(1)
                                 || mouse.column == second.x)
                     } else {
-                        mouse.column >= layout.body.x && mouse.column < layout.body.right()
+                        mouse.column >= layout.body.x
+                            && mouse.column < layout.body.right()
                             && (mouse.row == first.bottom().saturating_sub(1)
                                 || mouse.row == second.y)
                     };
@@ -1268,12 +1484,136 @@ impl App {
         );
         frame.render_widget(
             Paragraph::new(format!(
-                "{}  |  F3 rail · Shift+Tab pane · Alt+H/V split · Alt+arrows/drag border resize · Ctrl+Q quit",
+                "{}  |  Ctrl+P actions · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
                 self.notice
             )),
             outer[2],
         );
+        self.draw_tool_cards(frame, area);
+        if self.map_modal {
+            self.peer_map.render(
+                frame,
+                area,
+                self.groups[self.active_group].active_id().unwrap_or(""),
+            );
+        }
+        self.draw_actions(frame, area);
         self.draw_request(frame, area);
+    }
+
+    fn draw_actions(&self, frame: &mut Frame, area: Rect) {
+        if !self.action_menu {
+            return;
+        }
+        let width = area.width.saturating_sub(2).min(58);
+        let height = area.height.saturating_sub(2).min(10);
+        if width < 18 || height < 3 {
+            return;
+        }
+        let modal = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        let visible = usize::from(height.saturating_sub(2));
+        let start = self
+            .action_selected
+            .saturating_sub(visible.saturating_sub(1));
+        let rows: Vec<Line> = ACTIONS
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible)
+            .map(|(index, (label, hint))| {
+                let style = if index == self.action_selected {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                Line::from(format!(
+                    " {} {:<28} {}",
+                    if index == self.action_selected {
+                        '›'
+                    } else {
+                        ' '
+                    },
+                    label,
+                    hint
+                ))
+                .style(style)
+            })
+            .collect();
+        frame.render_widget(Clear, modal);
+        frame.render_widget(
+            Paragraph::new(rows).block(
+                Block::default()
+                    .title(" Actions · ↑/↓ choose · Enter open · Esc close ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan)),
+            ),
+            modal,
+        );
+    }
+
+    fn draw_tool_cards(&self, frame: &mut Frame, area: Rect) {
+        if !self.tool_modal {
+            return;
+        }
+        let width = area.width.saturating_sub(4).min(100);
+        let height = area.height.saturating_sub(4).min(28);
+        if width < 24 || height < 7 {
+            return;
+        }
+        let modal = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        let cards = self.active_tool_cards();
+        let mut body = String::new();
+        if cards.is_empty() {
+            body.push_str("No tool activity in this session.");
+        } else {
+            let selected = self.tool_selected.min(cards.len() - 1);
+            let start = selected
+                .saturating_sub(7)
+                .min(cards.len().saturating_sub(8));
+            for (index, card) in cards.iter().enumerate().skip(start).take(8) {
+                body.push_str(if index == selected { "▸ " } else { "  " });
+                body.push_str(&format!("{} · {}\n", card.name, card.status()));
+            }
+            let card = &cards[selected];
+            body.push_str("\nTool: ");
+            body.push_str(&card.name);
+            if let Some(parent) = &card.parent_id {
+                body.push_str("\nParent: ");
+                body.push_str(parent);
+            }
+            body.push_str("\nStatus: ");
+            body.push_str(&card.status());
+            body.push_str("\n\nInput:\n");
+            body.push_str(card.input.as_deref().unwrap_or("(unavailable)"));
+            body.push_str("\n\nResult:\n");
+            body.push_str(card.result.as_deref().unwrap_or("(pending)"));
+        }
+        frame.render_widget(Clear, modal);
+        frame.render_widget(
+            Paragraph::new(body)
+                .wrap(Wrap { trim: false })
+                .scroll((self.tool_scroll, 0))
+                .block(
+                    Block::default()
+                        .title(" Tool activity · ↑/↓ select · PgUp/PgDn scroll · Esc close ")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Cyan)),
+                ),
+            modal,
+        );
     }
 
     fn draw_request(&self, frame: &mut Frame, area: Rect) {
@@ -1456,7 +1796,8 @@ impl App {
             .map(|s| s.transcript.as_str())
             .unwrap_or("No session open. Select one in the rail and press Enter.");
         let lines = markdown::render(content, inner[1].width.saturating_sub(2));
-        let (lines, scroll_from_top) = transcript_window(lines, inner[1].height, inner[1].y, group.scroll);
+        let (lines, scroll_from_top) =
+            transcript_window(lines, inner[1].height, inner[1].y, group.scroll);
         frame.render_widget(
             Paragraph::new(lines)
                 .scroll((scroll_from_top, 0))
@@ -1472,7 +1813,12 @@ impl App {
     }
 }
 
-fn transcript_window(lines: Vec<Line<'static>>, viewport: u16, origin_y: u16, scroll: usize) -> (Vec<Line<'static>>, u16) {
+fn transcript_window(
+    lines: Vec<Line<'static>>,
+    viewport: u16,
+    origin_y: u16,
+    scroll: usize,
+) -> (Vec<Line<'static>>, u16) {
     // Paragraph's internal `area.height + scroll.y` and its buffer row
     // `area.top() + y` are u16. Reserve the actual height and screen origin
     // so both calculations fit while moving a bounded window through lines.
@@ -1564,7 +1910,11 @@ pub fn run_with_channels_state_guarded(
     live_ids: Vec<String>,
     complete_roster: Arc<Mutex<bool>>,
 ) -> io::Result<()> {
-    run_loop(frames, Some(prompts), Some((store, live_ids, complete_roster)))
+    run_loop(
+        frames,
+        Some(prompts),
+        Some((store, live_ids, complete_roster)),
+    )
 }
 
 fn run_loop(
@@ -1603,9 +1953,15 @@ fn run_loop(
         if event::poll(Duration::from_millis(50))? {
             changed |= app.handle(event::read()?);
         }
+        if prompt_sender.is_none() {
+            if let Some(id) = app.pending_peer_refresh.take() {
+                changed |= app.peer_map.roster(&id, &serde_json::json!({"ok":false}));
+            }
+        }
         if let Some(sender) = &prompt_sender {
             let disconnected = dispatch_prompts(&mut app, sender);
             let disconnected = dispatch_answers(&mut app, sender) || disconnected;
+            let disconnected = dispatch_peer_refresh(&mut app, sender) || disconnected;
             if disconnected {
                 prompt_sender = None;
                 changed = true;
@@ -1713,6 +2069,24 @@ fn dispatch_answers(app: &mut App, sender: &SyncSender<crate::bridge::WorkerComm
     false
 }
 
+fn dispatch_peer_refresh(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+    let Some(id) = app.pending_peer_refresh.take() else {
+        return false;
+    };
+    if id.is_empty() {
+        return false;
+    }
+    match sender.try_send(crate::bridge::WorkerCommand::Peers(id)) {
+        Ok(()) => false,
+        Err(TrySendError::Full(crate::bridge::WorkerCommand::Peers(id))) => {
+            app.pending_peer_refresh = Some(id);
+            false
+        }
+        Err(TrySendError::Disconnected(crate::bridge::WorkerCommand::Peers(_))) => true,
+        Err(_) => unreachable!(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1737,12 +2111,20 @@ mod tests {
         for scroll in [0, 1, 4_457, 65_535, 65_536, 69_991, 69_992] {
             let (window, offset) = transcript_window(lines.clone(), 8, 0, scroll);
             assert!(window.len() <= u16::MAX as usize);
-            assert_eq!(window[usize::from(offset)].to_string(), (69_992 - scroll).to_string());
+            assert_eq!(
+                window[usize::from(offset)].to_string(),
+                (69_992 - scroll).to_string()
+            );
         }
-        let mut app = App::default();
-        app.focus = Focus::Transcript;
+        let mut app = App {
+            focus: Focus::Transcript,
+            ..Default::default()
+        };
         app.groups[0].scroll = usize::from(u16::MAX);
-        assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))));
+        assert!(app.handle(Event::Key(KeyEvent::new(
+            KeyCode::PageUp,
+            KeyModifiers::NONE
+        ))));
         assert_eq!(app.groups[0].scroll, usize::from(u16::MAX) + 5);
     }
 
@@ -1755,14 +2137,21 @@ mod tests {
         let mut saved = crate::ui_state::LayoutSignature::capture(&app);
         app.rail_width = 32;
         let complete = Mutex::new(false);
-        assert!(save_layout_if_changed(&mut app, &mut store, &complete, &mut saved));
+        assert!(save_layout_if_changed(
+            &mut app, &mut store, &complete, &mut saved
+        ));
         assert_ne!(saved, crate::ui_state::LayoutSignature::capture(&app));
         assert!(!store.path().exists());
         *complete.lock().unwrap() = true;
-        assert!(save_layout_if_changed(&mut app, &mut store, &complete, &mut saved), "{}", app.notice);
+        assert!(
+            save_layout_if_changed(&mut app, &mut store, &complete, &mut saved),
+            "{}",
+            app.notice
+        );
         assert_eq!(saved, crate::ui_state::LayoutSignature::capture(&app));
         assert!(app.notice.is_empty());
-        let written: serde_json::Value = serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
         assert_eq!(written["rust_ui"]["rail_width"], 32);
     }
 
@@ -1776,15 +2165,26 @@ mod tests {
         app.rail_width = 33;
         std::fs::create_dir_all(store.path()).unwrap();
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(store.path().parent().unwrap(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(
+            store.path().parent().unwrap(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         let complete = Mutex::new(true);
-        assert!(save_layout_if_changed(&mut app, &mut store, &complete, &mut saved));
+        assert!(save_layout_if_changed(
+            &mut app, &mut store, &complete, &mut saved
+        ));
         assert_ne!(saved, crate::ui_state::LayoutSignature::capture(&app));
         std::fs::remove_dir(store.path()).unwrap();
-        assert!(save_layout_if_changed(&mut app, &mut store, &complete, &mut saved), "{}", app.notice);
+        assert!(
+            save_layout_if_changed(&mut app, &mut store, &complete, &mut saved),
+            "{}",
+            app.notice
+        );
         assert_eq!(saved, crate::ui_state::LayoutSignature::capture(&app));
         assert!(app.notice.is_empty());
-        let written: serde_json::Value = serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
         assert_eq!(written["rust_ui"]["rail_width"], 33);
     }
 

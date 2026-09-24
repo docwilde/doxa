@@ -184,6 +184,119 @@ pub fn tabset_path(home: &Path, scope_key: &str, machine_id: &str) -> PathBuf {
     home.join("tabsets").join(format!("{}-{}.json", digest(scope_key, 24), digest(machine_id, 12)))
 }
 
+/// Pre-1.10 tabset name, used only as an adoption source.
+pub fn legacy_tabset_path(home: &Path, scope_key: &str) -> PathBuf {
+    home.join("tabsets")
+        .join(format!("{}.json", digest(scope_key, 24)))
+}
+
+fn ensure_private_directory(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::PermissionsExt;
+    let created = match fs::symlink_metadata(path) {
+        Ok(_) => false,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(path)?;
+            true
+        }
+        Err(error) => return Err(error),
+    };
+    let dir = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    if created {
+        dir.set_permissions(fs::Permissions::from_mode(0o700))?;
+    }
+    let meta = dir.metadata()?;
+    if !meta.is_dir()
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.permissions().mode() & 0o022 != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "state directory must be owned and not writable by others",
+        ));
+    }
+    Ok(dir)
+}
+
+/// Mint DOXA's local tabset filename identity exactly once. A concurrent
+/// creator wins without its ID being overwritten by this process.
+pub fn ensure_machine_id(home: &Path) -> io::Result<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = ensure_private_directory(home)?;
+    match machine_id(home) {
+        Ok(id) => return Ok(id),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut bytes = [0_u8; 16];
+    fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let id: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let mut temp = tempfile::Builder::new()
+        .prefix(".machine-id-")
+        .tempfile_in(home)?;
+    temp.as_file()
+        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    temp.write_all(id.as_bytes())?;
+    temp.as_file().sync_all()?;
+    match temp.persist_noclobber(home.join("machine-id")) {
+        Ok(_) => {
+            dir.sync_all()?;
+            Ok(id)
+        }
+        Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => machine_id(home),
+        Err(error) => Err(error.error),
+    }
+}
+
+/// Locate this machine's tabset, adopting a safe legacy scope-only file once.
+/// A pre-existing machine-specific file always wins. Adoption never replaces
+/// it, even if another process creates it concurrently.
+pub fn resolve_tabset_path(home: &Path, scope_key: &str) -> io::Result<PathBuf> {
+    if scope_key.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "empty scope key",
+        ));
+    }
+    let machine = ensure_machine_id(home)?;
+    let directory = home.join("tabsets");
+    let dir = ensure_private_directory(&directory)?;
+    let target = tabset_path(home, scope_key, &machine);
+    if fs::symlink_metadata(&target).is_ok() {
+        return Ok(target);
+    }
+    let legacy = legacy_tabset_path(home, scope_key);
+    let meta = match fs::symlink_metadata(&legacy) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(target),
+        Err(error) => return Err(error),
+    };
+    if !meta.is_file()
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.nlink() != 1
+        || meta.len() > MAX_TABSET_BYTES
+        || load_tabset(&legacy, scope_key).is_none()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsafe or invalid legacy tabset",
+        ));
+    }
+    match fs::hard_link(&legacy, &target) {
+        Ok(()) => {
+            fs::remove_file(&legacy)?;
+            dir.sync_all()?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    Ok(target)
+}
+
 /// Read an existing machine id. Read-only paths never mint one.
 pub fn machine_id(home: &Path) -> io::Result<String> {
     let id = String::from_utf8(read_bounded_regular(&home.join("machine-id"), MAX_MACHINE_ID_BYTES)?)

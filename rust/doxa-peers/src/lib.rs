@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Python-compatible, local peer presence registry and bounded local messaging.
 pub mod delivery;
+pub mod query;
+pub mod presence;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
@@ -195,7 +197,7 @@ impl Registry {
         let _ = fs::remove_file(path);
     }
 }
-fn safe_id(s: &str) -> bool {
+pub(crate) fn safe_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 128 && s.bytes().enumerate().all(|(i, b)|
         b.is_ascii_alphanumeric() || (i > 0 && b == b'-'))
 }
@@ -204,7 +206,7 @@ fn remove_regular_entry(path: &Path) {
         let _ = fs::remove_file(path);
     }
 }
-fn read_one(path: &Path) -> io::Result<PeerRecord> {
+pub(crate) fn read_one(path: &Path) -> io::Result<PeerRecord> {
     let meta = fs::symlink_metadata(path)?;
     if !meta.file_type().is_file() || meta.len() > MAX_ENTRY_BYTES || meta.uid() != unsafe { libc::geteuid() } { return Err(io::Error::new(io::ErrorKind::InvalidData, "unsafe registry entry")); }
     // Recheck the opened inode: an entry can be swapped for a FIFO or hard
@@ -220,12 +222,12 @@ fn read_one(path: &Path) -> io::Result<PeerRecord> {
     if bytes.len() as u64 > MAX_ENTRY_BYTES { return Err(io::Error::new(io::ErrorKind::InvalidData, "oversized registry entry")); }
     serde_json::from_slice(&bytes).map_err(io::Error::other)
 }
-fn pid_alive(pid: i32) -> bool {
+pub(crate) fn pid_alive(pid: i32) -> bool {
     if pid <= 0 { return false; }
     let status = unsafe { libc::kill(pid, 0) };
     status == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
-fn stale(s: &str) -> bool {
+pub(crate) fn stale(s: &str) -> bool {
     let Ok(t) = OffsetDateTime::parse(s, &Iso8601::DEFAULT) else { return true; };
     (OffsetDateTime::now_utc() - t).whole_seconds() > STALE_AFTER_SECS
 }

@@ -20,6 +20,7 @@ use crate::discovery::Session;
 pub enum WorkerCommand {
     Prompt(String, String),
     Answer(String, String, Value),
+    Peers(String),
 }
 
 fn revoke(guard: &Mutex<bool>) {
@@ -116,7 +117,7 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
     let router = thread::spawn(move || {
         while let Ok(command) = command_rx.recv() {
             let id = match &command {
-                WorkerCommand::Prompt(id, _) | WorkerCommand::Answer(id, _, _) => id,
+                WorkerCommand::Prompt(id, _) | WorkerCommand::Answer(id, _, _) | WorkerCommand::Peers(id) => id,
             };
             let Some((route, connected)) = routes.get(id) else {
                 let _ = router_frames.send(rejected(command, "Session is not attached"));
@@ -147,6 +148,8 @@ fn rejected(command: WorkerCommand, message: &str) -> Value {
             "text":text, "message":message}),
         WorkerCommand::Answer(session, request, _) => json!({"type":"answer_reply", "session_id":session,
             "request_id":request, "ok":false, "message":message}),
+        WorkerCommand::Peers(id) => json!({"type":"peer_roster", "session_id":id,
+            "ok":false, "error":message}),
     }
 }
 
@@ -249,6 +252,27 @@ fn worker_loop(
                     if matches!(result, Err(TransportError::Closed)) {
                         return;
                     }
+                }
+                Ok(WorkerCommand::Peers(id)) => {
+                    if id != session_id {
+                        let _ = frames.send(json!({"type":"peer_roster", "session_id":id,
+                            "ok":false, "error":"Peer target is not attached"}));
+                        continue;
+                    }
+                    let result = client.call("peers", Map::new());
+                    cursor.store(client.cursor, Ordering::Relaxed);
+                    if matches!(result, Err(TransportError::Closed)) {
+                        if let Some(guard) = roster_guard { revoke(guard); }
+                    }
+                    let reply = match result {
+                        Ok(ref reply) => json!({"type":"peer_roster", "session_id":id,
+                            "ok":reply["ok"] == true, "peers":reply.get("peers"),
+                            "error":reply.get("error")}),
+                        Err(ref error) => json!({"type":"peer_roster", "session_id":id,
+                            "ok":false, "error":error.to_string()}),
+                    };
+                    if frames.send(reply).is_err() { return; }
+                    if matches!(result, Err(TransportError::Closed)) { return; }
                 }
                 Ok(WorkerCommand::Prompt(id, text)) => {
                     if id != session_id {
@@ -389,6 +413,12 @@ mod tests {
                 json!({"type":"reply","id":1,"ok":true,"turn":"turn-1"})
             )
             .unwrap();
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&line).unwrap(),
+                json!({"type":"call","id":2,"method":"peers","params":{}}));
+            writeln!(socket, "{}", json!({"type":"reply","id":2,"ok":true,
+                "peers":[{"session_id":"peer-1","title":"Builder"}]})).unwrap();
         });
         let client = DaemonClient::connect(&path, None).unwrap();
         let (frames, prompts, worker) = spawn_worker(client);
@@ -406,6 +436,10 @@ mod tests {
             frames.recv_timeout(Duration::from_secs(2)).unwrap()["turn"],
             "turn-1"
         );
+        prompts.send(WorkerCommand::Peers("session-1".into())).unwrap();
+        let peers = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(peers["type"], "peer_roster");
+        assert_eq!(peers["peers"][0]["session_id"], "peer-1");
         drop(prompts);
         worker.join().unwrap();
         server.join().unwrap();

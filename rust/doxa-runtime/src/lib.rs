@@ -32,6 +32,8 @@ pub trait Host: Send + Sync + 'static {
     /// they are sent to other attached clients; internal execution keeps the
     /// original prompt. An error rejects new prompts before queueing.
     fn public_prompt(&self, text: &str) -> Result<String, String> { Ok(text.to_owned()) }
+    /// Owner-checked JSONL boundary for durable client restore.
+    fn transcript_snapshot(&self) -> io::Result<Option<(PathBuf, u64)>> { Ok(None) }
 }
 
 #[derive(Clone)]
@@ -238,9 +240,15 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
     let mut writer = match stream.try_clone() { Ok(s) => s, Err(_) => return };
     let hello = {
         let state = inner.state.lock().unwrap();
+        let transcript = match inner.host.transcript_snapshot() {
+            Ok(value) => value,
+            Err(_) => return,
+        };
         json!({"type":"hello", "proto":1, "doxa":inner.session.doxa_version,
             "session_id":inner.session.session_id, "model":inner.session.model,
-            "engine":inner.session.engine, "cwd":inner.session.cwd, "next_seq":state.next_seq})
+            "engine":inner.session.engine, "cwd":inner.session.cwd, "next_seq":state.next_seq,
+            "transcript_path":transcript.as_ref().map(|(path, _)| path.to_string_lossy().into_owned()),
+            "transcript_bytes":transcript.as_ref().map(|(_, size)| *size)})
     };
     if writer.set_write_timeout(Some(Duration::from_secs(2))).is_err() ||
         writer.write_all(&encode_reply(&hello)).is_err() { return; }
