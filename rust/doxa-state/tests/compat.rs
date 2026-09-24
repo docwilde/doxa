@@ -1,6 +1,7 @@
 use doxa_state::*;
 use serde_json::json;
 use std::{fs, os::unix::fs::PermissionsExt};
+use std::os::unix::ffi::OsStrExt;
 
 #[test]
 fn python_session_id_examples_and_path_attacks() {
@@ -118,4 +119,35 @@ fn writes_reject_bad_ids_and_symlinked_state_directory() {
     record.tabs[0].session_id = "safe-id".into();
     assert!(save_tabset(&alias.join("tab.json"), &record).is_err());
     assert!(!real.join("tab.json").exists());
+}
+
+#[test]
+fn state_readers_reject_oversize_symlink_and_fifo_inputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let tabset = dir.path().join("tabset.json");
+    let config = dir.path().join("config.toml");
+    let machine = dir.path().join("machine-id");
+    fs::File::create(&tabset).unwrap().set_len(MAX_TABSET_BYTES + 1).unwrap();
+    fs::File::create(&config).unwrap().set_len(MAX_CONFIG_BYTES + 1).unwrap();
+    fs::File::create(&machine).unwrap().set_len(MAX_MACHINE_ID_BYTES + 1).unwrap();
+    assert!(load_tabset(&tabset, "/repo").is_none());
+    assert!(load_config(&config).is_empty());
+    assert!(machine_id(dir.path()).is_err());
+
+    fs::remove_file(&tabset).unwrap();
+    fs::remove_file(&config).unwrap();
+    fs::remove_file(&machine).unwrap();
+    let source = dir.path().join("source");
+    fs::write(&source, "valid").unwrap();
+    for path in [&tabset, &config, &machine] {
+        std::os::unix::fs::symlink(&source, path).unwrap();
+    }
+    assert!(load_tabset(&tabset, "/repo").is_none());
+    assert!(load_config(&config).is_empty());
+    assert!(machine_id(dir.path()).is_err());
+
+    fs::remove_file(&tabset).unwrap();
+    let fifo = std::ffi::CString::new(tabset.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    assert!(load_tabset(&tabset, "/repo").is_none());
 }
