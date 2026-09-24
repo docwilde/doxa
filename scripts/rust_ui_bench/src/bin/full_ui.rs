@@ -4,6 +4,7 @@ use std::env;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::backend::TestBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -23,7 +24,7 @@ const TEXT: Color = Color::Rgb(242, 233, 221);
 const SECONDARY: Color = Color::Rgb(216, 205, 187);
 const DIM: Color = Color::Rgb(138, 128, 115);
 
-struct Pane { name: String, transcript: String, scroll: u16 }
+struct Pane { name: String, transcript: String, rendered: Vec<Line<'static>>, scroll: u16 }
 struct App { groups: [Vec<Pane>; 2], active: [usize; 2], sidebar_width: u16, focused: usize }
 
 impl App {
@@ -31,7 +32,7 @@ impl App {
         let mut n = 0;
         let groups = std::array::from_fn(|g| (0..[4, 3][g]).map(|_| {
             n += 1;
-            Pane { name: format!("session-{n}"), transcript: String::new(), scroll: 0 }
+            Pane { name: format!("session-{n}"), transcript: String::new(), rendered: Vec::new(), scroll: 0 }
         }).collect());
         Self { groups, active: [3, 2], sidebar_width: 25, focused: 1 }
     }
@@ -108,7 +109,7 @@ impl App {
         lines.push(Line::raw(""));
         if !pane.transcript.is_empty() {
             lines.push(Line::styled("  ▾ Benchmark transcript", Style::default().fg(ORANGE).bg(RAISED).add_modifier(Modifier::BOLD)));
-            for line in pane.transcript.lines() { lines.push(markdown_line(line)); }
+            lines.extend(pane.rendered.iter().cloned());
         }
         let inner = Rect { x: area.x + 2, y: area.y, width: area.width.saturating_sub(4), height: area.height };
         frame.render_widget(Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }).scroll((pane.scroll, 0)), inner);
@@ -118,12 +119,62 @@ impl App {
 
 fn inner_width(area: Rect) -> u16 { area.width.saturating_sub(4) }
 
-fn markdown_line(s: &str) -> Line<'static> {
-    let style = if s.starts_with("# ") { Style::default().fg(ORANGE).add_modifier(Modifier::BOLD) }
-        else if s.starts_with("- ") { Style::default().fg(TEXT) }
-        else if s.starts_with("```") { Style::default().fg(DIM).bg(RAISED) }
-        else { Style::default().fg(TEXT) };
-    Line::styled(format!("    {s}"), style)
+fn markdown_lines(source: &str) -> Vec<Line<'static>> {
+    // Parse the complete source on every update, then create Ratatui lines.
+    // The small presenter handles the constructs visible in this fixture and
+    // snapshot; pulldown-cmark performs the CommonMark parsing itself.
+    let mut out = Vec::new();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut list_depth = 0usize;
+    let mut in_item = false;
+    let mut strong = false;
+    let mut emphasis = false;
+    let mut heading = false;
+    let mut code_block = false;
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    for event in Parser::new_ext(source, options) {
+        match event {
+            Event::Start(Tag::List(_)) => { list_depth += 1; }
+            Event::End(TagEnd::List(_)) => { list_depth = list_depth.saturating_sub(1); }
+            Event::Start(Tag::Item) => {
+                flush_line(&mut out, &mut spans);
+                in_item = true;
+                spans.push(Span::styled(format!("{}• ", "  ".repeat(list_depth.saturating_sub(1))), Style::default().fg(ORANGE)));
+            }
+            Event::End(TagEnd::Item) => { flush_line(&mut out, &mut spans); in_item = false; }
+            Event::Start(Tag::Heading { .. }) => { flush_line(&mut out, &mut spans); heading = true; }
+            Event::End(TagEnd::Heading(_)) => { flush_line(&mut out, &mut spans); heading = false; }
+            Event::Start(Tag::Strong) => strong = true,
+            Event::End(TagEnd::Strong) => strong = false,
+            Event::Start(Tag::Emphasis) => emphasis = true,
+            Event::End(TagEnd::Emphasis) => emphasis = false,
+            Event::Start(Tag::CodeBlock(_)) => { flush_line(&mut out, &mut spans); code_block = true; }
+            Event::End(TagEnd::CodeBlock) => { flush_line(&mut out, &mut spans); code_block = false; }
+            Event::End(TagEnd::Paragraph) if !in_item => flush_line(&mut out, &mut spans),
+            Event::Text(s) | Event::Html(s) | Event::InlineHtml(s) => {
+                let mut style = Style::default().fg(if heading { ORANGE } else if code_block { SECONDARY } else { TEXT });
+                if heading || strong { style = style.add_modifier(Modifier::BOLD); }
+                if emphasis { style = style.add_modifier(Modifier::ITALIC); }
+                if code_block { style = style.bg(RAISED); }
+                for (index, piece) in s.split('\n').enumerate() {
+                    if index > 0 { flush_line(&mut out, &mut spans); }
+                    if !piece.is_empty() { spans.push(Span::styled(piece.to_owned(), style)); }
+                }
+            }
+            Event::Code(s) => spans.push(Span::styled(s.into_string(), Style::default().fg(ORANGE).bg(RAISED))),
+            Event::SoftBreak | Event::HardBreak => flush_line(&mut out, &mut spans),
+            Event::Rule => out.push(Line::styled("  ──────────", Style::default().fg(BORDER))),
+            _ => {}
+        }
+    }
+    flush_line(&mut out, &mut spans);
+    out
+}
+
+fn flush_line(out: &mut Vec<Line<'static>>, spans: &mut Vec<Span<'static>>) {
+    if !spans.is_empty() { out.push(Line::from(std::mem::take(spans))); }
 }
 fn draw(term: &mut Terminal<TestBackend>, app: &App) -> Result<(), Box<dyn std::error::Error>> {
     term.draw(|f| app.render(f))?;
@@ -135,17 +186,23 @@ fn summary(name: &str, mut xs: Vec<Duration>) {
     let n = xs.len();
     let p50 = if n % 2 == 0 { (xs[n/2-1].as_secs_f64() + xs[n/2].as_secs_f64()) * 500.0 } else { xs[n/2].as_secs_f64() * 1000.0 };
     let p95 = xs[(n * 95 / 100).min(n-1)].as_secs_f64() * 1000.0;
-    println!("{name}: iterations={n} p50_ms={p50:.4} p95_ms={p95:.4}");
+    let p25 = xs[n / 4].as_secs_f64() * 1000.0;
+    let p75 = xs[n * 3 / 4].as_secs_f64() * 1000.0;
+    let min = xs[0].as_secs_f64() * 1000.0;
+    let max = xs[n - 1].as_secs_f64() * 1000.0;
+    println!("{name}: iterations={n} min_ms={min:.4} p25_ms={p25:.4} p50_ms={p50:.4} p75_ms={p75:.4} p95_ms={p95:.4} max_ms={max:.4}");
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
     let runs = args.windows(2).find(|w| w[0] == "--runs").and_then(|w| w[1].parse::<usize>().ok()).unwrap_or(3);
+    if runs == 0 { return Err("--runs must be positive".into()); }
     let mut term = Terminal::new(TestBackend::new(WIDTH, HEIGHT))?;
     let mut app = App::new();
     if args.iter().any(|s| s == "--startup-only") { draw(&mut term, &app)?; return Ok(()); }
     if args.iter().any(|s| s == "--snapshot") {
         app.active_mut(0).transcript = "# Overview\n- One visible turn\n- **Markdown-like** content\n```rust\nlet doxa = true;\n```".into();
         app.active_mut(1).transcript = "# Benchmark\n- A second visible pane\n- Seven mounted session tabs".into();
+        for g in 0..2 { let pane = app.active_mut(g); pane.rendered = markdown_lines(&pane.transcript); }
         draw(&mut term, &app)?;
         let buffer = term.backend().buffer();
         for y in 0..HEIGHT {
@@ -156,7 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         return Ok(());
     }
-    let mut resize = Vec::new(); let mut append = Vec::new(); let mut scroll = Vec::new();
+    let mut resize = Vec::new(); let mut append = Vec::new(); let mut parse = Vec::new(); let mut scroll = Vec::new();
     for _ in 0..runs {
         app = App::new();
         for _ in 0..10 { draw(&mut term, &app)?; }
@@ -164,14 +221,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let start = Instant::now(); app.sidebar_width = width; draw(&mut term, &app)?; resize.push(start.elapsed());
         }
         let seed = (0..120).map(|i| format!("- transcript line {i:03}: reproducible text\n")).collect::<String>();
-        for g in 0..2 { app.active_mut(g).transcript = seed.clone(); }
+        for g in 0..2 {
+            let pane = app.active_mut(g);
+            pane.transcript = seed.clone();
+            pane.rendered = markdown_lines(&pane.transcript);
+        }
         draw(&mut term, &app)?;
         for i in 0..100 {
             let chunk = format!("delta {i:03}: {}\n", "x".repeat(28));
             let start = Instant::now();
             let pane = app.active_mut(1);
             pane.transcript.push_str(&chunk);
-            pane.scroll = pane.transcript.lines().count().saturating_sub(39) as u16;
+            let parse_start = Instant::now();
+            pane.rendered = markdown_lines(&pane.transcript);
+            parse.push(parse_start.elapsed());
+            pane.scroll = pane.rendered.len().saturating_sub(39) as u16;
             draw(&mut term, &app)?; append.push(start.elapsed());
         }
         app.active_mut(1).scroll = 0; draw(&mut term, &app)?;
@@ -179,6 +243,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let start = Instant::now(); app.active_mut(1).scroll += 1; draw(&mut term, &app)?; scroll.push(start.elapsed());
         }
     }
-    summary("resize_draw", resize); summary("append_draw", append); summary("scroll_draw", scroll);
+    summary("resize_draw", resize); summary("parse_only", parse); summary("append_parse_draw", append); summary("scroll_draw", scroll);
     Ok(())
 }
