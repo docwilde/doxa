@@ -2029,14 +2029,25 @@ impl App {
         let identity = group.active_id().and_then(|id| self.session_identity.get(id));
         let engine = identity.and_then(|pair| pair.0.as_deref());
         let model = identity.and_then(|pair| pair.1.as_deref());
-        let chips = match (engine, model) {
-            (Some(engine), Some(model)) => format!("  [{engine}] [{model}]"),
-            (Some(engine), None) => format!("  [{engine}]"),
-            (None, Some(model)) => format!("  [{model}]"),
-            (None, None) => String::new(),
-        };
+        let mut status_spans = vec![Span::styled(
+            format!(" {}  ", status),
+            Style::default().fg(theme::SECONDARY),
+        )];
+        if let Some(engine) = engine {
+            status_spans.push(Span::styled(
+                format!(" {} ", engine),
+                Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT),
+            ));
+        }
+        if let Some(model) = model {
+            status_spans.push(Span::raw(" "));
+            status_spans.push(Span::styled(
+                format!(" {} ", model),
+                Style::default().fg(theme::TEXT).bg(theme::HIGHLIGHT),
+            ));
+        }
         frame.render_widget(
-            Paragraph::new(format!(" {}{} ", status, chips)).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
+            Paragraph::new(Line::from(status_spans)).style(Style::default().bg(theme::RAISED)),
             inner[3],
         );
     }

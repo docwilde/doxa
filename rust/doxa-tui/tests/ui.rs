@@ -1,7 +1,7 @@
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use doxa_tui::ui::{App, Focus, Session, Split};
+use doxa_tui::{theme, ui::{App, Focus, Session, Split}};
 use ratatui::{
     backend::TestBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -149,17 +149,23 @@ fn two_panes_keep_distinct_prompts_and_live_identity_chips_at_80x24() {
     let rendered = screen(&app, 80, 24);
     assert!(rendered.contains("> first draft"), "{rendered}");
     assert!(rendered.contains("> second draft"), "{rendered}");
-    assert!(rendered.contains("[codex] [sol]"), "{rendered}");
-    assert!(rendered.contains("[claude]"), "{rendered}");
-    assert!(!rendered.contains("[session]"));
+    assert!(rendered.contains(" codex "), "{rendered}");
+    assert!(rendered.contains(" sol "), "{rendered}");
+    assert!(rendered.contains(" claude "), "{rendered}");
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let styled_cells = (25..52)
+        .filter(|&x| terminal.backend().buffer()[(x, 22)].bg == theme::HIGHLIGHT)
+        .count();
+    assert!(styled_cells >= 5, "engine/model chips have no visible highlight");
     app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.take_prompts(), vec![("two".into(), "second draft".into())]);
     app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT));
     assert_eq!(app.input, "first draft");
     app.apply_daemon_frame(&json!({"type":"event","session_id":"one","event":{"type":"model_changed","data":{"model":"astra"}}}));
     let rendered = screen(&app, 80, 24);
-    assert!(rendered.contains("[codex] [astra]"), "{rendered}");
-    assert!(!rendered.contains("[codex] [sol]"));
+    assert!(rendered.contains(" astra "), "{rendered}");
+    assert!(!rendered.lines().nth(22).unwrap_or("").contains(" sol "), "{rendered}");
 }
 
 #[test]
@@ -185,11 +191,13 @@ fn identity_chips_follow_status_and_sanitize_daemon_values() {
     assert!(!rendered.contains('\u{1b}'));
     assert!(!rendered.contains("[session]"));
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{"session_id":"one","engine":"claude","model":"opus"}}));
-    assert!(screen(&app, 80, 24).contains("[claude] [opus]"));
+    let rendered = screen(&app, 80, 24);
+    assert!(rendered.contains(" claude "), "{rendered}");
+    assert!(rendered.contains(" opus "), "{rendered}");
     app.apply_daemon_frame(&json!({"type":"event","session_id":"one","event":{"type":"model_changed","data":{"model":null}}}));
     let rendered = screen(&app, 80, 24);
-    assert!(rendered.contains("[claude]"));
-    assert!(!rendered.contains("[opus]"));
+    assert!(rendered.contains(" claude "), "{rendered}");
+    assert!(!rendered.contains(" opus "));
 }
 
 #[test]
