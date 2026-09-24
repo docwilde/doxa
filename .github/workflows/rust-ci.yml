@@ -45,6 +45,8 @@ jobs:
         uses: astral-sh/setup-uv@v10.0.1
       - name: Sync Python client dependencies
         run: uv sync --frozen --python 3.12
+      - name: Test native LORE sidecar boundary
+        run: uv run pytest tests/test_lore_bridge.py -q
       - name: Test native daemon protocol
         env:
           DOXA_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
