@@ -596,10 +596,11 @@ async fn run_turn_at(
             body["tools"] = Value::Array(definitions.clone());
             body["tool_choice"] = json!("auto");
         }
-        let completion = stream_at(
+        let completion = stream_at_with_key(
             vendor,
             endpoint,
             body,
+            &key,
             cancel.clone(),
             remaining,
             &mut on_delta,
@@ -678,15 +679,27 @@ async fn stream_at(
     vendor: Vendor,
     endpoint: &str,
     body: Value,
-    mut cancel: watch::Receiver<bool>,
+    cancel: watch::Receiver<bool>,
     timeout: Duration,
-    mut on_delta: impl FnMut(Delta),
+    on_delta: impl FnMut(Delta),
 ) -> Result<Completion, Error> {
     let key =
         std::env::var(vendor.env_var()).map_err(|_| Error::MissingCredential(vendor.env_var()))?;
     if key.is_empty() {
         return Err(Error::MissingCredential(vendor.env_var()));
     }
+    stream_at_with_key(vendor, endpoint, body, &key, cancel, timeout, on_delta).await
+}
+
+async fn stream_at_with_key(
+    _vendor: Vendor,
+    endpoint: &str,
+    body: Value,
+    key: &str,
+    mut cancel: watch::Receiver<bool>,
+    timeout: Duration,
+    mut on_delta: impl FnMut(Delta),
+) -> Result<Completion, Error> {
     let client = reqwest::Client::builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
@@ -695,7 +708,7 @@ async fn stream_at(
     let run = async {
         let response = client
             .post(endpoint)
-            .bearer_auth(&key)
+            .bearer_auth(key)
             .json(&body)
             .send()
             .await
@@ -722,7 +735,7 @@ async fn stream_at(
                         v.to_string()
                     }
                 })
-                .map(|s| sanitize_code(&scrub(&s, &key)));
+                .map(|s| sanitize_code(&scrub(&s, key)));
             return Err(Error::Http {
                 status: status.as_u16(),
                 code,
@@ -733,11 +746,11 @@ async fn stream_at(
         while let Some(next) = stream.next().await {
             let bytes = next.map_err(map_transport)?;
             for payload in decoder.push(&bytes)? {
-                acc.absorb(&payload, &key, &mut on_delta)?;
+                acc.absorb(&payload, key, &mut on_delta)?;
             }
             if decoder.done() {
-                acc.flush(&key, &mut on_delta);
-                return acc.finish(&key);
+                acc.flush(key, &mut on_delta);
+                return acc.finish(key);
             }
         }
         Err(Error::IncompleteStream)

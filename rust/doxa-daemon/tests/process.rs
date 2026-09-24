@@ -902,3 +902,254 @@ fn registry_write_failure_reaps_active_codex_process_group() {
     );
     assert!(!process.socket.exists());
 }
+
+#[cfg(feature = "local-test-server")]
+mod vendor_process {
+    use super::*;
+    use std::net::TcpListener;
+
+    fn fake_vendor(count: usize, answer: &'static str) -> (String, thread::JoinHandle<Vec<Value>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/chat/completions", listener.local_addr().unwrap());
+        let task = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..count {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0; 4096];
+                loop {
+                    let n = std::io::Read::read(&mut socket, &mut buf).unwrap();
+                    assert!(
+                        n > 0,
+                        "provider connection closed after {} request bytes",
+                        request.len()
+                    );
+                    request.extend_from_slice(&buf[..n]);
+                    if let Some(pos) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let header = String::from_utf8_lossy(&request[..pos]);
+                        let len = header
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length: ")
+                                    .and_then(|n| n.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= pos + 4 + len {
+                            assert!(header
+                                .to_ascii_lowercase()
+                                .contains("authorization: bearer test-key-1234"));
+                            requests.push(
+                                serde_json::from_slice(&request[pos + 4..pos + 4 + len]).unwrap(),
+                            );
+                            break;
+                        }
+                    }
+                }
+                let body = format!("data: {{\"model\":\"resolved-model\",\"choices\":[{{\"finish_reason\":\"stop\",\"delta\":{{\"content\":\"{answer}\"}}}}],\"usage\":{{\"prompt_tokens\":3,\"completion_tokens\":4}}}}\n\ndata: [DONE]\n\n");
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            requests
+        });
+        (endpoint, task)
+    }
+
+    fn start_vendor(runtime: &Path, vendor: &str, endpoint: &str, lore: &Path) -> Process {
+        let child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+            .args([
+                "--runtime-dir",
+                runtime.to_str().unwrap(),
+                "--cwd",
+                runtime.to_str().unwrap(),
+                "--session-id",
+                "vendor-session",
+                "--linger",
+                "10",
+                "--engine",
+                vendor,
+                "--lore-python",
+                lore.to_str().unwrap(),
+                "--vendor-endpoint",
+                endpoint,
+            ])
+            .env("DEEPSEEK_API_KEY", "test-key-1234")
+            .env("ZAI_API_KEY", "test-key-1234")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let registry = runtime.join("registry/vendor-session.json");
+        wait_until(|| registry.exists());
+        let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+        let socket = PathBuf::from(entry["daemon_socket"].as_str().unwrap());
+        Process {
+            child,
+            registry,
+            socket,
+        }
+    }
+
+    #[test]
+    fn native_vendor_chat_preserves_scrubbed_history_usage_and_model() {
+        for vendor in ["deepseek", "glm"] {
+            let dir = tempfile::tempdir().unwrap();
+            let lore = dir.path().join("lore-fixture");
+            fake_scrubber(&lore, false);
+            let (endpoint, server) = fake_vendor(2, "fixture-secret answer");
+            let mut process = start_vendor(dir.path(), vendor, &endpoint, &lore);
+            assert_eq!(process.entry()["engine"], vendor);
+            let (mut reader, mut socket) = process.connect();
+            assert_eq!(
+                receive(&mut reader)["model"],
+                if vendor == "glm" {
+                    "glm-5.3-flash"
+                } else {
+                    "deepseek-flash"
+                }
+            );
+            send(&mut socket, json!({"type":"attach","cursor":null}));
+            for id in 1..=2 {
+                send(
+                    &mut socket,
+                    json!({"type":"prompt","id":id,"text":"fixture-secret prompt"}),
+                );
+                assert_eq!(receive(&mut reader)["ok"], true);
+                let started = receive(&mut reader);
+                assert_eq!(started["event"]["type"], "turn_started");
+                assert_eq!(started["event"]["data"]["prompt"], "[redacted] prompt");
+                let text = receive(&mut reader);
+                assert_eq!(text["event"]["data"]["text"], "[redacted] answer", "{text}");
+                let done = receive(&mut reader);
+                assert_eq!(done["event"]["type"], "turn_done");
+                assert_eq!(done["event"]["data"]["is_error"], false);
+                assert_eq!(done["event"]["data"]["model"], "resolved-model");
+                assert_eq!(done["event"]["data"]["prompt_tokens"], 3);
+                assert_eq!(done["event"]["data"]["completion_tokens"], 4);
+                assert!(done["event"]["data"]["cost_usd"].is_null());
+            }
+            send(
+                &mut socket,
+                json!({"type":"call","id":3,"method":"set_model","params":{}}),
+            );
+            let unsupported = receive(&mut reader);
+            assert_eq!(unsupported["ok"], false);
+            assert!(unsupported["error"]
+                .as_str()
+                .unwrap()
+                .contains("unavailable"));
+            send(
+                &mut socket,
+                json!({"type":"call","id":4,"method":"stop","params":{}}),
+            );
+            assert_eq!(receive(&mut reader)["ok"], true);
+            wait_until(|| process.exited());
+            let requests = server.join().unwrap();
+            assert!(requests.iter().all(|body| body.get("tools").is_none()));
+            assert_eq!(requests[1]["messages"][1]["content"], "[redacted] answer");
+            assert!(!requests[1].to_string().contains("fixture-secret"));
+            assert_eq!(
+                fs::read_dir(dir.path().join("registry")).unwrap().count(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn vendor_scrub_failure_withholds_provider_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let lore = dir.path().join("lore-fixture");
+        fake_scrubber(&lore, true);
+        let (endpoint, server) = fake_vendor(1, "fixture-secret answer");
+        let mut process = start_vendor(dir.path(), "deepseek", &endpoint, &lore);
+        let (mut reader, mut socket) = process.connect();
+        receive(&mut reader);
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
+        let done = receive(&mut reader);
+        assert_eq!(done["event"]["type"], "turn_done");
+        assert_eq!(done["event"]["data"]["is_error"], true);
+        assert!(!done.to_string().contains("fixture-secret"));
+        send(
+            &mut socket,
+            json!({"type":"call","id":2,"method":"stop","params":{}}),
+        );
+        assert_eq!(receive(&mut reader)["ok"], true);
+        wait_until(|| process.exited());
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn vendor_interrupt_cancels_active_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let lore = dir.path().join("lore-fixture");
+        fake_scrubber(&lore, false);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}/chat/completions", listener.local_addr().unwrap());
+        let mut process = start_vendor(dir.path(), "glm", &endpoint, &lore);
+        let (mut reader, mut socket) = process.connect();
+        receive(&mut reader);
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
+        send(
+            &mut socket,
+            json!({"type":"call","id":2,"method":"interrupt","params":{}}),
+        );
+        let mut replied = false;
+        let mut done = false;
+        for _ in 0..3 {
+            let frame = receive(&mut reader);
+            if frame["type"] == "reply" {
+                assert_eq!(frame["ok"], true);
+                replied = true;
+            }
+            if frame["event"]["type"] == "turn_done" {
+                assert_eq!(frame["event"]["data"]["is_error"], true);
+                done = true;
+            }
+            if replied && done {
+                break;
+            }
+        }
+        assert!(replied && done);
+        send(
+            &mut socket,
+            json!({"type":"call","id":3,"method":"stop","params":{}}),
+        );
+        assert_eq!(receive(&mut reader)["ok"], true);
+        wait_until(|| process.exited());
+    }
+
+    #[test]
+    fn vendor_missing_credential_rejects_session_before_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let lore = dir.path().join("lore-fixture");
+        fake_scrubber(&lore, false);
+        let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+            .args([
+                "--runtime-dir",
+                dir.path().to_str().unwrap(),
+                "--cwd",
+                dir.path().to_str().unwrap(),
+                "--session-id",
+                "vendor-session",
+                "--engine",
+                "deepseek",
+                "--lore-python",
+                lore.to_str().unwrap(),
+            ])
+            .env_remove("DEEPSEEK_API_KEY")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(!dir.path().join("registry/vendor-session.json").exists());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("test-key-1234"));
+    }
+}

@@ -1,10 +1,12 @@
 //! Native DOXA protocol host. The fixture remains an explicit test mode.
 mod claude_host;
 mod codex_host;
+mod vendor_host;
 use claude_host::ClaudeHost;
 use codex_host::CodexHost;
 use doxa_engines::codex_driver::{DriverOptions, SandboxMode};
 use doxa_runtime::{Daemon, Host, Session};
+use doxa_vendors::Vendor;
 use serde_json::{json, Value};
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -16,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use vendor_host::VendorHost;
 
 static TERMINATE: AtomicBool = AtomicBool::new(false);
 extern "C" fn signal_handler(_: libc::c_int) {
@@ -44,6 +47,8 @@ enum Engine {
     Fixture,
     Codex,
     Claude,
+    DeepSeek,
+    Glm,
 }
 impl Engine {
     fn name(self) -> &'static str {
@@ -51,6 +56,15 @@ impl Engine {
             Self::Fixture => "fixture",
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::DeepSeek => "deepseek",
+            Self::Glm => "glm",
+        }
+    }
+    fn vendor(self) -> Option<Vendor> {
+        match self {
+            Self::DeepSeek => Some(Vendor::DeepSeek),
+            Self::Glm => Some(Vendor::Glm),
+            _ => None,
         }
     }
 }
@@ -66,6 +80,9 @@ struct Options {
     claude_script: Option<PathBuf>,
     resume: bool,
     model: Option<String>,
+    effort: Option<String>,
+    #[cfg(feature = "local-test-server")]
+    vendor_endpoint: Option<String>,
     sandbox: SandboxMode,
 }
 fn options() -> io::Result<Options> {
@@ -86,6 +103,9 @@ fn options() -> io::Result<Options> {
     let mut claude_script = None;
     let mut resume = false;
     let mut model = None;
+    let mut effort = None;
+    #[cfg(feature = "local-test-server")]
+    let mut vendor_endpoint = None;
     let mut sandbox = SandboxMode::WorkspaceWrite;
     let mut args = env::args_os().skip(1);
     while let Some(arg) = args.next() {
@@ -102,7 +122,8 @@ fn options() -> io::Result<Options> {
             Some("--engine") => engine = match value.to_str() {
                 Some("fixture") => Engine::Fixture, Some("codex") => Engine::Codex,
                 Some("claude") => Engine::Claude,
-                _ => return Err(invalid("engine must be fixture, codex, or claude")),
+                Some("deepseek") => Engine::DeepSeek, Some("glm") => Engine::Glm,
+                _ => return Err(invalid("engine must be fixture, codex, claude, deepseek, or glm")),
             },
             Some("--codex-bin") => codex_bin = Some(PathBuf::from(value)),
             Some("--lore-python") => lore_python = Some(PathBuf::from(value)),
@@ -119,6 +140,17 @@ fn options() -> io::Result<Options> {
                 }
                 model = Some(chosen);
             }
+            Some("--effort") => {
+                let chosen = value.into_string().map_err(|_| invalid("invalid effort"))?;
+                if !matches!(chosen.as_str(), "none" | "low" | "high" | "max") {
+                    return Err(invalid("invalid effort"));
+                }
+                effort = Some(chosen);
+            }
+            #[cfg(feature = "local-test-server")]
+            Some("--vendor-endpoint") => {
+                vendor_endpoint = Some(value.into_string().map_err(|_| invalid("invalid test endpoint"))?);
+            }
             Some("--sandbox") => sandbox = match value.to_str() {
                 Some("read-only") => SandboxMode::ReadOnly,
                 Some("workspace-write") => SandboxMode::WorkspaceWrite,
@@ -131,7 +163,7 @@ fn options() -> io::Result<Options> {
                 if !seconds.is_finite() || seconds < 0.0 { return Err(invalid("invalid linger")); }
                 linger = Duration::from_secs_f64(seconds);
             }
-            _ => return Err(invalid("usage: doxa-daemon [--runtime-dir PATH] [--cwd PATH] [--session-id ID] [--linger SECONDS] [--engine fixture|codex|claude] [--codex-bin PATH --lore-python PATH --claude-python PATH --claude-script PATH --model MODEL --sandbox MODE --resume true|false]")),
+            _ => return Err(invalid("usage: doxa-daemon [--runtime-dir PATH] [--cwd PATH] [--session-id ID] [--linger SECONDS] [--engine fixture|codex|claude|deepseek|glm] [--codex-bin PATH --lore-python PATH --claude-python PATH --claude-script PATH --model MODEL --effort EFFORT --sandbox MODE --resume true|false]")),
         }
     }
     // Do not let registry entries claim an unvalidated path or identity.
@@ -153,6 +185,9 @@ fn options() -> io::Result<Options> {
         return Err(invalid("runtime directory must be absolute"));
     }
     if engine == Engine::Codex {
+        if effort.is_some() {
+            return Err(invalid("effort requires a vendor engine"));
+        }
         codex_bin = Some(executable(
             codex_bin.ok_or_else(|| invalid("Codex needs --codex-bin"))?,
         )?);
@@ -163,6 +198,9 @@ fn options() -> io::Result<Options> {
             return Err(invalid("Claude options require --engine claude"));
         }
     } else if engine == Engine::Claude {
+        if effort.is_some() {
+            return Err(invalid("effort requires a vendor engine"));
+        }
         if resume && !explicit_session_id {
             return Err(invalid("Claude resume needs --session-id"));
         }
@@ -181,12 +219,29 @@ fn options() -> io::Result<Options> {
         if codex_bin.is_some() || lore_python.is_some() || sandbox != SandboxMode::WorkspaceWrite {
             return Err(invalid("Codex options require --engine codex"));
         }
+    } else if let Some(vendor) = engine.vendor() {
+        if codex_bin.is_some()
+            || claude_python.is_some()
+            || claude_script.is_some()
+            || resume
+            || sandbox != SandboxMode::WorkspaceWrite
+        {
+            return Err(invalid("unsupported option for vendor engine"));
+        }
+        lore_python = Some(executable(
+            lore_python.ok_or_else(|| invalid("vendor needs --lore-python"))?,
+        )?);
+        let chosen_model = model.get_or_insert_with(|| vendor.default_model().to_owned());
+        let chosen_effort = effort.get_or_insert_with(|| "high".to_owned());
+        doxa_vendors::request_body(vendor, chosen_model, &[], chosen_effort)
+            .map_err(|_| invalid("invalid vendor effort"))?;
     } else if codex_bin.is_some()
         || lore_python.is_some()
         || claude_python.is_some()
         || claude_script.is_some()
         || resume
         || model.is_some()
+        || effort.is_some()
         || sandbox != SandboxMode::WorkspaceWrite
     {
         return Err(invalid("Codex options require --engine codex"));
@@ -203,6 +258,9 @@ fn options() -> io::Result<Options> {
         claude_script,
         resume,
         model,
+        effort,
+        #[cfg(feature = "local-test-server")]
+        vendor_endpoint,
         sandbox,
     })
 }
@@ -368,6 +426,7 @@ fn run() -> io::Result<()> {
     let options = options()?;
     let mut codex_host = None;
     let mut claude_host = None;
+    let mut vendor_host = None;
     let host: Arc<dyn Host> = match options.engine {
         Engine::Fixture => Arc::new(FixtureHost),
         Engine::Codex => {
@@ -411,6 +470,24 @@ fn run() -> io::Result<()> {
                 .map_err(io::Error::other)?,
             );
             claude_host = Some(host.clone());
+            host
+        }
+        Engine::DeepSeek | Engine::Glm => {
+            let host = Arc::new(
+                VendorHost::new(
+                    options.engine.vendor().expect("vendor engine"),
+                    options.model.clone().expect("validated model"),
+                    options.effort.clone().expect("validated effort"),
+                    options
+                        .lore_python
+                        .as_ref()
+                        .expect("validated LORE interpreter"),
+                    #[cfg(feature = "local-test-server")]
+                    options.vendor_endpoint.clone(),
+                )
+                .map_err(io::Error::other)?,
+            );
+            vendor_host = Some(host.clone());
             host
         }
     };
@@ -475,6 +552,9 @@ fn run() -> io::Result<()> {
         if !host.shutdown() {
             eprintln!("doxa-daemon: Claude sidecar did not finalize cleanly");
         }
+    }
+    if let Some(host) = &vendor_host {
+        host.shutdown();
     }
     handle.shutdown();
     result

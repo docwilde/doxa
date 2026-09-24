@@ -111,6 +111,18 @@ To resume, also pass `--session-id ID --resume true`. The daemon forwards bounde
 events and supports `answer_needs_input`, `interrupt`, and graceful `finalize`
 on exit. The Python SDK remains required in this alpha.
 
+The native plain-chat vendor host accepts `--engine deepseek` or `--engine glm`
+with `--lore-python /absolute/path/to/python`; the interpreter must have DOXA
+and LORE installed. Keys come only from `DEEPSEEK_API_KEY` or `ZAI_API_KEY` in
+the environment. `--model` and `--effort low|high|max` are optional; DeepSeek
+also accepts `--effort none`. Provider endpoints are fixed in production.
+The host advertises no tools, rejects any provider tool call, and holds bounded
+conversation history only in memory. The full provider response is withheld
+until LORE scrubs it; a scrub failure fails the turn and commits no history.
+It reports provider model and token usage but no dollar cost. Interrupt and
+stop cancel the in-flight HTTP request. Vendor transcript persistence, resume,
+LORE context, tool execution, pricing, and live-provider validation remain open.
+
 Codex turns use `codex exec --json` and resume subsequent turns using the
 provider thread ID. User and assistant text is appended to Python 1.19-shaped
 JSONL under LORE's project directory, and `<session-id>.codex.json` records the
