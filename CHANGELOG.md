@@ -17,6 +17,12 @@ the stable 2.0 release has not been cut.
 - Add an interactive Claude permission mode chip with daemon capability checks.
   Entering `dontAsk` requires an idle session and a second confirmation;
   `bypassPermissions` remains unavailable without explicit launcher arming.
+- Harden the Rust preview's sidecar and TUI boundaries: preserve correlated
+  replies for oversized Claude frames, bound restored transcripts and input
+  requests, and keep archived history visible when a bounded tail is partial.
+- Keep daemon replay atomic when a client queue fills, and serialize Claude
+  prompt admission with shutdown and permission changes so an active turn
+  cannot be mistaken for an idle session.
 
 ## 2.0.0-alpha.5 — 2026-09-25
 
