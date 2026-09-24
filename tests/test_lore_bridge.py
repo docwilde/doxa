@@ -4,6 +4,8 @@ import io
 import json
 import types
 
+import pytest
+
 from doxa import lore_bridge
 
 
@@ -120,6 +122,12 @@ def test_pending_scrubs_nested_allowlisted_values_before_writing(monkeypatch):
         "confidence": 0.8, "subject_unresolved": False,
     }]
     assert b"SECRET" not in output.getvalue()
+
+
+def test_pending_rejects_keys_that_collapse_after_scrubbing():
+    scrub = lambda text: "[redacted]" if text.startswith("SECRET") else text
+    with pytest.raises(ValueError, match="collide"):
+        lore_bridge._scrub_pending_value({"SECRET-one": 1, "SECRET-two": 2}, scrub)
 
 
 def test_disabled_sync_returns_null(monkeypatch):

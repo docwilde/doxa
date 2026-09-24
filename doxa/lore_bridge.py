@@ -67,10 +67,15 @@ def _scrub_pending_value(value: Any, scrub: Any) -> Any:
     if isinstance(value, str):
         return scrub(value)
     if isinstance(value, dict):
-        return {
-            _scrub_pending_value(key, scrub): _scrub_pending_value(child, scrub)
-            for key, child in value.items()
-        }
+        result = {}
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise TypeError("invalid pending key")
+            safe_key = scrub(key)
+            if safe_key in result:
+                raise ValueError("pending keys collide after scrubbing")
+            result[safe_key] = _scrub_pending_value(child, scrub)
+        return result
     if isinstance(value, (list, tuple)):
         return [_scrub_pending_value(child, scrub) for child in value]
     if value is None or isinstance(value, (bool, int, float)):
