@@ -9,8 +9,11 @@ fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
 
 fn session(id: &str, collection: &str) -> Session {
     Session {
-        id: id.into(), title: format!("Session {id}"), collection: collection.into(),
-        transcript: "# Heading\n\nTranscript body".into(), status: "Ready".into(),
+        id: id.into(),
+        title: format!("Session {id}"),
+        collection: collection.into(),
+        transcript: "# Heading\n\nTranscript body".into(),
+        status: "Ready".into(),
     }
 }
 
@@ -18,9 +21,14 @@ fn screen(app: &App, width: u16, height: u16) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
     let buffer = terminal.backend().buffer();
-    (0..height).map(|y| {
-        (0..width).map(|x| buffer[(x, y)].symbol()).collect::<String>()
-    }).collect::<Vec<_>>().join("\n")
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -50,9 +58,15 @@ fn keyboard_and_rail_select_sessions_into_independent_groups() {
 #[test]
 fn daemon_frames_update_visible_session() {
     let mut app = App::default();
-    assert!(app.apply_daemon_frame(&json!({"type":"hello", "session_id":"abc", "model":"sol", "cwd":"repo"})));
-    assert!(app.apply_daemon_frame(&json!({"type":"event", "event":{"type":"text_delta", "data":{"text":"hello"}}})));
-    assert!(app.apply_daemon_frame(&json!({"type":"event", "event":{"type":"turn_done", "data":{}}})));
+    assert!(app.apply_daemon_frame(
+        &json!({"type":"hello", "session_id":"abc", "model":"sol", "cwd":"repo"})
+    ));
+    assert!(app.apply_daemon_frame(
+        &json!({"type":"event", "event":{"type":"text_delta", "data":{"text":"hello"}}})
+    ));
+    assert!(
+        app.apply_daemon_frame(&json!({"type":"event", "event":{"type":"turn_done", "data":{}}}))
+    );
     assert_eq!(app.sessions[0].transcript, "hello");
     assert_eq!(app.sessions[0].status, "Ready");
     assert!(app.apply_daemon_frame(&json!({"type":"reply", "ok":false, "error":"busy"})));
@@ -62,7 +76,9 @@ fn daemon_frames_update_visible_session() {
 #[test]
 fn daemon_labels_and_errors_cannot_emit_terminal_controls() {
     let mut app = App::default();
-    app.apply_daemon_frame(&json!({"type":"hello", "session_id":"abc", "model":"bad\u{1b}[31m", "cwd":"repo\nnext"}));
+    app.apply_daemon_frame(
+        &json!({"type":"hello", "session_id":"abc", "model":"bad\u{1b}[31m", "cwd":"repo\nnext"}),
+    );
     app.apply_daemon_frame(&json!({"type":"reply", "ok":false, "error":"oops\u{1b}[0m\u{202e}"}));
     assert!(!app.sessions[0].title.contains('\u{1b}'));
     assert!(!app.sessions[0].collection.contains('\n'));
@@ -73,16 +89,83 @@ fn daemon_labels_and_errors_cannot_emit_terminal_controls() {
 #[test]
 fn streamed_transcript_is_bounded_without_resetting_user_scroll() {
     let mut app = App::default();
-    app.apply_daemon_frame(&json!({"type":"hello", "session_id":"abc", "model":"test", "cwd":"repo"}));
+    app.apply_daemon_frame(
+        &json!({"type":"hello", "session_id":"abc", "model":"test", "cwd":"repo"}),
+    );
     app.groups[0].scroll = 7;
     for _ in 0..20 {
         app.apply_daemon_frame(&json!({"type":"event", "event":{"type":"text_delta", "data":{"text":"x".repeat(32_000)}}}));
     }
-    app.apply_daemon_frame(&json!({"type":"event", "event":{"type":"text_delta", "data":{"text":"🦀"}}}));
+    app.apply_daemon_frame(
+        &json!({"type":"event", "event":{"type":"text_delta", "data":{"text":"🦀"}}}),
+    );
     assert!(app.sessions[0].transcript.len() <= 512 * 1024);
     assert!(app.sessions[0].transcript.ends_with("🦀"));
     assert_eq!(app.groups[0].scroll, 7);
     assert!(app.notice.contains("limited"));
+}
+
+#[test]
+fn structured_events_render_in_target_pane_and_track_status() {
+    let mut app = App::default();
+    for id in ["one", "two"] {
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":id, "model":id, "cwd":"repo"}));
+    }
+    app.groups[1].tabs.push("two".into());
+    let events = [
+        ("reasoning_delta", json!({"text":"Checking the repository"})),
+        (
+            "tool_call",
+            json!({"id":"t1", "name":"Read", "input":{"path":"src/main.rs"}}),
+        ),
+        (
+            "tool_result",
+            json!({"id":"t1", "name":"Read", "result_summary":"2 lines", "duration_ms":12}),
+        ),
+        (
+            "peer_message",
+            json!({"from_title":"Worker", "body":"Ready for review"}),
+        ),
+        (
+            "peer_joined",
+            json!({"title":"Reviewer", "session_id":"peer1"}),
+        ),
+        ("tool_disabled", json!({"name":"Write", "reason":"policy"})),
+    ];
+    for (kind, data) in events {
+        assert!(app.apply_daemon_frame(
+            &json!({"type":"event", "session_id":"two", "event":{"type":kind, "data":data}})
+        ));
+    }
+    assert!(app.apply_daemon_frame(&json!({"type":"event", "session_id":"two", "event":{"type":"needs_input", "data":{"kind":"permission", "tool_name":"Write"}}})));
+    assert_eq!(app.sessions[1].status, "Needs input");
+    assert!(app.apply_daemon_frame(&json!({"type":"event", "session_id":"two", "event":{"type":"needs_input_resolved", "data":{"id":"q1"}}})));
+    assert_eq!(app.sessions[1].status, "Running");
+    assert!(app.apply_daemon_frame(&json!({"type":"event", "session_id":"two", "event":{"type":"turn_done", "data":{"is_error":true, "error":"failed"}}})));
+    assert_eq!(app.sessions[1].status, "Error");
+    assert!(app.sessions[0].transcript.is_empty());
+    let rendered = screen(&app, 110, 30);
+    assert!(rendered.contains("Reasoning:"));
+    assert!(rendered.contains("Tool:"));
+    assert!(rendered.contains("Peer Worker:"));
+    assert!(app.sessions[1].transcript.contains("Turn failed: failed"));
+}
+
+#[test]
+fn structured_event_fields_are_escaped_and_bounded() {
+    let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));
+    let hostile = format!("**bold**\u{1b}[31m\u{202e}{}", "x".repeat(2000));
+    assert!(app.apply_daemon_frame(&json!({"type":"event", "event":{"type":"tool_result", "data":{"name":"Read", "result_summary":hostile}}})));
+    let transcript = &app.sessions[0].transcript;
+    assert!(transcript.contains("\\*\\*bold\\*\\*"));
+    assert!(!transcript.contains('\u{1b}'));
+    assert!(!transcript.contains('\u{202e}'));
+    assert!(transcript.contains('…'));
+    assert!(transcript.len() < 700);
+    assert!(!app.apply_daemon_frame(
+        &json!({"type":"event", "event":{"type":"future_event", "data":{"text":"ignored"}}})
+    ));
 }
 
 #[test]
