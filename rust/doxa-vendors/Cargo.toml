@@ -11,5 +11,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde_json = "1"
 tokio = { version = "1", features = ["sync", "time"] }
 
+[features]
+local-test-server = []
+
+[[test]]
+name = "vendor"
+required-features = ["local-test-server"]
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }

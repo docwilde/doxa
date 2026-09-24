@@ -26,4 +26,4 @@ jobs:
       - name: Build release binary
         run: cargo +stable build --locked --release --manifest-path rust/doxa-tui/Cargo.toml
       - name: Test vendor chat adapter
-        run: cargo +stable test --locked --manifest-path rust/doxa-vendors/Cargo.toml
+        run: cargo +stable test --locked --features local-test-server --manifest-path rust/doxa-vendors/Cargo.toml

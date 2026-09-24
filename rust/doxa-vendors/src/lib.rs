@@ -181,10 +181,26 @@ impl SseDecoder {
 /// One request only. The caller owns history, tool gate, and the 24-step loop.
 /// Cancel watch changes abort the in-flight stream via Tokio's select loop.
 pub async fn stream_once(
+    vendor: Vendor, body: Value, cancel: watch::Receiver<bool>,
+    timeout: Duration, on_delta: impl FnMut(Delta),
+) -> Result<Completion, Error> {
+    stream_at(vendor, vendor.endpoint(), body, cancel, timeout, on_delta).await
+}
+
+/// Loopback transport override exclusively for deterministic integration tests.
+#[cfg(feature = "local-test-server")]
+pub async fn stream_once_local(
+    vendor: Vendor, endpoint: &str, body: Value, cancel: watch::Receiver<bool>,
+    timeout: Duration, on_delta: impl FnMut(Delta),
+) -> Result<Completion, Error> {
+    if !endpoint.starts_with("http://127.0.0.1:") { return Err(Error::InvalidEndpoint); }
+    stream_at(vendor, endpoint, body, cancel, timeout, on_delta).await
+}
+
+async fn stream_at(
     vendor: Vendor, endpoint: &str, body: Value, mut cancel: watch::Receiver<bool>,
     timeout: Duration, mut on_delta: impl FnMut(Delta),
 ) -> Result<Completion, Error> {
-    if !endpoint.starts_with("https://") && !endpoint.starts_with("http://127.0.0.1:") { return Err(Error::InvalidEndpoint); }
     let key = std::env::var(vendor.env_var()).map_err(|_| Error::MissingCredential(vendor.env_var()))?;
     if key.is_empty() { return Err(Error::MissingCredential(vendor.env_var())); }
     let client = reqwest::Client::builder().timeout(timeout).redirect(reqwest::redirect::Policy::none()).build().map_err(|_| Error::Transport)?;
@@ -200,7 +216,7 @@ pub async fn stream_once(
                 raw.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
                 if raw.len() >= ERROR_BODY_MAX { break; }
             }
-            let code = serde_json::from_slice::<Value>(&raw).ok().and_then(|v| v.pointer("/error/code").cloned()).map(|v| if let Some(s)=v.as_str() { s.to_owned() } else { v.to_string() }).map(|s| scrub(&s,&key));
+            let code = serde_json::from_slice::<Value>(&raw).ok().and_then(|v| v.pointer("/error/code").cloned()).map(|v| if let Some(s)=v.as_str() { s.to_owned() } else { v.to_string() }).map(|s| sanitize_code(&scrub(&s,&key)));
             return Err(Error::Http { status: status.as_u16(), code });
         }
         let mut decoder = SseDecoder::default();
@@ -222,5 +238,8 @@ async fn wait_cancel(cancel: &mut watch::Receiver<bool>) {
     if *cancel.borrow() { return; }
     while cancel.changed().await.is_ok() { if *cancel.borrow() { return; } }
     std::future::pending::<()>().await;
+}
+fn sanitize_code(code: &str) -> String {
+    code.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')).take(64).collect()
 }
 fn map_transport(error: reqwest::Error) -> Error { if error.is_timeout() { Error::Timeout } else { Error::Transport } }

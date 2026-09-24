@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-use doxa_vendors::{request_body, stream_once, Accumulator, Delta, Error, SseDecoder, Vendor, STREAM_LINE_MAX};
+use doxa_vendors::{request_body, stream_once_local, Accumulator, Delta, Error, SseDecoder, Vendor, STREAM_LINE_MAX};
 use serde_json::json;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -75,7 +75,7 @@ async fn fake_server_stream_and_scrub() {
     let body = "data: {\"model\":\"deepseek-flash\",\"choices\":[{\"delta\":{\"content\":\"hello test-se\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"cret-1234\"}}]}\n\ndata: [DONE]\n\n";
     let (url, task) = server(http("200 OK", body, "text/event-stream"), Duration::ZERO);
     let (_, cancel) = watch::channel(false); let mut deltas = Vec::new();
-    let result = stream_once(Vendor::DeepSeek, &url, json!({"model":"deepseek-flash"}), cancel, Duration::from_secs(3), |d| deltas.push(d)).await.unwrap();
+    let result = stream_once_local(Vendor::DeepSeek, &url, json!({"model":"deepseek-flash"}), cancel, Duration::from_secs(3), |d| deltas.push(d)).await.unwrap();
     let request = task.join().unwrap();
     assert!(request.contains("Authorization: Bearer test-secret-1234") || request.contains("authorization: Bearer test-secret-1234"));
     assert_eq!(result.text, "hello ***");
@@ -87,7 +87,7 @@ async fn fake_server_error_code_never_exposes_key() {
     let body = r#"{"error":{"code":"1302","message":"bad test-secret-1234"}}"#;
     let (url, task) = server(http("429 Too Many Requests", body, "application/json"), Duration::ZERO);
     let (_, cancel) = watch::channel(false);
-    let error = stream_once(Vendor::Glm, &url, json!({}), cancel, Duration::from_secs(3), |_|{}).await.unwrap_err();
+    let error = stream_once_local(Vendor::Glm, &url, json!({}), cancel, Duration::from_secs(3), |_|{}).await.unwrap_err();
     task.join().unwrap();
     assert_eq!(error, Error::Http { status: 429, code: Some("1302".into()) });
     assert!(!format!("{error}").contains("test-secret"));
@@ -97,11 +97,11 @@ async fn cancellation_and_timeout_abort_request() {
     std::env::set_var("DEEPSEEK_API_KEY", "test-secret-1234");
     let (url, task) = server(http("200 OK", "data: [DONE]\n\n", "text/event-stream"), Duration::from_millis(250));
     let (sender, cancel) = watch::channel(false);
-    let future = stream_once(Vendor::DeepSeek, &url, json!({}), cancel, Duration::from_secs(2), |_|{});
+    let future = stream_once_local(Vendor::DeepSeek, &url, json!({}), cancel, Duration::from_secs(2), |_|{});
     tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(40)).await; sender.send(true).unwrap(); });
     assert_eq!(future.await, Err(Error::Cancelled)); task.join().unwrap();
     let (url, task) = server(http("200 OK", "data: [DONE]\n\n", "text/event-stream"), Duration::from_millis(250));
     let (_, cancel) = watch::channel(false);
-    assert_eq!(stream_once(Vendor::DeepSeek, &url, json!({}), cancel, Duration::from_millis(50), |_|{}).await, Err(Error::Timeout));
+    assert_eq!(stream_once_local(Vendor::DeepSeek, &url, json!({}), cancel, Duration::from_millis(50), |_|{}).await, Err(Error::Timeout));
     task.join().unwrap();
 }

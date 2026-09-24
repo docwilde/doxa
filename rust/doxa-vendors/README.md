@@ -4,4 +4,4 @@
 
 The SSE decoder caps a line at 1 MiB and a response at 64 MiB. Tool arguments cap at 1 MiB with at most 128 calls. A whole request has a timeout, and cancellation drops its HTTP future. The caller must own the 3600-second **turn** deadline across repeated requests, a 24-step tool loop, conversation history, usage accounting, price-sheet charges, and a working `ToolGate` before it offers any tool definitions. This crate returns assembled calls but never executes one or claims `mcp_tools`/`tool_gate` parity.
 
-The crate is not yet wired to the native daemon. CI uses a local fake HTTP server and synthetic keys. Live DeepSeek/GLM behavior, credentials, model catalogue changes, LORE tool gating, and multi-step provider interaction remain release gates.
+The crate is not yet wired to the native daemon. CI enables a loopback-only test transport and uses a local fake HTTP server with synthetic keys. The production entry point fixes provider URLs, so an arbitrary endpoint cannot receive an API key. Live DeepSeek/GLM behavior, credentials, model catalogue changes, LORE tool gating, and multi-step provider interaction remain release gates.
