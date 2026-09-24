@@ -710,6 +710,7 @@ async def test_secret_scrub_applied_before_persistence(tmp_path):
     transcript = engine.transcript_path.read_text(encoding="utf-8")
     assert "AKIAABCDEFGHIJKLMNOP" not in transcript
     assert "[REDACTED:aws]" in transcript
+    assert {json.loads(line)["engine"] for line in transcript.splitlines()} == {"claude"}
 
 
 @pytest.mark.asyncio

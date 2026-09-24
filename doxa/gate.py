@@ -97,6 +97,10 @@ class OperatorContext:
     cwd: str
     repo_root: str
     belief_store: "Callable[[], Any] | None" = None
+    source_engine: "str | None" = None
+    """Engine that produced a memory proposal. Set by the session host, never
+    accepted from model tool arguments, and retained when a different engine
+    later approves the proposal."""
 
     spawn_depth: int = 0
     """How deep this session already sits in a spawn chain -- 0 for one a

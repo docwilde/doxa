@@ -907,7 +907,8 @@ class CodexEngine:
         by the time it arrives here."""
         try:
             with self.transcript_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                fh.write(json.dumps({**record, "engine": CODEX_ENGINE_ID},
+                                    ensure_ascii=False) + "\n")
         except OSError:
             # A transcript that cannot be written must not take the turn
             # down: the session is still usable, it just will not be
@@ -1225,6 +1226,7 @@ class CodexEngine:
         env = {
             mcpserver_mod.ENV_SESSION_ID: self.session_id,
             mcpserver_mod.ENV_CWD: self.cwd,
+            mcpserver_mod.ENV_ENGINE: CODEX_ENGINE_ID,
             mcpserver_mod.ENV_SPAWN_DEPTH: str(self.spawn_depth),
             # Memory off means the lore_* tools are ABSENT from the
             # server's tools/list, not present and refusing -- the same

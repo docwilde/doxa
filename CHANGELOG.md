@@ -1,12 +1,22 @@
 # Changelog
 
 Newest first. Versions are annotated git tags on the commit that shipped
-them (`v0.1.0` … `v1.17.0`); the ranges below are derived from that history,
+them (`v0.1.0` … `v1.18.0`); the ranges below are derived from that history,
 not written from memory.
 
-## Unreleased
+## 1.18.0 — 2026-09-24
 
-- DOXA starts Claude CLI once in safe mode in the background without sending a prompt, giving it a bounded chance to refresh its model catalogue. The picker now reads the newer `cc` cache only when its filename matches the active organization and account, as well as the older organization-scoped `ccd` cache. It reports a refresh only when a validated cache's fetch time advances, and labels unchanged or unavailable snapshots honestly.
+**One LORE memory across engines.**
+
+- Claude, Codex, and vendor sessions continue to use the same LORE user and repo scopes. New curated facts and user-model belief evidence carry an informational source-engine label through approval and signed sync; DOXA shows it in memory, belief, and session views without changing scope or authority.
+- DOXA labels its LORE-compatible transcripts with the active engine so FTS5 search and later review preserve the session's origin. Standalone Codex session indexing and Codex startup injection ship in LORE 0.58.0, which DOXA now pins.
+- Codex can explicitly propose a fact with `lore_remember`. Automatic Codex transcript review remains unavailable; no proposal is implied by ending a Codex session.
+- Config saves now lock the full read-modify-write cycle and replace the file through a private temporary file. `/update` reports a completed upgrade with a separate sync failure as partial instead of implying the whole update failed.
+- DOXA starts Claude CLI once in safe mode in the background to refresh its model catalogue. The picker validates the newer `cc` cache against the active account and organization, retains the older `ccd` cache, and reports a refresh only when a validated fetch time advances.
+- Spawn reservations now enforce session caps while approvals are pending; Codex cancellation reaps its turn process group. Transcript restore reads a bounded tail, and peer delivery retains its initiating turn across awaits.
+- The machine-wide peer bridge now starts with live daemons when remote access is enabled. It accepts Tailscale identity headers only from a Unix-socket peer whose kernel credentials match the configured proxy UID; loopback TCP callers are refused.
+- Split-pane dividers can be dragged, with minimum pane sizes and saved layout weights preserved.
+- The status line now shows an engine chip beside the model selector; changing it sets the default for new sessions while the current session keeps its engine.
 
 ## 1.17.0 — 2026-09-24
 

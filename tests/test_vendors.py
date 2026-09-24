@@ -1207,6 +1207,7 @@ async def test_the_turn_is_written_to_a_lore_shaped_transcript(tmp_path):
         if line.strip()
     ]
     assert [row["type"] for row in lines] == ["user", "assistant"]
+    assert [row["engine"] for row in lines] == [eng.spec.engine_id] * 2
     assert lines[0]["message"]["content"] == "say hello"
     assert lines[0]["sessionId"] == eng.session_id
     assert lines[1]["message"]["content"][0]["text"] == "hello"

@@ -268,6 +268,21 @@ def test_last_referenced_survives_in_the_tooltip_and_only_there():
     # The coalesce it reports is still lore_core's own dormancy clock.
     assert "2d" in belief_age_text(
         {"updated": _stamp(300 * DAY), "last_referenced": _stamp(2 * DAY)})
+
+
+def test_belief_source_engine_is_informational_in_tooltip_and_evidence():
+    from doxa.ui.labels import belief_evidence_rows
+
+    tip = belief_tooltip({"id": 1, "subject": "user-model", "claim": "concise status",
+                          "confidence": 0.8, "via": "derived", "source_engine": "codex"})
+    assert "source engine codex" in tip
+    assert "user-model" in tip
+    rows = belief_evidence_rows([
+        {"session_id": "s1", "source_engine": "codex", "note": "first"},
+        {"session_id": "s2", "source_engine": "claude", "note": "confirmed"},
+    ])
+    assert "engine codex" in rows[0]
+    assert "engine claude" in rows[1]
     assert "9d" in belief_age_text({"updated": _stamp(9 * DAY)})
 
 

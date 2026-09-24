@@ -54,7 +54,7 @@ async def test_claude_banner_preserves_precise_plan_and_organization(tmp_path):
     async with app.run_test() as pilot:
         await _opened(app, pilot)
         banner = app.query_one("#identity-block", SystemBlock).text
-        assert "DOXA 1.17.0" in banner
+        assert "DOXA 1.18.0" in banner
         assert "account  claude@example.com" in banner
         assert "plan     max 20x" in banner
         assert "org      Claude Org (owner)" in banner
@@ -77,7 +77,7 @@ async def test_codex_banner_and_usage_never_inherit_claude_identity(
         await _opened(app, pilot)
         banner = app.query_one("#identity-block", SystemBlock).text
         usage = app.active_pane._usage_text()
-        assert "DOXA 1.17.0" in banner
+        assert "DOXA 1.18.0" in banner
         assert "Claude Org" not in banner
         assert "claude@example.com" not in banner
         assert "max 20x" not in banner + usage

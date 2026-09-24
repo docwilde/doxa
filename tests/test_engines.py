@@ -568,6 +568,7 @@ async def test_the_turn_persists_a_transcript_line_per_side(tmp_path):
         for line in engine.transcript_path.read_text(encoding="utf-8").splitlines()
     ]
     assert [r["type"] for r in records] == ["user", "assistant"]
+    assert [r["engine"] for r in records] == ["codex", "codex"]
     assert records[0]["message"]["content"] == "ask"
     assert records[1]["message"]["content"][0]["text"] == "reply"
 
@@ -915,6 +916,7 @@ def test_every_turn_registers_the_doxa_mcp_server(tmp_path):
         assert over[f"{prefix}.default_tools_approval_mode"] == '"approve"'
         assert over[f"{prefix}.env.DOXA_MCP_SESSION_ID"] == '"s-42"'
         assert over[f"{prefix}.env.DOXA_MCP_CWD"] == json.dumps(str(tmp_path))
+        assert over[f"{prefix}.env.DOXA_MCP_ENGINE"] == '"codex"'
         assert over[f"{prefix}.env.DOXA_MCP_LORE"] == '"1"'
         # The prompt still arrives on stdin, after everything.
         assert argv[-1] == "-"

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import sqlite3
 
 import jsonschema
 import pytest
@@ -277,6 +278,7 @@ def test_remember_stages_pending_proposal_and_never_writes_memory(tmp_path):
     assert item["session_id"] == "sess-remember"
     assert item["derived_by"] == "doxa-tool"
     assert item["text"] == "doxa staged xylograph fact for the remember test"
+    assert "source_engine" not in item  # old callers remain explicitly unknown
 
     # Curated memory itself is byte-identical: staging is not writing.
     memory_after = {sc: read_entries(memory_path(sc, slug)) for sc in ("user", "project")}
@@ -288,6 +290,17 @@ def test_remember_stages_pending_proposal_and_never_writes_memory(tmp_path):
         scope="project", op_ctx=ctx,
     )
     assert again["staged"] is None
+
+
+def test_remember_preserves_host_engine_in_proposal(tmp_path):
+    ctx = OperatorContext(
+        session_id="sess-codex", cwd=str(tmp_path), repo_root=str(tmp_path),
+        source_engine="codex",
+    )
+    out = ops.WRITE_OPERATORS["lore_remember"].fn(
+        text="codex source provenance test fact", scope="user", op_ctx=ctx,
+    )
+    assert dict(load_pending())[out["staged"]]["source_engine"] == "codex"
 
 
 def test_remember_scrubs_secrets_and_validates(tmp_path):
@@ -323,6 +336,23 @@ def test_session_search_widens_to_all_projects(tmp_path):
         query="zeugma flotilla", op_ctx=_ctx(tmp_path))
     assert out["scope"] == "all" and out["count"] >= 1
     assert out["hits"][0]["session_id"] == "sess-other"
+
+
+def test_session_search_reports_indexed_engine_when_available(tmp_path):
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE VIRTUAL TABLE msg USING fts5("
+                 "session_id UNINDEXED, project UNINDEXED, ts UNINDEXED,"
+                 "role UNINDEXED, content)")
+    conn.execute("CREATE TABLE sessions(session_id TEXT PRIMARY KEY, engine TEXT)")
+    conn.execute("INSERT INTO msg VALUES(?,?,?,?,?)",
+                 ("s-codex", project_slug(str(tmp_path)), "2026-09-24", "user",
+                  "unique cross engine index probe"))
+    conn.execute("INSERT INTO sessions VALUES(?,?)", ("s-codex", "codex"))
+    out = ops.OPERATORS["lore_session_search"].fn(
+        query="unique cross engine index probe",
+        op_ctx=_ctx(tmp_path, belief_store=lambda: conn),
+    )
+    assert out["hits"][0]["engine"] == "codex"
 
 
 def test_registry_name_strips_only_the_doxa_prefix():

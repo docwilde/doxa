@@ -1731,6 +1731,7 @@ class SessionEngine:
                 cwd=self.cwd,
                 repo_root=gate_mod.repo_root_of(self.cwd),
                 belief_store=lore_store.db_connect,
+                source_engine="claude",
                 # Both HOST-resolved, like everything else on this
                 # sidecar: the depth came in on this process's argv, and
                 # the confirm seam is this engine's own bound method. A
@@ -1815,7 +1816,7 @@ class SessionEngine:
         by the time it gets here -- this method does not scrub, it only
         writes, so every call site above is the one that is accountable."""
         with self.transcript_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            fh.write(json.dumps({**record, "engine": "claude"}, ensure_ascii=False) + "\n")
 
     def _persist_user_text(self, text: str) -> None:
         self._persist({
@@ -2223,6 +2224,7 @@ class SessionEngine:
             )
             if job is None:
                 return
+            job["source_engine"] = "claude"
             tmp = lore_core.ROOT / "tmp"
             tmp.mkdir(parents=True, exist_ok=True)
             jobfile = tmp / f"review-{job['session_id']}.json"
@@ -3900,7 +3902,8 @@ class SessionEngine:
                 str(row[1]) for row in
                 conn.execute("PRAGMA table_info(beliefs)").fetchall()
             }
-            optional = [c for c in ("created", "updated", "last_referenced", "via")
+            optional = [c for c in ("created", "updated", "last_referenced", "via",
+                                    "source_engine")
                         if c in have]
             columns = ", ".join(
                 ["b.id", "b.subject", "b.claim", "b.confidence"]
@@ -4168,8 +4171,11 @@ class SessionEngine:
             return []
         try:
             conn = lore_store.db_connect()
+            have_engine = any(r[1] == "source_engine" for r in conn.execute(
+                "PRAGMA table_info(belief_evidence)").fetchall())
             rows = conn.execute(
-                "SELECT session_id, project, note, created FROM belief_evidence "
+                "SELECT session_id, project, note, created, "
+                f"{'source_engine' if have_engine else 'NULL'} FROM belief_evidence "
                 "WHERE belief_id = ? ORDER BY created, rowid LIMIT ?",
                 (int(belief_id), max(1, limit) + 1),
             ).fetchall()
@@ -4177,7 +4183,8 @@ class SessionEngine:
             return []
         trail = [
             {"session_id": r[0], "project": r[1],
-             "note": _scrub_text(str(r[2] or "")), "created": r[3]}
+             "note": _scrub_text(str(r[2] or "")), "created": r[3],
+             **({"source_engine": r[4]} if r[4] else {})}
             for r in rows[:limit]
         ]
         if len(rows) > limit and trail:
