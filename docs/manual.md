@@ -1170,8 +1170,8 @@ utilization figures the status bar chips show, with separators.
 
 DOXA compiles LORE's `lore_core` in-process (declared dependency, pinned
 to a tag) rather than shelling out to the Claude Code LORE plugin — one
-memory model, two front ends, one shared SQLite store when both are
-installed on a machine (`/about` names which copy loaded).
+memory model across the available engines and one shared SQLite store when
+LORE and DOXA are installed on a machine (`/about` names which copy loaded).
 
 User memory, project memory, and user-model beliefs are shared by every
 engine using that store. New memory proposals and belief evidence carry an
@@ -1191,7 +1191,7 @@ which copy loads — `package` is how to reproduce a bug against exactly the
 pinned dependency without moving the plugin checkout aside.
 
 **Curated memory** (user- and project-scoped) is hard-capped by character
-count — **9000 user, 8800 project** on `lore_core` 0.55.0, overridable
+count — **9000 user, 8800 project** on `lore_core` 0.58.0, overridable
 with `LORE_USER_CAP` / `LORE_MEMORY_CAP`. The caps live in `lore_core`,
 not in DOXA, so a LORE pin bump can move them; the status bar's
 `mem u%p%` chip reads `memory_cap(scope)` rather than a number of its own,

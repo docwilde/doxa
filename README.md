@@ -6,7 +6,7 @@
   <a href="https://github.com/docwilde/doxa/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/ci.yml?branch=main&label=tests" alt="CI status on main"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/built%20on-Claude%20Agent%20SDK-d97757" alt="built on Claude Agent SDK">
-  <img src="https://img.shields.io/badge/subscription-no%20API%20key%20needed-2f9e44" alt="billed via Claude subscription">
+  <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
 </p>
 
 > [!WARNING]
@@ -42,8 +42,9 @@ justified knowledge. The name is the thesis: belief is the raw material,
 never the finished thing.
 
 Memory is [LORE](https://github.com/docwilde/LORE)'s `lore_core`, imported
-in-process rather than shelled out to. LORE also ships as a Claude Code
-plugin; both front ends share one store. See
+in-process rather than shelled out to. Its Claude Code and Codex plugins
+share the same user and repo memory with DOXA; the source engine is recorded
+for context. See
 [LORE integration](docs/manual.md#lore-integration).
 
 ![DOXA shell: three tabs, one per model tier; a turn answered with a table of belief ids and status above a collapsed tool-calls fold; a status bar led by the permission-mode chip](assets/shots/hero.png)
@@ -64,8 +65,8 @@ spend, fake account numbers. See
   session and reject individual hunks.
 - **[A prompt queue.](docs/manual.md#typing-while-a-turn-runs)** Type during
   a turn; `/queue` shows and cancels prompts waiting to run.
-- **[Auditable memory.](docs/manual.md#lore-integration)** LORE stages new
-  beliefs for review; `--no-lore` disables memory for a session.
+- **[Auditable memory.](docs/manual.md#lore-integration)** LORE shares memory
+  across engines and stages new beliefs for review.
 - **[Visible permissions.](docs/manual.md#permission-modes)** Switch modes
   with `shift+tab`; a tool gate checks calls, while `!` runs outside the model.
 - **[Measured status.](docs/manual.md#the-status-bar)** Chips show available
@@ -174,7 +175,7 @@ catalogue in the picker when a key happens to be in the environment —
 then runs `uv tool install
 git+https://github.com/docwilde/doxa`. DOXA is not on PyPI. Re-running is
 safe and never touches an existing `~/.doxa/config.toml`. Add `sh -s --
-v1.17.0` to pin a tag instead of tracking `main`. Read it first if you
+v1.18.0` to pin a tag instead of tracking `main`. Read it first if you
 would rather not pipe a stranger's script into `sh`.
 
 For the default install that tracks `main`, `/update` refreshes the uv tool
@@ -323,9 +324,9 @@ and key — marking any your terminal cannot send.
 Beta, and a working daily driver for its author. Everything in
 [What you get](#what-you-get) and in the [manual](docs/manual.md) is on
 `main` and behaves as described; [CHANGELOG.md](CHANGELOG.md) has the
-history. `main` is what the install script tracks by default; `v1.17.0`
-pins this release, including remote browser control of local sessions and
-engine-specific model choices. Config keys, socket protocol and command
+history. `main` is what the install script tracks by default; `v1.18.0`
+pins this release, including shared LORE provenance, remote browser control,
+and engine-specific model choices. Config keys, socket protocol and command
 names can still change between minor versions.
 
 **Specified, not built.** Seventeen documents sit in
