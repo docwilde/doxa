@@ -16,6 +16,7 @@ not written from memory.
 - Spawn reservations now enforce session caps while approvals are pending; Codex cancellation reaps its turn process group. Transcript restore reads a bounded tail, and peer delivery retains its initiating turn across awaits.
 - The machine-wide peer bridge now starts with live daemons when remote access is enabled. It accepts Tailscale identity headers only from a Unix-socket peer whose kernel credentials match the configured proxy UID; loopback TCP callers are refused.
 - Split-pane dividers can be dragged, with minimum pane sizes and saved layout weights preserved.
+- The status line now shows an engine chip beside the model selector; changing it sets the default for new sessions while the current session keeps its engine.
 
 ## 1.17.0 — 2026-09-24
 
