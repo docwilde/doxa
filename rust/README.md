@@ -10,14 +10,28 @@ grouped sessions and split panes, accepts prompts, handles resize and scroll,
 and restores the terminal on exit. Existing daemon behavior and memory
 authority remain on the Python side.
 
-Build from this repository:
+Build the native frontend and daemon from this repository:
 
 ```sh
 cargo build --manifest-path rust/doxa-tui/Cargo.toml
-rust/doxa-tui/target/debug/doxa-rs --socket /path/to/existing/daemon.sock
-rust/doxa-tui/target/debug/doxa-rs --list
-rust/doxa-tui/target/debug/doxa-rs --session SESSION_ID
+cargo build --manifest-path rust/doxa-daemon/Cargo.toml
+DOXA_DAEMON_BIN="$PWD/rust/doxa-daemon/target/debug/doxa-daemon" \
+  rust/doxa-tui/target/debug/doxa-rs new
 ```
+
+`doxa-rs` now starts a native Codex session when no live sessions exist in the
+current project. `new` always starts one; `attach ID` reattaches, `stop ID`
+finalizes a running session, `list` shows all live sessions, and `doctor`
+checks executable resolution and registry access. `--session ID` and `--socket`
+remain available. A unique session ID prefix works for `attach` and `stop`.
+The daemon executable is located beside `doxa-rs`, then on `PATH`; an absolute
+`DOXA_DAEMON_BIN` overrides that search. The native Codex host needs the
+`codex` and `python3` executables on `PATH`, or explicit `--codex-bin` and
+`--lore-python` paths. The Python interpreter needs DOXA and LORE installed.
+`--model` overrides `DOXA_MODEL` and the Codex entry under `[models]` in
+`$DOXA_HOME/config.toml`; `--linger` overrides `DOXA_LINGER_SECS` and the
+`linger_secs` config value. `--sandbox` sets the native Codex sandbox. Use
+`--engine fixture` only for local integration checks.
 
 Or compile and install the preview from a ref with the POSIX installer:
 
