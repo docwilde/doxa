@@ -25,11 +25,7 @@ fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
 fn pane_boundary(app: &App) -> (u16, u16) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(3),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
         .split(app.size)[0];
     let body = if app.rail_visible {
         Layout::default()
@@ -86,7 +82,7 @@ fn horizontal_divider_drag_respects_minimum_height_and_resize_cancels_drag() {
     assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), x, y)));
     app.handle(mouse(MouseEventKind::Drag(MouseButton::Left), x, 39));
     let (_, boundary) = pane_boundary(&app);
-    assert!(37 - boundary >= 8);
+    assert!(39 - boundary >= 8);
     app.handle(mouse(MouseEventKind::Drag(MouseButton::Left), x, 0));
     let (_, boundary) = pane_boundary(&app);
     assert!(boundary >= 8);
@@ -139,6 +135,61 @@ fn screen(app: &App, width: u16, height: u16) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[test]
+fn two_panes_keep_distinct_prompts_and_live_identity_chips_at_80x24() {
+    let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"one","engine":"codex","model":"sol"}));
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"two","engine":"claude","model":null}));
+    app.groups[1].tabs.push("two".into());
+    for c in "first draft".chars() { app.handle(key(KeyCode::Char(c), KeyModifiers::NONE)); }
+    app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT));
+    for c in "second draft".chars() { app.handle(key(KeyCode::Char(c), KeyModifiers::NONE)); }
+    let rendered = screen(&app, 80, 24);
+    assert!(rendered.contains("> first draft"), "{rendered}");
+    assert!(rendered.contains("> second draft"), "{rendered}");
+    assert!(rendered.contains("[codex] [sol]"), "{rendered}");
+    assert!(rendered.contains("[claude]"), "{rendered}");
+    assert!(!rendered.contains("[session]"));
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.take_prompts(), vec![("two".into(), "second draft".into())]);
+    app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT));
+    assert_eq!(app.input, "first draft");
+    app.apply_daemon_frame(&json!({"type":"event","session_id":"one","event":{"type":"model_changed","data":{"model":"astra"}}}));
+    let rendered = screen(&app, 80, 24);
+    assert!(rendered.contains("[codex] [astra]"), "{rendered}");
+    assert!(!rendered.contains("[codex] [sol]"));
+}
+
+#[test]
+fn same_session_in_two_panes_keeps_independent_drafts() {
+    let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"one","engine":"codex","model":"sol"}));
+    app.groups[1].tabs.push("one".into());
+    app.handle(key(KeyCode::Char('a'), KeyModifiers::NONE));
+    app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT));
+    app.handle(key(KeyCode::Char('b'), KeyModifiers::NONE));
+    let rendered = screen(&app, 80, 24);
+    assert!(rendered.contains("> a"), "{rendered}");
+    assert!(rendered.contains("> b"), "{rendered}");
+    app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT));
+    assert_eq!(app.input, "a");
+}
+
+#[test]
+fn identity_chips_follow_status_and_sanitize_daemon_values() {
+    let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"one","engine":"bad\u{1b}[31m","model":null}));
+    let rendered = screen(&app, 80, 24);
+    assert!(!rendered.contains('\u{1b}'));
+    assert!(!rendered.contains("[session]"));
+    app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{"session_id":"one","engine":"claude","model":"opus"}}));
+    assert!(screen(&app, 80, 24).contains("[claude] [opus]"));
+    app.apply_daemon_frame(&json!({"type":"event","session_id":"one","event":{"type":"model_changed","data":{"model":null}}}));
+    let rendered = screen(&app, 80, 24);
+    assert!(rendered.contains("[claude]"));
+    assert!(!rendered.contains("[opus]"));
 }
 
 #[test]

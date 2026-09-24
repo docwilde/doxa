@@ -369,7 +369,8 @@ pub struct App {
     pub rail_selected: usize,
     pub focus: Focus,
     pub input: String,
-    input_drafts: HashMap<String, String>,
+    input_drafts: HashMap<(usize, String), String>,
+    session_identity: HashMap<String, (Option<String>, Option<String>)>,
     pub pending_prompts: Vec<(String, String)>,
     pub input_requests: Vec<InputRequest>,
     pub pending_answers: Vec<(String, String, serde_json::Value)>,
@@ -422,6 +423,7 @@ impl Default for App {
             focus: Focus::Prompt,
             input: String::new(),
             input_drafts: HashMap::new(),
+            session_identity: HashMap::new(),
             pending_prompts: Vec::new(),
             input_requests: Vec::new(),
             pending_answers: Vec::new(),
@@ -492,12 +494,9 @@ impl App {
                 let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else {
                     return false;
                 };
-                let model = safe_label(
-                    frame
-                        .get("model")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("session"),
-                );
+                let model = frame.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
+                let engine = frame.get("engine").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
+                self.session_identity.insert(id.to_owned(), (engine, model.clone()));
                 let cwd = safe_label(frame.get("cwd").and_then(|v| v.as_str()).unwrap_or(""));
                 if let Some(raw) = frame.get("cwd").and_then(|v| v.as_str()) {
                     let path = PathBuf::from(raw);
@@ -513,12 +512,12 @@ impl App {
                     .unwrap_or_default();
                 self.apply_update(DaemonUpdate::Upsert(Session {
                     id: id.into(),
-                    title: model.clone(),
+                    title: model.clone().unwrap_or_else(|| safe_label(id)),
                     collection: cwd,
                     transcript,
                     status: "Connected".into(),
                 }));
-                self.notice = format!("Connected · {model}");
+                self.notice = format!("Connected · {}", model.as_deref().unwrap_or(id));
                 true
             }
             "event" => {
@@ -544,6 +543,12 @@ impl App {
                     self.peer_map.event(&id, event_type, data);
                 }
                 match event_type {
+                    "model_changed" => {
+                        if let Some(identity) = self.session_identity.get_mut(&id) {
+                            identity.1 = data.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
+                        }
+                        true
+                    }
                     "text_delta" => {
                         let Some(text) = data.get("text").and_then(|v| v.as_str()) else {
                             return false;
@@ -637,6 +642,19 @@ impl App {
                 self.peer_map.roster(id, frame)
             }
             "reply" => {
+                if let Some(status) = frame.get("status") {
+                    let id = status.get("session_id").and_then(|v| v.as_str())
+                        .or_else(|| frame.get("session_id").and_then(|v| v.as_str()));
+                    if let Some(id) = id {
+                        let identity = self.session_identity.entry(id.to_owned()).or_default();
+                        if status.get("engine").is_some() {
+                            identity.0 = status.get("engine").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
+                        }
+                        if status.get("model").is_some() {
+                            identity.1 = status.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
+                        }
+                    }
+                }
                 let ok = frame.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
                 self.notice = if ok {
                     "Request accepted".into()
@@ -783,10 +801,7 @@ impl App {
     }
 
     pub fn handle(&mut self, event: Event) -> bool {
-        let before = self.groups[self.active_group]
-            .active_id()
-            .unwrap_or("")
-            .to_owned();
+        let before = (self.active_group, self.groups[self.active_group].active_id().unwrap_or("").to_owned());
         let changed = match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
@@ -801,10 +816,7 @@ impl App {
             Event::Mouse(mouse) => self.mouse(mouse),
             _ => false,
         };
-        let after = self.groups[self.active_group]
-            .active_id()
-            .unwrap_or("")
-            .to_owned();
+        let after = (self.active_group, self.groups[self.active_group].active_id().unwrap_or("").to_owned());
         if before != after {
             self.input_drafts
                 .insert(before, std::mem::take(&mut self.input));
@@ -1380,11 +1392,7 @@ impl App {
     fn layout(&self, area: Rect) -> PaneLayout {
         let outer = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(3),
-                Constraint::Length(3),
-                Constraint::Length(1),
-            ])
+            .constraints([Constraint::Min(3), Constraint::Length(1)])
             .split(area);
         let min_body = if self.split == Split::Vertical {
             MIN_PANE_WIDTH * 2
@@ -1503,6 +1511,22 @@ impl App {
                         self.drag = Some(DragTarget::Pane(self.split));
                     }
                 }
+                if self.drag.is_none() {
+                    if let Some(panes) = layout.panes {
+                        for (index, pane) in panes.iter().enumerate() {
+                            if mouse.column >= pane.x && mouse.column < pane.right()
+                                && mouse.row >= pane.y && mouse.row < pane.bottom() {
+                                self.active_group = index;
+                                self.focus = if mouse.row >= pane.bottom().saturating_sub(4) {
+                                    Focus::Prompt
+                                } else {
+                                    Focus::Transcript
+                                };
+                                return true;
+                            }
+                        }
+                    }
+                }
                 self.drag.is_some()
             }
             MouseEventKind::Drag(MouseButton::Left) => {
@@ -1591,14 +1615,6 @@ impl App {
             frame.render_widget(Paragraph::new("DOXA · enlarge terminal"), area);
             return;
         }
-        let outer = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(3),
-                Constraint::Length(3),
-                Constraint::Length(1),
-            ])
-            .split(area);
         let layout = self.layout(area);
         if let Some(rail) = layout.rail {
             self.draw_rail(frame, rail);
@@ -1609,24 +1625,12 @@ impl App {
         } else {
             self.draw_group(frame, layout.body, self.active_group);
         }
-        let prompt_title = if self.focus == Focus::Prompt {
-            " Prompt ● "
-        } else {
-            " Prompt "
-        };
-        frame.render_widget(
-            Paragraph::new(format!("> {}", self.input))
-                .style(Style::default().fg(theme::TEXT).bg(theme::RAISED))
-                .block(Block::default().title(prompt_title).borders(Borders::ALL)
-                    .border_style(Style::default().fg(if self.focus == Focus::Prompt { theme::ACCENT } else { theme::BORDER }))),
-            outer[1],
-        );
         frame.render_widget(
             Paragraph::new(format!(
                 "{}  |  Ctrl+P actions · Ctrl+R history · F2 diff · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
                 self.notice
             )).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
-            outer[2],
+            Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
         );
         self.draw_tool_cards(frame, area);
         if self.map_modal {
@@ -1950,6 +1954,7 @@ impl App {
             .constraints([
                 Constraint::Length(2),
                 Constraint::Min(1),
+                Constraint::Length(3),
                 Constraint::Length(1),
             ])
             .split(area);
@@ -2007,10 +2012,32 @@ impl App {
                     .border_style(Style::default().fg(theme::BORDER))),
             inner[1],
         );
-        let status = session.map(|s| s.status.as_str()).unwrap_or("No session");
+        let active = self.active_group == index;
+        let draft = group.active_id().map(|id| {
+            if active { self.input.as_str() } else { self.input_drafts.get(&(index, id.to_owned())).map(String::as_str).unwrap_or("") }
+        }).unwrap_or("");
         frame.render_widget(
-            Paragraph::new(format!(" {} ", status)).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
+            Paragraph::new(format!("> {draft}"))
+                .style(Style::default().fg(theme::TEXT).bg(theme::RAISED))
+                .block(Block::default()
+                    .title(if active && self.focus == Focus::Prompt { " Prompt ● " } else { " Prompt " })
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(if active && self.focus == Focus::Prompt { theme::ACCENT } else { theme::BORDER }))),
             inner[2],
+        );
+        let status = session.map(|s| s.status.as_str()).unwrap_or("No session");
+        let identity = group.active_id().and_then(|id| self.session_identity.get(id));
+        let engine = identity.and_then(|pair| pair.0.as_deref());
+        let model = identity.and_then(|pair| pair.1.as_deref());
+        let chips = match (engine, model) {
+            (Some(engine), Some(model)) => format!("  [{engine}] [{model}]"),
+            (Some(engine), None) => format!("  [{engine}]"),
+            (None, Some(model)) => format!("  [{model}]"),
+            (None, None) => String::new(),
+        };
+        frame.render_widget(
+            Paragraph::new(format!(" {}{} ", status, chips)).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
+            inner[3],
         );
     }
 }
