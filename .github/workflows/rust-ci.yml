@@ -23,5 +23,9 @@ jobs:
         run: rustup toolchain install stable --profile minimal
       - name: Test Rust frontend
         run: cargo +stable test --locked --manifest-path rust/doxa-tui/Cargo.toml
+      - name: Test Claude sidecar client
+        run: cargo +stable test --locked --manifest-path rust/doxa-claude/Cargo.toml
+      - name: Check Claude sidecar syntax
+        run: python3 -m py_compile rust/doxa-claude/claude_sidecar.py
       - name: Build release binary
         run: cargo +stable build --locked --release --manifest-path rust/doxa-tui/Cargo.toml
