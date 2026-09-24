@@ -34,17 +34,27 @@ fn rejects_oversized_output_and_input() {
 fn times_out_when_child_stalls() {
     let (_dir, mut bridge) = fake("time.sleep(5)");
     assert!(matches!(bridge.recv(Duration::from_millis(20)), Err(Error::Timeout)));
+    assert!(bridge.request("ping", json!({})).is_ok(), "receive timeout must leave idle bridge usable");
 }
 
 #[test]
 fn write_timeout_when_child_stops_reading() {
     let (_dir, mut bridge) = fake("time.sleep(5)");
-    let started = Instant::now();
-    assert!(matches!(
-        bridge.request_with_timeout("prompt", json!({"text":"x".repeat(MAX_FRAME - 200)}), Duration::from_millis(50)),
-        Err(Error::Timeout)
-    ));
-    assert!(started.elapsed() < Duration::from_secs(2));
+    let mut timed_out = false;
+    // Pipe capacity varies by runner. Fill it with bounded frames until a
+    // write actually blocks; a completed write is a valid result.
+    for _ in 0..512 {
+        match bridge.request_with_timeout(
+            "prompt", json!({"text":"x".repeat(MAX_FRAME - 200)}),
+            Duration::from_millis(50),
+        ) {
+            Ok(_) => continue,
+            Err(Error::Timeout) => { timed_out = true; break; }
+            Err(other) => panic!("unexpected write result: {other}"),
+        }
+    }
+    assert!(timed_out, "pipe did not fill after 512 near-max frames");
+    assert!(matches!(bridge.request("ping", json!({})), Err(Error::Closed)));
 }
 
 #[test]

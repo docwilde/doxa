@@ -19,7 +19,8 @@ provided they must be equal; a lone `resume` also becomes the session ID.
 The Rust client caps input and output frames, bounds the receive queue, applies
 startup and read timeouts, a 15-second maximum write deadline, and kills the
 sidecar's process group on write timeout or drop, including SDK CLI children
-that remain in that group. The sidecar deliberately
+that remain in that group. A `Bridge::recv` timeout is an idle poll result and
+leaves the process running. The sidecar deliberately
 does not print SDK exception text. Neither side logs prompts or secrets.
 `Bridge::recv` returns events and replies in arrival order; the host must
 correlate reply IDs and render events. No Rust TUI wiring is claimed here.

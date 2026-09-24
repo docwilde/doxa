@@ -101,6 +101,7 @@ impl Bridge {
 
     /// `timeout` can shorten, but never extend, the 15-second write bound.
     pub fn request_with_timeout(&mut self, method: &str, params: Value, timeout: Duration) -> Result<u64, Error> {
+        if self.terminated { return Err(Error::Closed); }
         if method.is_empty() || !params.is_object() { return Err(Error::Protocol); }
         let id = self.next_id;
         self.next_id = id.checked_add(1).ok_or(Error::Protocol)?;
@@ -139,6 +140,8 @@ impl Bridge {
         Ok(id)
     }
 
+    /// A receive timeout means no frame arrived during this poll. It does not
+    /// terminate an otherwise healthy idle session; callers may poll again.
     pub fn recv(&mut self, timeout: Duration) -> Result<Value, Error> {
         self.frames.recv_timeout(timeout).map_err(|e| match e {
             mpsc::RecvTimeoutError::Timeout => Error::Timeout,
