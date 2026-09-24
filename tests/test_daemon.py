@@ -214,6 +214,8 @@ async def test_hello_frame_is_version_stamped(tmp_path, monkeypatch):
         assert hello["doxa"] == __version__
         assert hello["session_id"] == daemon.session_id
         assert isinstance(hello["next_seq"], int)
+        assert hello["transcript_path"] == str(daemon.engine.transcript_path)
+        assert hello["transcript_bytes"] == 0  # no prompt persisted yet
         writer.close()
 
 
