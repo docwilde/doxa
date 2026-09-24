@@ -20,6 +20,25 @@ PROTOCOL = "doxa-claude-sidecar"
 VERSION = 1
 
 
+def validate_identity(session_id: str | None, resume: str | None) -> tuple[str | None, str | None]:
+    """Reject unsafe or contradictory IDs before SessionEngine touches paths."""
+    from doxa.identity import valid_session_id
+
+    if session_id is not None and (
+        not isinstance(session_id, str) or not valid_session_id(session_id)
+    ):
+        raise ValueError("invalid session id")
+    if resume is not None and (
+        not isinstance(resume, str) or not valid_session_id(resume)
+    ):
+        raise ValueError("invalid resume id")
+    if resume is not None:
+        if session_id is not None and session_id != resume:
+            raise ValueError("resume must match session id")
+        session_id = resume
+    return session_id, resume
+
+
 def emit(frame: dict) -> None:
     raw = json.dumps(frame, ensure_ascii=False, separators=(",", ":")).encode()
     if len(raw) + 1 > MAX_FRAME:
@@ -78,11 +97,11 @@ async def run() -> None:
                 cwd = params["cwd"]
                 if not isinstance(cwd, str) or not os.path.isdir(cwd):
                     raise ValueError("invalid cwd")
-                session_id = params.get("session_id")
-                resume = params.get("resume")
+                session_id, resume = validate_identity(
+                    params.get("session_id"), params.get("resume")
+                )
                 model = params.get("model")
-                if any(v is not None and not isinstance(v, str)
-                       for v in (session_id, resume, model)):
+                if model is not None and not isinstance(model, str):
                     raise ValueError("invalid start option")
                 options = {"cwd": cwd, "session_id": session_id, "resume": resume}
                 if model is not None:

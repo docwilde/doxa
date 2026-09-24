@@ -13,9 +13,13 @@ Available methods: `start` (`cwd`, optional `session_id`, `resume`, `model`),
 `prompt` (`text`), `answer` (`id`, `answer`), `interrupt` (empty params), and
 `finalize` (empty params). `prompt` acknowledges scheduling; turn completion
 arrives as an event. A second prompt while a turn runs is rejected in v1.
+`session_id` and `resume` must pass DOXA's session ID check. When both are
+provided they must be equal; a lone `resume` also becomes the session ID.
 
 The Rust client caps input and output frames, bounds the receive queue, applies
-startup and read timeouts, and kills the child on drop. The sidecar deliberately
+startup and read timeouts, a 15-second maximum write deadline, and kills the
+sidecar's process group on write timeout or drop, including SDK CLI children
+that remain in that group. The sidecar deliberately
 does not print SDK exception text. Neither side logs prompts or secrets.
 `Bridge::recv` returns events and replies in arrival order; the host must
 correlate reply IDs and render events. No Rust TUI wiring is claimed here.

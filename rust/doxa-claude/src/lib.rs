@@ -3,16 +3,19 @@
 
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const PROTOCOL: &str = "doxa-claude-sidecar";
 pub const VERSION: u64 = 1;
 pub const MAX_FRAME: usize = 64 * 1024;
 const START_TIMEOUT: Duration = Duration::from_secs(15);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug)]
 pub enum Error {
@@ -27,7 +30,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "sidecar I/O: {e}"),
-            Self::Timeout => write!(f, "sidecar response timed out"),
+            Self::Timeout => write!(f, "sidecar operation timed out"),
             Self::Closed => write!(f, "sidecar closed"),
             Self::Oversize => write!(f, "sidecar frame exceeds 64 KiB"),
             Self::Protocol => write!(f, "invalid sidecar protocol frame"),
@@ -44,6 +47,7 @@ pub struct Bridge {
     stdin: ChildStdin,
     frames: Receiver<Result<Value, Error>>,
     next_id: u64,
+    terminated: bool,
 }
 
 impl Bridge {
@@ -51,9 +55,16 @@ impl Bridge {
     pub fn spawn(python: impl AsRef<Path>, script: impl AsRef<Path>) -> Result<Self, Error> {
         let mut child = Command::new(python.as_ref())
             .arg("-u").arg(script.as_ref())
+            .process_group(0)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
             .spawn()?;
         let stdin = child.stdin.take().ok_or(Error::Closed)?;
+        let flags = unsafe { libc::fcntl(stdin.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(stdin.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            let _ = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+            let _ = child.wait();
+            return Err(Error::Io(io::Error::last_os_error()));
+        }
         let stdout = child.stdout.take().ok_or(Error::Closed)?;
         let (tx, rx) = mpsc::sync_channel(32);
         thread::spawn(move || {
@@ -74,7 +85,7 @@ impl Bridge {
                 }
             }
         });
-        let mut bridge = Self { child, stdin, frames: rx, next_id: 1 };
+        let mut bridge = Self { child, stdin, frames: rx, next_id: 1, terminated: false };
         let hello = bridge.recv(START_TIMEOUT)?;
         if hello["type"] != "hello" || hello["protocol"] != PROTOCOL || hello["version"] != VERSION {
             return Err(Error::Protocol);
@@ -85,6 +96,11 @@ impl Bridge {
     /// Acknowledgements and engine events share a stream. Calls only return
     /// the next frame; the host must keep polling to receive turn events.
     pub fn request(&mut self, method: &str, params: Value) -> Result<u64, Error> {
+        self.request_with_timeout(method, params, WRITE_TIMEOUT)
+    }
+
+    /// `timeout` can shorten, but never extend, the 15-second write bound.
+    pub fn request_with_timeout(&mut self, method: &str, params: Value, timeout: Duration) -> Result<u64, Error> {
         if method.is_empty() || !params.is_object() { return Err(Error::Protocol); }
         let id = self.next_id;
         self.next_id = id.checked_add(1).ok_or(Error::Protocol)?;
@@ -92,8 +108,34 @@ impl Bridge {
             .map_err(|_| Error::Protocol)?;
         bytes.push(b'\n');
         if bytes.len() > MAX_FRAME { return Err(Error::Oversize); }
-        self.stdin.write_all(&bytes)?;
-        self.stdin.flush()?;
+        let deadline = Instant::now() + timeout.min(WRITE_TIMEOUT);
+        let mut written = 0;
+        while written < bytes.len() {
+            match self.stdin.write(&bytes[written..]) {
+                Ok(0) => return Err(Error::Closed),
+                Ok(n) => written += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        self.terminate_group();
+                        return Err(Error::Timeout);
+                    };
+                    let millis = remaining.as_millis().max(1).min(i32::MAX as u128) as i32;
+                    let mut fd = libc::pollfd { fd: self.stdin.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
+                    let ready = unsafe { libc::poll(&mut fd, 1, millis) };
+                    if ready < 0 {
+                        let error = io::Error::last_os_error();
+                        if error.kind() == io::ErrorKind::Interrupted { continue; }
+                        return Err(Error::Io(error));
+                    }
+                }
+                Err(e) => return Err(Error::Io(e)),
+            }
+            if written < bytes.len() && Instant::now() >= deadline {
+                self.terminate_group();
+                return Err(Error::Timeout);
+            }
+        }
         Ok(id)
     }
 
@@ -104,11 +146,19 @@ impl Bridge {
         })?
     }
 
+    fn terminate_group(&mut self) {
+        if self.terminated { return; }
+        self.terminated = true;
+        // The sidecar is its own process-group leader. Its SDK CLI children
+        // inherit the group unless they explicitly detach.
+        let _ = unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL) };
+        let _ = self.child.wait();
+    }
+
 }
 
 impl Drop for Bridge {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.terminate_group();
     }
 }

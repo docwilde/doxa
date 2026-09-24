@@ -27,5 +27,7 @@ jobs:
         run: cargo +stable test --locked --manifest-path rust/doxa-claude/Cargo.toml
       - name: Check Claude sidecar syntax
         run: python3 -m py_compile rust/doxa-claude/claude_sidecar.py
+      - name: Test Claude sidecar identity checks
+        run: python3 -m unittest discover -s rust/doxa-claude/tests -p 'test_*.py'
       - name: Build release binary
         run: cargo +stable build --locked --release --manifest-path rust/doxa-tui/Cargo.toml
