@@ -17,12 +17,13 @@ use crossterm::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::{diff_view, markdown, peer_map::PeerMap};
+use crate::theme;
 
 mod tool_cards;
 use tool_cards::ToolCards;
@@ -1585,6 +1586,7 @@ impl App {
 
     pub fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
+        frame.render_widget(Block::default().style(Style::default().bg(theme::BASE).fg(theme::TEXT)), area);
         if area.width < 20 || area.height < 5 {
             frame.render_widget(Paragraph::new("DOXA · enlarge terminal"), area);
             return;
@@ -1614,14 +1616,16 @@ impl App {
         };
         frame.render_widget(
             Paragraph::new(format!("> {}", self.input))
-                .block(Block::default().title(prompt_title).borders(Borders::ALL)),
+                .style(Style::default().fg(theme::TEXT).bg(theme::RAISED))
+                .block(Block::default().title(prompt_title).borders(Borders::ALL)
+                    .border_style(Style::default().fg(if self.focus == Focus::Prompt { theme::ACCENT } else { theme::BORDER }))),
             outer[1],
         );
         frame.render_widget(
             Paragraph::new(format!(
                 "{}  |  Ctrl+P actions · Ctrl+R history · F2 diff · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
                 self.notice
-            )),
+            )).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             outer[2],
         );
         self.draw_tool_cards(frame, area);
@@ -1654,8 +1658,8 @@ impl App {
             let session = &self.sessions[index];
             let label = format!(" {} {} · {}", if position == self.history_selected { '›' } else { ' ' },
                 safe_label(&session.title), safe_label(&session.id));
-            let style = if position == self.history_selected { Style::default().fg(Color::Black).bg(Color::Cyan) }
-                else { Style::default().fg(Color::White) };
+            let style = if position == self.history_selected { Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT) }
+                else { Style::default().fg(theme::SECONDARY) };
             lines.push(Line::styled(label, style));
         }
         if let Some(&index) = matches.get(self.history_selected) {
@@ -1666,7 +1670,8 @@ impl App {
         frame.render_widget(Clear, modal);
         frame.render_widget(Paragraph::new(lines).block(Block::default()
             .title(" Session history · type to filter · Enter open · Esc close ")
-            .borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan))), modal);
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), modal);
     }
 
     fn draw_diff(&self, frame: &mut Frame, area: Rect) {
@@ -1680,14 +1685,15 @@ impl App {
             .skip(usize::from(self.diff_scroll))
             .take(usize::from(height.saturating_sub(2)))
             .map(|line| {
-            let color = if line.starts_with('+') && !line.starts_with("+++") { Color::Green }
-                else if line.starts_with('-') && !line.starts_with("---") { Color::Red }
-                else if line.starts_with("@@") { Color::Cyan } else { Color::White };
+            let color = if line.starts_with('+') && !line.starts_with("+++") { theme::SUCCESS }
+                else if line.starts_with('-') && !line.starts_with("---") { theme::ERROR }
+                else if line.starts_with("@@") { theme::ACCENT } else { theme::SECONDARY };
             Line::styled(line.to_owned(), Style::default().fg(color))
         }).collect();
         frame.render_widget(Paragraph::new(rows)
             .block(Block::default().title(" Worktree diff · ↑/↓ scroll · R refresh · F2/Esc close ")
-                .borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan))), modal);
+                .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), modal);
     }
 
     fn draw_actions(&self, frame: &mut Frame, area: Rect) {
@@ -1717,11 +1723,11 @@ impl App {
             .map(|(index, (label, hint))| {
                 let style = if index == self.action_selected {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
+                        .fg(theme::ACCENT)
+                        .bg(theme::HIGHLIGHT)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(theme::SECONDARY)
                 };
                 Line::from(format!(
                     " {} {:<28} {}",
@@ -1742,7 +1748,8 @@ impl App {
                 Block::default()
                     .title(" Actions · ↑/↓ choose · Enter open · Esc close ")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan)),
+                    .border_style(Style::default().fg(theme::BORDER))
+                    .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             ),
             modal,
         );
@@ -1799,7 +1806,8 @@ impl App {
                     Block::default()
                         .title(" Tool activity · ↑/↓ select · PgUp/PgDn scroll · Esc close ")
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Cyan)),
+                        .border_style(Style::default().fg(theme::BORDER))
+                    .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
                 ),
             modal,
         );
@@ -1873,7 +1881,8 @@ impl App {
                     Block::default()
                         .title(format!(" Input required · {} ", request.kind))
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Yellow)),
+                        .border_style(Style::default().fg(theme::ACCENT))
+                        .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
                 ),
             modal,
         );
@@ -1896,7 +1905,7 @@ impl App {
                         }
                     ),
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(theme::ACCENT)
                         .add_modifier(Modifier::BOLD),
                 ));
             }
@@ -1914,14 +1923,15 @@ impl App {
             lines.push(Line::from("  No sessions"));
         }
         frame.render_widget(
-            Paragraph::new(lines).block(
+            Paragraph::new(lines).style(Style::default().fg(theme::SECONDARY).bg(theme::RAIL)).block(
                 Block::default()
                     .title(if self.focus == Focus::Rail {
                         " Sessions ● "
                     } else {
                         " Sessions "
                     })
-                    .borders(Borders::ALL),
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::BORDER)),
             ),
             area,
         );
@@ -1964,7 +1974,7 @@ impl App {
         .select(group.active.min(group.tabs.len().saturating_sub(1)))
         .highlight_style(
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         )
         .block(
@@ -1978,9 +1988,10 @@ impl App {
                         ""
                     }
                 ))
-                .borders(Borders::ALL),
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::BORDER)),
         );
-        frame.render_widget(tabs, inner[0]);
+        frame.render_widget(tabs.style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), inner[0]);
         let content = session
             .map(|s| s.transcript.as_str())
             .unwrap_or("No session open. Select one in the rail and press Enter.");
@@ -1989,14 +2000,16 @@ impl App {
             transcript_window(lines, inner[1].height, inner[1].y, group.scroll);
         frame.render_widget(
             Paragraph::new(lines)
+                .style(Style::default().fg(theme::TEXT).bg(theme::BASE))
                 .scroll((scroll_from_top, 0))
                 .wrap(Wrap { trim: false })
-                .block(Block::default().borders(Borders::LEFT | Borders::RIGHT)),
+                .block(Block::default().borders(Borders::LEFT | Borders::RIGHT)
+                    .border_style(Style::default().fg(theme::BORDER))),
             inner[1],
         );
         let status = session.map(|s| s.status.as_str()).unwrap_or("No session");
         frame.render_widget(
-            Paragraph::new(format!(" {} ", status)).style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(format!(" {} ", status)).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             inner[2],
         );
     }

@@ -1,6 +1,7 @@
 //! Read-only, bounded peer presence and observed communication map.
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
+use crate::theme;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use serde_json::Value;
@@ -219,7 +220,8 @@ impl PeerMap {
             Block::default()
                 .title(" Peer communications · Ctrl+M/Esc close · R refresh ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan)),
+                .border_style(Style::default().fg(theme::BORDER))
+                .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             modal,
         );
         let inside = Rect::new(
@@ -285,7 +287,7 @@ impl PeerMap {
         let detail = format!("{} · {}\nObserved: {} sent / {} received · last {} events\n↑/↓ select peer · lines show observed traffic, not delivery guarantees",
             peer.title, peer.id, peer.sent, peer.received, scope.observations.len());
         frame.render_widget(
-            Paragraph::new(detail).style(Style::default().fg(Color::Gray)),
+            Paragraph::new(detail).style(Style::default().fg(theme::SECONDARY)),
             rows[1],
         );
     }
@@ -329,13 +331,13 @@ fn render_graph(frame: &mut Frame, area: Rect, peers: &[Peer], selected: usize) 
         .enumerate()
         .map(|(index, title)| {
             let color = if index == selected + 1 {
-                Color::Yellow
+                theme::ACCENT
             } else if index == 0 {
-                Color::Cyan
+                theme::BORDER
             } else if peers[index - 1].sent > 0 || peers[index - 1].received > 0 {
-                Color::Green
+                theme::SUCCESS
             } else {
-                Color::DarkGray
+                theme::MUTED
             };
             NodeLayout::new((16, 3))
                 .with_title(title)

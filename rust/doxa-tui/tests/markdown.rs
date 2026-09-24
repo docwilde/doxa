@@ -1,5 +1,6 @@
 use doxa_tui::markdown::render;
-use ratatui::style::{Color, Modifier};
+use doxa_tui::theme;
+use ratatui::style::Modifier;
 use unicode_width::UnicodeWidthStr;
 
 fn plain(source: &str, width: u16) -> Vec<String> {
@@ -21,7 +22,7 @@ fn transcript_prose_and_inline_styles() {
         span.content.contains('e') && span.style.add_modifier.contains(Modifier::ITALIC)
     }));
     assert!(lines.iter().flat_map(|line| &line.spans).any(|span| {
-        span.content.contains('c') && span.style.fg == Some(Color::Yellow)
+        span.content.contains('c') && span.style.fg == Some(theme::ACCENT)
     }));
     assert_eq!(plain("# Summary\n\nUse **strong**, *emphasis*, and `code`.", 80).concat(),
         "SummaryUse strong, emphasis, and code.");
