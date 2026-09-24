@@ -10,6 +10,10 @@ the stable 2.0 release has not been cut.
 - Keep offline archived tabs and their collection and layout metadata when the
   Rust preview saves a shared tabset from a partial live roster.
 - Retry a briefly busy LORE interpreter during sidecar startup.
+- Keep AskUser selections available after refused or uncertain delivery, and
+  retry layout saves after temporary write or roster failures.
+- Preserve safe existing state directory permissions and shut down a Codex
+  child cleanly if the daemon registry heartbeat fails.
 
 ## 2.0.0-alpha.2 — Rust development line (unreleased)
 

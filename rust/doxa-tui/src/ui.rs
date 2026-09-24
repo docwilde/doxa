@@ -1626,6 +1626,10 @@ fn save_layout_if_changed(
     let notice = match store.save_if_complete(app, complete) {
         Ok(true) => {
             *saved_layout = layout;
+            if app.notice.starts_with("Layout save skipped ·") {
+                app.notice.clear();
+                return true;
+            }
             return false;
         }
         Ok(false) => "Layout save skipped · live roster incomplete".into(),
@@ -1713,8 +1717,9 @@ mod tests {
         assert_ne!(saved, crate::ui_state::LayoutSignature::capture(&app));
         assert!(!store.path().exists());
         *complete.lock().unwrap() = true;
-        assert!(!save_layout_if_changed(&mut app, &mut store, &complete, &mut saved));
+        assert!(save_layout_if_changed(&mut app, &mut store, &complete, &mut saved));
         assert_eq!(saved, crate::ui_state::LayoutSignature::capture(&app));
+        assert!(app.notice.is_empty());
         let written: serde_json::Value = serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
         assert_eq!(written["rust_ui"]["rail_width"], 32);
     }
@@ -1732,8 +1737,9 @@ mod tests {
         assert!(save_layout_if_changed(&mut app, &mut store, &complete, &mut saved));
         assert_ne!(saved, crate::ui_state::LayoutSignature::capture(&app));
         std::fs::remove_dir(store.path()).unwrap();
-        assert!(!save_layout_if_changed(&mut app, &mut store, &complete, &mut saved));
+        assert!(save_layout_if_changed(&mut app, &mut store, &complete, &mut saved));
         assert_eq!(saved, crate::ui_state::LayoutSignature::capture(&app));
+        assert!(app.notice.is_empty());
         let written: serde_json::Value = serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
         assert_eq!(written["rust_ui"]["rail_width"], 33);
     }
