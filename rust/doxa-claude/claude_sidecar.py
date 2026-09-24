@@ -106,8 +106,9 @@ async def run() -> None:
                 options = {"cwd": cwd, "session_id": session_id, "resume": resume}
                 if model is not None:
                     options["model"] = model
-                engine = SessionEngine(**options)
-                started = await engine.start()
+                candidate = SessionEngine(**options)
+                started = await candidate.start()
+                engine = candidate
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": {"event": started.type, "data": started.data}})
                 peer_task = asyncio.create_task(publish_out_of_band())
