@@ -33,6 +33,7 @@ const MIN_PANE_WIDTH: u16 = 28;
 const MIN_PANE_HEIGHT: u16 = 8;
 const MIN_RAIL_WIDTH: u16 = 12;
 const MAX_PENDING_PROMPTS: usize = 32;
+const MAX_INPUT_REQUESTS: usize = 32;
 // JSON may expand one input byte to a six-byte Unicode escape.
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
@@ -128,17 +129,28 @@ fn event_string(data: &serde_json::Value, key: &str) -> Option<String> {
         .map(event_field)
 }
 
+fn transcript_tail(text: &str) -> &str {
+    if text.len() <= MAX_TRANSCRIPT_BYTES { return text; }
+    let mut start = text.len() - MAX_TRANSCRIPT_BYTES;
+    while !text.is_char_boundary(start) { start += 1; }
+    &text[start..]
+}
+
 fn append_transcript(session: &mut Session, text: &str) -> bool {
+    if text.len() >= MAX_TRANSCRIPT_BYTES {
+        session.transcript.clear();
+        session.transcript.push_str(transcript_tail(text));
+        return true;
+    }
+    let keep_existing = MAX_TRANSCRIPT_BYTES - text.len();
+    let clipped = session.transcript.len() > keep_existing;
+    if clipped {
+        let mut start = session.transcript.len() - keep_existing;
+        while !session.transcript.is_char_boundary(start) { start += 1; }
+        session.transcript.drain(..start);
+    }
     session.transcript.push_str(text);
-    if session.transcript.len() <= MAX_TRANSCRIPT_BYTES {
-        return false;
-    }
-    let mut start = session.transcript.len() - MAX_TRANSCRIPT_BYTES;
-    while !session.transcript.is_char_boundary(start) {
-        start += 1;
-    }
-    session.transcript.drain(..start);
-    true
+    clipped
 }
 
 fn structured_event(event_type: &str, data: &serde_json::Value) -> Option<String> {
@@ -511,7 +523,8 @@ impl Default for App {
 impl App {
     pub fn apply_update(&mut self, update: DaemonUpdate) {
         match update {
-            DaemonUpdate::Upsert(session) => {
+            DaemonUpdate::Upsert(mut session) => {
+                session.transcript = transcript_tail(&session.transcript).to_owned();
                 self.offline_ids.remove(&session.id);
                 if let Some(existing) = self.sessions.iter_mut().find(|s| s.id == session.id) {
                     *existing = session;
@@ -525,7 +538,7 @@ impl App {
             }
             DaemonUpdate::Transcript { id, markdown } => {
                 if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
-                    s.transcript = markdown;
+                    s.transcript = transcript_tail(&markdown).to_owned();
                 }
             }
             DaemonUpdate::Status { id, text } => {
@@ -674,7 +687,11 @@ impl App {
                                 self.permission_picker = None;
                                 self.permission_confirm_dont_ask = false;
                                 self.engine_picker = false;
-                                self.input_requests.push(request);
+                                if self.input_requests.len() < MAX_INPUT_REQUESTS {
+                                    self.input_requests.push(request);
+                                } else {
+                                    self.notice = "Too many input requests · inspect the session directly".into();
+                                }
                             }
                         } else {
                             self.notice = "Invalid input request · inspect another client".into();
@@ -3058,6 +3075,35 @@ mod tests {
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.groups[0].active_id(), Some("beta"));
         assert!(!app.history_modal);
+    }
+
+    #[test]
+    fn restored_and_appended_transcripts_keep_only_bounded_utf8_tail() {
+        let mut app = App::default();
+        let long = format!("{}éEND", "a".repeat(MAX_TRANSCRIPT_BYTES));
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "s".into(), title: "S".into(),
+            collection: "repo".into(), transcript: long.clone(), status: "Ready".into() }));
+        assert!(app.sessions[0].transcript.len() <= MAX_TRANSCRIPT_BYTES);
+        assert!(app.sessions[0].transcript.ends_with("éEND"));
+        app.apply_update(DaemonUpdate::Transcript { id: "s".into(), markdown: long.clone() });
+        assert!(app.sessions[0].transcript.len() <= MAX_TRANSCRIPT_BYTES);
+        let session = &mut app.sessions[0];
+        assert!(append_transcript(session, &long));
+        assert!(session.transcript.len() <= MAX_TRANSCRIPT_BYTES);
+        assert!(session.transcript.ends_with("éEND"));
+    }
+
+    #[test]
+    fn input_requests_have_a_visible_capacity_limit() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "engine":"claude"}));
+        for index in 0..=MAX_INPUT_REQUESTS {
+            app.apply_daemon_frame(&json!({"type":"event", "session_id":"s",
+                "event":{"type":"needs_input", "data":{"id":format!("request-{index}"),
+                    "kind":"permission", "title":"Approve?"}}}));
+        }
+        assert_eq!(app.input_requests.len(), MAX_INPUT_REQUESTS);
+        assert!(app.notice.contains("Too many input requests"));
     }
 
     #[test]
