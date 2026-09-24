@@ -27,6 +27,8 @@ jobs:
         run: cargo +stable test --locked --manifest-path rust/doxa-engines/Cargo.toml
       - name: Test external LORE bridge
         run: cargo +stable test --locked --manifest-path rust/doxa-lore/Cargo.toml
+      - name: Test Rust state compatibility
+        run: cargo +stable test --locked --manifest-path rust/doxa-state/Cargo.toml
       - name: Install uv for Python client integration
         uses: astral-sh/setup-uv@v10.0.1
       - name: Sync Python client dependencies
