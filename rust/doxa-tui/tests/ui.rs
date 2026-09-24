@@ -302,13 +302,27 @@ fn permission_requires_explicit_allow_and_preserves_prompt_draft() {
     app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));
     app.input = "unfinished prompt".into();
     app.apply_daemon_frame(&json!({"type":"event", "session_id":"one", "event":{"type":"needs_input", "data":{
-        "id":"req-1", "kind":"permission", "title":"Run shell command?", "input_summary":"rm file"}}}));
-    assert!(screen(&app, 90, 25).contains("Run shell command?"));
+        "id":"req-1", "kind":"permission", "title":"Run shell command?", "tool_name":"Bash",
+        "display_name":"Execute command", "description":"Deletes a file\u{1b}[31m", "input_summary":"rm file"}}}));
+    let rendered = screen(&app, 90, 25);
+    assert!(rendered.contains("Run shell command?"));
+    assert!(rendered.contains("Execute command"));
+    assert!(rendered.contains("Deletes a file"));
+    assert!(!rendered.contains('\u{1b}'));
     app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
     app.handle(key(KeyCode::Char('a'), KeyModifiers::NONE));
     assert!(app.take_answers().is_empty());
     assert_eq!(app.input, "unfinished prompt");
     app.handle(key(KeyCode::Char('A'), KeyModifiers::SHIFT));
+    assert!(app.input_requests[0].allow_armed);
+    assert!(app.take_answers().is_empty());
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(!app.input_requests[0].allow_armed);
+    assert!(app.take_answers().is_empty());
+    // Some terminals report uppercase letters without a SHIFT modifier.
+    app.handle(key(KeyCode::Char('A'), KeyModifiers::NONE));
+    assert!(app.take_answers().is_empty());
+    app.handle(key(KeyCode::Char('Y'), KeyModifiers::NONE));
     assert_eq!(
         app.take_answers(),
         vec![("one".into(), "req-1".into(), json!({"decision":"allow"}))]
@@ -324,6 +338,21 @@ fn permission_requires_explicit_allow_and_preserves_prompt_draft() {
     app.apply_daemon_frame(&json!({"type":"event", "session_id":"one", "event":{"type":"needs_input_resolved", "data":{"id":"req-1"}}}));
     assert!(app.input_requests.is_empty());
     assert_eq!(app.input, "unfinished prompt");
+}
+
+#[test]
+fn shifted_confirmation_allows_only_after_second_key() {
+    let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));
+    app.apply_daemon_frame(
+        &json!({"type":"event", "session_id":"one", "event":{"type":"needs_input", "data":{
+        "id":"req-shift", "kind":"permission", "tool_name":"Write"}}}),
+    );
+    app.handle(key(KeyCode::Char('A'), KeyModifiers::SHIFT));
+    assert!(app.take_answers().is_empty());
+    assert!(screen(&app, 90, 25).contains("Approval armed"));
+    app.handle(key(KeyCode::Char('Y'), KeyModifiers::SHIFT));
+    assert_eq!(app.take_answers()[0].2, json!({"decision":"allow"}));
 }
 
 #[test]
@@ -371,4 +400,35 @@ fn request_text_is_sanitized_and_spawn_requires_explicit_allow() {
     assert!(app.take_answers().is_empty());
     app.handle(key(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.take_answers()[0].2, json!({"decision":"deny"}));
+}
+
+#[test]
+fn question_dialog_shows_full_question_header_and_descriptions_with_scroll() {
+    let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));
+    let long_description = format!("{}Last line of option detail", "detail line\n".repeat(35));
+    app.apply_daemon_frame(
+        &json!({"type":"event", "session_id":"one", "event":{"type":"needs_input", "data":{
+        "id":"question-1", "kind":"ask_user", "questions":[{
+            "header":"Pick a color", "question":"Which color should the warning icon use?",
+            "options":[
+                {"label":"Red", "description":"Signals danger\u{1b}[31m"},
+                {"label":"Blue", "description":long_description}
+            ]
+        }]}}}),
+    );
+    let first = screen(&app, 90, 25);
+    assert!(first.contains("Pick a color"));
+    assert!(first.contains("Which color should the warning icon use?"));
+    assert!(first.contains("Signals danger"));
+    assert!(!first.contains('\u{1b}'));
+    for _ in 0..3 {
+        app.handle(key(KeyCode::PageDown, KeyModifiers::NONE));
+    }
+    assert!(screen(&app, 90, 25).contains("Last line of option detail"));
+    app.handle(key(KeyCode::Char('2'), KeyModifiers::NONE));
+    assert_eq!(
+        app.take_answers()[0].2,
+        json!({"answers":{"Which color should the warning icon use?":"Blue"}})
+    );
 }

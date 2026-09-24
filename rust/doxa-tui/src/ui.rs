@@ -220,16 +220,30 @@ struct PaneLayout {
 }
 
 #[derive(Clone, Debug)]
+pub struct QuestionOption {
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct InputQuestion {
+    pub question: String,
+    pub header: String,
+    pub options: Vec<QuestionOption>,
+}
+
+#[derive(Clone, Debug)]
 pub struct InputRequest {
     pub session_id: String,
     pub id: String,
     pub kind: String,
     pub heading: String,
-    pub questions: Vec<(String, String, Vec<String>)>,
+    pub questions: Vec<InputQuestion>,
     pub step: usize,
     pub selected: usize,
     pub answers: serde_json::Map<String, serde_json::Value>,
     pub sending: bool,
+    pub allow_armed: bool,
     pub scroll: u16,
 }
 
@@ -251,14 +265,23 @@ impl InputRequest {
                 data["task"].as_str().unwrap_or("")
             )
         } else {
-            format!(
-                "{}\n{}",
-                data["title"]
-                    .as_str()
-                    .or_else(|| data["tool_name"].as_str())
-                    .unwrap_or("Permission request"),
-                data["input_summary"].as_str().unwrap_or("")
-            )
+            let mut text = String::new();
+            for (label, field) in [
+                ("Title", "title"),
+                ("Tool", "tool_name"),
+                ("Display name", "display_name"),
+                ("Description", "description"),
+                ("Input", "input_summary"),
+            ] {
+                if let Some(value) = data[field].as_str().filter(|value| !value.is_empty()) {
+                    text.push_str(&format!("{label}: {value}\n"));
+                }
+            }
+            if text.is_empty() {
+                "Permission request".into()
+            } else {
+                text
+            }
         };
         let questions = if kind == "ask_user" {
             let items = data["questions"].as_array()?;
@@ -267,24 +290,26 @@ impl InputRequest {
             }
             items
                 .iter()
-                .map(|q| {
-                    (
-                        q["question"].as_str().unwrap_or("").to_owned(),
-                        q["header"]
-                            .as_str()
-                            .or_else(|| q["question"].as_str())
-                            .unwrap_or("")
-                            .to_owned(),
-                        q["options"]
-                            .as_array()
-                            .map(|items| {
-                                items
-                                    .iter()
-                                    .filter_map(|o| o["label"].as_str().map(str::to_owned))
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                    )
+                .map(|q| InputQuestion {
+                    question: q["question"].as_str().unwrap_or("").to_owned(),
+                    header: q["header"].as_str().unwrap_or("").to_owned(),
+                    options: q["options"]
+                        .as_array()
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|o| {
+                                    Some(QuestionOption {
+                                        label: o["label"].as_str()?.to_owned(),
+                                        description: o["description"]
+                                            .as_str()
+                                            .unwrap_or("")
+                                            .to_owned(),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 })
                 .collect()
         } else {
@@ -300,19 +325,16 @@ impl InputRequest {
             selected: 1,
             answers: serde_json::Map::new(),
             sending: false,
+            allow_armed: false,
             scroll: 0,
         })
     }
 
-    fn options(&self) -> Vec<String> {
-        if self.kind == "ask_user" {
-            self.questions
-                .get(self.step)
-                .map(|q| q.2.clone())
-                .unwrap_or_default()
-        } else {
-            vec!["Deny".into(), "Allow (Shift+A)".into()]
-        }
+    fn option_count(&self) -> usize {
+        self.questions
+            .get(self.step)
+            .map(|q| q.options.len())
+            .unwrap_or(0)
     }
 }
 
@@ -813,6 +835,11 @@ impl App {
         }
         let kind = self.input_requests[index].kind.clone();
         if kind != "ask_user" {
+            if !matches!(key.code, KeyCode::Char('A' | 'Y'))
+                || !(key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+            {
+                self.input_requests[index].allow_armed = false;
+            }
             match key.code {
                 KeyCode::Up => {
                     self.input_requests[index].scroll =
@@ -838,7 +865,7 @@ impl App {
             }
         }
         let answer = if kind == "ask_user" {
-            let count = self.input_requests[index].options().len();
+            let count = self.input_requests[index].option_count();
             match key.code {
                 KeyCode::Esc => Some(serde_json::json!({"declined":true})),
                 KeyCode::Up if count > 0 => {
@@ -848,7 +875,6 @@ impl App {
                     } else {
                         r.selected - 1
                     };
-                    r.scroll = r.selected.saturating_sub(8).min(u16::MAX as usize) as u16;
                     return true;
                 }
                 KeyCode::Down if count > 0 => {
@@ -858,7 +884,6 @@ impl App {
                     } else {
                         r.selected + 1
                     };
-                    r.scroll = r.selected.saturating_sub(8).min(u16::MAX as usize) as u16;
                     return true;
                 }
                 KeyCode::PageUp => {
@@ -888,7 +913,17 @@ impl App {
                 {
                     Some(serde_json::json!({"decision":"deny"}))
                 }
-                KeyCode::Char('A') if key.modifiers == KeyModifiers::SHIFT => {
+                KeyCode::Char('A')
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    self.input_requests[index].allow_armed = true;
+                    self.notice = "Approval armed · press Shift+Y to confirm".into();
+                    return true;
+                }
+                KeyCode::Char('Y')
+                    if self.input_requests[index].allow_armed
+                        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
+                {
                     Some(serde_json::json!({"decision":"allow"}))
                 }
                 _ => None,
@@ -910,11 +945,15 @@ impl App {
 
     fn choose_question(&mut self, index: usize) -> Option<serde_json::Value> {
         let request = &mut self.input_requests[index];
-        let (question, _, options) = request.questions.get(request.step)?;
-        let choice = options.get(request.selected.checked_sub(1)?)?.clone();
+        let question = request.questions.get(request.step)?;
+        let choice = question
+            .options
+            .get(request.selected.checked_sub(1)?)?
+            .label
+            .clone();
         request
             .answers
-            .insert(question.clone(), serde_json::Value::String(choice));
+            .insert(question.question.clone(), serde_json::Value::String(choice));
         request.step += 1;
         request.selected = 1;
         request.scroll = 0;
@@ -1227,33 +1266,45 @@ impl App {
             width,
             height,
         );
-        let heading = if request.kind == "ask_user" {
-            request
-                .questions
-                .get(request.step)
-                .map(|q| q.1.as_str())
-                .unwrap_or("Question unavailable")
-        } else {
-            &request.heading
-        };
-        let mut body = markdown::sanitize(heading);
-        body.push_str("\n\n");
+        let mut body = String::new();
         if request.kind == "ask_user" {
-            for (i, option) in request.options().iter().enumerate() {
-                body.push_str(&format!(
-                    "{} {}. {}\n",
-                    if i + 1 == request.selected {
-                        "▸"
-                    } else {
-                        " "
-                    },
-                    i + 1,
-                    safe_label(option)
-                ));
+            if let Some(question) = request.questions.get(request.step) {
+                if !question.header.is_empty() {
+                    body.push_str("Header: ");
+                    body.push_str(&markdown::sanitize(&question.header));
+                    body.push('\n');
+                }
+                body.push_str("Question: ");
+                body.push_str(&markdown::sanitize(&question.question));
+                body.push_str("\n\n");
+                for (i, option) in question.options.iter().enumerate() {
+                    body.push_str(&format!(
+                        "{} {}. {}\n",
+                        if i + 1 == request.selected {
+                            "▸"
+                        } else {
+                            " "
+                        },
+                        i + 1,
+                        markdown::sanitize(&option.label)
+                    ));
+                    if !option.description.is_empty() {
+                        body.push_str("   Description: ");
+                        body.push_str(&markdown::sanitize(&option.description));
+                        body.push('\n');
+                    }
+                }
+            } else {
+                body.push_str("Question unavailable\n");
             }
-            body.push_str("\n1–9 choose · ↑/↓ then Enter · Esc decline");
+            body.push_str("\n1–9 choose · ↑/↓ then Enter · PgUp/PgDn scroll · Esc decline");
         } else {
-            body.push_str("D deny · Shift+A allow · Esc deny · ↑/↓ scroll");
+            body.push_str(&markdown::sanitize(&request.heading));
+            body.push_str("\n\n");
+            body.push_str("D deny · Esc deny · ↑/↓ scroll\nShift+A then Shift+Y to allow");
+            if request.allow_armed {
+                body.push_str("\nApproval armed · press Shift+Y now");
+            }
         }
         if request.sending {
             body.push_str("\nSending answer…");
