@@ -143,8 +143,12 @@ The LORE sidecar supplies the exact project identity and scrubs every persisted
 string; failure to scrub leaves the new record unwritten. An existing transcript
 without a thread ID refuses a fresh Codex thread. `interrupt` cancels the
 running CLI process group, and `stop` cancels it and closes the daemon. The
-native Codex host does not yet register MCP, integrate LORE context/review/indexing,
-or implement peer messaging. The
+native Codex host prepends a LORE snapshot (up to 64 KiB) to the first provider
+turn only, under a memory header and footer. The snapshot is absent from the
+displayed prompt and transcript, and a resumed provider thread receives no
+duplicate. If the snapshot is unavailable or too large, the turn proceeds
+without context; LORE scrubbing remains required for visible and persisted
+text. The host does not yet register MCP or integrate LORE review/indexing. The
 registry reports the selected engine. `status`, `interrupt`, and `stop` are
 supported; Claude also supports `answer_needs_input`. `peers` returns a
 read-only, same-project roster of live peer IDs and LORE-scrubbed titles (up

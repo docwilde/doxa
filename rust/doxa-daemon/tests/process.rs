@@ -214,6 +214,34 @@ for line in sys.stdin:
     );
 }
 
+fn fake_context_sidecar(path: &Path, snapshot_available: bool) {
+    let snapshot_reply = if snapshot_available {
+        r#"{"ok":True,"text":"fixture-secret durable memory"}"#
+    } else {
+        r#"{"ok":False,"error":"operation_failed"}"#
+    };
+    executable(
+        path,
+        &format!(
+            r#"#!/usr/bin/env python3
+import json, sys
+print(json.dumps({{"type":"hello","proto":1,"capabilities":["scrub","snapshot","transcript_identity"]}}), flush=True)
+for line in sys.stdin:
+    frame = json.loads(line)
+    op = frame.get("op")
+    if op == "transcript_identity":
+        reply = {{"ok":True,"value":{{"projects_dir":frame["cwd"],"slug":"project"}}}}
+    elif op == "snapshot":
+        assert frame["scope"] == "all"
+        reply = {snapshot_reply}
+    else:
+        reply = {{"ok":True,"text":frame.get("text", "").replace("fixture-secret", "[redacted]")}}
+    print(json.dumps({{"type":"reply","id":frame["id"],**reply}}), flush=True)
+"#
+        ),
+    );
+}
+
 fn registry_peer(runtime: &Path, id: &str, scope: &str, title: &str) -> (UnixListener, PathBuf) {
     let socket = runtime.join(format!("{id}.sock"));
     let listener = UnixListener::bind(&socket).unwrap();
@@ -464,6 +492,136 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-
     send(
         &mut socket,
         json!({"type":"call","id":3,"method":"stop","params":{}}),
+    );
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+}
+
+#[test]
+fn codex_memory_reaches_only_first_provider_stdin_and_not_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let first = dir.path().join("first-prompt.txt");
+    let resumed = dir.path().join("resumed-prompts.txt");
+    fake_context_sidecar(&python, true);
+    executable(
+        &codex,
+        &format!(
+            r#"#!/bin/sh
+if [ "$2" = resume ]; then
+  cat >> '{}'
+  printf '\nEND\n' >> '{}'
+else
+  cat > '{}'
+fi
+echo '{{"type":"thread.started","thread_id":"thread_1"}}'
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"answer"}}}}'
+"#,
+            resumed.display(),
+            resumed.display(),
+            first.display()
+        ),
+    );
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    for (id, prompt) in [(1, "fixture-secret first"), (2, "second")] {
+        send(&mut socket, json!({"type":"prompt","id":id,"text":prompt}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        loop {
+            let frame = receive(&mut reader);
+            assert!(!frame.to_string().contains("fixture-secret"));
+            if frame["event"]["type"] == "turn_started" {
+                assert_eq!(
+                    frame["event"]["data"]["prompt"],
+                    prompt.replace("fixture-secret", "[redacted]")
+                );
+            }
+            if frame["event"]["type"] == "turn_done" {
+                break;
+            }
+        }
+    }
+    send(
+        &mut socket,
+        json!({"type":"call","id":4,"method":"stop","params":{}}),
+    );
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+    // Reopen the same DOXA session: the recorded provider thread must resume.
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":3,"text":"third"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    loop {
+        if receive(&mut reader)["event"]["type"] == "turn_done" {
+            break;
+        }
+    }
+    send(
+        &mut socket,
+        json!({"type":"call","id":4,"method":"stop","params":{}}),
+    );
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+
+    let first_text = fs::read_to_string(first).unwrap();
+    assert!(first_text.starts_with("[DOXA MEMORY -- not typed by the user]"));
+    assert!(first_text
+        .contains("fixture-secret durable memory\n[END OF MEMORY]\n\nfixture-secret first"));
+    assert_eq!(
+        fs::read_to_string(resumed).unwrap(),
+        "second\nEND\nthird\nEND\n"
+    );
+    let transcript = fs::read_to_string(dir.path().join("project/codex-session.jsonl")).unwrap();
+    assert!(!transcript.contains("DOXA MEMORY"));
+    assert!(!transcript.contains("durable memory"));
+    assert!(!transcript.contains("fixture-secret"));
+    assert!(transcript.contains("[redacted] first"));
+}
+
+#[test]
+fn unavailable_lore_snapshot_does_not_block_a_scrubbable_codex_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let captured = dir.path().join("stdin.txt");
+    fake_context_sidecar(&python, false);
+    executable(
+        &codex,
+        &format!(
+            "#!/bin/sh\ncat > '{}'\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\n",
+            captured.display()
+        ),
+    );
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(
+        &mut socket,
+        json!({"type":"prompt","id":1,"text":"fixture-secret prompt"}),
+    );
+    assert_eq!(receive(&mut reader)["ok"], true);
+    loop {
+        let event = receive(&mut reader);
+        assert!(!event.to_string().contains("fixture-secret"));
+        if event["event"]["type"] == "turn_done" {
+            assert_eq!(event["event"]["data"]["is_error"], false);
+            break;
+        }
+    }
+    assert_eq!(
+        fs::read_to_string(captured).unwrap(),
+        "fixture-secret prompt"
+    );
+    send(
+        &mut socket,
+        json!({"type":"call","id":2,"method":"stop","params":{}}),
     );
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
