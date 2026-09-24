@@ -3,8 +3,8 @@
 
 use serde_json::Value;
 use crate::transport::TranscriptSnapshot;
-use std::ffi::OsStr;
-use std::fs::{self, File, OpenOptions};
+use std::ffi::{CStr, OsStr, OsString};
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::ffi::OsStrExt;
@@ -44,10 +44,31 @@ fn open_at(parent: &File, name: &OsStr, flags: i32) -> Option<File> {
     if fd < 0 { None } else { Some(unsafe { File::from_raw_fd(fd) }) }
 }
 
-fn entries_in(open_dir: &File) -> Option<fs::ReadDir> {
-    // The fd remains open for the scan. /proc/self/fd gives read_dir a
-    // stable directory handle even if its original pathname is replaced.
-    fs::read_dir(format!("/proc/self/fd/{}", open_dir.as_raw_fd())).ok()
+fn names_in(open_dir: &File, limit: usize) -> Vec<OsString> {
+    // fdopendir owns its descriptor, so duplicate the pinned directory FD.
+    // Names returned by readdir are copied before the next call overwrites
+    // its buffer. No pathname is reopened during enumeration.
+    let fd = unsafe { libc::dup(open_dir.as_raw_fd()) };
+    if fd < 0 { return Vec::new(); }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        unsafe { libc::close(fd); }
+        return Vec::new();
+    }
+    let dir = unsafe { libc::fdopendir(fd) };
+    if dir.is_null() {
+        unsafe { libc::close(fd); }
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    while names.len() < limit {
+        let entry = unsafe { libc::readdir(dir) };
+        if entry.is_null() { break; }
+        let raw = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if raw == b"." || raw == b".." { continue; }
+        names.push(OsStr::from_bytes(raw).to_os_string());
+    }
+    unsafe { libc::closedir(dir); }
+    names
 }
 
 fn read_offline(mut file: File, uid: u32) -> Option<String> {
@@ -76,17 +97,15 @@ fn discover_in(root: &Path) -> Vec<OfflineSession> {
     let uid = unsafe { libc::geteuid() };
     let Ok(root) = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC).open(root) else { return Vec::new(); };
     if !owned_dir(&root, uid) { return Vec::new(); }
-    let Some(projects) = entries_in(&root) else { return Vec::new(); };
+    let projects = names_in(&root, MAX_PROJECTS);
     let mut candidates = Vec::new();
     let mut visited = 0;
-    for project in projects.flatten().take(MAX_PROJECTS) {
-        let Some(dir) = open_at(&root, &project.file_name(), libc::O_RDONLY | libc::O_DIRECTORY) else { continue; };
+    for project in projects {
+        let Some(dir) = open_at(&root, &project, libc::O_RDONLY | libc::O_DIRECTORY) else { continue; };
         if !owned_dir(&dir, uid) { continue; }
-        let Some(files) = entries_in(&dir) else { continue; };
-        for file in files.flatten() {
-            if visited == MAX_FILES { break; }
+        let files = names_in(&dir, MAX_FILES.saturating_sub(visited));
+        for name in files {
             visited += 1;
-            let name = file.file_name();
             let path = Path::new(&name);
             if path.extension().is_none_or(|ext| ext != "jsonl") { continue; }
             let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else { continue; };
@@ -95,7 +114,7 @@ fn discover_in(root: &Path) -> Vec<OfflineSession> {
             let Ok(meta) = open_file.metadata() else { continue; };
             if !meta.is_file() || meta.uid() != uid { continue; }
             let stamp = meta.modified().ok();
-            candidates.push((stamp, id.to_owned(), project.file_name().to_string_lossy().into_owned(), open_file));
+            candidates.push((stamp, id.to_owned(), project.to_string_lossy().into_owned(), open_file));
             if candidates.len() > MAX_OFFLINE {
                 candidates.sort_by(|a, b| b.0.cmp(&a.0));
                 candidates.pop();
@@ -178,6 +197,7 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::os::unix::fs::symlink;
 
     #[test]
@@ -234,5 +254,23 @@ mod tests {
         assert!(rendered.contains("original"));
         assert!(!rendered.contains("replacement"));
         assert!(open_at(&dir, OsStr::new("saved.jsonl"), libc::O_RDONLY).is_none());
+    }
+
+    #[test]
+    fn directory_enumeration_uses_opened_directory_after_path_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("project");
+        let moved = temp.path().join("moved");
+        let replacement = temp.path().join("replacement");
+        fs::create_dir(&original).unwrap();
+        fs::create_dir(&replacement).unwrap();
+        fs::write(original.join("original.jsonl"), b"").unwrap();
+        fs::write(replacement.join("replacement.jsonl"), b"").unwrap();
+        let open_dir = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(&original).unwrap();
+        fs::rename(&original, &moved).unwrap();
+        symlink(&replacement, &original).unwrap();
+        let names = names_in(&open_dir, 10);
+        assert!(names.contains(&OsString::from("original.jsonl")));
+        assert!(!names.contains(&OsString::from("replacement.jsonl")));
     }
 }
