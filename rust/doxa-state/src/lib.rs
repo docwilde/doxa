@@ -7,6 +7,28 @@ use std::fs;
 use std::io::Read;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+pub const MAX_TABSET_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_MACHINE_ID_BYTES: u64 = 256;
+
+fn read_bounded_regular(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    // Recheck the opened inode so a file swapped for a FIFO between path
+    // inspection and open cannot block startup or bypass the size limit.
+    let file = fs::OpenOptions::new().read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.nlink() != 1 || meta.len() > limit {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "unsafe or oversized state file"));
+    }
+    let mut raw = Vec::new();
+    file.take(limit + 1).read_to_end(&mut raw)?;
+    if raw.len() as u64 > limit {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "oversized state file"));
+    }
+    Ok(raw)
+}
 
 /// The ASCII filename grammar in `doxa.identity.valid_session_id`.
 pub fn valid_session_id(id: &str) -> bool {
@@ -73,12 +95,7 @@ pub fn list_daemons(registry_dir: &Path, scope: Option<&str>, scrub: impl Fn(&st
     let Ok(paths) = fs::read_dir(registry_dir) else { return peers };
     for entry in paths.flatten() {
         if entry.path().extension().and_then(|s| s.to_str()) != Some("json") { continue; }
-        let Ok(meta) = fs::symlink_metadata(entry.path()) else { continue; };
-        if !meta.file_type().is_file() || meta.len() > MAX_REGISTRY_BYTES { continue; }
-        use std::os::unix::fs::OpenOptionsExt;
-        let Ok(file) = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(entry.path()) else { continue; };
-        let mut raw = Vec::new();
-        if file.take(MAX_REGISTRY_BYTES + 1).read_to_end(&mut raw).is_err() || raw.len() as u64 > MAX_REGISTRY_BYTES { continue; }
+        let Ok(raw) = read_bounded_regular(&entry.path(), MAX_REGISTRY_BYTES) else { continue; };
         let Ok(value) = serde_json::from_slice::<Value>(&raw) else { continue; };
         let Some(map) = value.as_object() else { continue; };
         if !["session_id", "pid", "socket_path", "cwd", "repo_root", "title", "started_at", "heartbeat_at"]
@@ -121,7 +138,9 @@ pub fn list_daemons(registry_dir: &Path, scope: Option<&str>, scrub: impl Fn(&st
 
 /// Python's config load failure policy: malformed or absent means empty.
 pub fn load_config(path: &Path) -> toml::Table {
-    fs::read_to_string(path).ok().and_then(|s| s.parse::<toml::Table>().ok()).unwrap_or_default()
+    read_bounded_regular(path, MAX_CONFIG_BYTES).ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .and_then(|s| s.parse::<toml::Table>().ok()).unwrap_or_default()
 }
 
 /// `doxa.config.raw` precedence for a key supplied by the caller's settings table.
@@ -167,7 +186,8 @@ pub fn tabset_path(home: &Path, scope_key: &str, machine_id: &str) -> PathBuf {
 
 /// Read an existing machine id. Read-only paths never mint one.
 pub fn machine_id(home: &Path) -> io::Result<String> {
-    let id = fs::read_to_string(home.join("machine-id"))?;
+    let id = String::from_utf8(read_bounded_regular(&home.join("machine-id"), MAX_MACHINE_ID_BYTES)?)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid machine id encoding"))?;
     let id = id.trim();
     if id.is_empty() { return Err(io::Error::new(io::ErrorKind::InvalidData, "empty machine id")); }
     Ok(id.into())
@@ -175,7 +195,7 @@ pub fn machine_id(home: &Path) -> io::Result<String> {
 
 pub fn load_tabset(path: &Path, fallback_scope: &str) -> Option<TabSet> {
     if fallback_scope.is_empty() { return None; }
-    let value: Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    let value: Value = serde_json::from_slice(&read_bounded_regular(path, MAX_TABSET_BYTES).ok()?).ok()?;
     let data = value.as_object()?.clone();
     let rows = data.get("tabs").and_then(Value::as_array).or_else(|| {
         let layout = data.get("layout")?.as_object()?;

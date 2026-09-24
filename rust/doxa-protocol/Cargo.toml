@@ -1,0 +1,9 @@
+[package]
+name = "doxa-protocol"
+version = "2.0.0-alpha.2"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-only"
+
+[dependencies]
+serde_json = "1"

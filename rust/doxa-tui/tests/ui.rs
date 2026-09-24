@@ -1,10 +1,88 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use doxa_tui::ui::{App, Focus, Session, Split};
-use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+use ratatui::{backend::TestBackend, layout::{Constraint, Direction, Layout, Rect}, Terminal};
 use serde_json::json;
 
 fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
     Event::Key(KeyEvent::new(code, modifiers))
+}
+
+fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
+    Event::Mouse(MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE })
+}
+
+fn pane_boundary(app: &App) -> (u16, u16) {
+    let outer = Layout::default().direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(3), Constraint::Length(1)])
+        .split(app.size)[0];
+    let body = if app.rail_visible {
+        Layout::default().direction(Direction::Horizontal)
+            .constraints([Constraint::Length(app.rail_width), Constraint::Min(1)])
+            .split(outer)[1]
+    } else { outer };
+    let panes = Layout::default()
+        .direction(if app.split == Split::Vertical { Direction::Horizontal } else { Direction::Vertical })
+        .constraints([Constraint::Percentage(app.split_percent), Constraint::Percentage(100 - app.split_percent)])
+        .split(body);
+    if app.split == Split::Vertical { (panes[1].x, body.y + 5) } else { (body.x + 5, panes[1].y) }
+}
+
+#[test]
+fn vertical_divider_drag_respects_minimum_width_and_release() {
+    let mut app = App::default();
+    app.handle(Event::Resize(120, 40));
+    let (x, y) = pane_boundary(&app);
+    assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), x, y)));
+    assert!(app.handle(mouse(MouseEventKind::Drag(MouseButton::Left), 110, y)));
+    assert!(app.split_percent > 50);
+    let (boundary, _) = pane_boundary(&app);
+    assert!(120 - boundary >= 28);
+    app.handle(mouse(MouseEventKind::Drag(MouseButton::Left), 0, y));
+    let (boundary, _) = pane_boundary(&app);
+    assert!(boundary >= app.rail_width + 28);
+    app.handle(mouse(MouseEventKind::Up(MouseButton::Left), 0, y));
+    let released = app.split_percent;
+    assert!(!app.handle(mouse(MouseEventKind::Drag(MouseButton::Left), 95, y)));
+    assert_eq!(app.split_percent, released);
+}
+
+#[test]
+fn horizontal_divider_drag_respects_minimum_height_and_resize_cancels_drag() {
+    let mut app = App::default();
+    app.rail_visible = false;
+    app.split = Split::Horizontal;
+    app.handle(Event::Resize(90, 40));
+    let (x, y) = pane_boundary(&app);
+    assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), x, y)));
+    app.handle(mouse(MouseEventKind::Drag(MouseButton::Left), x, 39));
+    let (_, boundary) = pane_boundary(&app);
+    assert!(37 - boundary >= 8);
+    app.handle(mouse(MouseEventKind::Drag(MouseButton::Left), x, 0));
+    let (_, boundary) = pane_boundary(&app);
+    assert!(boundary >= 8);
+    let settled = app.split_percent;
+    app.handle(Event::Resize(90, 35));
+    assert!(!app.handle(mouse(MouseEventKind::Drag(MouseButton::Left), x, 20)));
+    assert_eq!(app.split_percent, settled);
+}
+
+#[test]
+fn rail_drag_preserves_pane_space_and_modal_blocks_drag() {
+    let mut app = App::default();
+    app.handle(Event::Resize(100, 40));
+    assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), 25, 5)));
+    app.handle(mouse(MouseEventKind::Drag(MouseButton::Left), 90, 5));
+    assert_eq!(app.rail_width, 44);
+    app.handle(mouse(MouseEventKind::Drag(MouseButton::Left), 0, 5));
+    assert_eq!(app.rail_width, 12);
+    app.handle(mouse(MouseEventKind::Up(MouseButton::Left), 0, 5));
+    assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), 12, 5)));
+    app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));
+    app.apply_daemon_frame(&json!({"type":"event", "session_id":"one", "event":{"type":"needs_input", "data":{
+        "id":"req", "kind":"permission", "title":"Approve?"}}}));
+    assert!(!app.handle(mouse(MouseEventKind::Drag(MouseButton::Left), 35, 5)));
+    assert!(!app.handle(mouse(MouseEventKind::Down(MouseButton::Left), 12, 5)));
+    assert_eq!(app.rail_width, 12);
 }
 
 fn session(id: &str, collection: &str) -> Session {

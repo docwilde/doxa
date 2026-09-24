@@ -25,19 +25,91 @@
 # this file to do that. Everything, including variable assignments that
 # look side-effect-free today, belongs inside main().
 
-INSTALL_SH_VERSION="1.0.0"
-DOXA_REPO_URL="https://github.com/docwilde/doxa"
-DOXA_RAW_BASE="https://raw.githubusercontent.com/docwilde/doxa"
-
 main() {
   set -eu
 
-  ref="${1:-main}"
+  INSTALL_SH_VERSION="1.0.0"
+  DOXA_REPO_URL="https://github.com/docwilde/doxa"
+  DOXA_RAW_BASE="https://raw.githubusercontent.com/docwilde/doxa"
 
   _info() { printf 'doxa-install: %s\n' "$*"; }
   _warn() { printf 'doxa-install: %s\n' "$*" >&2; }
   _fail() { printf 'doxa-install: %s\n' "$*" >&2; exit 1; }
   _need() { command -v "$1" >/dev/null 2>&1; }
+
+  _install_rust() {
+    rust_ref="${1:-rust/2.0}"
+    [ "$#" -le 1 ] || _fail "usage: sh install.sh --rust [ref]"
+    case "$rust_ref" in
+      "" | -* | *..* | *@\{* | *[!a-zA-Z0-9._/-]*)
+        _fail "invalid Rust ref '${rust_ref}' (use a branch, tag, or commit SHA)" ;;
+    esac
+
+    _need git || _fail "git is required to fetch the Rust preview. Install git and re-run."
+    _need cargo || _fail "cargo is required to compile the Rust preview. Install Rust from https://rustup.rs/ and re-run."
+    _need rustc || _fail "rustc is required to compile the Rust preview. Install Rust from https://rustup.rs/ and re-run."
+    _need mktemp || _fail "mktemp is required to create a temporary checkout."
+    _need cp || _fail "cp is required to install the Rust preview."
+    _need mv || _fail "mv is required to install the Rust preview."
+    host_target=$(rustc -vV | sed -n 's/^host: //p')
+    [ -n "$host_target" ] || _fail "could not determine the host Rust target"
+
+    rust_bin_dir="${DOXA_RUST_BIN_DIR:-$HOME/.local/bin}"
+    case "$rust_bin_dir" in
+      /*) : ;;
+      *) _fail "DOXA_RUST_BIN_DIR must be an absolute path" ;;
+    esac
+    rust_tmp=$(mktemp -d) || _fail "could not create a temporary checkout"
+    rust_stage=""
+    trap '[ -z "$rust_stage" ] || rm -rf "$rust_stage"; rm -rf "$rust_tmp"' EXIT HUP INT TERM
+    rust_repo="${DOXA_RUST_REPO_URL:-$DOXA_REPO_URL}"
+    _info "fetching Rust preview ref: ${rust_ref}"
+    git -C "$rust_tmp" init -q || _fail "could not initialize temporary checkout"
+    git -C "$rust_tmp" remote add origin "$rust_repo" || _fail "could not configure Rust source"
+    git -C "$rust_tmp" fetch --quiet --depth 1 origin "$rust_ref" || _fail "could not fetch Rust ref '${rust_ref}'"
+    git -C "$rust_tmp" checkout --quiet --detach FETCH_HEAD || _fail "could not check out Rust ref '${rust_ref}'"
+
+    tui_manifest="$rust_tmp/rust/doxa-tui/Cargo.toml"
+    [ -f "$tui_manifest" ] || _fail "Rust ref '${rust_ref}' has no rust/doxa-tui/Cargo.toml"
+    _info "building release doxa-rs"
+    CARGO_TARGET_DIR="$rust_tmp/target" cargo build --release --locked --target "$host_target" --manifest-path "$tui_manifest" --bin doxa-rs || _fail "Rust TUI build failed"
+    tui_bin="$rust_tmp/target/$host_target/release/doxa-rs"
+    [ -f "$tui_bin" ] || _fail "Rust TUI build produced no doxa-rs binary"
+
+    daemon_manifest="$rust_tmp/rust/doxa-daemon/Cargo.toml"
+    if [ -f "$daemon_manifest" ]; then
+      _info "building release Rust daemon"
+      CARGO_TARGET_DIR="$rust_tmp/target" cargo build --release --locked --target "$host_target" --manifest-path "$daemon_manifest" || _fail "Rust daemon build failed"
+      daemon_bin="$rust_tmp/target/$host_target/release/doxa-daemon-rs"
+      if [ ! -f "$daemon_bin" ]; then
+        daemon_bin="$rust_tmp/target/$host_target/release/doxa-daemon"
+      fi
+      [ -f "$daemon_bin" ] || _fail "Rust daemon build produced no doxa-daemon binary"
+    fi
+
+    mkdir -p "$rust_bin_dir" || _fail "could not create ${rust_bin_dir}"
+    [ ! -d "$rust_bin_dir/doxa-rs" ] || _fail "${rust_bin_dir}/doxa-rs is a directory"
+    [ ! -d "$rust_bin_dir/doxa-daemon-rs" ] || _fail "${rust_bin_dir}/doxa-daemon-rs is a directory"
+    rust_stage=$(mktemp -d "$rust_bin_dir/.doxa-install.XXXXXXXX") || _fail "could not stage Rust binaries"
+    cp "$tui_bin" "$rust_stage/doxa-rs" || _fail "could not stage doxa-rs"
+    chmod 755 "$rust_stage/doxa-rs" || _fail "could not make doxa-rs executable"
+    if [ -f "$daemon_manifest" ]; then
+      cp "$daemon_bin" "$rust_stage/doxa-daemon-rs" || _fail "could not stage doxa-daemon-rs"
+      chmod 755 "$rust_stage/doxa-daemon-rs" || _fail "could not make doxa-daemon-rs executable"
+    fi
+    mv -f "$rust_stage/doxa-rs" "$rust_bin_dir/doxa-rs" || _fail "could not install doxa-rs"
+    if [ -f "$daemon_manifest" ]; then
+      mv -f "$rust_stage/doxa-daemon-rs" "$rust_bin_dir/doxa-daemon-rs" || _fail "could not install doxa-daemon-rs"
+    fi
+    _info "installed Rust preview in ${rust_bin_dir}; run: doxa-rs"
+  }
+
+  if [ "${1:-}" = "--rust" ]; then
+    shift
+    _install_rust "$@"
+    return
+  fi
+  ref="${1:-main}"
 
   # Reads the answer from the CONTROLLING TERMINAL, never from stdin --
   # under `curl | sh`, fd 0 is the script itself, not a human. A run with

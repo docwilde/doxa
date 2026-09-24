@@ -8,6 +8,7 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::Deserialize;
 use time::format_description::well_known::Rfc3339;
@@ -20,6 +21,7 @@ const MAX_ENTRY_BYTES: u64 = 64 * 1024;
 pub struct Session {
     pub id: String,
     pub socket: PathBuf,
+    pub scope_key: String,
     pub clients: Option<u64>,
     pub started_at: String,
 }
@@ -27,6 +29,8 @@ pub struct Session {
 #[derive(Deserialize)]
 struct Entry {
     session_id: String,
+    cwd: String,
+    repo_root: Option<String>,
     pid: i32,
     heartbeat_at: String,
     started_at: String,
@@ -165,9 +169,31 @@ fn read_entry(path: &Path, runtime: &Path, uid: u32) -> Option<Session> {
     Some(Session {
         id: entry.session_id,
         socket,
+        scope_key: entry.repo_root.filter(|s| !s.is_empty()).unwrap_or(entry.cwd),
         clients: entry.clients,
         started_at: entry.started_at,
     })
+}
+
+/// Match Python's worktree-aware `main_repo_root_of(cwd) or cwd` scope.
+pub fn current_scope() -> io::Result<String> {
+    let cwd = env::current_dir()?;
+    let output = Command::new("git").args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(&cwd).output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            if let Ok(raw) = std::str::from_utf8(&output.stdout) {
+                let common = PathBuf::from(raw.trim());
+                if common.is_absolute() {
+                    let root = if common.file_name().is_some_and(|name| name == ".git") {
+                        common.parent().unwrap_or(&common)
+                    } else { common.as_path() };
+                    return Ok(root.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    Ok(cwd.to_string_lossy().into_owned())
 }
 
 fn pid_alive(pid: i32) -> bool {
@@ -238,6 +264,7 @@ mod tests {
         let entries = ["abc123", "abc456"].map(|id| Session {
             id: id.into(),
             socket: PathBuf::new(),
+            scope_key: String::new(),
             clients: None,
             started_at: String::new(),
         });
@@ -258,6 +285,7 @@ mod tests {
         let path = runtime.join("test.json");
         let mut entry = serde_json::json!({
             "session_id": "test", "pid": std::process::id(),
+            "cwd":"/tmp", "repo_root":null,
             "heartbeat_at": OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
             "started_at": "2026-01-01T00:00:00.000000Z",
             "title": "running", "daemon_socket": socket.to_str().unwrap(),

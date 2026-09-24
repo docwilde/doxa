@@ -1,0 +1,10 @@
+{"type":"thread.started","thread_id":"thread-fixture-1"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"cmd-1","type":"command_execution","command":"printf hello"}}
+{"type":"item.completed","item":{"id":"cmd-1","type":"command_execution","command":"printf hello","aggregated_output":"hello","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"plan-1","type":"todo_list","items":[{"text":"first","completed":false},{"text":"second","completed":false}]}}
+{"type":"item.updated","item":{"id":"plan-1","type":"todo_list","items":[{"text":"first","completed":true},{"text":"second","completed":false}]}}
+{"type":"item.completed","item":{"id":"plan-1","type":"todo_list","items":[{"text":"first","completed":true},{"text":"second","completed":true}]}}
+{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","summary":"I checked the result."}}
+{"type":"item.completed","item":{"id":"msg-1","type":"agent_message","text":"Done."}}
+{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5}}

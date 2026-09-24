@@ -1,8 +1,21 @@
 # Changelog
 
 Newest first. Versions are annotated git tags on the commit that shipped
-them (`v0.1.0` … `v1.19.0`); the ranges below are derived from that history,
-not written from memory.
+them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
+history, not written from memory. The Rust 2.0 development line is untagged.
+
+## 2.0.0-alpha.2 — Rust development line (unreleased)
+
+- Combined the native daemon and Codex host, bounded Claude and LORE sidecars,
+  vendor adapter, protocol, state, transcript, and peer foundations in one
+  integration branch.
+- Added multi-session TUI attachment, saved layouts, draggable dividers, and
+  a stable rail interaction test.
+- Added an opt-in `--rust` installer switch that compiles the preview and
+  installs it alongside the Python command.
+- Hardened the local vendor test endpoint so only an explicit loopback host
+  and port without URL credentials can receive a provider key.
+- The supported Python release remains 1.19.0. This alpha is not a 2.0 cutover.
 
 ## 1.19.0 — 2026-09-24
 

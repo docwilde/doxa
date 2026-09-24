@@ -1,6 +1,6 @@
 [package]
 name = "doxa-tui"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"
@@ -10,7 +10,9 @@ name = "doxa-rs"
 path = "src/main.rs"
 
 [dependencies]
+doxa-state = { path = "../doxa-state" }
 crossterm = "0.28"
+doxa-protocol = { path = "../doxa-protocol" }
 libc = "0.2"
 pulldown-cmark = "0.13"
 ratatui = "0.29"

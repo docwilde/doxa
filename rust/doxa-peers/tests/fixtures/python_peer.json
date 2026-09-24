@@ -1,0 +1,17 @@
+{
+  "session_id": "python-fixture",
+  "pid": 321,
+  "socket_path": "/run/user/1000/doxa/peer-python-f-321.sock",
+  "cwd": "/work/project/sub",
+  "repo_root": "/work/project",
+  "title": "Investigate tests",
+  "started_at": "2026-09-24T10:00:00.000000Z",
+  "heartbeat_at": "2026-09-24T10:00:01.000000Z",
+  "daemon_socket": "/run/user/1000/doxa/doxa.sock",
+  "clients": 0,
+  "usage_tokens": 1234,
+  "provider": "claude",
+  "model": "sonnet",
+  "engine": "doxa",
+  "parent_session_id": "parent-1"
+}
