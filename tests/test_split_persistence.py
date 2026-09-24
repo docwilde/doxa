@@ -331,7 +331,8 @@ async def test_a_saved_leaf_whose_session_died_leaves_no_hole(tmp_path):
         # The WINDOW's own width (v0.97.0: the tree moved up a level, so
         # the tab's rectangle is now one region's, not the whole thing's).
         whole = app._window_root().region.width
-        assert panes[0].region.width + panes[1].region.width == whole
+        # The one remaining column is the visible, draggable divider.
+        assert panes[0].region.width + 1 + panes[1].region.width == whole
 
 
 @pytest.mark.asyncio

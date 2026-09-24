@@ -38,6 +38,10 @@ from doxa import layout
 from doxa.app import DoxaApp, SessionPane
 from doxa.ui.prompt import PromptInput
 from doxa.ui.split import PaneTab
+from doxa.ui.split import SplitBox
+from doxa.ui import split as split_mod
+from doxa import tabsets as tabsets_mod
+from textual import events
 from tests.fakes import FakeEngine
 
 
@@ -50,11 +54,14 @@ def _isolated_home(monkeypatch, tmp_path):
     config_mod.invalidate()
 
 
-def _app(tmp_path):
+def _app(tmp_path, *, session_ids=False):
     engines: list[FakeEngine] = []
 
     def make() -> FakeEngine:
-        engines.append(FakeEngine([]))
+        engine = FakeEngine([])
+        if session_ids:
+            engine.session_id = f"sid-{len(engines) + 1}"
+        engines.append(engine)
         return engines[-1]
 
     return DoxaApp(
@@ -442,6 +449,39 @@ async def test_a_split_with_no_room_is_refused_and_changes_nothing(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "orientation,size,allowed",
+    [
+        (layout.ROW, (68, 30), False),
+        (layout.ROW, (69, 30), False),
+        (layout.ROW, (70, 30), True),
+        (layout.COLUMN, (100, 18), False),
+        (layout.COLUMN, (100, 19), False),
+        (layout.COLUMN, (100, 20), True),
+    ],
+)
+async def test_split_admission_reserves_the_visible_divider(
+    tmp_path, orientation, size, allowed,
+):
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        note = await app.split_active_pane(orientation)
+        if not allowed:
+            assert note is not None
+            assert len(app.groups()) == 1
+            return
+        assert note is None
+        assert await _wait(pilot, lambda: len(app.groups()) == 2)
+        await pilot.pause()
+        for group in app.groups():
+            if orientation == layout.ROW:
+                assert group.region.width >= layout.MIN_LEAF_WIDTH
+            else:
+                assert group.region.height >= layout.MIN_LEAF_HEIGHT
+
+
+@pytest.mark.asyncio
 async def test_splitting_past_the_depth_cap_is_refused_in_words(tmp_path):
     """Recursion is in the model; the interactive depth is capped, and a
     deeper split is refused with a message rather than performed."""
@@ -590,8 +630,144 @@ async def test_alt_arrow_moves_the_divider_between_two_leaves(tmp_path):
         assert new.region.width > before
         assert first.region.width > 0  # never dragged into nothing
         assert (
-            first.region.width + new.region.width
+            first.region.width + 1 + new.region.width  # painted divider
             == app._window_root().region.width
+        )
+
+
+def _mouse(kind, box: SplitBox, x: int, y: int):
+    return kind(
+        widget=box, x=x - box.region.x, y=y - box.region.y,
+        delta_x=0, delta_y=0, button=1, shift=False, meta=False,
+        ctrl=False, screen_x=x, screen_y=y,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("orientation", [layout.ROW, layout.COLUMN])
+async def test_dragging_a_split_boundary_resizes_and_persists(tmp_path, orientation):
+    app, _engines = _app(tmp_path, session_ids=True)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        assert await app.split_active_pane(orientation) is None
+        assert await _wait(pilot, lambda: len(app.groups()) == 2)
+        assert await _wait(pilot, lambda: all(p._session_id for p in app.panes()))
+        await pilot.pause()
+        box = next(box for box in app.query(SplitBox) if box.is_used)
+        first = list(box.children)[0]
+        before = first.region.width if orientation == layout.ROW else first.region.height
+        x = first.region.right - 1 if orientation == layout.ROW else first.region.x + 2
+        y = first.region.y + 2 if orientation == layout.ROW else first.region.bottom - 1
+        border = first.styles.border_right if orientation == layout.ROW else first.styles.border_bottom
+        assert border[0] == "solid"
+        assert border[1].hex == box.DIVIDER_COLOR
+        await pilot.mouse_down(offset=(x, y))
+        assert box._drag_boundary == 0
+        assert box._hot_boundary == 0
+        moved_x = x + (8 if orientation == layout.ROW else 0)
+        moved_y = y + (8 if orientation == layout.COLUMN else 0)
+        await pilot._post_mouse_events(
+            [events.MouseMove], offset=(moved_x, moved_y), button=1,
+        )
+        await pilot.mouse_up(offset=(moved_x, moved_y))
+        await pilot.pause()
+        assert box._drag_boundary is None
+        assert box._hot_boundary is None
+        after = first.region.width if orientation == layout.ROW else first.region.height
+        assert after > before
+        record = tabsets_mod.load(str(tmp_path))
+        assert record is not None
+        assert isinstance(record.groups, layout.Split)
+        assert record.groups.weights[0] > 0.5
+
+
+@pytest.mark.asyncio
+async def test_dragging_a_split_stops_at_the_leaf_floor(tmp_path):
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        assert await app.split_active_pane(layout.ROW) is None
+        assert await _wait(pilot, lambda: len(app.groups()) == 2)
+        await pilot.pause()
+        box = next(box for box in app.query(SplitBox) if box.is_used)
+        first, second = list(box.children)
+        x, y = first.region.right - 1, first.region.y + 2
+        box.on_mouse_down(_mouse(events.MouseDown, box, x, y))
+        box.on_mouse_move(_mouse(events.MouseMove, box, x + 1000, y))
+        box.on_mouse_up(_mouse(events.MouseUp, box, x + 1000, y))
+        await pilot.pause()
+        assert second.region.width >= layout.MIN_LEAF_WIDTH
+        assert first.region.width > second.region.width
+
+
+@pytest.mark.asyncio
+async def test_dragging_an_outer_boundary_preserves_nested_leaf_floors(tmp_path):
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        assert await app.split_active_pane(layout.ROW) is None
+        assert await _wait(pilot, lambda: len(app.groups()) == 2)
+        await pilot.pause()
+        assert await app.split_active_pane(layout.ROW) is None
+        assert await _wait(pilot, lambda: len(app.groups()) == 3)
+        await pilot.pause()
+        outer = next(box for box in app.query(SplitBox) if box.is_used)
+        x = list(outer.children)[0].region.right - 1
+        y = outer.region.y + 2
+        await pilot.mouse_down(offset=(x, y))
+        await pilot._post_mouse_events(
+            [events.MouseMove], offset=(BIG[0] - 2, y), button=1,
+        )
+        await pilot.mouse_up(offset=(BIG[0] - 2, y))
+        await pilot.pause()
+        widths = [group.region.width for group in app.groups()]
+        assert all(width >= layout.MIN_LEAF_WIDTH for width in widths), (widths, outer.weights)
+
+
+@pytest.mark.asyncio
+async def test_the_cell_next_to_a_divider_keeps_normal_mouse_behavior(tmp_path):
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        assert await app.split_active_pane(layout.ROW) is None
+        assert await _wait(pilot, lambda: len(app.groups()) == 2)
+        await pilot.pause()
+        box = next(box for box in app.query(SplitBox) if box.is_used)
+        first, second = list(box.children)
+        await pilot.mouse_down(offset=(second.region.x, second.region.y + 2))
+        assert box._drag_boundary is None
+        await pilot.mouse_up(offset=(second.region.x, second.region.y + 2))
+        assert first.region.right == second.region.x
+
+
+@pytest.mark.asyncio
+async def test_a_new_split_boundary_paints_after_hover_and_leave(tmp_path):
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        assert await app.split_active_pane(layout.ROW) is None
+        assert await _wait(pilot, lambda: len(app.groups()) == 2)
+        await pilot.pause()
+        box = next(box for box in app.query(SplitBox) if box.is_used)
+        first = list(box.children)[0]
+        x, y = first.region.right - 1, first.region.y + 2
+        await pilot._post_mouse_events([events.MouseMove], offset=(x, y))
+        assert box._hot_boundary == 0
+        await pilot._post_mouse_events([events.MouseMove], offset=(x - 5, y))
+        assert box._hot_boundary is None
+
+        new_pane = app._make_pane(app._new_session_factory)
+        new_group = app._make_group(app._make_tab(new_pane))
+        await box.mount(split_mod.chain(new_group))
+        box.divide(layout.ROW)
+        await pilot.pause()
+        children = list(box.children)
+        assert len(children) == 3
+        assert all(child.region.width > 0 for child in children)
+        assert all(
+            child.styles.border_right[0] == "solid"
+            and child.styles.border_right[1].hex == box.DIVIDER_COLOR
+            for child in children[:-1]
         )
 
 

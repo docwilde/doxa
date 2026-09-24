@@ -517,6 +517,26 @@ async def test_the_diff_paints_beside_the_session_both_with_real_rectangles(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("width,allowed", [(69, False), (70, True)])
+async def test_diff_open_reserves_the_split_divider_at_width_floor(
+    tmp_path, width, allowed,
+):
+    work = _repo(tmp_path)
+    app, _ = _app(work)
+    async with app.run_test(size=(width, 30)) as pilot:
+        assert await _wait(pilot, lambda: bool(app.active_pane._session_id))
+        note = await app.toggle_diff_pane()
+        if not allowed:
+            assert note is not None and "not enough width" in note
+            assert _diff_of(app) is None
+            return
+        assert note is None
+        assert await _wait(pilot, lambda: _diff_of(app) is not None)
+        await pilot.pause()
+        assert all(group.region.width >= layout.MIN_LEAF_WIDTH for group in app.groups())
+
+
+@pytest.mark.asyncio
 async def test_the_diff_pane_renders_with_non_zero_height_at_eighty_columns(
     tmp_path,
 ):
@@ -526,7 +546,6 @@ async def test_the_diff_pane_renders_with_non_zero_height_at_eighty_columns(
     work = _repo(tmp_path)
     app, _ = _app(work)
     async with app.run_test(size=(80, 24)) as pilot:
-        pane = app.active_pane
         diff = await _open_diff(pilot, app)
         assert diff.region.height > 0 and diff.region.width > 0
         assert not diff_mod.side_by_side_allowed(diff.region.width)
@@ -782,7 +801,6 @@ async def test_closing_a_diff_with_queued_rejections_is_refused(tmp_path):
     work = _repo(tmp_path)
     app, _ = _app(work)
     async with app.run_test(size=(160, 48)) as pilot:
-        pane = app.active_pane
         diff = await _open_diff(pilot, app)
         result = diff.result
         f = next(x for x in result.files if x.path == "f.py")
