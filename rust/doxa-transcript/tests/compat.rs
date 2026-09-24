@@ -1,7 +1,7 @@
 use doxa_transcript::{valid_session_id, TranscriptStore, MAX_TRANSCRIPT_BYTES, MAX_TRANSCRIPT_LINES};
 use serde_json::{json, Map, Value};
 use std::fs;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use tempfile::tempdir;
 
 fn store(root: &std::path::Path) -> TranscriptStore { TranscriptStore::new(root, "project", "session-1").unwrap() }
@@ -63,6 +63,16 @@ fn writes_new_python_shaped_codex_metadata() {
     })).unwrap();
     store.write_thread(fields, str::to_owned).unwrap();
     assert_eq!(store.recorded_thread_id().unwrap().as_deref(), Some("thread-1"));
+}
+
+#[test]
+fn append_tightens_permissions_on_legacy_transcript() {
+    let temp = tempdir().unwrap();
+    let store = store(temp.path());
+    fs::write(store.transcript_path(), b"{\"type\":\"user\"}\n").unwrap();
+    fs::set_permissions(store.transcript_path(), fs::Permissions::from_mode(0o644)).unwrap();
+    store.append(json!({"type":"assistant"}), "claude", str::to_owned).unwrap();
+    assert_eq!(fs::metadata(store.transcript_path()).unwrap().permissions().mode() & 0o777, 0o600);
 }
 
 #[test]

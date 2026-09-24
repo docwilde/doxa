@@ -4,7 +4,7 @@
 use serde_json::{Map, Value};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 pub const MAX_TRANSCRIPT_BYTES: usize = 8 * 1024 * 1024;
@@ -97,6 +97,11 @@ impl TranscriptStore {
         let mut opts = OpenOptions::new();
         let mut file = opts.create(true).append(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(self.transcript_path())?;
         checked_file(&file)?;
+        // Python 1.x may have created this file under a permissive umask.
+        // Tighten that existing inode before appending a new record.
+        if file.metadata()?.permissions().mode() & 0o077 != 0 {
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
         file.write_all(&bytes)
     }
 
