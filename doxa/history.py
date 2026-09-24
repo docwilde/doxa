@@ -683,6 +683,7 @@ class SessionSearch(OptionList):
         self.cwd = cwd
         self.hits: list[dict] = []
         self.query_text: str | None = None  # what the SHOWN hits are for
+        self._requested_query: str | None = None  # latest prompt text, even during debounce
         self._groups: list[dict] = []  # [] in flat mode, non-empty in tree mode
         self._rows: list[tuple[str, dict, "dict | None"]] = []
         self._seq = 0
@@ -707,8 +708,19 @@ class SessionSearch(OptionList):
         if self._dismissed:
             return
         query = value[len(SEARCH_PREFIX):]
-        if self.display and query == self.query_text:
+        if self.display and query == self._requested_query:
             return  # nothing about the query changed (e.g. a cursor move)
+        self._requested_query = query
+        # Invalidate an in-flight result as soon as the input changes,
+        # rather than waiting for the debounced replacement to launch.
+        self._seq += 1
+        if self.display and query == self.query_text:
+            # The user returned to the results already on screen. A timer
+            # for the intervening text must not launch after this point.
+            if self._timer is not None:
+                self._timer.stop()
+                self._timer = None
+            return
         self.display = True
         self._schedule(query)
 
@@ -808,6 +820,7 @@ class SessionSearch(OptionList):
             self.display = False
         self.hits = []
         self.query_text = None
+        self._requested_query = None
         self._groups = []
         self._rows = []
         self._seq += 1  # invalidate anything still in flight

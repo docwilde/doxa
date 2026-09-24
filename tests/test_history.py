@@ -333,6 +333,47 @@ async def test_a_slow_query_never_clobbers_a_newer_one(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_typing_invalidates_in_flight_results_before_debounce(monkeypatch, tmp_path):
+    """The old query must not paint during the next query's debounce."""
+    app = await _app(monkeypatch, tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+
+    def search(query, cwd, limit=20):
+        if query == "old":
+            started.set()
+            release.wait(5)
+        return [{"session_id": "search00", "project": "p", "ts": "",
+                 "role": "user", "snippet": query, "title": query}]
+
+    monkeypatch.setattr(history_mod, "search_sessions", search)
+    monkeypatch.setattr(history_mod, "DEBOUNCE_SECS", 1.0)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        popup = app.query_one("#session-search", SessionSearch)
+        popup.sync(SEARCH_PREFIX + "old")
+        popup.launch("old")
+        for _ in range(100):
+            if started.is_set():
+                break
+            await pilot.pause(0.01)
+        assert started.is_set()
+
+        popup.sync(SEARCH_PREFIX + "new")
+        release.set()
+        await pilot.pause(0.05)
+        assert popup.query_text is None
+        assert popup.hits == []
+
+        popup.launch("new")
+        for _ in range(100):
+            if popup.query_text == "new":
+                break
+            await pilot.pause(0.01)
+        assert [hit["snippet"] for hit in popup.hits] == ["new"]
+
+
+@pytest.mark.asyncio
 async def test_enter_inserts_the_selected_excerpt(monkeypatch, tmp_path):
     """Item J: Enter on a (single-session, flat) snippet inserts a small
     excerpt inline -- provenance line, then the snippet -- not the old
