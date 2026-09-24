@@ -243,12 +243,20 @@ async def test_each_tab_carries_its_own_label(monkeypatch, tmp_path):
     async with app.run_test() as pilot:
         first = app.active_pane
         assert await _settled(pilot, app, first)
+        # The header may paint before the opening pane has finished booting.
+        # Its loading cover deliberately intercepts Ctrl+T until then.
+        for _ in range(200):
+            if not app.query_one("#startup-status").display:
+                break
+            await pilot.pause(0.02)
+        assert not app.query_one("#startup-status").display
 
         await pilot.press("ctrl+t")
         for _ in range(200):
             if len(app.panes()) == 2:
                 break
             await pilot.pause(0.02)
+        assert len(app.panes()) == 2
         second = app.panes()[1]
         assert await _settled(pilot, app, second)
 
