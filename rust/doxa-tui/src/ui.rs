@@ -179,6 +179,13 @@ impl App {
                     if self.rejected_drafts.is_empty() { "" } else { " (Alt+Up to restore)" });
                 true
             }
+            "prompt_uncertain" => {
+                let Some(text) = frame.get("text").and_then(|v| v.as_str()) else { return false };
+                self.rejected_drafts.push(text.to_owned());
+                self.notice = format!("{} · check session before Alt+Up retry",
+                    safe_label(frame.get("message").and_then(|v| v.as_str()).unwrap_or("Prompt delivery unconfirmed")));
+                true
+            }
             _ => false,
         }
     }
@@ -492,5 +499,17 @@ mod tests {
         app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)));
         assert_eq!(app.input, "old prompt");
         assert_eq!(app.rejected_drafts, ["new draft"]);
+    }
+
+    #[test]
+    fn unconfirmed_prompt_requires_deliberate_recovery_before_retry() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"prompt_uncertain", "text":"possibly sent",
+            "message":"Prompt delivery unconfirmed"}));
+        assert!(app.input.is_empty());
+        assert_eq!(app.rejected_drafts, ["possibly sent"]);
+        assert!(app.notice.contains("check session"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)));
+        assert_eq!(app.input, "possibly sent");
     }
 }

@@ -64,12 +64,19 @@ fn worker_loop(mut client: DaemonClient, frames: SyncSender<Value>, prompts: Rec
                             }
                         }
                         Err(error) => {
-                            let message = match error {
-                                TransportError::Closed => "Daemon disconnected while sending prompt",
-                                TransportError::Timeout => "Daemon did not acknowledge prompt",
-                                _ => "Daemon rejected prompt transport",
+                            // Once bytes may have been written, a missing reply does not
+                            // prove that the daemon rejected the prompt. Keep the draft
+                            // available, but require a deliberate retry by the user.
+                            let (kind, message) = match error {
+                                TransportError::FrameTooLarge | TransportError::RequestIdsExhausted =>
+                                    ("prompt_rejected", "Prompt could not be sent"),
+                                TransportError::Timeout =>
+                                    ("prompt_uncertain", "Prompt delivery unconfirmed"),
+                                TransportError::Closed =>
+                                    ("prompt_uncertain", "Daemon disconnected; prompt delivery unconfirmed"),
+                                _ => ("prompt_uncertain", "Prompt delivery unconfirmed"),
                             };
-                            let _ = frames.send(json!({"type":"prompt_rejected", "text":text, "message":message}));
+                            let _ = frames.send(json!({"type":kind, "text":text, "message":message}));
                             if matches!(error, TransportError::Closed) {
                                 return;
                             }
