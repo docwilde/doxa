@@ -128,7 +128,9 @@ async fn provider_supplied_unsafe_thread_id_cannot_be_resumed() {
 #[tokio::test]
 async fn signaled_process_is_a_failed_turn() {
     let dir = TempDir::new().unwrap();
-    let script = fake_script(dir.path(), "kill -TERM $$");
+    // Finish the stdin transfer before exiting, so this tests signal
+    // reporting rather than the separate broken-pipe path.
+    let script = fake_script(dir.path(), "cat >/dev/null\nkill -TERM $$");
     let mut driver = CodexCliDriver::new(options(&dir, script), str::to_owned);
     let (_, output) = events(&mut driver, "hi").await;
     assert_eq!(output.last().unwrap().data["is_error"], true);
