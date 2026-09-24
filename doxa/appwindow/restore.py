@@ -43,7 +43,8 @@ from __future__ import annotations
 import contextlib
 from typing import Any
 
-from textual.widgets import TabPane
+from textual.widgets import Static, TabPane
+from textual.css.query import NoMatches
 
 from .. import collections as collections_mod
 from .. import layout as layout_mod
@@ -163,6 +164,18 @@ class WindowRestoreMixin:
             if self._restore_pending > 0:
                 return
         self._persist_tabset()
+
+    def _note_pane_startup_finished(self, pane: "SessionPane") -> None:
+        """Reveal the window once every opening pane has reached a result."""
+        if pane not in self._startup_waiting_panes:
+            return
+        self._startup_waiting_panes.remove(pane)
+        self._startup_pending = len(self._startup_waiting_panes)
+        if self._startup_pending == 0:
+            # A very fast boot can finish before this widget is composed.
+            # DoxaApp.on_mount applies the same state once it exists.
+            with contextlib.suppress(NoMatches):
+                self.query_one("#startup-status", Static).display = False
 
     def _persist_tabset(self, *, exclude_session_id: "str | None" = None) -> None:
         """Snapshot the CURRENT tab set to $DOXA_HOME/tabsets/<scope>.json
@@ -436,6 +449,7 @@ class WindowRestoreMixin:
         pane._restore_cwd = spec.cwd
         if leaf is not None:
             pane.prompt_ratio = layout_mod.clamp_prompt_ratio(leaf.prompt_ratio)
+        self._startup_waiting_panes.add(pane)
         return pane
 
     def _restore_group_tree(self) -> "layout_mod.Node | None":
@@ -571,6 +585,7 @@ class WindowRestoreMixin:
 
         if tree is None:
             pane = self._make_pane(self._engine_factory)
+            self._startup_waiting_panes.add(pane)
             pane._boot_report = self._restore_report
             return split_mod.chain(
                 self._make_group(self._make_tab(pane, id=self._FALLBACK_PANE_ID))
@@ -585,6 +600,7 @@ class WindowRestoreMixin:
             # the FIRST group rather than opening a second one: an archive
             # and its replacement are not two regions of work.
             pane = self._make_pane(self._engine_factory)
+            self._startup_waiting_panes.add(pane)
             pane._boot_report = self._restore_report
             first = split_mod.first_group(root)
             if first is not None:

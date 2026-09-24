@@ -558,6 +558,22 @@ def main(argv: "list[str] | None" = None) -> int:
     if args.model is None:
         args.model = config.model(engine_id)
 
+    # An explicit `new --branch` can be rejected before startup work.
+    # Keep that error as the first terminal line instead of claiming a
+    # session is loading when no session will be started.
+    prevalidated_branch = None
+    if args.command == "new" and not args.in_process:
+        prevalidated_branch = _resolve_branch_flag(cwd, args)
+        if prevalidated_branch is _BRANCH_FLAG_FAILED:
+            return 2
+
+    # Give an interactive terminal a visible answer before registry
+    # discovery, tab resolution, or a daemon spawn delays Textual's first
+    # frame. The alternate screen clears this line; DoxaApp carries the
+    # message forward until the opening panes finish.
+    if args.command not in {"doctor", "stop", "launcher"} and sys.stderr.isatty():
+        print("doxa: Loading…", file=sys.stderr, flush=True)
+
     if args.in_process:
         # The ONE branch that still builds an engine in the TUI process,
         # and since issue #39 it is the only one -- a second engine used
@@ -681,7 +697,10 @@ def main(argv: "list[str] | None" = None) -> int:
             return 0
 
     # `doxa new`, or plain `doxa` with nothing live in this scope.
-    base_branch = _resolve_branch_flag(cwd, args)
+    base_branch = (
+        prevalidated_branch if args.command == "new"
+        else _resolve_branch_flag(cwd, args)
+    )
     if base_branch is _BRANCH_FLAG_FAILED:
         return 2
     _sid, dsock = _spawn_daemon(

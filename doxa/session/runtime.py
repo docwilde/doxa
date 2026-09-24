@@ -203,23 +203,34 @@ class PaneRuntimeMixin:
         instead of stranded -- ``detach``/``stop`` cannot clear a handle
         that does not exist yet, so this is the one place that can."""
         try:
-            engine = await asyncio.to_thread(self._engine_factory)
-        except Exception as exc:  # noqa: BLE001 -- a spawn failure is a block, not a crash
-            # ``_system``, not a raw mount: it holds the NoMatches AND
-            # is_mounted pair this exact window needs (its own docstring
-            # explains why one guard is not enough), and this runs from a
-            # worker on a pane that may still be composing.
-            await self._system(f"session failed to start: {exc}")
-            return
-        if self._stopped or not self.is_mounted:
-            # Closed mid-spawn. Nothing will ever read this handle, and
-            # dropping it on the floor leaks a daemon that thinks it has
-            # a client.
+            try:
+                engine = await asyncio.to_thread(self._engine_factory)
+            except Exception as exc:  # noqa: BLE001 -- a spawn failure is a block, not a crash
+                # ``_system``, not a raw mount: it holds the NoMatches AND
+                # is_mounted pair this exact window needs (its own docstring
+                # explains why one guard is not enough), and this runs from a
+                # worker on a pane that may still be composing.
+                await self._system(f"session failed to start: {exc}")
+                return
+            if self._stopped or not self.is_mounted:
+                # Closed mid-spawn. Nothing will ever read this handle, and
+                # dropping it on the floor leaks a daemon that thinks it has
+                # a client.
+                with contextlib.suppress(Exception):
+                    await engine.finalize()
+                return
+            self.engine = engine
+            try:
+                await self._boot()
+            except Exception as exc:  # noqa: BLE001 -- failed boot needs a visible pane
+                await self._system(f"session failed to start: {exc}")
+        finally:
+            # Success, failure and cancellation all finish this pane's
+            # opening attempt. The app may already be gone on cancellation.
             with contextlib.suppress(Exception):
-                await engine.finalize()
-            return
-        self.engine = engine
-        await self._boot()
+                finished = getattr(self.app, "_note_pane_startup_finished", None)
+                if finished is not None:
+                    finished(self)
 
     async def _boot(self) -> None:
         assert self.engine is not None

@@ -223,6 +223,13 @@ async def _wait(pilot, cond, tries=100):
     return cond()
 
 
+async def _wait_for_startup_cover(pilot, app):
+    """User key gestures start only once the opening UI is visible."""
+    return await _wait(
+        pilot, lambda: not app.query_one("#startup-status").display
+    )
+
+
 def _claim_failures(app_cls) -> list:
     """Patch ``app_cls.report_failure`` to CAPTURE (not swallow) whatever
     reaches it, and hand back the live list a test can assert against --
@@ -253,6 +260,7 @@ async def test_boot_persists_the_first_tab(tmp_path):
     app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
     async with app.run_test() as pilot:
         assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        assert await _wait_for_startup_cover(pilot, app)
         await pilot.pause()
     record = tabsets.load(str(where))
     assert record is not None
@@ -274,6 +282,7 @@ async def test_new_tab_appends_to_the_persisted_order(tmp_path):
     app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
     async with app.run_test() as pilot:
         assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        assert await _wait_for_startup_cover(pilot, app)
         await pilot.press("ctrl+t")
         assert await _wait(
             pilot, lambda: len(app.panes()) == 2 and app.panes()[1]._session_id
@@ -292,6 +301,7 @@ async def test_rename_updates_the_pinned_name_in_the_record(tmp_path):
     app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
     async with app.run_test() as pilot:
         assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        assert await _wait_for_startup_cover(pilot, app)
         app.active_pane.set_custom_name("my pinned tab")
         await pilot.pause()
     record = tabsets.load(str(where))
@@ -315,6 +325,7 @@ async def test_ctrl_w_detach_keeps_the_session_in_the_record(tmp_path):
     app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
     async with app.run_test() as pilot:
         assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        assert await _wait_for_startup_cover(pilot, app)
         await pilot.press("ctrl+t")
         assert await _wait(
             pilot, lambda: len(app.panes()) == 2 and app.panes()[1]._session_id
@@ -349,6 +360,7 @@ async def test_ctrl_w_parks_it_ctrl_q_ends_it(tmp_path):
     app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
     async with app.run_test() as pilot:
         assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        assert await _wait_for_startup_cover(pilot, app)
         await pilot.press("ctrl+t")
         assert await _wait(
             pilot, lambda: len(app.panes()) == 2 and app.panes()[1]._session_id
@@ -400,6 +412,7 @@ async def test_stop_drops_the_ended_session_from_the_record(tmp_path):
     app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
     async with app.run_test() as pilot:
         assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        assert await _wait_for_startup_cover(pilot, app)
         await pilot.press("ctrl+t")
         assert await _wait(
             pilot, lambda: len(app.panes()) == 2 and app.panes()[1]._session_id
@@ -436,6 +449,7 @@ async def test_ctrl_q_drops_the_ended_session_from_the_record(tmp_path):
     app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
     async with app.run_test() as pilot:
         assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        assert await _wait_for_startup_cover(pilot, app)
         await pilot.press("ctrl+t")
         assert await _wait(
             pilot, lambda: len(app.panes()) == 2 and app.panes()[1]._session_id
@@ -494,6 +508,7 @@ async def test_ending_the_only_tab_with_ctrl_q_leaves_no_restore_record(tmp_path
     app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
     async with app.run_test() as pilot:
         assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        assert await _wait_for_startup_cover(pilot, app)
         await pilot.press("ctrl+q")
         await pilot.pause()
     assert seen == [], [f.headline() for f in seen]
@@ -520,6 +535,7 @@ async def test_palette_stop_active_on_the_only_tab_leaves_no_restore_record(
     app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
     async with app.run_test() as pilot:
         assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        assert await _wait_for_startup_cover(pilot, app)
         app._cmd_stop_active()  # palette "Quit: stop session" on the only tab
         await pilot.pause()
     assert seen == [], [f.headline() for f in seen]
@@ -545,6 +561,7 @@ async def test_detaching_the_only_tab_with_ctrl_w_also_leaves_no_restore_record(
     app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
     async with app.run_test() as pilot:
         assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        assert await _wait_for_startup_cover(pilot, app)
         await pilot.press("ctrl+w")
         await pilot.pause()
     assert seen == [], [f.headline() for f in seen]
@@ -572,6 +589,7 @@ async def test_peer_pump_tolerates_the_engine_already_being_gone(tmp_path):
     app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
     async with app.run_test() as pilot:
         assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        assert await _wait_for_startup_cover(pilot, app)
         pane = app.panes()[0]
         # _engine_ready is already set (boot completed); this simulates
         # detach()/stop() clearing the handle in the race window above.
@@ -611,6 +629,7 @@ async def test_ctrl_q_ended_session_is_not_in_resolve_at_all(tmp_path):
     app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
     async with app.run_test() as pilot:
         assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        assert await _wait_for_startup_cover(pilot, app)
         await pilot.press("ctrl+t")
         assert await _wait(
             pilot, lambda: len(app.panes()) == 2 and app.panes()[1]._session_id
@@ -661,6 +680,7 @@ async def test_quit_stop_drops_the_stopped_tab_keeps_the_detached_one(tmp_path):
     app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
     async with app.run_test() as pilot:
         assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        assert await _wait_for_startup_cover(pilot, app)
         await pilot.press("ctrl+t")
         assert await _wait(
             pilot, lambda: len(app.panes()) == 2 and app.panes()[1]._session_id
@@ -696,6 +716,7 @@ async def test_kill_evicts_a_session_already_recorded_as_detached(tmp_path):
     app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
     async with app.run_test() as pilot:
         assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        assert await _wait_for_startup_cover(pilot, app)
         await pilot.press("ctrl+t")
         assert await _wait(
             pilot, lambda: len(app.panes()) == 2 and app.panes()[1]._session_id
@@ -738,6 +759,7 @@ async def test_kill_evicts_a_session_still_attached_in_a_tab_of_this_window(
     )
     async with app.run_test() as pilot:
         assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        assert await _wait_for_startup_cover(pilot, app)
         await pilot.pause()
         record = tabsets.load(str(where))
         assert [t.session_id for t in record.tabs] == ["sid-only"]
@@ -773,6 +795,7 @@ async def test_quit_detach_keeps_every_tab_in_the_record(tmp_path):
     app = DoxaApp(cwd=str(where), engine_factory=factory, new_session_factory=factory)
     async with app.run_test() as pilot:
         assert await _wait(pilot, lambda: app.panes()[0]._session_id)
+        assert await _wait_for_startup_cover(pilot, app)
         await pilot.press("ctrl+t")
         assert await _wait(
             pilot, lambda: len(app.panes()) == 2 and app.panes()[1]._session_id
@@ -948,6 +971,7 @@ async def test_a_later_tab_switch_still_wins_over_the_restored_active_id(tmp_pat
             pilot,
             lambda: len(app.panes()) == 2 and all(p._session_id for p in app.panes()),
         )
+        assert await _wait_for_startup_cover(pilot, app)
         await pilot.press("ctrl+left")
         await pilot.pause()
         assert app.active_pane._session_id == "sid-1"
