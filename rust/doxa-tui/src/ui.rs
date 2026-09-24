@@ -1360,7 +1360,8 @@ impl App {
             if self.sessions.iter().any(|session| session.id == entry.id) { continue; }
             self.offline_ids.insert(entry.id.clone());
             self.sessions.push(Session { id: entry.id.clone(), title: entry.id,
-                collection: entry.project, transcript: entry.markdown, status: "Archived · read-only".into() });
+                collection: safe_label(&entry.project), transcript: transcript_tail(&entry.markdown).to_owned(),
+                status: "Archived · read-only".into() });
             changed = true;
         }
         changed
@@ -3113,9 +3114,10 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(1);
         app.history_pending = Some(rx);
         tx.send(vec![history::OfflineSession { id: "saved-1".into(),
-            project: "project".into(), markdown: "**You:** saved".into() }]).unwrap();
+            project: "project\u{1b}[31m".into(), markdown: "**You:** saved".into() }]).unwrap();
         assert!(app.poll_history());
         assert!(app.offline_ids.contains("saved-1"));
+        assert!(!app.sessions[0].collection.contains('\u{1b}'));
         app.handle(Event::Resize(100, 28));
         app.open_history();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
