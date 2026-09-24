@@ -1,5 +1,5 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, IsTerminal, Stdout};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
@@ -22,7 +22,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
 
-use crate::{diff_view, markdown, peer_map::PeerMap};
+use crate::{diff_view, history, markdown, peer_map::PeerMap};
 use crate::theme;
 
 mod tool_cards;
@@ -386,6 +386,8 @@ pub struct App {
     history_modal: bool,
     history_query: String,
     history_selected: usize,
+    history_pending: Option<Receiver<Vec<history::OfflineSession>>>,
+    offline_ids: HashSet<String>,
     diff_modal: bool,
     diff_scroll: u16,
     diff_text: String,
@@ -439,6 +441,8 @@ impl Default for App {
             history_modal: false,
             history_query: String::new(),
             history_selected: 0,
+            history_pending: None,
+            offline_ids: HashSet::new(),
             diff_modal: false,
             diff_scroll: 0,
             diff_text: String::new(),
@@ -457,6 +461,7 @@ impl App {
     pub fn apply_update(&mut self, update: DaemonUpdate) {
         match update {
             DaemonUpdate::Upsert(session) => {
+                self.offline_ids.remove(&session.id);
                 if let Some(existing) = self.sessions.iter_mut().find(|s| s.id == session.id) {
                     *existing = session;
                 } else {
@@ -1020,7 +1025,9 @@ impl App {
             KeyCode::Enter if self.focus == Focus::Prompt => {
                 if !self.input.is_empty() {
                     if let Some(id) = self.groups[self.active_group].active_id() {
-                        if self.pending_prompts.len() < MAX_PENDING_PROMPTS {
+                        if self.offline_ids.contains(id) {
+                            self.notice = "Archived transcript is read-only".into();
+                        } else if self.pending_prompts.len() < MAX_PENDING_PROMPTS {
                             self.pending_prompts
                                 .push((id.to_owned(), std::mem::take(&mut self.input)));
                             self.notice = "Prompt queued".into();
@@ -1047,7 +1054,7 @@ impl App {
                 || session.transcript[start..].to_lowercase().contains(&query) {
                 Some(index)
             } else { None }
-        }).take(64).collect()
+        }).take(128).collect()
     }
 
     fn history_fits(&self) -> bool {
@@ -1062,6 +1069,30 @@ impl App {
         self.history_modal = true;
         self.history_query.clear();
         self.history_selected = 0;
+        if self.history_pending.is_none() {
+            let (tx, rx) = mpsc::sync_channel(1);
+            self.history_pending = Some(rx);
+            std::thread::spawn(move || { let _ = tx.send(history::discover()); });
+        }
+    }
+
+    fn poll_history(&mut self) -> bool {
+        let Some(receiver) = &self.history_pending else { return false; };
+        let found = match receiver.try_recv() {
+            Ok(found) => found,
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => { self.history_pending = None; return false; }
+        };
+        self.history_pending = None;
+        let mut changed = false;
+        for entry in found {
+            if self.sessions.iter().any(|session| session.id == entry.id) { continue; }
+            self.offline_ids.insert(entry.id.clone());
+            self.sessions.push(Session { id: entry.id.clone(), title: entry.id,
+                collection: entry.project, transcript: entry.markdown, status: "Archived · read-only".into() });
+            changed = true;
+        }
+        changed
     }
 
     fn history_key(&mut self, key: KeyEvent) -> bool {
@@ -1679,14 +1710,15 @@ impl App {
         let modal = Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height);
         let matches = self.history_matches();
         let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&self.history_query))),
-            Line::from(" Attached sessions only · read-only transcript picker"), Line::from("")];
-        if matches.is_empty() { lines.push(Line::from(" No matching attached sessions")); }
+            Line::from(" Attached and archived sessions · read-only transcript picker"), Line::from("")];
+        if matches.is_empty() { lines.push(Line::from(if self.history_pending.is_some() { " Finding saved transcripts…" } else { " No matching sessions" })); }
         let visible = usize::from(height.saturating_sub(7)).max(1);
         let start = self.history_selected.saturating_sub(visible.saturating_sub(1));
         for (position, &index) in matches.iter().enumerate().skip(start).take(visible) {
             let session = &self.sessions[index];
-            let label = format!(" {} {} · {}", if position == self.history_selected { '›' } else { ' ' },
-                safe_label(&session.title), safe_label(&session.id));
+            let label = format!(" {} {} · {}{}", if position == self.history_selected { '›' } else { ' ' },
+                safe_label(&session.title), safe_label(&session.id),
+                if self.offline_ids.contains(&session.id) { " · archived" } else { "" });
             let style = if position == self.history_selected { Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT) }
                 else { Style::default().fg(theme::SECONDARY) };
             lines.push(Line::styled(label, style));
@@ -2219,6 +2251,7 @@ fn run_loop(
             changed |= app.handle(event::read()?);
         }
         changed |= app.poll_diff();
+        changed |= app.poll_history();
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
                 changed |= app.peer_map.roster(&id, &serde_json::json!({"ok":false}));
@@ -2257,6 +2290,13 @@ fn save_layout_if_changed(
 ) -> bool {
     let layout = crate::ui_state::LayoutSignature::capture(app);
     if layout == *saved_layout {
+        return false;
+    }
+    if app.groups.iter().any(|group| group.tabs.iter().any(|id| app.offline_ids.contains(id))) {
+        if app.notice != "Layout save skipped · archived tabs are read-only" {
+            app.notice = "Layout save skipped · archived tabs are read-only".into();
+            return true;
+        }
         return false;
     }
     let notice = match store.save_if_complete(app, complete) {
@@ -2384,6 +2424,26 @@ mod tests {
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.groups[0].active_id(), Some("beta"));
         assert!(!app.history_modal);
+    }
+
+    #[test]
+    fn offline_history_opens_read_only_and_never_queues_prompt() {
+        let mut app = App::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.history_pending = Some(rx);
+        tx.send(vec![history::OfflineSession { id: "saved-1".into(),
+            project: "project".into(), markdown: "**You:** saved".into() }]).unwrap();
+        assert!(app.poll_history());
+        assert!(app.offline_ids.contains("saved-1"));
+        app.handle(Event::Resize(100, 28));
+        app.open_history();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].active_id(), Some("saved-1"));
+        app.focus = Focus::Prompt;
+        app.input = "do not send".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.pending_prompts.is_empty());
+        assert_eq!(app.notice, "Archived transcript is read-only");
     }
 
     #[test]

@@ -9,11 +9,72 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const MAX_DIFF_BYTES: usize = 256 * 1024;
+const MAX_UNTRACKED_BYTES: usize = 64 * 1024;
+const MAX_UNTRACKED_FILES: usize = 100;
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
 pub struct DiffSnapshot {
     pub text: String,
+}
+
+fn git_output(cwd: &Path, args: &[&str], limit: usize) -> Result<(Vec<u8>, bool), String> {
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "Could not start git for this worktree.".to_owned())?;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut stdout = stdout;
+        let mut chunk = [0u8; 8192];
+        while let Ok(count) = stdout.read(&mut chunk) {
+            if count == 0 { break; }
+            let remaining = (limit + 1).saturating_sub(bytes.len());
+            bytes.extend_from_slice(&chunk[..count.min(remaining)]);
+        }
+        bytes
+    });
+    let deadline = Instant::now() + GIT_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => { let _ = child.kill(); let _ = child.wait(); break None; }
+        }
+    };
+    let bytes = reader.join().unwrap_or_default();
+    let Some(status) = status else { return Err("Git timed out or exceeded the bounded view.".into()); };
+    if !status.success() { return Err("Git could not inspect this worktree.".into()); }
+    let truncated = bytes.len() > limit;
+    Ok((bytes, truncated))
+}
+
+fn untracked_names(bytes: &[u8], truncated: bool) -> String {
+    let mut out = String::from("\nUntracked files (names only; contents are not read):\n");
+    let mut shown = 0;
+    // A bounded read can end inside a pathname. Never show a partial name.
+    let complete = if truncated { &bytes[..bytes.iter().rposition(|byte| *byte == 0).unwrap_or(0)] } else { bytes };
+    for raw in complete.split(|byte| *byte == 0) {
+        if raw.is_empty() { continue; }
+        if shown == MAX_UNTRACKED_FILES { break; }
+        let name = String::from_utf8_lossy(raw);
+        let escaped: String = name.chars().flat_map(char::escape_default).take(300).collect();
+        out.push_str("  ");
+        out.push_str(&escaped);
+        if escaped.chars().count() == 300 { out.push_str("…"); }
+        out.push('\n');
+        shown += 1;
+    }
+    if shown == 0 { out.push_str("  None\n"); }
+    if truncated || shown == MAX_UNTRACKED_FILES {
+        out.push_str("[Additional untracked names omitted from this view.]\n");
+    }
+    out
 }
 
 fn sidecar(cwd: &Path) -> Option<PathBuf> {
@@ -67,38 +128,20 @@ pub fn read(cwd: &Path) -> DiffSnapshot {
         Ok(pair) => pair,
         Err(note) => return DiffSnapshot { text: format!("Cannot determine a safe diff base: {note}") },
     };
-    let mut child = match Command::new("git")
-        .args(["--no-pager", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--find-renames", "--unified=3", &base, "--"])
-        .current_dir(&cwd).env("GIT_OPTIONAL_LOCKS", "0")
-        .stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
-            Ok(child) => child,
-            Err(_) => return DiffSnapshot { text: "Could not start git for this worktree.".into() },
-        };
-    // Read on this worker's own helper thread so a stalled git cannot block
-    // the UI worker's timeout. The main UI still never waits for either.
-    let stdout = child.stdout.take().expect("piped stdout");
-    let reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stdout.take((MAX_DIFF_BYTES + 1) as u64).read_to_end(&mut bytes);
-        bytes
-    });
-    let deadline = Instant::now() + GIT_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => { let _ = child.kill(); let _ = child.wait(); break None; }
-        }
+    let (bytes, truncated) = match git_output(&cwd,
+        &["--no-pager", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--find-renames", "--unified=3", &base, "--"], MAX_DIFF_BYTES) {
+        Ok(result) => result,
+        Err(note) => return DiffSnapshot { text: format!("Git could not compare this worktree with {base}: {note}") },
     };
-    let bytes = reader.join().unwrap_or_default();
-    let Some(status) = status else { return DiffSnapshot { text: "Git diff timed out or exceeded the bounded view.".into() }; };
-    let truncated = bytes.len() > MAX_DIFF_BYTES;
-    if !status.success() { return DiffSnapshot { text: format!("Git could not compare this worktree with {base}.") }; }
     let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_DIFF_BYTES)]);
     let mut out = format!("Base: {base} ({source})\n");
-    if text.is_empty() { out.push_str("No tracked changes in this comparison. Untracked files are not included."); }
+    if text.is_empty() { out.push_str("No tracked changes in this comparison.\n"); }
     else { out.push_str(&text); }
     if truncated { out.push_str("\n[Diff view truncated at 256 KiB; inspect the worktree for the full patch.]\n"); }
+    match git_output(&cwd, &["ls-files", "--others", "--exclude-standard", "-z", "--"], MAX_UNTRACKED_BYTES) {
+        Ok((names, truncated)) => out.push_str(&untracked_names(&names, truncated)),
+        Err(_) => out.push_str("\n[Untracked names unavailable.]\n"),
+    }
     DiffSnapshot { text: out }
 }
 
@@ -142,9 +185,20 @@ mod tests {
         let result = read(dir.path());
         assert!(result.text.contains("-old"), "{}", result.text);
         assert!(result.text.contains("+new"), "{}", result.text);
-        assert!(!result.text.contains("untracked.txt"));
+        assert!(result.text.contains("untracked.txt"));
+        assert!(!result.text.contains("untracked\n"));
+        assert!(result.text.contains("names only; contents are not read"));
         let staged = Command::new("git").args(["diff", "--cached", "--name-only"])
             .current_dir(dir.path()).output().unwrap();
         assert!(staged.stdout.is_empty());
+    }
+
+    #[test]
+    fn untracked_names_escape_control_characters_and_drop_partial_tail() {
+        let names = untracked_names(b"normal.txt\0line\nbreak\0partial", true);
+        assert!(names.contains("normal.txt"));
+        assert!(names.contains("line\\nbreak"));
+        assert!(!names.contains("partial"));
+        assert!(names.contains("Additional untracked names omitted"));
     }
 }
