@@ -33,6 +33,8 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -44,6 +46,25 @@ from doxa.ui.fleettab import FleetTab
 from doxa.ui.labels import help_text
 from tests.fakes import FakeEngine
 from tests.test_fleet import FakeBackend
+
+
+def test_fleet_tab_only_updates_when_report_changes(monkeypatch):
+    """A half-second poll must not invalidate the widget for the same text."""
+    session = SimpleNamespace(run_id="r1", alive=True)
+    tab = FleetTab(session)
+    update = Mock()
+    monkeypatch.setattr(tab.body, "update", update)
+    report = ["running", "running", "new message"]
+    monkeypatch.setattr(tab, "text", lambda: report.pop(0))
+
+    tab._refresh()
+    tab._refresh()
+    tab._refresh()
+
+    assert update.call_count == 2
+    assert [call.args[0].plain for call in update.call_args_list] == [
+        "running", "new message",
+    ]
 
 
 @pytest.fixture
