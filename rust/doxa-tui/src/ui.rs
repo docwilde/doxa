@@ -1097,7 +1097,9 @@ impl App {
                     self.diff_scroll = 0;
                     return true;
                 }
-                false
+                self.diff_text = "The active session changed while the diff loaded. Press R to refresh it.".into();
+                self.diff_scroll = 0;
+                true
             }
             Err(TryRecvError::Disconnected) => { self.diff_pending = None; self.diff_text = "Diff worker unavailable.".into(); true }
             Err(TryRecvError::Empty) => false,
