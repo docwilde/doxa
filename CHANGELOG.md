@@ -14,6 +14,9 @@ the stable 2.0 release has not been cut.
   without attaching them, and list untracked filenames in the read-only diff.
 - Add interactive engine and model chips. Claude models come from one bounded
   startup CLI catalog probe; unavailable catalogs offer no guessed choices.
+- Add an interactive Claude permission mode chip with daemon capability checks.
+  Entering `dontAsk` requires an idle session and a second confirmation;
+  `bypassPermissions` remains unavailable without explicit launcher arming.
 
 ## 2.0.0-alpha.5 — 2026-09-25
 

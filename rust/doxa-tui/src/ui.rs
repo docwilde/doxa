@@ -53,11 +53,11 @@ const ACTIONS: [(&str, &str); 11] = [
 
 const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
 const PERMISSION_CHOICES: [(&str, &str); 5] = [
-    ("default", "Standard permission prompts"),
-    ("acceptEdits", "Automatically accept edits"),
-    ("plan", "Plan without changes"),
-    ("auto", "Automatic permission mode"),
-    ("dontAsk", "Deny permission requests · idle only"),
+    ("default", "Ask before dangerous calls"),
+    ("acceptEdits", "Allow file edits; ask for other calls"),
+    ("plan", "Planning only; no tools run"),
+    ("auto", "Model classifier decides each call"),
+    ("dontAsk", "Deny unapproved calls without asking"),
 ];
 
 fn permission_index(mode: &str) -> Option<usize> {
@@ -403,6 +403,7 @@ pub struct App {
     permission_modes: HashMap<String, String>,
     session_activity: HashMap<String, (bool, usize)>,
     permission_picker: Option<(String, usize)>,
+    permission_confirm_dont_ask: bool,
     pending_permission_changes: Vec<(String, String)>,
     model_picker: Option<ModelPicker>,
     engine_picker: bool,
@@ -469,6 +470,7 @@ impl Default for App {
             permission_modes: HashMap::new(),
             session_activity: HashMap::new(),
             permission_picker: None,
+            permission_confirm_dont_ask: false,
             pending_permission_changes: Vec::new(),
             model_picker: None,
             engine_picker: false,
@@ -670,6 +672,7 @@ impl App {
                                 self.tool_modal = false;
                                 self.model_picker = None;
                                 self.permission_picker = None;
+                                self.permission_confirm_dont_ask = false;
                                 self.engine_picker = false;
                                 self.input_requests.push(request);
                             }
@@ -957,6 +960,7 @@ impl App {
                     self.model_picker = None;
                     self.engine_picker = false;
                     self.permission_picker = None;
+                    self.permission_confirm_dont_ask = false;
                     self.notice = "Enlarge terminal to open chip picker".into();
                 }
                 true
@@ -1221,6 +1225,7 @@ impl App {
         }
         let selected = self.permission_modes.get(&id).and_then(|mode| permission_index(mode)).unwrap_or(0);
         self.permission_picker = Some((id, selected));
+        self.permission_confirm_dont_ask = false;
     }
 
     fn select_permission_mode(&mut self) {
@@ -1231,16 +1236,23 @@ impl App {
             self.notice = "dontAsk requires an idle session with no queued prompts".into();
             return;
         }
+        if mode == "dontAsk" && self.permission_modes.get(id).is_none_or(|current| current != mode)
+            && !self.permission_confirm_dont_ask {
+            self.permission_confirm_dont_ask = true;
+            self.notice = "dontAsk denies unapproved calls silently; press Enter again to confirm".into();
+            return;
+        }
         self.pending_permission_changes.push((id.clone(), mode.to_owned()));
         self.notice = format!("Requesting permission mode · {mode}");
         self.permission_picker = None;
+        self.permission_confirm_dont_ask = false;
     }
 
     fn permission_picker_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
-            KeyCode::Esc => self.permission_picker = None,
-            KeyCode::Up => { if let Some((_, selected)) = &mut self.permission_picker { *selected = selected.saturating_sub(1); } }
-            KeyCode::Down => { if let Some((_, selected)) = &mut self.permission_picker { *selected = (*selected + 1).min(PERMISSION_CHOICES.len() - 1); } }
+            KeyCode::Esc => { self.permission_picker = None; self.permission_confirm_dont_ask = false; }
+            KeyCode::Up => { if let Some((_, selected)) = &mut self.permission_picker { *selected = selected.saturating_sub(1); self.permission_confirm_dont_ask = false; } }
+            KeyCode::Down => { if let Some((_, selected)) = &mut self.permission_picker { *selected = (*selected + 1).min(PERMISSION_CHOICES.len() - 1); self.permission_confirm_dont_ask = false; } }
             KeyCode::Enter => self.select_permission_mode(),
             _ => return false,
         }
@@ -1794,6 +1806,7 @@ impl App {
                 self.engine_picker = false;
                 self.model_picker = None;
                 self.permission_picker = None;
+                self.permission_confirm_dont_ask = false;
                 return true;
             }
             if self.engine_picker {
@@ -1810,7 +1823,12 @@ impl App {
                     let row = usize::from(mouse.row - (y + 4));
                     if row < PERMISSION_CHOICES.len() {
                         *selected = row;
-                        self.select_permission_mode();
+                        self.permission_confirm_dont_ask = false;
+                        if PERMISSION_CHOICES[row].0 == "dontAsk" {
+                            self.notice = "dontAsk denies unapproved calls silently; press Enter twice to confirm".into();
+                        } else {
+                            self.select_permission_mode();
+                        }
                     }
                 }
                 return true;
@@ -2019,7 +2037,7 @@ impl App {
         }
         frame.render_widget(
             Paragraph::new(format!(
-                "{}  |  Ctrl+P actions · Alt+E engine · Alt+M model · Ctrl+R history · F2 diff · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
+                "{}  |  Ctrl+P actions · Alt+E engine · Alt+M model · Alt+P permissions · Ctrl+R history · F2 diff · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
                 self.notice
             )).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
@@ -2060,7 +2078,11 @@ impl App {
         } else if let Some((id, selected)) = &self.permission_picker {
             title = " Claude permissions · this session · Enter select · Esc close ";
             lines.push(Line::from(" Changes how Claude handles tool permission requests."));
-            lines.push(Line::from(" Current mode marked with ●; select carefully."));
+            lines.push(Line::from(if self.permission_confirm_dont_ask {
+                " dontAsk silently denies unapproved calls. Enter again to confirm."
+            } else {
+                " Current mode marked with ●; dontAsk requires confirmation."
+            }));
             lines.push(Line::from(""));
             for (index, (mode, description)) in PERMISSION_CHOICES.iter().enumerate() {
                 let current = self.permission_modes.get(id).is_some_and(|current| current == mode);
@@ -2921,8 +2943,32 @@ mod tests {
         app.apply_daemon_frame(&json!({"type":"reply", "session_id":"s", "ok":true,
             "status":{"session_id":"s", "running":false, "queued":0}}));
         app.select_permission_mode();
+        assert!(app.pending_permission_changes.is_empty());
+        assert!(app.permission_confirm_dont_ask);
+        app.select_permission_mode();
         assert_eq!(app.pending_permission_changes, vec![("s".into(), "dontAsk".into())]);
         assert!(app.permission_picker.is_none());
+    }
+
+    #[test]
+    fn dont_ask_confirmation_clears_on_selection_change_and_mouse_cannot_submit() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 80, 24);
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "engine":"claude",
+            "permission_mode":"default", "running":false, "queued":0,
+            "can_set_permission_mode":true}));
+        app.groups[0].tabs = vec!["s".into()];
+        app.open_permission_picker();
+        app.permission_picker.as_mut().unwrap().1 = 4;
+        app.permission_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.permission_confirm_dont_ask);
+        app.permission_picker_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert!(!app.permission_confirm_dont_ask);
+        app.permission_picker_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: 8, row: 10, modifiers: KeyModifiers::NONE }));
+        assert!(app.pending_permission_changes.is_empty());
+        assert!(!app.permission_confirm_dont_ask);
     }
 
     #[test]

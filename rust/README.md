@@ -83,6 +83,9 @@ cannot be switched. `Alt+M` opens the live model picker when the daemon
 advertises model control. Claude catalog choices come from a bounded startup
 CLI probe; an unavailable catalog offers no guessed models. The colors follow
 Python DOXA's warm dark palette.
+`Alt+P` opens the Claude permission mode picker when supported by the session.
+Entering `dontAsk` requires a second Enter confirmation because unapproved
+calls are silently denied.
 
 Alpha tags identify preview snapshots. A stable 2.0 release waits until the
 frontend reaches feature parity and passes end-to-end terminal and daemon
