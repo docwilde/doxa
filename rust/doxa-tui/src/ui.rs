@@ -148,6 +148,7 @@ fn structured_event(event_type: &str, data: &serde_json::Value) -> Option<String
         "prompt_dequeued" => "Queued prompt started".into(),
         "prompt_cancelled" => "Queued prompt cancelled".into(),
         "prompt_discarded" => "Queued prompt discarded".into(),
+        "replay_gap" => "Some session events were missed during reconnect".into(),
         "remote_driver_changed" => format!(
             "Remote driver: {}",
             data.get("identity")

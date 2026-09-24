@@ -7,6 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 struct Fixture { gate: (Mutex<bool>, Condvar), prompts: Mutex<Vec<String>> }
@@ -109,6 +110,46 @@ fn prompt_reply_precedes_events_and_queue_notifies_only_other_client() {
     assert_eq!(*host.prompts.lock().unwrap(), vec!["first", "second"]);
 }
 
+struct PanicOnDequeue { fixture: Fixture, public_calls: AtomicUsize }
+impl Host for PanicOnDequeue {
+    fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) { self.fixture.prompt(text, emit); }
+    fn call(&self, method: &str, params: &Value) -> Result<Value, String> { self.fixture.call(method, params) }
+    fn public_prompt(&self, text: &str) -> Result<String, String> {
+        if self.public_calls.fetch_add(1, Ordering::SeqCst) == 2 { panic!("scrubber panicked"); }
+        Ok(text.to_owned())
+    }
+}
+
+#[test]
+fn queued_prompt_continues_after_display_scrubber_panics() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(PanicOnDequeue { fixture: Fixture::new(), public_calls: AtomicUsize::new(0) });
+    let handle = Daemon::bind(dir.path(), session(), host.clone()).unwrap().start();
+    let (mut reader, mut writer) = connect(handle.socket_path());
+    recv(&mut reader);
+    send(&mut writer, json!({"type":"attach","cursor":null}));
+    send(&mut writer, json!({"type":"prompt","id":1,"text":"first"}));
+    assert_eq!(recv(&mut reader)["ok"], true);
+    send(&mut writer, json!({"type":"prompt","id":2,"text":"second"}));
+    assert_eq!(recv(&mut reader)["queued"], true);
+    host.fixture.release();
+    let mut saw_redacted_dequeue = false;
+    let mut saw_second_turn = false;
+    for _ in 0..6 {
+        let frame = recv(&mut reader);
+        if frame["event"]["type"] == "prompt_dequeued" {
+            assert_eq!(frame["event"]["data"]["text"], "[redacted: prompt unavailable]");
+            saw_redacted_dequeue = true;
+        }
+        if frame["event"]["type"] == "text_delta" && frame["event"]["data"]["text"] == "second" {
+            saw_second_turn = true;
+            break;
+        }
+    }
+    assert!(saw_redacted_dequeue && saw_second_turn);
+    assert_eq!(*host.fixture.prompts.lock().unwrap(), ["first", "second"]);
+}
+
 #[test]
 fn malformed_and_oversize_clients_do_not_affect_next_client() {
     let dir = tempfile::tempdir().unwrap();
@@ -158,6 +199,9 @@ fn ring_evicts_old_events_and_large_event_keeps_sequence() {
     let (mut reader, mut writer) = connect(handle.socket_path());
     assert_eq!(recv(&mut reader)["next_seq"], 521);
     send(&mut writer, json!({"type":"attach","cursor":0}));
+    let gap = recv(&mut reader);
+    assert_eq!(gap["seq"], 8);
+    assert_eq!(gap["event"], json!({"type":"replay_gap","data":{"from_seq":0,"to_seq":8}}));
     assert_eq!(recv(&mut reader)["seq"], 9);
     for _ in 0..510 { recv(&mut reader); }
     let last = recv(&mut reader);
