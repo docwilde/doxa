@@ -178,6 +178,58 @@ class IdentityTests(unittest.TestCase):
             asyncio.run(sidecar.run())
         self.assertTrue(FakeEngine.cancelled)
 
+    def test_stdin_eof_skips_finalize_while_turn_ignores_cancellation(self):
+        class FakeEngine:
+            instance = None
+
+            def __init__(self, **_options):
+                self.cancellations = 0
+                self.finalize_calls = 0
+                FakeEngine.instance = self
+
+            async def start(self):
+                return types.SimpleNamespace(type="started", data={})
+
+            async def send(self, _prompt):
+                while True:
+                    try:
+                        await asyncio.sleep(3600)
+                    except asyncio.CancelledError:
+                        self.cancellations += 1
+                        if self.cancellations > 1:
+                            raise
+                    yield types.SimpleNamespace(type="ignored", data={})
+
+            async def peer_events(self):
+                if False:
+                    yield None
+
+            async def finalize(self):
+                self.finalize_calls += 1
+                return types.SimpleNamespace(type="finalized", data={})
+
+        frames = [
+            {"type": "request", "id": 1, "method": "start",
+             "params": {"cwd": str(SIDECAR.parent), "session_id": "eof"}},
+            {"type": "request", "id": 2, "method": "prompt", "params": {"text": "work"}},
+        ]
+
+        async def read_frame(_reader, _limit):
+            if not frames:
+                await asyncio.sleep(0.01)
+                return b""
+            return json.dumps(frames.pop(0)).encode() + b"\n"
+
+        engine_module = types.ModuleType("doxa.engine")
+        engine_module.SessionEngine = FakeEngine
+        with mock.patch.dict(sys.modules, {"doxa.engine": engine_module}), \
+             mock.patch.object(sidecar.asyncio, "to_thread", read_frame), \
+             mock.patch.object(sidecar, "emit"), \
+             mock.patch.object(sidecar, "TASK_CANCEL_TIMEOUT", 0.01):
+            asyncio.run(sidecar.run())
+        self.assertGreaterEqual(FakeEngine.instance.cancellations, 2)
+        self.assertEqual(FakeEngine.instance.finalize_calls, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

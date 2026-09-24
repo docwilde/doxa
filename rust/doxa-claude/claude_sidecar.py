@@ -19,6 +19,7 @@ MAX_FRAME = 64 * 1024
 PROTOCOL = "doxa-claude-sidecar"
 VERSION = 1
 EOF_FINALIZE_TIMEOUT = 5.0
+TASK_CANCEL_TIMEOUT = 1.0
 
 
 def validate_identity(session_id: str | None, resume: str | None) -> tuple[str | None, str | None]:
@@ -162,12 +163,16 @@ async def run() -> None:
     running = [task for task in (peer_task, turn) if task is not None and not task.done()]
     for task in running:
         task.cancel()
+    settled = True
     if running:
-        await asyncio.wait(running, timeout=1.0)
-    if reached_eof and engine is not None and not finalized:
+        _, pending = await asyncio.wait(running, timeout=TASK_CANCEL_TIMEOUT)
+        settled = not pending
+    if reached_eof and engine is not None and not finalized and settled:
         # A disappearing parent cannot send an explicit finalize request.
         # Give the engine a bounded chance to close its SDK client, stop peer
-        # presence, and index the transcript before this process exits.
+        # presence, and index the transcript before this process exits. A
+        # cancellation-resistant task may still be using the SDK; do not run
+        # finalization concurrently with it.
         try:
             await asyncio.wait_for(engine.finalize(), timeout=EOF_FINALIZE_TIMEOUT)
         except Exception:
