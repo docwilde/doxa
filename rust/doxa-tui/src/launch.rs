@@ -227,16 +227,52 @@ pub fn stop(session: &Session) -> io::Result<()> {
             "session identity changed during stop",
         ));
     }
-    client
+    let reply = client
         .call("stop", serde_json::Map::new())
         .map_err(io::Error::other)?;
+    if reply["ok"] != true {
+        return Err(io::Error::other("daemon refused stop request"));
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Write};
     use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn refused_stop_reply_is_not_reported_as_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            writeln!(stream, "{}", serde_json::json!({
+                "type":"hello", "proto":1, "session_id":"session-1", "cwd":"/tmp",
+                "engine":"fixture", "model":null, "next_seq":0
+            })).unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&line).unwrap(),
+                serde_json::json!({"type":"attach", "cursor":null}));
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], "stop");
+            writeln!(stream, "{}", serde_json::json!({
+                "type":"reply", "id":request["id"], "ok":false,
+                "error":"stop refused"
+            })).unwrap();
+        });
+        let session = Session { id:"session-1".into(), socket, scope_key:"/tmp".into(),
+            clients:Some(0), started_at:String::new() };
+        assert_eq!(stop(&session).unwrap_err().to_string(), "daemon refused stop request");
+        server.join().unwrap();
+    }
 
     #[test]
     fn resolves_only_real_executable_files() {
