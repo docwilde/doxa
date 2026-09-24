@@ -165,12 +165,17 @@ impl TranscriptStore {
         scrub_value(&mut value, &scrub);
         let bytes = serde_json::to_vec(&value)?;
         if bytes.len() as u64 > MAX_METADATA_BYTES { return Err(bad_data()); }
-        let temp = self.dir.join(format!(".{}.codex.{}.tmp", self.session_id, std::process::id()));
-        let mut opts = OpenOptions::new();
-        let mut file = opts.write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&temp)?;
-        checked_file(&file)?;
-        let result = (|| { file.write_all(&bytes)?; file.sync_all()?; fs::rename(&temp, self.thread_path()) })();
-        if result.is_err() { let _ = fs::remove_file(&temp); }
-        result
+        // Use a fresh name for each write. A crash may leave an old temp
+        // file behind, and concurrent writers in this process need distinct
+        // files even though they share a PID.
+        let mut temp = tempfile::Builder::new()
+            .prefix(&format!(".{}.codex.", self.session_id))
+            .suffix(".tmp")
+            .tempfile_in(&self.dir)?;
+        checked_file(temp.as_file())?;
+        temp.write_all(&bytes)?;
+        temp.as_file().sync_all()?;
+        temp.persist(self.thread_path()).map_err(|error| error.error)?;
+        Ok(())
     }
 }

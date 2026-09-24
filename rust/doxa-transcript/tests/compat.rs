@@ -66,6 +66,19 @@ fn writes_new_python_shaped_codex_metadata() {
 }
 
 #[test]
+fn metadata_write_ignores_orphaned_pid_named_temp_file() {
+    let temp = tempdir().unwrap();
+    let store = store(temp.path());
+    let orphan = temp.path().join("project").join(format!(".session-1.codex.{}.tmp", std::process::id()));
+    fs::write(&orphan, b"orphaned write").unwrap();
+    let mut fields = Map::new();
+    fields.insert("thread_id".into(), Value::String("thread-1".into()));
+    store.write_thread(fields, str::to_owned).unwrap();
+    assert_eq!(store.recorded_thread_id().unwrap().as_deref(), Some("thread-1"));
+    assert_eq!(fs::read(orphan).unwrap(), b"orphaned write");
+}
+
+#[test]
 fn append_tightens_permissions_on_legacy_transcript() {
     let temp = tempdir().unwrap();
     let store = store(temp.path());
