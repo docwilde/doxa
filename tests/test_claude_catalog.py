@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -37,6 +39,7 @@ def _cli(
             "loggedIn": authenticated,
             "authMethod": auth_method or ("claude.ai" if authenticated else "none"),
             "orgId": org if authenticated else None,
+            "email": "current@example.org" if authenticated else None,
             "secret": "not-a-real-secret",
         }
 
@@ -51,9 +54,13 @@ def _cli(
     return commands
 
 
-def _profile(base, org="current-org"):
+def _profile(base, org="current-org", account="current-account", email="current@example.org"):
     (base / ".claude.json").write_text(json.dumps({
-        "oauthAccount": {"organizationUuid": org},
+        "oauthAccount": {
+            "organizationUuid": org,
+            "accountUuid": account,
+            "emailAddress": email,
+        },
     }))
     identity.invalidate()
 
@@ -111,6 +118,49 @@ def test_fresh_cache_is_still_a_cache(tmp_path, monkeypatch):
     assert result is not None
     assert result.is_stale is False
     assert [m.id for m in result.models] == ["claude-sonnet-5", "claude-fable-5-1"]
+
+
+def test_current_cc_cache_is_scoped_by_account_filename(tmp_path, monkeypatch):
+    _cli(monkeypatch, version="2.1.281")
+    _profile(tmp_path)
+    path = _cache(tmp_path, fetched=NOW - timedelta(minutes=5),
+                  stale=NOW + timedelta(minutes=55))
+    data = json.loads(path.read_text())
+    data.pop("resolution")
+    data.pop("organizationUuid")
+    data["catalog"]["surface"] = "cc"
+    data["catalog"]["config"]["id"] = "cc"
+    path.unlink()
+    account_hash = hashlib.sha256(b"current-account").hexdigest()[:12]
+    scoped = path.with_name(f"current-org-{account_hash}-cc.json")
+    scoped.write_text(json.dumps(data))
+
+    result = claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW)
+    assert result is not None
+    assert [model.id for model in result.models] == ["claude-sonnet-5", "claude-fable-5-1"]
+
+    scoped.rename(path.with_name("other-org-account-cc.json"))
+    assert claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW) is None
+
+
+def test_current_cc_cache_rejects_other_account_in_same_org(tmp_path, monkeypatch):
+    _cli(monkeypatch, version="2.1.281")
+    _profile(tmp_path)
+    path = _cache(tmp_path)
+    data = json.loads(path.read_text())
+    data.pop("resolution")
+    data.pop("organizationUuid")
+    data["catalog"]["surface"] = "cc"
+    data["catalog"]["config"]["id"] = "cc"
+    path.unlink()
+    other_hash = hashlib.sha256(b"other-account").hexdigest()[:12]
+    path.with_name(f"current-org-{other_hash}-cc.json").write_text(json.dumps(data))
+    assert claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW) is None
+
+    own_hash = hashlib.sha256(b"current-account").hexdigest()[:12]
+    path.with_name(f"current-org-{own_hash}-cc.json").write_text(json.dumps(data))
+    _profile(tmp_path, email="other@example.org")
+    assert claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW) is None
 
 
 def test_other_account_and_logged_out_never_get_cached_models(tmp_path, monkeypatch):
@@ -215,3 +265,97 @@ def test_preserves_account_specific_billing_notice(tmp_path, monkeypatch):
     result = claude_catalog.read_cached_catalog(config_dir=tmp_path, now=NOW)
     assert result is not None
     assert result.models[0].notice == "Requires usage credits: Billed separately"
+
+
+async def test_startup_cli_warmup_sends_no_prompt_and_stops_on_deadline(monkeypatch):
+    calls = []
+    stopped = asyncio.Event()
+
+    class Input:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    class Process:
+        pid = 12345
+        returncode = None
+        stdin = Input()
+
+        async def wait(self):
+            await stopped.wait()
+            return self.returncode
+
+    process = Process()
+
+    async def spawn(*args, **kwargs):
+        calls.append((args, kwargs))
+        return process
+
+    def killpg(pid, signum):
+        calls.append((pid, signum))
+        process.returncode = -signum
+        stopped.set()
+
+    monkeypatch.setattr(claude_catalog.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(claude_catalog.os, "killpg", killpg)
+
+    assert await claude_catalog.warm_cli_catalog(timeout=0.01) is True
+    args, kwargs = calls[0]
+    assert args == (
+        "claude", "--safe-mode", "--print", "--verbose", "--input-format", "stream-json",
+        "--output-format", "stream-json",
+    )
+    assert kwargs["stdin"] == asyncio.subprocess.PIPE
+    assert process.stdin.closed
+    assert len(calls) == 2
+
+
+async def test_missing_cli_warmup_fails_cleanly(monkeypatch):
+    async def missing(*args, **kwargs):
+        raise FileNotFoundError("claude")
+
+    monkeypatch.setattr(claude_catalog.asyncio, "create_subprocess_exec", missing)
+    assert await claude_catalog.warm_cli_catalog(timeout=0.01) is False
+
+
+@pytest.mark.parametrize("before,after,expected", [
+    (None, None, "unchanged"),
+    (NOW - timedelta(hours=2), NOW - timedelta(hours=2), "unchanged"),
+    (NOW - timedelta(hours=2), NOW - timedelta(minutes=1), "refreshed"),
+    (None, NOW - timedelta(minutes=1), "refreshed"),
+])
+async def test_startup_refresh_requires_a_new_account_matched_snapshot(
+    monkeypatch, before, after, expected,
+):
+    snapshots = iter((before, after))
+
+    def read():
+        fetched_at = next(snapshots)
+        return None if fetched_at is None else claude_catalog.ClaudeCatalog(
+            models=(claude_catalog.ClaudeCatalogModel("claude-sonnet-5", "Sonnet 5"),),
+            fetched_at=fetched_at,
+            stale_at=fetched_at + timedelta(hours=1),
+            is_stale=True,
+        )
+
+    calls = []
+
+    async def warm():
+        calls.append("warm")
+        return True
+
+    monkeypatch.setattr(claude_catalog, "read_cached_catalog", read)
+    monkeypatch.setattr(claude_catalog, "warm_cli_catalog", warm)
+    assert await claude_catalog.attempt_cli_catalog_refresh() == expected
+    assert calls == ["warm"]
+
+
+async def test_failed_startup_cli_is_not_reported_as_refresh(monkeypatch):
+    monkeypatch.setattr(claude_catalog, "read_cached_catalog", lambda: None)
+
+    async def warm():
+        return False
+
+    monkeypatch.setattr(claude_catalog, "warm_cli_catalog", warm)
+    assert await claude_catalog.attempt_cli_catalog_refresh() == "unavailable"

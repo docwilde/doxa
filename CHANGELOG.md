@@ -4,6 +4,10 @@ Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v1.17.0`); the ranges below are derived from that history,
 not written from memory.
 
+## Unreleased
+
+- DOXA starts Claude CLI once in safe mode in the background without sending a prompt, giving it a bounded chance to refresh its model catalogue. The picker now reads the newer `cc` cache only when its filename matches the active organization and account, as well as the older organization-scoped `ccd` cache. It reports a refresh only when a validated cache's fetch time advances, and labels unchanged or unavailable snapshots honestly.
+
 ## 1.17.0 — 2026-09-24
 
 **Control local sessions from another device.**

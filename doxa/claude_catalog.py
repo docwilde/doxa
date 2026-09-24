@@ -14,14 +14,18 @@ closed so the provider can use its fallback.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 
 _MAX_CACHE_BYTES = 2 * 1024 * 1024
@@ -77,8 +81,23 @@ def _auth_status(cli: str) -> dict[str, Any] | None:
     return status
 
 
-def _catalog_identity(cli: str) -> tuple[str, bool] | None:
-    """(organization, offline), never an account guessed from credentials."""
+def _profile_account(org: str, email: str | None = None) -> str | None:
+    """Use local profile metadata only when it matches the CLI identity."""
+    from . import identity
+
+    profile = identity.local_account()
+    account = profile.get("accountUuid")
+    if profile.get("organizationUuid") != org or not isinstance(account, str) or not account:
+        return None
+    if email is not None:
+        profile_email = profile.get("emailAddress")
+        if not isinstance(profile_email, str) or profile_email.casefold() != email.casefold():
+            return None
+    return account
+
+
+def _catalog_identity(cli: str) -> tuple[str, bool, str | None] | None:
+    """(organization, offline, verified profile account), no credentials."""
     status = _auth_status(cli)
     if status is None:
         return None
@@ -90,7 +109,11 @@ def _catalog_identity(cli: str) -> tuple[str, bool] | None:
         return None
     if status.get("loggedIn") is True and status.get("authMethod") == "claude.ai":
         org = status.get("orgId")
-        return (org, False) if isinstance(org, str) and org else None
+        if not isinstance(org, str) or not org:
+            return None
+        email = status.get("email")
+        account = _profile_account(org, email) if isinstance(email, str) and email else None
+        return org, False, account
     if (
         status.get("loggedIn") is not False
         or status.get("authMethod") != "none"
@@ -103,7 +126,7 @@ def _catalog_identity(cli: str) -> tuple[str, bool] | None:
     from . import identity
 
     org = identity.local_account().get("organizationUuid")
-    return (org, True) if isinstance(org, str) and org else None
+    return (org, True, _profile_account(org)) if isinstance(org, str) and org else None
 
 
 def _cli_version(cli: str) -> tuple[int, int, int] | None:
@@ -170,7 +193,7 @@ def _model_rows(raw: Any, cli_version: tuple[int, int, int]) -> tuple[ClaudeCata
 
 def _read_one(
     path: Path, org: str, cli_version: tuple[int, int, int], now: datetime,
-    offline: bool,
+    offline: bool, account: str | None = None,
 ) -> ClaudeCatalog | None:
     try:
         if path.is_symlink() or path.stat().st_size > _MAX_CACHE_BYTES:
@@ -180,11 +203,21 @@ def _read_one(
         return None
     if not isinstance(data, dict):
         return None
-    if (
-        data.get("version") != 2
-        or data.get("resolution") != "token_org"
-        or data.get("organizationUuid") != org
-    ):
+    if data.get("version") != 2:
+        return None
+    # Recent Claude Code stores its subscription catalogue as
+    # <organization>-<first 12 SHA-256 hex of accountUuid>-cc.json. The
+    # older ccd cache records its organization inside the JSON. Match both
+    # identifiers for cc: another account in the same org may differ.
+    legacy = data.get("resolution") == "token_org" and data.get("organizationUuid") == org
+    account_hash = hashlib.sha256(account.encode()).hexdigest()[:12] if account else None
+    current = (
+        account_hash is not None
+        and "organizationUuid" not in data
+        and "resolution" not in data
+        and path.name == f"{org}-{account_hash}-cc.json"
+    )
+    if not legacy and not current:
         return None
     fetched_at = _timestamp(data.get("fetchedAt"))
     stale_at = _timestamp(data.get("staleAt"))
@@ -197,10 +230,11 @@ def _read_one(
     ):
         return None
     catalog = data.get("catalog")
-    if not isinstance(catalog, dict) or catalog.get("surface") != "ccd":
+    surface = "ccd" if legacy else "cc"
+    if not isinstance(catalog, dict) or catalog.get("surface") != surface:
         return None
     config = catalog.get("config")
-    if not isinstance(config, dict) or config.get("id") != "ccd":
+    if not isinstance(config, dict) or config.get("id") != surface:
         return None
     models = _model_rows(config.get("models"), cli_version)
     if not models:
@@ -224,7 +258,7 @@ def read_cached_catalog(
     version = _cli_version(cli) if identity else None
     if identity is None or version is None:
         return None
-    org, offline = identity
+    org, offline, account = identity
     base = config_dir or Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
     cache_dir = base / "cache" / "model-catalog"
     try:
@@ -232,6 +266,77 @@ def read_cached_catalog(
     except OSError:
         return None
     instant = now or datetime.now(timezone.utc)
-    candidates = (_read_one(path, org, version, instant, offline) for path in paths)
+    candidates = (_read_one(path, org, version, instant, offline, account) for path in paths)
     return max((item for item in candidates if item is not None),
                key=lambda item: item.fetched_at, default=None)
+
+
+async def warm_cli_catalog(*, cli: str = "claude", timeout: float = 8.0) -> bool:
+    """Start Claude once without a prompt; return whether it ran successfully.
+
+    Stream input stays open during initialization. No model request is sent;
+    the subprocess is stopped after a fixed window. ``--safe-mode`` disables
+    user hooks, MCP servers and other customizations while retaining normal
+    auth and model selection. ``--bare`` is unsuitable: it disables OAuth.
+    This uses the operator's ordinary CLI profile, just as
+    :func:`read_cached_catalog` does.
+    """
+    try:
+        process = await asyncio.create_subprocess_exec(
+            cli, "--safe-mode", "--print", "--verbose", "--input-format", "stream-json",
+            "--output-format", "stream-json", stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return False
+    try:
+        await asyncio.wait_for(process.wait(), timeout)
+        return process.returncode == 0
+    except asyncio.TimeoutError:
+        # An idle stream-json session normally waits for input indefinitely.
+        return True
+    finally:
+        if process.stdin is not None:
+            process.stdin.close()
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGTERM)
+            try:
+                await asyncio.wait_for(process.wait(), 1.0)
+            except asyncio.TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                await process.wait()
+
+
+CatalogRefreshStatus = Literal["refreshed", "unchanged", "unavailable"]
+
+
+async def attempt_cli_catalog_refresh() -> CatalogRefreshStatus:
+    """Compare validated account-matched snapshots around one CLI startup.
+
+    An idle stream-json process is evidence only that the CLI ran, not that
+    its private cache changed. Report a refresh only when ``fetchedAt``
+    advances or a matching catalogue appears where none existed before.
+    """
+    try:
+        before = await asyncio.to_thread(read_cached_catalog)
+    except Exception:  # noqa: BLE001 -- optional private cache inspection
+        before = None
+        baseline_known = False
+    else:
+        baseline_known = True
+    try:
+        cli_ran = await warm_cli_catalog()
+    except Exception:  # noqa: BLE001 -- optional CLI startup
+        cli_ran = False
+    try:
+        after = await asyncio.to_thread(read_cached_catalog)
+    except Exception:  # noqa: BLE001 -- optional private cache inspection
+        after = None
+    if cli_ran and baseline_known and after is not None and (
+        before is None or after.fetched_at > before.fetched_at
+    ):
+        return "refreshed"
+    return "unchanged" if cli_ran else "unavailable"
