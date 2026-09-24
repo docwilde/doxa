@@ -31,7 +31,8 @@ fn run(args: &[String]) -> io::Result<()> {
                 command = Some(arg)
             }
             "--session" | "--socket" | "--engine" | "--model" | "--linger" | "--sandbox"
-            | "--codex-bin" | "--lore-python" => {
+            | "--codex-bin" | "--lore-python" | "--claude-python" | "--claude-script"
+            | "--resume" => {
                 index += 1;
                 let value = args
                     .get(index)
@@ -45,9 +46,12 @@ fn run(args: &[String]) -> io::Result<()> {
                     }
                     "--socket" => socket = Some(value),
                     "--engine" => match value.as_str() {
-                        "codex" => options.fixture = false,
-                        "fixture" => options.fixture = true,
-                        _ => return Err(invalid("native engine must be codex or fixture")),
+                        "codex" => options.engine = launch::Engine::Codex,
+                        "claude" => options.engine = launch::Engine::Claude,
+                        "fixture" => options.engine = launch::Engine::Fixture,
+                        _ => {
+                            return Err(invalid("native engine must be codex, claude, or fixture"))
+                        }
                     },
                     "--model" => options.model = Some(value.clone()),
                     "--linger" => {
@@ -56,6 +60,9 @@ fn run(args: &[String]) -> io::Result<()> {
                     "--sandbox" => options.sandbox = Some(value.clone()),
                     "--codex-bin" => options.codex_bin = Some(PathBuf::from(value)),
                     "--lore-python" => options.lore_python = Some(PathBuf::from(value)),
+                    "--claude-python" => options.claude_python = Some(PathBuf::from(value)),
+                    "--claude-script" => options.claude_script = Some(PathBuf::from(value)),
+                    "--resume" => options.resume = Some(value.clone()),
                     _ => unreachable!(),
                 }
             }
@@ -77,9 +84,12 @@ fn run(args: &[String]) -> io::Result<()> {
     if let Some(socket) = socket {
         return bridge::run_socket(socket);
     }
+    if options.resume.is_some() && command != Some("new") {
+        return Err(invalid("--resume requires new --engine claude"));
+    }
     match command {
         Some("--help") => {
-            println!("Usage: doxa-rs [new|attach [ID]|stop [ID]|list|doctor] [options]\n       doxa-rs --session ID\n       doxa-rs --socket PATH\n\nPlain doxa-rs restores live sessions in the current project, or starts a native Codex session.\nnew always starts a session. attach and stop accept a full ID or unique prefix.\nOptions for new sessions: --engine codex|fixture, --model NAME, --linger SECONDS,\n--sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH,\n--lore-python PATH. DOXA_DAEMON_BIN selects an absolute native daemon path.\nCtrl+Q detaches without stopping the daemon.");
+            println!("Usage: doxa-rs [new|attach [ID]|stop [ID]|list|doctor] [options]\n       doxa-rs --session ID\n       doxa-rs --socket PATH\n\nPlain doxa-rs restores live sessions in the current project, or starts a native Codex session.\nnew always starts a session. attach and stop accept a full ID or unique prefix.\nOptions for new sessions: --engine codex|claude|fixture, --model NAME, --linger SECONDS.\nCodex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH, --lore-python PATH.\nClaude: --claude-python PATH, --claude-script ABSOLUTE_PATH, --resume SESSION_ID (with new).\nDOXA_DAEMON_BIN selects an absolute native daemon path. Ctrl+Q detaches without stopping the daemon.");
             Ok(())
         }
         Some("--version") => {
@@ -100,26 +110,52 @@ fn run(args: &[String]) -> io::Result<()> {
         }
         Some("doctor") => {
             let daemon = launch::daemon_binary();
-            let codex = launch::executable(
-                options
-                    .codex_bin
-                    .as_deref()
-                    .unwrap_or(std::path::Path::new("codex")),
-            );
-            let python = launch::executable(
-                options
-                    .lore_python
-                    .as_deref()
-                    .unwrap_or(std::path::Path::new("python3")),
-            );
             let runtime = discovery::runtime_dir();
             let mut missing = false;
-            for (name, result) in [
-                ("daemon", daemon),
-                ("codex", codex),
-                ("python", python),
-                ("runtime", runtime),
-            ] {
+            let mut checks = vec![("daemon", daemon), ("runtime", runtime)];
+            match options.engine {
+                launch::Engine::Codex => {
+                    checks.push((
+                        "codex",
+                        launch::executable(
+                            options
+                                .codex_bin
+                                .as_deref()
+                                .unwrap_or(std::path::Path::new("codex")),
+                        ),
+                    ));
+                    checks.push((
+                        "lore python",
+                        launch::executable(
+                            options
+                                .lore_python
+                                .as_deref()
+                                .unwrap_or(std::path::Path::new("python3")),
+                        ),
+                    ));
+                }
+                launch::Engine::Claude => {
+                    checks.push((
+                        "claude python",
+                        launch::executable(
+                            options
+                                .claude_python
+                                .as_deref()
+                                .unwrap_or(std::path::Path::new("python3")),
+                        ),
+                    ));
+                    checks.push((
+                        "claude sidecar",
+                        options
+                            .claude_script
+                            .as_deref()
+                            .ok_or_else(|| invalid("Claude needs --claude-script PATH"))
+                            .and_then(launch::claude_script),
+                    ));
+                }
+                launch::Engine::Fixture => {}
+            }
+            for (name, result) in checks {
                 match result {
                     Ok(path) => println!("ok {name}: {}", path.display()),
                     Err(error) => {
@@ -178,11 +214,8 @@ fn run(args: &[String]) -> io::Result<()> {
                     .filter(|s| !s.is_empty())
                     .map(PathBuf::from)
                     .or_else(|| std::env::var_os("HOME").map(|s| PathBuf::from(s).join(".doxa")));
-                let store = home.and_then(|home| {
-                    doxa_state::machine_id(&home).ok().and_then(|machine| {
-                        ui_state::UiStateStore::new(&home, &scope, &machine).ok()
-                    })
-                });
+                let store =
+                    home.and_then(|home| ui_state::UiStateStore::for_scope(&home, &scope).ok());
                 bridge::run_sessions(&sessions, store)
             }
         }

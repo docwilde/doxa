@@ -70,6 +70,14 @@ Alpha tags identify preview snapshots. A stable 2.0 release waits until the
 frontend reaches feature parity and passes end-to-end terminal and daemon
 tests.
 
+Start the native Claude host from the terminal frontend with
+`doxa-rs new --engine claude --claude-python /absolute/path/to/python
+--claude-script /absolute/path/to/claude_sidecar.py`. The Python interpreter
+must have DOXA, LORE, and the Claude Agent SDK installed. Add `--model NAME`
+to choose a model, or `--resume SESSION_ID` to resume that session's Claude
+conversation. `doxa-rs doctor --engine claude` checks the selected Python
+interpreter, sidecar script, daemon, and runtime path.
+
 ## Native daemon
 
 `doxa-daemon` is a native protocol v1 host process for lifecycle and transport

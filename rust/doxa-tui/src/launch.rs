@@ -9,14 +9,25 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Engine {
+    #[default]
+    Codex,
+    Claude,
+    Fixture,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct LaunchOptions {
+    pub engine: Engine,
     pub model: Option<String>,
     pub linger: Option<f64>,
     pub sandbox: Option<String>,
     pub codex_bin: Option<PathBuf>,
     pub lore_python: Option<PathBuf>,
-    pub fixture: bool,
+    pub claude_python: Option<PathBuf>,
+    pub claude_script: Option<PathBuf>,
+    pub resume: Option<String>,
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -47,6 +58,33 @@ pub fn executable(input: &Path) -> io::Result<PathBuf> {
         io::ErrorKind::NotFound,
         format!("executable not found: {}", input.display()),
     ))
+}
+
+/// The sidecar is Python source, not an executable. Require a real absolute
+/// file so the daemon never receives a relative path resolved in another cwd.
+pub fn claude_script(input: &Path) -> io::Result<PathBuf> {
+    if !input.is_absolute() {
+        return Err(invalid("Claude sidecar path must be absolute"));
+    }
+    let path = fs::canonicalize(input)?;
+    if !fs::metadata(&path)?.is_file() {
+        return Err(invalid("Claude sidecar must be a file"));
+    }
+    Ok(path)
+}
+
+pub fn claude_dependencies(options: &LaunchOptions) -> io::Result<(PathBuf, PathBuf)> {
+    let python = executable(
+        options
+            .claude_python
+            .as_deref()
+            .unwrap_or(Path::new("python3")),
+    )?;
+    let script = options
+        .claude_script
+        .as_deref()
+        .ok_or_else(|| invalid("Claude needs --claude-script PATH"))?;
+    Ok((python, claude_script(script)?))
 }
 
 pub fn daemon_binary() -> io::Result<PathBuf> {
@@ -118,7 +156,12 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
         .or_else(|| {
             cfg.as_ref()
                 .and_then(|c| c.get("models"))
-                .and_then(|m| m.get("codex"))
+                .and_then(|m| {
+                    m.get(match options.engine {
+                        Engine::Claude => "claude",
+                        _ => "codex",
+                    })
+                })
                 .and_then(toml::Value::as_str)
                 .map(str::to_owned)
         });
@@ -151,7 +194,14 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
         return Err(invalid("invalid sandbox"));
     }
     let daemon = daemon_binary()?;
-    let id = random_id()?;
+    let id = if let Some(id) = &options.resume {
+        if options.engine != Engine::Claude || !discovery::valid_id(id) {
+            return Err(invalid("Claude resume needs a valid session ID"));
+        }
+        id.clone()
+    } else {
+        random_id()?
+    };
     let mut command = Command::new(daemon);
     command.args([
         "--runtime-dir",
@@ -165,24 +215,66 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
         "--linger",
         &linger.to_string(),
     ]);
-    if options.fixture {
-        command.args(["--engine", "fixture"]);
-    } else {
-        let codex = executable(options.codex_bin.as_deref().unwrap_or(Path::new("codex")))?;
-        let python = executable(
-            options
-                .lore_python
-                .as_deref()
-                .unwrap_or(Path::new("python3")),
-        )?;
-        command.args(["--engine", "codex", "--codex-bin"]);
-        command.arg(codex);
-        command
-            .arg("--lore-python")
-            .arg(python)
-            .args(["--sandbox", sandbox]);
-        if let Some(model) = &model {
-            command.arg("--model").arg(model);
+    match options.engine {
+        Engine::Fixture => {
+            if options.model.is_some()
+                || options.sandbox.is_some()
+                || options.codex_bin.is_some()
+                || options.lore_python.is_some()
+                || options.claude_python.is_some()
+                || options.claude_script.is_some()
+                || options.resume.is_some()
+            {
+                return Err(invalid(
+                    "engine-specific options cannot be used with fixture",
+                ));
+            }
+            command.args(["--engine", "fixture"]);
+        }
+        Engine::Codex => {
+            if options.claude_python.is_some()
+                || options.claude_script.is_some()
+                || options.resume.is_some()
+            {
+                return Err(invalid("Claude options require --engine claude"));
+            }
+            let codex = executable(options.codex_bin.as_deref().unwrap_or(Path::new("codex")))?;
+            let python = executable(
+                options
+                    .lore_python
+                    .as_deref()
+                    .unwrap_or(Path::new("python3")),
+            )?;
+            command.args(["--engine", "codex", "--codex-bin"]);
+            command.arg(codex);
+            command
+                .arg("--lore-python")
+                .arg(python)
+                .args(["--sandbox", sandbox]);
+            if let Some(model) = &model {
+                command.arg("--model").arg(model);
+            }
+        }
+        Engine::Claude => {
+            if options.codex_bin.is_some()
+                || options.lore_python.is_some()
+                || options.sandbox.is_some()
+            {
+                return Err(invalid("Codex options require --engine codex"));
+            }
+            let (python, script) = claude_dependencies(options)?;
+            command
+                .args(["--engine", "claude"])
+                .arg("--claude-python")
+                .arg(python)
+                .arg("--claude-script")
+                .arg(script);
+            if options.resume.is_some() {
+                command.args(["--resume", "true"]);
+            }
+            if let Some(model) = &model {
+                command.arg("--model").arg(model);
+            }
         }
     }
     let mut child = command
@@ -204,7 +296,14 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
             return Ok(session);
         }
         if let Some(status) = child.try_wait()? {
-            return Err(io::Error::other(format!("native daemon exited before startup ({status}); check Codex authentication and LORE availability")));
+            return Err(io::Error::other(format!(
+                "native daemon exited before startup ({status}); check {} dependencies",
+                match options.engine {
+                    Engine::Claude => "Claude SDK and sidecar",
+                    Engine::Codex => "Codex authentication and LORE",
+                    Engine::Fixture => "fixture",
+                }
+            )));
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
@@ -250,27 +349,47 @@ mod tests {
         let listener = UnixListener::bind(&socket).unwrap();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            writeln!(stream, "{}", serde_json::json!({
-                "type":"hello", "proto":1, "session_id":"session-1", "cwd":"/tmp",
-                "engine":"fixture", "model":null, "next_seq":0
-            })).unwrap();
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "type":"hello", "proto":1, "session_id":"session-1", "cwd":"/tmp",
+                    "engine":"fixture", "model":null, "next_seq":0
+                })
+            )
+            .unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
-            assert_eq!(serde_json::from_str::<serde_json::Value>(&line).unwrap(),
-                serde_json::json!({"type":"attach", "cursor":null}));
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&line).unwrap(),
+                serde_json::json!({"type":"attach", "cursor":null})
+            );
             line.clear();
             reader.read_line(&mut line).unwrap();
             let request: serde_json::Value = serde_json::from_str(&line).unwrap();
             assert_eq!(request["method"], "stop");
-            writeln!(stream, "{}", serde_json::json!({
-                "type":"reply", "id":request["id"], "ok":false,
-                "error":"stop refused"
-            })).unwrap();
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "type":"reply", "id":request["id"], "ok":false,
+                    "error":"stop refused"
+                })
+            )
+            .unwrap();
         });
-        let session = Session { id:"session-1".into(), socket, scope_key:"/tmp".into(),
-            clients:Some(0), started_at:String::new() };
-        assert_eq!(stop(&session).unwrap_err().to_string(), "daemon refused stop request");
+        let session = Session {
+            id: "session-1".into(),
+            socket,
+            scope_key: "/tmp".into(),
+            clients: Some(0),
+            started_at: String::new(),
+        };
+        assert_eq!(
+            stop(&session).unwrap_err().to_string(),
+            "daemon refused stop request"
+        );
         server.join().unwrap();
     }
 
