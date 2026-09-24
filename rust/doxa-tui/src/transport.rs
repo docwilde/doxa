@@ -2,7 +2,9 @@
 
 use serde_json::{json, Map, Value};
 use std::collections::VecDeque;
+use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -199,8 +201,15 @@ fn read_snapshot(hello: &Value) -> Option<TranscriptSnapshot> {
     let path = hello["transcript_path"].as_str()?;
     let size = hello["transcript_bytes"].as_u64()?;
     if size == 0 { return None; }
-    let mut file = std::fs::File::open(path).ok()?;
-    if file.metadata().ok()?.len() < size { return None; }
+    // Hello comes from the socket peer. Never let a FIFO in its claimed
+    // transcript path block startup, or follow a final symlink to another file.
+    let mut file = OpenOptions::new().read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.len() < size {
+        return None;
+    }
     let start = size.saturating_sub(MAX_RESTORE_BYTES);
     file.seek(SeekFrom::Start(start)).ok()?;
     let mut bytes = vec![0; (size - start) as usize];
