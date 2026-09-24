@@ -2,7 +2,9 @@
 
 use serde_json::{json, Map, Value};
 use std::collections::VecDeque;
-use std::io::{self, BufRead, BufReader, Write};
+use std::fs::OpenOptions;
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -13,6 +15,13 @@ pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 const MAX_QUEUED_FRAMES: usize = 1024;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_RESTORE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// A bounded tail ending at the daemon's persisted transcript size at hello time.
+pub struct TranscriptSnapshot {
+    pub bytes: Vec<u8>,
+    pub earlier_bytes_omitted: bool,
+}
 
 #[derive(Debug)]
 pub enum TransportError {
@@ -69,6 +78,16 @@ pub struct DaemonClient {
 impl DaemonClient {
     /// `None` replays the daemon's entire retained event ring.
     pub fn connect(path: impl AsRef<Path>, cursor: Option<u64>) -> Result<Self, TransportError> {
+        Self::connect_inner(path, cursor, false).map(|(client, _)| client)
+    }
+
+    /// Restore the durable local transcript before attaching at the hello
+    /// sequence. Old daemons and unreadable files fall back to ring replay.
+    pub fn connect_for_restore(path: impl AsRef<Path>) -> Result<(Self, Option<TranscriptSnapshot>), TransportError> {
+        Self::connect_inner(path, None, true)
+    }
+
+    fn connect_inner(path: impl AsRef<Path>, cursor: Option<u64>, restore: bool) -> Result<(Self, Option<TranscriptSnapshot>), TransportError> {
         let stream = UnixStream::connect(path)?;
         let writer = stream.try_clone()?;
         writer.set_write_timeout(Some(REPLY_TIMEOUT))?;
@@ -78,13 +97,15 @@ impl DaemonClient {
         let hello = read_json(&mut reader, &mut pending_bytes)?;
         validate_hello(&hello)?;
         reader.get_ref().set_read_timeout(None)?;
+        let snapshot = if restore { read_snapshot(&hello) } else { None };
+        let attach_cursor = if snapshot.is_some() { hello["next_seq"].as_u64() } else { cursor };
         let mut client = Self {
-            reader, writer, hello, cursor: cursor.unwrap_or(0), next_id: 1,
+            reader, writer, hello, cursor: attach_cursor.unwrap_or(0), next_id: 1,
             queued: VecDeque::new(),
             pending_bytes,
         };
-        client.write_json(&json!({"type": "attach", "cursor": cursor}))?;
-        Ok(client)
+        client.write_json(&json!({"type": "attach", "cursor": attach_cursor}))?;
+        Ok((client, snapshot))
     }
 
     /// Read one validated event or reply JSON object. An idle event stream
@@ -174,6 +195,30 @@ impl DaemonClient {
         self.reader.get_ref().set_read_timeout(None)?;
         result
     }
+}
+
+fn read_snapshot(hello: &Value) -> Option<TranscriptSnapshot> {
+    let path = hello["transcript_path"].as_str()?;
+    let size = hello["transcript_bytes"].as_u64()?;
+    if size == 0 { return None; }
+    // Hello comes from the socket peer. Never let a FIFO in its claimed
+    // transcript path block startup, or follow a final symlink to another file.
+    let mut file = OpenOptions::new().read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.len() < size {
+        return None;
+    }
+    let start = size.saturating_sub(MAX_RESTORE_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = vec![0; (size - start) as usize];
+    file.read_exact(&mut bytes).ok()?;
+    if start > 0 {
+        let after_first_line = bytes.iter().position(|byte| *byte == b'\n')? + 1;
+        bytes.drain(..after_first_line);
+    }
+    Some(TranscriptSnapshot { bytes, earlier_bytes_omitted: start > 0 })
 }
 
 fn read_json(reader: &mut BufReader<UnixStream>, pending: &mut Vec<u8>) -> Result<Value, TransportError> {

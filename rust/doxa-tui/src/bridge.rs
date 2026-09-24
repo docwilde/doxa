@@ -9,6 +9,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::transport::{DaemonClient, TransportError};
+use crate::history;
 use crate::ui;
 
 type Prompt = (String, String);
@@ -16,8 +17,8 @@ type Prompt = (String, String);
 /// Attach to a running Python DOXA daemon. The Rust TUI currently hosts one
 /// session per process; additional session discovery belongs to later 2.0 work.
 pub fn run_socket(path: impl AsRef<Path>) -> io::Result<()> {
-    let client = DaemonClient::connect(path, None).map_err(as_io_error)?;
-    let (frames, prompts, worker) = spawn_worker(client);
+    let (client, snapshot) = DaemonClient::connect_for_restore(path).map_err(as_io_error)?;
+    let (frames, prompts, worker) = spawn_worker_with_snapshot(client, snapshot);
     let result = ui::run_with_channels(frames, prompts);
     // Dropping the UI's channel sender on return tells the reader thread to
     // stop after its current bounded socket poll or prompt acknowledgement.
@@ -29,17 +30,29 @@ fn as_io_error(error: TransportError) -> io::Error {
     io::Error::new(io::ErrorKind::Other, error)
 }
 
+#[cfg(test)]
 fn spawn_worker(client: DaemonClient) -> (Receiver<Value>, SyncSender<Prompt>, JoinHandle<()>) {
+    spawn_worker_with_snapshot(client, None)
+}
+
+fn spawn_worker_with_snapshot(client: DaemonClient, snapshot: Option<crate::transport::TranscriptSnapshot>) -> (Receiver<Value>, SyncSender<Prompt>, JoinHandle<()>) {
     let (frame_tx, frame_rx) = mpsc::sync_channel(128);
     let (prompt_tx, prompt_rx) = mpsc::sync_channel(32);
-    let worker = thread::spawn(move || worker_loop(client, frame_tx, prompt_rx));
+    let worker = thread::spawn(move || worker_loop(client, snapshot, frame_tx, prompt_rx));
     (frame_rx, prompt_tx, worker)
 }
 
-fn worker_loop(mut client: DaemonClient, frames: SyncSender<Value>, prompts: Receiver<Prompt>) {
+fn worker_loop(mut client: DaemonClient, snapshot: Option<crate::transport::TranscriptSnapshot>, frames: SyncSender<Value>, prompts: Receiver<Prompt>) {
     let session_id = client.hello["session_id"].as_str().unwrap_or_default().to_owned();
     if frames.send(client.hello.clone()).is_err() {
         return;
+    }
+    if let Some(snapshot) = snapshot {
+        let markdown = history::render(&snapshot);
+        if !markdown.is_empty() && frames.send(json!({"type":"event", "session_id":session_id,
+            "event":{"type":"text_delta", "data":{"text":markdown}}})).is_err() {
+            return;
+        }
     }
     loop {
         // Bound prompt work so a burst cannot starve incoming daemon events.
