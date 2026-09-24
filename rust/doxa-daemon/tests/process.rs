@@ -9,6 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[track_caller]
 fn wait_until(mut predicate: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !predicate() {
