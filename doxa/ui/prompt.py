@@ -312,7 +312,9 @@ class PromptInput(TextArea):
             self.pinned_rows if self.pinned_rows
             else max(self.MIN_ROWS, min(self.MAX_ROWS, self.wrapped_document.height))
         )
-        self.styles.height = max(self.MIN_ROWS, rows) + 2  # +2: the round border
+        height = max(self.MIN_ROWS, rows) + 2  # +2: the round border
+        if self.styles.height is None or self.styles.height.value != height:
+            self.styles.height = height
 
     def sync_height(self) -> None:
         """:meth:`_resize_to_content` under a name the pane may call --

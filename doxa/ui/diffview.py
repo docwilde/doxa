@@ -323,6 +323,7 @@ class HunkView(Vertical):
         # in a pane wide enough for two columns and stay that way until
         # the next resize.
         self._width = width
+        self._painted_width: int | None = None
         self._body = Static("", classes="hunk-body")
         self._pending = Static("", classes="hunk-pending")
         self._pending.display = False  # hide-at-zero, the house convention
@@ -346,6 +347,9 @@ class HunkView(Vertical):
         a function of the width the pane actually has RIGHT NOW -- the
         same "fit it to the box it is painted into" idiom
         ``TurnBlock._title_budget`` uses."""
+        if width == self._painted_width:
+            return
+        self._painted_width = width
         if diff_mod.side_by_side_allowed(width):
             self._body.update(_side_by_side_text(self.hunk, width))
         else:
@@ -492,6 +496,7 @@ class DiffPane(Vertical):
         self._note.display = False
         self._files = VerticalScroll(id=f"diff-files-{id or session_id}")
         self._painted = False
+        self._painted_width: int | None = None
 
     # -- layout -------------------------------------------------------
 
@@ -555,6 +560,8 @@ class DiffPane(Vertical):
             result = diff_mod.DiffResult(
                 status=diff_mod.STATUS_ERROR, detail=str(exc)
             )
+        if self._painted and result == self.result:
+            return
         self.result = result
         await self._repaint()
 
@@ -603,12 +610,14 @@ class DiffPane(Vertical):
         }
         await files.remove_children()
         width = self.size.width or 0
-        for file_diff in self.result.files:
-            section = FileSection(file_diff)
-            await files.mount(section)
-            if file_diff.path in open_paths:
+        sections = [FileSection(file_diff) for file_diff in self.result.files]
+        if sections:
+            await files.mount(*sections)
+        for section in sections:
+            if section.file_diff.path in open_paths:
                 section.collapsed = False
         self._painted = True
+        self._painted_width = width
         self._repaint_open(width)
         self._remark_queued(width)
 
@@ -677,8 +686,10 @@ class DiffPane(Vertical):
         hunks are already parsed; this is a ``Static.update``) and it is
         the only way an Alt+arrow drag can change the view it was aimed
         at. Nothing is recomputed -- git is not called from here."""
-        if self._painted:
-            self._repaint_open(self.size.width or 0)
+        width = self.size.width or 0
+        if self._painted and width != self._painted_width:
+            self._painted_width = width
+            self._repaint_open(width)
 
     @on(Collapsible.Expanded)
     def _on_file_expanded(self, event: Collapsible.Expanded) -> None:
