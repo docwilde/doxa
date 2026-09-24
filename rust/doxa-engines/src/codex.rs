@@ -100,7 +100,7 @@ impl CodexJsonlNormalizer {
         let mut out = self.flush_eof();
         if self.closed { return out; }
         self.closed = true;
-        let failure = process_error.map(|s| (self.scrub)(s)).or_else(|| {
+        let failure = process_error.map(|s| truncate(&(self.scrub)(s), RESULT_SUMMARY_CHARS)).or_else(|| {
             (self.bad_frames > 0).then(|| {
                 let noun = if self.bad_frames == 1 { "line was" } else { "lines were" };
                 let sample = if self.bad_sample.is_empty() { String::new() } else { format!(" (first: {})", self.bad_sample) };

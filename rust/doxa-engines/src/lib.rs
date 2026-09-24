@@ -2,6 +2,8 @@
 //! only a Codex stdout parser; it does not launch or authenticate a CLI.
 
 pub mod codex;
+#[cfg(unix)]
+pub mod codex_driver;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
