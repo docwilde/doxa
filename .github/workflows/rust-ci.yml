@@ -1,0 +1,27 @@
+name: Rust 2.0 CI
+
+on:
+  pull_request:
+    paths:
+      - "rust/**"
+      - ".github/workflows/rust-ci.yml"
+  push:
+    branches: ["rust/2.0"]
+    paths:
+      - "rust/**"
+      - ".github/workflows/rust-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select stable Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Test Rust frontend
+        run: cargo +stable test --locked --manifest-path rust/doxa-tui/Cargo.toml
+      - name: Build release binary
+        run: cargo +stable build --locked --release --manifest-path rust/doxa-tui/Cargo.toml
