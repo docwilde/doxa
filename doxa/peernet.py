@@ -22,7 +22,7 @@ everything below: "a reachable daemon socket is **remote code execution
 with the user's privileges**, and no amount of UI care compensates for
 getting this wrong." So:
 
-* **Loopback is the default and is not merely a default.**
+* **A Unix socket is the production backend.**
   :func:`bind_host` returns ``127.0.0.1`` unless told otherwise, AND
   :meth:`PeerNetServer.start` refuses to bind anything at all unless
   ``remote_listening_decision`` allows it. Two independent gates, because
@@ -33,13 +33,12 @@ getting this wrong." So:
   that ``tailscale serve`` attaches, and the tailnet is what vouches for
   it. remote.md: "If DOXA finds itself writing a password or token file,
   the design took a wrong turn."
-* **The header is believed on ONE path.** ``tailscale serve`` terminates
-  TLS and forwards to a loopback listener; a header arriving anywhere else
-  was written by whoever connected. :meth:`PeerNetServer` therefore
-  computes ``from_loopback`` from the SOCKET's own peer address -- never
-  from anything in the request -- and hands that to
-  ``remote_policy.identity_decision``, which refuses unconditionally when
-  it is false, before it looks at the login at all.
+* **The header is believed only from a kernel-attested proxy.** A loopback
+  TCP address is not evidence: any local process can connect and write an
+  arbitrary header.  The runtime bridge binds a Unix socket for
+  ``tailscale serve`` and checks Linux ``SO_PEERCRED`` for tailscaled's
+  UID before it hands the header to policy. TCP has no equivalent proof
+  and is refused, even when it comes from 127.0.0.1.
 * **DOXA's allow-list is DOXA's own.** ``remote_policy.allowed_logins()``,
   empty by default, and an empty list refuses everyone rather than
   everyone. Defence in depth over the tailnet's own ACLs.
@@ -82,10 +81,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
 import inspect
 import ipaddress
 import json
+import os
+import socket
+import struct
+import sys
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Callable
 
 from . import peers as peers_mod
@@ -104,6 +109,8 @@ __all__ = [
     "fetch_roster",
     "listen_decision",
     "loopback",
+    "proxy_uid",
+    "runtime_socket_path",
 ]
 
 
@@ -126,6 +133,46 @@ would only show up on the path nobody tests."""
 
 CONNECT_TIMEOUT_SECS = 5.0
 READ_TIMEOUT_SECS = 10.0
+BRIDGE_IDLE_SECS = 75.0
+BRIDGE_POLL_SECS = 5.0
+
+
+def runtime_socket_path() -> Path:
+    """The private backend socket for ``tailscale serve``.
+
+    A TCP listener cannot tell tailscaled apart from another local process:
+    both can connect from 127.0.0.1 and write an arbitrary identity header.
+    The production bridge therefore uses a Unix socket.  On Linux the kernel
+    supplies the connecting process's credentials, which lets us accept a
+    header only from the tailscaled service account.  Tailscale Serve supports
+    Unix-socket proxy targets; point it at this path rather than at a TCP
+    port.
+    """
+    return peers_mod.runtime_dir() / "peernet.sock"
+
+
+def proxy_uid() -> int:
+    """UID permitted to present Tailscale's identity headers.
+
+    ``tailscaled`` normally runs as root.  A malformed override deliberately
+    becomes -1, which cannot authenticate a Unix peer and therefore fails
+    closed instead of quietly falling back to a permissive value.
+    """
+    from . import config as config_mod
+
+    try:
+        uid = int(config_mod.raw("DOXA_REMOTE_PROXY_UID").strip() or "0")
+    except ValueError:
+        return -1
+    # The bridge itself is owned by the interactive DOXA user.  Letting
+    # that same unprivileged UID stand in for tailscaled would make the
+    # socket mode irrelevant: any same-user process could connect and forge
+    # Tailscale-User-Login.  Root is the deliberate exception because a
+    # root-owned DOXA instance and root tailscaled already share the
+    # machine's privileged trust domain.
+    if os.getuid() != 0 and uid == os.getuid():
+        return -1
+    return uid
 
 OP_ROSTER = "roster"
 OP_DELIVER = "deliver"
@@ -273,22 +320,14 @@ def endpoints() -> "tuple[Endpoint, ...]":
 def listen_decision() -> policy_mod.Decision:
     """May a cross-machine listener exist at all right now?
 
-    Straight through to ``remote_policy.remote_listening_decision`` -- this
-    function adds ONE thing, a louder reason when the bind address has been
-    moved off loopback, and adds no authority whatsoever. It cannot allow
-    what the policy refuses."""
-    decision = policy_mod.remote_listening_decision(
+    Straight through to ``remote_policy.remote_listening_decision``.  The
+    production runtime uses :func:`runtime_socket_path`, so this decision
+    deliberately does not treat a configured TCP bind address as proof of
+    identity.  TCP is retained only as an injectable test adapter and is
+    rejected by the default identity verifier."""
+    return policy_mod.remote_listening_decision(
         enabled=policy_mod.remote_enabled()
     )
-    if decision.allowed and not loopback(bind_host()):
-        return policy_mod.Decision.allow(
-            f"remote listening is enabled AND bound to {bind_host()}, which "
-            "is NOT loopback -- DOXA is reachable from the network directly "
-            "rather than through a tailscale serve forwarder, and the "
-            "Tailscale-User-Login header will be refused on every request "
-            "that arrives there (doxa.remote_policy.identity_decision)"
-        )
-    return decision
 
 
 # -- the listener ------------------------------------------------------
@@ -322,16 +361,25 @@ class PeerNetServer:
         *,
         host: "str | None" = None,
         port: "int | None" = None,
+        socket_path: "str | Path | None" = None,
         evaluate: "Callable[..., policy_mod.Decision] | None" = None,
+        trusted_proxy: "Callable[[asyncio.StreamWriter], bool] | None" = None,
     ) -> None:
         self.host = host or bind_host()
         self.port = int(port) if port is not None else bind_port()
+        self.socket_path = Path(socket_path) if socket_path is not None else None
         self.handlers = dict(handlers or {})
         # The policy seam, injected ONLY so a test can watch what this
         # module asks. It defaults to the real function and there is no
         # code path that answers a policy question itself: see the module
         # docstring's "no second policy".
         self._evaluate = evaluate or policy_mod.evaluate
+        # A test may inject a trusted proxy because it cannot make its
+        # asyncio client appear to be the system tailscaled process.  The
+        # production default is deliberately stricter: only a Unix-domain
+        # peer whose kernel UID is the configured tailscaled UID can carry
+        # an identity header into policy.
+        self._trusted_proxy = trusted_proxy or self._is_tailscaled_peer
         self._server: "asyncio.AbstractServer | None" = None
         self.refusals: "list[str]" = []
 
@@ -353,9 +401,23 @@ class PeerNetServer:
         if not decision.allowed:
             self.refusals.append(decision.reason)
             return decision
-        self._server = await asyncio.start_server(
-            self._handle, host=self.host, port=self.port
-        )
+        if self.socket_path is not None:
+            # Do not unlink an existing name.  Another daemon may own the
+            # machine-wide bridge; replacing its pathname would make that
+            # live bridge unreachable while granting us no useful listener.
+            if self.socket_path.exists():
+                raise PeerNetError(
+                    f"remote bridge socket already exists: {self.socket_path}"
+                )
+            self.socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self._server = await asyncio.start_unix_server(
+                self._handle, path=str(self.socket_path), limit=MAX_BODY_BYTES,
+            )
+            os.chmod(self.socket_path, 0o600)
+        else:
+            self._server = await asyncio.start_server(
+                self._handle, host=self.host, port=self.port
+            )
         return decision
 
     async def stop(self) -> None:
@@ -365,6 +427,9 @@ class PeerNetServer:
         with contextlib.suppress(Exception):
             await self._server.wait_closed()
         self._server = None
+        if self.socket_path is not None:
+            with contextlib.suppress(OSError):
+                self.socket_path.unlink()
 
     @property
     def port_in_use(self) -> "int | None":
@@ -389,8 +454,11 @@ class PeerNetServer:
                 headers = _parse_headers(head)
                 length = min(int(headers.get("content-length", "0") or 0), MAX_BODY_BYTES)
                 raw = await reader.readexactly(length) if length else b"{}"
-            peername = writer.get_extra_info("peername")
-            from_loopback = loopback(peername[0] if peername else None)
+            # Never infer this from a loopback TCP address.  Every local
+            # process can use one and forge Tailscale-User-Login.  The Unix
+            # socket's SO_PEERCRED result is supplied by the kernel and is
+            # the proof that this request came through tailscaled.
+            from_loopback = bool(self._trusted_proxy(writer))
             body = json.loads(raw.decode("utf-8", errors="replace") or "{}")
             status, payload = await self._dispatch(
                 body if isinstance(body, dict) else {},
@@ -405,6 +473,27 @@ class PeerNetServer:
         writer.close()
         with contextlib.suppress(Exception):
             await writer.wait_closed()
+
+    @staticmethod
+    def _is_tailscaled_peer(writer: asyncio.StreamWriter) -> bool:
+        """Whether the kernel identifies this Unix peer as tailscaled.
+
+        Linux exposes ``SO_PEERCRED`` only on Unix sockets.  TCP has no
+        equivalent credential in asyncio, so it always returns False.  That
+        is intentional: accepting a header from 127.0.0.1 would turn any
+        local process into an allow-listed remote user.
+        """
+        sock = writer.get_extra_info("socket")
+        if sock is None or sock.family != socket.AF_UNIX:
+            return False
+        if not hasattr(socket, "SO_PEERCRED"):
+            return False
+        try:
+            raw = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+            _pid, uid, _gid = struct.unpack("3i", raw)
+        except (OSError, struct.error):
+            return False
+        return uid == proxy_uid()
 
     async def _dispatch(
         self, body: dict, *, login: "str | None", from_loopback: bool
@@ -747,3 +836,83 @@ async def combined_roster(
         except PeerNetError as exc:
             problems.append(str(exc))
     return out, problems
+
+
+# -- process lifetime ---------------------------------------------------
+
+
+async def serve_runtime_bridge() -> int:
+    """Run the one machine-wide peer bridge until the registry is empty.
+
+    This is intentionally a separate process from any SessionDaemon.  A
+    daemon can exit while peers remain; tying the bridge to that first
+    daemon would make remote peering disappear even though the shared
+    registry still says sessions are live.  The bridge handlers read that
+    registry for every request, so no state needs to be handed over.
+
+    The idle grace absorbs registry-heartbeat reaping and a daemon restart.
+    It also means a bridge that has nothing left to serve eventually removes
+    its private socket rather than becoming a permanent background process.
+    """
+    bridge = PeerNetServer(local_handlers(), socket_path=runtime_socket_path())
+    try:
+        decision = await bridge.start()
+    except (OSError, PeerNetError):
+        # Another runtime bridge won the startup race.  Its handlers see the
+        # same registry, so this process has nothing to do.
+        return 0
+    if not decision.allowed:
+        return 0
+    empty_since: float | None = None
+    loop = asyncio.get_running_loop()
+    try:
+        while True:
+            if peers_mod.read_registry(probe=True):
+                empty_since = None
+            elif empty_since is None:
+                empty_since = loop.time()
+            elif loop.time() - empty_since >= BRIDGE_IDLE_SECS:
+                # Coordinate shutdown with a daemon beginning startup.  It
+                # is not enough to have observed an empty registry before
+                # taking this lock: a daemon could have registered itself
+                # and be waiting to decide whether to launch a replacement.
+                # Closing and unlinking while still locked gives that daemon
+                # one unambiguous state when it acquires the lock.
+                lock_path = runtime_socket_path().with_name("peernet-start.lock")
+                lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+                try:
+                    while True:
+                        try:
+                            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except BlockingIOError:
+                            await asyncio.sleep(0.02)
+                    if peers_mod.read_registry(probe=True):
+                        empty_since = None
+                        continue
+                    await bridge.stop()
+                    return 0
+                finally:
+                    with contextlib.suppress(OSError):
+                        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    os.close(lock_fd)
+            await asyncio.sleep(BRIDGE_POLL_SECS)
+    finally:
+        await bridge.stop()
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    """Minimal private entry point used by :class:`doxa.daemon.SessionDaemon`.
+
+    It is deliberately not a user-facing CLI surface.  Starting it without
+    the exact internal flag does nothing, keeping an accidental
+    ``python -m doxa.peernet`` from creating a listener.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args != ["--serve-runtime-bridge"]:
+        return 2
+    return asyncio.run(serve_runtime_bridge())
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised via subprocess
+    raise SystemExit(main())

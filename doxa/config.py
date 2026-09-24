@@ -448,12 +448,12 @@ SETTINGS: tuple[Setting, ...] = (
         key="remote_enabled", env="DOXA_REMOTE_ENABLED",
         label="remote listening", category="Remote",
         kind="bool", default="",
-        help="Allow a remote bridge to attach to this daemon at all "
+        help="Start the private remote peer bridge with this daemon "
              "(doxa.remote_policy.remote_enabled)",
-        note="OFF by default, and loopback-only stays the behavior when "
-             "it is off -- this row does not by itself open a socket, it "
-             "is the gate a future bridge process (docs/plans/remote.md, "
-             "track R2) checks before it does. Turning it on grants "
+        note="OFF by default. When on, the first live daemon starts a "
+             "machine-wide bridge with a 0600 Unix socket in its runtime "
+             "directory for `tailscale serve` to proxy to; it does not "
+             "expose a TCP port. Turning it on grants "
              "nothing by itself: remote_allowed_logins below still "
              "refuses every identity while it is empty.",
     ),
@@ -500,27 +500,37 @@ SETTINGS: tuple[Setting, ...] = (
         key="remote_bind", env="DOXA_REMOTE_BIND",
         label="remote bind address", category="Remote",
         kind="str", default="127.0.0.1",
-        help="Address the cross-machine peer bridge binds when remote "
-             "listening is on (doxa.peernet.bind_host)",
-        note="LOOPBACK, and it should stay loopback: the design is "
-             "`tailscale serve` terminating TLS and forwarding here, "
-             "which is what makes the Tailscale-User-Login header mean "
-             "anything. DOXA believes that header ONLY on a loopback "
-             "connection, so moving this to 0.0.0.0 does not widen "
-             "access -- it produces a listener that refuses every "
-             "request for lack of a trustworthy identity.",
+        help="Legacy TCP test-adapter address (doxa.peernet.bind_host)",
+        note="The daemon's production bridge ignores this setting and uses "
+             "a private Unix socket. TCP cannot distinguish tailscaled from "
+             "another local process that forges Tailscale-User-Login, so "
+             "the default verifier refuses TCP requests.",
     ),
     Setting(
         key="remote_port", env="DOXA_REMOTE_PORT",
         label="remote bind port", category="Remote",
         kind="number", default="47600",
-        help="Port the cross-machine peer bridge listens on "
-             "(doxa.peernet.bind_port)",
-        note="Fixed rather than ephemeral because the `tailscale serve` "
-             "rule on the other side has to name it, and a port that "
-             "moves per launch is a forwarding rule that breaks per "
-             "launch. Nothing listens at all until remote listening is "
-             "turned on above.",
+        help="Legacy TCP test-adapter port (doxa.peernet.bind_port)",
+        note="The daemon's production bridge ignores this setting. Configure "
+             "the externally served Tailscale port with `tailscale serve`; "
+             "the DOXA backend is its private Unix socket.",
+    ),
+    Setting(
+        key="remote_proxy_uid", env="DOXA_REMOTE_PROXY_UID",
+        label="remote proxy uid", category="Remote",
+        kind="number", default="0",
+        help="Unix UID of the local Tailscale Serve proxy allowed to pass "
+             "Tailscale identity headers (doxa.peernet.proxy_uid)",
+        note="The remote bridge uses a private Unix socket, not a loopback "
+             "TCP port: any local process can forge an HTTP header on TCP. "
+             "On Linux the bridge reads SO_PEERCRED and accepts a header "
+             "only when the peer has this UID. Tailscaled normally runs as "
+             "root (0), or another service UID distinct from the DOXA user. "
+             "DOXA refuses an unprivileged UID equal to its own because any "
+             "same-user process could then forge a header. Point Tailscale "
+             "Serve at the bridge with `tailscale serve --bg "
+             "unix:/absolute/path/to/peernet.sock`; a malformed or unsafe "
+             "value refuses every request.",
     ),
     Setting(
         key="remote_allow_shell", env="DOXA_REMOTE_ALLOW_SHELL",

@@ -130,6 +130,32 @@ Non-negotiables:
   the status bar, the way the worktree and branch are shown. A silent second
   driver is the thing a user cannot detect and cannot consent to.
 
+### Peer bridge transport contract
+
+The peer bridge is not a remote-daemon transport. When `remote_enabled` is
+set, the first live daemon starts a detached machine-wide bridge, which creates
+`$DOXA_RUNTIME_DIR/peernet.sock` with mode 0600. It reads the shared registry
+on every request and stays alive while any session remains, so ending the first
+daemon does not remove the bridge. Configure Tailscale Serve to proxy to that
+Unix socket. The bridge accepts `Tailscale-User-Login` only when Linux
+`SO_PEERCRED` identifies the Unix peer as the configured tailscaled UID
+(`remote_proxy_uid`, default `0`), then applies DOXA's allow-list.
+Tailscaled must run as root or a distinct service UID; setting the proxy UID
+to the unprivileged DOXA user's UID is refused because another same-user
+process could forge the header. The socket's 0600 mode lets root connect by
+default; a distinct non-root service UID needs an administrator-managed ACL
+and that ACL must be restored if the bridge recreates its socket. Configure
+the proxy with the absolute runtime path, for example:
+
+```
+sudo tailscale serve --bg unix:/absolute/path/to/peernet.sock
+```
+
+A loopback TCP connection cannot provide this proof: another local process can
+connect to it and forge the header. TCP bridge requests therefore fail closed,
+including requests from `127.0.0.1`. Platforms without `SO_PEERCRED` also fail
+closed until they have an equivalent kernel-backed proxy identity check.
+
 ## Two candidate renderers
 
 **(a) Stream the Textual app.** `textual-serve` / `textual-web` exist (neither

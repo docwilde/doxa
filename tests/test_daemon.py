@@ -36,6 +36,7 @@ from claude_agent_sdk import ToolPermissionContext
 from doxa import __version__, peers
 from doxa import config as config_mod
 from doxa import daemon as daemon_mod
+from doxa import peernet as peernet_mod
 from doxa import worktrees as worktrees_mod
 from doxa.client import EngineClient, EngineClientError
 from doxa.daemon import PROTOCOL_VERSION, EventRing, SessionDaemon
@@ -132,6 +133,73 @@ async def test_protocol_round_trip(tmp_path, monkeypatch):
         # Status cache refreshed after the turn.
         assert client.total_cost_usd == pytest.approx(0.001)
         await client.finalize()
+
+
+@pytest.mark.asyncio
+async def test_remote_peer_bridge_uses_the_private_runtime_socket_and_stops(
+    tmp_path, monkeypatch,
+):
+    """Remote peering belongs to the runtime that owns the registry, but
+    never opens a forgeable loopback TCP listener.  The bridge is a Unix
+    socket for Tailscale Serve to proxy to, and disappears with its owner."""
+    monkeypatch.setenv("DOXA_REMOTE_ENABLED", "1")
+    socket_path = tmp_path / "rt" / "peernet.sock"
+    async with running_daemon(tmp_path, monkeypatch) as (daemon, _, _):
+        assert daemon.peer_net == socket_path
+        assert daemon.peer_net_process is not None
+        assert socket_path.exists()
+        assert socket_path.stat().st_mode & 0o777 == 0o600
+        daemon.peer_net_process.terminate()
+        await asyncio.to_thread(daemon.peer_net_process.wait, 2)
+    # The test stopped the detached bridge itself. Production lets its
+    # registry-empty timer perform this cleanup.
+    socket_path.unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_remote_bridge_survives_the_daemon_that_started_it_when_a_peer_remains(
+    tmp_path, monkeypatch,
+):
+    """The bridge is machine-wide.  Session one can finish before session
+    two without silently removing remote peering for the remaining session."""
+    monkeypatch.setenv("DOXA_REMOTE_ENABLED", "1")
+    socket_path = tmp_path / "rt" / "peernet.sock"
+    async with running_daemon(tmp_path, monkeypatch) as (first, _, first_task):
+        async with running_daemon(tmp_path, monkeypatch) as (second, _, _):
+            assert first.peer_net_process is not None
+            await first._shutdown("first leaves")
+            await asyncio.wait_for(first_task, 5)
+            assert not first.socket_path.exists()
+            assert second.socket_path.exists()
+            assert socket_path.exists(), "the detached bridge follows the registry, not first"
+            first.peer_net_process.terminate()
+            await asyncio.to_thread(first.peer_net_process.wait, 2)
+    socket_path.unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_remote_bridge_probe_timeout_preserves_existing_socket(
+    tmp_path, monkeypatch,
+):
+    """A timeout says a bridge may be busy; it is never evidence that its
+    pathname is stale. A second daemon must leave that socket alone."""
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setenv("DOXA_REMOTE_ENABLED", "1")
+    socket_path = peernet_mod.runtime_socket_path()
+    socket_path.parent.mkdir(parents=True)
+    socket_path.touch()
+
+    async def _slow_connect(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(daemon_mod.asyncio, "open_unix_connection", _slow_connect)
+    monkeypatch.setattr(
+        daemon_mod.subprocess, "Popen",
+        lambda *args, **kwargs: pytest.fail("a timeout must not launch a replacement"),
+    )
+    daemon = SessionDaemon(cwd=str(tmp_path))
+    await daemon._start_peer_net()
+    assert socket_path.exists()
 
 
 @pytest.mark.asyncio
