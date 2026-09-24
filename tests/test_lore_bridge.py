@@ -31,8 +31,9 @@ def test_index_transcript_is_capability_gated_and_lore_scoped(monkeypatch, tmp_p
         (lambda text: text, lambda: None)))
     monkeypatch.setattr(lore_bridge, "_transcript_identity", lambda cwd, ext: {
         "projects_dir": str(tmp_path), "slug": ext[0](cwd)})
+    connection = types.SimpleNamespace(close=lambda: seen.append("closed"))
     monkeypatch.setattr(lore_bridge, "_index_ops", lambda: (
-        lambda: "LORE database", lambda conn, fd, path:
+        lambda: connection, lambda conn, fd, path:
         (seen.append((conn, path, os.fstat(fd).st_ino)) or (1, 1))))
     requests = [
         {"id": 1, "op": "index_transcript_v1", "cwd": "/repo", "session_id": "session-1"},
@@ -46,7 +47,7 @@ def test_index_transcript_is_capability_gated_and_lore_scoped(monkeypatch, tmp_p
     frames = [json.loads(line) for line in output.getvalue().splitlines()]
     assert "index_transcript_v1" in frames[0]["capabilities"]
     assert frames[1]["value"] == {"indexed": 1, "consumed": 1}
-    assert seen == [("LORE database", transcript, transcript.stat().st_ino)]
+    assert seen == [(connection, transcript, transcript.stat().st_ino), "closed"]
     assert frames[2]["error"] == "operation_failed"
 
 
@@ -98,7 +99,7 @@ def test_index_transcript_reads_pinned_inode_after_path_swap(monkeypatch, tmp_pa
         return 1, 1
 
     assert lore_bridge._index_transcript("/repo", "session-1", (),
-                                         (lambda: None, index)) == {"indexed": 1, "consumed": 1}
+                                         (lambda: types.SimpleNamespace(close=lambda: None), index)) == {"indexed": 1, "consumed": 1}
     assert seen == [("safe original\n", transcript)]
 
 
@@ -112,6 +113,26 @@ def test_index_transcript_rejects_symlinked_project_directory(monkeypatch, tmp_p
     with pytest.raises(OSError):
         lore_bridge._index_transcript("/repo", "session-1", (),
                                        (lambda: None, lambda conn, fd, path: (1, 1)))
+
+
+def test_index_transcript_closes_connection_and_fd_on_index_failure(monkeypatch, tmp_path):
+    project = tmp_path / "mapped-project"
+    project.mkdir()
+    (project / "session-1.jsonl").write_text("safe\n")
+    monkeypatch.setattr(lore_bridge, "_transcript_identity", lambda cwd, ext: {
+        "projects_dir": str(tmp_path), "slug": "mapped-project"})
+    seen = []
+
+    def fail(conn, fd, path):
+        seen.append(fd)
+        raise RuntimeError("index failed")
+
+    conn = types.SimpleNamespace(close=lambda: seen.append("closed"))
+    with pytest.raises(RuntimeError):
+        lore_bridge._index_transcript("/repo", "session-1", (), (lambda: conn, fail))
+    assert seen[1] == "closed"
+    with pytest.raises(OSError):
+        os.fstat(seen[0])
 
 
 def test_pending_review_v1_uses_lore_snapshot_and_rejects_changed_proposal(monkeypatch, tmp_path):
@@ -173,6 +194,32 @@ def test_pending_review_v1_never_sends_partial_or_other_project(monkeypatch, tmp
     assert hidden.value.code == "pending_unavailable"
 
 
+def test_pending_review_control_bytes_fit_reply_without_changing_raw(monkeypatch, tmp_path):
+    pending_dir = tmp_path / "pending"
+    pending_dir.mkdir()
+    # JSON cannot carry literal control bytes. Backslashes in the raw file
+    # need another round of escaping in the reply.
+    raw = b'{"scope":"user","text":"' + b'\\n' * ((lore_bridge._MAX_REVIEW_RAW_BYTES - 28) // 2) + b'"}'
+    (pending_dir / "one.json").write_bytes(raw)
+    ext = (lambda cwd: "this", None, None, None)
+    reader = (tmp_path, lambda pid: (raw, (pending_dir / "one.json").stat().st_ino))
+    result = lore_bridge._pending_review("/repo", "one", ext, reader)
+    assert result["raw"].encode() == raw
+    assert result["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert len(lore_bridge._frame({"type": "reply", "id": 2**64 - 1,
+                                   "ok": True, "value": result})) <= lore_bridge.MAX_FRAME_BYTES
+
+    expanded = b'{"scope":"user"}' + b'\n' * (lore_bridge.MAX_FRAME_BYTES // 2 - 16)
+    assert len(expanded) <= lore_bridge.MAX_FRAME_BYTES // 2
+    with pytest.raises(ValueError, match="frame too large"):
+        lore_bridge._frame({"type": "reply", "id": 1, "ok": True,
+                            "value": {"raw": expanded.decode()}})
+    (pending_dir / "one.json").write_bytes(expanded)
+    with pytest.raises(lore_bridge.PendingReviewError) as large:
+        lore_bridge._pending_review("/repo", "one", ext, reader)
+    assert large.value.code == "pending_incomplete"
+
+
 def test_sidecar_scrub_snapshot_and_generic_error(monkeypatch):
     def snapshot(cwd, scope="all"):
         if cwd == "/fail":
@@ -209,6 +256,49 @@ def test_oversize_request_closes_without_echo(monkeypatch):
     monkeypatch.setattr(lore_bridge.sys, "stdout", types.SimpleNamespace(buffer=output))
     lore_bridge.serve()
     assert len(output.getvalue().splitlines()) == 1  # hello only
+
+
+def test_deep_json_request_does_not_stop_following_frames(monkeypatch):
+    monkeypatch.setattr(lore_bridge, "_lore", lambda: (lambda text: text, lambda cwd, scope: ""))
+    monkeypatch.setattr(lore_bridge, "_extensions", lambda: None)
+    deep = b'{"id":1,"op":"scrub","text":"x","extra":' + b'[' * 10000 + b'0' + b']' * 10000 + b'}\n'
+    output = io.BytesIO()
+    monkeypatch.setattr(lore_bridge.sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(
+        deep + lore_bridge._frame({"id": 2, "op": "scrub", "text": "after"}))))
+    monkeypatch.setattr(lore_bridge.sys, "stdout", types.SimpleNamespace(buffer=output))
+    lore_bridge.serve()
+    frames = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert frames[1] == {"type": "reply", "id": 2, "ok": True, "text": "after"}
+
+
+def test_read_connections_close_on_success_and_query_failure():
+    closed = []
+
+    class Connection:
+        def __init__(self, fail=False):
+            self.fail = fail
+
+        def execute(self, query, params=()):
+            if self.fail:
+                raise sqlite3.OperationalError("query failed")
+            return types.SimpleNamespace(fetchone=lambda: None, fetchall=lambda: [])
+
+        def close(self):
+            closed.append(self)
+
+    made = []
+
+    def connect(fail=False):
+        conn = Connection(fail)
+        made.append(conn)
+        return conn
+
+    assert lore_bridge._consult("hello", (connect, lambda text, op: text), str) is None
+    assert lore_bridge._beliefs(0, 1, (connect, None), str) == []
+    assert lore_bridge._evidence(1, 0, 1, (connect, None), str) == []
+    with pytest.raises(sqlite3.OperationalError):
+        lore_bridge._beliefs(0, 1, (lambda: connect(True), None), str)
+    assert closed == made
 
 
 def test_unavailable_lore_refuses_scrubbing(monkeypatch):
@@ -323,8 +413,9 @@ def test_disabled_sync_returns_null(monkeypatch):
     assert frames[2]["value"] is None
 
 
-def test_consult_beliefs_and_evidence_are_bounded_scrubbed_and_cite_only(monkeypatch):
-    conn = sqlite3.connect(":memory:")
+def test_consult_beliefs_and_evidence_are_bounded_scrubbed_and_cite_only(monkeypatch, tmp_path):
+    db_path = tmp_path / "store.db"
+    conn = sqlite3.connect(db_path)
     conn.execute("CREATE TABLE beliefs(id INTEGER, subject TEXT, claim TEXT, confidence REAL, status TEXT, updated TEXT)")
     conn.execute("CREATE TABLE belief_evidence(belief_id INTEGER, session_id TEXT, project TEXT, note TEXT, created TEXT, source_engine TEXT)")
     conn.execute("CREATE VIRTUAL TABLE belief_fts USING fts5(belief_id UNINDEXED, claim)")
@@ -332,13 +423,16 @@ def test_consult_beliefs_and_evidence_are_bounded_scrubbed_and_cite_only(monkeyp
     conn.execute("INSERT INTO belief_fts VALUES(1,'SECRET fact')")
     for n in range(3):
         conn.execute("INSERT INTO belief_evidence VALUES(1,'SECRET session','project','SECRET note',?, 'claude')", (str(n),))
+    conn.commit()
+    conn.close()
     monkeypatch.setattr(lore_bridge, "_lore", lambda: (lambda text: text.replace("SECRET", "[redacted]"), lambda cwd, scope: ""))
     monkeypatch.setattr(lore_bridge, "_extensions", lambda: None)
-    monkeypatch.setattr(lore_bridge, "_read_ops", lambda: (lambda: conn, lambda text, op: text))
+    monkeypatch.setattr(lore_bridge, "_read_ops", lambda: (lambda: sqlite3.connect(db_path), lambda text, op: text))
     requests = [
         {"id": 1, "op": "consult", "prompt": "fact"},
         {"id": 2, "op": "beliefs", "offset": 0, "limit": 1},
         {"id": 3, "op": "evidence", "belief_id": 1, "limit": 2},
+        {"id": 6, "op": "evidence", "belief_id": 1, "offset": 1, "limit": 1},
         {"id": 4, "op": "beliefs", "limit": 51},
         {"id": 5, "op": "consult", "prompt": "SECRET" * 9000},
     ]
@@ -355,5 +449,7 @@ def test_consult_beliefs_and_evidence_are_bounded_scrubbed_and_cite_only(monkeyp
     assert len(frames[3]["value"]) == 2
     assert frames[3]["value"][-1]["trail_truncated"] is True
     assert frames[3]["value"][0]["session_id"] == "[redacted] session"
-    assert frames[4]["error"] == frames[5]["error"] == "operation_failed"
+    assert frames[4]["value"][0]["created"] == "1"
+    assert frames[4]["value"][0]["trail_truncated"] is True
+    assert frames[5]["error"] == frames[6]["error"] == "operation_failed"
     assert b"SECRET" not in output.getvalue()

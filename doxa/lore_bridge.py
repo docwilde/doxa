@@ -27,8 +27,9 @@ _INDEX_OP = "index_transcript_v1"
 _PENDING_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z", re.ASCII)
 _SESSION_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z-]{0,127}\Z", re.ASCII)
 _MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024
-# Leave room for JSON escaping and the rest of the reply frame.
-_MAX_REVIEW_RAW_BYTES = MAX_FRAME_BYTES // 2
+# A raw ASCII control byte can expand to six JSON bytes (\\u00XX). Reserve
+# reply metadata too; review must return the exact bytes for SHA/inode checks.
+_MAX_REVIEW_RAW_BYTES = (MAX_FRAME_BYTES - 512) // 6
 
 
 class PendingReviewError(Exception):
@@ -148,7 +149,11 @@ def _index_transcript(cwd: str, session_id: str, ext: tuple[Any, Any, Any, Any],
     # while the logical path remains the stable database cursor key.
     transcript_fd = _open_transcript_fd(root, slug, session_id)
     try:
-        indexed, consumed = ops[1](ops[0](), transcript_fd, transcript)
+        conn = ops[0]()
+        try:
+            indexed, consumed = ops[1](conn, transcript_fd, transcript)
+        finally:
+            conn.close()
     finally:
         os.close(transcript_fd)
     if (type(indexed) is not int or type(consumed) is not int
@@ -202,7 +207,7 @@ def _pending_review(cwd: str, pid: str, ext: tuple[Any, Any, Any, Any],
     try:
         raw = data.decode("utf-8")
         item = json.loads(raw)
-    except (UnicodeError, ValueError) as exc:
+    except (UnicodeError, ValueError, RecursionError) as exc:
         raise PendingReviewError("pending_incomplete") from exc
     if not isinstance(item, dict):
         raise PendingReviewError("pending_incomplete")
@@ -234,12 +239,15 @@ def _consult(prompt: str, read_ops: tuple[Any, Any], scrub: Any) -> dict | None:
     if not expression:
         return None
     conn = read_ops[0]()
-    row = conn.execute(
-        "SELECT b.id, b.claim, b.confidence, bm25(belief_fts) "
-        "FROM beliefs b JOIN belief_fts f ON b.id = f.belief_id "
-        "WHERE belief_fts MATCH ? AND b.status = 'active' "
-        "ORDER BY bm25(belief_fts) LIMIT 1", (expression,),
-    ).fetchone()
+    try:
+        row = conn.execute(
+            "SELECT b.id, b.claim, b.confidence, bm25(belief_fts) "
+            "FROM beliefs b JOIN belief_fts f ON b.id = f.belief_id "
+            "WHERE belief_fts MATCH ? AND b.status = 'active' "
+            "ORDER BY bm25(belief_fts) LIMIT 1", (expression,),
+        ).fetchone()
+    finally:
+        conn.close()
     if row is None:
         return None
     claim = scrub(str(row[1]))
@@ -250,12 +258,15 @@ def _consult(prompt: str, read_ops: tuple[Any, Any], scrub: Any) -> dict | None:
 
 def _beliefs(offset: int, limit: int, read_ops: tuple[Any, Any], scrub: Any) -> list[dict]:
     conn = read_ops[0]()
-    rows = conn.execute(
-        "SELECT b.id, b.subject, b.claim, b.confidence, "
-        "(SELECT count(*) FROM belief_evidence e WHERE e.belief_id = b.id) "
-        "FROM beliefs b WHERE b.status = 'active' "
-        "ORDER BY b.updated DESC, b.id LIMIT ? OFFSET ?", (limit, offset),
-    ).fetchall()
+    try:
+        rows = conn.execute(
+            "SELECT b.id, b.subject, b.claim, b.confidence, "
+            "(SELECT count(*) FROM belief_evidence e WHERE e.belief_id = b.id) "
+            "FROM beliefs b WHERE b.status = 'active' "
+            "ORDER BY b.updated DESC, b.id LIMIT ? OFFSET ?", (limit, offset),
+        ).fetchall()
+    finally:
+        conn.close()
     result = []
     for row in rows:
         claim = scrub(str(row[2]))
@@ -265,15 +276,19 @@ def _beliefs(offset: int, limit: int, read_ops: tuple[Any, Any], scrub: Any) -> 
     return result
 
 
-def _evidence(belief_id: int, limit: int, read_ops: tuple[Any, Any], scrub: Any) -> list[dict]:
+def _evidence(belief_id: int, offset: int, limit: int, read_ops: tuple[Any, Any], scrub: Any) -> list[dict]:
     conn = read_ops[0]()
-    have_engine = any(row[1] == "source_engine" for row in conn.execute(
-        "PRAGMA table_info(belief_evidence)").fetchall())
-    rows = conn.execute(
-        "SELECT session_id, project, note, created, "
-        f"{'source_engine' if have_engine else 'NULL'} FROM belief_evidence "
-        "WHERE belief_id = ? ORDER BY created, rowid LIMIT ?", (belief_id, limit + 1),
-    ).fetchall()
+    try:
+        have_engine = any(row[1] == "source_engine" for row in conn.execute(
+            "PRAGMA table_info(belief_evidence)").fetchall())
+        rows = conn.execute(
+            "SELECT session_id, project, note, created, "
+            f"{'source_engine' if have_engine else 'NULL'} FROM belief_evidence "
+            "WHERE belief_id = ? ORDER BY created, rowid LIMIT ? OFFSET ?",
+            (belief_id, limit + 1, offset),
+        ).fetchall()
+    finally:
+        conn.close()
     trail = []
     for row in rows[:limit]:
         note = scrub(str(row[2] or ""))
@@ -357,7 +372,7 @@ def serve() -> None:
             return  # The stream is no longer framed; do not resynchronize blindly.
         try:
             req = json.loads(raw)
-        except (ValueError, UnicodeError):
+        except (ValueError, UnicodeError, RecursionError):
             continue
         if not isinstance(req, dict):
             continue
@@ -425,8 +440,8 @@ def serve() -> None:
                     belief_id = req.get("belief_id")
                     if type(belief_id) is not int or not 0 < belief_id <= 2**63 - 1:
                         raise ValueError("invalid belief id")
-                    _offset, limit = _valid_page(req, 50)
-                    result = _evidence(belief_id, limit, read_ops, scrub)
+                    offset, limit = _valid_page(req, 50)
+                    result = _evidence(belief_id, offset, limit, read_ops, scrub)
                 _write({"type": "reply", "id": rid, "ok": True, "value": result})
                 continue
             else:
