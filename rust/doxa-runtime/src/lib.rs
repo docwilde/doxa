@@ -251,12 +251,14 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
     let id = inner.next_client_id.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(CLIENT_QUEUE_CAPACITY);
     let mut writer = match stream.try_clone() { Ok(s) => s, Err(_) => return };
+    let transcript = match inner.host.transcript_snapshot() {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+    let can_set_model = inner.host.can_set_model();
+    let can_set_permission_mode = inner.host.can_set_permission_mode();
     let hello = {
         let state = inner.state.lock().unwrap();
-        let transcript = match inner.host.transcript_snapshot() {
-            Ok(value) => value,
-            Err(_) => return,
-        };
         json!({"type":"hello", "proto":1, "doxa":inner.session.doxa_version,
             "session_id":inner.session.session_id, "model":state.model,
             "permission_mode":state.permission_mode, "bypass_armed":false,
@@ -264,8 +266,8 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             "transcript_path":transcript.as_ref().map(|(path, _)| path.to_string_lossy().into_owned()),
             "transcript_bytes":transcript.as_ref().map(|(_, size)| *size),
             "running":state.busy,"queued":state.prompts.len(),
-            "can_set_model":inner.host.can_set_model(),
-            "can_set_permission_mode":inner.host.can_set_permission_mode()})
+            "can_set_model":can_set_model,
+            "can_set_permission_mode":can_set_permission_mode})
     };
     if writer.set_write_timeout(Some(Duration::from_secs(2))).is_err() ||
         writer.write_all(&encode_reply(&hello)).is_err() { return; }
@@ -293,23 +295,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             Some("attach") => {
                 let cursor = if frame["cursor"].is_null() { None } else { frame["cursor"].as_u64() };
                 if !frame["cursor"].is_null() && cursor.is_none() { break; }
-                let mut state = inner.state.lock().unwrap();
-                // Replay and registration are one atomic operation with publish.
-                if let (Some(requested), Some((oldest, _))) = (cursor, state.ring.front()) {
-                    if requested < *oldest {
-                        // This client missed part of the bounded ring. Use the
-                        // last missing sequence so its cursor still advances
-                        // monotonically before the retained replay starts.
-                        let gap = json!({"type":"event","seq":oldest - 1,"turn":null,
-                            "event":{"type":"replay_gap","data":{"from_seq":requested,"to_seq":oldest - 1}}});
-                        if tx.try_send(encode_event(&gap)).is_err() { break; }
-                    }
-                }
-                let replay: Vec<_> = state.ring.iter().filter(|(seq, _)| cursor.is_none_or(|c| *seq >= c))
-                    .map(|(_, bytes)| bytes.clone()).collect();
-                if replay.len() > CLIENT_QUEUE_CAPACITY { break; }
-                for bytes in replay { if tx.try_send(bytes).is_err() { break; } }
-                state.clients.insert(id, tx.clone());
+                if !attach_client(&inner, id, cursor, &tx) { break; }
             }
             Some("prompt") | Some("call") if !inner.state.lock().unwrap().clients.contains_key(&id) => {
                 send(&tx, json!({"type":"reply","id":frame["id"],"ok":false,"error":"attach required"}));
@@ -324,6 +310,25 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
     let _ = writer_thread.join();
 }
 
+fn attach_client(inner: &Inner, id: u64, cursor: Option<u64>, tx: &SyncSender<Vec<u8>>) -> bool {
+    let mut state = inner.state.lock().unwrap();
+    // Replay and registration are one atomic operation with publish.
+    if let (Some(requested), Some((oldest, _))) = (cursor, state.ring.front()) {
+        if requested < *oldest {
+            // The gap advances the cursor before retained replay starts.
+            let gap = json!({"type":"event","seq":oldest - 1,"turn":null,
+                "event":{"type":"replay_gap","data":{"from_seq":requested,"to_seq":oldest - 1}}});
+            if tx.try_send(encode_event(&gap)).is_err() { return false; }
+        }
+    }
+    let replay: Vec<_> = state.ring.iter().filter(|(seq, _)| cursor.is_none_or(|c| *seq >= c))
+        .map(|(_, bytes)| bytes.clone()).collect();
+    if replay.len() > CLIENT_QUEUE_CAPACITY { return false; }
+    if replay.into_iter().any(|bytes| tx.try_send(bytes).is_err()) { return false; }
+    state.clients.insert(id, tx.clone());
+    true
+}
+
 fn handle_prompt(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, client_id: u64, frame: &Value) {
     let Some(req_id) = frame["id"].as_u64() else { return; };
     let Some(text) = frame["text"].as_str() else {
@@ -332,9 +337,11 @@ fn handle_prompt(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, client_id: u64, f
     if text.trim().is_empty() {
         send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"empty prompt"})); return;
     }
-    let display = match inner.host.public_prompt(text) {
-        Ok(display) => display,
-        Err(_) => {
+    let display = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+        inner.host.public_prompt(text)
+    )) {
+        Ok(Ok(display)) => display,
+        _ => {
             send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"prompt could not be scrubbed"}));
             return;
         }
@@ -384,12 +391,14 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
     let _control_guard = matches!(method, "set_model" | "set_permission_mode")
         .then(|| inner.controls.lock().unwrap());
     let (result, changed) = if method == "status" {
+        let can_set_model = inner.host.can_set_model();
+        let can_set_permission_mode = inner.host.can_set_permission_mode();
         let state = inner.state.lock().unwrap();
         (Ok(json!({"status":{"session_id":inner.session.session_id,"cwd":inner.session.cwd,
             "model":state.model,"permission_mode":state.permission_mode,
             "engine":inner.session.engine,"running":state.busy,"queued":state.prompts.len(),
-            "can_set_model":inner.host.can_set_model(),
-            "can_set_permission_mode":inner.host.can_set_permission_mode()}})), None)
+            "can_set_model":can_set_model,
+            "can_set_permission_mode":can_set_permission_mode}})), None)
     } else if matches!(method, "set_model" | "set_permission_mode") {
         // Control calls may wait on a sidecar. Hold the control lock across
         // that call, but never the global state lock: event publishing and
@@ -402,7 +411,9 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
         if refuse_dont_ask {
             (Err("dontAsk requires an idle session with no queued prompts".into()), None)
         } else {
-            let result = inner.host.call(method, &params).and_then(|extra| {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                inner.host.call(method, &params)
+            )).unwrap_or_else(|_| Err("host panicked".into())).and_then(|extra| {
                 let field = if method == "set_model" { "model" } else { "mode" };
                 let valid = extra.get(field).and_then(Value::as_str).is_some_and(|value| {
                     !value.trim().is_empty()
@@ -481,5 +492,30 @@ fn read_bounded(reader: &mut BufReader<UnixStream>, line: &mut Vec<u8>) -> io::R
         line.extend_from_slice(&available[..n]);
         reader.consume(n);
         if complete { return Ok(line.len()); }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoopHost;
+    impl Host for NoopHost {
+        fn prompt(&self, _: &str, _: &mut dyn FnMut(Value)) {}
+        fn call(&self, _: &str, _: &Value) -> Result<Value, String> { Ok(json!({})) }
+    }
+
+    #[test]
+    fn failed_replay_does_not_register_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = Daemon::bind(dir.path(), Session {
+            session_id: "replay-test".into(), cwd: "/tmp".into(), model: None,
+            engine: "test".into(), doxa_version: "test".into(),
+        }, Arc::new(NoopHost)).unwrap();
+        daemon.inner.publish(None, json!({"type":"text_delta","data":{"text":"retained"}}));
+        let (tx, rx) = mpsc::sync_channel(CLIENT_QUEUE_CAPACITY);
+        drop(rx);
+        assert!(!attach_client(&daemon.inner, 1, None, &tx));
+        assert!(daemon.inner.state.lock().unwrap().clients.is_empty());
     }
 }
