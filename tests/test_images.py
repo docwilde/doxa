@@ -96,12 +96,56 @@ def test_probe_runs_at_most_once(monkeypatch):
         calls.append(1)
         return "halfblock"
 
-    monkeypatch.delenv("DOXA_IMAGE_MODE", raising=False)
+    monkeypatch.setenv("DOXA_IMAGE_MODE", "probe")
     monkeypatch.setattr(images, "_probe", probe_once)
     monkeypatch.setattr(images, "_detected", None)
+    monkeypatch.setattr(images, "_probe_window_closed", False)
     assert images.detect_mode() == "halfblock"
     assert images.detect_mode() == "halfblock"
     assert calls == [1]
+
+
+def test_default_text_mode_never_queries_terminal(monkeypatch):
+    monkeypatch.delenv("DOXA_IMAGE_MODE", raising=False)
+    monkeypatch.setattr(images, "_detected", None)
+
+    def no_probe():
+        raise AssertionError("a text-only launch queried the terminal")
+
+    monkeypatch.setattr(images, "_probe", no_probe)
+    assert images.detect_mode() == "text"
+    assert dict(images.diagnostics())["mode"] == "text — default (no terminal probe)"
+
+
+def test_live_probe_setting_waits_for_restart(monkeypatch, tmp_path):
+    from doxa.app import DoxaApp
+
+    monkeypatch.setenv("DOXA_HOME", str(tmp_path / "doxa-home"))
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("DOXA_IMAGE_MODE", "text")
+    monkeypatch.setattr(images, "_detected", None)
+    monkeypatch.setattr(images, "_probe_window_closed", False)
+    DoxaApp(cwd=str(tmp_path), engine_factory=lambda: None)
+    assert images._probe_window_closed
+
+    def no_late_probe():
+        raise AssertionError("a late image probe raced Textual's stdin reader")
+
+    monkeypatch.setattr(images, "_probe", no_late_probe)
+    monkeypatch.setenv("DOXA_IMAGE_MODE", "probe")
+    assert images.detect_mode() == "text"
+    assert images.probe_requires_restart()
+    rows = dict(images.diagnostics())
+    assert rows["mode"] == "text — probe requires restart"
+    assert "restart" in rows["probe"]
+
+
+def test_text_launch_settles_cell_size_without_import(monkeypatch):
+    monkeypatch.delenv("DOXA_IMAGE_MODE", raising=False)
+    monkeypatch.setattr(images, "_cell_size", None)
+    monkeypatch.setattr(images, "_cell_size_settled", False)
+    images.settle_unmeasured_cell_size()
+    assert images.cell_size() is None
 
 
 def test_widget_for_bad_source_degrades_to_fallback(monkeypatch, tmp_path):

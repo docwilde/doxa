@@ -85,10 +85,9 @@ ENV_VAR = "DOXA_KEYBOARD_PROTOCOL"
 # legacy terminal rather than a timeout we chose to interpret.
 QUERY = "\x1b[?u\x1b[c"
 
-# Long enough for a round trip through tmux and an ssh hop, short enough
-# that a terminal which ignores both queries costs a third of a second at
-# startup, once, ever.
-PROBE_TIMEOUT_SECS = 0.3
+# Local terminals answer promptly. A slower or silent terminal remains
+# UNKNOWN rather than holding the first frame for a third of a second.
+PROBE_TIMEOUT_SECS = 0.1
 
 _RE_KITTY_REPLY = re.compile(r"\x1b\[\?[0-9;]*u")
 _RE_DA_REPLY = re.compile(r"\x1b\[\?[0-9;]*c")

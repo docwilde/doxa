@@ -315,12 +315,19 @@ def test_worktrees_check_passes_clean_with_no_orphans(tmp_path):
 
 
 def test_image_protocol_check_reports_the_detected_mode(monkeypatch):
-    from doxa import images as images_mod
-
-    monkeypatch.setattr(images_mod, "detect_mode", lambda: "halfblock")
+    monkeypatch.delenv("DOXA_IMAGE_MODE", raising=False)
     check = doctor_mod._image_protocol_check()
     assert check.status == doctor_mod.STATUS_PASS
-    assert "halfblock" in check.detail
+    assert check.detail == "text (default, no terminal probe)"
+    monkeypatch.setenv("DOXA_IMAGE_MODE", "probe")
+    from doxa import images as images_mod
+
+    monkeypatch.setattr(images_mod, "_detected", "halfblock")
+    assert doctor_mod._image_protocol_check().detail == "halfblock (probed)"
+    monkeypatch.setenv("DOXA_IMAGE_MODE", "sixel")
+    assert doctor_mod._image_protocol_check().detail == (
+        "sixel (forced via DOXA_IMAGE_MODE)"
+    )
 
 
 def test_keyboard_enhancement_check_is_honestly_unknown(monkeypatch):

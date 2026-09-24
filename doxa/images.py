@@ -13,25 +13,21 @@ text fallback, it is the function's own failure mode. Any construction
 error, a missing file, an unsupported terminal, a broken ``textual-image``
 install: all of them degrade to the text line, never to an exception.
 
-Detection discipline (the part that can bite): probing the terminal for
-TGP/sixel support writes escape sequences and reads the reply from stdin --
-textual-image documents that this "will not work anymore once Textual is
-started" (Textual's stdin reader thread eats the response). So the probe
-runs AT MOST ONCE, cached module-wide, and doxa.app imports this module at
-import time -- i.e. before ``App.run()`` -- so a real TTY is probed while we
-still own it. Under pytest / headless use stdout is a pipe, ``_is_tty()``
-is False, and the probe short-circuits to "text" without writing a byte.
+Detection discipline (the part that can bite): the optional terminal probe
+for TGP/sixel writes escape sequences and reads stdin. It runs only with
+``DOXA_IMAGE_MODE=probe``, at most once and before ``App.run()``. Textual's
+reader thread would otherwise eat the reply. The default text mode never
+imports textual-image or talks to the terminal during startup.
 
-``DOXA_IMAGE_MODE`` (kgp | sixel | halfblock | text) overrides detection
-entirely -- checked per call, so tests force each tier without touching the
-cache, and a user whose terminal lies about its support has a way out.
+Images default to the text fallback without querying the terminal. The
+optional ``DOXA_IMAGE_MODE=probe`` restores the detection ladder; a named
+mode (kgp | sixel | halfblock | text) forces that tier directly.
 
 v0.41.0 added the reporting half (:func:`diagnostics`,
 :func:`renderable_modes`, :func:`cell_size`), which is what ``/img`` with
-no argument renders. It measures nothing new: the ladder probe is spent
-before ``App.run()`` and cannot honestly be repeated, so every row is
-either a settled value or an explicit "not measured", and the tiers /img
-DRAWS are only the ones this terminal answered for.
+no argument renders. It measures nothing new: an optional ladder probe is
+spent before ``App.run()`` and cannot honestly be repeated, so every row
+is either a settled value or an explicit "not measured".
 
 v0.49.0 added the containment half, from a crash report, and it is three
 separate defences against the same fact -- **this library runs code inside
@@ -58,6 +54,9 @@ ENV_VAR = "DOXA_IMAGE_MODE"
 
 # Ladder result, settled at most once per process (see module docstring).
 _detected: str | None = None
+# A live Settings change may select "probe" after Textual has claimed stdin.
+# A late terminal query would race its reader thread, so it requires restart.
+_probe_window_closed = False
 
 
 def _mute_library_logging() -> None:
@@ -142,15 +141,44 @@ def _probe() -> str:
 
 
 def detect_mode() -> str:
-    """The effective render mode: the DOXA_IMAGE_MODE override when set to a
-    known mode, else the (once-)probed ladder result."""
+    """The effective render mode, with terminal probing explicitly opt-in."""
     forced = config_mod.raw(ENV_VAR).strip().lower()
     if forced in MODES:
         return forced
+    if forced != "probe":
+        return "text"
     global _detected
     if _detected is None:
+        if _probe_window_closed:
+            return "text"
         _detected = _probe()
     return _detected
+
+
+def close_probe_window() -> None:
+    """Forbid terminal queries after DoxaApp's pre-Textual setup."""
+    global _probe_window_closed
+    _probe_window_closed = True
+
+
+def probe_requires_restart() -> bool:
+    """A live request cannot query the terminal after Textual owns stdin."""
+    return (
+        config_mod.raw(ENV_VAR).strip().lower() == "probe"
+        and _probe_window_closed
+        and _detected is None
+    )
+
+
+def settle_unmeasured_cell_size() -> None:
+    """Keep later diagnostics from querying stdin after Textual starts.
+
+    The text-only startup does not import textual-image at all. If the user
+    enables a pixel mode later, widget_for seeds the library's cell-size
+    cache with its documented fallback before constructing a widget.
+    """
+    global _cell_size_settled
+    _cell_size_settled = True
 
 
 # -- what we MEASURED, for /img's showcase --------------------------------
@@ -276,14 +304,16 @@ def renderable_modes() -> "tuple[str, ...]":
 
 def _support_rows() -> "list[tuple[str, str]]":
     """The four ladder rungs, each labelled with HOW we know."""
-    forced = config_mod.raw(ENV_VAR).strip().lower() in MODES
+    selection = config_mod.raw(ENV_VAR).strip().lower()
+    forced = selection in MODES
+    probing = selection == "probe"
     detected = detect_mode()
     unconditional = "always available — plain cell output, needs no terminal support"
     if forced:
-        unasked = f"not measured — DOXA_IMAGE_MODE forces {detected}; unset it to probe"
+        unasked = f"not measured — DOXA_IMAGE_MODE forces {detected}; set it to probe and restart to measure"
         kgp = sixel = unasked
-    elif not probe_answered():
-        unasked = "not measured — no interactive terminal to ask (headless, or a pipe)"
+    elif not probing or not probe_answered():
+        unasked = "not measured — image probe was not run or received no answer"
         kgp = sixel = unasked
     elif detected == "kgp":
         kgp = "supported — this terminal answered the graphics query"
@@ -311,16 +341,22 @@ def diagnostics() -> "list[tuple[str, str]]":
     goes and finds out."""
     detected = detect_mode()
     forced = config_mod.raw(ENV_VAR).strip().lower() in MODES
+    probing = config_mod.raw(ENV_VAR).strip().lower() == "probe"
+    restart_needed = probe_requires_restart()
     rows = [(
         "mode",
         f"{detected} — forced via DOXA_IMAGE_MODE" if forced
-        else f"{detected} — probed",
+        else "text — probe requires restart" if restart_needed
+        else f"{detected} — probed" if probing
+        else "text — default (no terminal probe)",
     )]
     rows.append((
         "probe",
         "answered once at startup, before the TUI took stdin"
-        if probe_answered()
-        else "no answer — stdout is not an interactive terminal we could ask",
+        if probing and probe_answered()
+        else "not run — restart to probe before Textual takes stdin"
+        if restart_needed else "no answer — terminal did not answer the image query"
+        if probing else "not run — image rendering defaults to text",
     ))
     version = library_version()
     rows.append((
@@ -457,6 +493,12 @@ def widget_for(source: Any, desc: str, mode: str | None = None):
     if mode == "text":
         return Static(fallback_line(desc), classes="image-fallback")
     try:
+        # A text-only launch intentionally skipped the startup cell-size
+        # query. A later opt-in must not let textual-image query stdin from
+        # inside Textual's render loop, where its reply would be consumed.
+        from textual_image._terminal import get_cell_size
+
+        _seed_library_cache(get_cell_size)
         from textual_image.widget import HalfcellImage, SixelImage, TGPImage
 
         cls = {"kgp": TGPImage, "sixel": SixelImage, "halfblock": HalfcellImage}[mode]

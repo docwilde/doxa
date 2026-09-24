@@ -664,9 +664,9 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="image_mode", env="DOXA_IMAGE_MODE", label="image mode",
         category="Appearance", kind="choice",
-        choices=("", "kgp", "sixel", "halfblock", "text"),
-        help="Force a rung of the terminal-image ladder; empty = probe "
-             "(doxa.images.detect_mode)",
+        choices=("", "probe", "kgp", "sixel", "halfblock", "text"),
+        help="Empty = text fallback (fast startup); probe = detect terminal "
+             "support; or force a rung of the image ladder",
     ),
     Setting(
         key="boot_banner", env="DOXA_BOOT_BANNER", label="boot banner",
