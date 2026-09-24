@@ -212,7 +212,10 @@ pub fn load_tabset(path: &Path, fallback_scope: &str) -> Option<TabSet> {
             cwd: obj.get("cwd").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned),
         });
     }
-    if tabs.is_empty() { return None; }
+    // An intentionally empty tabset still owns layout, collections, and
+    // future fields that must survive the next save. A nonempty array whose
+    // rows were all rejected is malformed rather than an empty tabset.
+    if tabs.is_empty() && !rows.is_empty() { return None; }
     Some(TabSet {
         scope_key: data.get("scope_key").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or(fallback_scope).into(),
         active_session_id: data.get("active_session_id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned),
@@ -232,7 +235,11 @@ pub fn save_tabset(path: &Path, record: &TabSet) -> io::Result<()> {
         .is_some_and(|layout| layout.contains_key("trees") || layout.contains_key("groups"))
         || record.raw.contains_key("collections");
     if has_structure {
-        let old: Vec<&str> = record.raw.get("tabs").and_then(Value::as_array)
+        let old_rows = record.raw.get("tabs").and_then(Value::as_array).or_else(|| {
+            let layout = record.raw.get("layout")?.as_object()?;
+            (layout.get("kind")?.as_str()? == "tabs").then(|| layout.get("tabs")?.as_array()).flatten()
+        });
+        let old: Vec<&str> = old_rows
             .into_iter().flatten()
             .filter_map(|row| row.get("session_id").and_then(Value::as_str))
             .filter(|id| valid_session_id(id))
@@ -259,17 +266,27 @@ pub fn save_tabset(path: &Path, record: &TabSet) -> io::Result<()> {
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let parent = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent directory"))?;
-    fs::create_dir_all(parent)?;
-    if fs::symlink_metadata(parent)?.file_type().is_symlink() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "symlinked state directory"));
+    let created = match fs::symlink_metadata(parent) {
+        Ok(_) => false,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(parent)?;
+            true
+        }
+        Err(error) => return Err(error),
+    };
+    let dir = fs::OpenOptions::new().read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(parent)?;
+    if created { dir.set_permissions(fs::Permissions::from_mode(0o700))?; }
+    let meta = dir.metadata()?;
+    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() }
+        || meta.permissions().mode() & 0o022 != 0 {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "state directory must be owned and not writable by others"));
     }
-    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
     let mut tmp = tempfile::Builder::new().prefix(".doxa-state-").tempfile_in(parent)?;
     tmp.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;
     tmp.write_all(bytes)?;
     tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|error| error.error)?;
-    let dir = fs::File::open(parent)?;
     dir.sync_all()?;
     Ok(())
 }

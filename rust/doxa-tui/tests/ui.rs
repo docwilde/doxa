@@ -184,6 +184,20 @@ fn streamed_transcript_is_bounded_without_resetting_user_scroll() {
 }
 
 #[test]
+fn long_transcript_can_render_its_first_and_last_lines() {
+    let mut app = App::default();
+    app.rail_visible = false;
+    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("long", "Work")));
+    let lines: String = (0..70_000).map(|i| format!("{i:05}\n")).collect();
+    assert!(lines.len() < 512 * 1024);
+    app.sessions[0].transcript = format!("```\n{lines}```");
+
+    assert!(screen(&app, 90, 25).contains("69999"));
+    app.groups[0].scroll = usize::MAX;
+    assert!(screen(&app, 90, 25).contains("00000"));
+}
+
+#[test]
 fn structured_events_render_in_target_pane_and_track_status() {
     let mut app = App::default();
     for id in ["one", "two"] {
@@ -356,7 +370,7 @@ fn shifted_confirmation_allows_only_after_second_key() {
 }
 
 #[test]
-fn question_steps_and_escape_declines() {
+fn question_steps_and_failed_delivery_allow_retry() {
     let mut app = App::default();
     app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));
     app.apply_daemon_frame(
@@ -378,10 +392,24 @@ fn question_steps_and_escape_declines() {
             json!({"answers":{"Color?":"Blue","Size?":"Small"}})
         )]
     );
+    assert_eq!(app.input_requests[0].step, 1);
+    assert_eq!(app.input_requests[0].selected, 1);
+    assert!(screen(&app, 90, 25).contains("Size?"));
     app.apply_daemon_frame(&json!({"type":"answer_reply", "session_id":"one", "request_id":"req-2", "ok":false, "message":"stale"}));
     assert!(!app.input_requests[0].sending);
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.take_answers()[0].2, json!({"answers":{"Color?":"Blue","Size?":"Small"}}));
+    assert_eq!(app.input_requests[0].step, 1);
+    app.apply_daemon_frame(&json!({"type":"answer_reply", "session_id":"one", "request_id":"req-2", "ok":false,
+        "uncertain":true, "message":"timeout"}));
+    assert!(!app.input_requests[0].sending);
+    assert!(screen(&app, 90, 25).contains("Size?"));
+    app.handle(key(KeyCode::Char('2'), KeyModifiers::NONE));
+    assert_eq!(app.take_answers()[0].2, json!({"answers":{"Color?":"Blue","Size?":"Large"}}));
     app.handle(key(KeyCode::Esc, KeyModifiers::NONE));
-    assert_eq!(app.take_answers()[0].2, json!({"declined":true}));
+    assert!(app.take_answers().is_empty());
+    app.apply_daemon_frame(&json!({"type":"event", "session_id":"one", "event":{"type":"needs_input_resolved", "data":{"id":"req-2"}}}));
+    assert!(app.input_requests.is_empty());
     app.handle(key(KeyCode::Char('q'), KeyModifiers::CONTROL));
     assert!(app.should_quit);
 }

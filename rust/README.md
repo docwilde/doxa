@@ -45,11 +45,12 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. Rich tool cards and clickable links are
-still 2.0 work. The binary version is `2.0.0-alpha.2` for this
+still 2.0 work. The binary version is `2.0.0-alpha.3` for this
 separate development line, not a DOXA 2.0 release.
 
-No 2.0 release tag is planned until the frontend reaches feature parity and
-passes end-to-end terminal and daemon tests.
+Alpha tags identify preview snapshots. A stable 2.0 release waits until the
+frontend reaches feature parity and passes end-to-end terminal and daemon
+tests.
 
 ## Native daemon
 

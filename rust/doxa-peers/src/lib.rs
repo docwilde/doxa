@@ -174,17 +174,10 @@ impl Registry {
     }
     pub fn sweep_stale(&self, scrubber: &impl Scrubber) -> io::Result<usize> {
         let before = fs::read_dir(&self.directory)?.filter_map(Result::ok).filter(|e| e.path().extension() == Some(OsStr::new("json"))).count();
+        // A failed socket probe alone does not prove that a live peer has
+        // exited. Its listener may be temporarily unavailable; let its PID
+        // and heartbeat determine whether its presence can be reaped.
         let _ = self.read(scrubber, true, false)?;
-        for entry in fs::read_dir(&self.directory)? {
-            let path = entry?.path();
-            if path.extension() != Some(OsStr::new("json")) { continue; }
-            if let Ok(peer) = read_one(&path) {
-                if std::os::unix::net::UnixStream::connect(&peer.socket_path).is_err() {
-                    remove_regular_entry(&path);
-                    self.reap_socket(&peer.socket_path, !pid_alive(peer.pid));
-                }
-            }
-        }
         let after = fs::read_dir(&self.directory)?.filter_map(Result::ok).filter(|e| e.path().extension() == Some(OsStr::new("json"))).count();
         Ok(before.saturating_sub(after))
     }

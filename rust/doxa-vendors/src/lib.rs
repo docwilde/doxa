@@ -28,7 +28,7 @@ impl Vendor {
 pub enum Error {
     MissingCredential(&'static str), InvalidEffort, InvalidEndpoint,
     Transport, Timeout, Cancelled, Http { status: u16, code: Option<String> },
-    StreamLineTooLarge, StreamBodyTooLarge, ToolArgumentsTooLarge,
+    StreamLineTooLarge, StreamBodyTooLarge, ToolArgumentsTooLarge, InvalidToolArguments,
     TooManyToolCalls, IncompleteStream, InvalidUtf8,
 }
 impl std::fmt::Display for Error {
@@ -122,18 +122,19 @@ impl Accumulator {
         let reasoning = self.reasoning_filter.flush(key);
         if !reasoning.is_empty() { self.completion.reasoning.push_str(&reasoning); on_delta(Delta::Reasoning(reasoning)); }
     }
-    pub fn finish(mut self, key: &str) -> Completion {
+    pub fn finish(mut self, key: &str) -> Result<Completion, Error> {
         self.flush(key, |_| {});
         for (index, call) in self.calls {
             if call.name.is_empty() { continue; }
-            let arguments = serde_json::from_str::<Value>(&call.arguments).ok().and_then(|v| v.as_object().cloned()).unwrap_or_default();
+            let arguments = serde_json::from_str::<Map<String, Value>>(&call.arguments)
+                .map_err(|_| Error::InvalidToolArguments)?;
             let arguments = arguments.into_iter().map(|(k,v)| (scrub(&k, key), scrub_json(v, key))).collect();
             self.completion.tool_calls.push(ToolCall {
                 id: if call.id.is_empty() { format!("call_{index}") } else { call.id },
                 name: call.name, arguments,
             });
         }
-        self.completion
+        Ok(self.completion)
     }
 }
 fn scrub_json(value: Value, key: &str) -> Value {
@@ -232,7 +233,7 @@ async fn stream_at(
         while let Some(next) = stream.next().await {
             let bytes = next.map_err(map_transport)?;
             for payload in decoder.push(&bytes)? { acc.absorb(&payload, &key, &mut on_delta)?; }
-            if decoder.done() { acc.flush(&key, &mut on_delta); return Ok(acc.finish(&key)); }
+            if decoder.done() { acc.flush(&key, &mut on_delta); return acc.finish(&key); }
         }
         Err(Error::IncompleteStream)
     };

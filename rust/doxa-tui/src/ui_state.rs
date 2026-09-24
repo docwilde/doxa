@@ -134,6 +134,13 @@ impl UiStateStore {
         if !self.writable_layout {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "saved layout has more than two panes"));
         }
+        // This UI mounts live daemons only. A saved tab whose daemon is
+        // offline may still have a transcript and restore as an archived tab
+        // in Python. Do not rewrite the shared record from a partial view.
+        if self.record.as_ref().is_some_and(|record| record.tabs.iter().any(|tab|
+            !app.groups.iter().any(|group| group.tabs.contains(&tab.session_id)))) {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "saved layout includes offline tabs"));
+        }
         let mut seen = HashSet::new();
         let mut tabs = Vec::new();
         for group in &app.groups {

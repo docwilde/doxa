@@ -62,6 +62,27 @@ def _extensions() -> tuple[Any, Any, Any, Any] | None:
         return None
 
 
+def _scrub_pending_value(value: Any, scrub: Any) -> Any:
+    """Preserve JSON structure while scrubbing every nested string."""
+    if isinstance(value, str):
+        return scrub(value)
+    if isinstance(value, dict):
+        result = {}
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise TypeError("invalid pending key")
+            safe_key = scrub(key)
+            if safe_key in result:
+                raise ValueError("pending keys collide after scrubbing")
+            result[safe_key] = _scrub_pending_value(child, scrub)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_scrub_pending_value(child, scrub) for child in value]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    raise TypeError("invalid pending value")
+
+
 def _pending(cwd: str, offset: int, limit: int, ext: tuple[Any, Any, Any, Any]) -> list[dict]:
     slug = ext[0](cwd)
     scrub = ext[3][0]
@@ -80,7 +101,7 @@ def _pending(cwd: str, offset: int, limit: int, ext: tuple[Any, Any, Any, Any]) 
         record = {"pid": pid}
         # Keep pid as the stable routing identifier. Every other string is
         # display data and must pass through LORE's secret scrubber.
-        record.update({key: scrub(item[key]) if isinstance(item[key], str) else item[key]
+        record.update({key: _scrub_pending_value(item[key], scrub)
                        for key in _PENDING_FIELDS if item.get(key) is not None})
         record.update({key: scrub(str(item[key])) for key in _PENDING_TEXT if item.get(key)})
         records.append(record)

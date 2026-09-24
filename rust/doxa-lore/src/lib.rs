@@ -81,7 +81,25 @@ impl LoreClient {
                 if libc::setsid() == -1 { Err(io::Error::last_os_error()) } else { Ok(()) }
             });
         }
-        let mut child = command.spawn().map_err(LoreError::Io)?;
+        // An interpreter being replaced during an update can briefly return
+        // ETXTBSY. Retry only that transient error; other spawn failures are
+        // reported immediately.
+        #[cfg(unix)]
+        let mut busy_retries = 0;
+        let mut child = loop {
+            match command.spawn() {
+                Ok(child) => break child,
+                Err(error) => {
+                    #[cfg(unix)]
+                    if error.raw_os_error() == Some(libc::ETXTBSY) && busy_retries < 10 {
+                        busy_retries += 1;
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    return Err(LoreError::Io(error));
+                }
+            }
+        };
         let stdin = child.stdin.take().ok_or(LoreError::InvalidFrame)?;
         #[cfg(unix)]
         {

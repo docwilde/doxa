@@ -216,8 +216,10 @@ impl Inner {
                 } else { state.busy = false; None }
             };
             if let Some((prompt, turn)) = next {
-                let display = inner.host.public_prompt(&prompt.text)
-                    .unwrap_or_else(|_| "[redacted: prompt unavailable]".to_owned());
+                let display = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                    inner.host.public_prompt(&prompt.text)
+                )).ok().and_then(Result::ok)
+                    .unwrap_or_else(|| "[redacted: prompt unavailable]".to_owned());
                 inner.publish(None, json!({"type":"prompt_dequeued","data":{"id":prompt.queue_id,"text":display}}));
                 inner.start_turn(prompt.text, turn);
             }
@@ -268,6 +270,16 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
                 if !frame["cursor"].is_null() && cursor.is_none() { break; }
                 let mut state = inner.state.lock().unwrap();
                 // Replay and registration are one atomic operation with publish.
+                if let (Some(requested), Some((oldest, _))) = (cursor, state.ring.front()) {
+                    if requested < *oldest {
+                        // This client missed part of the bounded ring. Use the
+                        // last missing sequence so its cursor still advances
+                        // monotonically before the retained replay starts.
+                        let gap = json!({"type":"event","seq":oldest - 1,"turn":null,
+                            "event":{"type":"replay_gap","data":{"from_seq":requested,"to_seq":oldest - 1}}});
+                        if tx.try_send(encode_event(&gap)).is_err() { break; }
+                    }
+                }
                 let replay: Vec<_> = state.ring.iter().filter(|(seq, _)| cursor.is_none_or(|c| *seq >= c))
                     .map(|(_, bytes)| bytes.clone()).collect();
                 if replay.len() > CLIENT_QUEUE_CAPACITY { break; }

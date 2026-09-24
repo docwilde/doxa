@@ -24,6 +24,7 @@ fn legacy_flat_record_and_future_layout_survive_save() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tabsets/test.json");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o750)).unwrap();
     fs::write(&path, json!({
         "scope_key":"/repo", "active_session_id":"s2",
         "tabs":[{"session_id":"../bad"},{"session_id":"s1","pinned_name":"one","cwd":"/repo"},{"session_id":"s2"}],
@@ -40,13 +41,33 @@ fn legacy_flat_record_and_future_layout_survive_save() {
     assert_eq!(saved["future_key"]["x"], 1);
     assert_eq!(saved["tabs"].as_array().unwrap().len(), 2);
     assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-    assert_eq!(fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+    assert_eq!(fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o750);
+}
+
+#[test]
+fn empty_tabset_retains_raw_layout_and_collections() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let path = dir.path().join("empty.json");
+    let original = json!({"scope_key":"/repo","tabs":[],"active_session_id":null,
+        "layout":{"kind":"tabs","tabs":[],"future_layout":"keep"},
+        "collections":[{"name":"Archive","sessions":[]}],"future_key":{"keep":true}});
+    fs::write(&path, original.to_string()).unwrap();
+    let record = load_tabset(&path, "/repo").expect("valid empty tabset");
+    assert!(record.tabs.is_empty());
+    assert_eq!(record.raw["collections"], original["collections"]);
+    save_tabset(&path, &record).unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(saved["layout"]["future_layout"], "keep");
+    assert_eq!(saved["collections"], original["collections"]);
+    assert_eq!(saved["future_key"], original["future_key"]);
 }
 
 #[test]
 fn config_precedence_and_parse_failure() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o750)).unwrap();
     fs::write(&path, "flag = true\nmodel = 'sonnet'\n[projects]\n'/repo' = { colour = 'blue' }\n").unwrap();
     let cfg = load_config(&path);
     assert_eq!(raw_setting(None, &cfg, "flag"), "1");
@@ -100,6 +121,35 @@ fn tabset_refuses_membership_change_with_unparsed_layout() {
     record.tabs.push(Tab { session_id: "s2".into(), pinned_name: None, cwd: None });
     assert!(save_tabset(&path, &record).is_err());
     assert_eq!(serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap(), original);
+}
+
+#[test]
+fn layout_only_tabset_preserves_membership_with_collections() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o750)).unwrap();
+    let path = dir.path().join("record.json");
+    let original = json!({"scope_key":"/repo","layout":{"kind":"tabs","tabs":[{"session_id":"s1"}],"groups":{"kind":"future"}},"collections":[{"sessions":["s1"]}]});
+    fs::write(&path, original.to_string()).unwrap();
+    let mut record = load_tabset(&path, "/repo").unwrap();
+    save_tabset(&path, &record).unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["tabs"][0]["session_id"], "s1");
+    assert_eq!(saved["layout"]["groups"], original["layout"]["groups"]);
+    record.tabs[0].session_id = "s2".into();
+    assert!(save_tabset(&path, &record).is_err());
+}
+
+#[test]
+fn existing_state_directory_keeps_its_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("existing");
+    fs::create_dir(&parent).unwrap();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o750)).unwrap();
+    save_config(&parent.join("config.toml"), &Default::default()).unwrap();
+    assert_eq!(fs::metadata(&parent).unwrap().permissions().mode() & 0o777, 0o750);
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o770)).unwrap();
+    assert!(save_config(&parent.join("config.toml"), &Default::default()).is_err());
+    assert_eq!(fs::metadata(&parent).unwrap().permissions().mode() & 0o777, 0o770);
 }
 
 #[test]

@@ -154,14 +154,14 @@ dependencies = [
 
 [[package]]
 name = "doxa-protocol"
-version = "2.0.0-alpha.2"
+version = "2.0.0-alpha.3"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "doxa-state"
-version = "2.0.0-alpha.2"
+version = "2.0.0-alpha.3"
 dependencies = [
  "libc",
  "serde",
@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-tui"
-version = "2.0.0-alpha.2"
+version = "2.0.0-alpha.3"
 dependencies = [
  "crossterm",
  "doxa-protocol",

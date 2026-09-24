@@ -13,7 +13,7 @@ name: LORE bump
 #      marketplace and can drift in either direction from the pin.
 #   2. A bare install -- `uv tool install git+...doxa`, or CI -- is frozen at
 #      the pinned ref forever, until a human edits pyproject.toml and re-locks.
-#   3. ci.yml's third matrix leg checks LORE out at `main`. That leg is a
+#   3. ci.yml's plugin matrix leg checks LORE out at `main`. That leg is a
 #      CANARY: it reports that a LORE change BROKE DOXA. It cannot report
 #      that a LORE release exists and DOXA has not taken it.
 #

@@ -389,3 +389,33 @@ fn sigterm_reaps_active_codex_process_group() {
     assert!(!marker.exists(), "Codex descendant survived daemon termination");
     assert!(!process.registry.exists());
 }
+
+#[test]
+fn registry_write_failure_reaps_active_codex_process_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let ready = dir.path().join("ready");
+    let marker = dir.path().join("survived");
+    fake_scrubber(&python, false);
+    executable(&codex, &format!("#!/bin/sh\ncat >/dev/null\necho ready > {}\nsh -c 'sleep 1; echo leaked > {}' &\nwait\n", ready.display(), marker.display()));
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| ready.exists() && process.entry()["clients"] == 1);
+
+    fs::remove_file(&process.registry).unwrap();
+    fs::write(&process.registry, "replacement").unwrap();
+    let (mut second, mut second_socket) = process.connect();
+    receive(&mut second);
+    send(&mut second_socket, json!({"type":"attach","cursor":null}));
+    wait_until(|| process.exited());
+    assert!(!process.child.try_wait().unwrap().unwrap().success());
+    thread::sleep(Duration::from_millis(1200));
+    assert!(!marker.exists(), "Codex descendant survived registry write failure");
+    assert_eq!(fs::read_to_string(&process.registry).unwrap(), "replacement");
+    assert!(!process.socket.exists());
+}

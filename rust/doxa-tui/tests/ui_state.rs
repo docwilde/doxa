@@ -34,19 +34,52 @@ fn incomplete_roster_preserves_existing_tabset_byte_for_byte() {
 }
 
 #[test]
-fn flat_legacy_record_restores_active_tab_and_skips_stale_ids() {
+fn flat_legacy_record_keeps_offline_tab_when_live_layout_changes() {
     let (_dir, mut store) = seeded(json!({"tabs":[{"session_id":"a"},{"session_id":"stale"},{"session_id":"b"}],"active_session_id":"b"}));
     let mut app = App::default();
     assert!(store.restore(&mut app, &live(&["a", "b"])));
     assert_eq!(app.groups[0].tabs, ["a", "b"]);
     assert_eq!(app.groups[0].active, 1);
     assert!(app.groups[1].tabs.is_empty());
-    store.save(&app).unwrap();
+    app.rail_width = 31;
+    let original = fs::read(store.path()).unwrap();
+    assert!(store.save_if_complete(&app, &Mutex::new(true)).is_err());
+    assert_eq!(fs::read(store.path()).unwrap(), original);
     let saved: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
-    assert_eq!(saved["tabs"].as_array().unwrap().len(), 2);
-    assert_eq!(saved["layout"]["kind"], "tabs");
-    assert_eq!(saved["layout"]["groups"]["tabs"].as_array().unwrap().len(), 2);
+    assert_eq!(saved["tabs"].as_array().unwrap().len(), 3);
+    assert_eq!(saved["tabs"][1]["session_id"], "stale");
     assert_eq!(saved["active_session_id"], "b");
+}
+
+#[test]
+fn archived_middle_tab_and_collection_survive_split_mutation() {
+    let (_dir, mut store) = seeded(json!({
+        "tabs":[{"session_id":"live-a"},{"session_id":"archived","pinned_name":"Old work","cwd":"/repo"},{"session_id":"live-b"}],
+        "active_session_id":"live-b",
+        "layout":{"kind":"tabs","groups":{"kind":"group","active":2,"tabs":[
+            {"kind":"leaf","session_id":"live-a"},
+            {"kind":"leaf","session_id":"archived","view":"diff"},
+            {"kind":"leaf","session_id":"live-b"}]}},
+        "collections":[{"name":"Keep","sessions":["live-a","archived","live-b"]}]
+    }));
+    let mut app = App::default();
+    assert!(store.restore(&mut app, &live(&["live-a", "live-b"])));
+    assert_eq!(app.groups[0].tabs, ["live-a", "live-b"]);
+    app.groups[0].tabs.pop();
+    app.groups[1].tabs.push("live-b".into());
+    app.groups[0].active = 0;
+    app.groups[1].active = 0;
+    app.active_group = 1;
+    app.split_percent = 65;
+    app.rail_width = 34;
+    let original = fs::read(store.path()).unwrap();
+    assert!(store.save_if_complete(&app, &Mutex::new(true)).is_err());
+    assert_eq!(fs::read(store.path()).unwrap(), original);
+    let saved: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(saved["tabs"].as_array().unwrap().iter().map(|row| row["session_id"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["live-a", "archived", "live-b"]);
+    assert_eq!(saved["layout"]["groups"]["tabs"][1]["view"], "diff");
+    assert_eq!(saved["collections"][0]["sessions"], json!(["live-a", "archived", "live-b"]));
 }
 
 #[test]
@@ -119,6 +152,21 @@ fn no_live_saved_tab_leaves_fresh_app_untouched() {
     let mut app = App::default();
     assert!(!store.restore(&mut app, &live(&["current"])));
     assert!(app.groups.iter().all(|g| g.tabs.is_empty()));
+}
+
+#[test]
+fn new_live_tab_preserves_metadata_from_saved_empty_tabset() {
+    let (_dir, mut store) = seeded(json!({"tabs":[],"active_session_id":null,
+        "layout":{"kind":"tabs","tabs":[],"future_layout":"keep"},
+        "collections":[{"name":"Archive","sessions":[]}],"future_key":42}));
+    let mut app = App::default();
+    app.groups[0].tabs.push("new-session".into());
+    store.save(&app).unwrap();
+    let saved: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(saved["tabs"][0]["session_id"], "new-session");
+    assert_eq!(saved["layout"]["future_layout"], "keep");
+    assert_eq!(saved["collections"][0]["name"], "Archive");
+    assert_eq!(saved["future_key"], 42);
 }
 
 #[test]

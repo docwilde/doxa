@@ -2,7 +2,29 @@
 
 Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
-history, not written from memory. The Rust 2.0 development line is untagged.
+history, not written from memory. Rust alpha tags identify preview snapshots;
+the stable 2.0 release has not been cut.
+
+## 2.0.0-alpha.3 — Rust development line (unreleased)
+
+- Keep offline archived tabs and their collection and layout metadata when the
+  Rust preview saves a shared tabset from a partial live roster.
+- Retry a briefly busy LORE interpreter during sidecar startup.
+- Keep AskUser selections available after refused or uncertain delivery, and
+  retry layout saves after temporary write or roster failures.
+- Preserve safe existing state directory permissions and shut down a Codex
+  child cleanly if the daemon registry heartbeat fails.
+- Reject malformed vendor tool-call arguments, allow failed Claude starts to
+  retry, and complete partial sidecar protocol writes.
+- Keep live peers during transient socket failures, recover queued turns after
+  a display-scrub panic, and signal a replay gap after a long disconnect.
+- Scrub nested pending values before returning them from the LORE sidecar.
+- Retain layout and collection metadata in empty tabsets, keep the full
+  transcript scrollable, use unique thread metadata temporary files,
+  and finalize the Claude sidecar after stdin closes.
+- Run the Python CI matrix on 3.12 while retaining both LORE loading paths.
+- Refuse pending replies with scrubbed key collisions, and avoid finalizing
+  Claude while a cancelled turn is still active.
 
 ## 2.0.0-alpha.2 — Rust development line (unreleased)
 

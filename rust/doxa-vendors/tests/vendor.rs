@@ -55,7 +55,7 @@ fn fragmented_sse_and_tool_arguments() {
     );
     let mut decoder = SseDecoder::default(); let mut acc = Accumulator::default(); let mut deltas = Vec::new();
     for byte in sse.as_bytes().chunks(7) { for p in decoder.push(byte).unwrap() { acc.absorb(&p, "secret", |d| deltas.push(d)).unwrap(); } }
-    assert!(decoder.done()); acc.flush("secret", |d| deltas.push(d)); let out = acc.finish("secret");
+    assert!(decoder.done()); acc.flush("secret", |d| deltas.push(d)); let out = acc.finish("secret").unwrap();
     assert_eq!(deltas, vec![Delta::Text("hello".into()), Delta::Reasoning("think".into())]);
     assert_eq!(out.model.as_deref(), Some("resolved-model"));
     assert_eq!(out.usage.unwrap()["completion_tokens"], 7);
@@ -70,7 +70,7 @@ fn provider_metadata_cannot_echo_the_active_key() {
         "choices": [{"finish_reason": key, "delta": {}}]
     });
     acc.absorb(&frame.to_string(), key, |_| {}).unwrap();
-    let completion = acc.finish(key);
+    let completion = acc.finish(key).unwrap();
     assert_eq!(completion.usage.unwrap(), json!({
         "prompt_tokens": 4, "metadata": {"echo": "***"}, "labels": ["***"]
     }));
@@ -83,6 +83,17 @@ fn bounds_reject_oversized_line_and_arguments() {
     let mut acc = Accumulator::default();
     let frame = json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"x","arguments":"a".repeat(1024*1024+1)}}]}}]}).to_string();
     assert_eq!(acc.absorb(&frame,"", |_|{}), Err(Error::ToolArgumentsTooLarge));
+}
+
+#[test]
+fn malformed_tool_arguments_cannot_become_empty_arguments() {
+    for arguments in ["", "{\"path\":", "[1,2]", "null"] {
+        let mut acc = Accumulator::default();
+        let frame = json!({"choices":[{"delta":{"tool_calls":[{"index":0,
+            "function":{"name":"delete_file","arguments":arguments}}]}}]});
+        acc.absorb(&frame.to_string(), "", |_| {}).unwrap();
+        assert_eq!(acc.finish(""), Err(Error::InvalidToolArguments));
+    }
 }
 #[tokio::test]
 async fn fake_server_stream_and_scrub() {
