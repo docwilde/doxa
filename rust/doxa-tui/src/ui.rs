@@ -517,7 +517,7 @@ impl App {
                     transcript,
                     status: "Connected".into(),
                 }));
-                self.notice = format!("Connected · {}", model.as_deref().unwrap_or(id));
+                self.notice = format!("Connected · {}", model.as_deref().unwrap_or(&safe_label(id)));
                 true
             }
             "event" => {
@@ -544,8 +544,15 @@ impl App {
                 }
                 match event_type {
                     "model_changed" => {
+                        let old_model = self.session_identity.get(&id).and_then(|identity| identity.1.clone());
+                        let new_model = data.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                         if let Some(identity) = self.session_identity.get_mut(&id) {
-                            identity.1 = data.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
+                            identity.1 = new_model.clone();
+                        }
+                        if let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) {
+                            if old_model.as_deref() == Some(session.title.as_str()) {
+                                if let Some(model) = new_model { session.title = model; }
+                            }
                         }
                         true
                     }
@@ -806,6 +813,10 @@ impl App {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
                 self.drag = None;
+                if self.history_modal && !self.history_fits() {
+                    self.history_modal = false;
+                    self.notice = "Enlarge terminal to open session history".into();
+                }
                 true
             }
             Event::Key(key)
@@ -896,9 +907,7 @@ impl App {
             return true;
         }
         if key.code == KeyCode::Char('r') && ctrl {
-            self.history_modal = true;
-            self.history_query.clear();
-            self.history_selected = 0;
+            self.open_history();
             return true;
         }
         if key.code == KeyCode::F(2) || (key.code == KeyCode::Char('g') && alt) {
@@ -1039,6 +1048,20 @@ impl App {
                 Some(index)
             } else { None }
         }).take(64).collect()
+    }
+
+    fn history_fits(&self) -> bool {
+        self.size.width >= 28 && self.size.height >= 12
+    }
+
+    fn open_history(&mut self) {
+        if !self.history_fits() {
+            self.notice = "Enlarge terminal to open session history".into();
+            return;
+        }
+        self.history_modal = true;
+        self.history_query.clear();
+        self.history_selected = 0;
     }
 
     fn history_key(&mut self, key: KeyEvent) -> bool {
@@ -1188,7 +1211,7 @@ impl App {
                         self.active_group = 1 - self.active_group;
                         self.focus = Focus::Prompt;
                     }
-                    6 => { self.history_modal = true; self.history_query.clear(); self.history_selected = 0; },
+                    6 => self.open_history(),
                     7 => self.open_diff(),
                     _ => unreachable!("fixed action list"),
                 }
@@ -2360,6 +2383,66 @@ mod tests {
         assert!(!view.contains("First · alpha"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.groups[0].active_id(), Some("beta"));
+        assert!(!app.history_modal);
+    }
+
+    #[test]
+    fn history_and_mouse_switches_restore_each_pane_draft() {
+        let mut app = App::default();
+        for id in ["alpha", "beta"] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id: id.into(), title: id.into(),
+                collection: "repo".into(), transcript: String::new(), status: "Ready".into() }));
+        }
+        app.handle(Event::Resize(100, 28));
+        app.input = "alpha draft".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].active_id(), Some("beta"));
+        assert!(app.input.is_empty());
+        app.input = "beta draft".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        assert!(app.input.is_empty());
+        app.input = "second pane draft".into();
+        let first = app.layout(app.size).panes.unwrap()[0];
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: first.x + 2, row: first.y + 2, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.input, "beta draft");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].active_id(), Some("alpha"));
+        assert_eq!(app.input, "alpha draft");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        assert_eq!(app.input, "second pane draft");
+    }
+
+    #[test]
+    fn model_change_updates_only_model_title_and_hello_sanitizes_id_notice() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"raw\u{1b}[31m", "model":"old"}));
+        assert_eq!(app.sessions[0].title, "old");
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"raw\u{1b}[31m",
+            "event":{"type":"model_changed", "data":{"model":"new"}}}));
+        assert_eq!(app.sessions[0].title, "new");
+        app.sessions[0].title = "Custom title".into();
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"raw\u{1b}[31m",
+            "event":{"type":"model_changed", "data":{"model":"newer"}}}));
+        assert_eq!(app.sessions[0].title, "Custom title");
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"raw\u{1b}[31m"}));
+        assert!(!app.notice.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn history_stays_closed_when_terminal_cannot_draw_it() {
+        let mut app = App::default();
+        app.handle(Event::Resize(27, 11));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
+        assert!(!app.history_modal);
+        assert!(app.notice.contains("Enlarge terminal"));
+        app.handle(Event::Resize(100, 28));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
+        assert!(app.history_modal);
+        app.handle(Event::Resize(27, 11));
         assert!(!app.history_modal);
     }
 

@@ -20,7 +20,13 @@ fn sidecar(cwd: &Path) -> Option<PathBuf> {
     let home = std::env::var_os("DOXA_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".doxa")))?;
-    Some(home.join("worktrees/.meta").join(format!("{}.json", cwd.file_name()?.to_str()?)))
+    sidecar_in_home(cwd, &home)
+}
+
+fn sidecar_in_home(cwd: &Path, home: &Path) -> Option<PathBuf> {
+    let root = home.join("worktrees").canonicalize().ok()?;
+    if cwd.parent()? != root { return None; }
+    Some(root.join(".meta").join(format!("{}.json", cwd.file_name()?.to_str()?)))
 }
 
 fn safe_ref(value: &str) -> bool {
@@ -87,7 +93,7 @@ pub fn read(cwd: &Path) -> DiffSnapshot {
     let bytes = reader.join().unwrap_or_default();
     let Some(status) = status else { return DiffSnapshot { text: "Git diff timed out or exceeded the bounded view.".into() }; };
     let truncated = bytes.len() > MAX_DIFF_BYTES;
-    if !status.success() && !truncated { return DiffSnapshot { text: format!("Git could not compare this worktree with {base}.") }; }
+    if !status.success() { return DiffSnapshot { text: format!("Git could not compare this worktree with {base}.") }; }
     let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_DIFF_BYTES)]);
     let mut out = format!("Base: {base} ({source})\n");
     if text.is_empty() { out.push_str("No tracked changes in this comparison. Untracked files are not included."); }
@@ -105,6 +111,19 @@ mod tests {
         assert!(!safe_ref("--output=/tmp/a"));
         assert!(!safe_ref("main..other"));
         assert!(safe_ref("refs/heads/main"));
+    }
+
+    #[test]
+    fn sidecar_requires_worktree_under_doxa_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("home/worktrees");
+        let unrelated = dir.path().join("other/same-name");
+        let worktree = root.join("same-name");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+        assert_eq!(sidecar_in_home(&worktree, &dir.path().join("home")),
+            Some(root.join(".meta/same-name.json")));
+        assert_eq!(sidecar_in_home(&unrelated, &dir.path().join("home")), None);
     }
 
 
