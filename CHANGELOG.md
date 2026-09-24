@@ -14,6 +14,11 @@ the stable 2.0 release has not been cut.
   retry layout saves after temporary write or roster failures.
 - Preserve safe existing state directory permissions and shut down a Codex
   child cleanly if the daemon registry heartbeat fails.
+- Reject malformed vendor tool-call arguments, allow failed Claude starts to
+  retry, and complete partial sidecar protocol writes.
+- Keep live peers during transient socket failures, recover queued turns after
+  a display-scrub panic, and signal a replay gap after a long disconnect.
+- Scrub nested pending values before returning them from the LORE sidecar.
 
 ## 2.0.0-alpha.2 — Rust development line (unreleased)
 
