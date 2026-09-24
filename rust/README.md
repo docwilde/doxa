@@ -73,6 +73,11 @@ Alpha tags identify preview snapshots. A stable 2.0 release waits until the
 frontend reaches feature parity and passes end-to-end terminal and daemon
 tests.
 
+The Python CI workflow is paused on the Rust development line while native
+features are being built. It must be restored before a stable 2.0 cutover;
+focused Python sidecar and compatibility tests still run locally during this
+preview phase.
+
 Start the native Claude host from the terminal frontend with
 `doxa-rs new --engine claude --claude-python /absolute/path/to/python
 --claude-script /absolute/path/to/claude_sidecar.py`. The Python interpreter

@@ -19,6 +19,8 @@ the stable 2.0 release has not been cut.
   secret scrubbing and guarded file reads.
 - Extend the native CLI, session state migration, and Rust CI coverage for the
   daemon's local peer and vendor paths.
+- Pause the Python CI workflow on the Rust development line until the 2.0
+  compatibility gate is restored before a stable cutover.
 
 ## 2.0.0-alpha.3 — 2026-09-24
 
