@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Narrow rendering prototype for comparison with scripts/bench_ui.py.
 //! This is not a DOXA client or a port of DOXA's Textual widgets.
 
