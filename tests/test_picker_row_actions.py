@@ -136,6 +136,36 @@ async def _pending_picker(pilot, app):
     raise AssertionError("the proposals picker never opened")
 
 
+def _hold_filter_timers(monkeypatch, picker):
+    """Keep the picker debounce pending until a test fires its callback.
+
+    Pilot key presses yield to the event loop; on a busy runner, two presses
+    can take longer than the real 130 ms debounce. Capture only this picker's
+    timer so pending-state assertions do not depend on runner speed.
+    """
+    timers = []
+
+    class HeldTimer:
+        def __init__(self, callback):
+            self.callback = callback
+            self.stopped = False
+
+        def stop(self):
+            self.stopped = True
+
+        def fire(self):
+            assert not self.stopped
+            self.callback()
+
+    def set_timer(_delay, callback):
+        timer = HeldTimer(callback)
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr(picker, "set_timer", set_timer)
+    return timers
+
+
 def _row_index(picker, rid: str) -> int:
     return next(i for i, (r, _l) in enumerate(picker._rows) if r == rid)
 
@@ -810,14 +840,15 @@ async def test_a_keystroke_does_not_rebuild_rows_before_the_debounce_fires(
     async with app.run_test(size=(200, 48)) as pilot:
         await pilot.pause()
         _pane, picker = await _beliefs_picker(pilot, app)
+        timers = _hold_filter_timers(monkeypatch, picker)
         before = [rid for rid, _l in picker._rows if rid.startswith("belief:")]
         assert len(before) == 2
 
         await pilot.press("u")
         await pilot.press("v")
-        # No pause long enough for the debounce -- the row list must
-        # still be the UNFILTERED one, and the border must already show
-        # the in-flight marker even though the rows have not moved yet.
+        # The held debounce has not fired: rows remain unfiltered while
+        # the border already shows the pending marker.
+        assert len(timers) == 2 and timers[0].stopped
         after_keystroke = [rid for rid, _l in picker._rows if rid.startswith("belief:")]
         assert after_keystroke == before, (
             "the rebuild must not run synchronously with the keystroke"
@@ -836,10 +867,13 @@ async def test_the_in_flight_marker_clears_once_the_debounce_settles(
     async with app.run_test(size=(200, 48)) as pilot:
         await pilot.pause()
         _pane, picker = await _beliefs_picker(pilot, app)
+        timers = _hold_filter_timers(monkeypatch, picker)
 
         await pilot.press("u")
         await pilot.press("v")
         assert picker.border_subtitle == "/uv …"
+        assert len(timers) == 2 and timers[0].stopped
+        timers[1].fire()
 
         def _settled() -> bool:
             rows = [rid for rid, _l in picker._rows if rid.startswith("belief:")]
