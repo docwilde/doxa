@@ -688,9 +688,12 @@ AboutDialog {
     color: #F2E9DD;
 }
 
+/* Keep the transcript scrollable without drawing Textual's two-column
+   scrollbar at the far right of every pane. */
 #block-list {
     background: $doxa-base;
     padding: 1 2;
+    scrollbar-size-vertical: 0;
 }
 
 /* TurnBlock: unboxed -- no border, no block-level fill of its own. The
