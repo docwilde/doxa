@@ -62,7 +62,29 @@ async def run() -> None:
                            "set_model", "set_permission_mode", "list_models"]})
     engine = None
     turn = None
-    catalog_probe = None
+    catalog_task = None
+
+    async def load_catalog() -> dict:
+        """Prepare one account-scoped snapshot off the request path."""
+        from doxa.claude_catalog import attempt_cli_catalog_refresh
+        from doxa.providers import ClaudeProvider, model_provider
+
+        try:
+            status = await attempt_cli_catalog_refresh()
+        except Exception:  # optional CLI probe
+            status = "unavailable"
+        ClaudeProvider.startup_catalog_checked(status)
+        try:
+            provider = model_provider("claude")
+            models = await provider.list_models()
+            # Static aliases are not proof this account can use them.
+            available = [m for m in models if m.source != "fallback"]
+            return {"models": [m.id for m in available[:100]
+                               if isinstance(m.id, str) and 0 < len(m.id) <= 128],
+                    "note": (provider.catalog_note(available) if available else
+                             "No verified Claude model catalog available")[:500]}
+        except Exception:  # optional catalog discovery must not stop the session
+            return {"models": [], "note": "No verified Claude model catalog available"}
 
     async def publish_turn(prompt: str) -> None:
         try:
@@ -125,9 +147,7 @@ async def run() -> None:
                 candidate = SessionEngine(**options)
                 started = await candidate.start()
                 engine = candidate
-                from doxa.claude_catalog import attempt_cli_catalog_refresh
-
-                catalog_probe = asyncio.create_task(attempt_cli_catalog_refresh())
+                catalog_task = asyncio.create_task(load_catalog())
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": {"event": started.type, "data": started.data,
                                  "permission_mode": getattr(candidate, "permission_mode", "default")}})
@@ -148,25 +168,11 @@ async def run() -> None:
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": {"applied": applied}})
             elif method == "list_models" and engine is not None:
-                from doxa.providers import ClaudeProvider, model_provider
-
-                if catalog_probe is not None:
-                    try:
-                        status = await asyncio.wait_for(asyncio.shield(catalog_probe), 6.0)
-                    except Exception:  # optional catalog probe may time out or fail
-                        status = "unavailable"
-                    ClaudeProvider.startup_catalog_checked(status)
-
-                provider = model_provider("claude")
-                models = await provider.list_models()
-                # The provider's last-resort aliases are not evidence that
-                # this account can use them. Keep the picker empty instead.
-                available = [m for m in models if m.source != "fallback"]
+                result = (catalog_task.result() if catalog_task.done() else
+                          {"models": [], "loading": True,
+                           "note": "Claude model catalog is loading; press R to retry"})
                 emit({"type": "reply", "id": request_id, "ok": True,
-                      "result": {"models": [m.id for m in available[:100]
-                                            if isinstance(m.id, str) and 0 < len(m.id) <= 128],
-                                 "note": (provider.catalog_note(available) if available else
-                                          "No verified Claude model catalog available")[:500]}})
+                      "result": result})
             elif method == "set_model" and engine is not None:
                 model = params["model"]
                 if model is not None and (

@@ -237,7 +237,8 @@ fn worker_loop(
                     let reply = match result {
                         Ok(reply) => json!({"type":"models_reply", "session_id":id,
                             "ok":reply["ok"] == true, "models":reply.get("models"),
-                            "note":reply.get("note"), "error":reply.get("error")}),
+                            "note":reply.get("note"), "loading":reply.get("loading"),
+                            "error":reply.get("error")}),
                         Err(error) => json!({"type":"models_reply", "session_id":id,
                             "ok":false, "error":error.to_string()}),
                     };

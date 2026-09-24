@@ -59,6 +59,7 @@ struct ModelPicker {
     selected: usize,
     note: String,
     loading: bool,
+    catalog_pending: bool,
 }
 
 fn safe_label(value: &str) -> String {
@@ -686,6 +687,7 @@ impl App {
                 let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else { return false; };
                 if let Some(picker) = self.model_picker.as_mut().filter(|picker| picker.session_id == id) {
                     picker.loading = false;
+                    picker.catalog_pending = frame["loading"] == true;
                     picker.models = if frame["ok"] == true {
                         frame["models"].as_array().into_iter().flatten()
                             .filter_map(|value| value.as_str())
@@ -1127,7 +1129,8 @@ impl App {
             return;
         }
         self.model_picker = Some(ModelPicker { session_id: id.clone(), models: Vec::new(),
-            selected: 0, note: "Loading this engine's model catalog…".into(), loading: true });
+            selected: 0, note: "Loading this engine's model catalog…".into(),
+            loading: true, catalog_pending: false });
         self.pending_model_queries.push(id);
     }
 
@@ -1137,6 +1140,13 @@ impl App {
             KeyCode::Esc => self.model_picker = None,
             KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
             KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.models.len().saturating_sub(1)),
+            KeyCode::Char('r' | 'R') if !picker.loading => {
+                picker.loading = true;
+                picker.catalog_pending = false;
+                picker.note = "Refreshing this engine's model catalog…".into();
+                picker.models.clear();
+                self.pending_model_queries.push(picker.session_id.clone());
+            }
             KeyCode::Enter if !picker.loading => {
                 if let Some(model) = picker.models.get(picker.selected) {
                     self.pending_model_changes.push((picker.session_id.clone(), model.clone()));
@@ -1913,11 +1923,13 @@ impl App {
                     Style::default().fg(if index == self.engine_selected { theme::ACCENT } else { theme::SECONDARY })));
             }
         } else {
-            title = " Model · this session · Enter select · Esc close ";
+            title = " Model · this session · R retry · Enter select · Esc close ";
             let picker = self.model_picker.as_ref().unwrap();
             lines.push(Line::from(format!(" {}", picker.note)));
             lines.push(Line::from(""));
-            if !picker.loading && picker.models.is_empty() {
+            if picker.catalog_pending {
+                lines.push(Line::from(" Catalog probe in progress · press R to retry"));
+            } else if !picker.loading && picker.models.is_empty() {
                 lines.push(Line::from(" No verified models available for this session"));
             }
             let visible = usize::from(height.saturating_sub(5));
@@ -2705,6 +2717,26 @@ mod tests {
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.pending_model_changes.is_empty());
         assert!(app.model_picker.is_some());
+    }
+
+    #[test]
+    fn model_picker_retries_in_progress_catalog_with_r() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s",
+            "engine":"claude", "model":"existing", "cwd":"/tmp", "can_set_model":true}));
+        app.open_model_picker();
+        app.pending_model_queries.clear();
+        app.apply_daemon_frame(&json!({"type":"models_reply", "session_id":"s",
+            "ok":true, "loading":true, "models":[],
+            "note":"Claude model catalog is loading; press R to retry"}));
+        assert!(app.model_picker.as_ref().unwrap().catalog_pending);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)));
+        assert_eq!(app.pending_model_queries, vec!["s"]);
+        app.apply_daemon_frame(&json!({"type":"models_reply", "session_id":"s",
+            "ok":true, "models":["verified"], "note":"Claude CLI cache"}));
+        assert!(!app.model_picker.as_ref().unwrap().catalog_pending);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.pending_model_changes, vec![("s".into(), "verified".into())]);
     }
 
     #[test]

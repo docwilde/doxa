@@ -17,6 +17,79 @@ spec.loader.exec_module(sidecar)
 
 
 class IdentityTests(unittest.TestCase):
+    def test_catalog_probe_does_not_block_model_or_control_replies(self):
+        from doxa import claude_catalog, providers
+
+        class FakeEngine:
+            def __init__(self, **_options):
+                pass
+
+            async def start(self):
+                return types.SimpleNamespace(type="started", data={})
+
+            async def set_model(self, model):
+                return model
+
+            async def finalize(self):
+                return types.SimpleNamespace(type="finalized", data={})
+
+            async def peer_events(self):
+                if False:
+                    yield None
+
+        class FakeProvider:
+            async def list_models(self):
+                return [types.SimpleNamespace(id="verified", source="cache")]
+
+            def catalog_note(self, _models):
+                return "verified cache"
+
+        engine_module = types.ModuleType("doxa.engine")
+        engine_module.SessionEngine = FakeEngine
+        frames = [
+            ("start", {"cwd": str(SIDECAR.parent), "session_id": "catalog"}),
+            ("list_models", {}),
+            ("set_model", {"model": "verified"}),
+            ("list_models", {}),
+            ("finalize", {}),
+        ]
+        requests = iter({"type": "request", "id": i, "method": method, "params": params}
+                        for i, (method, params) in enumerate(frames, 1))
+        replies = []
+        gate = asyncio.Event()
+
+        async def read_frame(_reader, _limit):
+            try:
+                frame = next(requests)
+            except StopIteration:
+                return b""
+            if frame["id"] == 4:
+                gate.set()
+            await asyncio.sleep(0)
+            return json.dumps(frame).encode() + b"\n"
+
+        async def slow_probe():
+            await gate.wait()
+            return "refreshed"
+
+        probe = mock.AsyncMock(side_effect=slow_probe)
+
+        with mock.patch.dict(sys.modules, {"doxa.engine": engine_module}), \
+             mock.patch.object(sidecar.asyncio, "to_thread", read_frame), \
+             mock.patch.object(sidecar, "emit", replies.append), \
+             mock.patch.object(claude_catalog, "attempt_cli_catalog_refresh", probe) as refresh, \
+             mock.patch.object(providers, "model_provider", return_value=FakeProvider()), \
+             mock.patch.object(providers.ClaudeProvider, "startup_catalog_checked"):
+            asyncio.run(sidecar.run())
+
+        self.assertEqual(refresh.call_count, 1)
+        by_id = {frame["id"]: frame for frame in replies if frame.get("type") == "reply"}
+        self.assertEqual(by_id[2]["result"], {
+            "models": [], "loading": True,
+            "note": "Claude model catalog is loading; press R to retry"})
+        self.assertEqual(by_id[3]["result"]["model"], "verified")
+        self.assertEqual(by_id[4]["result"]["models"], ["verified"])
+
     def test_list_models_uses_one_startup_probe_and_hides_static_fallback(self):
         from doxa import claude_catalog, providers
 
@@ -65,6 +138,7 @@ class IdentityTests(unittest.TestCase):
 
                 async def read_frame(_reader, _limit):
                     try:
+                        await asyncio.sleep(0)
                         return json.dumps(next(requests)).encode() + b"\n"
                     except StopIteration:
                         return b""
