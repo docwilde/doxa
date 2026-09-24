@@ -49,7 +49,9 @@ connect to an existing Python daemon.
 With one live daemon session, `doxa-rs` attaches to it directly. With multiple
 sessions, use `--list` and select one by full ID or unique ID prefix.
 `--socket` remains available for an explicit path. `--demo` opens the shell
-without a connection. `Ctrl+Q` detaches the Rust UI
+without a connection. `Ctrl+P` opens the action menu; use Up/Down, Enter, and
+Esc to navigate the peer map, tool activity, session rail selection, tabs, and
+panes. `Ctrl+M` and `Ctrl+T` remain direct shortcuts. `Ctrl+Q` detaches the Rust UI
 without stopping its daemon. `Ctrl+M` opens the read-only peer communications
 map; Up/Down selects a peer, R refreshes the live roster, and Esc closes it.
 The map uses `tui-nodes` 0.9 with the Rust frontend's Ratatui 0.29.

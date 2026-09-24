@@ -1,6 +1,12 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use doxa_tui::ui::{App, Focus, Session, Split};
-use ratatui::{backend::TestBackend, layout::{Constraint, Direction, Layout, Rect}, Terminal};
+use ratatui::{
+    backend::TestBackend,
+    layout::{Constraint, Direction, Layout, Rect},
+    Terminal,
+};
 use serde_json::json;
 
 fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
@@ -8,23 +14,47 @@ fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
 }
 
 fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
-    Event::Mouse(MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE })
+    Event::Mouse(MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    })
 }
 
 fn pane_boundary(app: &App) -> (u16, u16) {
-    let outer = Layout::default().direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(3), Constraint::Length(1)])
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(3),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
         .split(app.size)[0];
     let body = if app.rail_visible {
-        Layout::default().direction(Direction::Horizontal)
+        Layout::default()
+            .direction(Direction::Horizontal)
             .constraints([Constraint::Length(app.rail_width), Constraint::Min(1)])
             .split(outer)[1]
-    } else { outer };
+    } else {
+        outer
+    };
     let panes = Layout::default()
-        .direction(if app.split == Split::Vertical { Direction::Horizontal } else { Direction::Vertical })
-        .constraints([Constraint::Percentage(app.split_percent), Constraint::Percentage(100 - app.split_percent)])
+        .direction(if app.split == Split::Vertical {
+            Direction::Horizontal
+        } else {
+            Direction::Vertical
+        })
+        .constraints([
+            Constraint::Percentage(app.split_percent),
+            Constraint::Percentage(100 - app.split_percent),
+        ])
         .split(body);
-    if app.split == Split::Vertical { (panes[1].x, body.y + 5) } else { (body.x + 5, panes[1].y) }
+    if app.split == Split::Vertical {
+        (panes[1].x, body.y + 5)
+    } else {
+        (body.x + 5, panes[1].y)
+    }
 }
 
 #[test]
@@ -78,8 +108,10 @@ fn rail_drag_preserves_pane_space_and_modal_blocks_drag() {
     app.handle(mouse(MouseEventKind::Up(MouseButton::Left), 0, 5));
     assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), 12, 5)));
     app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));
-    app.apply_daemon_frame(&json!({"type":"event", "session_id":"one", "event":{"type":"needs_input", "data":{
-        "id":"req", "kind":"permission", "title":"Approve?"}}}));
+    app.apply_daemon_frame(
+        &json!({"type":"event", "session_id":"one", "event":{"type":"needs_input", "data":{
+        "id":"req", "kind":"permission", "title":"Approve?"}}}),
+    );
     assert!(!app.handle(mouse(MouseEventKind::Drag(MouseButton::Left), 35, 5)));
     assert!(!app.handle(mouse(MouseEventKind::Down(MouseButton::Left), 12, 5)));
     assert_eq!(app.rail_width, 12);
@@ -174,6 +206,86 @@ fn tool_activity_modal_tracks_call_result_and_blocks_layout_mouse() {
     assert_eq!(app.rail_width, width);
     assert!(app.handle(key(KeyCode::Esc, KeyModifiers::NONE)));
     assert!(!screen(&app, 100, 35).contains("Tool activity · ↑/↓"));
+}
+
+#[test]
+fn action_menu_opens_views_and_navigates_sessions_without_leaking_keys_to_prompt() {
+    let mut app = App::default();
+    app.handle(Event::Resize(80, 24));
+    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("one", "Work")));
+    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("two", "Work")));
+    app.input = "draft".into();
+    assert!(app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL)));
+    assert!(screen(&app, 80, 24).contains("Actions"));
+    assert!(screen(&app, 80, 24).contains("Peer map"));
+    assert!(app.handle(key(KeyCode::Char('x'), KeyModifiers::NONE)));
+    assert_eq!(app.input, "draft");
+    assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
+    assert!(screen(&app, 80, 24).contains("Peer"));
+    assert!(app.handle(key(KeyCode::Esc, KeyModifiers::NONE)));
+
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    app.handle(key(KeyCode::Down, KeyModifiers::NONE));
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(screen(&app, 80, 24).contains("Tool activity"));
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE));
+
+    app.rail_selected = 1;
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    app.handle(key(KeyCode::Down, KeyModifiers::NONE));
+    app.handle(key(KeyCode::Down, KeyModifiers::NONE));
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.groups[0].tabs.len(), 2);
+    assert_eq!(app.focus, Focus::Transcript);
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    for _ in 0..3 {
+        app.handle(key(KeyCode::Down, KeyModifiers::NONE));
+    }
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.groups[0].active, 0);
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    for _ in 0..4 {
+        app.handle(key(KeyCode::Down, KeyModifiers::NONE));
+    }
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.groups[0].active, 1);
+    assert!(app.pending_prompts.is_empty());
+}
+
+#[test]
+fn action_menu_stays_bounded_on_tiny_terminal_and_blocks_mouse_drag() {
+    let mut app = App::default();
+    app.handle(Event::Resize(20, 5));
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    for _ in 0..5 {
+        app.handle(key(KeyCode::Down, KeyModifiers::NONE));
+    }
+    let tiny = screen(&app, 20, 5);
+    assert!(tiny.contains("Actions"));
+    let rail_width = app.rail_width;
+    assert!(!app.handle(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        rail_width,
+        2
+    )));
+    assert_eq!(app.rail_width, rail_width);
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!screen(&app, 20, 5).contains("Actions · ↑/↓"));
+}
+
+#[test]
+fn action_menu_cannot_cover_a_pending_permission_request() {
+    let mut app = App::default();
+    app.handle(Event::Resize(80, 24));
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"one","model":"test"}));
+    app.apply_daemon_frame(&json!({"type":"event","session_id":"one","event":{
+        "type":"needs_input","data":{"id":"req","kind":"permission","title":"Approve?"}
+    }}));
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    let visible = screen(&app, 80, 24);
+    assert!(visible.contains("Approve?"));
+    assert!(!visible.contains("Actions · ↑/↓"));
+    assert!(app.pending_answers.is_empty());
 }
 
 #[test]
@@ -423,14 +535,22 @@ fn question_steps_and_failed_delivery_allow_retry() {
     app.apply_daemon_frame(&json!({"type":"answer_reply", "session_id":"one", "request_id":"req-2", "ok":false, "message":"stale"}));
     assert!(!app.input_requests[0].sending);
     app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.take_answers()[0].2, json!({"answers":{"Color?":"Blue","Size?":"Small"}}));
+    assert_eq!(
+        app.take_answers()[0].2,
+        json!({"answers":{"Color?":"Blue","Size?":"Small"}})
+    );
     assert_eq!(app.input_requests[0].step, 1);
-    app.apply_daemon_frame(&json!({"type":"answer_reply", "session_id":"one", "request_id":"req-2", "ok":false,
-        "uncertain":true, "message":"timeout"}));
+    app.apply_daemon_frame(
+        &json!({"type":"answer_reply", "session_id":"one", "request_id":"req-2", "ok":false,
+        "uncertain":true, "message":"timeout"}),
+    );
     assert!(!app.input_requests[0].sending);
     assert!(screen(&app, 90, 25).contains("Size?"));
     app.handle(key(KeyCode::Char('2'), KeyModifiers::NONE));
-    assert_eq!(app.take_answers()[0].2, json!({"answers":{"Color?":"Blue","Size?":"Large"}}));
+    assert_eq!(
+        app.take_answers()[0].2,
+        json!({"answers":{"Color?":"Blue","Size?":"Large"}})
+    );
     app.handle(key(KeyCode::Esc, KeyModifiers::NONE));
     assert!(app.take_answers().is_empty());
     app.apply_daemon_frame(&json!({"type":"event", "session_id":"one", "event":{"type":"needs_input_resolved", "data":{"id":"req-2"}}}));
