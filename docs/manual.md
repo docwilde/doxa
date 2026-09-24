@@ -1071,16 +1071,15 @@ And `peer_left` tells you a delegate is *gone*, never whether it
 succeeded. The design, including what is deliberately not built, is
 [docs/plans/spawn-session.md](plans/spawn-session.md).
 
-### Remote drivers — a policy, and no transport
+### Remote drivers
 
-Nothing listens on a network. `doxa/remote_policy.py` (v1.8.0) is the
-**authorization decision** a future bridge process will ask, shipped
-ahead of the bridge on purpose: a reachable daemon socket is remote code
-execution with your privileges, so the answer is decided once, in one
-module a security review can read start to finish, rather than
-re-derived at each call site a bridge would grow. There is no socket, no
-TLS and no header parsing in it, and there is no second renderer
-anywhere.
+`doxa/remote_policy.py` makes the authorization decision for both optional
+bridges. The browser bridge controls local daemon sessions through Tailscale
+Serve; the machine-wide peer bridge exchanges messages across machines. Both
+require explicit opt-in and an allowed Tailscale login. The peer bridge uses
+a Unix socket and checks the proxy's kernel credentials before accepting an
+identity header. See the [remote plan](plans/remote.md) for the transport and
+browser setup.
 
 Three independent questions, and every answer is a `Decision` carrying a
 reason — never a bare bool, because a refusal that cannot say why is a
@@ -1088,9 +1087,10 @@ refusal nobody can act on:
 
 - **May a listener exist at all?** `remote_enabled` is off by default.
 - **Is this identity one DOXA trusts?** `identity_decision` refuses
-  outright unless the request arrived on the loopback listener
-  `tailscale serve` forwards to, whatever login the caller claims. DOXA
-  then keeps its **own** allow-list on top of the tailnet's, and an
+  outright unless the bridge has attested the local Tailscale proxy. For
+  the peer bridge, that means a Unix-socket peer with the configured UID;
+  a loopback TCP caller cannot attest the proxy. DOXA keeps its **own**
+  allow-list on top of the tailnet's, and an
   **empty allow-list refuses everyone** — it does not fall back to
   permitting everyone, which is the direction allow-list bugs usually
   fail in.
@@ -1106,11 +1106,9 @@ refusal nobody can act on:
   request that arrived over the network may ask for it. Both have to be
   open.
 
-The one surface a user sees today is the status bar's `◎ remote:<id>`
-chip, hidden until something is driving the session. That is the spec's
-"say who is connected" rule: a silent second driver is the thing a user
-cannot detect and cannot consent to. Nothing can set it yet, because no
-bridge exists to pass an identity in.
+An attached browser driver appears as `◎ remote:<id>` in the local status
+bar. The browser controls sessions that continue running on this machine;
+it does not move a worktree or model run to the remote device.
 
 ## The status bar
 

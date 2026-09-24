@@ -13,7 +13,8 @@ not written from memory.
 - Codex can explicitly propose a fact with `lore_remember`. Automatic Codex transcript review remains unavailable; no proposal is implied by ending a Codex session.
 - Config saves now lock the full read-modify-write cycle and replace the file through a private temporary file. `/update` reports a completed upgrade with a separate sync failure as partial instead of implying the whole update failed.
 - DOXA starts Claude CLI once in safe mode in the background to refresh its model catalogue. The picker validates the newer `cc` cache against the active account and organization, retains the older `ccd` cache, and reports a refresh only when a validated fetch time advances.
-- Spawn and turn handling now harden runtime safety for Codex and peer delivery.
+- Spawn reservations now enforce session caps while approvals are pending; Codex cancellation reaps its turn process group. Transcript restore reads a bounded tail, and peer delivery retains its initiating turn across awaits.
+- The machine-wide peer bridge now starts with live daemons when remote access is enabled. It accepts Tailscale identity headers only from a Unix-socket peer whose kernel credentials match the configured proxy UID; loopback TCP callers are refused.
 
 ## 1.17.0 — 2026-09-24
 
