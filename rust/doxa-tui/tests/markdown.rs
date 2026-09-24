@@ -88,9 +88,56 @@ fn table_and_untrusted_control_text() {
     let lines = plain(table, 40);
     assert!(lines.iter().any(|line| line.contains("Key") && line.contains("Value")));
     assert!(lines.iter().any(|line| line.contains('A') && line.contains('B')));
-    assert!(lines.iter().any(|line| line.starts_with('─')));
+    assert!(lines.iter().any(|line| line.starts_with('├')));
     let unsafe_text = plain("answer \u{1b}[31m \u{202e}[click](https://example.com/\u{1b}x)", 80).join(" ");
     assert!(!unsafe_text.contains('\u{1b}'));
     assert!(!unsafe_text.contains('\u{202e}'));
     assert!(unsafe_text.contains('�'));
+}
+
+#[test]
+fn table_columns_align_with_unicode_styles_and_gfm_alignment() {
+    let source = "| Name | Count | Center |\n| :--- | ---: | :---: |\n| **界** | 7 | x |\n| café | 123 | yz |";
+    let lines = render(source, 40);
+    let plain: Vec<String> = lines.iter().map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect()).collect();
+    assert_eq!(plain.len(), 4);
+    let borders: Vec<Vec<usize>> = plain.iter().filter(|line| line.starts_with('│')).map(|line| {
+        line.char_indices().filter_map(|(byte, ch)| (ch == '│').then_some(UnicodeWidthStr::width(&line[..byte]))).collect()
+    }).collect();
+    assert!(borders.windows(2).all(|pair| pair[0] == pair[1]), "{plain:?}");
+    assert!(plain.iter().all(|line| UnicodeWidthStr::width(line.as_str()) <= 40));
+    assert!(plain[2].contains("7 "));
+    assert!(lines[2].spans.iter().any(|span| span.content.contains('界') && span.style.add_modifier.contains(Modifier::BOLD)));
+}
+
+#[test]
+fn narrow_tables_wrap_cells_without_exceeding_viewport() {
+    let source = "| Key | Value |\n| --- | --- |\n| 界界界 | abcdefghijklmnop |";
+    for width in [1, 5, 11, 16] {
+        let lines = plain(source, width);
+        assert!(!lines.is_empty());
+        assert!(lines.iter().all(|line| UnicodeWidthStr::width(line.as_str()) <= width as usize), "{width}: {lines:?}");
+    }
+    let lines = plain(source, 16);
+    assert!(lines.iter().any(|line| line.contains("abc")));
+    assert!(lines.len() > 3);
+}
+
+#[test]
+fn long_table_cell_stays_bounded_by_viewport() {
+    let source = format!("| Data |\n| --- |\n| {} |", "x".repeat(10_000));
+    let lines = plain(&source, 20);
+    assert!(lines.len() > 500);
+    assert!(lines.iter().all(|line| UnicodeWidthStr::width(line.as_str()) <= 20));
+    assert_eq!(lines.iter().map(|line| line.matches('x').count()).sum::<usize>(), 10_000);
+}
+
+#[test]
+fn link_destination_is_visible_and_sanitized_in_table_cell() {
+    let source = "| Ref |\n| --- |\n| [go](https://example.com/x) |";
+    let lines = plain(source, 40).join("\n");
+    assert!(lines.contains("go (https://example.com/x)"));
+    let lines = plain("| Ref |\n| --- |\n| [go](https://example.com/\u{1b}]8;;evil\u{7}) |", 28).join("\n");
+    assert!(!lines.contains('\u{1b}'));
+    assert!(!lines.contains('\u{7}'));
 }

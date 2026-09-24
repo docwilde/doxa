@@ -3,7 +3,7 @@
 //! Each call reparses the full source. A trailing, incomplete construct may
 //! change meaning when the next streamed fragment arrives.
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
 use ratatui::{style::{Color, Modifier, Style}, text::{Line, Span}};
 use unicode_width::UnicodeWidthChar;
 
@@ -23,6 +23,7 @@ struct List {
 
 #[derive(Default)]
 struct Table {
+    alignments: Vec<Alignment>,
     rows: Vec<Vec<Vec<Span<'static>>>>,
     row: Vec<Vec<Span<'static>>>,
     cell: Vec<Span<'static>>,
@@ -42,7 +43,8 @@ struct Renderer {
     width: usize,
 }
 
-/// Render CommonMark and GFM tables to styled terminal lines. Model supplied
+/// Render CommonMark and GFM tables to styled terminal lines. Link destinations
+/// are visible text; this API has no click coordinates or opener. Model supplied
 /// control characters are replaced so they cannot become terminal commands.
 pub fn render(source: &str, width: u16) -> Vec<Line<'static>> {
     let mut renderer = Renderer {
@@ -135,10 +137,13 @@ impl Renderer {
                 Tag::Strong => self.enter(Style::default().add_modifier(Modifier::BOLD)),
                 Tag::Strikethrough => self.enter(Style::default().add_modifier(Modifier::CROSSED_OUT)),
                 Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
-                    self.links.push(sanitize(&dest_url));
+                    self.links.push(sanitize(&dest_url).replace('\n', " "));
                     self.enter(Style::default().fg(Color::Blue).add_modifier(Modifier::UNDERLINED));
                 }
-                Tag::Table(_) => { self.flush(); self.table = Some(Table::default()); }
+                Tag::Table(alignments) => {
+                    self.flush();
+                    self.table = Some(Table { alignments, ..Table::default() });
+                }
                 Tag::TableRow => { if let Some(table) = self.table.as_mut() { table.row.clear(); } }
                 Tag::TableCell => { if let Some(table) = self.table.as_mut() {
                     table.cell.clear(); table.in_cell = true;
@@ -243,19 +248,136 @@ impl Renderer {
     }
 
     fn table_lines(&mut self, table: Table) {
-        for (index, row) in table.rows.into_iter().enumerate() {
-            let mut spans = vec![Span::raw("│ ")];
-            for (column, cell) in row.into_iter().enumerate() {
-                if column > 0 { spans.push(Span::raw(" │ ")); }
-                spans.extend(cell);
+        let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0);
+        if columns == 0 { return; }
+        // A grid needs one cell and four framing cells per column. When the
+        // viewport is narrower, use the ordinary bounded line wrapper.
+        if columns.saturating_mul(4).saturating_add(1) > self.width {
+            for row in table.rows {
+                let mut spans = vec![Span::raw("│ ")];
+                for (column, cell) in row.into_iter().enumerate() {
+                    if column > 0 { spans.push(Span::raw(" │ ")); }
+                    spans.extend(cell);
+                }
+                spans.push(Span::raw(" │"));
+                self.wrap(Block { spans, ..Block::default() });
             }
-            spans.push(Span::raw(" │"));
-            self.wrap(Block { spans, ..Block::default() });
+            return;
+        }
+
+        let available = self.width - (3 * columns + 1);
+        let mut widths = vec![1; columns];
+        for row in &table.rows {
+            for (column, cell) in row.iter().enumerate() {
+                widths[column] = widths[column].max(cell_natural_width(cell, available));
+            }
+        }
+        let total: usize = widths.iter().sum();
+        if total > available {
+            // Water-fill using a binary searched cap, so a very wide cell
+            // cannot cause a loop proportional to its source length.
+            let (mut low, mut high) = (1, *widths.iter().max().unwrap());
+            while low < high {
+                let mid = low + (high - low) / 2;
+                if widths.iter().map(|width| (*width).min(mid)).sum::<usize>() >= available {
+                    high = mid;
+                } else {
+                    low = mid + 1;
+                }
+            }
+            widths.iter_mut().for_each(|width| *width = (*width).min(low));
+            let mut excess = widths.iter().sum::<usize>() - available;
+            for width in widths.iter_mut().rev() {
+                let take = excess.min(width.saturating_sub(1));
+                *width -= take;
+                excess -= take;
+                if excess == 0 { break; }
+            }
+        }
+
+        for (index, row) in table.rows.into_iter().enumerate() {
+            let cells: Vec<Vec<Vec<Span<'static>>>> = (0..columns).map(|column| {
+                wrap_cell(row.get(column).map(Vec::as_slice).unwrap_or(&[]), widths[column])
+            }).collect();
+            let height = cells.iter().map(Vec::len).max().unwrap_or(1);
+            for line_index in 0..height {
+                let mut spans = vec![Span::raw("│ ")];
+                for column in 0..columns {
+                    if column > 0 { spans.push(Span::raw(" │ ")); }
+                    let cell_line = cells[column].get(line_index).map(Vec::as_slice).unwrap_or(&[]);
+                    let used = cell_line.iter().map(|span| cell_width(&span.content)).sum::<usize>();
+                    let padding = widths[column] - used;
+                    let alignment = table.alignments.get(column).copied().unwrap_or(Alignment::Left);
+                    let left = match alignment {
+                        Alignment::Right => padding,
+                        Alignment::Center => padding / 2,
+                        _ => 0,
+                    };
+                    if left > 0 { spans.push(Span::raw(" ".repeat(left))); }
+                    spans.extend(cell_line.iter().cloned());
+                    if padding > left { spans.push(Span::raw(" ".repeat(padding - left))); }
+                }
+                spans.push(Span::raw(" │"));
+                self.lines.push(Line::from(spans));
+            }
             if index + 1 == table.header_rows {
-                self.lines.push(Line::from("─".repeat(self.width.min(80))));
+                let mut rule = String::from("├");
+                for (column, width) in widths.iter().enumerate() {
+                    if column > 0 { rule.push('┼'); }
+                    rule.push_str(&"─".repeat(width + 2));
+                }
+                rule.push('┤');
+                self.lines.push(Line::from(rule));
             }
         }
     }
+}
+
+fn cell_natural_width(cell: &[Span<'_>], cap: usize) -> usize {
+    let (mut line, mut widest) = (0usize, 0usize);
+    for span in cell {
+        for ch in span.content.chars() {
+            if ch == '\n' {
+                widest = widest.max(line);
+                line = 0;
+            } else {
+                line = line.saturating_add(UnicodeWidthChar::width(ch).unwrap_or(0)).min(cap);
+            }
+        }
+    }
+    widest.max(line).max(1)
+}
+
+fn wrap_cell(cell: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> {
+    let mut lines: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+    let mut used = 0;
+    for span in cell {
+        for ch in span.content.chars() {
+            if ch == '\n' {
+                lines.push(Vec::new());
+                used = 0;
+                continue;
+            }
+            let ch = if UnicodeWidthChar::width(ch).unwrap_or(0) > width { '�' } else { ch };
+            let size = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used > 0 && used + size > width {
+                lines.push(Vec::new());
+                used = 0;
+            }
+            let line = lines.last_mut().unwrap();
+            if let Some(last) = line.last_mut() {
+                if last.style == span.style {
+                    last.content.to_mut().push(ch);
+                } else {
+                    line.push(Span::styled(ch.to_string(), span.style));
+                }
+            } else {
+                line.push(Span::styled(ch.to_string(), span.style));
+            }
+            used += size;
+        }
+    }
+    lines
 }
 
 fn add_prefix(spans: &mut Vec<Span<'static>>, col: &mut usize, prefix: &str) {
