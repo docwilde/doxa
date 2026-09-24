@@ -606,10 +606,20 @@ class PaneRuntimeMixin:
         await self._engine_ready.wait()
         if self.engine is None:
             return
+        # Textual 8 can release the engine worker before the pane's child
+        # scroll container has received its Mount event. An incoming peer
+        # frame may already be queued then, so wait rather than dropping it
+        # or trying to mount into a container that is only in the DOM.
+        block_list = await self._opening_container()
+        if block_list is None or self.engine is None:
+            return
         async for ev in self.engine.peer_events():
+            # A queued frame can also arrive as the pane is being closed.
+            # Once its transcript is unmounted there is nowhere to render.
+            if self._stopped or not block_list.is_mounted:
+                return
             if ev.type == "peer_message":
                 self._note_peer_traffic("rx")
-                block_list = self.query_one("#block-list", VerticalScroll)
                 await block_list.mount(PeerMessageBlock(ev.data))
                 self.scroll_transcript_to_end(block_list)
             elif ev.type == "peer_sent":
@@ -623,7 +633,6 @@ class PaneRuntimeMixin:
                 # and a second rendering of the same event is noise.
                 self._note_peer_traffic("tx")
             elif ev.type == "tool_disabled":
-                block_list = self.query_one("#block-list", VerticalScroll)
                 await block_list.mount(SystemBlock(
                     f"⊘ tool disabled for this session: {ev.data.get('name')}"
                     f" — {ev.data.get('reason')}"
