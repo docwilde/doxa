@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import re
 import stat
 import sys
+from pathlib import Path
 from typing import Any
 
 MAX_FRAME_BYTES = 1024 * 1024
@@ -21,7 +23,10 @@ PROTOCOL_VERSION = 1
 _OPS = ("scrub", "snapshot", "pending", "sync_state", "refresh_interval", "transcript_identity")
 _READ_OPS = ("consult", "beliefs", "evidence")
 _REVIEW_OP = "pending_review_v1"
+_INDEX_OP = "index_transcript_v1"
 _PENDING_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z", re.ASCII)
+_SESSION_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z-]{0,127}\Z", re.ASCII)
+_MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024
 # Leave room for JSON escaping and the rest of the reply frame.
 _MAX_REVIEW_RAW_BYTES = MAX_FRAME_BYTES // 2
 
@@ -82,6 +87,45 @@ def _read_ops() -> tuple[Any, Any] | None:
         return db_connect, fts_expr
     except Exception:  # noqa: BLE001 -- older LORE may not expose FTS
         return None
+
+
+def _index_ops() -> tuple[Any, Any] | None:
+    """Use LORE's incremental indexer; DOXA never writes its store directly."""
+    try:
+        from lore_core.store import db_connect, index_live
+        return db_connect, index_live
+    except Exception:  # noqa: BLE001 -- optional on older LORE builds
+        return None
+
+
+def _index_transcript(cwd: str, session_id: str, ext: tuple[Any, Any, Any, Any],
+                      ops: tuple[Any, Any]) -> dict[str, int]:
+    if (not isinstance(cwd, str) or not cwd or len(cwd) > 4096 or "\x00" in cwd
+            or not isinstance(session_id, str) or _SESSION_ID.fullmatch(session_id) is None):
+        raise ValueError("invalid transcript identity")
+    identity = _transcript_identity(cwd, ext)
+    root = Path(identity["projects_dir"])
+    slug = identity["slug"]
+    if (not root.is_absolute() or not isinstance(slug, str) or not slug
+            or slug in (".", "..") or "/" in slug or "\\" in slug):
+        raise ValueError("invalid project identity")
+    project = root / slug
+    transcript = project / f"{session_id}.jsonl"
+    # The caller supplies only cwd and session ID. Resolve project naming via
+    # LORE and refuse links or foreign-owned files before its indexer opens it.
+    for directory in (root, project):
+        metadata = directory.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
+            raise ValueError("unsafe transcript directory")
+    metadata = transcript.lstat()
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+            or metadata.st_size > _MAX_TRANSCRIPT_BYTES):
+        raise ValueError("unsafe transcript file")
+    indexed, consumed = ops[1](ops[0](), transcript)
+    if (type(indexed) is not int or type(consumed) is not int
+            or indexed < 0 or consumed < 0):
+        raise TypeError("invalid index result")
+    return {"indexed": indexed, "consumed": consumed}
 
 
 def _pending_review_reader() -> tuple[Any, Any] | None:
@@ -269,10 +313,12 @@ def serve() -> None:
     lore = _lore()
     ext = _extensions() if lore is not None else None
     read_ops = _read_ops() if lore is not None else None
+    index_ops = _index_ops() if lore is not None and ext is not None else None
     review = _pending_review_reader() if lore is not None and ext is not None else None
     _write({"type": "hello", "proto": PROTOCOL_VERSION,
             "capabilities": (list(_OPS if ext is not None else _OPS[:2])
                              + (list(_READ_OPS) if read_ops is not None else [])
+                             + ([_INDEX_OP] if index_ops is not None else [])
                              + ([_REVIEW_OP] if review is not None else [])) if lore is not None else []})
     while True:
         raw = sys.stdin.buffer.readline(MAX_FRAME_BYTES + 1)
@@ -295,6 +341,10 @@ def serve() -> None:
             continue
         scrub, snapshot = lore
         try:
+            if op == _INDEX_OP and ext is not None and index_ops is not None:
+                result = _index_transcript(req.get("cwd"), req.get("session_id"), ext, index_ops)
+                _write({"type": "reply", "id": rid, "ok": True, "value": result})
+                continue
             if op == _REVIEW_OP and ext is not None and review is not None:
                 result = _pending_review(req.get("cwd"), req.get("pid"), ext, review,
                                          req.get("expected"))

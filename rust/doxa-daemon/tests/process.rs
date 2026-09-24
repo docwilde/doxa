@@ -514,6 +514,68 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-
 }
 
 #[test]
+fn codex_host_indexes_completed_turn_and_finalized_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let index_log = dir.path().join("index-requests.jsonl");
+    executable(
+        &python,
+        &format!(
+            r#"#!/usr/bin/env python3
+import json, sys
+print(json.dumps({{"type":"hello","proto":1,"capabilities":["scrub","snapshot","transcript_identity","index_transcript_v1"]}}), flush=True)
+for line in sys.stdin:
+    frame = json.loads(line)
+    op = frame["op"]
+    if op == "transcript_identity":
+        value = {{"projects_dir":frame["cwd"],"slug":"project"}}
+        reply = {{"value":value}}
+    elif op == "index_transcript_v1":
+        with open({:?}, "a") as out:
+            out.write(json.dumps(frame) + "\n")
+        reply = {{"value":{{"indexed":2,"consumed":2}}}}
+    else:
+        reply = {{"text":frame.get("text", "")}}
+    print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,**reply}}), flush=True)
+"#,
+            index_log.to_str().unwrap()
+        ),
+    );
+    executable(
+        &codex,
+        "#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}'\n",
+    );
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    loop {
+        if receive(&mut reader)["event"]["type"] == "turn_done" {
+            break;
+        }
+    }
+    wait_until(|| index_log.exists());
+    send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+    let rows: Vec<Value> = fs::read_to_string(index_log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert_eq!(row["op"], "index_transcript_v1");
+        assert_eq!(row["cwd"], dir.path().to_str().unwrap());
+        assert_eq!(row["session_id"], "codex-session");
+        assert!(row.get("path").is_none());
+    }
+}
+
+#[test]
 fn codex_memory_reaches_only_first_provider_stdin_and_not_transcript() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");

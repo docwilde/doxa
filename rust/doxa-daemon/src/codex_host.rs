@@ -1,5 +1,5 @@
 use doxa_engines::codex_driver::{CodexCliDriver, DriverError, DriverOptions};
-use doxa_lore::LoreClient;
+use doxa_lore::{LoreClient, LoreError};
 use doxa_runtime::Host;
 use doxa_transcript::TranscriptStore;
 use serde_json::Map;
@@ -126,6 +126,24 @@ impl CodexHost {
         }
     }
 
+    fn index_transcript(&self) {
+        if self.scrub_failed.load(Ordering::Acquire) {
+            return;
+        }
+        // The Rust writer has already scrubbed every persisted record. LORE
+        // owns the incremental index and scrubs again before inserting rows.
+        let result = self
+            .lore
+            .lock()
+            .unwrap()
+            .index_transcript(&self.cwd, &self.session_id);
+        if let Err(error) = result {
+            if !matches!(error, LoreError::Unavailable) {
+                eprintln!("doxa-daemon: LORE transcript indexing failed");
+            }
+        }
+    }
+
     /// Codex has no system-message channel. Send memory only when creating a
     /// provider thread; an existing thread already contains its first turn.
     /// Snapshot failure is a memory-less turn, as in Python CodexEngine.
@@ -154,6 +172,7 @@ impl CodexHost {
             }
             thread::sleep(Duration::from_millis(10));
         }
+        self.index_transcript();
         true
     }
 }
@@ -250,13 +269,15 @@ impl Host for CodexHost {
                 self.persist_thread(&id);
             }
         }
-        *self.active.lock().unwrap() = None;
         if self.scrub_failed.load(Ordering::Acquire) {
+            *self.active.lock().unwrap() = None;
             emit(
                 json!({"type":"turn_done","data":{"is_error":true,"error":"LORE scrub failed; provider output withheld"}}),
             );
             return;
         }
+        self.index_transcript();
+        *self.active.lock().unwrap() = None;
         match result {
             Ok(_) => {} // The driver emitted a terminal event.
             Err(error) => {
