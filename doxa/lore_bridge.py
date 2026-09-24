@@ -90,12 +90,45 @@ def _read_ops() -> tuple[Any, Any] | None:
 
 
 def _index_ops() -> tuple[Any, Any] | None:
-    """Use LORE's incremental indexer; DOXA never writes its store directly."""
+    """Require LORE's descriptor-based indexer; never pass a checked path to reopen."""
     try:
-        from lore_core.store import db_connect, index_live
-        return db_connect, index_live
+        from lore_core.store import db_connect, index_live_fd
+        return db_connect, index_live_fd
     except Exception:  # noqa: BLE001 -- optional on older LORE builds
         return None
+
+
+def _open_transcript_fd(root: Path, slug: str, session_id: str) -> int:
+    """Walk directories without following links and verify the opened inode."""
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    components = root.parts[1:]
+    if root.anchor != "/" or not components or any(part in ("", ".", "..") for part in components):
+        raise ValueError("unsafe transcript directory")
+    directory_fd = os.open("/", directory_flags)
+    try:
+        for index, component in enumerate((*components, slug)):
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+            if index >= len(components) - 1:
+                metadata = os.fstat(directory_fd)
+                if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid()
+                        or metadata.st_mode & 0o002):
+                    raise ValueError("unsafe transcript directory")
+        transcript_fd = os.open(f"{session_id}.jsonl", file_flags, dir_fd=directory_fd)
+        try:
+            metadata = os.fstat(transcript_fd)
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid()
+                    or metadata.st_mode & 0o002 or metadata.st_nlink != 1
+                    or metadata.st_size > _MAX_TRANSCRIPT_BYTES):
+                raise ValueError("unsafe transcript file")
+            return transcript_fd
+        except BaseException:
+            os.close(transcript_fd)
+            raise
+    finally:
+        os.close(directory_fd)
 
 
 def _index_transcript(cwd: str, session_id: str, ext: tuple[Any, Any, Any, Any],
@@ -111,21 +144,13 @@ def _index_transcript(cwd: str, session_id: str, ext: tuple[Any, Any, Any, Any],
         raise ValueError("invalid project identity")
     project = root / slug
     transcript = project / f"{session_id}.jsonl"
-    # The caller supplies only cwd and session ID. Resolve project naming via
-    # LORE and reject obvious links, foreign-owned, or world-writable paths.
-    # LORE currently reopens by path; these checks cannot prevent a same-UID
-    # or group member from swapping an entry after this check.
-    for directory in (root, project):
-        metadata = directory.lstat()
-        if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid()
-                or metadata.st_mode & 0o002):
-            raise ValueError("unsafe transcript directory")
-    metadata = transcript.lstat()
-    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
-            or metadata.st_mode & 0o002
-            or metadata.st_size > _MAX_TRANSCRIPT_BYTES):
-        raise ValueError("unsafe transcript file")
-    indexed, consumed = ops[1](ops[0](), transcript)
+    # LORE derives the project location; the opened descriptor pins the inode
+    # while the logical path remains the stable database cursor key.
+    transcript_fd = _open_transcript_fd(root, slug, session_id)
+    try:
+        indexed, consumed = ops[1](ops[0](), transcript_fd, transcript)
+    finally:
+        os.close(transcript_fd)
     if (type(indexed) is not int or type(consumed) is not int
             or indexed < 0 or consumed < 0):
         raise TypeError("invalid index result")

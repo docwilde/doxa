@@ -13,9 +13,12 @@ optional `pending`, `sync_state`, `refresh_interval`, `consult`, `beliefs`, and
 `evidence` readers. `index_transcript_v1` delegates incremental indexing to
 LORE after a native Codex turn and again at finalization. The request carries
 only cwd and a validated session ID; the sidecar derives the transcript path
-from LORE's own project mapping, rejects links and foreign-owned files, and
-returns counts only. Indexing is idempotent in LORE and does not derive beliefs
-or approve proposals. When LORE provides its same-descriptor pending snapshot
+from LORE's own project mapping, opens each component without following links,
+and verifies the opened file's owner, type, size, and link count. It passes the
+file descriptor to LORE's `index_live_fd` so a path replacement cannot redirect
+the indexer to another file. Older LORE builds without this API do not advertise
+transcript indexing. Indexing returns counts only, is idempotent in LORE, and
+does not derive beliefs or approve proposals. When LORE provides its same-descriptor pending snapshot
 API, the sidecar advertises `pending_review_v1` to
 return one complete raw UTF-8 proposal, its SHA-256 digest, inode, and an
 explicit completeness marker. The client checks the raw bytes against the

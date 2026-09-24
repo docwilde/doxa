@@ -185,7 +185,8 @@ displayed prompt and transcript, and a resumed provider thread receives no
 duplicate. If the snapshot is unavailable or too large, the turn proceeds
 without context; LORE scrubbing remains required for visible and persisted
 text. After each native Codex turn and at shutdown, the external LORE sidecar
-incrementally indexes its owner-checked transcript. Automatic Codex proposal
+incrementally indexes its verified transcript descriptor when LORE exposes
+`index_live_fd`. Automatic Codex proposal
 review remains unavailable, matching the Python Codex host; MCP registration
 is still open. The registry reports the selected engine. `status`, `interrupt`,
 and `stop` are supported; Claude also supports `answer_needs_input`,

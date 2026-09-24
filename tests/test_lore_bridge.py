@@ -3,6 +3,7 @@
 import io
 import hashlib
 import json
+import os
 import sqlite3
 import types
 
@@ -31,7 +32,8 @@ def test_index_transcript_is_capability_gated_and_lore_scoped(monkeypatch, tmp_p
     monkeypatch.setattr(lore_bridge, "_transcript_identity", lambda cwd, ext: {
         "projects_dir": str(tmp_path), "slug": ext[0](cwd)})
     monkeypatch.setattr(lore_bridge, "_index_ops", lambda: (
-        lambda: "LORE database", lambda conn, path: (seen.append((conn, path)) or (1, 1))))
+        lambda: "LORE database", lambda conn, fd, path:
+        (seen.append((conn, path, os.fstat(fd).st_ino)) or (1, 1))))
     requests = [
         {"id": 1, "op": "index_transcript_v1", "cwd": "/repo", "session_id": "session-1"},
         {"id": 2, "op": "index_transcript_v1", "cwd": "/repo", "session_id": "../secret"},
@@ -44,7 +46,7 @@ def test_index_transcript_is_capability_gated_and_lore_scoped(monkeypatch, tmp_p
     frames = [json.loads(line) for line in output.getvalue().splitlines()]
     assert "index_transcript_v1" in frames[0]["capabilities"]
     assert frames[1]["value"] == {"indexed": 1, "consumed": 1}
-    assert seen == [("LORE database", transcript)]
+    assert seen == [("LORE database", transcript, transcript.stat().st_ino)]
     assert frames[2]["error"] == "operation_failed"
 
 
@@ -57,9 +59,9 @@ def test_index_transcript_rejects_symlink_and_foreign_path(monkeypatch, tmp_path
     monkeypatch.setattr(lore_bridge, "_transcript_identity", lambda cwd, ext: {
         "projects_dir": str(tmp_path), "slug": "mapped-project"})
     called = []
-    with pytest.raises(ValueError):
+    with pytest.raises((ValueError, OSError)):
         lore_bridge._index_transcript("/repo", "session-1", (),
-                                       (lambda: None, lambda conn, path: called.append(path)))
+                                       (lambda: None, lambda conn, fd, path: called.append(path)))
     assert called == []
 
 
@@ -73,8 +75,43 @@ def test_index_transcript_rejects_world_writable_project_directory(monkeypatch, 
     called = []
     with pytest.raises(ValueError):
         lore_bridge._index_transcript("/repo", "session-1", (),
-                                       (lambda: None, lambda conn, path: called.append(path)))
+                                       (lambda: None, lambda conn, fd, path: called.append(path)))
     assert called == []
+
+
+def test_index_transcript_reads_pinned_inode_after_path_swap(monkeypatch, tmp_path):
+    project = tmp_path / "mapped-project"
+    project.mkdir()
+    transcript = project / "session-1.jsonl"
+    transcript.write_text("safe original\n")
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text("secret replacement\n")
+    monkeypatch.setattr(lore_bridge, "_transcript_identity", lambda cwd, ext: {
+        "projects_dir": str(tmp_path), "slug": "mapped-project"})
+    seen = []
+
+    def index(conn, fd, logical_path):
+        transcript.rename(project / "moved.jsonl")
+        transcript.symlink_to(outside)
+        with os.fdopen(os.dup(fd), encoding="utf-8") as source:
+            seen.append((source.read(), logical_path))
+        return 1, 1
+
+    assert lore_bridge._index_transcript("/repo", "session-1", (),
+                                         (lambda: None, index)) == {"indexed": 1, "consumed": 1}
+    assert seen == [("safe original\n", transcript)]
+
+
+def test_index_transcript_rejects_symlinked_project_directory(monkeypatch, tmp_path):
+    real_project = tmp_path / "real"
+    real_project.mkdir()
+    (real_project / "session-1.jsonl").write_text("safe\n")
+    (tmp_path / "mapped-project").symlink_to(real_project, target_is_directory=True)
+    monkeypatch.setattr(lore_bridge, "_transcript_identity", lambda cwd, ext: {
+        "projects_dir": str(tmp_path), "slug": "mapped-project"})
+    with pytest.raises(OSError):
+        lore_bridge._index_transcript("/repo", "session-1", (),
+                                       (lambda: None, lambda conn, fd, path: (1, 1)))
 
 
 def test_pending_review_v1_uses_lore_snapshot_and_rejects_changed_proposal(monkeypatch, tmp_path):
