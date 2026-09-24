@@ -323,6 +323,7 @@ class HunkView(Vertical):
         # in a pane wide enough for two columns and stay that way until
         # the next resize.
         self._width = width
+        self._painted_width: int | None = None
         self._body = Static("", classes="hunk-body")
         self._pending = Static("", classes="hunk-pending")
         self._pending.display = False  # hide-at-zero, the house convention
@@ -346,6 +347,9 @@ class HunkView(Vertical):
         a function of the width the pane actually has RIGHT NOW -- the
         same "fit it to the box it is painted into" idiom
         ``TurnBlock._title_budget`` uses."""
+        if width == self._painted_width:
+            return
+        self._painted_width = width
         if diff_mod.side_by_side_allowed(width):
             self._body.update(_side_by_side_text(self.hunk, width))
         else:
@@ -492,6 +496,12 @@ class DiffPane(Vertical):
         self._note.display = False
         self._files = VerticalScroll(id=f"diff-files-{id or session_id}")
         self._painted = False
+        self._painted_width: int | None = None
+        self._refresh_requested = False
+        self._refresh_running = False
+        # reject()/flush_pending() also call refresh_diff directly; they
+        # must not start a second git subprocess beside a scheduled tick.
+        self._refresh_lock = asyncio.Lock()
 
     # -- layout -------------------------------------------------------
 
@@ -530,33 +540,48 @@ class DiffPane(Vertical):
     def schedule_refresh(self) -> None:
         """Recompute, from wherever the tick came from.
 
-        ``exclusive=True`` on its own group is the whole rate limit, and
-        it is the right one: a turn that lands thirty edits fires thirty
-        ticks, each cancelling the last in-flight git call, and the user
-        sees the diff after the last edit rather than a queue of thirty
-        stale ones. No timer, no debounce interval to tune, no second
-        lifecycle -- the same reasoning that gave v0.56.0's spinner zero
-        idle cost."""
+        Coalesce ticks while a refresh is running. Cancelling an asyncio
+        worker cannot stop a ``to_thread`` git subprocess that already
+        started, so exclusive workers could leave many computes running
+        after a burst. One worker does the current compute, then one more
+        if any edit landed during it. No timer or idle work."""
         if not self.is_mounted:
             return
-        self.run_worker(self.refresh_diff(), exclusive=True, group="diff")
+        self._refresh_requested = True
+        if not self._refresh_running:
+            self._refresh_running = True
+            self.run_worker(self._refresh_loop(), group="diff")
 
-    async def refresh_diff(self) -> None:
+    async def _refresh_loop(self) -> None:
+        try:
+            while self._refresh_requested and self.is_mounted:
+                self._refresh_requested = False
+                await self.refresh_diff(_skip_if_superseded=True)
+        finally:
+            self._refresh_running = False
+
+    async def refresh_diff(self, *, _skip_if_superseded: bool = False) -> None:
         """Run ``git diff`` off the event loop and repaint.
 
         ``asyncio.to_thread`` for the reason ``SessionEngine.switch_branch``
         gives at its own call: these are git subprocess calls, and a
-        keystroke must not wait behind one."""
-        try:
-            result = await asyncio.to_thread(diff_mod.compute, self.diff_cwd)
-        except Exception as exc:  # noqa: BLE001 -- a broken diff is a message,
-            # never a dead pane: this runs from a worker, and an escaping
-            # exception there is an error block nobody claimed.
-            result = diff_mod.DiffResult(
-                status=diff_mod.STATUS_ERROR, detail=str(exc)
-            )
-        self.result = result
-        await self._repaint()
+        keystroke must not wait behind one. The lock also serializes direct
+        refreshes after a rejection with the scheduled worker."""
+        async with self._refresh_lock:
+            try:
+                result = await asyncio.to_thread(diff_mod.compute, self.diff_cwd)
+            except Exception as exc:  # noqa: BLE001 -- a broken diff is a message,
+                # never a dead pane: this runs from a worker, and an escaping
+                # exception there is an error block nobody claimed.
+                result = diff_mod.DiffResult(
+                    status=diff_mod.STATUS_ERROR, detail=str(exc)
+                )
+            if _skip_if_superseded and self._refresh_requested:
+                return
+            if self._painted and result == self.result:
+                return
+            self.result = result
+            await self._repaint()
 
     async def _repaint(self, passes: int = 3) -> None:
         """Rebuild the file list.
@@ -603,12 +628,14 @@ class DiffPane(Vertical):
         }
         await files.remove_children()
         width = self.size.width or 0
-        for file_diff in self.result.files:
-            section = FileSection(file_diff)
-            await files.mount(section)
-            if file_diff.path in open_paths:
+        sections = [FileSection(file_diff) for file_diff in self.result.files]
+        if sections:
+            await files.mount(*sections)
+        for section in sections:
+            if section.file_diff.path in open_paths:
                 section.collapsed = False
         self._painted = True
+        self._painted_width = width
         self._repaint_open(width)
         self._remark_queued(width)
 
@@ -677,8 +704,10 @@ class DiffPane(Vertical):
         hunks are already parsed; this is a ``Static.update``) and it is
         the only way an Alt+arrow drag can change the view it was aimed
         at. Nothing is recomputed -- git is not called from here."""
-        if self._painted:
-            self._repaint_open(self.size.width or 0)
+        width = self.size.width or 0
+        if self._painted and width != self._painted_width:
+            self._painted_width = width
+            self._repaint_open(width)
 
     @on(Collapsible.Expanded)
     def _on_file_expanded(self, event: Collapsible.Expanded) -> None:

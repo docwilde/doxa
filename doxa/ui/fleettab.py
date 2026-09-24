@@ -77,6 +77,7 @@ class FleetTab(TabPane):
         self.body = Static("", classes="fleet-body")
         self.scroll = VerticalScroll(self.body, classes="fleet-scroll")
         self._timer: Any = None
+        self._last_text: str | None = None
         super().__init__(self.base_label, id=id)
 
     def compose(self) -> ComposeResult:
@@ -124,7 +125,13 @@ class FleetTab(TabPane):
         state the one on screen."""
         alive = bool(getattr(self.session, "alive", False))
         with contextlib.suppress(Exception):
-            self.body.update(Text(self.text()))
+            rendered = self.text()
+            # The timer runs twice per second, while the elapsed clock
+            # usually changes once per second and the files may stay
+            # unchanged much longer. Skip an identical report's repaint.
+            if rendered != self._last_text:
+                self.body.update(Text(rendered))
+                self._last_text = rendered
         if not alive:
             self._cancel_timer()
 

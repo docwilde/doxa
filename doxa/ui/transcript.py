@@ -620,6 +620,7 @@ class ToolChip(Collapsible):
         self.call_id = call_id
         self.tool_name = name
         self.tool_input = input_data
+        self._arg_summary = _one_line(json.dumps(input_data, ensure_ascii=False), 60)
         self.tool_result: str | None = None
         self.tool_image_path: str | None = None
         self.is_error = False
@@ -644,13 +645,12 @@ class ToolChip(Collapsible):
         )
 
     def _chip_title(self) -> str:
-        arg_summary = _one_line(json.dumps(self.tool_input, ensure_ascii=False), 60)
         if self.tool_result is None:
             status, dur = "…", "…"
         else:
             status = "✗" if self.is_error else "✓"
             dur = f"{self.duration_ms}ms" if self.duration_ms is not None else "?"
-        return f"⚒ {self.tool_name}({arg_summary})  ·  {dur}  {status}"
+        return f"⚒ {self.tool_name}({self._arg_summary})  ·  {dur}  {status}"
 
     def update_result(
         self,
@@ -1148,6 +1148,8 @@ class TurnBlock(Collapsible):
 
     def __init__(self, prompt: str) -> None:
         self.prompt_text = prompt
+        self._prompt_line = _one_line(prompt, limit=1_000_000)
+        self._prompt_full_rendered = ""
         self.assistant_text = ""
         self.thinking = ThinkingMarker()
         self.reasoning_holder = Vertical(classes="turn-reasoning")
@@ -1209,7 +1211,7 @@ class TurnBlock(Collapsible):
         # _one_line's own slicing is given a budget nothing realistic will
         # ever hit -- only its whitespace-collapsing is wanted here; the
         # word-boundary cut below is what actually enforces the limit.
-        collapsed = _one_line(self.prompt_text, limit=1_000_000)
+        collapsed = self._prompt_line
         budget = max(self._title_budget() - len(suffix), 8)
         shown, truncated = _truncate_at_word(collapsed, budget)
         self._sync_prompt_full(collapsed, truncated)
@@ -1233,12 +1235,14 @@ class TurnBlock(Collapsible):
         prompt_full = getattr(self, "prompt_full", None)
         if prompt_full is None:
             return
-        prompt_full.display = truncated
-        if truncated:
-            prompt_full.update(
+        if prompt_full.display != truncated:
+            prompt_full.display = truncated
+        if truncated and not self._prompt_full_rendered:
+            self._prompt_full_rendered = (
                 f"⤒ title truncated -- full prompt:\n"
                 f"{_escape_markup(self.prompt_text)}"
             )
+            prompt_full.update(self._prompt_full_rendered)
 
     def _on_resize(self, event: events.Resize) -> None:
         """A title fitted to yesterday's width lies about what it holds --

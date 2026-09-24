@@ -582,6 +582,8 @@ class StatusBar(Static):
         # SessionPane._refresh_status alongside the markup string itself,
         # so the two can never drift out of sync with each other.
         self._chip_hints: "list[tuple[str, str]]" = []
+        self._tooltip_markup: str | None = None
+        self._tooltip_plain = ""
         # v0.91.0: this row is also the pane's DIVIDER (see
         # SessionPane.nudge_prompt). Screen y of the last drag position,
         # None while nothing is being dragged.
@@ -642,7 +644,11 @@ class StatusBar(Static):
         pos = x - 2
         if pos < 0:
             return None
-        plain = Content.from_markup(str(self.renderable)).plain
+        markup = str(self.renderable)
+        if markup != self._tooltip_markup:
+            self._tooltip_plain = Content.from_markup(markup).plain
+            self._tooltip_markup = markup
+        plain = self._tooltip_plain
         cursor = 0
         for text, hint in self._chip_hints:
             idx = plain.find(text, cursor)

@@ -357,7 +357,12 @@ class PaneChipsMixin:
             bar = self.query_one("#status-bar", StatusBar)
         except NoMatches:
             return
-        bar.update("  ·  ".join(chip.render() for chip in chips))
+        markup = "  ·  ".join(chip.render() for chip in chips)
+        # Static.update rebuilds its visual and requests a layout refresh,
+        # even when the content is identical. Peer and turn events can call
+        # this method repeatedly without changing any visible chip.
+        if bar.renderable != markup:
+            bar.update(markup)
         bar.set_chip_hints([hint for chip in chips for hint in chip.hints])
 
     def _ctx_absolute_inline(self) -> bool:

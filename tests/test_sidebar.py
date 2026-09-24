@@ -38,7 +38,7 @@ from doxa import triage as triage_mod
 from doxa.app import DoxaApp
 from doxa.ui import labels as labels_mod
 from doxa.ui import sidebar as sidebar_mod
-from doxa.ui.sidebar import LOOSE_HEADING, NOT_OPEN, Row, SessionSidebar, SidebarLine, build_rows
+from doxa.ui.sidebar import LOOSE_HEADING, NOT_OPEN, Row, SidebarLine, build_rows
 from doxa.ui.split import PaneGroup, SplitBox
 from tests.fakes import FakeEngine
 
@@ -512,13 +512,12 @@ async def test_a_split_never_sees_the_rail(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_ctrl_b_toggles_the_rail_and_nothing_else_claims_it(tmp_path):
+async def test_f3_toggles_the_rail_and_nothing_else_claims_it(tmp_path):
     """Re-verified against the CURRENT binding set, which is the check the
     spec asks for by name -- it moved three times this release series."""
     keys = [b.key for b in DoxaApp.BINDINGS]
     assert keys.count("f3") == 1
-    # Deliverable under BOTH keyboard encodings, unlike ctrl+<digit> and
-    # alt+<letter>, which this project chose and had to walk back.
+    # F3 is available under both keyboard encodings.
     from doxa import keyboard as keyboard_mod
 
     assert keyboard_mod.unreachable_under_legacy("f3") is False
@@ -532,6 +531,37 @@ async def test_ctrl_b_toggles_the_rail_and_nothing_else_claims_it(tmp_path):
         assert await _wait(pilot, lambda: app.sidebar().region.width == 0)
         # The toggle WRITES, which is what ends hide-at-zero's guessing.
         assert config_mod.sidebar_mode() == config_mod.SIDEBAR_OFF
+
+
+@pytest.mark.asyncio
+async def test_transcript_scrolls_without_a_visible_right_scrollbar(tmp_path):
+    """The far-right transcript scrollbar is visual only; wheel, Page Down,
+    and programmatic scrolling still reach content beyond the viewport."""
+    from textual import events
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static
+
+    app, _engines = _app(tmp_path)
+    async with app.run_test(size=BIG) as pilot:
+        block_list = app.query_one("#block-list", VerticalScroll)
+        await block_list.mount(*(Static(f"scroll row {i}") for i in range(100)))
+        await pilot.pause()
+        assert block_list.styles.scrollbar_size_vertical == 0
+        assert block_list.max_scroll_y > 0
+        block_list.post_message(events.MouseScrollDown(
+            widget=block_list, x=1, y=1, delta_x=0, delta_y=1,
+            button=0, shift=False, meta=False, ctrl=False,
+        ))
+        await pilot.pause()
+        assert block_list.scroll_y > 0
+        block_list.scroll_home(animate=False)
+        await pilot.pause()
+        block_list.focus()
+        await pilot.press("pagedown")
+        assert block_list.scroll_y > 0
+        block_list.scroll_end(animate=False)
+        await pilot.pause()
+        assert block_list.scroll_y == block_list.max_scroll_y
 
 
 @pytest.mark.asyncio
