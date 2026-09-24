@@ -114,7 +114,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 Requires Python 3.11+, [`uv`](https://docs.astral.sh/uv/), and Git. The
 installer tracks `main` by default; replace the final `sh` with
-`sh -s -- v1.18.0` to pin this
+`sh -s -- v1.19.0` to pin this
 release. Provider CLIs can be installed and signed in later. DOXA is not on
 PyPI.
 
