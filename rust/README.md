@@ -15,9 +15,14 @@ Build from this repository:
 ```sh
 cargo build --manifest-path rust/doxa-tui/Cargo.toml
 rust/doxa-tui/target/debug/doxa-rs --socket /path/to/existing/daemon.sock
+rust/doxa-tui/target/debug/doxa-rs --list
+rust/doxa-tui/target/debug/doxa-rs --session SESSION_ID
 ```
 
-`--demo` opens the shell without a connection. `Ctrl+Q` detaches the Rust UI
+With one live daemon session, `doxa-rs` attaches to it directly. With multiple
+sessions, use `--list` and select one by full ID or unique ID prefix.
+`--socket` remains available for an explicit path. `--demo` opens the shell
+without a connection. `Ctrl+Q` detaches the Rust UI
 without stopping its daemon. On attach, the frontend restores prompts and
 assistant text from the daemon's persisted JSONL file, then follows live
 events from the same snapshot boundary. The visible view is limited to the
@@ -26,7 +31,7 @@ and the UI's 512 KiB transcript buffer. It marks omitted earlier content;
 the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
-in-flight deltas may be absent. Session discovery, permission dialogs, rich
+in-flight deltas may be absent. Permission dialogs, rich
 tool cards, clickable links, aligned Markdown tables, and drag dividers are
 still 2.0 work. The binary version is `2.0.0-alpha.1` for this
 separate development line, not a DOXA 2.0 release.

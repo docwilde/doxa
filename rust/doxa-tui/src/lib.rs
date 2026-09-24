@@ -3,5 +3,6 @@
 pub mod markdown;
 pub mod bridge;
 pub mod history;
+pub mod discovery;
 pub mod transport;
 pub mod ui;

@@ -26,6 +26,129 @@ fn safe_label(value: &str) -> String {
     markdown::sanitize(value).replace('\n', " ").chars().take(200).collect()
 }
 
+const MAX_EVENT_FIELD_CHARS: usize = 320;
+
+// Structured event fields are untrusted Markdown as well as terminal text.
+// Keep each row small even when a daemon sends a very large JSON value.
+fn event_field(value: &str) -> String {
+    let clean = markdown::sanitize(value).replace(['\n', '\r'], " ");
+    let mut chars = clean.chars();
+    let mut clipped: String = chars.by_ref().take(MAX_EVENT_FIELD_CHARS).collect();
+    if chars.next().is_some() {
+        clipped.push('…');
+    }
+    let mut escaped = String::with_capacity(clipped.len());
+    for ch in clipped.chars() {
+        if matches!(
+            ch,
+            '\\' | '`'
+                | '*'
+                | '_'
+                | '{'
+                | '}'
+                | '['
+                | ']'
+                | '('
+                | ')'
+                | '#'
+                | '+'
+                | '-'
+                | '.'
+                | '!'
+                | '>'
+                | '|'
+                | '~'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+fn event_string(data: &serde_json::Value, key: &str) -> Option<String> {
+    data.get(key)
+        .and_then(|value| value.as_str())
+        .map(event_field)
+}
+
+fn append_transcript(session: &mut Session, text: &str) -> bool {
+    session.transcript.push_str(text);
+    if session.transcript.len() <= MAX_TRANSCRIPT_BYTES {
+        return false;
+    }
+    let mut start = session.transcript.len() - MAX_TRANSCRIPT_BYTES;
+    while !session.transcript.is_char_boundary(start) {
+        start += 1;
+    }
+    session.transcript.drain(..start);
+    true
+}
+
+fn structured_event(event_type: &str, data: &serde_json::Value) -> Option<String> {
+    let field = |key| event_string(data, key).unwrap_or_default();
+    let row = match event_type {
+        "reasoning_delta" => format!("Reasoning: {}", field("text")),
+        "tool_call" => {
+            let name = field("name");
+            let input = data
+                .get("input")
+                .filter(|value| !value.is_null())
+                .map(|value| event_field(&value.to_string()))
+                .unwrap_or_default();
+            if input.is_empty() {
+                format!("Tool: {name} started")
+            } else {
+                format!("Tool: {name} started · {input}")
+            }
+        }
+        "tool_result" => {
+            let name = field("name");
+            let result = field("result_summary");
+            let outcome = if data.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
+                "failed"
+            } else {
+                "finished"
+            };
+            let duration = data
+                .get("duration_ms")
+                .and_then(|v| v.as_u64())
+                .map(|ms| format!(" · {ms} ms"))
+                .unwrap_or_default();
+            if result.is_empty() {
+                format!("Tool: {name} {outcome}{duration}")
+            } else {
+                format!("Tool: {name} {outcome}{duration} · {result}")
+            }
+        }
+        "peer_joined" => format!("Peer joined: {}", field("title")),
+        "peer_left" => format!("Peer left: {}", field("session_id")),
+        "peer_message" => format!("Peer {}: {}", field("from_title"), field("body")),
+        "peer_sent" => "Peer message sent".into(),
+        "tool_disabled" => format!("Tool disabled: {} · {}", field("name"), field("reason")),
+        "needs_input" => format!("Needs input: {} · {}", field("kind"), field("tool_name")),
+        "needs_input_resolved" => "Input request resolved".into(),
+        "turn_refused" => format!("Turn refused: {}", field("message")),
+        "session_done" => "Session ended".into(),
+        "prompt_queued" => "Prompt queued".into(),
+        "prompt_dequeued" => "Queued prompt started".into(),
+        "prompt_cancelled" => "Queued prompt cancelled".into(),
+        "prompt_discarded" => "Queued prompt discarded".into(),
+        "remote_driver_changed" => format!(
+            "Remote driver: {}",
+            data.get("identity")
+                .and_then(|v| v.as_str())
+                .map(event_field)
+                .unwrap_or_else(|| "none".into())
+        ),
+        "turn_done" if data.get("is_error").and_then(|v| v.as_bool()) == Some(true) => {
+            format!("Turn failed: {}", field("error"))
+        }
+        _ => return None,
+    };
+    Some(format!("\n\n{row}\n\n"))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Session {
     pub id: String,
@@ -117,78 +240,198 @@ impl App {
     /// Apply one versioned daemon frame after transport decoding. Returns whether
     /// visible state changed. Unknown frames are ignored for forward compatibility.
     pub fn apply_daemon_frame(&mut self, frame: &serde_json::Value) -> bool {
-        let Some(kind) = frame.get("type").and_then(|v| v.as_str()) else { return false };
+        let Some(kind) = frame.get("type").and_then(|v| v.as_str()) else {
+            return false;
+        };
         match kind {
             "hello" => {
-                let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else { return false };
-                let model = safe_label(frame.get("model").and_then(|v| v.as_str()).unwrap_or("session"));
+                let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else {
+                    return false;
+                };
+                let model = safe_label(
+                    frame
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("session"),
+                );
                 let cwd = safe_label(frame.get("cwd").and_then(|v| v.as_str()).unwrap_or(""));
                 self.apply_update(DaemonUpdate::Upsert(Session {
-                    id: id.into(), title: model.clone(), collection: cwd,
-                    transcript: String::new(), status: "Connected".into(),
+                    id: id.into(),
+                    title: model.clone(),
+                    collection: cwd,
+                    transcript: String::new(),
+                    status: "Connected".into(),
                 }));
                 self.notice = format!("Connected · {model}");
                 true
             }
             "event" => {
-                let Some(event) = frame.get("event") else { return false };
-                let Some(event_type) = event.get("type").and_then(|v| v.as_str()) else { return false };
+                let Some(event) = frame.get("event") else {
+                    return false;
+                };
+                let Some(event_type) = event.get("type").and_then(|v| v.as_str()) else {
+                    return false;
+                };
                 let data = &event["data"];
                 // A transport reader may serve several sockets. The frame itself
                 // lacks a session id, so a reader can add one before delivery.
-                let id = frame.get("session_id").and_then(|v| v.as_str())
+                let id = frame
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
                     .or_else(|| self.groups[self.active_group].active_id())
                     .or_else(|| self.sessions.first().map(|s| s.id.as_str()));
-                let Some(id) = id.map(str::to_owned) else { return false };
+                let Some(id) = id.map(str::to_owned) else {
+                    return false;
+                };
                 match event_type {
                     "text_delta" => {
-                        let Some(text) = data.get("text").and_then(|v| v.as_str()) else { return false };
+                        let Some(text) = data.get("text").and_then(|v| v.as_str()) else {
+                            return false;
+                        };
                         if let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) {
-                            session.transcript.push_str(text);
-                            if session.transcript.len() > MAX_TRANSCRIPT_BYTES {
-                                let mut start = session.transcript.len() - MAX_TRANSCRIPT_BYTES;
-                                while !session.transcript.is_char_boundary(start) { start += 1; }
-                                session.transcript.drain(..start);
+                            if append_transcript(session, text) {
                                 self.notice = "Transcript tail limited to 512 KiB".into();
                             }
                             true
-                        } else { false }
+                        } else {
+                            false
+                        }
                     }
-                    "turn_started" => { self.apply_update(DaemonUpdate::Status { id, text: "Running".into() }); true }
-                    "turn_done" => { self.apply_update(DaemonUpdate::Status { id, text: "Ready".into() }); true }
-                    "needs_input" => { self.apply_update(DaemonUpdate::Status { id, text: "Needs input".into() }); true }
-                    _ => false,
+                    "turn_started" => {
+                        self.apply_update(DaemonUpdate::Status {
+                            id,
+                            text: "Running".into(),
+                        });
+                        true
+                    }
+                    "turn_done" => {
+                        let status = if data.get("is_error").and_then(|v| v.as_bool()) == Some(true)
+                        {
+                            "Error"
+                        } else {
+                            "Ready"
+                        };
+                        self.apply_update(DaemonUpdate::Status {
+                            id: id.clone(),
+                            text: status.into(),
+                        });
+                        self.append_event(&id, event_type, data);
+                        true
+                    }
+                    "needs_input" => {
+                        self.apply_update(DaemonUpdate::Status {
+                            id: id.clone(),
+                            text: "Needs input".into(),
+                        });
+                        self.append_event(&id, event_type, data);
+                        true
+                    }
+                    "needs_input_resolved" => {
+                        self.apply_update(DaemonUpdate::Status {
+                            id: id.clone(),
+                            text: "Running".into(),
+                        });
+                        self.append_event(&id, event_type, data)
+                    }
+                    "session_done" => {
+                        self.apply_update(DaemonUpdate::Status {
+                            id: id.clone(),
+                            text: "Ended".into(),
+                        });
+                        self.append_event(&id, event_type, data)
+                    }
+                    "turn_refused" => {
+                        self.apply_update(DaemonUpdate::Status {
+                            id: id.clone(),
+                            text: "Ready".into(),
+                        });
+                        self.append_event(&id, event_type, data)
+                    }
+                    _ => self.append_event(&id, event_type, data),
                 }
             }
             "reply" => {
                 let ok = frame.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                self.notice = if ok { "Request accepted".into() } else {
-                    format!("Request failed: {}", safe_label(frame.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error")))
+                self.notice = if ok {
+                    "Request accepted".into()
+                } else {
+                    format!(
+                        "Request failed: {}",
+                        safe_label(
+                            frame
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown error")
+                        )
+                    )
                 };
                 true
             }
             "client_notice" => {
-                self.notice = safe_label(frame.get("message").and_then(|v| v.as_str())
-                    .unwrap_or("Daemon connection unavailable"));
+                self.notice = safe_label(
+                    frame
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Daemon connection unavailable"),
+                );
                 true
             }
             "prompt_rejected" => {
-                let Some(text) = frame.get("text").and_then(|v| v.as_str()) else { return false };
-                if self.input.is_empty() { self.input = text.to_owned(); }
-                else { self.rejected_drafts.push(text.to_owned()); }
-                self.notice = format!("{} · draft retained{}", safe_label(frame.get("message").and_then(|v| v.as_str()).unwrap_or("Prompt refused")),
-                    if self.rejected_drafts.is_empty() { "" } else { " (Alt+Up to restore)" });
+                let Some(text) = frame.get("text").and_then(|v| v.as_str()) else {
+                    return false;
+                };
+                if self.input.is_empty() {
+                    self.input = text.to_owned();
+                } else {
+                    self.rejected_drafts.push(text.to_owned());
+                }
+                self.notice = format!(
+                    "{} · draft retained{}",
+                    safe_label(
+                        frame
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Prompt refused")
+                    ),
+                    if self.rejected_drafts.is_empty() {
+                        ""
+                    } else {
+                        " (Alt+Up to restore)"
+                    }
+                );
                 true
             }
             "prompt_uncertain" => {
-                let Some(text) = frame.get("text").and_then(|v| v.as_str()) else { return false };
+                let Some(text) = frame.get("text").and_then(|v| v.as_str()) else {
+                    return false;
+                };
                 self.rejected_drafts.push(text.to_owned());
-                self.notice = format!("{} · check session before Alt+Up retry",
-                    safe_label(frame.get("message").and_then(|v| v.as_str()).unwrap_or("Prompt delivery unconfirmed")));
+                self.notice = format!(
+                    "{} · check session before Alt+Up retry",
+                    safe_label(
+                        frame
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Prompt delivery unconfirmed")
+                    )
+                );
                 true
             }
             _ => false,
         }
+    }
+
+    fn append_event(&mut self, id: &str, event_type: &str, data: &serde_json::Value) -> bool {
+        let Some(row) = structured_event(event_type, data) else {
+            return false;
+        };
+        let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) else {
+            return false;
+        };
+        if append_transcript(session, &row) {
+            self.notice = "Transcript tail limited to 512 KiB".into();
+        }
+        true
     }
 
     pub fn handle(&mut self, event: Event) -> bool {
