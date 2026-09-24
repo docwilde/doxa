@@ -44,7 +44,12 @@ def emit(frame: dict) -> None:
     if len(raw) + 1 > MAX_FRAME:
         # Do not truncate a JSON event into a misleading partial result.
         raw = json.dumps({"type": "error", "code": "frame_too_large"}).encode()
-    os.write(sys.stdout.fileno(), raw + b"\n")
+    data = memoryview(raw + b"\n")
+    while data:
+        written = os.write(sys.stdout.fileno(), data)
+        if written <= 0:
+            raise OSError("sidecar stdout closed")
+        data = data[written:]
 
 
 async def run() -> None:

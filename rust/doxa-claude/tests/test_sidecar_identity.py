@@ -17,6 +17,19 @@ spec.loader.exec_module(sidecar)
 
 
 class IdentityTests(unittest.TestCase):
+    def test_emit_writes_complete_frame_after_partial_write(self):
+        parts = []
+
+        def partial_write(_fd, data):
+            chunk = bytes(data[:3])
+            parts.append(chunk)
+            return len(chunk)
+
+        with mock.patch.object(sidecar.os, "write", partial_write):
+            sidecar.emit({"type": "reply", "ok": True})
+        self.assertEqual(json.loads(b"".join(parts)), {"type": "reply", "ok": True})
+        self.assertTrue(b"".join(parts).endswith(b"\n"))
+
     def test_fresh_id_and_resume(self):
         self.assertEqual(sidecar.validate_identity("abc-123", None), ("abc-123", None))
         self.assertEqual(sidecar.validate_identity(None, "abc-123"), ("abc-123", "abc-123"))
