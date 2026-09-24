@@ -942,6 +942,13 @@ class DoxaApp(
         self._restore_pending = (
             live_specs if live_specs or not self._restore_tabs else 1
         )
+        # The startup cover remains visible across Textual's alternate-screen
+        # switch until each opening pane has either booted or shown a failure.
+        # An ordinary launch has one pane even though _restore_pending is 0.
+        self._startup_pending = self._restore_pending or 1
+        # Populated while compose builds the opening tree. Only these panes
+        # may clear the cover; a later Ctrl+T or split is never counted.
+        self._startup_waiting_panes: set[SessionPane] = set()
         # Sessions detached (Ctrl+W / "/detach") THIS run: no longer a
         # mounted pane (its _session_id would drop out of panes() once
         # removed), but still running -- item D #4 says a detached session
@@ -1333,6 +1340,11 @@ class DoxaApp(
     def compose(self) -> ComposeResult:
         yield BeliefInspector()  # hidden stub, palette-toggled
         yield ClockChip()  # upper-right, own layer -- see theme.tcss
+        yield Static(
+            "Restoring session…" if self._restore_tabs or self._restore_report
+            else "Loading…",
+            id="startup-status",
+        )
         # v1.0.0: the session rail is a SIBLING of the window root, never
         # a member of it. See doxa/ui/sidebar.py's module docstring for
         # the whole argument; the two consequences that matter HERE are:
@@ -1353,6 +1365,7 @@ class DoxaApp(
                 yield self._compose_restored_root()
             else:
                 pane = self._make_pane(self._engine_factory)
+                self._startup_waiting_panes.add(pane)
                 # Item D fallback: every saved tab was dead (nothing to
                 # reattach), but doxa.cli still has a report to show --
                 # "restored 0, skipped N" -- on the one fresh tab it
@@ -1486,8 +1499,21 @@ class DoxaApp(
         the first version of the number-overlay dismissal was written that
         way and the overlay simply stayed up.
 
-        Kept to exactly one job for that reason. Anything more here would
-        be a second event pipeline beside Textual's own."""
+        The startup cover also gates keyboard input here: focusing a prompt
+        behind the cover must not let an unseen `!` submit run a shell
+        command."""
+        if (
+            self._startup_pending
+            and isinstance(event, (events.Key, events.Paste))
+            and any(self.screen.query("#startup-status"))
+        ):
+            # The prompt is focused behind the cover. A hidden `!` submit
+            # could execute a shell command before the pane is ready.
+            if isinstance(event, events.Key) and event.key in {"escape", "ctrl+q"}:
+                self.exit()
+            event.stop()
+            event.prevent_default()
+            return
         if isinstance(event, events.Key):
             self._dismiss_group_numbers(event)
         await super().on_event(event)
@@ -1535,6 +1561,9 @@ class DoxaApp(
         marker is written the moment this fires -- declining or Esc-ing
         out of the wizard must not make it reappear at the next launch;
         /setup still runs on demand any time."""
+        self._startup_pending = len(self._startup_waiting_panes)
+        if self._startup_pending == 0:
+            self.query_one("#startup-status", Static).display = False
         self._activate_initial_tab()
         from . import setup as setup_mod
 

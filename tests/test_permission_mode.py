@@ -65,11 +65,20 @@ def _offset_of(app, needle: str) -> tuple[int, int]:
 
 
 async def _wait_status(pilot, app, needle: str, tries=200) -> bool:
+    # The status text can refresh before the opening pane finishes booting.
+    # Wait for the startup cover too: it deliberately blocks clicks and keys
+    # while that pane is still loading.
+    def ready() -> bool:
+        return (
+            needle in _status_plain(app)
+            and not app.query_one("#startup-status").display
+        )
+
     for _ in range(tries):
-        if needle in _status_plain(app):
+        if ready():
             return True
         await pilot.pause(0.02)
-    return needle in _status_plain(app)
+    return ready()
 
 
 async def _wait_for(pilot, predicate, tries=200):

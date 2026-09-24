@@ -1455,9 +1455,13 @@ async def test_enter_on_the_close_confirm_terminates(monkeypatch, tmp_path):
     was pressing the default this test used to pin."""
     from doxa.app import CloseWithTurnRunning
 
-    app = DoxaApp(cwd=str(tmp_path))
+    app, _engines = await _app(monkeypatch, tmp_path)
     async with app.run_test() as pilot:
-        await pilot.pause()
+        # A user cannot open this dialog until the startup cover releases
+        # keyboard input; test Enter against the visible, ready UI.
+        assert await _wait_for(
+            pilot, lambda: not app.query_one("#startup-status").display
+        )
         chosen: list = []
         app.push_screen(CloseWithTurnRunning(), callback=chosen.append)
         assert await _wait_for(
