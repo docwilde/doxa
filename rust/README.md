@@ -139,11 +139,16 @@ bounded plain-chat history beside the Python transcript as
 true`; missing, corrupt, wrong-engine, or wrong-model state refuses resume.
 Python's engine/messages envelope is readable; newly written envelopes also
 record session ID and model. LORE scrubs every saved string before an atomic
-replacement. The full provider response is withheld until LORE scrubs it; a
-scrub or storage failure fails the turn and commits no history.
+replacement. Accepted turns also append Python 1.19-shaped user and assistant
+records to `<session-id>.jsonl`. Resume verifies that JSONL and the replay
+file contain the same turns; a partial two-file write refuses further turns
+and later resume. The full provider response is withheld until LORE scrubs it;
+a scrub or storage failure fails the turn and commits no history.
 It reports provider model and token usage but no dollar cost. Interrupt and
-stop cancel the in-flight HTTP request. Vendor JSONL transcript persistence,
-LORE context, tool execution, pricing, and live-provider validation remain open.
+stop cancel the in-flight HTTP request. Native hello exposes an owner-checked
+JSONL path and byte boundary so the TUI can restore completed vendor and Codex
+turns before attaching to the live event ring. LORE context, tool execution,
+pricing, and live-provider validation remain open.
 
 Codex turns use `codex exec --json` and resume subsequent turns using the
 provider thread ID. User and assistant text is appended to Python 1.19-shaped

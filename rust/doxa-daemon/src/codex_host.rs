@@ -5,7 +5,7 @@ use doxa_transcript::TranscriptStore;
 use serde_json::Map;
 use serde_json::{json, Value};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -159,6 +159,9 @@ impl CodexHost {
 }
 
 impl Host for CodexHost {
+    fn transcript_snapshot(&self) -> io::Result<Option<(PathBuf, u64)>> {
+        self.store.transcript_snapshot()
+    }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
         if self.closing.load(Ordering::Acquire) {
             emit(

@@ -13,6 +13,7 @@ pub const MAX_METADATA_BYTES: u64 = 64 * 1024;
 pub const THREAD_SUFFIX: &str = ".codex.json";
 pub const MAX_VENDOR_MESSAGES_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_VENDOR_MESSAGES: usize = 512;
+pub const MAX_VENDOR_TRANSCRIPT_BYTES: u64 = 16 * 1024 * 1024;
 
 fn invalid() -> io::Error {
     io::Error::new(
@@ -182,6 +183,115 @@ impl TranscriptStore {
 
     pub fn transcript_path(&self) -> PathBuf {
         self.dir.join(format!("{}.jsonl", self.session_id))
+    }
+
+    /// Return an owner-checked file boundary for a client's bounded restore.
+    pub fn transcript_snapshot(&self) -> io::Result<Option<(PathBuf, u64)>> {
+        owned_dir(&self.dir)?;
+        let file = match open_read(&self.transcript_path()) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(Some((self.transcript_path(), file.metadata()?.len())))
+    }
+
+    /// Append one accepted vendor turn as two Python-shaped JSONL records.
+    /// Scrub both records before opening the file; a write failure remains
+    /// detectable on next resume by comparison with `.messages.json`.
+    pub fn try_append_vendor_turn(
+        &self,
+        engine: &str,
+        cwd: &str,
+        prompt: &str,
+        answer: &str,
+        timestamp: &str,
+        mut scrub: impl FnMut(&str) -> io::Result<String>,
+    ) -> io::Result<()> {
+        owned_dir(&self.dir)?;
+        let user = serde_json::json!({"type":"user", "message":{"role":"user","content":prompt},
+            "cwd":cwd,"sessionId":self.session_id,"timestamp":timestamp});
+        let assistant = serde_json::json!({"type":"assistant",
+            "message":{"role":"assistant","content":[{"type":"text","text":answer}]},
+            "sessionId":self.session_id,"timestamp":timestamp});
+        let mut bytes = Vec::new();
+        for mut record in [user, assistant] {
+            record["engine"] = Value::String(engine.to_owned());
+            try_scrub_value(&mut record, &mut scrub)?;
+            if record["engine"] != engine || record["sessionId"] != self.session_id {
+                return Err(bad_data());
+            }
+            let line = serde_json::to_vec(&record)?;
+            if line.len() > MAX_TRANSCRIPT_BYTES {
+                return Err(bad_data());
+            }
+            bytes.extend_from_slice(&line);
+            bytes.push(b'\n');
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(self.transcript_path())?;
+        checked_file(&file)?;
+        if file.metadata()?.len().saturating_add(bytes.len() as u64) > MAX_VENDOR_TRANSCRIPT_BYTES {
+            return Err(bad_data());
+        }
+        if file.metadata()?.permissions().mode() & 0o077 != 0 {
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    /// Reject a crash that left the replay file and JSONL at different turns.
+    pub fn verify_vendor_transcript(&self, engine: &str, messages: &[Value]) -> io::Result<()> {
+        owned_dir(&self.dir)?;
+        let mut file = match open_read(&self.transcript_path()) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound && messages.is_empty() => {
+                return Ok(())
+            }
+            Err(error) => return Err(error),
+        };
+        if file.metadata()?.len() > MAX_VENDOR_TRANSCRIPT_BYTES {
+            return Err(bad_data());
+        }
+        let mut raw = Vec::new();
+        file.read_to_end(&mut raw)?;
+        if raw.last() != Some(&b'\n') {
+            return Err(bad_data());
+        }
+        let mut found = Vec::new();
+        for line in raw.split(|b| *b == b'\n').filter(|line| !line.is_empty()) {
+            let record: Value = serde_json::from_slice(line).map_err(|_| bad_data())?;
+            if record["engine"] != engine || record["sessionId"] != self.session_id {
+                return Err(bad_data());
+            }
+            match record["type"].as_str() {
+                Some("user") if record["message"]["role"] == "user" => {
+                    found.push(
+                        serde_json::json!({"role":"user","content":record["message"]["content"]}),
+                    );
+                }
+                Some("assistant") if record["message"]["role"] == "assistant" => {
+                    let blocks = record["message"]["content"]
+                        .as_array()
+                        .ok_or_else(bad_data)?;
+                    if blocks.len() != 1 || blocks[0]["type"] != "text" {
+                        return Err(bad_data());
+                    }
+                    found.push(serde_json::json!({"role":"assistant","content":blocks[0]["text"]}));
+                }
+                _ => return Err(bad_data()),
+            }
+        }
+        if found != messages {
+            return Err(bad_data());
+        }
+        Ok(())
     }
     pub fn thread_path(&self) -> PathBuf {
         self.dir

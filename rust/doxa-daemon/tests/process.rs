@@ -663,7 +663,17 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-
     for index in 0..2 {
         let mut process = Process::start_codex(dir.path(), &codex, &python);
         let (mut reader, mut socket) = process.connect();
-        receive(&mut reader);
+        let hello = receive(&mut reader);
+        if index == 1 {
+            assert_eq!(
+                hello["transcript_path"],
+                dir.path()
+                    .join("project/codex-session.jsonl")
+                    .to_str()
+                    .unwrap()
+            );
+            assert!(hello["transcript_bytes"].as_u64().unwrap() > 0);
+        }
         send(&mut socket, json!({"type":"attach","cursor":null}));
         send(
             &mut socket,
@@ -1295,6 +1305,19 @@ mod vendor_process {
             wait_until(|| first.exited());
             first_server.join().unwrap();
             let state = dir.path().join("project/vendor-session.messages.json");
+            let transcript = dir.path().join("project/vendor-session.jsonl");
+            let records: Vec<Value> = fs::read_to_string(&transcript)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0]["message"]["content"], "[redacted] prompt");
+            assert_eq!(
+                records[1]["message"]["content"][0]["text"],
+                "[redacted] first"
+            );
+            assert!(records.iter().all(|record| record["engine"] == vendor));
             let saved: Value = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
             assert_eq!(saved["engine"], vendor);
             assert_eq!(saved["session_id"], "vendor-session");
@@ -1305,8 +1328,16 @@ mod vendor_process {
             let (endpoint, second_server) = fake_vendor(1, "second");
             let mut second = start_vendor_resume(dir.path(), vendor, &endpoint, &lore, true);
             let (mut reader, mut socket) = second.connect();
-            receive(&mut reader);
-            send(&mut socket, json!({"type":"attach","cursor":null}));
+            let hello = receive(&mut reader);
+            assert_eq!(hello["transcript_path"], transcript.to_str().unwrap());
+            assert_eq!(
+                hello["transcript_bytes"],
+                fs::metadata(&transcript).unwrap().len()
+            );
+            send(
+                &mut socket,
+                json!({"type":"attach","cursor":hello["next_seq"]}),
+            );
             send(
                 &mut socket,
                 json!({"type":"prompt","id":1,"text":"continue"}),
@@ -1325,8 +1356,17 @@ mod vendor_process {
             assert_eq!(requests[0]["messages"][0]["content"], "[redacted] prompt");
             assert_eq!(requests[0]["messages"][1]["content"], "[redacted] first");
             assert_eq!(requests[0]["messages"][2]["content"], "continue");
+            let records: Vec<Value> = fs::read_to_string(&transcript)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(records.len(), 4);
+            assert_eq!(records[2]["message"]["content"], "continue");
+            assert_eq!(records[3]["message"]["content"][0]["text"], "second");
 
-            fs::write(&state, b"{broken").unwrap();
+            let good_transcript = fs::read(&transcript).unwrap();
+            fs::write(&transcript, b"{broken\n").unwrap();
             let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
                 .args([
                     "--runtime-dir",
@@ -1348,6 +1388,28 @@ mod vendor_process {
                 .unwrap();
             assert!(!output.status.success());
             assert!(!dir.path().join("registry/vendor-session.json").exists());
+            fs::write(&transcript, good_transcript).unwrap();
+            fs::write(&state, b"{broken").unwrap();
+            let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+                .args([
+                    "--runtime-dir",
+                    dir.path().to_str().unwrap(),
+                    "--cwd",
+                    dir.path().to_str().unwrap(),
+                    "--session-id",
+                    "vendor-session",
+                    "--engine",
+                    vendor,
+                    "--lore-python",
+                    lore.to_str().unwrap(),
+                    "--resume",
+                    "true",
+                ])
+                .env("DEEPSEEK_API_KEY", "test-key-1234")
+                .env("ZAI_API_KEY", "test-key-1234")
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
             assert_eq!(fs::read(&state).unwrap(), b"{broken");
         }
     }
@@ -1372,6 +1434,52 @@ mod vendor_process {
         send(
             &mut socket,
             json!({"type":"call","id":2,"method":"stop","params":{}}),
+        );
+        assert_eq!(receive(&mut reader)["ok"], true);
+        wait_until(|| process.exited());
+        assert_eq!(server.join().unwrap().len(), 1);
+        assert!(!dir.path().join("project/vendor-session.jsonl").exists());
+        assert!(!dir
+            .path()
+            .join("project/vendor-session.messages.json")
+            .exists());
+    }
+
+    #[test]
+    fn vendor_transcript_write_failure_poisoned_session_without_history_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let lore = dir.path().join("lore-fixture");
+        fake_scrubber(&lore, false);
+        let (endpoint, server) = fake_vendor(1, "answer");
+        let mut process = start_vendor(dir.path(), "deepseek", &endpoint, &lore);
+        let (mut reader, mut socket) = process.connect();
+        receive(&mut reader);
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        let target = dir.path().join("outside");
+        fs::write(&target, b"untouched").unwrap();
+        let transcript = dir.path().join("project/vendor-session.jsonl");
+        std::os::unix::fs::symlink(&target, &transcript).unwrap();
+        send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
+        let done = receive(&mut reader);
+        assert_eq!(done["event"]["data"]["is_error"], true);
+        assert_eq!(fs::read(&target).unwrap(), b"untouched");
+        assert!(!dir
+            .path()
+            .join("project/vendor-session.messages.json")
+            .exists());
+        send(&mut socket, json!({"type":"prompt","id":2,"text":"again"}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        let refused = receive(&mut reader);
+        assert_eq!(refused["event"]["data"]["is_error"], true);
+        assert!(refused["event"]["data"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("uncertain"));
+        send(
+            &mut socket,
+            json!({"type":"call","id":3,"method":"stop","params":{}}),
         );
         assert_eq!(receive(&mut reader)["ok"], true);
         wait_until(|| process.exited());

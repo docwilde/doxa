@@ -274,6 +274,9 @@ impl PeerHost {
 }
 
 impl Host for PeerHost {
+    fn transcript_snapshot(&self) -> io::Result<Option<(PathBuf, u64)>> {
+        self.inner.transcript_snapshot()
+    }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
         self.inner.prompt(text, emit);
     }

@@ -5,6 +5,7 @@ use doxa_transcript::TranscriptStore;
 use doxa_vendors::{Error, Vendor, MAX_TURN_DURATION};
 use serde_json::{json, Value};
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -17,6 +18,9 @@ pub struct VendorHost {
     lore: Mutex<LoreClient>,
     history: Mutex<Vec<Value>>,
     store: TranscriptStore,
+    cwd: String,
+    storage_uncertain: AtomicBool,
+    committed_bytes: AtomicU64,
     active: Mutex<Option<watch::Sender<bool>>>,
     turns: AtomicU64,
     closing: AtomicBool,
@@ -75,6 +79,13 @@ impl VendorHost {
         if saved.is_none() && store.transcript_path().exists() {
             return Err("existing vendor transcript has no messages state".to_owned());
         }
+        store
+            .verify_vendor_transcript(vendor.engine_id(), saved.as_deref().unwrap_or(&[]))
+            .map_err(|_| "vendor transcript and messages state diverged".to_owned())?;
+        let committed_bytes = store
+            .transcript_snapshot()
+            .map_err(|_| "vendor transcript path is unsafe".to_owned())?
+            .map_or(0, |(_, size)| size);
         let mut history = saved.unwrap_or_default();
         for message in &mut history {
             let content = message["content"].as_str().ok_or("invalid saved message")?;
@@ -89,6 +100,9 @@ impl VendorHost {
             lore: Mutex::new(lore),
             history: Mutex::new(history),
             store,
+            cwd: cwd.into_owned(),
+            storage_uncertain: AtomicBool::new(false),
+            committed_bytes: AtomicU64::new(committed_bytes),
             active: Mutex::new(None),
             turns: AtomicU64::new(0),
             closing: AtomicBool::new(false),
@@ -126,6 +140,10 @@ impl Host for VendorHost {
     }
 
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        if self.storage_uncertain.load(Ordering::Acquire) {
+            emit(done("Vendor storage state is uncertain; restart refused"));
+            return;
+        }
         if self.closing.load(Ordering::Acquire) {
             emit(done("Vendor session is stopping"));
             return;
@@ -204,6 +222,26 @@ impl Host for VendorHost {
                     if let Some(last) = history.last_mut() {
                         last["content"] = json!(text);
                     }
+                    let timestamp = crate::iso_now();
+                    if self
+                        .store
+                        .try_append_vendor_turn(
+                            self.vendor.engine_id(),
+                            &self.cwd,
+                            &prompt,
+                            &text,
+                            &timestamp,
+                            |value| {
+                                self.scrub(value)
+                                    .map_err(|_| std::io::Error::other("LORE scrub failed"))
+                            },
+                        )
+                        .is_err()
+                    {
+                        self.storage_uncertain.store(true, Ordering::Release);
+                        emit(done("Vendor transcript could not be safely saved"));
+                        return;
+                    }
                     let saved = self.store.try_write_vendor_messages(
                         self.vendor.engine_id(),
                         &self.model,
@@ -214,10 +252,18 @@ impl Host for VendorHost {
                         },
                     );
                     let Ok(history) = saved else {
+                        self.storage_uncertain.store(true, Ordering::Release);
                         emit(done("Vendor history could not be safely saved"));
                         return;
                     };
+                    let Ok(Some((_, committed_bytes))) = self.store.transcript_snapshot() else {
+                        self.storage_uncertain.store(true, Ordering::Release);
+                        emit(done("Vendor transcript commit boundary unavailable"));
+                        return;
+                    };
                     *self.history.lock().unwrap() = history;
+                    self.committed_bytes
+                        .store(committed_bytes, Ordering::Release);
                     if !reasoning.is_empty() {
                         emit(json!({"type":"reasoning_delta","data":{"text":reasoning}}));
                     }
@@ -260,6 +306,13 @@ impl Host for VendorHost {
             }
             _ => Err(format!("{method} is unavailable in the native vendor host")),
         }
+    }
+
+    fn transcript_snapshot(&self) -> std::io::Result<Option<(PathBuf, u64)>> {
+        self.store.transcript_snapshot().map(|snapshot| {
+            snapshot
+                .map(|(path, size)| (path, size.min(self.committed_bytes.load(Ordering::Acquire))))
+        })
     }
 }
 
