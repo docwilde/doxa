@@ -15,12 +15,35 @@ pub enum Engine {
     Codex,
     Claude,
     Fixture,
+    DeepSeek,
+    Glm,
+}
+
+impl Engine {
+    pub fn vendor_key(self) -> Option<&'static str> {
+        match self {
+            Self::DeepSeek => Some("DEEPSEEK_API_KEY"),
+            Self::Glm => Some("ZAI_API_KEY"),
+            _ => None,
+        }
+    }
+
+    fn model_key(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::DeepSeek => "deepseek",
+            Self::Glm => "glm",
+            Self::Fixture => "fixture",
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct LaunchOptions {
     pub engine: Engine,
     pub model: Option<String>,
+    pub effort: Option<String>,
     pub linger: Option<f64>,
     pub sandbox: Option<String>,
     pub codex_bin: Option<PathBuf>,
@@ -85,6 +108,17 @@ pub fn claude_dependencies(options: &LaunchOptions) -> io::Result<(PathBuf, Path
         .as_deref()
         .ok_or_else(|| invalid("Claude needs --claude-script PATH"))?;
     Ok((python, claude_script(script)?))
+}
+
+pub fn vendor_effort(options: &LaunchOptions) -> io::Result<()> {
+    if let Some(effort) = &options.effort {
+        if !(matches!(effort.as_str(), "low" | "high" | "max")
+            || options.engine == Engine::DeepSeek && effort == "none")
+        {
+            return Err(invalid("invalid vendor effort"));
+        }
+    }
+    Ok(())
 }
 
 pub fn daemon_binary() -> io::Result<PathBuf> {
@@ -152,16 +186,17 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
     let model = options
         .model
         .clone()
-        .or_else(|| configured_string("model", "DOXA_MODEL", None))
+        .or_else(|| {
+            if options.engine.vendor_key().is_none() {
+                configured_string("model", "DOXA_MODEL", None)
+            } else {
+                None
+            }
+        })
         .or_else(|| {
             cfg.as_ref()
                 .and_then(|c| c.get("models"))
-                .and_then(|m| {
-                    m.get(match options.engine {
-                        Engine::Claude => "claude",
-                        _ => "codex",
-                    })
-                })
+                .and_then(|m| m.get(options.engine.model_key()))
                 .and_then(toml::Value::as_str)
                 .map(str::to_owned)
         });
@@ -218,6 +253,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
     match options.engine {
         Engine::Fixture => {
             if options.model.is_some()
+                || options.effort.is_some()
                 || options.sandbox.is_some()
                 || options.codex_bin.is_some()
                 || options.lore_python.is_some()
@@ -235,6 +271,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
             if options.claude_python.is_some()
                 || options.claude_script.is_some()
                 || options.resume.is_some()
+                || options.effort.is_some()
             {
                 return Err(invalid("Claude options require --engine claude"));
             }
@@ -259,6 +296,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
             if options.codex_bin.is_some()
                 || options.lore_python.is_some()
                 || options.sandbox.is_some()
+                || options.effort.is_some()
             {
                 return Err(invalid("Codex options require --engine codex"));
             }
@@ -274,6 +312,38 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
             }
             if let Some(model) = &model {
                 command.arg("--model").arg(model);
+            }
+        }
+        Engine::DeepSeek | Engine::Glm => {
+            if options.codex_bin.is_some()
+                || options.sandbox.is_some()
+                || options.claude_python.is_some()
+                || options.claude_script.is_some()
+                || options.resume.is_some()
+            {
+                return Err(invalid("unsupported option for vendor engine"));
+            }
+            let key = options.engine.vendor_key().expect("vendor engine");
+            if !env::var(key).is_ok_and(|value| !value.is_empty()) {
+                return Err(invalid(format!("{key} is required for native vendor chat")));
+            }
+            vendor_effort(options)?;
+            let python = executable(
+                options
+                    .lore_python
+                    .as_deref()
+                    .unwrap_or(Path::new("python3")),
+            )?;
+            let name = options.engine.model_key();
+            command
+                .args(["--engine", name])
+                .arg("--lore-python")
+                .arg(python);
+            if let Some(model) = &model {
+                command.arg("--model").arg(model);
+            }
+            if let Some(effort) = &options.effort {
+                command.arg("--effort").arg(effort);
             }
         }
     }
@@ -292,7 +362,13 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
                 return Err(error);
             }
         };
-        if let Some(session) = sessions.into_iter().find(|s| s.id == id) {
+        let expected_socket = format!("daemon-{}-{}.sock", &id[..id.len().min(8)], child.id());
+        if let Some(session) = sessions.into_iter().find(|s| {
+            s.id == id
+                && s.socket
+                    .file_name()
+                    .is_some_and(|name| name == expected_socket.as_str())
+        }) {
             return Ok(session);
         }
         if let Some(status) = child.try_wait()? {
@@ -302,6 +378,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
                     Engine::Claude => "Claude SDK and sidecar",
                     Engine::Codex => "Codex authentication and LORE",
                     Engine::Fixture => "fixture",
+                    Engine::DeepSeek | Engine::Glm => "vendor API key and LORE",
                 }
             )));
         }

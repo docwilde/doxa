@@ -78,6 +78,17 @@ to choose a model, or `--resume SESSION_ID` to resume that session's Claude
 conversation. `doxa-rs doctor --engine claude` checks the selected Python
 interpreter, sidecar script, daemon, and runtime path.
 
+Start native DeepSeek or GLM plain chat with `doxa-rs new --engine deepseek`
+or `doxa-rs new --engine glm`. Set `DEEPSEEK_API_KEY` or `ZAI_API_KEY` in the
+environment, respectively. `--lore-python` selects the Python interpreter
+used for LORE scrubbing (default `python3`); it must have DOXA and LORE
+installed. `--model` overrides the matching `deepseek` or `glm` entry under
+`[models]` in `$DOXA_HOME/config.toml`. The Codex-only `DOXA_MODEL` setting
+does not select a vendor model. `--effort low|high|max` is optional; DeepSeek
+also accepts `none`. `doxa-rs doctor --engine deepseek|glm` checks the daemon,
+LORE interpreter, provider key presence, and effort value without printing the
+key. Vendor chat has no tools, persistence, or resume in this alpha.
+
 ## Native daemon
 
 `doxa-daemon` is a native protocol v1 host process for lifecycle and transport

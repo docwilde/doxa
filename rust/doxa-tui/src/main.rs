@@ -30,9 +30,9 @@ fn run(args: &[String]) -> io::Result<()> {
             {
                 command = Some(arg)
             }
-            "--session" | "--socket" | "--engine" | "--model" | "--linger" | "--sandbox"
-            | "--codex-bin" | "--lore-python" | "--claude-python" | "--claude-script"
-            | "--resume" => {
+            "--session" | "--socket" | "--engine" | "--model" | "--effort" | "--linger"
+            | "--sandbox" | "--codex-bin" | "--lore-python" | "--claude-python"
+            | "--claude-script" | "--resume" => {
                 index += 1;
                 let value = args
                     .get(index)
@@ -45,15 +45,20 @@ fn run(args: &[String]) -> io::Result<()> {
                         prefix = Some(value);
                     }
                     "--socket" => socket = Some(value),
-                    "--engine" => match value.as_str() {
-                        "codex" => options.engine = launch::Engine::Codex,
-                        "claude" => options.engine = launch::Engine::Claude,
-                        "fixture" => options.engine = launch::Engine::Fixture,
-                        _ => {
-                            return Err(invalid("native engine must be codex, claude, or fixture"))
+                    "--engine" => {
+                        match value.as_str() {
+                            "codex" => options.engine = launch::Engine::Codex,
+                            "claude" => options.engine = launch::Engine::Claude,
+                            "fixture" => options.engine = launch::Engine::Fixture,
+                            "deepseek" => options.engine = launch::Engine::DeepSeek,
+                            "glm" => options.engine = launch::Engine::Glm,
+                            _ => return Err(invalid(
+                                "native engine must be codex, claude, deepseek, glm, or fixture",
+                            )),
                         }
-                    },
+                    }
                     "--model" => options.model = Some(value.clone()),
+                    "--effort" => options.effort = Some(value.clone()),
                     "--linger" => {
                         options.linger = Some(value.parse().map_err(|_| invalid("invalid linger"))?)
                     }
@@ -89,7 +94,7 @@ fn run(args: &[String]) -> io::Result<()> {
     }
     match command {
         Some("--help") => {
-            println!("Usage: doxa-rs [new|attach [ID]|stop [ID]|list|doctor] [options]\n       doxa-rs --session ID\n       doxa-rs --socket PATH\n\nPlain doxa-rs restores live sessions in the current project, or starts a native Codex session.\nnew always starts a session. attach and stop accept a full ID or unique prefix.\nOptions for new sessions: --engine codex|claude|fixture, --model NAME, --linger SECONDS.\nCodex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH, --lore-python PATH.\nClaude: --claude-python PATH, --claude-script ABSOLUTE_PATH, --resume SESSION_ID (with new).\nDOXA_DAEMON_BIN selects an absolute native daemon path. Ctrl+Q detaches without stopping the daemon.");
+            println!("Usage: doxa-rs [new|attach [ID]|stop [ID]|list|doctor] [options]\n       doxa-rs --session ID\n       doxa-rs --socket PATH\n\nPlain doxa-rs restores live sessions in the current project, or starts a native Codex session.\nnew always starts a session. attach and stop accept a full ID or unique prefix.\nOptions for new sessions: --engine codex|claude|deepseek|glm|fixture, --model NAME, --linger SECONDS.\nCodex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH, --lore-python PATH.\nClaude: --claude-python PATH, --claude-script ABSOLUTE_PATH, --resume SESSION_ID (with new).\nDeepSeek/GLM: --lore-python PATH, --effort low|high|max (DeepSeek also none); API key in provider environment variable.\nDOXA_DAEMON_BIN selects an absolute native daemon path. Ctrl+Q detaches without stopping the daemon.");
             Ok(())
         }
         Some("--version") => {
@@ -154,6 +159,28 @@ fn run(args: &[String]) -> io::Result<()> {
                     ));
                 }
                 launch::Engine::Fixture => {}
+                launch::Engine::DeepSeek | launch::Engine::Glm => {
+                    checks.push((
+                        "lore python",
+                        launch::executable(
+                            options
+                                .lore_python
+                                .as_deref()
+                                .unwrap_or(std::path::Path::new("python3")),
+                        ),
+                    ));
+                    if let Err(error) = launch::vendor_effort(&options) {
+                        println!("missing vendor effort: {error}");
+                        missing = true;
+                    }
+                    let key = options.engine.vendor_key().expect("vendor engine");
+                    if std::env::var(key).is_ok_and(|value| !value.is_empty()) {
+                        println!("ok {key}: set");
+                    } else {
+                        println!("missing {key}: unset");
+                        missing = true;
+                    }
+                }
             }
             for (name, result) in checks {
                 match result {
