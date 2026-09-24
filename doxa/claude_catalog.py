@@ -25,7 +25,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 
 _MAX_CACHE_BYTES = 2 * 1024 * 1024
@@ -272,7 +272,7 @@ def read_cached_catalog(
 
 
 async def warm_cli_catalog(*, cli: str = "claude", timeout: float = 8.0) -> bool:
-    """Start Claude once without sending a prompt so it can refresh its cache.
+    """Start Claude once without a prompt; return whether it ran successfully.
 
     Stream input stays open during initialization. No model request is sent;
     the subprocess is stopped after a fixed window. ``--safe-mode`` disables
@@ -308,3 +308,35 @@ async def warm_cli_catalog(*, cli: str = "claude", timeout: float = 8.0) -> bool
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGKILL)
                 await process.wait()
+
+
+CatalogRefreshStatus = Literal["refreshed", "unchanged", "unavailable"]
+
+
+async def attempt_cli_catalog_refresh() -> CatalogRefreshStatus:
+    """Compare validated account-matched snapshots around one CLI startup.
+
+    An idle stream-json process is evidence only that the CLI ran, not that
+    its private cache changed. Report a refresh only when ``fetchedAt``
+    advances or a matching catalogue appears where none existed before.
+    """
+    try:
+        before = await asyncio.to_thread(read_cached_catalog)
+    except Exception:  # noqa: BLE001 -- optional private cache inspection
+        before = None
+        baseline_known = False
+    else:
+        baseline_known = True
+    try:
+        cli_ran = await warm_cli_catalog()
+    except Exception:  # noqa: BLE001 -- optional CLI startup
+        cli_ran = False
+    try:
+        after = await asyncio.to_thread(read_cached_catalog)
+    except Exception:  # noqa: BLE001 -- optional private cache inspection
+        after = None
+    if cli_ran and baseline_known and after is not None and (
+        before is None or after.fetched_at > before.fetched_at
+    ):
+        return "refreshed"
+    return "unchanged" if cli_ran else "unavailable"

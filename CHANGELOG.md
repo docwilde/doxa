@@ -6,7 +6,7 @@ not written from memory.
 
 ## Unreleased
 
-- DOXA starts Claude CLI once in safe mode in the background without sending a prompt, giving it a bounded chance to refresh its model catalogue. The picker now reads the newer `cc` cache only when its filename matches the active organization and account, as well as the older organization-scoped `ccd` cache, and explains when the CLI could not provide a matching list.
+- DOXA starts Claude CLI once in safe mode in the background without sending a prompt, giving it a bounded chance to refresh its model catalogue. The picker now reads the newer `cc` cache only when its filename matches the active organization and account, as well as the older organization-scoped `ccd` cache. It reports a refresh only when a validated cache's fetch time advances, and labels unchanged or unavailable snapshots honestly.
 
 ## 1.17.0 — 2026-09-24
 

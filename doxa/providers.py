@@ -246,13 +246,13 @@ class ClaudeProvider:
     comment for the parallel note on the tab-label side."""
 
     _catalog_generation = 0
-    _startup_cli_ok: bool | None = None
+    _startup_refresh_status: str | None = None
 
     @classmethod
-    def startup_catalog_checked(cls, cli_ok: bool) -> None:
+    def startup_catalog_checked(cls, status: str) -> None:
         """Make existing pane providers reread Claude's cache after startup."""
         cls._catalog_generation += 1
-        cls._startup_cli_ok = cli_ok
+        cls._startup_refresh_status = status
 
     def __init__(self) -> None:
         self._cache: "list[ModelInfo] | None" = None
@@ -291,26 +291,34 @@ class ClaudeProvider:
     def catalog_note(self, models: list[ModelInfo]) -> str:
         if models and models[0].source == "offline-cache":
             state = "stale" if models[0].stale else "cached"
-            return (
+            note = (
                 f"model catalog: Claude CLI offline {state} snapshot, last seen "
                 f"{models[0].as_of}; Claude is signed out — sign-in required; "
                 "model availability unverified"
             )
+            if models[0].stale and type(self)._startup_refresh_status == "unchanged":
+                note += "; startup check did not update this snapshot"
+            return note
         if models and models[0].source == "cache":
             state = "stale" if models[0].stale else "cached"
-            return (
+            note = (
                 f"model catalog: Claude CLI {state} list, last seen "
                 f"{models[0].as_of}; availability may have changed"
             )
+            if models[0].stale and type(self)._startup_refresh_status == "unchanged":
+                note += "; startup check did not update this snapshot"
+            elif models[0].stale and type(self)._startup_refresh_status == "unavailable":
+                note += "; Claude CLI startup check unavailable"
+            return note
         if models and models[0].source == "fallback":
             note = (
                 "model catalog: static fallback -- the Anthropic Models "
                 "API is not reachable under this session's OAuth auth"
             )
-            if type(self)._startup_cli_ok is False:
-                note += "; Claude CLI startup refresh unavailable"
-            elif type(self)._startup_cli_ok is True:
-                note += "; Claude CLI provided no matching cached list"
+            if type(self)._startup_refresh_status == "unavailable":
+                note += "; Claude CLI startup check unavailable"
+            elif type(self)._startup_refresh_status == "unchanged":
+                note += "; startup check produced no matching cached list"
             return note
         return ""
 

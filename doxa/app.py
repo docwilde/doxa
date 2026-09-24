@@ -1559,10 +1559,10 @@ class DoxaApp(
         from . import claude_catalog, providers
 
         try:
-            cli_ok = await claude_catalog.warm_cli_catalog()
+            status = await claude_catalog.attempt_cli_catalog_refresh()
         except Exception:  # noqa: BLE001 -- optional startup catalogue
-            cli_ok = False
-        providers.ClaudeProvider.startup_catalog_checked(cli_ok)
+            status = "unavailable"
+        providers.ClaudeProvider.startup_catalog_checked(status)
 
     async def _check_for_update(self) -> None:
         """Boot-time "is there something to pull" check -- see

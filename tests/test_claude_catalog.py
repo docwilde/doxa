@@ -317,3 +317,45 @@ async def test_missing_cli_warmup_fails_cleanly(monkeypatch):
 
     monkeypatch.setattr(claude_catalog.asyncio, "create_subprocess_exec", missing)
     assert await claude_catalog.warm_cli_catalog(timeout=0.01) is False
+
+
+@pytest.mark.parametrize("before,after,expected", [
+    (None, None, "unchanged"),
+    (NOW - timedelta(hours=2), NOW - timedelta(hours=2), "unchanged"),
+    (NOW - timedelta(hours=2), NOW - timedelta(minutes=1), "refreshed"),
+    (None, NOW - timedelta(minutes=1), "refreshed"),
+])
+async def test_startup_refresh_requires_a_new_account_matched_snapshot(
+    monkeypatch, before, after, expected,
+):
+    snapshots = iter((before, after))
+
+    def read():
+        fetched_at = next(snapshots)
+        return None if fetched_at is None else claude_catalog.ClaudeCatalog(
+            models=(claude_catalog.ClaudeCatalogModel("claude-sonnet-5", "Sonnet 5"),),
+            fetched_at=fetched_at,
+            stale_at=fetched_at + timedelta(hours=1),
+            is_stale=True,
+        )
+
+    calls = []
+
+    async def warm():
+        calls.append("warm")
+        return True
+
+    monkeypatch.setattr(claude_catalog, "read_cached_catalog", read)
+    monkeypatch.setattr(claude_catalog, "warm_cli_catalog", warm)
+    assert await claude_catalog.attempt_cli_catalog_refresh() == expected
+    assert calls == ["warm"]
+
+
+async def test_failed_startup_cli_is_not_reported_as_refresh(monkeypatch):
+    monkeypatch.setattr(claude_catalog, "read_cached_catalog", lambda: None)
+
+    async def warm():
+        return False
+
+    monkeypatch.setattr(claude_catalog, "warm_cli_catalog", warm)
+    assert await claude_catalog.attempt_cli_catalog_refresh() == "unavailable"
