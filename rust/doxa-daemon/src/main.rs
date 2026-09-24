@@ -223,24 +223,25 @@ fn run() -> io::Result<()> {
     let mut empty_since = Instant::now();
     let mut last_beat = Instant::now();
     let mut previous_clients = 0;
-    while !TERMINATE.load(Ordering::Acquire) && !handle.is_stopping() {
+    let result = loop {
+        if TERMINATE.load(Ordering::Acquire) || handle.is_stopping() { break Ok(()); }
         let clients = handle.attached_clients();
         if clients > 0 { had_client = true; empty_since = Instant::now(); }
         else if previous_clients > 0 { empty_since = Instant::now(); }
         let delay = if had_client { options.linger } else { options.linger.max(Duration::from_secs(120)) };
-        if clients == 0 && empty_since.elapsed() >= delay { break; }
+        if clients == 0 && empty_since.elapsed() >= delay { break Ok(()); }
         if clients != previous_clients || last_beat.elapsed() >= Duration::from_secs(15) {
-            registry.write(clients)?;
+            if let Err(error) = registry.write(clients) { break Err(error); }
             last_beat = Instant::now();
         }
         previous_clients = clients;
         thread::sleep(Duration::from_millis(20));
-    }
+    };
     if let Some(host) = &codex_host {
         if !host.shutdown() { eprintln!("doxa-daemon: Codex process did not finish after cancellation"); }
     }
     handle.shutdown();
-    Ok(())
+    result
 }
 fn main() {
     if let Err(error) = run() { eprintln!("doxa-daemon: {error}"); std::process::exit(1); }
