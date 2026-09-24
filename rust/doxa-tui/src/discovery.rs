@@ -19,7 +19,6 @@ const MAX_ENTRY_BYTES: u64 = 64 * 1024;
 #[derive(Debug, Clone)]
 pub struct Session {
     pub id: String,
-    pub title: String,
     pub socket: PathBuf,
     pub clients: Option<u64>,
     pub started_at: String,
@@ -31,7 +30,8 @@ struct Entry {
     pid: i32,
     heartbeat_at: String,
     started_at: String,
-    title: String,
+    #[serde(rename = "title")]
+    _title: String,
     daemon_socket: Option<String>,
     clients: Option<u64>,
 }
@@ -164,7 +164,6 @@ fn read_entry(path: &Path, runtime: &Path, uid: u32) -> Option<Session> {
     }
     Some(Session {
         id: entry.session_id,
-        title: safe_label(&entry.title),
         socket,
         clients: entry.clients,
         started_at: entry.started_at,
@@ -187,19 +186,6 @@ pub fn valid_id(id: &str) -> bool {
     id.len() <= 128
         && id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
         && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-}
-
-fn safe_label(raw: &str) -> String {
-    let label: String = raw
-        .chars()
-        .filter(|c| !c.is_control() && *c != '\u{1b}')
-        .take(96)
-        .collect();
-    if label.trim().is_empty() {
-        "(untitled)".into()
-    } else {
-        label
-    }
 }
 
 /// Full ID wins, then an unambiguous prefix. Never guess among candidates.
@@ -251,7 +237,6 @@ mod tests {
     fn selection_never_guesses() {
         let entries = ["abc123", "abc456"].map(|id| Session {
             id: id.into(),
-            title: id.into(),
             socket: PathBuf::new(),
             clients: None,
             started_at: String::new(),
@@ -261,11 +246,6 @@ mod tests {
         assert!(select(&entries, Some("abc")).is_err());
         assert!(select(&entries, None).is_err());
         assert!(select(&entries, Some("../abc")).is_err());
-    }
-
-    #[test]
-    fn labels_cannot_control_terminal() {
-        assert_eq!(safe_label("hello\u{1b}[2J\nworld"), "hello[2Jworld");
     }
 
     #[test]

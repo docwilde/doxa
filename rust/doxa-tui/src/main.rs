@@ -9,7 +9,7 @@ fn main() -> std::io::Result<()> {
             }
             for session in sessions {
                 let clients = session.clients.map_or("?".into(), |n| n.to_string());
-                println!("{}  {}  clients:{}", session.id, session.title, clients);
+                println!("{}  clients:{}", session.id, clients);
             }
             Ok(())
         }
