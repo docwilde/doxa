@@ -604,14 +604,9 @@ impl App {
                     return false;
                 };
                 let data = &event["data"];
-                // A transport reader may serve several sockets. The frame itself
-                // lacks a session id, so a reader can add one before delivery.
-                let id = frame
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| self.groups[self.active_group].active_id())
-                    .or_else(|| self.sessions.first().map(|s| s.id.as_str()));
-                let Some(id) = id.map(str::to_owned) else {
+                // The transport tags every socket frame before delivery. An
+                // untagged frame must not alter the currently focused session.
+                let Some(id) = frame.get("session_id").and_then(|v| v.as_str()).map(str::to_owned) else {
                     return false;
                 };
                 if self.sessions.iter().any(|session| session.id == id) {
@@ -787,11 +782,8 @@ impl App {
                 true
             }
             "reply" => {
-                if frame["ok"] == true && frame["queued"] == true {
-                    if let Some(id) = frame["session_id"].as_str() {
-                        self.session_activity.entry(id.to_owned()).or_default().1 += 1;
-                    }
-                }
+                // Both native and Python daemons broadcast prompt_queued after
+                // the enqueue reply. Count that event once, not this reply.
                 if let Some(status) = frame.get("status") {
                     let id = status.get("session_id").and_then(|v| v.as_str())
                         .or_else(|| frame.get("session_id").and_then(|v| v.as_str()));
@@ -892,11 +884,10 @@ impl App {
                 let Some(text) = frame.get("text").and_then(|v| v.as_str()) else {
                     return false;
                 };
+                let Some(target) = frame.get("session_id").and_then(|v| v.as_str()) else {
+                    return false;
+                };
                 let active = self.groups[self.active_group].active_id().unwrap_or("");
-                let target = frame
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(active);
                 if self.input.is_empty() && target == active {
                     self.input = text.to_owned();
                 } else {
@@ -925,11 +916,9 @@ impl App {
                 let Some(text) = frame.get("text").and_then(|v| v.as_str()) else {
                     return false;
                 };
-                let active = self.groups[self.active_group].active_id().unwrap_or("");
-                let target = frame
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(active);
+                let Some(target) = frame.get("session_id").and_then(|v| v.as_str()) else {
+                    return false;
+                };
                 self.rejected_drafts
                     .entry(target.into())
                     .or_default()
@@ -3345,7 +3334,7 @@ mod tests {
             ..Default::default()
         };
         app.apply_daemon_frame(
-            &json!({"type":"prompt_rejected", "text":"old prompt", "message":"queue full"}),
+            &json!({"type":"prompt_rejected", "session_id":"", "text":"old prompt", "message":"queue full"}),
         );
         assert_eq!(app.input, "new draft");
         assert_eq!(app.rejected_drafts[""], ["old prompt"]);
@@ -3357,7 +3346,7 @@ mod tests {
     #[test]
     fn unconfirmed_prompt_requires_deliberate_recovery_before_retry() {
         let mut app = App::default();
-        app.apply_daemon_frame(&json!({"type":"prompt_uncertain", "text":"possibly sent",
+        app.apply_daemon_frame(&json!({"type":"prompt_uncertain", "session_id":"", "text":"possibly sent",
             "message":"Prompt delivery unconfirmed"}));
         assert!(app.input.is_empty());
         assert_eq!(app.rejected_drafts[""], ["possibly sent"]);
@@ -3383,5 +3372,30 @@ mod tests {
         assert_eq!(app.input, "draft for b");
         app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
         assert_eq!(app.input, "draft for a");
+    }
+
+    #[test]
+    fn untagged_event_or_rejection_cannot_change_the_active_session() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"a", "model":"model"}));
+        let original = app.sessions[0].transcript.clone();
+        assert!(!app.apply_daemon_frame(&json!({"type":"event",
+            "event":{"type":"text_delta", "data":{"text":"wrong session"}}})));
+        assert!(!app.apply_daemon_frame(&json!({"type":"prompt_rejected", "text":"wrong draft"})));
+        assert_eq!(app.sessions[0].transcript, original);
+        assert!(app.rejected_drafts.is_empty());
+    }
+
+    #[test]
+    fn queued_reply_and_broadcast_count_one_prompt() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"a", "queued":0}));
+        app.apply_daemon_frame(&json!({"type":"reply", "session_id":"a", "ok":true, "queued":true}));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"a",
+            "event":{"type":"prompt_queued", "data":{"id":"q"}}}));
+        assert_eq!(app.session_activity["a"].1, 1);
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"a",
+            "event":{"type":"prompt_dequeued", "data":{"id":"q"}}}));
+        assert_eq!(app.session_activity["a"].1, 0);
     }
 }
