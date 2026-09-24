@@ -212,7 +212,10 @@ pub fn load_tabset(path: &Path, fallback_scope: &str) -> Option<TabSet> {
             cwd: obj.get("cwd").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned),
         });
     }
-    if tabs.is_empty() { return None; }
+    // An intentionally empty tabset still owns layout, collections, and
+    // future fields that must survive the next save. A nonempty array whose
+    // rows were all rejected is malformed rather than an empty tabset.
+    if tabs.is_empty() && !rows.is_empty() { return None; }
     Some(TabSet {
         scope_key: data.get("scope_key").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or(fallback_scope).into(),
         active_session_id: data.get("active_session_id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned),

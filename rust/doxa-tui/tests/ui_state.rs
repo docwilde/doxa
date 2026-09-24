@@ -155,6 +155,21 @@ fn no_live_saved_tab_leaves_fresh_app_untouched() {
 }
 
 #[test]
+fn new_live_tab_preserves_metadata_from_saved_empty_tabset() {
+    let (_dir, mut store) = seeded(json!({"tabs":[],"active_session_id":null,
+        "layout":{"kind":"tabs","tabs":[],"future_layout":"keep"},
+        "collections":[{"name":"Archive","sessions":[]}],"future_key":42}));
+    let mut app = App::default();
+    app.groups[0].tabs.push("new-session".into());
+    store.save(&app).unwrap();
+    let saved: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(saved["tabs"][0]["session_id"], "new-session");
+    assert_eq!(saved["layout"]["future_layout"], "keep");
+    assert_eq!(saved["collections"][0]["name"], "Archive");
+    assert_eq!(saved["future_key"], 42);
+}
+
+#[test]
 fn transcript_scroll_does_not_count_as_layout_change() {
     let mut app = App::default();
     let before = doxa_tui::ui_state::LayoutSignature::capture(&app);

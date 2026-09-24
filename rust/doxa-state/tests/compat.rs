@@ -45,6 +45,25 @@ fn legacy_flat_record_and_future_layout_survive_save() {
 }
 
 #[test]
+fn empty_tabset_retains_raw_layout_and_collections() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let path = dir.path().join("empty.json");
+    let original = json!({"scope_key":"/repo","tabs":[],"active_session_id":null,
+        "layout":{"kind":"tabs","tabs":[],"future_layout":"keep"},
+        "collections":[{"name":"Archive","sessions":[]}],"future_key":{"keep":true}});
+    fs::write(&path, original.to_string()).unwrap();
+    let record = load_tabset(&path, "/repo").expect("valid empty tabset");
+    assert!(record.tabs.is_empty());
+    assert_eq!(record.raw["collections"], original["collections"]);
+    save_tabset(&path, &record).unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(saved["layout"]["future_layout"], "keep");
+    assert_eq!(saved["collections"], original["collections"]);
+    assert_eq!(saved["future_key"], original["future_key"]);
+}
+
+#[test]
 fn config_precedence_and_parse_failure() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
