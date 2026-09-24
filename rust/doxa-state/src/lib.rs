@@ -37,19 +37,38 @@ pub fn runtime_dir(home: &Path, doxa_runtime_dir: Option<&str>, xdg_runtime_dir:
 /// Upper bound for one advisory presence file. The Python writer emits only a few KB.
 pub const MAX_REGISTRY_BYTES: u64 = 64 * 1024;
 
-fn scrub_strings(value: &mut Value, scrub: &impl Fn(&str) -> String) {
-    match value {
-        Value::String(s) => *s = scrub(s),
-        Value::Array(items) => items.iter_mut().for_each(|item| scrub_strings(item, scrub)),
-        Value::Object(map) => map.values_mut().for_each(|item| scrub_strings(item, scrub)),
-        _ => {}
-    }
+/// Raw routing fields are kept separate from display text. Never render these
+/// fields directly; paths and IDs are used only to locate the daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonRoute {
+    pub session_id: String,
+    pub pid: i32,
+    pub socket_path: String,
+    pub daemon_socket: String,
+    pub scope_key: String,
+    pub started_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonDisplay {
+    pub title: String,
+    pub cwd: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub engine: Option<String>,
+    pub parent_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonInfo {
+    pub route: DaemonRoute,
+    pub display: DaemonDisplay,
 }
 
 /// Read valid live daemon entries, in newest-first order, without modifying registry files.
-/// The required scrubber runs over every returned string, including nested future fields.
-/// Supply the same redactor used for other untrusted session text before display or logging.
-pub fn list_daemons(registry_dir: &Path, scope: Option<&str>, scrub: impl Fn(&str) -> String) -> Vec<Value> {
+/// The required scrubber runs over each exposed display string. Unknown fields
+/// are dropped; raw routing strings are separate and must never be rendered.
+pub fn list_daemons(registry_dir: &Path, scope: Option<&str>, scrub: impl Fn(&str) -> String) -> Vec<DaemonInfo> {
     let mut peers = Vec::new();
     let Ok(paths) = fs::read_dir(registry_dir) else { return peers };
     for entry in paths.flatten() {
@@ -60,12 +79,16 @@ pub fn list_daemons(registry_dir: &Path, scope: Option<&str>, scrub: impl Fn(&st
         let Ok(file) = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(entry.path()) else { continue; };
         let mut raw = Vec::new();
         if file.take(MAX_REGISTRY_BYTES + 1).read_to_end(&mut raw).is_err() || raw.len() as u64 > MAX_REGISTRY_BYTES { continue; }
-        let Ok(mut value) = serde_json::from_slice::<Value>(&raw) else { continue; };
+        let Ok(value) = serde_json::from_slice::<Value>(&raw) else { continue; };
         let Some(map) = value.as_object() else { continue; };
         if !["session_id", "pid", "socket_path", "cwd", "repo_root", "title", "started_at", "heartbeat_at"]
             .iter().all(|key| map.contains_key(*key)) { continue; }
-        if !map.get("session_id").and_then(Value::as_str).is_some_and(valid_session_id) { continue; }
-        if map.get("daemon_socket").and_then(Value::as_str).filter(|s| !s.is_empty()).is_none() { continue; }
+        let Some(session_id) = map.get("session_id").and_then(Value::as_str).filter(|s| valid_session_id(s)) else { continue; };
+        let Some(daemon_socket) = map.get("daemon_socket").and_then(Value::as_str).filter(|s| !s.is_empty()) else { continue; };
+        let Some(socket_path) = map.get("socket_path").and_then(Value::as_str) else { continue; };
+        let Some(cwd) = map.get("cwd").and_then(Value::as_str) else { continue; };
+        let Some(title) = map.get("title").and_then(Value::as_str) else { continue; };
+        let Some(started_at) = map.get("started_at").and_then(Value::as_str) else { continue; };
         let Some(pid) = map.get("pid").and_then(Value::as_i64) else { continue; };
         if pid <= 0 || pid > i32::MAX as i64 { continue; }
         // kill(pid, 0) reports EPERM for an existing process owned by another user.
@@ -76,13 +99,23 @@ pub fn list_daemons(registry_dir: &Path, scope: Option<&str>, scrub: impl Fn(&st
         let Ok(ts) = time::PrimitiveDateTime::parse(heartbeat, &format) else { continue; };
         let age = time::OffsetDateTime::now_utc().unix_timestamp() - ts.assume_utc().unix_timestamp();
         if age > 60 { continue; }
-        let scope_key = map.get("repo_root").and_then(Value::as_str).filter(|s| !s.is_empty())
-            .or_else(|| map.get("cwd").and_then(Value::as_str));
-        if scope.is_some() && scope != scope_key { continue; }
-        scrub_strings(&mut value, &scrub);
-        peers.push(value);
+        let scope_key = map.get("repo_root").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or(cwd);
+        if scope.is_some() && scope != Some(scope_key) { continue; }
+        let display_optional = |name: &str| map.get(name).and_then(Value::as_str).filter(|s| !s.is_empty()).map(&scrub);
+        peers.push(DaemonInfo {
+            route: DaemonRoute {
+                session_id: session_id.into(), pid: pid as i32,
+                socket_path: socket_path.into(), daemon_socket: daemon_socket.into(),
+                scope_key: scope_key.into(), started_at: started_at.into(),
+            },
+            display: DaemonDisplay {
+                title: scrub(title), cwd: scrub(cwd),
+                provider: display_optional("provider"), model: display_optional("model"),
+                engine: display_optional("engine"), parent_session_id: display_optional("parent_session_id"),
+            },
+        });
     }
-    peers.sort_by(|a, b| b.get("started_at").and_then(Value::as_str).cmp(&a.get("started_at").and_then(Value::as_str)));
+    peers.sort_by(|a, b| b.route.started_at.cmp(&a.route.started_at));
     peers
 }
 

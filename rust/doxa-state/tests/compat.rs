@@ -69,11 +69,11 @@ fn registry_filters_dead_and_malformed_entries() {
 }
 
 #[test]
-fn registry_rejects_symlinks_oversize_and_bad_ids_and_scrubs_nested_text() {
+fn registry_rejects_symlinks_oversize_and_bad_ids_and_scrubs_display_text() {
     let dir = tempfile::tempdir().unwrap();
     let now = time::OffsetDateTime::now_utc();
     let stamp = now.format(&time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:6]Z")).unwrap();
-    let mut entry = json!({"session_id":"safe","pid":std::process::id(),"socket_path":"/tmp/sock","cwd":"/repo/SECRET","repo_root":"/repo","title":"SECRET","started_at":stamp,"heartbeat_at":stamp,"daemon_socket":"/tmp/daemon","future":{"label":"SECRET"}});
+    let mut entry = json!({"session_id":"safe","pid":std::process::id(),"socket_path":"/tmp/sock","cwd":"/repo/SECRET","repo_root":"/repo","title":"SECRET","provider":"SECRET","started_at":stamp,"heartbeat_at":stamp,"daemon_socket":"/tmp/daemon","future":{"label":"SECRET"}});
     fs::write(dir.path().join("safe.json"), entry.to_string()).unwrap();
     entry["session_id"] = json!("../bad");
     fs::write(dir.path().join("bad-id.json"), entry.to_string()).unwrap();
@@ -81,9 +81,11 @@ fn registry_rejects_symlinks_oversize_and_bad_ids_and_scrubs_nested_text() {
     std::os::unix::fs::symlink(dir.path().join("safe.json"), dir.path().join("link.json")).unwrap();
     let found = list_daemons(dir.path(), Some("/repo"), |s| s.replace("SECRET", "[redacted]"));
     assert_eq!(found.len(), 1);
-    assert_eq!(found[0]["title"], "[redacted]");
-    assert_eq!(found[0]["cwd"], "/repo/[redacted]");
-    assert_eq!(found[0]["future"]["label"], "[redacted]");
+    assert_eq!(found[0].display.title, "[redacted]");
+    assert_eq!(found[0].display.cwd, "/repo/[redacted]");
+    assert_eq!(found[0].display.provider.as_deref(), Some("[redacted]"));
+    assert_eq!(found[0].route.scope_key, "/repo");
+    assert_eq!(found[0].route.session_id, "safe");
 }
 
 #[test]
