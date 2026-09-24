@@ -1,5 +1,6 @@
 use doxa_runtime::{Daemon, Host, Session, MAX_FRAME_BYTES};
 use serde_json::{json, Value};
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -93,6 +94,63 @@ fn slow_model_control_does_not_block_other_clients_status() {
     let frame: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(frame["status"]["model"], Value::Null);
     assert_eq!(recv(&mut control_reader)["model"], "test-model");
+}
+
+struct ControlReplies(Mutex<VecDeque<Value>>);
+
+impl Host for ControlReplies {
+    fn prompt(&self, _: &str, _: &mut dyn FnMut(Value)) {}
+    fn call(&self, _: &str, _: &Value) -> Result<Value, String> {
+        Ok(self.0.lock().unwrap().pop_front().unwrap())
+    }
+}
+
+#[test]
+fn malformed_control_replies_do_not_report_success_or_change_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let replies = vec![
+        json!({}), json!({"model":null}), json!({"model":42}),
+        json!({"model":""}), json!({"model":"bad\nmodel"}), json!([]),
+        json!({}), json!({"mode":null}), json!({"mode":42}),
+        json!({"mode":""}), json!({"mode":"unrecognized"}), json!([]),
+        json!({"mode":"dontAsk"}),
+        json!({"model":"test-model"}), json!({"mode":"plan"}),
+    ];
+    let host = Arc::new(ControlReplies(Mutex::new(replies.into())));
+    let handle = Daemon::bind(dir.path(), session(), host).unwrap().start();
+    let (mut reader, mut writer) = connect(handle.socket_path());
+    recv(&mut reader);
+    send(&mut writer, json!({"type":"attach","cursor":null}));
+
+    for id in 1..=13 {
+        let method = if id <= 6 { "set_model" } else { "set_permission_mode" };
+        send(&mut writer, json!({"type":"call","id":id,"method":method,
+            "params":{"mode":"plan"}}));
+        let reply = recv(&mut reader);
+        assert_eq!(reply["id"], id);
+        assert_eq!(reply["ok"], false);
+        assert!(reply["error"].as_str().unwrap().contains("invalid"));
+        send(&mut writer, json!({"type":"call","id":100+id,"method":"status","params":{}}));
+        let status = recv(&mut reader);
+        assert_eq!(status["id"], 100+id, "unexpected event after rejected control");
+        assert_eq!(status["status"]["model"], Value::Null);
+        assert_eq!(status["status"]["permission_mode"], "default");
+    }
+
+    for (id, method, field, selected) in [(14, "set_model", "model", "test-model"),
+        (15, "set_permission_mode", "mode", "plan")] {
+        send(&mut writer, json!({"type":"call","id":id,"method":method,
+            "params":{"mode":"plan"}}));
+        let reply = recv(&mut reader);
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply[field], selected);
+        let event = recv(&mut reader);
+        assert_eq!(event["event"]["data"][field], selected);
+    }
+    send(&mut writer, json!({"type":"call","id":16,"method":"status","params":{}}));
+    let status = recv(&mut reader);
+    assert_eq!(status["status"]["model"], "test-model");
+    assert_eq!(status["status"]["permission_mode"], "plan");
 }
 
 #[test]

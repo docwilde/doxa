@@ -25,6 +25,8 @@ const MAX_CONNECTIONS: usize = 64;
 /// If the host returns without `turn_done` or `turn_refused`, the daemon emits
 /// one `turn_done`; it also emits an error terminal if the host panics.
 /// Methods are called from worker threads and must be safe for concurrent calls.
+/// Successful `set_model` and `set_permission_mode` calls must return an
+/// object containing a selected `model` or `mode` string, respectively.
 pub trait Host: Send + Sync + 'static {
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value));
     fn call(&self, method: &str, params: &Value) -> Result<Value, String>;
@@ -393,7 +395,17 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
         if refuse_dont_ask {
             (Err("dontAsk requires an idle session with no queued prompts".into()), None)
         } else {
-            let result = inner.host.call(method, &params);
+            let result = inner.host.call(method, &params).and_then(|extra| {
+                let field = if method == "set_model" { "model" } else { "mode" };
+                let valid = extra.get(field).and_then(Value::as_str).is_some_and(|value| {
+                    !value.trim().is_empty()
+                        && !value.chars().any(char::is_control)
+                        && (field != "mode" ||
+                            (matches!(value, "default" | "acceptEdits" | "plan" | "auto" | "dontAsk")
+                                && params["mode"] == value))
+                });
+                if valid { Ok(extra) } else { Err(format!("host returned invalid {field} reply")) }
+            });
             let changed = match (&result, method) {
                 (Ok(extra), "set_model") => extra["model"].as_str().map(|model| {
                     let mut state = inner.state.lock().unwrap();
