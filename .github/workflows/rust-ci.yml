@@ -27,5 +27,7 @@ jobs:
         run: cargo +stable test --locked --manifest-path rust/doxa-engines/Cargo.toml
       - name: Test external LORE bridge
         run: cargo +stable test --locked --manifest-path rust/doxa-lore/Cargo.toml
+      - name: Test native daemon and Codex host
+        run: cargo +stable test --locked --manifest-path rust/doxa-daemon/Cargo.toml
       - name: Build release binary
         run: cargo +stable build --locked --release --manifest-path rust/doxa-tui/Cargo.toml

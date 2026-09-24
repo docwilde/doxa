@@ -29,12 +29,43 @@ impl Process {
         Self { child, registry, socket }
     }
     fn entry(&self) -> Value { serde_json::from_slice(&fs::read(&self.registry).unwrap()).unwrap() }
+    fn start_codex(runtime: &Path, codex: &Path, python: &Path) -> Self {
+        let child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+            .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", runtime.to_str().unwrap(),
+                "--session-id", "codex-session", "--linger", "10", "--engine", "codex",
+                "--codex-bin", codex.to_str().unwrap(), "--lore-python", python.to_str().unwrap()])
+            .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+        let registry = runtime.join("registry/codex-session.json");
+        wait_until(|| registry.exists());
+        let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+        let socket = PathBuf::from(entry["daemon_socket"].as_str().unwrap());
+        Self { child, registry, socket }
+    }
     fn connect(&self) -> (BufReader<UnixStream>, UnixStream) {
         let socket = UnixStream::connect(&self.socket).unwrap();
         socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         (BufReader::new(socket.try_clone().unwrap()), socket)
     }
     fn exited(&mut self) -> bool { self.child.try_wait().unwrap().is_some() }
+}
+fn executable(path: &Path, body: &str) {
+    fs::write(path, body).unwrap();
+    let mut perms = fs::metadata(path).unwrap().permissions();
+    perms.set_mode(0o700);
+    fs::set_permissions(path, perms).unwrap();
+}
+fn fake_scrubber(path: &Path, fail: bool) {
+    let mode = if fail { "True" } else { "False" };
+    executable(path, &format!(r#"#!/usr/bin/env python3
+import json, sys
+print(json.dumps({{"type":"hello","proto":1,"capabilities":["scrub","snapshot"]}}), flush=True)
+for line in sys.stdin:
+    frame = json.loads(line)
+    if {mode} and "fixture-secret" in frame.get("text", ""):
+        print(json.dumps({{"type":"reply","id":frame["id"],"ok":False,"error":"operation_failed"}}), flush=True)
+    else:
+        print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,"text":frame.get("text", "").replace("fixture-secret", "[redacted]")}}), flush=True)
+"#));
 }
 impl Drop for Process {
     fn drop(&mut self) {
@@ -151,4 +182,180 @@ fn rejects_traversal_and_existing_registry() {
     assert!(process.registry.exists());
     unsafe { libc::kill(process.child.id() as libc::pid_t, libc::SIGTERM); }
     wait_until(|| process.exited());
+}
+
+#[test]
+fn codex_host_resumes_and_scrubs_provider_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let args = dir.path().join("argv.txt");
+    let prompt = dir.path().join("prompt.txt");
+    fake_scrubber(&python, false);
+    executable(&codex, &format!(r#"#!/bin/sh
+printf '%s\n' "$@" >> '{}'
+echo END >> '{}'
+cat >> '{}'
+echo '{{"type":"thread.started","thread_id":"thread_1"}}'
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-secret answer"}}}}'
+"#, args.display(), args.display(), prompt.display()));
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    assert_eq!(process.entry()["engine"], "codex");
+    let (mut reader, mut socket) = process.connect();
+    assert_eq!(receive(&mut reader)["engine"], "codex");
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    for (id, text) in [(1, "first prompt"), (2, "second prompt")] {
+        send(&mut socket, json!({"type":"prompt","id":id,"text":text}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        let mut kinds = Vec::new();
+        loop {
+            let frame = receive(&mut reader);
+            assert!(!frame.to_string().contains("fixture-secret"));
+            let event = &frame["event"];
+            kinds.push(event["type"].as_str().unwrap().to_owned());
+            if event["type"] == "text_delta" {
+                assert_eq!(event["data"]["text"], "[redacted] answer");
+            }
+            if event["type"] == "turn_done" { assert_eq!(event["data"]["is_error"], false); break; }
+        }
+        assert_eq!(kinds, ["turn_started", "text_delta", "turn_done"]);
+    }
+    let argv = fs::read_to_string(args).unwrap();
+    assert!(argv.contains("exec\nresume\nthread_1\n"));
+    assert_eq!(fs::read_to_string(prompt).unwrap(), "first promptsecond prompt");
+    send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+}
+
+#[test]
+fn scrub_failure_withholds_provider_content_and_fails_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    fake_scrubber(&python, true);
+    executable(&codex, "#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"fixture-secret answer\"}}'\n");
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    let mut frames = Vec::new();
+    loop {
+        let frame = receive(&mut reader);
+        assert!(!frame.to_string().contains("fixture-secret"));
+        let done = frame["event"]["type"] == "turn_done";
+        frames.push(frame);
+        if done { break; }
+    }
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[1]["event"]["data"]["is_error"], true);
+    assert!(frames[1]["event"]["data"]["error"].as_str().unwrap().contains("scrub failed"));
+    send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+}
+
+#[test]
+fn interrupt_reaps_codex_process_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let marker = dir.path().join("survived");
+    fake_scrubber(&python, false);
+    executable(&codex, &format!("#!/bin/sh\ncat >/dev/null\nsh -c 'sleep 1; echo leaked > {}' &\nwait\n", marker.display()));
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
+    send(&mut socket, json!({"type":"call","id":2,"method":"interrupt","params":{}}));
+    let mut replied = false;
+    let mut done = false;
+    while !replied || !done {
+        let frame = receive(&mut reader);
+        if frame["type"] == "reply" { assert_eq!(frame["ok"], true); replied = true; }
+        if frame["event"]["type"] == "turn_done" {
+            assert_eq!(frame["event"]["data"]["is_error"], true);
+            done = true;
+        }
+    }
+    thread::sleep(Duration::from_millis(1200));
+    assert!(!marker.exists(), "Codex descendant survived interruption");
+    send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+}
+
+#[test]
+fn missing_lore_sidecar_rejects_session_before_socket_or_registry() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("broken-python");
+    executable(&codex, "#!/bin/sh\nexit 0\n");
+    executable(&python, "#!/bin/sh\nexit 1\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
+            "--session-id", "codex-session", "--engine", "codex",
+            "--codex-bin", codex.to_str().unwrap(), "--lore-python", python.to_str().unwrap()])
+        .output().unwrap();
+    assert!(!output.status.success());
+    assert!(!dir.path().join("registry/codex-session.json").exists());
+    assert!(!dir.path().join("daemon-codex-s").exists());
+}
+
+#[test]
+fn queued_codex_prompt_is_scrubbed_for_other_clients() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    fake_scrubber(&python, false);
+    executable(&codex, "#!/bin/sh\ncat >/dev/null\nsleep 1\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}'\n");
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let (mut first, mut first_socket) = process.connect();
+    receive(&mut first);
+    send(&mut first_socket, json!({"type":"attach","cursor":null}));
+    send(&mut first_socket, json!({"type":"prompt","id":1,"text":"first"}));
+    assert_eq!(receive(&mut first)["ok"], true);
+    assert_eq!(receive(&mut first)["event"]["type"], "turn_started");
+    let (mut second, mut second_socket) = process.connect();
+    let hello = receive(&mut second);
+    send(&mut second_socket, json!({"type":"attach","cursor":hello["next_seq"]}));
+    wait_until(|| process.entry()["clients"] == 2);
+    send(&mut first_socket, json!({"type":"prompt","id":2,"text":"fixture-secret queued"}));
+    let reply = receive(&mut first);
+    assert_eq!(reply["queued"], true);
+    let event = receive(&mut second);
+    assert_eq!(event["event"]["type"], "prompt_queued");
+    assert_eq!(event["event"]["data"]["text"], "[redacted] queued");
+    assert!(!event.to_string().contains("fixture-secret"));
+    send(&mut first_socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
+    while receive(&mut first)["id"] != 3 {}
+    wait_until(|| process.exited());
+}
+
+#[test]
+fn sigterm_reaps_active_codex_process_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let ready = dir.path().join("ready");
+    let marker = dir.path().join("survived");
+    fake_scrubber(&python, false);
+    executable(&codex, &format!("#!/bin/sh\ncat >/dev/null\necho ready > {}\nsh -c 'sleep 1; echo leaked > {}' &\nwait\n", ready.display(), marker.display()));
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| ready.exists());
+    unsafe { libc::kill(process.child.id() as libc::pid_t, libc::SIGTERM); }
+    wait_until(|| process.exited());
+    thread::sleep(Duration::from_millis(1200));
+    assert!(!marker.exists(), "Codex descendant survived daemon termination");
+    assert!(!process.registry.exists());
 }

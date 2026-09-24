@@ -28,6 +28,10 @@ const MAX_CONNECTIONS: usize = 64;
 pub trait Host: Send + Sync + 'static {
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value));
     fn call(&self, method: &str, params: &Value) -> Result<Value, String>;
+    /// Text included in queue events. A real host can scrub prompts before
+    /// they are sent to other attached clients; internal execution keeps the
+    /// original prompt. An error rejects new prompts before queueing.
+    fn public_prompt(&self, text: &str) -> Result<String, String> { Ok(text.to_owned()) }
 }
 
 #[derive(Clone)]
@@ -212,7 +216,9 @@ impl Inner {
                 } else { state.busy = false; None }
             };
             if let Some((prompt, turn)) = next {
-                inner.publish(None, json!({"type":"prompt_dequeued","data":{"id":prompt.queue_id,"text":prompt.text}}));
+                let display = inner.host.public_prompt(&prompt.text)
+                    .unwrap_or_else(|_| "[redacted: prompt unavailable]".to_owned());
+                inner.publish(None, json!({"type":"prompt_dequeued","data":{"id":prompt.queue_id,"text":display}}));
                 inner.start_turn(prompt.text, turn);
             }
         });
@@ -289,6 +295,13 @@ fn handle_prompt(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, client_id: u64, f
     if text.trim().is_empty() {
         send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"empty prompt"})); return;
     }
+    let display = match inner.host.public_prompt(text) {
+        Ok(display) => display,
+        Err(_) => {
+            send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"prompt could not be scrubbed"}));
+            return;
+        }
+    };
     let mut state = inner.state.lock().unwrap();
     if state.busy {
         if state.prompts.len() == PROMPT_QUEUE_CAPACITY {
@@ -301,7 +314,7 @@ fn handle_prompt(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, client_id: u64, f
         state.prompts.push_back(Prompt { text: text.to_owned(), queue_id: queue_id.clone() });
         drop(state);
         // Origin client receives its queue notification in the reply only.
-        let event = json!({"type":"prompt_queued","data":{"id":queue_id,"text":text,"position":position}});
+        let event = json!({"type":"prompt_queued","data":{"id":queue_id,"text":display,"position":position}});
         publish_except(inner, client_id, event);
     } else {
         let turn = format!("r{:011}", state.next_turn_id);

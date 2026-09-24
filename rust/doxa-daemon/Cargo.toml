@@ -7,8 +7,12 @@ license = "AGPL-3.0-only"
 
 [dependencies]
 doxa-runtime = { path = "../doxa-runtime" }
+doxa-engines = { path = "../doxa-engines" }
+doxa-lore = { path = "../doxa-lore" }
 libc = "0.2"
 serde_json = "1"
+tokio = { version = "1", features = ["rt", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
 tempfile = "3"

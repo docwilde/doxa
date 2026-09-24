@@ -201,7 +201,7 @@ impl CodexJsonlNormalizer {
         match value {
             Value::String(text) => Value::String((self.scrub)(text)),
             Value::Array(items) => Value::Array(items.iter().map(|item| self.scrub_value(item)).collect()),
-            Value::Object(fields) => Value::Object(fields.iter().map(|(key, value)| (key.clone(), self.scrub_value(value))).collect()),
+            Value::Object(fields) => Value::Object(fields.iter().map(|(key, value)| ((self.scrub)(key), self.scrub_value(value))).collect()),
             _ => value.clone(),
         }
     }

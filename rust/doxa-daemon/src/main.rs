@@ -1,5 +1,7 @@
-//! A deliberately deterministic native host for protocol and lifecycle work.
-//! Replace FixtureHost with a real engine before offering this as a user session.
+//! Native DOXA protocol host. The fixture remains an explicit test mode.
+mod codex_host;
+use codex_host::CodexHost;
+use doxa_engines::codex_driver::{DriverOptions, SandboxMode};
 use doxa_runtime::{Daemon, Host, Session};
 use serde_json::{json, Value};
 use std::env;
@@ -31,7 +33,14 @@ impl Host for FixtureHost {
     }
 }
 
-struct Options { runtime: PathBuf, cwd: PathBuf, session_id: String, linger: Duration }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Engine { Fixture, Codex }
+impl Engine { fn name(self) -> &'static str { match self { Self::Fixture => "fixture", Self::Codex => "codex" } } }
+struct Options {
+    runtime: PathBuf, cwd: PathBuf, session_id: String, linger: Duration,
+    engine: Engine, codex_bin: Option<PathBuf>, lore_python: Option<PathBuf>,
+    model: Option<String>, sandbox: SandboxMode,
+}
 fn options() -> io::Result<Options> {
     let mut runtime = env::var_os("DOXA_RUNTIME_DIR").map(PathBuf::from)
         .or_else(|| env::var_os("XDG_RUNTIME_DIR").map(|p| PathBuf::from(p).join("doxa")))
@@ -39,6 +48,11 @@ fn options() -> io::Result<Options> {
     let mut cwd = env::current_dir()?;
     let mut session_id = random_id()?;
     let mut linger = Duration::from_secs(120);
+    let mut engine = Engine::Fixture;
+    let mut codex_bin = None;
+    let mut lore_python = None;
+    let mut model = None;
+    let mut sandbox = SandboxMode::WorkspaceWrite;
     let mut args = env::args_os().skip(1);
     while let Some(arg) = args.next() {
         let value = args.next().ok_or_else(|| invalid("missing argument value"))?;
@@ -46,13 +60,32 @@ fn options() -> io::Result<Options> {
             Some("--runtime-dir") => runtime = PathBuf::from(value),
             Some("--cwd") => cwd = PathBuf::from(value),
             Some("--session-id") => session_id = value.into_string().map_err(|_| invalid("invalid session id"))?,
+            Some("--engine") => engine = match value.to_str() {
+                Some("fixture") => Engine::Fixture, Some("codex") => Engine::Codex,
+                _ => return Err(invalid("engine must be fixture or codex")),
+            },
+            Some("--codex-bin") => codex_bin = Some(PathBuf::from(value)),
+            Some("--lore-python") => lore_python = Some(PathBuf::from(value)),
+            Some("--model") => {
+                let chosen = value.into_string().map_err(|_| invalid("invalid model"))?;
+                if chosen.is_empty() || chosen.len() > 128 || chosen.chars().any(char::is_control) {
+                    return Err(invalid("invalid model"));
+                }
+                model = Some(chosen);
+            }
+            Some("--sandbox") => sandbox = match value.to_str() {
+                Some("read-only") => SandboxMode::ReadOnly,
+                Some("workspace-write") => SandboxMode::WorkspaceWrite,
+                Some("danger-full-access") => SandboxMode::DangerFullAccess,
+                _ => return Err(invalid("invalid sandbox")),
+            },
             Some("--linger") => {
                 let seconds: f64 = value.to_str().ok_or_else(|| invalid("invalid linger"))?
                     .parse().map_err(|_| invalid("invalid linger"))?;
                 if !seconds.is_finite() || seconds < 0.0 { return Err(invalid("invalid linger")); }
                 linger = Duration::from_secs_f64(seconds);
             }
-            _ => return Err(invalid("usage: doxa-daemon [--runtime-dir PATH] [--cwd PATH] [--session-id ID] [--linger SECONDS]")),
+            _ => return Err(invalid("usage: doxa-daemon [--runtime-dir PATH] [--cwd PATH] [--session-id ID] [--linger SECONDS] [--engine fixture|codex] [--codex-bin PATH --lore-python PATH --model MODEL --sandbox MODE]")),
         }
     }
     // Do not let registry entries claim an unvalidated path or identity.
@@ -64,9 +97,24 @@ fn options() -> io::Result<Options> {
         return Err(invalid("invalid session id"));
     }
     if !runtime.is_absolute() { return Err(invalid("runtime directory must be absolute")); }
-    Ok(Options { runtime, cwd, session_id, linger })
+    if engine == Engine::Codex {
+        codex_bin = Some(executable(codex_bin.ok_or_else(|| invalid("Codex needs --codex-bin"))?)?);
+        lore_python = Some(executable(lore_python.ok_or_else(|| invalid("Codex needs --lore-python"))?)?);
+    } else if codex_bin.is_some() || lore_python.is_some() || model.is_some() || sandbox != SandboxMode::WorkspaceWrite {
+        return Err(invalid("Codex options require --engine codex"));
+    }
+    Ok(Options { runtime, cwd, session_id, linger, engine, codex_bin, lore_python, model, sandbox })
 }
 fn invalid(message: &str) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message) }
+fn executable(path: PathBuf) -> io::Result<PathBuf> {
+    if !path.is_absolute() { return Err(invalid("executable path must be absolute")); }
+    let path = fs::canonicalize(path)?;
+    let meta = fs::metadata(&path)?;
+    if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
+        return Err(invalid("executable path must name an executable file"));
+    }
+    Ok(path)
+}
 fn random_id() -> io::Result<String> {
     let mut bytes = [0u8; 16];
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;
@@ -88,7 +136,7 @@ fn owned_directory(path: &Path) -> io::Result<()> {
     }
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
-struct Registry { path: PathBuf, inode: Option<u64>, started_at: String, repo_root: Option<String>, cwd: String, session_id: String, socket: String }
+struct Registry { path: PathBuf, inode: Option<u64>, started_at: String, repo_root: Option<String>, cwd: String, session_id: String, socket: String, engine: Engine }
 impl Registry {
     fn new(options: &Options, socket: &Path) -> io::Result<Self> {
         let dir = options.runtime.join("registry");
@@ -100,14 +148,14 @@ impl Registry {
             .and_then(|o| String::from_utf8(o.stdout).ok()).map(|s| s.trim().to_owned());
         Ok(Self { path, inode: None, started_at: iso_now(), repo_root,
             cwd: options.cwd.to_string_lossy().into_owned(), session_id: options.session_id.clone(),
-            socket: socket.to_string_lossy().into_owned() })
+            socket: socket.to_string_lossy().into_owned(), engine: options.engine })
     }
     fn write(&mut self, clients: usize) -> io::Result<()> {
         let entry = json!({"session_id":self.session_id,"pid":std::process::id(),
             "socket_path":self.socket,"daemon_socket":self.socket,"cwd":self.cwd,
-            "repo_root":self.repo_root,"title":"DOXA Rust fixture session",
+            "repo_root":self.repo_root,"title":format!("DOXA Rust {} session", self.engine.name()),
             "started_at":self.started_at,"heartbeat_at":iso_now(),"clients":clients,
-            "engine":"fixture"});
+            "engine":self.engine.name()});
         let tmp = self.path.with_extension(format!("json.{}.tmp", std::process::id()));
         let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
         let result = (|| -> io::Result<()> {
@@ -135,9 +183,23 @@ impl Drop for Registry {
 }
 fn run() -> io::Result<()> {
     let options = options()?;
+    let mut codex_host = None;
+    let host: Arc<dyn Host> = match options.engine {
+        Engine::Fixture => Arc::new(FixtureHost),
+        Engine::Codex => {
+            let mut driver = DriverOptions::new(options.cwd.clone());
+            driver.executable = options.codex_bin.clone().expect("validated Codex executable");
+            driver.model = options.model.clone();
+            driver.sandbox = options.sandbox;
+            let host = Arc::new(CodexHost::new(driver, options.lore_python.as_ref().expect("validated LORE interpreter"))
+                .map_err(io::Error::other)?);
+            codex_host = Some(host.clone());
+            host
+        }
+    };
     let session = Session { session_id: options.session_id.clone(), cwd: options.cwd.to_string_lossy().into_owned(),
-        model: None, engine: "fixture".into(), doxa_version: "2.0.0-alpha.1".into() };
-    let mut handle = Daemon::bind(&options.runtime, session, Arc::new(FixtureHost))?.start();
+        model: options.model.clone(), engine: options.engine.name().into(), doxa_version: "2.0.0-alpha.1".into() };
+    let mut handle = Daemon::bind(&options.runtime, session, host)?.start();
     let mut registry = Registry::new(&options, handle.socket_path())?;
     registry.write(0)?;
     unsafe {
@@ -160,6 +222,9 @@ fn run() -> io::Result<()> {
         }
         previous_clients = clients;
         thread::sleep(Duration::from_millis(20));
+    }
+    if let Some(host) = &codex_host {
+        if !host.shutdown() { eprintln!("doxa-daemon: Codex process did not finish after cancellation"); }
     }
     handle.shutdown();
     Ok(())

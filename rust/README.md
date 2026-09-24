@@ -32,7 +32,7 @@ separate development line, not a DOXA 2.0 release.
 No 2.0 release tag is planned until the frontend reaches feature parity and
 passes end-to-end terminal and daemon tests.
 
-## Native daemon fixture
+## Native daemon
 
 `doxa-daemon` is a native protocol v1 host process for lifecycle and transport
 integration. Run `cargo build --manifest-path rust/doxa-daemon/Cargo.toml`, then
@@ -46,11 +46,24 @@ sets seconds to wait after the last client detaches (default 120). An unclaimed
 process gets at least 120 seconds for its first attach. SIGTERM and SIGINT stop
 the socket and remove the registry entry.
 
-The current host intentionally returns one fixed response for every prompt.
-It does not call a real model, persist transcript or context, provide peer
-messaging, support engine-specific RPCs, or run LORE review and indexing. The
-registry reports `engine: fixture` to make this limit visible. Only `status`
-and `stop` calls are supported; other calls return an explicit error. Its
-`socket_path` points to the daemon socket for Python registry discovery, but
-peer message frames are not implemented, so do not use this fixture as a peer
-messaging target. This binary is for integration work, not user conversations.
+The default `fixture` host returns one fixed response for every prompt. To
+select the first native Codex host explicitly, pass `--engine codex` with
+`--codex-bin /absolute/path/to/codex` and
+`--lore-python /absolute/path/to/python`. The interpreter must have DOXA and
+LORE installed. The Codex CLI must already be authenticated. Both executable
+paths are resolved and checked before opening a socket. Optional `--model`
+and `--sandbox read-only|workspace-write|danger-full-access` are passed as
+separate CLI arguments, never through a shell. A missing LORE sidecar prevents
+the session from starting; a scrub failure during a turn withholds further
+provider events and fails the turn. The Python sidecar is a temporary
+dependency while Rust memory integration is built.
+
+Codex turns use `codex exec --json` and resume subsequent turns using the
+provider thread ID. `interrupt` cancels the running CLI process group, and
+`stop` cancels it and closes the daemon. The native Codex host does not yet
+persist transcripts or thread IDs across daemon restarts, register MCP,
+integrate LORE context/review/indexing, or implement peer messaging. The
+registry reports the selected engine. Only `status`, `interrupt` (Codex),
+and `stop` are supported; other calls return an explicit error. The
+`socket_path` is suitable for local TUI or Python `EngineClient` attach, but
+peer frames are not implemented. Treat this as an integration alpha.
