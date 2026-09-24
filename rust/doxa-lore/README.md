@@ -10,7 +10,12 @@ prompts or credentials into terminal logs.
 
 Protocol v1 has `hello` with required `scrub` and `snapshot` capabilities and
 optional `pending`, `sync_state`, `refresh_interval`, `consult`, `beliefs`, and
-`evidence` readers. When LORE provides its same-descriptor pending snapshot
+`evidence` readers. `index_transcript_v1` delegates incremental indexing to
+LORE after a native Codex turn and again at finalization. The request carries
+only cwd and a validated session ID; the sidecar derives the transcript path
+from LORE's own project mapping, rejects links and foreign-owned files, and
+returns counts only. Indexing is idempotent in LORE and does not derive beliefs
+or approve proposals. When LORE provides its same-descriptor pending snapshot
 API, the sidecar advertises `pending_review_v1` to
 return one complete raw UTF-8 proposal, its SHA-256 digest, inode, and an
 explicit completeness marker. The client checks the raw bytes against the
@@ -37,7 +42,7 @@ with an explicit human review gate enforced at the UI/daemon boundary. A
 caller-supplied `reviewed` flag or pending ID alone cannot authorize a write.
 LORE's own approval path also requires special handling for unverified sync
 operations and durable archive-on-success. Until that end-to-end protocol
-exists, this crate has no approval mutation. The bridge currently does not
-expose belief mutations or indexing, and
-is not yet connected to the native daemon or engine adapters. Python remains
-a dependency only for this external LORE integration during the transition.
+exists, this crate has no approval mutation. Codex transcript indexing is
+connected to the native daemon; deriver review of Codex transcripts remains
+skipped, matching Python DOXA's declared limitation. Python remains a
+dependency only for this external LORE integration during the transition.

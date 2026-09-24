@@ -1,6 +1,7 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
 use std::collections::HashMap;
 use std::io::{self, IsTerminal, Stdout};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,12 +17,13 @@ use crossterm::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
 
-use crate::{markdown, peer_map::PeerMap};
+use crate::{diff_view, markdown, peer_map::PeerMap};
+use crate::theme;
 
 mod tool_cards;
 use tool_cards::ToolCards;
@@ -34,13 +36,15 @@ const MAX_PENDING_PROMPTS: usize = 32;
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
 const MAX_ANSWER_BYTES: usize = 10 * 1024;
-const ACTIONS: [(&str, &str); 6] = [
+const ACTIONS: [(&str, &str); 8] = [
     ("Peer map", "Ctrl+M"),
     ("Tool activity", "Ctrl+T"),
     ("Open selected session", "rail selection"),
     ("Previous tab", "active pane"),
     ("Next tab", "active pane"),
     ("Switch pane", "Shift+Tab"),
+    ("Session history", "Ctrl+R"),
+    ("Worktree diff", "F2"),
 ];
 
 fn safe_label(value: &str) -> String {
@@ -353,7 +357,7 @@ impl InputRequest {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct App {
     pub sessions: Vec<Session>,
     pub groups: [PaneGroup; 2],
@@ -365,7 +369,8 @@ pub struct App {
     pub rail_selected: usize,
     pub focus: Focus,
     pub input: String,
-    input_drafts: HashMap<String, String>,
+    input_drafts: HashMap<(usize, String), String>,
+    session_identity: HashMap<String, (Option<String>, Option<String>)>,
     pub pending_prompts: Vec<(String, String)>,
     pub input_requests: Vec<InputRequest>,
     pub pending_answers: Vec<(String, String, serde_json::Value)>,
@@ -378,6 +383,14 @@ pub struct App {
     map_modal: bool,
     action_menu: bool,
     action_selected: usize,
+    history_modal: bool,
+    history_query: String,
+    history_selected: usize,
+    diff_modal: bool,
+    diff_scroll: u16,
+    diff_text: String,
+    diff_pending: Option<Receiver<(String, diff_view::DiffSnapshot)>>,
+    session_cwds: HashMap<String, PathBuf>,
     pending_peer_refresh: Option<String>,
     pub notice: String,
     pub should_quit: bool,
@@ -410,6 +423,7 @@ impl Default for App {
             focus: Focus::Prompt,
             input: String::new(),
             input_drafts: HashMap::new(),
+            session_identity: HashMap::new(),
             pending_prompts: Vec::new(),
             input_requests: Vec::new(),
             pending_answers: Vec::new(),
@@ -422,6 +436,14 @@ impl Default for App {
             map_modal: false,
             action_menu: false,
             action_selected: 0,
+            history_modal: false,
+            history_query: String::new(),
+            history_selected: 0,
+            diff_modal: false,
+            diff_scroll: 0,
+            diff_text: String::new(),
+            diff_pending: None,
+            session_cwds: HashMap::new(),
             pending_peer_refresh: None,
             notice: "Disconnected · waiting for daemon".into(),
             should_quit: false,
@@ -472,13 +494,16 @@ impl App {
                 let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else {
                     return false;
                 };
-                let model = safe_label(
-                    frame
-                        .get("model")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("session"),
-                );
+                let model = frame.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
+                let engine = frame.get("engine").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
+                self.session_identity.insert(id.to_owned(), (engine, model.clone()));
                 let cwd = safe_label(frame.get("cwd").and_then(|v| v.as_str()).unwrap_or(""));
+                if let Some(raw) = frame.get("cwd").and_then(|v| v.as_str()) {
+                    let path = PathBuf::from(raw);
+                    if path.is_absolute() && raw.len() <= 4096 {
+                        self.session_cwds.insert(id.to_owned(), path);
+                    }
+                }
                 let transcript = self
                     .sessions
                     .iter()
@@ -487,12 +512,12 @@ impl App {
                     .unwrap_or_default();
                 self.apply_update(DaemonUpdate::Upsert(Session {
                     id: id.into(),
-                    title: model.clone(),
+                    title: model.clone().unwrap_or_else(|| safe_label(id)),
                     collection: cwd,
                     transcript,
                     status: "Connected".into(),
                 }));
-                self.notice = format!("Connected · {model}");
+                self.notice = format!("Connected · {}", model.as_deref().unwrap_or(&safe_label(id)));
                 true
             }
             "event" => {
@@ -518,6 +543,19 @@ impl App {
                     self.peer_map.event(&id, event_type, data);
                 }
                 match event_type {
+                    "model_changed" => {
+                        let old_model = self.session_identity.get(&id).and_then(|identity| identity.1.clone());
+                        let new_model = data.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
+                        if let Some(identity) = self.session_identity.get_mut(&id) {
+                            identity.1 = new_model.clone();
+                        }
+                        if let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) {
+                            if old_model.as_deref() == Some(session.title.as_str()) {
+                                if let Some(model) = new_model { session.title = model; }
+                            }
+                        }
+                        true
+                    }
                     "text_delta" => {
                         let Some(text) = data.get("text").and_then(|v| v.as_str()) else {
                             return false;
@@ -611,6 +649,19 @@ impl App {
                 self.peer_map.roster(id, frame)
             }
             "reply" => {
+                if let Some(status) = frame.get("status") {
+                    let id = status.get("session_id").and_then(|v| v.as_str())
+                        .or_else(|| frame.get("session_id").and_then(|v| v.as_str()));
+                    if let Some(id) = id {
+                        let identity = self.session_identity.entry(id.to_owned()).or_default();
+                        if status.get("engine").is_some() {
+                            identity.0 = status.get("engine").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
+                        }
+                        if status.get("model").is_some() {
+                            identity.1 = status.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
+                        }
+                    }
+                }
                 let ok = frame.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
                 self.notice = if ok {
                     "Request accepted".into()
@@ -757,14 +808,15 @@ impl App {
     }
 
     pub fn handle(&mut self, event: Event) -> bool {
-        let before = self.groups[self.active_group]
-            .active_id()
-            .unwrap_or("")
-            .to_owned();
+        let before = (self.active_group, self.groups[self.active_group].active_id().unwrap_or("").to_owned());
         let changed = match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
                 self.drag = None;
+                if self.history_modal && !self.history_fits() {
+                    self.history_modal = false;
+                    self.notice = "Enlarge terminal to open session history".into();
+                }
                 true
             }
             Event::Key(key)
@@ -775,10 +827,7 @@ impl App {
             Event::Mouse(mouse) => self.mouse(mouse),
             _ => false,
         };
-        let after = self.groups[self.active_group]
-            .active_id()
-            .unwrap_or("")
-            .to_owned();
+        let after = (self.active_group, self.groups[self.active_group].active_id().unwrap_or("").to_owned());
         if before != after {
             self.input_drafts
                 .insert(before, std::mem::take(&mut self.input));
@@ -799,6 +848,12 @@ impl App {
         }
         if self.action_menu {
             return self.action_key(key);
+        }
+        if self.history_modal {
+            return self.history_key(key);
+        }
+        if self.diff_modal {
+            return self.diff_key(key);
         }
         if self.map_modal {
             let owner = self.groups[self.active_group]
@@ -849,6 +904,14 @@ impl App {
             self.action_menu = true;
             self.action_selected = 0;
             self.drag = None;
+            return true;
+        }
+        if key.code == KeyCode::Char('r') && ctrl {
+            self.open_history();
+            return true;
+        }
+        if key.code == KeyCode::F(2) || (key.code == KeyCode::Char('g') && alt) {
+            self.open_diff();
             return true;
         }
         match key.code {
@@ -974,6 +1037,112 @@ impl App {
         }
     }
 
+    fn history_matches(&self) -> Vec<usize> {
+        let query = self.history_query.to_lowercase();
+        self.sessions.iter().enumerate().filter_map(|(index, session)| {
+            let mut start = session.transcript.len().saturating_sub(16 * 1024);
+            while !session.transcript.is_char_boundary(start) { start += 1; }
+            if query.is_empty() || session.title.to_lowercase().contains(&query)
+                || session.id.to_lowercase().contains(&query)
+                || session.transcript[start..].to_lowercase().contains(&query) {
+                Some(index)
+            } else { None }
+        }).take(64).collect()
+    }
+
+    fn history_fits(&self) -> bool {
+        self.size.width >= 28 && self.size.height >= 12
+    }
+
+    fn open_history(&mut self) {
+        if !self.history_fits() {
+            self.notice = "Enlarge terminal to open session history".into();
+            return;
+        }
+        self.history_modal = true;
+        self.history_query.clear();
+        self.history_selected = 0;
+    }
+
+    fn history_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('r') if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.history_modal = false;
+            }
+            KeyCode::Up => self.history_selected = self.history_selected.saturating_sub(1),
+            KeyCode::Down => self.history_selected = (self.history_selected + 1).min(self.history_matches().len().saturating_sub(1)),
+            KeyCode::Backspace => { self.history_query.pop(); self.history_selected = 0; }
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                if self.history_query.len() + c.len_utf8() <= 200 { self.history_query.push(c); self.history_selected = 0; }
+            }
+            KeyCode::Enter => {
+                if let Some(&index) = self.history_matches().get(self.history_selected) {
+                    let id = self.sessions[index].id.clone();
+                    let tabs = &mut self.groups[self.active_group];
+                    if let Some(index) = tabs.tabs.iter().position(|tab| tab == &id) { tabs.active = index; }
+                    else { tabs.tabs.push(id); tabs.active = tabs.tabs.len() - 1; }
+                    tabs.scroll = 0;
+                    self.focus = Focus::Transcript;
+                    self.history_modal = false;
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn open_diff(&mut self) {
+        if self.diff_modal { self.diff_modal = false; return; }
+        self.diff_modal = true;
+        self.diff_scroll = 0;
+        self.diff_pending = None;
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.diff_text = "Select a session to inspect its worktree.".into();
+            return;
+        };
+        let Some(cwd) = self.session_cwds.get(&id).cloned() else {
+            self.diff_text = "This session did not provide a worktree directory.".into();
+            return;
+        };
+        self.diff_text = "Loading worktree diff…".into();
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.diff_pending = Some(rx);
+        std::thread::spawn(move || { let _ = tx.send((id, diff_view::read(&cwd))); });
+    }
+
+    fn poll_diff(&mut self) -> bool {
+        let Some(receiver) = &self.diff_pending else { return false; };
+        match receiver.try_recv() {
+            Ok((id, snapshot)) => {
+                self.diff_pending = None;
+                if self.groups[self.active_group].active_id() == Some(id.as_str()) {
+                    self.diff_text = markdown::sanitize(&snapshot.text);
+                    self.diff_scroll = 0;
+                    return true;
+                }
+                self.diff_text = "The active session changed while the diff loaded. Press R to refresh it.".into();
+                self.diff_scroll = 0;
+                true
+            }
+            Err(TryRecvError::Disconnected) => { self.diff_pending = None; self.diff_text = "Diff worker unavailable.".into(); true }
+            Err(TryRecvError::Empty) => false,
+        }
+    }
+
+    fn diff_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc | KeyCode::F(2) => self.diff_modal = false,
+            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::ALT) => self.diff_modal = false,
+            KeyCode::Char('r' | 'R') => { self.diff_modal = false; self.open_diff(); },
+            KeyCode::Up => self.diff_scroll = self.diff_scroll.saturating_sub(1),
+            KeyCode::Down => self.diff_scroll = self.diff_scroll.saturating_add(1),
+            KeyCode::PageUp => self.diff_scroll = self.diff_scroll.saturating_sub(10),
+            KeyCode::PageDown => self.diff_scroll = self.diff_scroll.saturating_add(10),
+            _ => return false,
+        }
+        true
+    }
+
     fn active_tool_cards(&self) -> &[tool_cards::ToolCard] {
         self.groups[self.active_group]
             .active_id()
@@ -1042,6 +1211,8 @@ impl App {
                         self.active_group = 1 - self.active_group;
                         self.focus = Focus::Prompt;
                     }
+                    6 => self.open_history(),
+                    7 => self.open_diff(),
                     _ => unreachable!("fixed action list"),
                 }
             }
@@ -1246,11 +1417,7 @@ impl App {
     fn layout(&self, area: Rect) -> PaneLayout {
         let outer = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(3),
-                Constraint::Length(3),
-                Constraint::Length(1),
-            ])
+            .constraints([Constraint::Min(3), Constraint::Length(1)])
             .split(area);
         let min_body = if self.split == Split::Vertical {
             MIN_PANE_WIDTH * 2
@@ -1332,6 +1499,8 @@ impl App {
             || self.tool_modal
             || self.map_modal
             || self.action_menu
+            || self.history_modal
+            || self.diff_modal
         {
             self.drag = None;
             return false;
@@ -1365,6 +1534,22 @@ impl App {
                     };
                     if on_divider {
                         self.drag = Some(DragTarget::Pane(self.split));
+                    }
+                }
+                if self.drag.is_none() {
+                    if let Some(panes) = layout.panes {
+                        for (index, pane) in panes.iter().enumerate() {
+                            if mouse.column >= pane.x && mouse.column < pane.right()
+                                && mouse.row >= pane.y && mouse.row < pane.bottom() {
+                                self.active_group = index;
+                                self.focus = if mouse.row >= pane.bottom().saturating_sub(4) {
+                                    Focus::Prompt
+                                } else {
+                                    Focus::Transcript
+                                };
+                                return true;
+                            }
+                        }
                     }
                 }
                 self.drag.is_some()
@@ -1450,18 +1635,11 @@ impl App {
 
     pub fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
+        frame.render_widget(Block::default().style(Style::default().bg(theme::BASE).fg(theme::TEXT)), area);
         if area.width < 20 || area.height < 5 {
             frame.render_widget(Paragraph::new("DOXA · enlarge terminal"), area);
             return;
         }
-        let outer = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(3),
-                Constraint::Length(3),
-                Constraint::Length(1),
-            ])
-            .split(area);
         let layout = self.layout(area);
         if let Some(rail) = layout.rail {
             self.draw_rail(frame, rail);
@@ -1472,22 +1650,12 @@ impl App {
         } else {
             self.draw_group(frame, layout.body, self.active_group);
         }
-        let prompt_title = if self.focus == Focus::Prompt {
-            " Prompt ● "
-        } else {
-            " Prompt "
-        };
-        frame.render_widget(
-            Paragraph::new(format!("> {}", self.input))
-                .block(Block::default().title(prompt_title).borders(Borders::ALL)),
-            outer[1],
-        );
         frame.render_widget(
             Paragraph::new(format!(
-                "{}  |  Ctrl+P actions · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
+                "{}  |  Ctrl+P actions · Ctrl+R history · F2 diff · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
                 self.notice
-            )),
-            outer[2],
+            )).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
+            Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
         );
         self.draw_tool_cards(frame, area);
         if self.map_modal {
@@ -1498,7 +1666,63 @@ impl App {
             );
         }
         self.draw_actions(frame, area);
+        self.draw_history(frame, area);
+        self.draw_diff(frame, area);
         self.draw_request(frame, area);
+    }
+
+    fn draw_history(&self, frame: &mut Frame, area: Rect) {
+        if !self.history_modal { return; }
+        let width = area.width.saturating_sub(4).min(88);
+        let height = area.height.saturating_sub(4).min(24);
+        if width < 24 || height < 8 { return; }
+        let modal = Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height);
+        let matches = self.history_matches();
+        let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&self.history_query))),
+            Line::from(" Attached sessions only · read-only transcript picker"), Line::from("")];
+        if matches.is_empty() { lines.push(Line::from(" No matching attached sessions")); }
+        let visible = usize::from(height.saturating_sub(7)).max(1);
+        let start = self.history_selected.saturating_sub(visible.saturating_sub(1));
+        for (position, &index) in matches.iter().enumerate().skip(start).take(visible) {
+            let session = &self.sessions[index];
+            let label = format!(" {} {} · {}", if position == self.history_selected { '›' } else { ' ' },
+                safe_label(&session.title), safe_label(&session.id));
+            let style = if position == self.history_selected { Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT) }
+                else { Style::default().fg(theme::SECONDARY) };
+            lines.push(Line::styled(label, style));
+        }
+        if let Some(&index) = matches.get(self.history_selected) {
+            let preview: String = self.sessions[index].transcript.chars().rev().take(240).collect::<String>().chars().rev().collect();
+            lines.push(Line::from(""));
+            lines.push(Line::from(format!(" Preview: {}", safe_label(&preview))));
+        }
+        frame.render_widget(Clear, modal);
+        frame.render_widget(Paragraph::new(lines).block(Block::default()
+            .title(" Session history · type to filter · Enter open · Esc close ")
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), modal);
+    }
+
+    fn draw_diff(&self, frame: &mut Frame, area: Rect) {
+        if !self.diff_modal { return; }
+        let width = area.width.saturating_sub(4).min(120);
+        let height = area.height.saturating_sub(4).min(36);
+        if width < 24 || height < 8 { return; }
+        let modal = Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height);
+        frame.render_widget(Clear, modal);
+        let rows: Vec<Line> = self.diff_text.lines()
+            .skip(usize::from(self.diff_scroll))
+            .take(usize::from(height.saturating_sub(2)))
+            .map(|line| {
+            let color = if line.starts_with('+') && !line.starts_with("+++") { theme::SUCCESS }
+                else if line.starts_with('-') && !line.starts_with("---") { theme::ERROR }
+                else if line.starts_with("@@") { theme::ACCENT } else { theme::SECONDARY };
+            Line::styled(line.to_owned(), Style::default().fg(color))
+        }).collect();
+        frame.render_widget(Paragraph::new(rows)
+            .block(Block::default().title(" Worktree diff · ↑/↓ scroll · R refresh · F2/Esc close ")
+                .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), modal);
     }
 
     fn draw_actions(&self, frame: &mut Frame, area: Rect) {
@@ -1528,11 +1752,11 @@ impl App {
             .map(|(index, (label, hint))| {
                 let style = if index == self.action_selected {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
+                        .fg(theme::ACCENT)
+                        .bg(theme::HIGHLIGHT)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(theme::SECONDARY)
                 };
                 Line::from(format!(
                     " {} {:<28} {}",
@@ -1553,7 +1777,8 @@ impl App {
                 Block::default()
                     .title(" Actions · ↑/↓ choose · Enter open · Esc close ")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan)),
+                    .border_style(Style::default().fg(theme::BORDER))
+                    .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             ),
             modal,
         );
@@ -1610,7 +1835,8 @@ impl App {
                     Block::default()
                         .title(" Tool activity · ↑/↓ select · PgUp/PgDn scroll · Esc close ")
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Cyan)),
+                        .border_style(Style::default().fg(theme::BORDER))
+                    .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
                 ),
             modal,
         );
@@ -1684,7 +1910,8 @@ impl App {
                     Block::default()
                         .title(format!(" Input required · {} ", request.kind))
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Yellow)),
+                        .border_style(Style::default().fg(theme::ACCENT))
+                        .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
                 ),
             modal,
         );
@@ -1707,7 +1934,7 @@ impl App {
                         }
                     ),
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(theme::ACCENT)
                         .add_modifier(Modifier::BOLD),
                 ));
             }
@@ -1725,14 +1952,15 @@ impl App {
             lines.push(Line::from("  No sessions"));
         }
         frame.render_widget(
-            Paragraph::new(lines).block(
+            Paragraph::new(lines).style(Style::default().fg(theme::SECONDARY).bg(theme::RAIL)).block(
                 Block::default()
                     .title(if self.focus == Focus::Rail {
                         " Sessions ● "
                     } else {
                         " Sessions "
                     })
-                    .borders(Borders::ALL),
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::BORDER)),
             ),
             area,
         );
@@ -1751,6 +1979,7 @@ impl App {
             .constraints([
                 Constraint::Length(2),
                 Constraint::Min(1),
+                Constraint::Length(3),
                 Constraint::Length(1),
             ])
             .split(area);
@@ -1775,7 +2004,7 @@ impl App {
         .select(group.active.min(group.tabs.len().saturating_sub(1)))
         .highlight_style(
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         )
         .block(
@@ -1789,9 +2018,10 @@ impl App {
                         ""
                     }
                 ))
-                .borders(Borders::ALL),
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::BORDER)),
         );
-        frame.render_widget(tabs, inner[0]);
+        frame.render_widget(tabs.style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), inner[0]);
         let content = session
             .map(|s| s.transcript.as_str())
             .unwrap_or("No session open. Select one in the rail and press Enter.");
@@ -1800,15 +2030,50 @@ impl App {
             transcript_window(lines, inner[1].height, inner[1].y, group.scroll);
         frame.render_widget(
             Paragraph::new(lines)
+                .style(Style::default().fg(theme::TEXT).bg(theme::BASE))
                 .scroll((scroll_from_top, 0))
                 .wrap(Wrap { trim: false })
-                .block(Block::default().borders(Borders::LEFT | Borders::RIGHT)),
+                .block(Block::default().borders(Borders::LEFT | Borders::RIGHT)
+                    .border_style(Style::default().fg(theme::BORDER))),
             inner[1],
         );
-        let status = session.map(|s| s.status.as_str()).unwrap_or("No session");
+        let active = self.active_group == index;
+        let draft = group.active_id().map(|id| {
+            if active { self.input.as_str() } else { self.input_drafts.get(&(index, id.to_owned())).map(String::as_str).unwrap_or("") }
+        }).unwrap_or("");
         frame.render_widget(
-            Paragraph::new(format!(" {} ", status)).style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(format!("> {draft}"))
+                .style(Style::default().fg(theme::TEXT).bg(theme::RAISED))
+                .block(Block::default()
+                    .title(if active && self.focus == Focus::Prompt { " Prompt ● " } else { " Prompt " })
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(if active && self.focus == Focus::Prompt { theme::ACCENT } else { theme::BORDER }))),
             inner[2],
+        );
+        let status = session.map(|s| s.status.as_str()).unwrap_or("No session");
+        let identity = group.active_id().and_then(|id| self.session_identity.get(id));
+        let engine = identity.and_then(|pair| pair.0.as_deref());
+        let model = identity.and_then(|pair| pair.1.as_deref());
+        let mut status_spans = vec![Span::styled(
+            format!(" {}  ", status),
+            Style::default().fg(theme::SECONDARY),
+        )];
+        if let Some(engine) = engine {
+            status_spans.push(Span::styled(
+                format!(" {} ", engine),
+                Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT),
+            ));
+        }
+        if let Some(model) = model {
+            status_spans.push(Span::raw(" "));
+            status_spans.push(Span::styled(
+                format!(" {} ", model),
+                Style::default().fg(theme::TEXT).bg(theme::HIGHLIGHT),
+            ));
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(status_spans)).style(Style::default().bg(theme::RAISED)),
+            inner[3],
         );
     }
 }
@@ -1953,6 +2218,7 @@ fn run_loop(
         if event::poll(Duration::from_millis(50))? {
             changed |= app.handle(event::read()?);
         }
+        changed |= app.poll_diff();
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
                 changed |= app.peer_map.roster(&id, &serde_json::json!({"ok":false}));
@@ -2090,7 +2356,108 @@ fn dispatch_peer_refresh(app: &mut App, sender: &SyncSender<crate::bridge::Worke
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
     use serde_json::json;
+
+    fn painted(app: &App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..28).map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn history_picker_filters_attached_transcripts_and_opens_selected_tab() {
+        let mut app = App::default();
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "alpha".into(), title: "First".into(),
+            collection: "repo".into(), transcript: "red apple".into(), status: "Ready".into() }));
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "beta".into(), title: "Second".into(),
+            collection: "repo".into(), transcript: "green pear".into(), status: "Ready".into() }));
+        app.handle(Event::Resize(100, 28));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
+        for c in "pear".chars() { app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))); }
+        let view = painted(&app);
+        assert!(view.contains("Session history"));
+        assert!(view.contains("Second"));
+        assert!(!view.contains("First · alpha"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].active_id(), Some("beta"));
+        assert!(!app.history_modal);
+    }
+
+    #[test]
+    fn history_and_mouse_switches_restore_each_pane_draft() {
+        let mut app = App::default();
+        for id in ["alpha", "beta"] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id: id.into(), title: id.into(),
+                collection: "repo".into(), transcript: String::new(), status: "Ready".into() }));
+        }
+        app.handle(Event::Resize(100, 28));
+        app.input = "alpha draft".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].active_id(), Some("beta"));
+        assert!(app.input.is_empty());
+        app.input = "beta draft".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        assert!(app.input.is_empty());
+        app.input = "second pane draft".into();
+        let first = app.layout(app.size).panes.unwrap()[0];
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: first.x + 2, row: first.y + 2, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.input, "beta draft");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].active_id(), Some("alpha"));
+        assert_eq!(app.input, "alpha draft");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        assert_eq!(app.input, "second pane draft");
+    }
+
+    #[test]
+    fn model_change_updates_only_model_title_and_hello_sanitizes_id_notice() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"raw\u{1b}[31m", "model":"old"}));
+        assert_eq!(app.sessions[0].title, "old");
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"raw\u{1b}[31m",
+            "event":{"type":"model_changed", "data":{"model":"new"}}}));
+        assert_eq!(app.sessions[0].title, "new");
+        app.sessions[0].title = "Custom title".into();
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"raw\u{1b}[31m",
+            "event":{"type":"model_changed", "data":{"model":"newer"}}}));
+        assert_eq!(app.sessions[0].title, "Custom title");
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"raw\u{1b}[31m"}));
+        assert!(!app.notice.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn history_stays_closed_when_terminal_cannot_draw_it() {
+        let mut app = App::default();
+        app.handle(Event::Resize(27, 11));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
+        assert!(!app.history_modal);
+        assert!(app.notice.contains("Enlarge terminal"));
+        app.handle(Event::Resize(100, 28));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
+        assert!(app.history_modal);
+        app.handle(Event::Resize(27, 11));
+        assert!(!app.history_modal);
+    }
+
+    #[test]
+    fn diff_view_is_read_only_modal_and_renders_patch_colors() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.diff_modal = true;
+        app.diff_text = "Base: HEAD\n@@ -1 +1 @@\n-old\n+new".into();
+        let view = painted(&app);
+        assert!(view.contains("Worktree diff"));
+        assert!(view.contains("+new"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!app.diff_modal);
+    }
 
     #[test]
     fn long_transcript_window_reaches_both_ends() {

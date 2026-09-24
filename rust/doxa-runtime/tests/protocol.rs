@@ -1,5 +1,6 @@
 use doxa_runtime::{Daemon, Host, Session, MAX_FRAME_BYTES};
 use serde_json::{json, Value};
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -7,8 +8,8 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 struct Fixture { gate: (Mutex<bool>, Condvar), prompts: Mutex<Vec<String>> }
 impl Fixture {
@@ -31,7 +32,7 @@ impl Host for Fixture {
     }
 }
 fn session() -> Session { Session { session_id:"test-session".into(), cwd:"/tmp".into(), model:None,
-    engine:"fixture".into(), doxa_version:"2.0.0-alpha.4".into() } }
+    engine:"fixture".into(), doxa_version:"2.0.0-alpha.5".into() } }
 fn connect(path: &Path) -> (BufReader<UnixStream>, UnixStream) {
     let stream = UnixStream::connect(path).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
@@ -47,6 +48,109 @@ fn recv(reader: &mut BufReader<UnixStream>) -> Value {
 fn send(writer: &mut UnixStream, frame: Value) {
     writer.write_all(serde_json::to_string(&frame).unwrap().as_bytes()).unwrap();
     writer.write_all(b"\n").unwrap();
+}
+
+struct BlockingControl {
+    entered: AtomicBool,
+    gate: (Mutex<bool>, Condvar),
+}
+
+impl Host for BlockingControl {
+    fn prompt(&self, _: &str, emit: &mut dyn FnMut(Value)) {
+        emit(json!({"type":"turn_done","data":{}}));
+    }
+    fn call(&self, method: &str, _: &Value) -> Result<Value, String> {
+        if method != "set_model" { return Err("unknown method".into()); }
+        self.entered.store(true, Ordering::Release);
+        let mut ready = self.gate.0.lock().unwrap();
+        while !*ready { ready = self.gate.1.wait(ready).unwrap(); }
+        Ok(json!({"model":"test-model"}))
+    }
+}
+
+#[test]
+fn slow_model_control_does_not_block_other_clients_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(BlockingControl { entered: AtomicBool::new(false), gate: (Mutex::new(false), Condvar::new()) });
+    let handle = Daemon::bind(dir.path(), session(), host.clone()).unwrap().start();
+    let (mut control_reader, mut control_writer) = connect(handle.socket_path());
+    let (mut status_reader, mut status_writer) = connect(handle.socket_path());
+    recv(&mut control_reader);
+    recv(&mut status_reader);
+    send(&mut control_writer, json!({"type":"attach","cursor":null}));
+    send(&mut status_writer, json!({"type":"attach","cursor":null}));
+    send(&mut control_writer, json!({"type":"call","id":1,"method":"set_model","params":{"model":"test-model"}}));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !host.entered.load(Ordering::Acquire) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(host.entered.load(Ordering::Acquire));
+    send(&mut status_writer, json!({"type":"call","id":2,"method":"status","params":{}}));
+    let mut line = String::new();
+    let status = status_reader.read_line(&mut line);
+    *host.gate.0.lock().unwrap() = true;
+    host.gate.1.notify_all();
+    assert!(status.is_ok() && !line.is_empty(), "status blocked behind slow control RPC: {status:?}");
+    let frame: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(frame["status"]["model"], Value::Null);
+    assert_eq!(recv(&mut control_reader)["model"], "test-model");
+}
+
+struct ControlReplies(Mutex<VecDeque<Value>>);
+
+impl Host for ControlReplies {
+    fn prompt(&self, _: &str, _: &mut dyn FnMut(Value)) {}
+    fn call(&self, _: &str, _: &Value) -> Result<Value, String> {
+        Ok(self.0.lock().unwrap().pop_front().unwrap())
+    }
+}
+
+#[test]
+fn malformed_control_replies_do_not_report_success_or_change_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let replies = vec![
+        json!({}), json!({"model":null}), json!({"model":42}),
+        json!({"model":""}), json!({"model":"bad\nmodel"}), json!([]),
+        json!({}), json!({"mode":null}), json!({"mode":42}),
+        json!({"mode":""}), json!({"mode":"unrecognized"}), json!([]),
+        json!({"mode":"dontAsk"}),
+        json!({"model":"test-model"}), json!({"mode":"plan"}),
+    ];
+    let host = Arc::new(ControlReplies(Mutex::new(replies.into())));
+    let handle = Daemon::bind(dir.path(), session(), host).unwrap().start();
+    let (mut reader, mut writer) = connect(handle.socket_path());
+    recv(&mut reader);
+    send(&mut writer, json!({"type":"attach","cursor":null}));
+
+    for id in 1..=13 {
+        let method = if id <= 6 { "set_model" } else { "set_permission_mode" };
+        send(&mut writer, json!({"type":"call","id":id,"method":method,
+            "params":{"mode":"plan"}}));
+        let reply = recv(&mut reader);
+        assert_eq!(reply["id"], id);
+        assert_eq!(reply["ok"], false);
+        assert!(reply["error"].as_str().unwrap().contains("invalid"));
+        send(&mut writer, json!({"type":"call","id":100+id,"method":"status","params":{}}));
+        let status = recv(&mut reader);
+        assert_eq!(status["id"], 100+id, "unexpected event after rejected control");
+        assert_eq!(status["status"]["model"], Value::Null);
+        assert_eq!(status["status"]["permission_mode"], "default");
+    }
+
+    for (id, method, field, selected) in [(14, "set_model", "model", "test-model"),
+        (15, "set_permission_mode", "mode", "plan")] {
+        send(&mut writer, json!({"type":"call","id":id,"method":method,
+            "params":{"mode":"plan"}}));
+        let reply = recv(&mut reader);
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply[field], selected);
+        let event = recv(&mut reader);
+        assert_eq!(event["event"]["data"][field], selected);
+    }
+    send(&mut writer, json!({"type":"call","id":16,"method":"status","params":{}}));
+    let status = recv(&mut reader);
+    assert_eq!(status["status"]["model"], "test-model");
+    assert_eq!(status["status"]["permission_mode"], "plan");
 }
 
 #[test]

@@ -279,6 +279,8 @@ impl PeerHost {
 }
 
 impl Host for PeerHost {
+    fn initial_model(&self) -> Option<String> { self.inner.initial_model() }
+    fn initial_permission_mode(&self) -> String { self.inner.initial_permission_mode() }
     fn transcript_snapshot(&self) -> io::Result<Option<(PathBuf, u64)>> {
         self.inner.transcript_snapshot()
     }

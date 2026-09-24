@@ -4,8 +4,9 @@
 //! change meaning when the next streamed fragment arrives.
 
 use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
-use ratatui::{style::{Color, Modifier, Style}, text::{Line, Span}};
+use ratatui::{style::{Modifier, Style}, text::{Line, Span}};
 use unicode_width::UnicodeWidthChar;
+use crate::theme;
 
 #[derive(Default)]
 struct Block {
@@ -108,11 +109,11 @@ impl Renderer {
                 Tag::Paragraph => { if self.block.is_none() { self.start(false); } }
                 Tag::Heading { .. } => {
                     self.start(false);
-                    self.enter(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+                    self.enter(Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD));
                 }
                 Tag::CodeBlock(_) => {
                     self.start(true);
-                    self.enter(Style::default().fg(Color::Yellow));
+                    self.enter(Style::default().fg(theme::ACCENT));
                 }
                 Tag::BlockQuote(_) => { self.flush(); self.quote_depth += 1; }
                 Tag::List(next) => {
@@ -138,7 +139,7 @@ impl Renderer {
                 Tag::Strikethrough => self.enter(Style::default().add_modifier(Modifier::CROSSED_OUT)),
                 Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
                     self.links.push(sanitize(&dest_url).replace('\n', " "));
-                    self.enter(Style::default().fg(Color::Blue).add_modifier(Modifier::UNDERLINED));
+                    self.enter(Style::default().fg(theme::ACCENT).add_modifier(Modifier::UNDERLINED));
                 }
                 Tag::Table(alignments) => {
                     self.flush();
@@ -182,7 +183,7 @@ impl Renderer {
             },
             Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => self.push(&text),
             Event::Code(text) => {
-                self.enter(Style::default().fg(Color::Yellow));
+                self.enter(Style::default().fg(theme::ACCENT));
                 self.push(&text);
                 self.leave();
             }

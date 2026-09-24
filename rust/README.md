@@ -4,11 +4,11 @@
 1.x release remains the supported application. The Rust binary is named
 `doxa-rs` during development so installing it does not replace `doxa`.
 
-The first milestone has a real terminal event loop, a client for DOXA's
-versioned Unix-socket daemon, and a Markdown transcript presenter. It draws
-grouped sessions and split panes, accepts prompts, handles resize and scroll,
-and restores the terminal on exit. Existing daemon behavior and memory
-authority remain on the Python side.
+The preview has a native daemon for Codex and vendor chat, plus a Python
+Claude SDK sidecar. Its Ratatui frontend attaches to native or Python v1
+daemons, draws grouped sessions and split panes, accepts prompts, and renders
+Markdown. LORE remains the external authority for memory and secret scrubbing;
+the Rust process does not reimplement its store.
 
 Build the native frontend and daemon from this repository:
 
@@ -66,8 +66,19 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
-clickable links are still 2.0 work. The binary version is `2.0.0-alpha.4` for this
+clickable links are still 2.0 work. The binary version is `2.0.0-alpha.5` for this
 separate development line, not a DOXA 2.0 release.
+
+`Ctrl+R` opens a searchable picker for attached sessions and their bounded
+transcript tails. `F2` (or `Alt+G`) opens a read-only, 256 KiB worktree diff in
+an asynchronous modal. The diff compares tracked changes with the recorded
+worktree base when one exists, or with `HEAD`; untracked files are omitted.
+Offline session search and a persistent diff pane remain future work.
+Each split pane has its own prompt and keeps a draft for its active session.
+Its status row shows engine and model chips from that session's daemon hello,
+status, and model change events. The chips display current values; model and
+engine picker interactions remain future work in the native frontend. The
+colors follow Python DOXA's warm dark palette.
 
 Alpha tags identify preview snapshots. A stable 2.0 release waits until the
 frontend reaches feature parity and passes end-to-end terminal and daemon
@@ -85,6 +96,11 @@ must have DOXA, LORE, and the Claude Agent SDK installed. Add `--model NAME`
 to choose a model, or `--resume SESSION_ID` to resume that session's Claude
 conversation. `doxa-rs doctor --engine claude` checks the selected Python
 interpreter, sidecar script, daemon, and runtime path.
+Native Claude sessions can change their model and permission mode through
+capability-gated live controls. The daemon reports the selected values to
+attached clients. The Rust launcher has no explicit bypass arming flow yet,
+so `bypassPermissions` is refused. Entering `dontAsk` requires an idle session
+with no queued prompts.
 
 Start native DeepSeek or GLM plain chat with `doxa-rs new --engine deepseek`
 or `doxa-rs new --engine glm`. Set `DEEPSEEK_API_KEY` or `ZAI_API_KEY` in the
@@ -168,9 +184,12 @@ turn only, under a memory header and footer. The snapshot is absent from the
 displayed prompt and transcript, and a resumed provider thread receives no
 duplicate. If the snapshot is unavailable or too large, the turn proceeds
 without context; LORE scrubbing remains required for visible and persisted
-text. The host does not yet register MCP or integrate LORE review/indexing. The
-registry reports the selected engine. `status`, `interrupt`, and `stop` are
-supported; Claude also supports `answer_needs_input`. `peers` returns a
+text. After each native Codex turn and at shutdown, the external LORE sidecar
+incrementally indexes its owner-checked transcript. Automatic Codex proposal
+review remains unavailable, matching the Python Codex host; MCP registration
+is still open. The registry reports the selected engine. `status`, `interrupt`,
+and `stop` are supported; Claude also supports `answer_needs_input`,
+`set_model`, and `set_permission_mode`. `peers` returns a
 read-only, same-project roster of live peer IDs and LORE-scrubbed titles (up
 to 32). It fails closed when the LORE scrubber is unavailable. Other calls
 return an explicit error. The

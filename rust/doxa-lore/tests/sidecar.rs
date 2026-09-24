@@ -156,6 +156,40 @@ fn older_sidecar_keeps_core_operations_but_disables_new_ones() {
         client.pending_review("/repo", "one"),
         Err(LoreError::Unavailable)
     ));
+    assert!(matches!(
+        client.index_transcript("/repo", "session-1"),
+        Err(LoreError::Unavailable)
+    ));
+}
+
+#[test]
+fn index_transcript_uses_capability_and_session_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fake(
+        dir.path(),
+        r#"
+import json, sys
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','index_transcript_v1']}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    assert req['op'] == 'index_transcript_v1'
+    assert set(req) == {'id', 'op', 'cwd', 'session_id'}
+    value = {'indexed': 2, 'consumed': 3} if req['session_id'] == 'session-1' else {'indexed': 4, 'consumed': 3}
+    print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
+"#,
+    );
+    let mut client = LoreClient::spawn(&path, Duration::from_secs(2)).unwrap();
+    assert_eq!(client.index_transcript("/repo", "session-1").unwrap(), 2);
+    for session_id in ["", "../secret", "with_underscore", "é", "-bad"] {
+        assert!(matches!(
+            client.index_transcript("/repo", session_id),
+            Err(LoreError::InvalidFrame)
+        ));
+    }
+    assert!(matches!(
+        client.index_transcript("/repo", "session-2"),
+        Err(LoreError::InvalidFrame)
+    ));
 }
 
 #[test]

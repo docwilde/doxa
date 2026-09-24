@@ -14,7 +14,67 @@ from doxa import lore_bridge
 @pytest.fixture(autouse=True)
 def no_optional_read_store(monkeypatch):
     monkeypatch.setattr(lore_bridge, "_read_ops", lambda: None)
+    monkeypatch.setattr(lore_bridge, "_index_ops", lambda: None)
     monkeypatch.setattr(lore_bridge, "_pending_review_reader", lambda: None)
+
+
+def test_index_transcript_is_capability_gated_and_lore_scoped(monkeypatch, tmp_path):
+    project = tmp_path / "mapped-project"
+    project.mkdir()
+    transcript = project / "session-1.jsonl"
+    transcript.write_text('{"type":"user","message":{"content":"safe"}}\n')
+    seen = []
+    monkeypatch.setattr(lore_bridge, "_lore", lambda: (lambda text: text, lambda cwd, scope: ""))
+    monkeypatch.setattr(lore_bridge, "_extensions", lambda: (
+        lambda cwd: "mapped-project", lambda: None, lambda: [],
+        (lambda text: text, lambda: None)))
+    monkeypatch.setattr(lore_bridge, "_transcript_identity", lambda cwd, ext: {
+        "projects_dir": str(tmp_path), "slug": ext[0](cwd)})
+    monkeypatch.setattr(lore_bridge, "_index_ops", lambda: (
+        lambda: "LORE database", lambda conn, path: (seen.append((conn, path)) or (1, 1))))
+    requests = [
+        {"id": 1, "op": "index_transcript_v1", "cwd": "/repo", "session_id": "session-1"},
+        {"id": 2, "op": "index_transcript_v1", "cwd": "/repo", "session_id": "../secret"},
+    ]
+    output = io.BytesIO()
+    monkeypatch.setattr(lore_bridge.sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(
+        b"".join(map(lore_bridge._frame, requests)))))
+    monkeypatch.setattr(lore_bridge.sys, "stdout", types.SimpleNamespace(buffer=output))
+    lore_bridge.serve()
+    frames = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert "index_transcript_v1" in frames[0]["capabilities"]
+    assert frames[1]["value"] == {"indexed": 1, "consumed": 1}
+    assert seen == [("LORE database", transcript)]
+    assert frames[2]["error"] == "operation_failed"
+
+
+def test_index_transcript_rejects_symlink_and_foreign_path(monkeypatch, tmp_path):
+    project = tmp_path / "mapped-project"
+    project.mkdir()
+    outside = tmp_path / "other.jsonl"
+    outside.write_text("private")
+    (project / "session-1.jsonl").symlink_to(outside)
+    monkeypatch.setattr(lore_bridge, "_transcript_identity", lambda cwd, ext: {
+        "projects_dir": str(tmp_path), "slug": "mapped-project"})
+    called = []
+    with pytest.raises(ValueError):
+        lore_bridge._index_transcript("/repo", "session-1", (),
+                                       (lambda: None, lambda conn, path: called.append(path)))
+    assert called == []
+
+
+def test_index_transcript_rejects_world_writable_project_directory(monkeypatch, tmp_path):
+    project = tmp_path / "mapped-project"
+    project.mkdir()
+    (project / "session-1.jsonl").write_text('{"type":"user"}\n')
+    project.chmod(0o777)
+    monkeypatch.setattr(lore_bridge, "_transcript_identity", lambda cwd, ext: {
+        "projects_dir": str(tmp_path), "slug": "mapped-project"})
+    called = []
+    with pytest.raises(ValueError):
+        lore_bridge._index_transcript("/repo", "session-1", (),
+                                       (lambda: None, lambda conn, path: called.append(path)))
+    assert called == []
 
 
 def test_pending_review_v1_uses_lore_snapshot_and_rejects_changed_proposal(monkeypatch, tmp_path):

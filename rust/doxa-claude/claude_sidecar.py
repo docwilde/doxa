@@ -58,7 +58,8 @@ async def run() -> None:
     from doxa.engine import SessionEngine
 
     emit({"type": "hello", "protocol": PROTOCOL, "version": VERSION,
-          "capabilities": ["start", "prompt", "answer", "interrupt", "finalize"]})
+          "capabilities": ["start", "prompt", "answer", "interrupt", "finalize",
+                           "set_model", "set_permission_mode"]})
     engine = None
     turn = None
 
@@ -124,7 +125,8 @@ async def run() -> None:
                 started = await candidate.start()
                 engine = candidate
                 emit({"type": "reply", "id": request_id, "ok": True,
-                      "result": {"event": started.type, "data": started.data}})
+                      "result": {"event": started.type, "data": started.data,
+                                 "permission_mode": getattr(candidate, "permission_mode", "default")}})
                 peer_task = asyncio.create_task(publish_out_of_band())
             elif method == "prompt" and engine is not None:
                 prompt = params["text"]
@@ -141,6 +143,31 @@ async def run() -> None:
                 applied = await engine.answer_needs_input(params["id"], answer)
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": {"applied": applied}})
+            elif method == "set_model" and engine is not None:
+                model = params["model"]
+                if model is not None and (
+                    not isinstance(model, str) or not model.strip()
+                    or len(model) > 256 or any(ord(char) < 32 for char in model)
+                ):
+                    raise ValueError("invalid model")
+                selected = await engine.set_model(model)
+                emit({"type": "reply", "id": request_id, "ok": True,
+                      "result": {"model": selected}})
+            elif method == "set_permission_mode" and engine is not None:
+                mode = params["mode"]
+                if mode not in ("default", "acceptEdits", "plan", "auto", "dontAsk"):
+                    # The Rust launcher has no bypass-arming option. Even if
+                    # an inherited environment arms the Python engine, this
+                    # sidecar must not make bypass reachable through the RPC.
+                    raise ValueError("unsupported permission mode")
+                if mode == "dontAsk" and (
+                    getattr(engine, "_turn_running", False)
+                    or len(getattr(engine, "_prompt_queue", ()))
+                ):
+                    raise ValueError("dontAsk requires an idle session")
+                selected = await engine.set_permission_mode(mode)
+                emit({"type": "reply", "id": request_id, "ok": True,
+                      "result": {"mode": selected}})
             elif method == "interrupt" and engine is not None:
                 if engine._client is None:
                     raise ValueError("not connected")

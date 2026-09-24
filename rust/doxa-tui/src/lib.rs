@@ -3,6 +3,7 @@
 pub mod markdown;
 pub mod bridge;
 pub mod history;
+pub mod diff_view;
 pub mod discovery;
 pub mod transport;
 pub mod ui;
@@ -12,3 +13,4 @@ pub mod ui_state;
 pub mod launch;
 
 pub mod peer_map;
+pub mod theme;

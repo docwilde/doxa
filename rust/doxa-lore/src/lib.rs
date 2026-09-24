@@ -236,6 +236,34 @@ impl LoreClient {
         Ok((PathBuf::from(root), slug.to_owned()))
     }
 
+    /// Ask external LORE to incrementally index this DOXA-owned transcript.
+    /// The sidecar derives the path from LORE's project mapping; no arbitrary
+    /// path or transcript contents cross this request boundary. This does not
+    /// derive beliefs or approve pending proposals.
+    pub fn index_transcript(&mut self, cwd: &str, session_id: &str) -> Result<u64, LoreError> {
+        if cwd.is_empty()
+            || cwd.len() > 4096
+            || cwd.contains('\0')
+            || session_id.is_empty()
+            || session_id.len() > 128
+            || !session_id.bytes().enumerate().all(|(i, b)| {
+                b.is_ascii_alphanumeric() || (i > 0 && b == b'-')
+            })
+        {
+            return Err(LoreError::InvalidFrame);
+        }
+        let value = self.request_value(
+            "index_transcript_v1",
+            json!({"cwd":cwd,"session_id":session_id}),
+        )?;
+        let indexed = value["indexed"].as_u64().ok_or(LoreError::InvalidFrame)?;
+        let consumed = value["consumed"].as_u64().ok_or(LoreError::InvalidFrame)?;
+        if indexed > consumed {
+            return Err(LoreError::InvalidFrame);
+        }
+        Ok(indexed)
+    }
+
     pub fn pending(&mut self, cwd: &str, offset: u16, limit: u8) -> Result<Vec<Value>, LoreError> {
         if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0') || offset > 10000 || limit > 50
         {

@@ -2,6 +2,7 @@
 //! This crate deliberately does not claim native Rust SDK or feature parity.
 
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
@@ -48,6 +49,7 @@ pub struct Bridge {
     frames: Receiver<Result<Value, Error>>,
     next_id: u64,
     terminated: bool,
+    capabilities: HashSet<String>,
 }
 
 impl Bridge {
@@ -85,13 +87,22 @@ impl Bridge {
                 }
             }
         });
-        let mut bridge = Self { child, stdin, frames: rx, next_id: 1, terminated: false };
+        let mut bridge = Self { child, stdin, frames: rx, next_id: 1, terminated: false, capabilities: HashSet::new() };
         let hello = bridge.recv(START_TIMEOUT)?;
         if hello["type"] != "hello" || hello["protocol"] != PROTOCOL || hello["version"] != VERSION {
             return Err(Error::Protocol);
         }
+        if let Some(capabilities) = hello.get("capabilities") {
+            let Some(names) = capabilities.as_array() else { return Err(Error::Protocol); };
+            if names.len() > 64 || names.iter().any(|name| name.as_str().is_none()) {
+                return Err(Error::Protocol);
+            }
+            bridge.capabilities = names.iter().filter_map(Value::as_str).map(str::to_owned).collect();
+        }
         Ok(bridge)
     }
+
+    pub fn supports(&self, method: &str) -> bool { self.capabilities.contains(method) }
 
     /// Acknowledgements and engine events share a stream. Calls only return
     /// the next frame; the host must keep polling to receive turn events.

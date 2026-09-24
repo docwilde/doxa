@@ -514,6 +514,77 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-
 }
 
 #[test]
+fn codex_host_indexes_completed_turn_and_finalized_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let index_log = dir.path().join("index-requests.jsonl");
+    let index_done = dir.path().join("index-done");
+    executable(
+        &python,
+        &format!(
+            r#"#!/usr/bin/env python3
+import json, sys, time
+print(json.dumps({{"type":"hello","proto":1,"capabilities":["scrub","snapshot","transcript_identity","index_transcript_v1"]}}), flush=True)
+for line in sys.stdin:
+    frame = json.loads(line)
+    op = frame["op"]
+    if op == "transcript_identity":
+        value = {{"projects_dir":frame["cwd"],"slug":"project"}}
+        reply = {{"value":value}}
+    elif op == "index_transcript_v1":
+        with open({:?}, "a") as out:
+            out.write(json.dumps(frame) + "\n")
+        time.sleep(0.8)
+        open({:?}, "w").close()
+        reply = {{"value":{{"indexed":2,"consumed":2}}}}
+    else:
+        reply = {{"text":frame.get("text", "")}}
+    print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,**reply}}), flush=True)
+"#,
+            index_log.to_str().unwrap(),
+            index_done.to_str().unwrap()
+        ),
+    );
+    executable(
+        &codex,
+        "#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}'\n",
+    );
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    loop {
+        if receive(&mut reader)["event"]["type"] == "turn_done" {
+            break;
+        }
+    }
+    wait_until(|| index_log.exists());
+    // The sidecar is still indexing. Completion must already be visible to
+    // the runtime rather than keeping the session busy for its round trip.
+    send(&mut socket, json!({"type":"call","id":3,"method":"status","params":{}}));
+    assert_eq!(receive(&mut reader)["status"]["running"], false);
+    assert!(!index_done.exists(), "turn completion waited for LORE indexing");
+    send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+    let rows: Vec<Value> = fs::read_to_string(index_log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert_eq!(row["op"], "index_transcript_v1");
+        assert_eq!(row["cwd"], dir.path().to_str().unwrap());
+        assert_eq!(row["session_id"], "codex-session");
+        assert!(row.get("path").is_none());
+    }
+}
+
+#[test]
 fn codex_memory_reaches_only_first_provider_stdin_and_not_transcript() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
@@ -814,6 +885,9 @@ for line in sys.stdin:
     let (mut reader, mut socket) = process.connect();
     assert_eq!(receive(&mut reader)["engine"], "claude");
     send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"call","id":6,"method":"set_model",
+        "params":{"model":"haiku"}}));
+    assert_eq!(receive(&mut reader)["ok"], false);
     send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
     assert_eq!(receive(&mut reader)["ok"], true);
     assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
@@ -864,6 +938,77 @@ for line in sys.stdin:
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
     assert!(finalized.exists());
+}
+
+#[test]
+fn claude_controls_require_capabilities_and_broadcast_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("claude-controls.py");
+    fs::write(&script, r#"import json, sys
+print(json.dumps({"type":"hello","protocol":"doxa-claude-sidecar","version":1,
+                  "capabilities":["set_model","set_permission_mode"]}),flush=True)
+for line in sys.stdin:
+    frame=json.loads(line)
+    method=frame["method"]
+    result={}
+    if method=="start":
+        result={"data":{"model":"opus"},"permission_mode":"plan"}
+    elif method=="set_model":
+        result={"model":frame["params"]["model"] or "default"}
+    elif method=="set_permission_mode":
+        result={"mode":frame["params"]["mode"]}
+    elif method=="prompt":
+        print(json.dumps({"type":"reply","id":frame["id"],"ok":True,"result":{}}),flush=True)
+        print(json.dumps({"type":"event","event":"needs_input","data":{"id":"q"}}),flush=True)
+        continue
+    elif method=="answer":
+        print(json.dumps({"type":"reply","id":frame["id"],"ok":True,"result":{"applied":True}}),flush=True)
+        print(json.dumps({"type":"event","event":"turn_done","data":{}}),flush=True)
+        continue
+    print(json.dumps({"type":"reply","id":frame["id"],"ok":True,"result":result}),flush=True)
+    if method=="finalize": break
+"#).unwrap();
+    let mut process = Process::start_claude(dir.path(), &script);
+    let (mut reader, mut socket) = process.connect();
+    let hello = receive(&mut reader);
+    assert_eq!(hello["model"], "opus");
+    assert_eq!(hello["permission_mode"], "plan");
+    assert_eq!(hello["bypass_armed"], false);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"call","id":1,"method":"set_model",
+        "params":{"model":"haiku"}}));
+    assert_eq!(receive(&mut reader)["model"], "haiku");
+    assert_eq!(receive(&mut reader)["event"]["type"], "model_changed");
+    send(&mut socket, json!({"type":"call","id":2,"method":"set_permission_mode",
+        "params":{"mode":"dontAsk"}}));
+    assert_eq!(receive(&mut reader)["mode"], "dontAsk");
+    assert_eq!(receive(&mut reader)["event"]["type"], "permission_mode_changed");
+    send(&mut socket, json!({"type":"call","id":3,"method":"status","params":{}}));
+    let status = receive(&mut reader);
+    assert_eq!(status["status"]["model"], "haiku");
+    assert_eq!(status["status"]["permission_mode"], "dontAsk");
+    send(&mut socket, json!({"type":"call","id":4,"method":"set_permission_mode",
+        "params":{"mode":"bypassPermissions"}}));
+    assert_eq!(receive(&mut reader)["ok"], false);
+    send(&mut socket, json!({"type":"call","id":5,"method":"set_permission_mode",
+        "params":{"mode":"plan"}}));
+    assert_eq!(receive(&mut reader)["mode"], "plan");
+    assert_eq!(receive(&mut reader)["event"]["type"], "permission_mode_changed");
+    send(&mut socket, json!({"type":"prompt","id":6,"text":"hello"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    assert_eq!(receive(&mut reader)["event"]["type"], "needs_input");
+    send(&mut socket, json!({"type":"call","id":7,"method":"set_permission_mode",
+        "params":{"mode":"dontAsk"}}));
+    assert_eq!(receive(&mut reader)["ok"], false);
+    send(&mut socket, json!({"type":"call","id":8,"method":"answer_needs_input",
+        "params":{"id":"q","answer":{"yes":true}}}));
+    let answer1 = receive(&mut reader);
+    let answer2 = receive(&mut reader);
+    assert!(answer1["applied"] == true || answer2["applied"] == true);
+    assert!(answer1["event"]["type"] == "turn_done" || answer2["event"]["type"] == "turn_done");
+    send(&mut socket, json!({"type":"call","id":9,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
 }
 
 #[test]
