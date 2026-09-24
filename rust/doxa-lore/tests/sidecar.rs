@@ -152,6 +152,55 @@ fn older_sidecar_keeps_core_operations_but_disables_new_ones() {
         client.consult("query"),
         Err(LoreError::Unavailable)
     ));
+    assert!(matches!(
+        client.pending_review("/repo", "one"),
+        Err(LoreError::Unavailable)
+    ));
+}
+
+#[test]
+fn full_review_binds_complete_raw_bytes_and_inode() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fake(
+        dir.path(),
+        r#"
+import hashlib, json, sys
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','pending_review_v1']}), flush=True)
+raw = '{"kind":"sync","op":{"payload":"entire signed op bytes"}}\n'
+for line in sys.stdin:
+    req = json.loads(line)
+    value = {'pid':req['pid'], 'raw':raw, 'sha256':hashlib.sha256(raw.encode()).hexdigest(), 'inode':87, 'complete':True}
+    if req['pid'] == 'changed': value['sha256'] = '0' * 64
+    if req['pid'] == 'partial': value['complete'] = False
+    if req['pid'] == 'swapped': value['pid'] = 'other'
+    if req['pid'] == 'invalid': value['raw'] = '{"kind":'
+    print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
+"#,
+    );
+    let mut client = LoreClient::spawn(&path, Duration::from_secs(2)).unwrap();
+    let review = client.pending_review("/repo", "one").unwrap();
+    assert_eq!(review.pid(), "one");
+    assert_eq!(review.inode(), 87);
+    assert!(review.raw().contains("entire signed op bytes"));
+    assert_eq!(review.sha256().len(), 64);
+    for pid in ["changed", "partial", "swapped", "invalid"] {
+        assert!(
+            matches!(
+                client.pending_review("/repo", pid),
+                Err(LoreError::InvalidFrame)
+            ),
+            "{pid}"
+        );
+    }
+    for pid in ["../other", "", "a/b"] {
+        assert!(
+            matches!(
+                client.pending_review("/repo", pid),
+                Err(LoreError::InvalidFrame)
+            ),
+            "{pid}"
+        );
+    }
 }
 
 #[test]

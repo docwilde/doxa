@@ -5,6 +5,7 @@
 //! returns an error; callers must not silently persist unsanitized text.
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::io::{self, Read, Write};
 #[cfg(unix)]
@@ -19,6 +20,32 @@ use std::time::{Duration, Instant};
 
 pub const PROTOCOL_VERSION: u64 = 1;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+/// A complete, immutable pending-file snapshot for a human review screen.
+/// The raw JSON is the exact UTF-8 byte sequence whose digest LORE reports.
+/// This value alone grants no authority to approve or mutate the proposal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingReview {
+    pid: String,
+    raw: String,
+    sha256: String,
+    inode: u64,
+}
+
+impl PendingReview {
+    pub fn pid(&self) -> &str {
+        &self.pid
+    }
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+    pub fn inode(&self) -> u64 {
+        self.inode
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SyncState {
@@ -221,6 +248,54 @@ impl LoreClient {
             return Err(LoreError::InvalidFrame);
         }
         Ok(rows.clone())
+    }
+
+    /// Fetch one complete proposal from a sidecar that explicitly supports
+    /// same-descriptor pending snapshots. The legacy `pending` rows are
+    /// scrubbed previews and must never be used as approval evidence.
+    ///
+    /// A future approval operation must independently check this digest and
+    /// inode against the claimed file, after the UI has actually rendered the
+    /// entire `raw` value. This client intentionally exposes no mutation.
+    pub fn pending_review(&mut self, cwd: &str, pid: &str) -> Result<PendingReview, LoreError> {
+        if cwd.is_empty()
+            || cwd.len() > 4096
+            || cwd.contains('\0')
+            || pid.is_empty()
+            || pid.len() > 128
+            || !pid
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        {
+            return Err(LoreError::InvalidFrame);
+        }
+        let value = self.request_value("pending_review_v1", json!({"cwd":cwd,"pid":pid}))?;
+        let returned_pid = value["pid"].as_str().ok_or(LoreError::InvalidFrame)?;
+        let raw = value["raw"].as_str().ok_or(LoreError::InvalidFrame)?;
+        let sha256 = value["sha256"].as_str().ok_or(LoreError::InvalidFrame)?;
+        let inode = value["inode"]
+            .as_u64()
+            .filter(|v| *v > 0)
+            .ok_or(LoreError::InvalidFrame)?;
+        if returned_pid != pid
+            || value["complete"] != true
+            || raw.is_empty()
+            || raw.len() > MAX_FRAME_BYTES
+            || !sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            || sha256.len() != 64
+            || format!("{:x}", Sha256::digest(raw.as_bytes())) != sha256
+            || !serde_json::from_str::<Value>(raw).is_ok_and(|item| item.is_object())
+        {
+            return Err(LoreError::InvalidFrame);
+        }
+        Ok(PendingReview {
+            pid: pid.to_owned(),
+            raw: raw.to_owned(),
+            sha256: sha256.to_owned(),
+            inode,
+        })
     }
 
     /// One active FTS belief. It is derived data for citation, never an instruction.
