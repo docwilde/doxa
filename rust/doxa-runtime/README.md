@@ -17,8 +17,10 @@ Implemented in this slice:
 - Bounded 64 KiB line-JSON input and output; slow clients have bounded output
   queues and are dropped instead of slowing other clients.
 - Prompt dispatch with a bounded eight-item FIFO, a reply before turn events,
-  and queue notifications to other clients. Host calls and a built-in minimal
-  `status` call have protocol v1 reply envelopes.
+  and queue notifications to other clients. A missing terminal turn event is
+  synthesized so clients cannot wait forever on a returned or panicked host.
+  Host calls and a built-in minimal `status` call have protocol v1 reply
+  envelopes.
 - Multiple clients, explicit handle shutdown, and a host-approved `stop` call.
 
 This is **not yet a replacement for the Python daemon**. The Python engine,
@@ -32,4 +34,8 @@ TUI continues to connect to the Python daemon.
 Run `cargo test --manifest-path rust/doxa-runtime/Cargo.toml` from the repo
 root. The socket tests cover frame shapes, replay/live order, prompt ordering,
 multiple clients, malformed and oversized input, permissions, path refusal,
-and cleanup.
+and cleanup. One integration test connects with the real Python
+`doxa.client.EngineClient` and checks attach, replay, prompt events, and status.
+The fixture's minimal status leaves the Python client's other cached fields
+at their defaults; those fields need the native engine adapter and full RPC
+implementation before this socket can back the production UI.

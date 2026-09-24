@@ -22,6 +22,8 @@ const MAX_CONNECTIONS: usize = 64;
 
 /// The engine seam. `prompt` may emit zero or more protocol event objects.
 /// Each event is wrapped in a sequence-numbered `event` frame by the daemon.
+/// If the host returns without `turn_done` or `turn_refused`, the daemon emits
+/// one `turn_done`; it also emits an error terminal if the host panics.
 /// Methods are called from worker threads and must be safe for concurrent calls.
 pub trait Host: Send + Sync + 'static {
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value));
@@ -75,8 +77,12 @@ impl Daemon {
     /// Bind inside an owner-private runtime directory. Existing socket paths
     /// are never removed or replaced, even if a previous process left one.
     pub fn bind(runtime_dir: impl AsRef<Path>, session: Session, host: Arc<dyn Host>) -> io::Result<Self> {
-        if session.session_id.is_empty() || session.session_id.len() > 128 ||
-            !session.session_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') ||
+        // Keep this identical to doxa.identity._SESSION_ID_RE:
+        // [0-9A-Za-z][0-9A-Za-z-]{0,127}.
+        let id = session.session_id.as_bytes();
+        if id.is_empty() || id.len() > 128 ||
+            !id[0].is_ascii_alphanumeric() ||
+            !id[1..].iter().all(|b| b.is_ascii_alphanumeric() || *b == b'-') ||
             session.cwd.is_empty() || session.engine.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid session metadata"));
         }
@@ -179,10 +185,17 @@ impl Inner {
     fn start_turn(self: &Arc<Self>, text: String, turn: String) {
         let inner = self.clone();
         thread::spawn(move || {
-            let mut emit = |event: Value| inner.publish(Some(&turn), event);
+            let mut terminal_emitted = false;
+            let mut emit = |event: Value| {
+                if terminal_emitted { return; }
+                terminal_emitted = matches!(event["type"].as_str(), Some("turn_done" | "turn_refused"));
+                inner.publish(Some(&turn), event);
+            };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.host.prompt(&text, &mut emit)));
-            if result.is_err() {
+            if result.is_err() && !terminal_emitted {
                 inner.publish(Some(&turn), json!({"type":"turn_done", "data":{"is_error":true,"error":"host panicked"}}));
+            } else if !terminal_emitted {
+                inner.publish(Some(&turn), json!({"type":"turn_done", "data":{}}));
             }
             let next = {
                 let mut state = inner.state.lock().unwrap();
@@ -314,7 +327,7 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
         Ok(json!({"status":{"session_id":inner.session.session_id,"cwd":inner.session.cwd,
             "model":inner.session.model,"engine":inner.session.engine,"running":state.busy,"queued":state.prompts.len()}}))
     } else { inner.host.call(method, &params) };
-    let stop_ok = method == "stop" && result.is_ok();
+    let stop_ok = method == "stop" && matches!(&result, Ok(value) if value.is_object());
     match result {
         Ok(extra) if extra.is_object() => {
             let mut reply = json!({"type":"reply","id":req_id,"ok":true});

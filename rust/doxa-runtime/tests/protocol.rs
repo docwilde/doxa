@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -180,4 +181,121 @@ fn host_approved_stop_removes_socket() {
         std::thread::sleep(Duration::from_millis(10));
     }
     panic!("stopped daemon left its socket behind");
+}
+
+#[test]
+fn session_id_matches_python_identity_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    for id in ["a", "9", "A-b-0", &format!("a{}", "-".repeat(127))] {
+        let mut meta = session(); meta.session_id = id.into();
+        let daemon = Daemon::bind(dir.path(), meta, Arc::new(Fixture::new())).unwrap();
+        // A new ID may share an eight-character prefix; remove the socket
+        // through the handle before checking the next case.
+        drop(daemon.start());
+    }
+    for id in ["", "-bad", "_bad", "a_b", "a.b", "../bad", "a/b", "a\\b", "é", "aé",
+        &format!("a{}", "-".repeat(128))] {
+        let mut meta = session(); meta.session_id = id.into();
+        assert!(Daemon::bind(dir.path(), meta, Arc::new(Fixture::new())).is_err(), "accepted {id:?}");
+    }
+}
+
+#[test]
+fn python_engine_client_attaches_replays_and_sends_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(Fixture::new());
+    host.release();
+    let handle = Daemon::bind(dir.path(), session(), host).unwrap().start();
+    handle.publish(json!({"type":"text_delta","data":{"text":"replayed"}}));
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let script = r#"
+import asyncio, json, sys
+from doxa.client import EngineClient
+
+async def run():
+    client = EngineClient(sys.argv[1])
+    started = await client.start()
+    replay = await asyncio.wait_for(anext(client.peer_events()), 5)
+    events = []
+    async for event in client.send('hello from Python'):
+        events.append([event.type, event.data])
+    status = await client.refresh_status()
+    result = {'started': started.type, 'session_id': client.session_id,
+              'replay': replay.data['text'], 'events': events,
+              'status_session_id': status['session_id'], 'cursor': client.cursor}
+    await client.finalize()
+    return result
+
+print(json.dumps(asyncio.run(asyncio.wait_for(run(), 8))))
+"#;
+    let output = Command::new("python3").arg("-c").arg(script).arg(handle.socket_path())
+        .env("PYTHONPATH", repo_root).output().unwrap();
+    assert!(output.status.success(), "Python EngineClient failed: {}",
+        String::from_utf8_lossy(&output.stderr));
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["started"], "session_started");
+    assert_eq!(result["session_id"], "test-session");
+    assert_eq!(result["replay"], "replayed");
+    assert_eq!(result["events"][0], json!(["text_delta", {"text":"hello from Python"}]));
+    assert_eq!(result["events"][1][0], "turn_done");
+    assert_eq!(result["status_session_id"], "test-session");
+    assert_eq!(result["cursor"], 3);
+}
+
+struct TerminalHost { mode: &'static str }
+impl Host for TerminalHost {
+    fn prompt(&self, _: &str, emit: &mut dyn FnMut(Value)) {
+        emit(json!({"type":"text_delta","data":{"text":"body"}}));
+        if self.mode == "explicit" {
+            emit(json!({"type":"turn_done","data":{"explicit":true}}));
+        } else if self.mode == "refused" {
+            emit(json!({"type":"turn_refused","data":{"reason":"fixture"}}));
+        } else if self.mode == "panic" {
+            panic!("fixture failure");
+        }
+    }
+    fn call(&self, method: &str, _: &Value) -> Result<Value, String> {
+        if method == "stop" { Ok(json!(42)) } else { Err("unknown method".into()) }
+    }
+}
+
+#[test]
+fn every_turn_has_exactly_one_terminal_event() {
+    for mode in ["implicit", "explicit", "refused", "panic"] {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = Daemon::bind(dir.path(), session(), Arc::new(TerminalHost { mode })).unwrap().start();
+        let (mut reader, mut writer) = connect(handle.socket_path());
+        recv(&mut reader);
+        send(&mut writer, json!({"type":"attach","cursor":null}));
+        send(&mut writer, json!({"type":"prompt","id":1,"text":"hello"}));
+        assert_eq!(recv(&mut reader)["ok"], true);
+        assert_eq!(recv(&mut reader)["event"]["type"], "text_delta");
+        let terminal = recv(&mut reader);
+        assert_eq!(terminal["event"]["type"], if mode == "refused" { "turn_refused" } else { "turn_done" });
+        assert_eq!(terminal["event"]["data"]["is_error"] == true, mode == "panic");
+        let mut settled = false;
+        for id in 2..22 {
+            send(&mut writer, json!({"type":"call","id":id,"method":"status","params":{}}));
+            let status = recv(&mut reader);
+            assert_eq!(status["type"], "reply", "extra event after terminal in {mode}");
+            if status["status"]["running"] == false { settled = true; break; }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(settled, "turn did not settle in {mode}");
+    }
+}
+
+#[test]
+fn invalid_stop_reply_does_not_stop_listener() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = Daemon::bind(dir.path(), session(), Arc::new(TerminalHost { mode:"implicit" })).unwrap().start();
+    let (mut reader, mut writer) = connect(handle.socket_path());
+    recv(&mut reader);
+    send(&mut writer, json!({"type":"attach","cursor":null}));
+    send(&mut writer, json!({"type":"call","id":1,"method":"stop","params":{}}));
+    let reply = recv(&mut reader);
+    assert_eq!(reply["ok"], false);
+    assert!(handle.socket_path().exists());
+    let (mut next, _) = connect(handle.socket_path());
+    assert_eq!(recv(&mut next)["type"], "hello");
 }
