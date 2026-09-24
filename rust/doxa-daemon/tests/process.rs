@@ -974,6 +974,9 @@ for line in sys.stdin:
     assert_eq!(hello["model"], "opus");
     assert_eq!(hello["permission_mode"], "plan");
     assert_eq!(hello["bypass_armed"], false);
+    assert_eq!(hello["can_set_permission_mode"], true);
+    assert_eq!(hello["running"], false);
+    assert_eq!(hello["queued"], 0);
     send(&mut socket, json!({"type":"attach","cursor":null}));
     send(&mut socket, json!({"type":"call","id":1,"method":"set_model",
         "params":{"model":"haiku"}}));
@@ -987,6 +990,7 @@ for line in sys.stdin:
     let status = receive(&mut reader);
     assert_eq!(status["status"]["model"], "haiku");
     assert_eq!(status["status"]["permission_mode"], "dontAsk");
+    assert_eq!(status["status"]["can_set_permission_mode"], true);
     send(&mut socket, json!({"type":"call","id":4,"method":"set_permission_mode",
         "params":{"mode":"bypassPermissions"}}));
     assert_eq!(receive(&mut reader)["ok"], false);

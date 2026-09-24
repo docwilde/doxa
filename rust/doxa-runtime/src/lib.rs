@@ -33,6 +33,7 @@ pub trait Host: Send + Sync + 'static {
     fn initial_model(&self) -> Option<String> { None }
     fn initial_permission_mode(&self) -> String { "default".to_owned() }
     fn can_set_model(&self) -> bool { false }
+    fn can_set_permission_mode(&self) -> bool { false }
     /// Text included in queue events. A real host can scrub prompts before
     /// they are sent to other attached clients; internal execution keeps the
     /// original prompt. An error rejects new prompts before queueing.
@@ -262,7 +263,9 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             "engine":inner.session.engine, "cwd":inner.session.cwd, "next_seq":state.next_seq,
             "transcript_path":transcript.as_ref().map(|(path, _)| path.to_string_lossy().into_owned()),
             "transcript_bytes":transcript.as_ref().map(|(_, size)| *size),
-            "can_set_model":inner.host.can_set_model()})
+            "running":state.busy,"queued":state.prompts.len(),
+            "can_set_model":inner.host.can_set_model(),
+            "can_set_permission_mode":inner.host.can_set_permission_mode()})
     };
     if writer.set_write_timeout(Some(Duration::from_secs(2))).is_err() ||
         writer.write_all(&encode_reply(&hello)).is_err() { return; }
@@ -385,7 +388,8 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
         (Ok(json!({"status":{"session_id":inner.session.session_id,"cwd":inner.session.cwd,
             "model":state.model,"permission_mode":state.permission_mode,
             "engine":inner.session.engine,"running":state.busy,"queued":state.prompts.len(),
-            "can_set_model":inner.host.can_set_model()}})), None)
+            "can_set_model":inner.host.can_set_model(),
+            "can_set_permission_mode":inner.host.can_set_permission_mode()}})), None)
     } else if matches!(method, "set_model" | "set_permission_mode") {
         // Control calls may wait on a sidecar. Hold the control lock across
         // that call, but never the global state lock: event publishing and

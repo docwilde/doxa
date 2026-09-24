@@ -37,7 +37,7 @@ const MAX_PENDING_PROMPTS: usize = 32;
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
 const MAX_ANSWER_BYTES: usize = 10 * 1024;
-const ACTIONS: [(&str, &str); 10] = [
+const ACTIONS: [(&str, &str); 11] = [
     ("Peer map", "Ctrl+M"),
     ("Tool activity", "Ctrl+T"),
     ("Open selected session", "rail selection"),
@@ -48,9 +48,21 @@ const ACTIONS: [(&str, &str); 10] = [
     ("Worktree diff", "F2"),
     ("Engine for new session", "Alt+E"),
     ("Session model", "Alt+M"),
+    ("Claude permissions", "Alt+P"),
 ];
 
 const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
+const PERMISSION_CHOICES: [(&str, &str); 5] = [
+    ("default", "Standard permission prompts"),
+    ("acceptEdits", "Automatically accept edits"),
+    ("plan", "Plan without changes"),
+    ("auto", "Automatic permission mode"),
+    ("dontAsk", "Deny permission requests · idle only"),
+];
+
+fn permission_index(mode: &str) -> Option<usize> {
+    PERMISSION_CHOICES.iter().position(|(candidate, _)| *candidate == mode)
+}
 
 #[derive(Debug)]
 struct ModelPicker {
@@ -387,6 +399,11 @@ pub struct App {
     input_drafts: HashMap<(usize, String), String>,
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
     model_capabilities: HashMap<String, bool>,
+    permission_capabilities: HashMap<String, bool>,
+    permission_modes: HashMap<String, String>,
+    session_activity: HashMap<String, (bool, usize)>,
+    permission_picker: Option<(String, usize)>,
+    pending_permission_changes: Vec<(String, String)>,
     model_picker: Option<ModelPicker>,
     engine_picker: bool,
     engine_selected: usize,
@@ -448,6 +465,11 @@ impl Default for App {
             input_drafts: HashMap::new(),
             session_identity: HashMap::new(),
             model_capabilities: HashMap::new(),
+            permission_capabilities: HashMap::new(),
+            permission_modes: HashMap::new(),
+            session_activity: HashMap::new(),
+            permission_picker: None,
+            pending_permission_changes: Vec::new(),
             model_picker: None,
             engine_picker: false,
             engine_selected: 0,
@@ -530,6 +552,12 @@ impl App {
                 let engine = frame.get("engine").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                 self.session_identity.insert(id.to_owned(), (engine, model.clone()));
                 self.model_capabilities.insert(id.to_owned(), frame["can_set_model"] == true);
+                self.permission_capabilities.insert(id.to_owned(), frame["can_set_permission_mode"] == true);
+                if let Some(mode) = frame["permission_mode"].as_str().filter(|mode| permission_index(mode).is_some()) {
+                    self.permission_modes.insert(id.to_owned(), mode.to_owned());
+                }
+                self.session_activity.insert(id.to_owned(), (frame["running"] == true,
+                    frame["queued"].as_u64().unwrap_or(0) as usize));
                 let cwd = safe_label(frame.get("cwd").and_then(|v| v.as_str()).unwrap_or(""));
                 if let Some(raw) = frame.get("cwd").and_then(|v| v.as_str()) {
                     let path = PathBuf::from(raw);
@@ -589,6 +617,12 @@ impl App {
                         }
                         true
                     }
+                    "permission_mode_changed" => {
+                        if let Some(mode) = data["mode"].as_str().filter(|mode| permission_index(mode).is_some()) {
+                            self.permission_modes.insert(id, mode.to_owned());
+                        }
+                        true
+                    }
                     "text_delta" => {
                         let Some(text) = data.get("text").and_then(|v| v.as_str()) else {
                             return false;
@@ -603,6 +637,7 @@ impl App {
                         }
                     }
                     "turn_started" => {
+                        self.session_activity.entry(id.clone()).or_default().0 = true;
                         self.apply_update(DaemonUpdate::Status {
                             id,
                             text: "Running".into(),
@@ -610,6 +645,7 @@ impl App {
                         true
                     }
                     "turn_done" => {
+                        self.session_activity.entry(id.clone()).or_default().0 = false;
                         let status = if data.get("is_error").and_then(|v| v.as_bool()) == Some(true)
                         {
                             "Error"
@@ -633,6 +669,7 @@ impl App {
                                 self.drag = None;
                                 self.tool_modal = false;
                                 self.model_picker = None;
+                                self.permission_picker = None;
                                 self.engine_picker = false;
                                 self.input_requests.push(request);
                             }
@@ -674,6 +711,15 @@ impl App {
                         });
                         self.append_event(&id, event_type, data)
                     }
+                    "prompt_queued" => {
+                        self.session_activity.entry(id.clone()).or_default().1 += 1;
+                        self.append_event(&id, event_type, data)
+                    }
+                    "prompt_dequeued" | "prompt_cancelled" | "prompt_discarded" => {
+                        let activity = self.session_activity.entry(id.clone()).or_default();
+                        activity.1 = activity.1.saturating_sub(1);
+                        self.append_event(&id, event_type, data)
+                    }
                     _ => self.append_event(&id, event_type, data),
                 }
             }
@@ -712,7 +758,20 @@ impl App {
                 };
                 true
             }
+            "set_permission_mode_reply" => {
+                self.notice = if frame["ok"] == true {
+                    format!("Permission mode selected · {}", safe_label(frame["mode"].as_str().unwrap_or("awaiting event")))
+                } else {
+                    format!("Permission change failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
+                };
+                true
+            }
             "reply" => {
+                if frame["ok"] == true && frame["queued"] == true {
+                    if let Some(id) = frame["session_id"].as_str() {
+                        self.session_activity.entry(id.to_owned()).or_default().1 += 1;
+                    }
+                }
                 if let Some(status) = frame.get("status") {
                     let id = status.get("session_id").and_then(|v| v.as_str())
                         .or_else(|| frame.get("session_id").and_then(|v| v.as_str()));
@@ -726,6 +785,15 @@ impl App {
                         }
                         if let Some(can_set) = status.get("can_set_model").and_then(|v| v.as_bool()) {
                             self.model_capabilities.insert(id.to_owned(), can_set);
+                        }
+                        if let Some(can_set) = status.get("can_set_permission_mode").and_then(|v| v.as_bool()) {
+                            self.permission_capabilities.insert(id.to_owned(), can_set);
+                        }
+                        if let Some(mode) = status["permission_mode"].as_str().filter(|mode| permission_index(mode).is_some()) {
+                            self.permission_modes.insert(id.to_owned(), mode.to_owned());
+                        }
+                        if let (Some(running), Some(queued)) = (status["running"].as_bool(), status["queued"].as_u64()) {
+                            self.session_activity.insert(id.to_owned(), (running, queued as usize));
                         }
                     }
                 }
@@ -884,9 +952,11 @@ impl App {
                     self.history_modal = false;
                     self.notice = "Enlarge terminal to open session history".into();
                 }
-                if (self.model_picker.is_some() || self.engine_picker) && (w < 29 || h < 11) {
+                if ((self.model_picker.is_some() || self.engine_picker) && (w < 29 || h < 11))
+                    || (self.permission_picker.is_some() && (w < 60 || h < 15)) {
                     self.model_picker = None;
                     self.engine_picker = false;
+                    self.permission_picker = None;
                     self.notice = "Enlarge terminal to open chip picker".into();
                 }
                 true
@@ -919,6 +989,7 @@ impl App {
             return self.request_key(key);
         }
         if self.model_picker.is_some() { return self.model_picker_key(key); }
+        if self.permission_picker.is_some() { return self.permission_picker_key(key); }
         if self.engine_picker { return self.engine_picker_key(key); }
         if self.action_menu {
             return self.action_key(key);
@@ -985,6 +1056,7 @@ impl App {
             return true;
         }
         if key.code == KeyCode::Char('m') && alt { self.open_model_picker(); return true; }
+        if key.code == KeyCode::Char('p') && alt { self.open_permission_picker(); return true; }
         if key.code == KeyCode::Char('e') && alt { self.open_engine_picker(); return true; }
         if key.code == KeyCode::F(2) || (key.code == KeyCode::Char('g') && alt) {
             self.open_diff();
@@ -1132,6 +1204,47 @@ impl App {
             selected: 0, note: "Loading this engine's model catalog…".into(),
             loading: true, catalog_pending: false });
         self.pending_model_queries.push(id);
+    }
+
+    fn open_permission_picker(&mut self) {
+        if self.size.width > 0 && (self.size.width < 60 || self.size.height < 15) {
+            self.notice = "Enlarge terminal to open permission picker".into();
+            return;
+        }
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.notice = "Select a session to inspect permissions".into();
+            return;
+        };
+        if !self.permission_capabilities.get(&id).copied().unwrap_or(false) {
+            self.notice = "This session cannot change permission modes".into();
+            return;
+        }
+        let selected = self.permission_modes.get(&id).and_then(|mode| permission_index(mode)).unwrap_or(0);
+        self.permission_picker = Some((id, selected));
+    }
+
+    fn select_permission_mode(&mut self) {
+        let Some((id, selected)) = self.permission_picker.as_ref() else { return; };
+        let mode = PERMISSION_CHOICES[*selected].0;
+        if mode == "dontAsk" && self.permission_modes.get(id).is_none_or(|current| current != mode)
+            && !self.session_activity.get(id).is_some_and(|(busy, queued)| !busy && *queued == 0) {
+            self.notice = "dontAsk requires an idle session with no queued prompts".into();
+            return;
+        }
+        self.pending_permission_changes.push((id.clone(), mode.to_owned()));
+        self.notice = format!("Requesting permission mode · {mode}");
+        self.permission_picker = None;
+    }
+
+    fn permission_picker_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => self.permission_picker = None,
+            KeyCode::Up => { if let Some((_, selected)) = &mut self.permission_picker { *selected = selected.saturating_sub(1); } }
+            KeyCode::Down => { if let Some((_, selected)) = &mut self.permission_picker { *selected = (*selected + 1).min(PERMISSION_CHOICES.len() - 1); } }
+            KeyCode::Enter => self.select_permission_mode(),
+            _ => return false,
+        }
+        true
     }
 
     fn model_picker_key(&mut self, key: KeyEvent) -> bool {
@@ -1386,6 +1499,7 @@ impl App {
                     7 => self.open_diff(),
                     8 => self.open_engine_picker(),
                     9 => self.open_model_picker(),
+                    10 => self.open_permission_picker(),
                     _ => unreachable!("fixed action list"),
                 }
             }
@@ -1670,7 +1784,7 @@ impl App {
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
         if self.active_request_index().is_none()
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && (self.engine_picker || self.model_picker.is_some()) {
+            && (self.engine_picker || self.model_picker.is_some() || self.permission_picker.is_some()) {
             let width = self.size.width.saturating_sub(4).min(74);
             let height = self.size.height.saturating_sub(4).min(19);
             if width < 25 || height < 7 { return false; }
@@ -1679,6 +1793,7 @@ impl App {
             if mouse.column < x || mouse.column >= x + width || mouse.row < y || mouse.row >= y + height {
                 self.engine_picker = false;
                 self.model_picker = None;
+                self.permission_picker = None;
                 return true;
             }
             if self.engine_picker {
@@ -1687,6 +1802,16 @@ impl App {
                     self.engine_selected = row;
                     self.notice = format!("Run separately for a new session: doxa-rs new --engine {}", ENGINE_CHOICES[row]);
                     self.engine_picker = false;
+                }
+                return true;
+            }
+            if let Some((_, selected)) = &mut self.permission_picker {
+                if mouse.row >= y + 4 {
+                    let row = usize::from(mouse.row - (y + 4));
+                    if row < PERMISSION_CHOICES.len() {
+                        *selected = row;
+                        self.select_permission_mode();
+                    }
                 }
                 return true;
             }
@@ -1708,6 +1833,7 @@ impl App {
             || self.history_modal
             || self.diff_modal
             || self.model_picker.is_some()
+            || self.permission_picker.is_some()
             || self.engine_picker
         {
             self.drag = None;
@@ -1763,6 +1889,9 @@ impl App {
                                         .and_then(|id| self.session_identity.get(id))
                                         .and_then(|identity| identity.1.as_deref())
                                         .map(|model| model.width() + 3).unwrap_or(0);
+                                    let permission_width = self.groups[index].active_id()
+                                        .and_then(|id| self.permission_modes.get(id))
+                                        .map(|mode| mode.width() + 3).unwrap_or(0);
                                     let relative = usize::from(mouse.column.saturating_sub(pane.x));
                                     if relative >= status_width && relative < status_width + engine_width {
                                         self.open_engine_picker();
@@ -1771,6 +1900,12 @@ impl App {
                                     if model_width > 0 && relative >= status_width + engine_width + 1
                                         && relative < status_width + engine_width + 1 + model_width {
                                         self.open_model_picker();
+                                        return true;
+                                    }
+                                    let permission_start = status_width + engine_width + 1 + model_width + 1;
+                                    if permission_width > 0 && relative >= permission_start
+                                        && relative < permission_start + permission_width {
+                                        self.open_permission_picker();
                                         return true;
                                     }
                                 }
@@ -1905,7 +2040,7 @@ impl App {
     }
 
     fn draw_chip_picker(&self, frame: &mut Frame, area: Rect) {
-        if !self.engine_picker && self.model_picker.is_none() { return; }
+        if !self.engine_picker && self.model_picker.is_none() && self.permission_picker.is_none() { return; }
         let width = area.width.saturating_sub(4).min(74);
         let height = area.height.saturating_sub(4).min(19);
         if width < 25 || height < 7 { return; }
@@ -1921,6 +2056,17 @@ impl App {
             for (index, engine) in ENGINE_CHOICES.iter().enumerate() {
                 lines.push(Line::styled(format!(" {} {}", if index == self.engine_selected { '›' } else { ' ' }, engine),
                     Style::default().fg(if index == self.engine_selected { theme::ACCENT } else { theme::SECONDARY })));
+            }
+        } else if let Some((id, selected)) = &self.permission_picker {
+            title = " Claude permissions · this session · Enter select · Esc close ";
+            lines.push(Line::from(" Changes how Claude handles tool permission requests."));
+            lines.push(Line::from(" Current mode marked with ●; select carefully."));
+            lines.push(Line::from(""));
+            for (index, (mode, description)) in PERMISSION_CHOICES.iter().enumerate() {
+                let current = self.permission_modes.get(id).is_some_and(|current| current == mode);
+                lines.push(Line::styled(format!(" {} {} {} · {}", if index == *selected { '›' } else { ' ' },
+                    if current { '●' } else { ' ' }, mode, description),
+                    Style::default().fg(if index == *selected { theme::ACCENT } else { theme::SECONDARY })));
             }
         } else {
             title = " Model · this session · R retry · Enter select · Esc close ";
@@ -2346,6 +2492,11 @@ impl App {
                 Style::default().fg(theme::TEXT).bg(theme::HIGHLIGHT),
             ));
         }
+        if let Some(mode) = group.active_id().and_then(|id| self.permission_modes.get(id)) {
+            status_spans.push(Span::raw(" "));
+            status_spans.push(Span::styled(format!(" {} ▾", mode),
+                Style::default().fg(theme::TEXT).bg(theme::HIGHLIGHT)));
+        }
         frame.render_widget(
             Paragraph::new(Line::from(status_spans)).style(Style::default().bg(theme::RAISED)),
             inner[3],
@@ -2652,6 +2803,22 @@ fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::Wor
             Err(_) => unreachable!(),
         }
     }
+    let mut permissions = std::mem::take(&mut app.pending_permission_changes).into_iter();
+    while let Some((id, mode)) = permissions.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::SetPermissionMode(id, mode)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::SetPermissionMode(id, mode))) => {
+                app.pending_permission_changes.push((id, mode));
+                app.pending_permission_changes.extend(permissions);
+                break;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                app.notice = "Daemon unavailable for permission change".into();
+                return true;
+            }
+            Err(_) => unreachable!(),
+        }
+    }
     false
 }
 
@@ -2704,6 +2871,76 @@ mod tests {
         app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.pending_model_changes, vec![("claude-1".into(), "opus".into())]);
+    }
+
+    #[test]
+    fn permission_picker_requires_capability_and_tracks_daemon_state() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 80, 24);
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"codex-1",
+            "engine":"codex", "permission_mode":"default", "can_set_permission_mode":false}));
+        app.groups[0].tabs = vec!["codex-1".into()];
+        app.open_permission_picker();
+        assert!(app.permission_picker.is_none());
+
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"claude-1",
+            "engine":"claude", "permission_mode":"plan", "running":false, "queued":0,
+            "can_set_permission_mode":true}));
+        app.groups[0].tabs = vec!["claude-1".into()];
+        app.open_permission_picker();
+        assert_eq!(app.permission_picker.as_ref().unwrap().1, 2);
+        app.permission_picker.as_mut().unwrap().1 = 1;
+        app.permission_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.pending_permission_changes, vec![("claude-1".into(), "acceptEdits".into())]);
+        assert_eq!(app.permission_modes["claude-1"], "plan");
+        app.apply_daemon_frame(&json!({"type":"set_permission_mode_reply", "session_id":"claude-1",
+            "ok":false, "error":"sidecar unavailable"}));
+        assert!(app.notice.contains("failed"));
+        assert_eq!(app.permission_modes["claude-1"], "plan");
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"claude-1",
+            "event":{"type":"permission_mode_changed", "data":{"mode":"acceptEdits"}}}));
+        assert_eq!(app.permission_modes["claude-1"], "acceptEdits");
+    }
+
+    #[test]
+    fn dont_ask_requires_idle_and_empty_queue() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 80, 24);
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "engine":"claude",
+            "permission_mode":"default", "running":true, "queued":0,
+            "can_set_permission_mode":true}));
+        app.groups[0].tabs = vec!["s".into()];
+        app.open_permission_picker();
+        app.permission_picker.as_mut().unwrap().1 = 4;
+        app.select_permission_mode();
+        assert!(app.pending_permission_changes.is_empty());
+        app.apply_daemon_frame(&json!({"type":"reply", "session_id":"s", "ok":true,
+            "status":{"session_id":"s", "running":false, "queued":1}}));
+        app.select_permission_mode();
+        assert!(app.pending_permission_changes.is_empty());
+        app.apply_daemon_frame(&json!({"type":"reply", "session_id":"s", "ok":true,
+            "status":{"session_id":"s", "running":false, "queued":0}}));
+        app.select_permission_mode();
+        assert_eq!(app.pending_permission_changes, vec![("s".into(), "dontAsk".into())]);
+        assert!(app.permission_picker.is_none());
+    }
+
+    #[test]
+    fn permission_picker_mouse_selects_mode_and_outside_click_closes() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 80, 24);
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "engine":"claude",
+            "permission_mode":"default", "running":false, "queued":0,
+            "can_set_permission_mode":true}));
+        app.groups[0].tabs = vec!["s".into()];
+        app.open_permission_picker();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: 8, row: 8, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.pending_permission_changes, vec![("s".into(), "plan".into())]);
+        app.open_permission_picker();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0, row: 0, modifiers: KeyModifiers::NONE }));
+        assert!(app.permission_picker.is_none());
     }
 
     #[test]
