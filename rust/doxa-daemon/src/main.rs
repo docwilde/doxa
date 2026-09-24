@@ -1,5 +1,7 @@
 //! Native DOXA protocol host. The fixture remains an explicit test mode.
+mod claude_host;
 mod codex_host;
+use claude_host::ClaudeHost;
 use codex_host::CodexHost;
 use doxa_engines::codex_driver::{DriverOptions, SandboxMode};
 use doxa_runtime::{Daemon, Host, Session};
@@ -41,12 +43,14 @@ impl Host for FixtureHost {
 enum Engine {
     Fixture,
     Codex,
+    Claude,
 }
 impl Engine {
     fn name(self) -> &'static str {
         match self {
             Self::Fixture => "fixture",
             Self::Codex => "codex",
+            Self::Claude => "claude",
         }
     }
 }
@@ -58,6 +62,9 @@ struct Options {
     engine: Engine,
     codex_bin: Option<PathBuf>,
     lore_python: Option<PathBuf>,
+    claude_python: Option<PathBuf>,
+    claude_script: Option<PathBuf>,
+    resume: bool,
     model: Option<String>,
     sandbox: SandboxMode,
 }
@@ -70,10 +77,14 @@ fn options() -> io::Result<Options> {
         });
     let mut cwd = env::current_dir()?;
     let mut session_id = random_id()?;
+    let mut explicit_session_id = false;
     let mut linger = Duration::from_secs(120);
     let mut engine = Engine::Fixture;
     let mut codex_bin = None;
     let mut lore_python = None;
+    let mut claude_python = None;
+    let mut claude_script = None;
+    let mut resume = false;
     let mut model = None;
     let mut sandbox = SandboxMode::WorkspaceWrite;
     let mut args = env::args_os().skip(1);
@@ -84,13 +95,23 @@ fn options() -> io::Result<Options> {
         match arg.to_str() {
             Some("--runtime-dir") => runtime = PathBuf::from(value),
             Some("--cwd") => cwd = PathBuf::from(value),
-            Some("--session-id") => session_id = value.into_string().map_err(|_| invalid("invalid session id"))?,
+            Some("--session-id") => {
+                session_id = value.into_string().map_err(|_| invalid("invalid session id"))?;
+                explicit_session_id = true;
+            },
             Some("--engine") => engine = match value.to_str() {
                 Some("fixture") => Engine::Fixture, Some("codex") => Engine::Codex,
-                _ => return Err(invalid("engine must be fixture or codex")),
+                Some("claude") => Engine::Claude,
+                _ => return Err(invalid("engine must be fixture, codex, or claude")),
             },
             Some("--codex-bin") => codex_bin = Some(PathBuf::from(value)),
             Some("--lore-python") => lore_python = Some(PathBuf::from(value)),
+            Some("--claude-python") => claude_python = Some(PathBuf::from(value)),
+            Some("--claude-script") => claude_script = Some(PathBuf::from(value)),
+            Some("--resume") => resume = match value.to_str() {
+                Some("true") => true, Some("false") => false,
+                _ => return Err(invalid("resume must be true or false")),
+            },
             Some("--model") => {
                 let chosen = value.into_string().map_err(|_| invalid("invalid model"))?;
                 if chosen.is_empty() || chosen.len() > 128 || chosen.chars().any(char::is_control) {
@@ -110,7 +131,7 @@ fn options() -> io::Result<Options> {
                 if !seconds.is_finite() || seconds < 0.0 { return Err(invalid("invalid linger")); }
                 linger = Duration::from_secs_f64(seconds);
             }
-            _ => return Err(invalid("usage: doxa-daemon [--runtime-dir PATH] [--cwd PATH] [--session-id ID] [--linger SECONDS] [--engine fixture|codex] [--codex-bin PATH --lore-python PATH --model MODEL --sandbox MODE]")),
+            _ => return Err(invalid("usage: doxa-daemon [--runtime-dir PATH] [--cwd PATH] [--session-id ID] [--linger SECONDS] [--engine fixture|codex|claude] [--codex-bin PATH --lore-python PATH --claude-python PATH --claude-script PATH --model MODEL --sandbox MODE --resume true|false]")),
         }
     }
     // Do not let registry entries claim an unvalidated path or identity.
@@ -138,8 +159,33 @@ fn options() -> io::Result<Options> {
         lore_python = Some(executable(
             lore_python.ok_or_else(|| invalid("Codex needs --lore-python"))?,
         )?);
+        if claude_python.is_some() || claude_script.is_some() || resume {
+            return Err(invalid("Claude options require --engine claude"));
+        }
+    } else if engine == Engine::Claude {
+        if resume && !explicit_session_id {
+            return Err(invalid("Claude resume needs --session-id"));
+        }
+        claude_python = Some(executable(
+            claude_python.ok_or_else(|| invalid("Claude needs --claude-python"))?,
+        )?);
+        let script = claude_script.ok_or_else(|| invalid("Claude needs --claude-script"))?;
+        if !script.is_absolute() {
+            return Err(invalid("Claude script path must be absolute"));
+        }
+        let script = fs::canonicalize(script)?;
+        if !fs::metadata(&script)?.is_file() {
+            return Err(invalid("Claude script must be a file"));
+        }
+        claude_script = Some(script);
+        if codex_bin.is_some() || lore_python.is_some() || sandbox != SandboxMode::WorkspaceWrite {
+            return Err(invalid("Codex options require --engine codex"));
+        }
     } else if codex_bin.is_some()
         || lore_python.is_some()
+        || claude_python.is_some()
+        || claude_script.is_some()
+        || resume
         || model.is_some()
         || sandbox != SandboxMode::WorkspaceWrite
     {
@@ -153,6 +199,9 @@ fn options() -> io::Result<Options> {
         engine,
         codex_bin,
         lore_python,
+        claude_python,
+        claude_script,
+        resume,
         model,
         sandbox,
     })
@@ -318,6 +367,7 @@ impl Drop for Registry {
 fn run() -> io::Result<()> {
     let options = options()?;
     let mut codex_host = None;
+    let mut claude_host = None;
     let host: Arc<dyn Host> = match options.engine {
         Engine::Fixture => Arc::new(FixtureHost),
         Engine::Codex => {
@@ -340,6 +390,27 @@ fn run() -> io::Result<()> {
                 .map_err(io::Error::other)?,
             );
             codex_host = Some(host.clone());
+            host
+        }
+        Engine::Claude => {
+            let host = Arc::new(
+                ClaudeHost::new(
+                    options
+                        .claude_python
+                        .as_ref()
+                        .expect("validated Claude interpreter"),
+                    options
+                        .claude_script
+                        .as_ref()
+                        .expect("validated Claude script"),
+                    &options.cwd,
+                    &options.session_id,
+                    options.resume,
+                    options.model.as_deref(),
+                )
+                .map_err(io::Error::other)?,
+            );
+            claude_host = Some(host.clone());
             host
         }
     };
@@ -398,6 +469,11 @@ fn run() -> io::Result<()> {
     if let Some(host) = &codex_host {
         if !host.shutdown() {
             eprintln!("doxa-daemon: Codex process did not finish after cancellation");
+        }
+    }
+    if let Some(host) = &claude_host {
+        if !host.shutdown() {
+            eprintln!("doxa-daemon: Claude sidecar did not finalize cleanly");
         }
     }
     handle.shutdown();

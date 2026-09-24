@@ -92,6 +92,13 @@ the session from starting; a scrub failure during a turn withholds further
 provider events and fails the turn. The Python sidecar is a temporary
 dependency while Rust memory integration is built.
 
+To host Claude, pass `--engine claude --claude-python /absolute/path/to/python
+--claude-script /absolute/path/to/claude_sidecar.py`. This uses DOXA's Python
+`SessionEngine` and Claude Agent SDK in a separate process. `--model` is optional.
+To resume, also pass `--session-id ID --resume true`. The daemon forwards bounded
+events and supports `answer_needs_input`, `interrupt`, and graceful `finalize`
+on exit. The Python SDK remains required in this alpha.
+
 Codex turns use `codex exec --json` and resume subsequent turns using the
 provider thread ID. User and assistant text is appended to Python 1.19-shaped
 JSONL under LORE's project directory, and `<session-id>.codex.json` records the
@@ -102,8 +109,8 @@ without a thread ID refuses a fresh Codex thread. `interrupt` cancels the
 running CLI process group, and `stop` cancels it and closes the daemon. The
 native Codex host does not yet register MCP, integrate LORE context/review/indexing,
 or implement peer messaging. The
-registry reports the selected engine. Only `status`, `interrupt` (Codex),
-and `stop` are supported; other calls return an explicit error. The
+registry reports the selected engine. `status`, `interrupt`, and `stop` are
+supported; Claude also supports `answer_needs_input`. Other calls return an explicit error. The
 `socket_path` is suitable for local TUI or Python `EngineClient` attach, but
 peer frames are not implemented. Treat this as an integration alpha.
 

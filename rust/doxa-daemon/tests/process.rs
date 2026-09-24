@@ -88,6 +88,38 @@ impl Process {
             socket,
         }
     }
+    fn start_claude(runtime: &Path, script: &Path) -> Self {
+        let child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+            .args([
+                "--runtime-dir",
+                runtime.to_str().unwrap(),
+                "--cwd",
+                runtime.to_str().unwrap(),
+                "--session-id",
+                "claude-session",
+                "--linger",
+                "10",
+                "--engine",
+                "claude",
+                "--claude-python",
+                "/usr/bin/python3",
+                "--claude-script",
+                script.to_str().unwrap(),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let registry = runtime.join("registry/claude-session.json");
+        wait_until(|| registry.exists());
+        let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+        let socket = PathBuf::from(entry["daemon_socket"].as_str().unwrap());
+        Self {
+            child,
+            registry,
+            socket,
+        }
+    }
     fn connect(&self) -> (BufReader<UnixStream>, UnixStream) {
         let socket = UnixStream::connect(&self.socket).unwrap();
         socket
@@ -530,6 +562,102 @@ fn thread_identity_is_durable_before_turn_completes() {
     wait_until(|| path.exists());
     let thread: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     assert_eq!(thread["thread_id"], "thread_early");
+    unsafe {
+        libc::kill(process.child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    wait_until(|| process.exited());
+}
+
+#[test]
+fn claude_sidecar_answers_interrupts_and_finalizes() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("claude-fixture.py");
+    let finalized = dir.path().join("finalized");
+    fs::write(&script, format!(r#"import json, sys
+print(json.dumps({{"type":"hello","protocol":"doxa-claude-sidecar","version":1}}),flush=True)
+for line in sys.stdin:
+    frame=json.loads(line)
+    method=frame["method"]
+    if method == "start":
+        assert frame["params"]["session_id"] == "claude-session"
+        print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,"result":{{"event":"session_started","data":{{}}}}}}),flush=True)
+    elif method == "prompt":
+        print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,"result":{{}}}}),flush=True)
+        print(json.dumps({{"type":"event","event":"turn_started","data":{{"prompt":frame["params"]["text"]}}}}),flush=True)
+        print(json.dumps({{"type":"event","event":"needs_input","data":{{"id":"question-1"}}}}),flush=True)
+    elif method == "answer":
+        assert frame["params"]["id"] == "question-1"
+        print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,"result":{{"applied":True}}}}),flush=True)
+        print(json.dumps({{"type":"event","event":"text_delta","data":{{"text":"answered"}}}}),flush=True)
+        print(json.dumps({{"type":"event","event":"turn_done","data":{{"is_error":False}}}}),flush=True)
+    elif method == "interrupt":
+        print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,"result":{{}}}}),flush=True)
+        print(json.dumps({{"type":"event","event":"turn_interrupted","data":{{}}}}),flush=True)
+    elif method == "finalize":
+        open({:?},"w").write("done")
+        print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,"result":{{}}}}),flush=True)
+        break
+"#, finalized.to_string_lossy().to_string())).unwrap();
+    let mut process = Process::start_claude(dir.path(), &script);
+    assert_eq!(process.entry()["engine"], "claude");
+    let (mut reader, mut socket) = process.connect();
+    assert_eq!(receive(&mut reader)["engine"], "claude");
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
+    assert_eq!(receive(&mut reader)["event"]["type"], "needs_input");
+    send(
+        &mut socket,
+        json!({"type":"call","id":2,"method":"answer_needs_input",
+        "params":{"id":"question-1","answer":{"choice":"yes"}}}),
+    );
+    assert_eq!(receive(&mut reader)["applied"], true);
+    assert_eq!(receive(&mut reader)["event"]["data"]["text"], "answered");
+    assert_eq!(receive(&mut reader)["event"]["type"], "turn_done");
+    send(&mut socket, json!({"type":"prompt","id":3,"text":"again"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
+    assert_eq!(receive(&mut reader)["event"]["type"], "needs_input");
+    send(
+        &mut socket,
+        json!({"type":"call","id":4,"method":"interrupt","params":{}}),
+    );
+    assert_eq!(receive(&mut reader)["ok"], true);
+    let interrupted = receive(&mut reader);
+    assert_eq!(interrupted["event"]["type"], "turn_done");
+    assert_eq!(interrupted["event"]["data"]["is_error"], true);
+    send(
+        &mut socket,
+        json!({"type":"call","id":5,"method":"stop","params":{}}),
+    );
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+    assert!(finalized.exists());
+}
+
+#[test]
+fn oversized_claude_event_fails_turn_without_forwarding_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("claude-oversize.py");
+    fs::write(&script, r#"import json, sys
+print(json.dumps({"type":"hello","protocol":"doxa-claude-sidecar","version":1}),flush=True)
+for line in sys.stdin:
+    frame=json.loads(line)
+    print(json.dumps({"type":"reply","id":frame["id"],"ok":True,"result":{}}),flush=True)
+    if frame["method"] == "prompt":
+        print(json.dumps({"type":"event","event":"text_delta","data":{"text":"SENSITIVE"*10000}}),flush=True)
+"#).unwrap();
+    let mut process = Process::start_claude(dir.path(), &script);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    let frame = receive(&mut reader);
+    assert_eq!(frame["event"]["type"], "turn_done");
+    assert_eq!(frame["event"]["data"]["is_error"], true);
+    assert!(!frame.to_string().contains("SENSITIVE"));
     unsafe {
         libc::kill(process.child.id() as libc::pid_t, libc::SIGTERM);
     }
