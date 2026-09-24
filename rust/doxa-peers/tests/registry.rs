@@ -82,10 +82,25 @@ fn stale_live_pid_keeps_socket_dead_pid_only_removes_contained_socket() {
     assert!(!inner.exists());
 }
 #[test]
-fn launch_sweep_removes_unreachable_presence_without_touching_live_pid_socket() {
+fn launch_sweep_keeps_fresh_live_peer_when_socket_is_unreachable() {
     let tmp=tempfile::tempdir().unwrap(); let rt=tmp.path().join("rt"); let reg=Registry::open(&rt).unwrap();
     let missing=rt.join("peer-missing.sock");
     reg.write(&record("unreachable",&missing)).unwrap();
+    assert_eq!(reg.sweep_stale(&scrub).unwrap(),0);
+    assert!(reg.directory().join("unreachable.json").exists());
+    assert_eq!(reg.read(&scrub, false, false).unwrap().len(), 1);
+
+    let closed=rt.join("peer-closed.sock");
+    let listener=UnixListener::bind(&closed).unwrap();
+    reg.write(&record("closed",&closed)).unwrap();
+    drop(listener);
+    assert_eq!(reg.sweep_stale(&scrub).unwrap(),0);
+    assert!(reg.directory().join("closed.json").exists());
+    assert!(closed.exists(), "a live peer's socket must not be removed");
+
+    let mut stale=record("stale",&missing);
+    stale.heartbeat_at="2020-01-01T00:00:00.000000Z".into();
+    reg.write(&stale).unwrap();
     assert_eq!(reg.sweep_stale(&scrub).unwrap(),1);
-    assert!(!reg.directory().join("unreachable.json").exists());
+    assert!(!reg.directory().join("stale.json").exists());
 }
