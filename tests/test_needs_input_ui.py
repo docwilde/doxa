@@ -64,7 +64,7 @@ async def test_ask_user_question_opens_the_popup_and_blinks_the_tab(tmp_path, mo
         assert await _wait(pilot, lambda: _popup(pane).is_open)
         assert pane.needs_input is True
         assert pane._attention_timer is not None
-        assert "needs input" in str(pane.query_one("#status-bar", Static).renderable)
+        assert "needs input" in str(pane.query_one("#status-bar", Static).content)
 
 
 @pytest.mark.asyncio

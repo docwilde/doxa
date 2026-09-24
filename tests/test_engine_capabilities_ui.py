@@ -23,7 +23,7 @@ from tests.fakes import FakeEngine
 
 
 def _status_plain(app) -> str:
-    return Content.from_markup(str(app.query_one("#status-bar").renderable)).plain
+    return Content.from_markup(str(app.query_one("#status-bar").content)).plain
 
 
 def _chip_actions(app) -> "set[str]":

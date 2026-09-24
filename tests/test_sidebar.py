@@ -926,6 +926,6 @@ def test_a_session_title_of_rich_markup_paints_literally():
     # What the widget will actually paint. With markup on, Rich eats the
     # tags (and chokes on the stray bracket); with it off, the title is
     # the characters it is made of.
-    painted = visualize(line, line._content, markup=line._render_markup).plain
+    painted = visualize(line, line.content, markup=line._render_markup).plain
     assert "[bold red]done[/]" in painted
     assert "[unbalanced" in painted

@@ -58,7 +58,7 @@ async def test_status_bar_peers_chip_counts_same_repo_peers(monkeypatch, tmp_pat
     app = DoxaApp(cwd=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
-        assert "peers 2" in str(app.query_one("#status-bar").renderable)
+        assert "peers 2" in str(app.query_one("#status-bar").content)
 
 
 @pytest.mark.asyncio
@@ -167,7 +167,7 @@ async def test_incoming_peer_message_renders_distinct_scrubbed_block(monkeypatch
         )
         blocks = await _wait_blocks(app, pilot, PeerMessageBlock)
         assert len(blocks) == 1
-        rendered = str(blocks[0].renderable)
+        rendered = str(blocks[0].content)
         assert "scout" in rendered and "ffff9999" in rendered
         assert FAKE_AWS_KEY not in rendered
         assert "[REDACTED" in rendered
@@ -183,16 +183,16 @@ async def test_peer_joined_event_updates_status_chip(monkeypatch, tmp_path):
     app = DoxaApp(cwd=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
-        assert "peers" not in str(app.query_one("#status-bar").renderable)
+        assert "peers" not in str(app.query_one("#status-bar").content)
         engine._peers = [_peer("cccc4444-0000", "gamma")]
         engine.push_peer_event(EngineEvent("peer_joined", {
             "session_id": "cccc4444-0000", "title": "gamma", "cwd": "/work/repo",
         }))
         for _ in range(100):
-            if "peers 1" in str(app.query_one("#status-bar").renderable):
+            if "peers 1" in str(app.query_one("#status-bar").content):
                 break
             await pilot.pause(0.02)
-        assert "peers 1" in str(app.query_one("#status-bar").renderable)
+        assert "peers 1" in str(app.query_one("#status-bar").content)
 
 
 # =======================================================================

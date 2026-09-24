@@ -291,9 +291,8 @@ class ContextBlock(SystemBlock):
             body += f"\n\n{sources}"
         if rest:
             body += f"\n{rest}"
-        if body != self._content:
-            self._content = body
-            self._visual = None
+        if body != self.content:
+            self.update(body, layout=False)
         return self.visual
 
 
@@ -424,15 +423,11 @@ class _DrawnMark(Static):
 
         # Recomputed every call, against THIS call's content_size -- never
         # a value cached from a resize that may since be stale. Written
-        # through self._content/self._visual (Static's own machinery, the
-        # same path .update() uses) rather than a Text built and returned
-        # directly, so introspection that reads .renderable -- most of
-        # this module's own test suite -- keeps seeing exactly what was
-        # last painted.
+        # Keep Static's content in sync with the fitted artwork so both
+        # painting and inspection see what was last drawn.
         text = "\n".join(banner_mod.drawn_lines(self.content_size.width))
-        if text != self._content:
-            self._content = text
-            self._visual = None
+        if text != self.content:
+            self.update(text, layout=False)
         return self.visual
 
 

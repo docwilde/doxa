@@ -724,7 +724,7 @@ whole drag. That is deliberately the only affordance it has: a GUI would
 say "draggable" by changing the mouse pointer to a resize arrow, and DOXA
 cannot. The sequence that would do it — `OSC 22` — is unimplemented in a
 large share of terminals including Warp, is write-only everywhere except
-kitty (so there is nothing to ask before writing it), and Textual 5.3
+kitty (so there is nothing to ask before writing it), and Textual 8.2.8
 offers no API for it. DOXA does not emit escape sequences it cannot
 verify a terminal accepted, so the highlight carries the whole message
 instead. If your pointer does not change shape over the divider, that is

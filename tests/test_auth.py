@@ -175,7 +175,7 @@ async def test_login_keeps_tui_live_and_refreshes_identity(
         # Identity was re-read: the precise tier now shows in BOTH surfaces.
         identity_text = app.query_one("#identity-block", SystemBlock).text
         assert "max 20x" in identity_text
-        assert "max 20x" in str(app.query_one("#status-bar").renderable)
+        assert "max 20x" in str(app.query_one("#status-bar").content)
     identity.invalidate()
     config.invalidate()
 

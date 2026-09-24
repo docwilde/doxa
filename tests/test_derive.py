@@ -380,7 +380,7 @@ def _system_blocks(app):
 
 
 def _plain(widget) -> str:
-    return Content.from_markup(str(widget.renderable)).plain
+    return Content.from_markup(str(widget.content)).plain
 
 
 async def _wait(pilot, cond, tries=150):

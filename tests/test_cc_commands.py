@@ -95,7 +95,7 @@ async def test_model_switch_is_live_and_becomes_the_settings_row(
         assert fake.model_switches == ["haiku"]
         assert fake.model == "haiku"
         assert "no reconnect" in text
-        assert "haiku" in str(app.query_one("#status-bar").renderable)
+        assert "haiku" in str(app.query_one("#status-bar").content)
     config.invalidate()
     assert config.load()["model"] == "haiku"
     assert config.model() == "haiku"

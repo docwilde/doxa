@@ -420,7 +420,7 @@ async def test_the_traceback_fold_opens_and_has_height(tmp_path):
         await _settle(pilot, 20)
         assert block.region.height > collapsed_height
         assert block.body.region.height > 0, "the fold opened onto nothing"
-        detail = str(block.body.renderable)
+        detail = str(block.body.content)
         assert "a distinctive marker string" in detail
         assert "Traceback" in detail
 
@@ -440,8 +440,8 @@ async def test_a_secret_in_a_traceback_is_scrubbed_before_display(tmp_path):
         block.collapsed = False
         await _settle(pilot, 20)
         assert SECRET not in block.title
-        assert SECRET not in str(block.body.renderable)
-        assert "REDACTED" in str(block.body.renderable)
+        assert SECRET not in str(block.body.content)
+        assert "REDACTED" in str(block.body.content)
         # And nowhere in the persisted copy either.
         log = errors.log_path()
         assert log.exists()
@@ -692,8 +692,8 @@ async def test_a_failed_answer_delivery_is_reported_and_says_what_to_do(
         assert "ConnectionResetError" in blocks[0].title
         assert blocks[0].region.height > 0
         told = [
-            str(b.renderable) for b in pane.query(SystemBlock)
-            if "did not reach the session" in str(b.renderable)
+            str(b.content) for b in pane.query(SystemBlock)
+            if "did not reach the session" in str(b.content)
         ]
         assert told, "the session wedged silently again"
 

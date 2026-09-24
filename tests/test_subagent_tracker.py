@@ -143,20 +143,20 @@ async def test_status_chip_hidden_at_zero_shown_at_n(tmp_path):
     async with app.run_test() as pilot:
         await pilot.pause()
         pane = app.active_pane
-        assert "⧉" not in str(pane.query_one("#status-bar").renderable)
+        assert "⧉" not in str(pane.query_one("#status-bar").content)
 
         pane.query_one("#prompt-input").value = "explore the repo"
         await pilot.press("enter")
         assert await _wait(pilot, lambda: "task-1" in pane._subagents)
         assert await _wait(
             pilot,
-            lambda: "⧉ 1 agent" in str(pane.query_one("#status-bar").renderable),
+            lambda: "⧉ 1 agent" in str(pane.query_one("#status-bar").content),
         )
 
         engine.open_gate.set()
         engine.finish_gate.set()
         assert await _wait(pilot, lambda: not pane.turn_in_flight)
-        assert "⧉" not in str(pane.query_one("#status-bar").renderable)
+        assert "⧉" not in str(pane.query_one("#status-bar").content)
 
 
 @pytest.mark.asyncio
@@ -174,7 +174,7 @@ async def test_second_line_mounts_and_unmounts(tmp_path):
         await pilot.press("enter")
         assert await _wait(pilot, lambda: bool(pane.query("#subagent-line")))
         line = pane.query_one("#subagent-line", SubagentLine)
-        assert "explore the auth module" in str(line.renderable)
+        assert "explore the auth module" in str(line.content)
 
         engine.open_gate.set()
         engine.finish_gate.set()

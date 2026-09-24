@@ -62,7 +62,9 @@ from tests.wait_stable import wait_stable
 
 
 async def _select(picker, rid: str) -> None:
-    picker.select_row(next(i for i, (r, _l) in enumerate(picker._rows) if r == rid))
+    index = next((i for i, (r, _l) in enumerate(picker._rows) if r == rid), None)
+    assert index is not None, (rid, picker.is_open, picker._rows)
+    picker.select_row(index)
 
 
 async def _wait(pilot, predicate, tries: int = 200) -> None:

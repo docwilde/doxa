@@ -922,10 +922,9 @@ def test_doxa_does_not_try_to_change_the_mouse_pointer():
        ask the terminal, and never read silence as an answer. A capability
        with no reply channel is one DOXA cannot claim, and this project
        says where a gesture does not work rather than pretending.
-    3. **Textual 5.3.0 offers no API for it** -- verified below, not
-       assumed. (Textual 7.4.0 later added a ``pointer`` TCSS rule that
-       writes the same sequence; hand-rolling it here would collide with
-       that upgrade rather than anticipate it.)
+    3. **Textual 8.2.8 exposes no pointer style through StylesBase** --
+       verified below. The rail keeps its hover highlight as the visible
+       affordance on terminals that ignore OSC 22.
 
     So the hover highlight carries the whole affordance instead -- the
     divider inverts, which is what the two tests above pin. This test is
@@ -934,15 +933,12 @@ def test_doxa_does_not_try_to_change_the_mouse_pointer():
     from pathlib import Path
 
     import doxa
-    import textual
 
     root = Path(doxa.__file__).parent
     for path in root.rglob("*.py"):
         assert "]22;" not in path.read_text("utf-8"), path
     assert "]22;" not in (root / "theme.tcss").read_text("utf-8")
-    # And the reason it is not simply delegated: there is nothing to
-    # delegate to on this pin.
-    assert textual.__version__.startswith("5.")
+    # Textual still exposes no pointer style on this pin.
     from textual.css import styles as textual_styles
 
     assert not hasattr(textual_styles.StylesBase, "pointer")

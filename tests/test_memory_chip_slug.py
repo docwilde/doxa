@@ -52,7 +52,7 @@ def _status_plain(scope) -> str:
     """``scope`` is the app (single-pane tests) or a specific pane (a
     multi-tab test, where every pane's StatusBar shares the same id and
     an app-wide query would silently pick up whichever mounted first)."""
-    return Content.from_markup(str(scope.query_one(StatusBar).renderable)).plain
+    return Content.from_markup(str(scope.query_one(StatusBar).content)).plain
 
 
 async def _wait_status(pilot, scope, needle: str, tries: int = 300) -> bool:

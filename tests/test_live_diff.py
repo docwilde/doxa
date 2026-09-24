@@ -477,7 +477,7 @@ async def _open_diff(pilot, app):
             and _diff_of(app).region.width > 0
             and pane.region.width > 0
             and pane.region.width < app.size.width
-            and "reading the diff" not in str(_diff_of(app)._head.renderable)
+            and "reading the diff" not in str(_diff_of(app)._head.content)
         ),
     )
     assert ok, "the diff pane never painted"
@@ -686,7 +686,7 @@ async def test_a_rejection_clicked_during_a_turn_is_visibly_pending(tmp_path):
 
         assert len(diff.queued) == 1
         assert view._pending.display is True
-        assert "queued" in str(view._pending.renderable)
+        assert "queued" in str(view._pending.content)
         assert view._button.disabled
         # Nothing on disk moved: that is what "queued" MEANS.
         assert "CHANGED_TOP" in (work / "f.py").read_text()

@@ -33,7 +33,7 @@ def _status_plain(app) -> str:
     asserted against raw markup is a chip whose colour can hide it."""
     from textual.content import Content
 
-    return Content.from_markup(str(app.query_one("#status-bar").renderable)).plain
+    return Content.from_markup(str(app.query_one("#status-bar").content)).plain
 
 
 # -- chip-identity anchors -------------------------------------------------
@@ -61,7 +61,7 @@ def _chip_actions(app) -> "set[str]":
     folder chip's text (the directory name) ever containing the same
     word by coincidence, because the folder chip's own action is always
     ``open_repo_picker``, never any other chip's."""
-    raw = str(app.query_one("#status-bar").renderable)
+    raw = str(app.query_one("#status-bar").content)
     return set(_CLICK_ACTION_RE.findall(raw))
 
 

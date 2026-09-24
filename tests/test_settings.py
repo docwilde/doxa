@@ -145,7 +145,7 @@ async def test_modal_mounts_a_row_per_setting(monkeypatch, tmp_path):
         await pilot.press("ctrl+comma")
         screen = await _open_settings(app, pilot)
         # Every row is present, on its category tab...
-        labels = {str(n.renderable) for n in screen.query(".setting-label")}
+        labels = {str(n.content) for n in screen.query(".setting-label")}
         for setting in config.SETTINGS:
             assert setting.label in labels
         # ...and every row that is NOT env-shadowed offers a field.
@@ -166,7 +166,7 @@ async def test_every_category_renders_its_own_rows(monkeypatch, tmp_path):
         screen = await _open_settings(app, pilot)
         for category in CATEGORIES:
             pane = screen.query_one(f"#settings-cat-{category.lower()}")
-            labels = {str(n.renderable) for n in pane.query(".setting-label")}
+            labels = {str(n.content) for n in pane.query(".setting-label")}
             expected = {
                 s.label for s in config.SETTINGS if s.category == category
             }
@@ -232,7 +232,7 @@ async def test_rows_show_the_effective_value_and_its_source(monkeypatch, tmp_pat
         await pilot.press("ctrl+comma")
         screen = await _open_settings(app, pilot)
         values = " | ".join(
-            str(n.renderable) for n in screen.query(".setting-value")
+            str(n.content) for n in screen.query(".setting-value")
         )
         assert "900   (config)" in values          # from the file
         assert "120   (default)" in values         # linger, untouched
@@ -254,7 +254,7 @@ async def test_an_env_shadowed_row_is_read_only_and_says_why(monkeypatch, tmp_pa
         assert not screen.query(f"#{field_id('derive_secs')}")
         assert "derive_secs" not in screen.values()
         shadowed = " ".join(
-            str(n.renderable) for n in screen.query(".setting-shadowed")
+            str(n.content) for n in screen.query(".setting-shadowed")
         )
         assert "set by env" in shadowed
         assert "unset DOXA_DERIVE_SECS" in shadowed
@@ -276,7 +276,7 @@ async def test_saving_rereads_and_shows_the_new_effective_value(
         screen.action_save()
         await pilot.pause()
         values = " | ".join(
-            str(n.renderable) for n in screen.query(".setting-value")
+            str(n.content) for n in screen.query(".setting-value")
         )
         assert "77   (config)" in values
     config.invalidate()
@@ -301,7 +301,7 @@ async def test_model_row_follows_the_session_not_the_config_default(
         await pilot.press("ctrl+comma")
         screen = await _open_settings(app, pilot)
         values = " | ".join(
-            str(n.renderable) for n in screen.query(".setting-value")
+            str(n.content) for n in screen.query(".setting-value")
         )
         assert "haiku   (session — config default is sonnet)" in values
 
@@ -316,7 +316,7 @@ async def test_paths_tab_shows_real_resolved_paths(monkeypatch, tmp_path):
         await pilot.press("ctrl+comma")
         screen = await _open_settings(app, pilot)
         pane = screen.query_one("#settings-cat-paths")
-        values = " | ".join(str(n.renderable) for n in pane.query(".setting-value"))
+        values = " | ".join(str(n.content) for n in pane.query(".setting-value"))
         assert str(config.doxa_home()) in values
         assert str(tmp_path / "rt") in values          # the runtime dir, resolved
         assert str(config.config_path()) in values
@@ -336,14 +336,14 @@ async def test_memory_tab_shows_the_shared_lore_store_read_only(
         await pilot.press("ctrl+comma")
         screen = await _open_settings(app, pilot)
         pane = screen.query_one("#settings-cat-memory")
-        labels = {str(n.renderable) for n in pane.query(".setting-label")}
+        labels = {str(n.content) for n in pane.query(".setting-label")}
         assert "lore store" in labels
-        notes = " ".join(str(n.renderable) for n in pane.query(".setting-note"))
+        notes = " ".join(str(n.content) for n in pane.query(".setting-note"))
         assert "Shared with the Claude Code LORE plugin" in notes
         assert "LORE_ROOT" in notes
         import lore_core
 
-        values = " | ".join(str(n.renderable) for n in pane.query(".setting-value"))
+        values = " | ".join(str(n.content) for n in pane.query(".setting-value"))
         assert str(lore_core.ROOT) in values
 
 

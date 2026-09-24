@@ -298,7 +298,7 @@ async def test_applying_a_choice_and_skipping_reach_the_summary(monkeypatch, tmp
         await pilot.press("s")  # skip -- do not chain into Settings
         await pilot.pause()
         assert screen.index == len(screen.findings)
-        body = str(screen.query_one("#setup-body").renderable)
+        body = str(screen.query_one("#setup-body").content)
         assert "setup: done." in body
         assert "doctor: patched report" in body
         assert "LORE store:" in body

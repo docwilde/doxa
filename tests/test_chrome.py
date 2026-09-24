@@ -448,7 +448,7 @@ async def test_clock_shows_by_default_and_is_the_only_armed_timer(monkeypatch, t
         await pilot.pause()
         chip = app.query_one(ClockChip)
         assert chip.display is True
-        assert chip.renderable  # something is actually painted, not ""
+        assert chip.content  # something is actually painted, not ""
         assert chip._auto_refresh_timer is not None
         # It is the ONLY thing armed -- _armed() already excludes it by
         # type, so an empty result here means nothing ELSE is running.
@@ -560,4 +560,4 @@ async def test_clock_tooltip_carries_the_visible_error_for_a_bad_timezone(monkey
         chip = app.query_one(ClockChip)
         assert chip.tooltip is not None
         assert "Not/A_Real_Zone" in chip.tooltip
-        assert chip.renderable  # still rendered -- the fallback, not a blank chip
+        assert chip.content  # still rendered -- the fallback, not a blank chip

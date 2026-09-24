@@ -18,7 +18,7 @@ repo chip is a SELECTOR too now, opening a directory-walking picker.
 Same headless Pilot + FakeEngine pattern as tests/test_branch_command.py
 and tests/test_subagent_tracker.py. Click coordinates are resolved from
 the status bar's PLAIN (markup-stripped) text via
-``textual.content.Content.from_markup(...).plain`` -- `.renderable` on a
+``textual.content.Content.from_markup(...).plain`` -- `.content` on a
 Static is the raw string handed to `update()`, brackets and all, so a
 naive string index would land on the wrong screen column once a chip
 carries `[@click=...]` markup.
@@ -86,7 +86,7 @@ async def _settled(pilot, pane, tries=200):
 
 
 def _status_plain(app) -> str:
-    return Content.from_markup(str(app.query_one("#status-bar").renderable)).plain
+    return Content.from_markup(str(app.query_one("#status-bar").content)).plain
 
 
 def _offset_of(app, needle: str) -> tuple[int, int]:
@@ -390,7 +390,7 @@ async def test_unavailable_effort_keeps_model_chip_without_bracket(monkeypatch, 
         assert await _wait_status(pilot, app, "gpt-6-sol")
         bar = app.query_one("#status-bar", StatusBar)
         assert "gpt-6-sol [" not in _status_plain(app)
-        assert "open_effort_picker" not in str(bar.renderable)
+        assert "open_effort_picker" not in str(bar.content)
         await pilot.click("#status-bar", offset=_offset_of(app, "gpt-6-sol"))
         await pilot.pause()
         picker = app.query_one("#chip-picker", ChipPicker)
@@ -405,8 +405,8 @@ async def test_codex_effort_is_shown_without_claude_picker(monkeypatch, tmp_path
     async with app.run_test() as pilot:
         assert await _wait_status(pilot, app, "gpt-6-sol [xhigh]")
         bar = app.query_one("#status-bar", StatusBar)
-        assert "open_effort_picker" not in str(bar.renderable)
-        assert "open_model_picker" in str(bar.renderable)
+        assert "open_effort_picker" not in str(bar.content)
+        assert "open_model_picker" in str(bar.content)
 
 
 # -- ACTIONABLE tier: peers -> a roster picker, ctx% -> /compact ---------
@@ -608,8 +608,8 @@ async def test_ctx_confirm_accept_sends_compact(monkeypatch, tmp_path):
             await pilot.pause(0.02)
         assert isinstance(app.screen, CompactConfirm)
         body = app.screen.query_one("#compact-confirm-body")
-        assert "91%" in str(body.renderable)
-        assert "discard" in str(body.renderable).lower()
+        assert "91%" in str(body.content)
+        assert "discard" in str(body.content).lower()
         await pilot.click("#compact-confirm-yes")
         for _ in range(100):
             if engines[0].received_prompts:
@@ -1362,8 +1362,8 @@ async def test_compact_confirm_buttons_have_real_height_and_are_hittable(
         # Self-describing: each door names the key that opens it, because
         # the operator's report was "no OK" -- they could not tell what to
         # press even once something was on screen.
-        assert "enter" in str(yes.renderable).lower()
-        assert "esc" in str(no.renderable).lower()
+        assert "enter" in str(yes.content).lower()
+        assert "esc" in str(no.content).lower()
 
 
 @pytest.mark.asyncio
@@ -1433,9 +1433,9 @@ async def test_close_confirm_buttons_have_real_height_and_are_hittable(
         # Same self-describing rule as the compact dialog. The DEFAULT
         # door is terminate (see CloseWithTurnRunning's docstring and
         # tests/test_sessions.py) -- this label pair moved with it.
-        assert "enter" in str(app.screen.query_one("#close-terminate").renderable)
-        assert "· d ]" in str(app.screen.query_one("#close-detach").renderable)
-        assert "esc" in str(app.screen.query_one("#close-cancel").renderable)
+        assert "enter" in str(app.screen.query_one("#close-terminate").content)
+        assert "· d ]" in str(app.screen.query_one("#close-detach").content)
+        assert "esc" in str(app.screen.query_one("#close-cancel").content)
 
 
 @pytest.mark.asyncio

@@ -480,7 +480,7 @@ async def test_text_tier_shows_the_wordmark_and_never_the_fallback_line(tmp_path
         assert block.region.height > 0
         drawn = block.query_one(".banner-wordmark")
         assert drawn.region.height == banner.FULL_ROWS
-        rendered = str(drawn.renderable)
+        rendered = str(drawn.content)
         assert "[image:" not in rendered
         assert banner.TAGLINE in rendered
         # v0.72.0: the full-width form draws ΔΟΞΑ in blocks, not the plain
@@ -514,7 +514,7 @@ async def test_a_mid_width_terminal_shows_mark_and_wordmark_never_an_image(
         assert block is not None
         drawn = block.query_one(".banner-wordmark")
         assert drawn.region.height == len(banner.MARK_ROWS)
-        rendered = str(drawn.renderable)
+        rendered = str(drawn.content)
         assert banner.WORDMARK in rendered
         assert banner.TAGLINE not in rendered
         assert not block.query(".banner-image")
@@ -645,11 +645,11 @@ async def test_bare_img_renders_the_showcase_with_visible_samples(tmp_path, monk
         await _settle(pilot, 100)
         showcase = app.query_one(ImageShowcaseBlock)
         assert showcase.region.height > 0
-        report = str(showcase.query_one(".image-diagnostics").renderable)
+        report = str(showcase.query_one(".image-diagnostics").content)
         assert "halfblock" in report
         assert "cell size" in report
         # One label per tier it may honestly draw, and no more.
-        labels = [str(w.renderable) for w in showcase.query(".image-mode-label")]
+        labels = [str(w.content) for w in showcase.query(".image-mode-label")]
         assert labels == ["── halfblock ──", "── text ──"]
         # And the half-block sample is a picture the user can see.
         sample = showcase.query(".banner-image")[0]
@@ -767,7 +767,7 @@ def _plain_lines(widget) -> "list[str]":
     """The rendered rows with the color markup taken back off."""
     import re
 
-    text = re.sub(r"\[/?(?:b )?#?[0-9A-Fa-f]{0,6}\]", "", str(widget.renderable))
+    text = re.sub(r"\[/?(?:b )?#?[0-9A-Fa-f]{0,6}\]", "", str(widget.content))
     return text.splitlines()
 
 
@@ -811,7 +811,7 @@ async def test_a_terminal_too_narrow_for_the_glyphs_drops_to_the_name(
         block = _banner(app)
         drawn = block.query_one(".banner-wordmark")
         assert drawn.region.height == 1
-        assert banner.WORDMARK in str(drawn.renderable)
+        assert banner.WORDMARK in str(drawn.content)
         # v0.70.0: there is no fallback-reason line left to stay silent --
         # the raster it explained was never given IS the thing that is
         # gone, so the class itself no longer exists anywhere in the DOM.

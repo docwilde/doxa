@@ -967,12 +967,11 @@ BLOCK_SECS = 0.5
 #: at once. Pre-fix, the worst gap is this number.
 PROBE_BLOCK_SECS = 2.0
 
-#: The gap that counts as a freeze. Measured ceiling above: 399 ms of
-#: Textual mount work with the collector held off, in a full run. This is
-#: 2.5x that ceiling and half of PROBE_BLOCK_SECS -- the first margin is
-#: why it does not fail on correct code, the second is why it still fails
-#: on the defect.
-STALL_LIMIT = 1.0
+#: Textual 8 reached 1.05 s of mount work late in a 2,800-test run, with
+#: the collector held off and the factory proven to run in a thread. Keep
+#: room for that measured tail while staying below the synchronous 2 s
+#: factory block that this test catches.
+STALL_LIMIT = 1.25
 
 #: How many times the loop must wake while the factory is blocking.
 #: PROBE_BLOCK_SECS / 0.01 = ~200 when it is threaded, exactly 0 when it
@@ -1004,7 +1003,7 @@ def _assert_the_spawn_stayed_off_the_loop(probe, beat, loop_thread, gesture):
         f"factory is not the cause — it ran off the loop and the loop "
         f"kept waking through it — so either something ELSE on this "
         f"path is blocking, or Textual's mount cost has grown past the "
-        f"399 ms this bar was measured against"
+        f"1.05 s observed under Textual 8 in the full suite"
     )
 
 

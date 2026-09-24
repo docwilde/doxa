@@ -155,7 +155,7 @@ async def test_codex_start_exposes_fetched_account(tmp_path, monkeypatch):
 
 def test_settings_about_uses_only_the_selected_engines_account():
     def values(screen):
-        return [str(row.renderable) for row in screen._about_rows()
+        return [str(row.content) for row in screen._about_rows()
                 if isinstance(row, Static)]
 
     claude = values(SettingsScreen(

@@ -869,13 +869,13 @@ async def test_context_leads_with_a_grid_of_draughts_glyphs_and_keeps_the_number
                 # this test fail under the full suite while passing alone:
                 # the first frame is honestly the numbers view, and the
                 # grid is the next one. Poll for the grid itself.
-                plain = _plain(str(block.renderable))
+                plain = _plain(str(block.content))
                 if "⛀" in plain or "⛁" in plain:
                     break
             await pilot.pause(0.02)
         assert block is not None, "/context did not mount a ContextBlock"
         assert block.region.height > 0
-        rendered = str(block.renderable)
+        rendered = str(block.content)
         plain = _plain(rendered)
         assert "⛀" in plain or "⛁" in plain, f"grid never painted; last frame: {plain[:200]!r}"
         assert "⛶" in plain
@@ -914,7 +914,7 @@ async def test_the_grid_never_overflows_the_content_box_it_was_measured_against(
                 await pilot.pause(0.02)
             assert block is not None
             available = block.content_size.width
-            rendered = _plain(str(block.renderable))
+            rendered = _plain(str(block.content))
             for line in rendered.splitlines():
                 if "⛀" not in line and "⛁" not in line and "⛶" not in line:
                     continue
@@ -952,7 +952,7 @@ async def test_a_narrow_pane_drops_the_grid_and_keeps_the_numbers(
             await pilot.pause(0.02)
         assert block is not None
         assert block.content_size.width < GRID_WIDTH
-        rendered = str(block.renderable)
+        rendered = str(block.content)
         assert "⛀" not in rendered and "⛁" not in rendered and "⛶" not in rendered
         assert "60,650" in rendered
 
@@ -976,11 +976,11 @@ async def test_the_ascii_setting_swaps_glyphs_for_brackets_in_the_live_widget(
             found = list(app.query(ContextBlock))
             if found:
                 block = found[0]
-                plain = _plain(str(block.renderable))
+                plain = _plain(str(block.content))
                 if "[#]" in plain or "[ ]" in plain:
                     break
             await pilot.pause(0.02)
         assert block is not None
-        plain = _plain(str(block.renderable))
+        plain = _plain(str(block.content))
         assert "[#]" in plain or "[ ]" in plain
         assert "⛀" not in plain and "⛁" not in plain and "⛶" not in plain

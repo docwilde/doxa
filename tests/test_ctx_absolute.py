@@ -240,7 +240,7 @@ async def _app(monkeypatch, cwd, fake):
 def _status_plain(app) -> str:
     from textual.content import Content
 
-    return Content.from_markup(str(app.query_one("#status-bar").renderable)).plain
+    return Content.from_markup(str(app.query_one("#status-bar").content)).plain
 
 
 async def _wait_status(pilot, app, needle: str, tries=200) -> bool:

@@ -22,7 +22,7 @@ classifiers = [
 ]
 dependencies = [
     "claude-agent-sdk>=0.2.144",
-    "textual>=5,<6",
+    "textual>=8,<9",
     "textual-image>=0.12.0",
     # NOT a new dependency: textual-image has always required Pillow and it
     # has always been on disk. What changed in v0.41.0 is who imports it.

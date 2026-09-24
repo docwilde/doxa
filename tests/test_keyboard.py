@@ -84,16 +84,9 @@ def _fresh_cache():
     # Modifiers the encoding cannot express in any position.
     "super+k",
     "hyper+left",
-    # Alt+<CHARACTER>. Corrected in v0.95.0 after the live report that
-    # Alt+S and Alt+D did nothing. The old entry reasoned about the
-    # TERMINAL (which does send Alt, as an ESC prefix, and always has)
-    # when the binding depends on what TEXTUAL decodes -- and textual
-    # 5.3.0 has no ESC-prefix-to-Alt path at all. Measured:
-    # XTermParser().feed("\x1bs") -> Key('escape'), Key('s'), so a
-    # binding on alt+s never fires and the bare letter lands in the
-    # prompt instead. See test_textual_cannot_decode_alt_from_an_esc_prefix
-    # in tests/test_split_keys.py, which pins the parser itself.
-    "alt+s", "alt+d", "alt+g", "alt+x", "alt+comma", "alt+enter",
+    # Textual 8 decodes ESC-prefixed letters, while modified punctuation
+    # and control codes still lose Alt under the legacy encoding.
+    "alt+b", "alt+f", "alt+1", "alt+comma", "alt+enter",
     "alt+tab", "alt+backspace", "alt+space",
     # Ctrl+Alt is an ESC prefix in front of the C0 byte -- no better.
     "ctrl+alt+x",
@@ -117,6 +110,7 @@ def test_known_unreachable_combinations_are_reported_as_such(key):
     # prefix a modified LETTER uses, and Textual decodes it:
     # XTermParser().feed("\x1b[1;3D") -> Key('alt+left').
     "alt+left", "alt+right", "alt+up", "alt+down", "alt+f4",
+    "alt+s", "alt+d", "alt+g", "alt+x",
     # Back-tab: the one modified form the legacy encoding does carry.
     "shift+tab",
     # Unmodified anything.
@@ -378,7 +372,7 @@ async def test_the_about_dialog_actually_draws_the_keyboard_row(
         body = app.screen.query_one("#about-body")
         assert body.size.height > 0, f"about body collapsed: {body.size}"
         assert body.size.width > 0, f"about body collapsed: {body.size}"
-        rendered = str(body.renderable)
+        rendered = str(body.content)
         assert "keyboard" in rendered
         assert "legacy" in rendered
 
@@ -438,17 +432,9 @@ def test_unreachable_bindings_names_the_real_ones(monkeypatch):
     # out loud where it does not work, instead of leaving it documented
     # and silently dead -- which is the defect v0.39.0 exists to close.
     #
-    # Alt+S / Alt+D / Alt+G are here as of v0.95.0, and the previous
-    # version of this comment claimed the opposite in so many words:
-    # "Alt is an ESC prefix every terminal has sent since long before the
-    # kitty protocol, so both are reachable under either encoding". The
-    # terminal half is true; the conclusion was not, because Textual has
-    # no ESC-prefix-to-Alt path and hands the app Escape-then-letter. The
-    # keys stayed BOUND (real muscle memory on kitty/ghostty/WezTerm/foot)
-    # and moved off the primary slot -- Ctrl+O, Ctrl+N and F2 carry that
-    # now -- so appearing in this list is again the whole deal: a second,
-    # partly deliverable binding is defensible only while /help and
-    # /doctor say out loud where it does not work.
+    # Textual 8 decodes ESC-prefixed letters, so Alt+S / Alt+D / Alt+G
+    # no longer belong in this list. Ctrl+O, Ctrl+N and F2 remain the
+    # primary split and diff shortcuts.
     #
     # The pane-movement keys (Ctrl+Shift+arrow) and the between-leaf
     # divider (Alt+ARROW) are still absent, and for the reason the split
@@ -469,7 +455,7 @@ def test_unreachable_bindings_names_the_real_ones(monkeypatch):
         # earlier in the registry than /settings; the other eight digits
         # come from DoxaApp.BINDINGS afterwards. Order here is "registry
         # bindings, then app hotkeys", not alphabetical.
-        "Ctrl+1", "Ctrl+,", "Ctrl+Tab", "Alt+S", "Alt+D", "Alt+G",
+        "Ctrl+1", "Ctrl+,", "Ctrl+Tab",
         *[f"Ctrl+{digit}" for digit in range(2, 10)],
     ]
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.KITTY)
@@ -529,13 +515,8 @@ def test_unreachable_doors_names_the_real_commands(monkeypatch):
     binding -- so /mode is the honest door for it too, read off the
     registry rather than hand-copied."""
     monkeypatch.setenv(keyboard_mod.ENV_VAR, keyboard_mod.LEGACY)
-    # Alt+S / Alt+D / Alt+G joined the list in v0.95.0: that release moved
-    # the split and diff keys to Ctrl+O / Ctrl+N / F2 after measuring that
-    # Textual's parser has no ESC-prefix -> Alt path at all, and kept the
-    # Alt spellings as kitty-tier aliases. Their doors resolve through the
-    # SECOND pass -- alt+s shares the `split_pane` action with ctrl+o,
-    # which is /split's own `binding` -- which is the whole reason that
-    # pass exists.
+    # Textual 8 recognizes ESC-prefixed Alt+letter, so the split and diff
+    # aliases are reachable under the legacy encoding and need no door.
     assert labels_mod.unreachable_doors() == [
         # Every digit resolves to /pane through the ACTION pass, not the
         # binding pass: they are one action taking the group number, and
@@ -544,9 +525,6 @@ def test_unreachable_doors_names_the_real_commands(monkeypatch):
         ("Ctrl+1", "/pane"),
         ("Ctrl+,", "/settings"),
         ("Ctrl+Tab", "/mode"),
-        ("Alt+S", "/split"),
-        ("Alt+D", "/vsplit"),
-        ("Alt+G", "/diff"),
         *[(f"Ctrl+{digit}", "/pane") for digit in range(2, 10)],
     ]
 

@@ -72,11 +72,11 @@ async def test_turn_block_and_tool_chip_appear_live(monkeypatch, tmp_path):
         chip.collapsed = False
         await pilot.pause()
         assert chip._formatted is True
-        assert "ARGS:" in chip._body.renderable
-        assert "RESULT:\n4" in chip._body.renderable
+        assert "ARGS:" in chip._body.content
+        assert "RESULT:\n4" in chip._body.content
 
         # Status bar reflects the finished turn.
-        status = app.query_one("#status-bar").renderable
+        status = app.query_one("#status-bar").content
         assert "0.0020" in status or "$0.0020" in status
         assert "3 beliefs" in status
 
@@ -92,7 +92,7 @@ async def test_status_bar_effort_chip_hidden_at_cli_default(monkeypatch, tmp_pat
     app = DoxaApp(cwd=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
-        status = str(app.query_one("#status-bar").renderable)
+        status = str(app.query_one("#status-bar").content)
         assert "effort:" not in status
 
 
@@ -107,7 +107,7 @@ async def test_status_bar_effort_chip_shows_asserted_level(monkeypatch, tmp_path
     app = DoxaApp(cwd=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
-        status = str(app.query_one("#status-bar").renderable)
+        status = str(app.query_one("#status-bar").content)
         assert "[xhigh]" in Content.from_markup(status).plain
 
 
@@ -203,7 +203,7 @@ async def test_tool_disabled_shows_in_status_area(monkeypatch, tmp_path):
         assert "⊘" in blocks[0].text
         assert "lore_belief_search" in blocks[0].text
 
-        status = str(app.query_one("#status-bar").renderable)
+        status = str(app.query_one("#status-bar").content)
         assert "⊘ lore_belief_search" in status
 
 
@@ -235,7 +235,7 @@ async def test_subscription_auth_shows_tier_not_dollars(monkeypatch, tmp_path):
             if app.query("#identity-block"):
                 break
             await pilot.pause(0.02)
-        status = str(app.query_one("#status-bar").renderable)
+        status = str(app.query_one("#status-bar").content)
         assert "sub:max" in status
         # The figure stays a secondary what-if, not a bill -- but the words
         # "if API" were dropped from the CHIP for row width; `sub:` and `≈`
@@ -261,7 +261,7 @@ async def test_api_key_auth_keeps_the_dollar_display(monkeypatch, tmp_path):
     app = DoxaApp(cwd=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
-        status = str(app.query_one("#status-bar").renderable)
+        status = str(app.query_one("#status-bar").content)
         assert "$0.0000" in status
         assert "sub:" not in status and "if API" not in status
 
@@ -286,11 +286,11 @@ async def test_status_line_shows_repo_and_branch(monkeypatch, tmp_path):
             if app._git is not None:
                 break
             await pilot.pause(0.02)
-        # `.renderable` is the RAW markup string (status-chips, item Y: the
+        # `.content` is the RAW markup string (status-chips, item Y: the
         # branch half is now a click-action span) -- Content.from_markup(
         # ...).plain is the VISIBLE text, which is what "shows repo and
         # branch" actually means here.
-        status = Content.from_markup(str(app.query_one("#status-bar").renderable)).plain
+        status = Content.from_markup(str(app.query_one("#status-bar").content)).plain
         assert "myrepo ⎇ trunk" in status
 
         # Branch switch: .git/HEAD changes; the next refresh must see it.
@@ -300,7 +300,7 @@ async def test_status_line_shows_repo_and_branch(monkeypatch, tmp_path):
         )
         app._git._mtime = None  # defeat same-second mtime granularity
         app._refresh_status()
-        status = Content.from_markup(str(app.query_one("#status-bar").renderable)).plain
+        status = Content.from_markup(str(app.query_one("#status-bar").content)).plain
         assert "myrepo ⎇ feature/x" in status
 
 
@@ -318,7 +318,7 @@ async def test_status_line_has_no_git_chip_outside_a_repo(monkeypatch, tmp_path)
                 break
             await pilot.pause(0.02)
         assert app._git.render() is None
-        status = str(app.query_one("#status-bar").renderable)
+        status = str(app.query_one("#status-bar").content)
         assert "⎇" not in status
 
 

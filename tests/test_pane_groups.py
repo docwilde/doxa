@@ -435,7 +435,7 @@ async def test_the_overlay_flashes_every_group_and_fires_on_a_miss(tmp_path):
         for group in app._group_order():
             overlay = group.query_one(GroupNumber)
             assert overlay.styles.display == "block"
-            numbers.append(str(overlay.renderable))
+            numbers.append(str(overlay.content))
         assert numbers == ["1", "2"]
         assert app._group_flash_timer is not None, "a ONE-SHOT timer, armed"
 

@@ -85,7 +85,7 @@ async def test_narrow_terminal_truncates_the_title_at_a_word_boundary(
         # query match).
         title_widget = block.query_one("CollapsibleTitle")
         assert title_widget.region.height > 0
-        rendered = str(title_widget.renderable)
+        rendered = str(title_widget.content)
         assert "…" in rendered
 
 
@@ -106,7 +106,7 @@ async def test_truncated_prompt_is_reachable_in_full_in_the_fold_body(
 
         assert block.prompt_full.display is True
         assert block.prompt_full.region.height > 0
-        rendered = str(block.prompt_full.renderable)
+        rendered = str(block.prompt_full.content)
         assert LONG_PROMPT in rendered
 
 
@@ -133,4 +133,4 @@ async def test_title_retruncates_on_resize_not_a_stale_cut(monkeypatch, tmp_path
         await pilot.pause()
         assert "…" in block.title
         assert block.prompt_full.display is True
-        assert LONG_PROMPT in str(block.prompt_full.renderable)
+        assert LONG_PROMPT in str(block.prompt_full.content)

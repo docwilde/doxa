@@ -66,7 +66,7 @@ async def test_bang_renders_the_output_and_the_exit_code(monkeypatch, tmp_path):
     async with app.run_test() as pilot:
         await pilot.pause()
         block = await _bang(app, pilot, "!echo hello-from-the-shell")
-        rendered = str(block.renderable)
+        rendered = str(block.content)
         assert "hello-from-the-shell" in rendered
         assert "exit 0" in rendered
         assert "echo hello-from-the-shell" in rendered  # the command itself
@@ -78,7 +78,7 @@ async def test_a_failing_command_shows_its_real_exit_code(monkeypatch, tmp_path)
     async with app.run_test() as pilot:
         await pilot.pause()
         block = await _bang(app, pilot, "!exit 42")
-        assert "exit 42" in str(block.renderable)
+        assert "exit 42" in str(block.content)
 
 
 @pytest.mark.asyncio
@@ -89,7 +89,7 @@ async def test_stderr_is_shown_too(monkeypatch, tmp_path):
     async with app.run_test() as pilot:
         await pilot.pause()
         block = await _bang(app, pilot, "!echo trouble >&2; exit 3")
-        rendered = str(block.renderable)
+        rendered = str(block.content)
         assert "trouble" in rendered and "exit 3" in rendered
 
 
@@ -99,7 +99,7 @@ async def test_a_silent_command_still_says_how_it_ended(monkeypatch, tmp_path):
     async with app.run_test() as pilot:
         await pilot.pause()
         block = await _bang(app, pilot, "!true")
-        rendered = str(block.renderable)
+        rendered = str(block.content)
         assert "no output" in rendered and "exit 0" in rendered
 
 
@@ -121,7 +121,7 @@ async def test_it_runs_in_the_sessions_own_directory(monkeypatch, tmp_path):
     async with app.run_test() as pilot:
         await pilot.pause()
         block = await _bang(app, pilot, "!ls")
-        assert "marker-file" in str(block.renderable)
+        assert "marker-file" in str(block.content)
 
 
 @pytest.mark.asyncio
@@ -142,7 +142,7 @@ async def test_a_slow_command_leaves_the_ui_live(monkeypatch, tmp_path):
             await pilot.pause(0.02)
         assert blocks, "no block mounted while the command was still running"
         assert blocks[0].result is None
-        assert "running" in str(blocks[0].renderable)
+        assert "running" in str(blocks[0].content)
 
         # The UI is not blocked: a keystroke still reaches the prompt.
         await pilot.press("h", "i")
@@ -153,7 +153,7 @@ async def test_a_slow_command_leaves_the_ui_live(monkeypatch, tmp_path):
                 break
             await pilot.pause(0.02)
         assert blocks[0].result is not None
-        assert "exit 0" in str(blocks[0].renderable)
+        assert "exit 0" in str(blocks[0].content)
 
 
 @pytest.mark.asyncio
@@ -189,8 +189,8 @@ async def test_shell_block_is_not_styled_as_model_output(monkeypatch, tmp_path):
         block = await _bang(app, pilot, "!echo x")
         assert not isinstance(block, SystemBlock)
         assert "shell-block" in block.classes
-        assert "▎ doxa" not in str(block.renderable)
-        assert str(block.renderable).startswith("❯ ")
+        assert "▎ doxa" not in str(block.content)
+        assert str(block.content).startswith("❯ ")
     theme = (PACKAGE / "theme.tcss").read_text()
     assert "ShellBlock {" in theme
 
@@ -214,7 +214,7 @@ async def test_runaway_output_is_capped_and_says_by_how_much(
 def _completed_text(result) -> str:
     block = ShellBlock(result.command, result.cwd)
     block.complete(result)
-    return str(block.renderable)
+    return str(block.content)
 
 
 @pytest.mark.asyncio
@@ -326,7 +326,7 @@ async def test_a_peer_sessions_message_is_rendered_never_executed(
                 break
             await pilot.pause(0.02)
         assert blocks, "the peer message never rendered at all"
-        assert f"!touch {canary}" in str(blocks[0].renderable)  # shown as TEXT
+        assert f"!touch {canary}" in str(blocks[0].content)  # shown as TEXT
         await pilot.pause(0.2)
         assert list(app.query(ShellBlock)) == []
     assert not canary.exists()
@@ -418,7 +418,7 @@ async def test_neither_the_command_nor_its_output_reaches_the_model(
     async with app.run_test() as pilot:
         await pilot.pause()
         block = await _bang(app, pilot, "!echo secret-side-channel")
-        assert "secret-side-channel" in str(block.renderable)
+        assert "secret-side-channel" in str(block.content)
         assert fake.received_prompts == []
         assert fake.num_turns == 0
 

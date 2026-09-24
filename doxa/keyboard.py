@@ -11,28 +11,15 @@ DOXA binds ``ctrl+comma`` to /settings and reads ``shift+enter`` at the
 prompt; on a terminal without the protocol both are silently dead, and
 nothing anywhere told the user whether DOXA or the terminal was at fault.
 
-**What Textual reports: nothing.** Textual 5.3.0's Linux driver *requests*
-the protocol unconditionally on startup --
-``textual/drivers/linux_driver.py:276`` writes ``\\x1b[>1u`` -- and disables
-it again at ``:373``. It never asks whether the request was granted and
-keeps no flag for it. Contrast the in-band window resize right beside it,
-which IS queried (``_query_in_band_window_resize``, ``:149``), answered
-through ``messages.InBandWindowResize`` and remembered on the driver
-(``_in_band_window_resize``, ``:64``) *and* on the app
-(``App.supports_smooth_scrolling``, ``textual/app.py:822``). There is no
-equivalent for the keyboard: no ``App`` attribute, no ``Driver`` property,
-no message. ``textual/_xterm_parser.py:326`` will happily decode a ``CSI u``
-key if one arrives, but that is a parse, not a report -- it can only tell us
-anything after the user has already pressed a key we may not be able to
-receive.
+**What Textual reports: nothing.** Its Linux driver requests the kitty
+protocol on startup, but exposes no capability flag saying whether the
+terminal granted it. Parsing a later ``CSI u`` key is not a support report:
+the user has already pressed a key by then.
 
-**Alt is not the escape hatch it looks like.** v0.91.0 moved the split
-keys onto Alt+letter believing Alt reached every terminal because every
-terminal has sent it as an ESC prefix forever. Measured in v0.95.0, that
-is true of the terminal and false of Textual: its parser has no
-ESC-prefix-to-Alt path, so ``alt+s`` only ever arrives on a terminal that
-granted the kitty protocol. :data:`_ALT_ONLY_UNDER_KITTY` carries the
-transcript.
+**Most Alt+letters now work under legacy encoding.** Textual 8 decodes an
+ESC prefix before most letters as Alt. ``ESC b`` and ``ESC f`` retain their
+older cursor mappings, while digits and punctuation also lose Alt.
+:data:`_ALT_ONLY_UNDER_KITTY` covers those remaining cases.
 
 So DOXA asks the terminal itself, using the protocol's own support query:
 
@@ -229,28 +216,9 @@ _UNMODIFIABLE = frozenset({"enter", "tab", "escape", "backspace", "space"})
 # Modifiers the legacy encoding has no representation for whatsoever.
 _IMPOSSIBLE_MODIFIERS = frozenset({"super", "hyper", "meta"})
 
-# Alt used to be listed as fine here, on the reasoning that a terminal
-# sends it as an ESC prefix and has done since long before the kitty
-# protocol. The premise is true and the conclusion was wrong, because the
-# question is not what the TERMINAL sends -- it is what TEXTUAL decodes.
-# Measured against textual 5.3.0's own parser (v0.95.0):
-#
-#     XTermParser().feed("\x1bs")  -> Key('escape'), Key('s')
-#     XTermParser().feed("\x1bd")  -> Key('escape'), Key('d')
-#     XTermParser().feed("\x1b[115;3u") -> Key('alt+s')     # kitty
-#     XTermParser().feed("\x1b[1;3D")   -> Key('alt+left')  # legacy, fine
-#
-# The string "alt" appears exactly once in ``textual/_xterm_parser.py``
-# (line 338), inside the CSI-u modifier table -- there is no ESC-prefix
-# to-Alt path in the parser at all. ``textual/_ansi_sequences.py`` maps a
-# handful of two-byte ESC pairs by hand (``\x1bf`` -> ctrl+right,
-# ``\x1bb`` -> ctrl+left, ``\x1b\x7f`` -> ctrl+w) and no letter to Alt.
-#
-# So under the legacy encoding a binding on ``alt+<character>`` can never
-# fire: the app is handed a bare Escape and then the naked letter, which
-# a focused prompt happily types. Alt+<NAMED key> is a different physical
-# encoding -- CSI 1;3<final>, the same shape as Ctrl+arrow -- and does
-# decode, which is why alt+arrow survives this and alt+letter does not.
+# Textual 8 decodes most ESC-prefixed letters as Alt. ESC b/f are older
+# ctrl+left/right mappings; ESC digits map to symbols, and punctuation or
+# control codes lose Alt. Modified arrows use CSI 1;3<final>.
 _ALT_ONLY_UNDER_KITTY = "alt"
 
 
@@ -267,11 +235,8 @@ def unreachable_under_legacy(key: str) -> bool:
     has sent and plain letters are fine, and a wrong claim about any of
     them would be worse than the silence it replaced.
 
-    Alt+<character> is the one entry this function got WRONG rather than
-    merely omitted, from v0.91.0 until v0.95.0 -- see the
-    :data:`_ALT_ONLY_UNDER_KITTY` note for the measurement that corrected
-    it. Alt+<named key> (arrows, F-keys) is still reachable and still
-    says so."""
+    Textual 8 makes most Alt+letters reachable on legacy terminals; the
+    parser still drops Alt on b/f, digits, punctuation, and control codes."""
     parts = key.split("+")
     # "ctrl+@" is spelled with the character (Keys.ControlAt), unlike every
     # other punctuation key, which uses its Unicode name. Split on "+"
@@ -291,11 +256,11 @@ def unreachable_under_legacy(key: str) -> bool:
             return False
         return bool(modifiers & {"ctrl", "shift", _ALT_ONLY_UNDER_KITTY})
     if _ALT_ONLY_UNDER_KITTY in modifiers:
-        # See the _ALT_ONLY_UNDER_KITTY note above. A CHARACTER key under
-        # Alt goes out as an ESC prefix, which textual 5.3.0 does not
-        # decode as Alt at all; a NAMED key goes out as CSI 1;3<final>,
-        # which it does. Checked before the ctrl branch so ctrl+alt+<char>
-        # -- ESC then the C0 byte, decoded no better -- lands here too.
+        # Textual 8 recognizes most ESC-prefixed letters. b/f and digits
+        # retain older mappings; punctuation and control codes lose Alt.
+        if (len(base) == 1 and base.isalpha() and base not in {"b", "f"}
+                and modifiers == {"alt"}):
+            return False
         if len(base) == 1 or base in _NAMED_PRINTABLE:
             return True
         if base in _C0_CTRL_PUNCTUATION or base == "@":

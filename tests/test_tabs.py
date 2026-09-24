@@ -95,8 +95,8 @@ async def test_per_tab_status_and_identity_are_independent(tmp_path):
         for pane in app.panes():
             pane._refresh_status()
         first, second = app.panes()
-        assert "sub:max" in str(first.query_one("#status-bar").renderable)
-        second_status = str(second.query_one("#status-bar").renderable)
+        assert "sub:max" in str(first.query_one("#status-bar").content)
+        second_status = str(second.query_one("#status-bar").content)
         assert "sub:" not in second_status and "$0.4200" in second_status
 
         # One identity block per session, each inside its own pane.

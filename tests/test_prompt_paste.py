@@ -217,7 +217,7 @@ async def test_empty_paste_with_clipboard_image_reports_a_stub_notice(
         else:
             blocks = []
         assert blocks, "no clipboard-image notice was ever mounted"
-        assert "image/png" in str(blocks[-1].renderable)
+        assert "image/png" in str(blocks[-1].content)
         assert prompt.value == ""
 
 

@@ -57,7 +57,7 @@ def _rendered_text(block: TurnBlock) -> str:
     """Everything the markdown body actually draws, as one string."""
     parts: list[str] = []
     for child in block.body.query(MarkdownParagraph):
-        parts.append(str(child.renderable))
+        parts.append(str(child.content))
     for child in block.body.children:
         renderable = getattr(child, "renderable", None)
         if renderable is not None:
@@ -167,7 +167,7 @@ async def test_inline_code_is_styled_not_backticked(app):
         await pilot.pause()
 
         paragraph = block.body.query_one(MarkdownParagraph)
-        content = paragraph.renderable
+        content = paragraph.content
         assert "doxa attach" in str(content)
         assert "`" not in str(content)
         assert content.spans, "inline code produced no style span at all"

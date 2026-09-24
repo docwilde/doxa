@@ -170,24 +170,15 @@ def _parsed(data: str) -> "list[str]":
     ]
 
 
-def test_textual_cannot_decode_alt_from_an_esc_prefix():
-    """The measurement that condemned Alt+S / Alt+D / Alt+G.
-
-    A terminal without the kitty protocol sends Alt+X as ESC then X, and
-    has since long before the protocol existed -- which is what v0.91.0
-    reasoned from, and it is true. What it did not check is that textual
-    5.3.0 has no ESC-prefix-to-Alt path: the string "alt" occurs once in
-    ``textual/_xterm_parser.py``, inside the CSI-u modifier table, and
-    ``_ansi_sequences.py`` hand-maps a few two-byte ESC pairs to
-    ctrl+arrow and ctrl+w and no letter to Alt.
-
-    So the app is handed a bare Escape and then the naked character, the
-    binding never fires, and a focused prompt types the letter."""
-    assert _parsed("\x1bs") == ["escape", "s"]
-    assert _parsed("\x1bd") == ["escape", "d"]
-    assert _parsed("\x1bg") == ["escape", "g"]
-    # ...and the kitty encoding of the same key, which is the ONLY way
-    # those bindings ever fired. 115/100/103 are s/d/g; ;3 is Alt.
+def test_textual_decodes_alt_from_an_esc_prefix():
+    """Textual 8 recognizes legacy ESC-prefixed Alt+letter sequences."""
+    assert _parsed("\x1bs") == ["alt+s"]
+    assert _parsed("\x1bd") == ["alt+d"]
+    assert _parsed("\x1bg") == ["alt+g"]
+    assert _parsed("\x1bb") == ["ctrl+left"]
+    assert _parsed("\x1bf") == ["ctrl+right"]
+    assert _parsed("\x1b1") == ["inverted_exclamation_mark"]
+    # The kitty encoding also remains supported.
     assert _parsed("\x1b[115;3u") == ["alt+s"]
     assert _parsed("\x1b[100;3u") == ["alt+d"]
     assert _parsed("\x1b[103;3u") == ["alt+g"]

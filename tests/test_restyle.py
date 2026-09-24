@@ -144,7 +144,7 @@ async def test_markdown_streaming_survives_chunk_boundaries(monkeypatch, tmp_pat
         assert len(list(block.body.query(MarkdownTable))) == 1
 
         paragraph = block.body.children[0]
-        content = paragraph.renderable
+        content = paragraph.content
         assert "**" not in str(content)
         assert any(span.style == ".strong" for span in content.spans)
 

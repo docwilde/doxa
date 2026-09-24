@@ -125,16 +125,16 @@ async def test_engine_chip_precedes_model_and_selects_new_session_default(
     fake = FakeEngine([], model="claude-sonnet-4-5")
     app, _ = await _app(monkeypatch, tmp_path, fake)
     async with app.run_test() as pilot:
+        bar = app.query_one("#status-bar")
         for _ in range(200):
-            if app.active_pane.engine is fake:
+            if app.active_pane.engine is fake and "claude-sonnet-4-5" in str(bar.content):
                 break
             await pilot.pause(0.02)
-        bar = app.query_one("#status-bar")
-        plain = Content.from_markup(str(bar.renderable)).plain
+        plain = Content.from_markup(str(bar.content)).plain
         assert plain.index("claude") < plain.index("claude-sonnet-4-5")
         keys = [chip.key for chip in app.active_pane._status_chips()]
         assert keys[keys.index("claude") + 1].startswith("claude-sonnet-4-5")
-        assert "open_engine_picker" in str(bar.renderable)
+        assert "open_engine_picker" in str(bar.content)
         await pilot.click("#status-bar", offset=_chip_offset(app, "claude"))
         await pilot.pause()
         picker = app.query_one("#chip-picker", ChipPicker)
@@ -153,7 +153,7 @@ async def test_engine_chip_precedes_model_and_selects_new_session_default(
         assert config_mod.engine() == "codex"
         assert engines_mod.engine_id_of(app.active_pane.engine) == "claude"
         assert app._new_session_engine_override == "codex"
-        assert "claude" in Content.from_markup(str(bar.renderable)).plain
+        assert "claude" in Content.from_markup(str(bar.content)).plain
 
 
 def test_the_settings_engine_row_offers_exactly_the_registered_engines():

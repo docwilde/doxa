@@ -361,7 +361,7 @@ class PaneChipsMixin:
         # Static.update rebuilds its visual and requests a layout refresh,
         # even when the content is identical. Peer and turn events can call
         # this method repeatedly without changing any visible chip.
-        if bar.renderable != markup:
+        if bar.content != markup:
             bar.update(markup)
         bar.set_chip_hints([hint for chip in chips for hint in chip.hints])
 
@@ -2309,9 +2309,15 @@ class PaneChipsMixin:
             # First selection ARMS. Reopening with a differently worded row
             # is the confirmation: it is the only row that changed, and it
             # is not where the highlight was.
-            self.app.call_after_refresh(
+            # Textual 8 defers focus changes. Reopening on the same refresh
+            # can still receive the old picker's queued Blur, closing the
+            # confirmation before it can be selected. Give that focus
+            # handoff one event-loop turn before showing the armed row.
+            self.app.set_timer(
+                0.01,
                 partial(self._open_pending_actions, rid, item, by_id,
-                        arm_approve=True))
+                        arm_approve=True),
+            )
             return
         if chosen == "act:approve!":
             self.run_worker(self._resolve_pending(item, "approve"),

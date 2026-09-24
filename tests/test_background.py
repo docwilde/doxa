@@ -83,6 +83,10 @@ def _rendered_bytes(widget) -> str:
 @pytest.fixture(autouse=True)
 def _isolated_config(monkeypatch, tmp_path):
     monkeypatch.setenv("DOXA_HOME", str(tmp_path / "doxa-home"))
+    # Textual 8 honors NO_COLOR during widget rendering. These byte-level
+    # assertions exercise a truecolor terminal, independent of the test
+    # runner's own color preference.
+    monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     monkeypatch.delenv("DOXA_BACKGROUND", raising=False)
     config.invalidate()
@@ -329,7 +333,7 @@ async def test_settings_row_carries_the_terminal_side_caveat(monkeypatch, tmp_pa
                 break
             await pilot.pause(0.02)
         notes = " ".join(
-            str(n.renderable) for n in app.screen.query(".setting-note")
+            str(n.content) for n in app.screen.query(".setting-note")
         )
         assert "terminal" in notes.lower()
         assert "background_opacity" in notes

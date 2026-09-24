@@ -151,7 +151,7 @@ async def _wait(pilot, cond, tries=300):
 
 
 def _bar_markup(app) -> str:
-    return str(app.query_one("#status-bar", StatusBar).renderable)
+    return str(app.query_one("#status-bar", StatusBar).content)
 
 
 def _bar_plain(app) -> str:
@@ -736,7 +736,7 @@ async def test_the_pane_paints_the_wash_at_its_real_width(tmp_path):
             # so the actual paint) is a pump cycle later. A plain ``str``
             # has no ``.plain``, so that pre-paint moment is read as "no
             # rows yet" instead of raising.
-            body = view._body.renderable
+            body = view._body.content
             text = body if isinstance(body, str) else body.plain
             rows = [r for r in text.splitlines() if r.strip()]
             return [r for r in rows if r[8:9] in "+-"]

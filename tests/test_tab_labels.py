@@ -326,7 +326,7 @@ async def test_status_bar_shows_the_base_inside_a_worktree_session(
         # The TAB shows the base...
         assert _tab_label(app, pane) == f"Sonnet@myrepo:trunk{TAB_ISOLATION_MARKER}"
         # ...and so does the STATUS BAR now: one string, one meaning.
-        status = str(pane.query_one("#status-bar").renderable)
+        status = str(pane.query_one("#status-bar").content)
         assert "myrepo[/][/] ⎇ " in status
         assert "trunk" in status
         assert "doxa/brlabel2" not in status
@@ -453,7 +453,7 @@ async def test_enter_commits_and_pins_the_name(monkeypatch, tmp_path):
         await pilot.pause()
         assert _tab_label(app, pane) == "graph importer"
         # ...while the STATUS bar still tracks both, as it always did.
-        status = str(pane.query_one("#status-bar").renderable)
+        status = str(pane.query_one("#status-bar").content)
         assert "other" in status and "haiku" in status
 
 

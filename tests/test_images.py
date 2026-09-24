@@ -61,7 +61,7 @@ def test_env_override_forces_each_tier(monkeypatch, png):
     monkeypatch.setenv("DOXA_IMAGE_MODE", "text")
     widget = images.widget_for(str(png), "the picture")
     assert isinstance(widget, Static)
-    assert str(widget.renderable) == "[image: the picture]"
+    assert str(widget.content) == "[image: the picture]"
 
 
 def test_probe_ladder_order(monkeypatch):
@@ -156,7 +156,7 @@ def test_widget_for_bad_source_degrades_to_fallback(monkeypatch, tmp_path):
     monkeypatch.setenv("DOXA_IMAGE_MODE", "halfblock")
     widget = images.widget_for(str(tmp_path / "missing.png"), "missing.png")
     assert isinstance(widget, Static)
-    assert "[image: missing.png]" in str(widget.renderable)
+    assert "[image: missing.png]" in str(widget.content)
 
 
 def test_looks_like_image_path(png, tmp_path):
@@ -301,7 +301,7 @@ async def test_tool_chip_mounts_fallback_text_on_text_tier(monkeypatch, tmp_path
         assert chip._image_mounted is True
         fallbacks = list(chip.query(".image-fallback"))
         assert len(fallbacks) == 1
-        assert f"[image: {png}]" in str(fallbacks[0].renderable)
+        assert f"[image: {png}]" in str(fallbacks[0].content)
 
 
 @pytest.mark.asyncio
@@ -340,9 +340,9 @@ async def test_img_command_mounts_block_with_fallback(monkeypatch, tmp_path, png
             await pilot.pause(0.02)
         blocks = list(app.query(ImageBlock))
         assert len(blocks) == 1
-        assert str(png) in str(blocks[0].query_one(".image-caption").renderable)
+        assert str(png) in str(blocks[0].query_one(".image-caption").content)
         assert f"[image: {png}]" in str(
-            blocks[0].query_one(".image-fallback").renderable
+            blocks[0].query_one(".image-fallback").content
         )
         # A slash command is never a turn.
         assert not app.query("TurnBlock")

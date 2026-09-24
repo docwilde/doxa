@@ -185,19 +185,19 @@ async def test_trace_tree_folds_and_formats_lazily(monkeypatch, tmp_path):
         # holds all the way down the tree.
         assert task.collapsed is True and sub.collapsed is True
         assert task._formatted is False and sub._formatted is False
-        assert str(task._subout.renderable) == ""  # buffered, not rendered
+        assert str(task._subout.content) == ""  # buffered, not rendered
 
         task.collapsed = False
         await pilot.pause()
         assert task._formatted is True
-        assert "SUBAGENT:" in str(task._subout.renderable)
-        assert "[REDACTED:aws]" in str(task._subout.renderable)
+        assert "SUBAGENT:" in str(task._subout.content)
+        assert "[REDACTED:aws]" in str(task._subout.content)
         assert sub._formatted is False  # the child only pays when opened
 
         sub.collapsed = False
         await pilot.pause()
         assert sub._formatted is True
-        assert "RESULT:\n2 hits" in str(sub._body.renderable)
+        assert "RESULT:\n2 hits" in str(sub._body.content)
 
 
 @pytest.mark.asyncio

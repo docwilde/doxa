@@ -95,7 +95,7 @@ def _plain(widget) -> str:
     """What the widget actually renders, markup resolved -- not the string
     a formatter returned. The two are the same only when nobody made the
     v0.35.0 mistake of keying content off one form and reading the other."""
-    return str(widget.renderable)
+    return str(widget.content)
 
 
 # -- the formatters: timestamps, age, verdict ---------------------------
@@ -412,11 +412,11 @@ async def test_neither_outcome_is_silent(monkeypatch, tmp_path):
         await pilot.pause()
         picker.try_action_key("a")   # apply
         for _ in range(150):
-            texts = [str(b.renderable) for b in pane.query("SystemBlock")]
+            texts = [str(b.content) for b in pane.query("SystemBlock")]
             if any("20260824-00 approved" in t for t in texts):
                 break
             await pilot.pause(0.02)
-        texts = "\n".join(str(b.renderable) for b in pane.query("SystemBlock"))
+        texts = "\n".join(str(b.content) for b in pane.query("SystemBlock"))
         assert "20260824-00 approved" in texts
         assert "add → memory/user" in texts
         assert "via approved" in texts, "the provenance label is named to the user"
@@ -440,11 +440,11 @@ async def test_a_failed_approve_says_so_and_does_not_claim_success(
         await pilot.pause()
         picker.try_action_key("a")
         for _ in range(150):
-            texts = [str(b.renderable) for b in pane.query("SystemBlock")]
+            texts = [str(b.content) for b in pane.query("SystemBlock")]
             if any("NOT approved" in t for t in texts):
                 break
             await pilot.pause(0.02)
-        texts = "\n".join(str(b.renderable) for b in pane.query("SystemBlock"))
+        texts = "\n".join(str(b.content) for b in pane.query("SystemBlock"))
         assert "NOT approved" in texts
         assert "memory scope is full" in texts
 
@@ -1642,7 +1642,7 @@ async def test_reject_takes_one_selection_and_writes_nothing(
             await pilot.pause(0.02)
         await pilot.pause()
         assert fake.rejected == [pid] and fake.approved == []
-        texts = "\n".join(str(b.renderable) for b in pane.query("SystemBlock"))
+        texts = "\n".join(str(b.content) for b in pane.query("SystemBlock"))
         assert "rejected" in texts and "Nothing was written" in texts
 
 

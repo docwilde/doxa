@@ -644,7 +644,7 @@ class StatusBar(Static):
         pos = x - 2
         if pos < 0:
             return None
-        markup = str(self.renderable)
+        markup = str(self.content)
         if markup != self._tooltip_markup:
             self._tooltip_plain = Content.from_markup(markup).plain
             self._tooltip_markup = markup

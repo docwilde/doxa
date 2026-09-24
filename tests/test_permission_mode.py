@@ -52,11 +52,11 @@ async def _app(monkeypatch, cwd, fake=None):
 
 
 def _status_plain(app) -> str:
-    return Content.from_markup(str(app.query_one("#status-bar").renderable)).plain
+    return Content.from_markup(str(app.query_one("#status-bar").content)).plain
 
 
 def _status_markup(app) -> str:
-    return str(app.query_one("#status-bar").renderable)
+    return str(app.query_one("#status-bar").content)
 
 
 def _offset_of(app, needle: str) -> tuple[int, int]:
@@ -1005,7 +1005,7 @@ async def test_dontask_requires_confirmation(monkeypatch, tmp_path):
         )
         await pilot.pause()
 
-        body = str(app.screen.query_one("#mode-confirm-body").renderable)
+        body = str(app.screen.query_one("#mode-confirm-body").content)
         assert "DENIED" in body or "denied" in body
         assert "nothing will ask" in body
         assert "this session only" in body.lower()
@@ -1107,8 +1107,8 @@ async def test_confirm_buttons_have_real_height_and_are_hittable(
             assert button.size.width > 0, f"{button.id} collapsed: {button.size}"
             assert _hit(app, button) is button, f"{button.id} is not hittable"
         # Self-describing: each door names its own key.
-        assert "y" in str(yes.renderable).lower()
-        assert "esc" in str(no.renderable).lower()
+        assert "y" in str(yes.content).lower()
+        assert "esc" in str(no.content).lower()
 
 
 @pytest.mark.asyncio

@@ -164,7 +164,7 @@ async def test_slash_about_opens_a_modal_whose_text_is_actually_visible(
         body = app.screen.query_one("#about-body")
         assert body.size.height > 0, f"about body collapsed: {body.size}"
         assert body.size.width > 0, f"about body collapsed: {body.size}"
-        rendered = str(body.renderable)
+        rendered = str(body.content)
         assert version_mod.resolve_version() in rendered
         assert "python" in rendered and "licence" in rendered
         # And it is genuinely painted, not merely sized: the screen's own
@@ -193,8 +193,8 @@ async def test_about_buttons_have_real_height_and_are_hittable(
             assert button.size.width > 0, f"{wid} collapsed: {button.size}"
             assert _hit(app, button) is button, f"{wid} is not hittable"
         # Self-describing, the same rule the other two confirms follow.
-        assert "c" in str(app.screen.query_one("#about-copy").renderable)
-        assert "esc" in str(app.screen.query_one("#about-close").renderable)
+        assert "c" in str(app.screen.query_one("#about-copy").content)
+        assert "esc" in str(app.screen.query_one("#about-close").content)
 
 
 @pytest.mark.asyncio
@@ -224,7 +224,7 @@ async def test_copy_puts_the_visible_text_on_the_clipboard(monkeypatch, tmp_path
         app.push_screen(AboutDialog())
         assert await _wait_for(pilot, lambda: isinstance(app.screen, AboutDialog))
         await pilot.pause()
-        body_text = str(app.screen.query_one("#about-body").renderable)
+        body_text = str(app.screen.query_one("#about-body").content)
         await pilot.click("#about-copy")
         assert await _wait_for(pilot, lambda: bool(copied))
         assert copied[-1] == body_text

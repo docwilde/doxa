@@ -77,7 +77,7 @@ async def test_status_line_colors_the_chip_after_a_pressured_turn(
         app.query_one("#prompt-input").value = "go"
         await pilot.press("enter")
         for _ in range(200):
-            status = str(app.query_one("#status-bar").renderable)
+            status = str(app.query_one("#status-bar").content)
             if "93%" in status:
                 break
             await pilot.pause(0.02)
@@ -116,7 +116,7 @@ async def test_headroom_chip_shows_real_cached_numbers(monkeypatch, tmp_path):
     app = DoxaApp(cwd=str(tmp_path))
     async with app.run_test() as pilot:
         for _ in range(200):
-            status = str(app.query_one("#status-bar").renderable)
+            status = str(app.query_one("#status-bar").content)
             if "s:9%" in status:
                 break
             await pilot.pause(0.02)
@@ -141,7 +141,7 @@ async def test_no_headroom_chip_when_nothing_is_cached(monkeypatch, tmp_path):
             if app.active_pane is not None and app.active_pane._git is not None:
                 break
             await pilot.pause(0.02)
-        status = str(app.query_one("#status-bar").renderable)
+        status = str(app.query_one("#status-bar").content)
         assert "s:" not in status and "w:" not in status
         assert "$0.0000" in status
     identity.invalidate()
@@ -174,7 +174,7 @@ async def test_headroom_chip_refreshes_on_turn_done_and_never_on_a_timer(
     app = DoxaApp(cwd=str(tmp_path))
     async with app.run_test() as pilot:
         for _ in range(200):
-            if "s:9%" in str(app.query_one("#status-bar").renderable):
+            if "s:9%" in str(app.query_one("#status-bar").content):
                 break
             await pilot.pause(0.02)
         assert len(calls) == 1  # boot only
@@ -188,7 +188,7 @@ async def test_headroom_chip_refreshes_on_turn_done_and_never_on_a_timer(
         app.query_one("#prompt-input").value = "go"
         await pilot.press("enter")
         for _ in range(200):
-            status = str(app.query_one("#status-bar").renderable)
+            status = str(app.query_one("#status-bar").content)
             if "s:31%" in status:
                 break
             await pilot.pause(0.02)
@@ -400,7 +400,7 @@ async def test_status_line_chip_order(monkeypatch, tmp_path):
     app = DoxaApp(cwd=str(repo))
     async with app.run_test() as pilot:
         for _ in range(200):
-            status = str(app.query_one("#status-bar").renderable)
+            status = str(app.query_one("#status-bar").content)
             if "myrepo" in status:
                 break
             await pilot.pause(0.02)
@@ -452,7 +452,7 @@ async def test_the_two_hex_ids_in_the_bar_are_told_apart(monkeypatch, tmp_path):
     app = DoxaApp(cwd=str(repo))
     async with app.run_test() as pilot:
         for _ in range(200):
-            status = str(app.query_one("#status-bar").renderable)
+            status = str(app.query_one("#status-bar").content)
             if "myrepo" in status:
                 break
             await pilot.pause(0.02)

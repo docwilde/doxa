@@ -299,7 +299,7 @@ async def test_the_confirm_says_which_key_takes_which_door(monkeypatch, tmp_path
         assert await _wait(pilot, lambda: isinstance(app.screen, screen.__class__))
         assert await _wait(pilot, lambda: bool(app.screen.query("#close-terminate")))
         labels = {
-            node_id: str(app.screen.query_one(node_id).renderable)
+            node_id: str(app.screen.query_one(node_id).content)
             for node_id in ("#close-terminate", "#close-detach", "#close-cancel")
         }
         assert "enter" in labels["#close-terminate"]
@@ -430,9 +430,9 @@ async def test_the_peers_chip_says_how_many_are_detached(monkeypatch, tmp_path):
     async with app.run_test() as pilot:
         assert await _wait(
             pilot,
-            lambda: "peers" in str(app.active_pane.query_one("#status-bar").renderable),
+            lambda: "peers" in str(app.active_pane.query_one("#status-bar").content),
         )
-        status = str(app.active_pane.query_one("#status-bar").renderable)
+        status = str(app.active_pane.query_one("#status-bar").content)
         assert "peers 2" in status
         assert "⌁)" not in status  # nothing detached: no suffix at all
 
@@ -442,9 +442,9 @@ async def test_the_peers_chip_says_how_many_are_detached(monkeypatch, tmp_path):
     async with app.run_test() as pilot:
         assert await _wait(
             pilot,
-            lambda: "peers" in str(app.active_pane.query_one("#status-bar").renderable),
+            lambda: "peers" in str(app.active_pane.query_one("#status-bar").content),
         )
-        status = str(app.active_pane.query_one("#status-bar").renderable)
+        status = str(app.active_pane.query_one("#status-bar").content)
         assert "peers 3 (2⌁)" in status
 
 

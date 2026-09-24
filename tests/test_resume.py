@@ -516,13 +516,13 @@ async def test_enter_on_a_conversation_row_opens_a_visible_confirm(
             assert _hit(app, button) is button, f"{wid} is not hittable"
         # Self-describing: each door names its own key, the rule every
         # other confirm in this family follows.
-        assert "enter" in str(dialog.query_one("#resume-confirm-yes").renderable)
-        assert "esc" in str(dialog.query_one("#resume-confirm-no").renderable)
+        assert "enter" in str(dialog.query_one("#resume-confirm-yes").content)
+        assert "esc" in str(dialog.query_one("#resume-confirm-no").content)
 
         body = dialog.query_one("#resume-confirm-body")
         assert body.size.height > 0, f"body collapsed: {body.size}"
         assert _hit(app, body) is body
-        rendered = str(body.renderable)
+        rendered = str(body.content)
         assert RESUMED_ID in rendered or OTHER_ID in rendered
         # The body STATES WHAT WILL HAPPEN rather than asking "are you
         # sure?" -- including the surprising part, that it opens a new tab.
@@ -555,7 +555,7 @@ async def test_an_unresumable_conversation_gets_one_door_and_a_reason(
         assert not dialog.query("#resume-confirm-yes")  # no door that lies
         close = dialog.query_one("#resume-confirm-no")
         assert close.size.height > 0 and _hit(app, close) is close
-        body = str(dialog.query_one("#resume-confirm-body").renderable)
+        body = str(dialog.query_one("#resume-confirm-body").content)
         assert "v0.56.0" in body and "searchable" in body
 
 
@@ -1047,7 +1047,7 @@ async def test_resume_with_an_ambiguous_prefix_refuses_and_lists(
         await pane._cmd_resume("aaaa1111")
         await pilot.pause()
         text = "\n".join(
-            str(b.renderable) for b in pane.query("SystemBlock")
+            str(b.content) for b in pane.query("SystemBlock")
         )
         assert "matches 2 conversations" in text
         assert "give more of the id" in text
@@ -1243,9 +1243,9 @@ async def test_an_unresumable_restored_tab_still_explains_itself_on_screen(
         tab = app.query_one(ArchivedSessionTab)
         for _ in range(300):
             blocks = list(tab.query("SystemBlock"))
-            if blocks and "not resumed" in str(blocks[0].renderable):
+            if blocks and "not resumed" in str(blocks[0].content):
                 break
             await pilot.pause(0.02)
-        head = str(list(tab.query("SystemBlock"))[0].renderable)
+        head = str(list(tab.query("SystemBlock"))[0].content)
         assert "read-only" in head              # v0.32.0's own words, kept
         assert "not resumed" in head            # and why, which is new
