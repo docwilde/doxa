@@ -5,6 +5,22 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.5 — development
+
+- Add live model and permission mode controls to native Claude sessions with
+  capability checks and current status broadcasts. Bypass mode remains
+  unavailable until the Rust launcher has an explicit arming flow.
+- Ask external LORE to index native Codex transcripts after turns and on
+  shutdown. Automatic Codex proposal review remains unavailable, as in DOXA
+  1.x.
+- Add an attached-session history picker and a bounded, read-only worktree
+  diff view to the Rust TUI. History search does not yet cover offline sessions,
+  and the diff omits untracked files.
+- Restore the Python DOXA palette in the Rust TUI. Each pane now has its own
+  prompt and draft, with engine and model chips from that session's daemon.
+- Keep status reads responsive while a Claude control request waits on its
+  sidecar, and serialize permission changes with prompt admission.
+
 ## 2.0.0-alpha.4 — 2026-09-24
 
 - Add native Codex, Claude, DeepSeek, and GLM session launch and resume paths,

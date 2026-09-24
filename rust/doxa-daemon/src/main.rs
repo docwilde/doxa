@@ -530,7 +530,7 @@ fn run() -> io::Result<()> {
         cwd: options.cwd.to_string_lossy().into_owned(),
         model: options.model.clone(),
         engine: options.engine.name().into(),
-        doxa_version: "2.0.0-alpha.4".into(),
+        doxa_version: "2.0.0-alpha.5".into(),
     };
     let mut handle = Daemon::bind(&options.runtime, session, host)?.start();
     let inbox = Inbox::bind(&options.runtime, &options.session_id)?;
