@@ -22,6 +22,14 @@ evidence-backed beliefs and an informational source-engine label. See the
 [engine capabilities](docs/manual.md#engine-capabilities) and
 [LORE integration](docs/manual.md#lore-integration) guides.
 
+> [!NOTE]
+> A separate [Rust 2.0 port](https://github.com/docwilde/doxa/tree/rust/2.0/rust)
+> is in progress. Its `doxa-rs` terminal client can attach to DOXA sessions,
+> and an early native daemon and engine adapters are being built alongside it.
+> The Python 1.19 line remains the supported application. The
+> [Rust preview guide](https://github.com/docwilde/doxa/blob/rust/2.0/rust/README.md)
+> covers the opt-in build, current capabilities, and gaps.
+
 ![DOXA shell: three tabs, one per model tier; a turn answered with a table of belief ids and status above a collapsed tool-calls fold; a status bar led by the permission-mode chip](assets/shots/hero.png)
 
 *Every image here is rendered headlessly from the real app — scripted, no
