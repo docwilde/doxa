@@ -63,6 +63,20 @@ def test_index_transcript_rejects_symlink_and_foreign_path(monkeypatch, tmp_path
     assert called == []
 
 
+def test_index_transcript_rejects_world_writable_project_directory(monkeypatch, tmp_path):
+    project = tmp_path / "mapped-project"
+    project.mkdir()
+    (project / "session-1.jsonl").write_text('{"type":"user"}\n')
+    project.chmod(0o777)
+    monkeypatch.setattr(lore_bridge, "_transcript_identity", lambda cwd, ext: {
+        "projects_dir": str(tmp_path), "slug": "mapped-project"})
+    called = []
+    with pytest.raises(ValueError):
+        lore_bridge._index_transcript("/repo", "session-1", (),
+                                       (lambda: None, lambda conn, path: called.append(path)))
+    assert called == []
+
+
 def test_pending_review_v1_uses_lore_snapshot_and_rejects_changed_proposal(monkeypatch, tmp_path):
     from lore_core import pending as pending_mod
 

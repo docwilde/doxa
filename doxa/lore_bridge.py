@@ -112,13 +112,17 @@ def _index_transcript(cwd: str, session_id: str, ext: tuple[Any, Any, Any, Any],
     project = root / slug
     transcript = project / f"{session_id}.jsonl"
     # The caller supplies only cwd and session ID. Resolve project naming via
-    # LORE and refuse links or foreign-owned files before its indexer opens it.
+    # LORE and reject obvious links, foreign-owned, or world-writable paths.
+    # LORE currently reopens by path; these checks cannot prevent a same-UID
+    # or group member from swapping an entry after this check.
     for directory in (root, project):
         metadata = directory.lstat()
-        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
+        if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid()
+                or metadata.st_mode & 0o002):
             raise ValueError("unsafe transcript directory")
     metadata = transcript.lstat()
     if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o002
             or metadata.st_size > _MAX_TRANSCRIPT_BYTES):
         raise ValueError("unsafe transcript file")
     indexed, consumed = ops[1](ops[0](), transcript)
