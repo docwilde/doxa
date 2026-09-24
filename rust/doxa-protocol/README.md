@@ -9,3 +9,6 @@ authorization, engine semantics, or persistence.
 `doxa/client.py`, `doxa/daemon.py`, and `doxa/peers.py` remain the behavior
 reference. The TUI and native runtime will adopt this crate after their
 current frontend and daemon PRs merge.
+
+Run `cargo test --locked --manifest-path rust/doxa-protocol/Cargo.toml` from
+the repository root. Rust CI runs this crate independently of the TUI.
