@@ -4,6 +4,7 @@ use doxa_peers::delivery::{self, Ledger, PeerFrame, RateLimiter, SendLimits};
 use doxa_peers::{now, presence, scope_for_cwd, PeerRecord, Registry};
 use doxa_runtime::Host;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc::SyncSender, Arc, Mutex};
@@ -18,7 +19,7 @@ pub struct PeerHost {
     session_id: String,
     title: String,
     limiter: Mutex<RateLimiter>,
-    inbound_limiter: Mutex<RateLimiter>,
+    inbound_limiters: Mutex<HashMap<String, RateLimiter>>,
     ledger: Ledger,
     events: SyncSender<Value>,
 }
@@ -49,7 +50,7 @@ impl PeerHost {
             session_id,
             title,
             limiter: Mutex::new(RateLimiter::new(SendLimits::default())),
-            inbound_limiter: Mutex::new(RateLimiter::new(SendLimits::default())),
+            inbound_limiters: Mutex::new(HashMap::new()),
             ledger: Ledger::new(home.join("peers/messages.jsonl")),
             events,
         })
@@ -244,11 +245,16 @@ impl PeerHost {
         if !roster.iter().any(|p| p.session_id == frame.from_id) {
             return Err("sender is not a live same-scope peer".into());
         }
-        self.inbound_limiter
-            .lock()
-            .map_err(|_| "peer rate limiter unavailable")?
-            .charge(None, 1)
-            .map_err(|_| "peer receive limit".to_owned())?;
+        {
+            let mut limiters = self.inbound_limiters
+                .lock()
+                .map_err(|_| "peer rate limiter unavailable")?;
+            limiters.retain(|id, _| roster.iter().any(|peer| peer.session_id == *id));
+            limiters.entry(frame.from_id.clone())
+                .or_insert_with(|| RateLimiter::new(SendLimits::default()))
+                .charge(None, 1)
+                .map_err(|_| "peer receive limit".to_owned())?;
+        }
         let (title, body, repo, sent_at, kind) = self.with_lore(|lore| {
             let clean = |lore: &mut LoreClient, text: &str| {
                 lore.scrub(text)

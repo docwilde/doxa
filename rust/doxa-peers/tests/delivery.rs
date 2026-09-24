@@ -124,6 +124,11 @@ fn rejects_oversize_and_unsafe_paths_and_bounds_budget() -> io::Result<()> {
     assert!(limits.charge(Some("a"), 2).is_ok());
     assert_eq!(limits.charge(Some("a"), 1).err().unwrap().kind(), io::ErrorKind::WouldBlock);
     assert_eq!(limits.charge(Some("b"), 1).err().unwrap().kind(), io::ErrorKind::WouldBlock);
+    let mut long_turn = RateLimiter::new(SendLimits { per_turn: 2, per_window: 3, window: Duration::from_millis(10) });
+    long_turn.charge(Some("long"), 2)?;
+    thread::sleep(Duration::from_millis(20));
+    long_turn.charge(None, 1)?;
+    assert_eq!(long_turn.charge(Some("long"), 1).err().unwrap().kind(), io::ErrorKind::WouldBlock);
     Ok(())
 }
 

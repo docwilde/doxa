@@ -238,14 +238,16 @@ impl Ledger {
 pub struct SendLimits { pub per_turn: u32, pub per_window: u32, pub window: Duration }
 impl Default for SendLimits { fn default() -> Self { Self { per_turn: 64, per_window: 512, window: Duration::from_secs(60) } } }
 struct Charge { at: Instant, count: u32, turn: Option<String> }
-pub struct RateLimiter { limits: SendLimits, history: VecDeque<Charge> }
+pub struct RateLimiter { limits: SendLimits, history: VecDeque<Charge>, current_turn: Option<String> }
 impl RateLimiter {
-    pub fn new(limits: SendLimits) -> Self { Self { limits, history: VecDeque::new() } }
+    pub fn new(limits: SendLimits) -> Self { Self { limits, history: VecDeque::new(), current_turn: None } }
     pub fn charge(&mut self, turn: Option<&str>, fanout: usize) -> io::Result<()> {
         let count = u32::try_from(fanout).map_err(|_| invalid("fanout too large"))?;
         if count == 0 { return Err(invalid("empty fanout")); }
         let now = Instant::now();
-        self.history.retain(|c| now.duration_since(c.at) < self.limits.window || (turn.is_some() && c.turn.as_deref() == turn));
+        if let Some(turn) = turn { self.current_turn = Some(turn.to_owned()); }
+        let live = self.current_turn.as_deref();
+        self.history.retain(|c| now.duration_since(c.at) < self.limits.window || (live.is_some() && c.turn.as_deref() == live));
         let turn_used: u32 = self.history.iter().filter(|c| turn.is_some() && c.turn.as_deref() == turn).map(|c| c.count).sum();
         let window_used: u32 = self.history.iter().filter(|c| now.duration_since(c.at) < self.limits.window).map(|c| c.count).sum();
         if turn.is_some() && turn_used.saturating_add(count) > self.limits.per_turn { return Err(io::Error::new(io::ErrorKind::WouldBlock, "peer turn send limit")); }

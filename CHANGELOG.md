@@ -13,6 +13,8 @@ the stable 2.0 release has not been cut.
   Rust TUI, including scoped local peer messages and a private inbox.
 - Keep partial peer frames across nonblocking polls so an idle local connection
   cannot pause the daemon's UI and shutdown loop.
+- Clamp peer selection when switching scopes and account for each sender's
+  inbound message budget independently.
 - Add read-only LORE context, evidence, and pending proposal snapshots with
   secret scrubbing and guarded file reads.
 - Extend the native CLI, session state migration, and Rust CI coverage for the
