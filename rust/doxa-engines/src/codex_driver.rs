@@ -143,45 +143,66 @@ impl CodexCliDriver {
         self.normalizer.begin_turn();
         let stderr = child.stderr.take().expect("piped stderr");
         let mut stderr_task = tokio::spawn(drain_stderr_tail(stderr));
-        let write = async {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(prompt.as_bytes()).await?;
-                stdin.shutdown().await?;
-            }
-            Ok::<(), io::Error>(())
-        };
+        // The CLI may fill stdout before reading stdin. Write in a separate
+        // task and drain stdout at the same time; awaiting write_all first
+        // deadlocks when both pipes fill (notably with a large LORE preamble).
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let prompt_bytes = prompt.as_bytes().to_vec();
+        let mut stdin_task = tokio::spawn(async move {
+            stdin.write_all(&prompt_bytes).await?;
+            stdin.shutdown().await
+        });
+        let mut stdin_complete = false;
         let mut failure: Option<String> = None;
         let mut cancelled = false;
-        tokio::select! {
-            result = write => { if let Err(err) = result { failure = Some(format!("stdin write failed: {err}")); } }
-            _ = cancel.cancelled() => { cancelled = true; }
-            _ = sleep_until(deadline) => { failure = Some("the turn ran past its time limit and the process was killed".into()); }
-        }
         let mut exit_code = None;
         let mut signaled = false;
-        if failure.is_none() && !cancelled {
-            let mut stdout = child.stdout.take().expect("piped stdout");
-            let mut chunk = [0u8; 8192];
-            loop {
-                tokio::select! {
-                    read = stdout.read(&mut chunk) => {
-                        match read {
-                            Ok(0) => break,
-                            Ok(n) => match self.normalizer.push_bytes(&chunk[..n]) {
-                                Ok(events) => { for event in events { emit(event); } if self.normalizer.is_closed() { break; } }
-                                Err(ParseError::LineTooLong) => {
-                                    failure = Some(format!("one stdout event exceeded the {MAX_LINE_BYTES}-byte read limit; the rest of the turn could not be read"));
-                                    break;
-                                }
-                            },
-                            Err(err) => { failure = Some(format!("stdout read failed: {err}")); break; }
-                        }
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        let mut chunk = [0u8; 8192];
+        loop {
+            tokio::select! {
+                read = stdout.read(&mut chunk) => {
+                    match read {
+                        Ok(0) => break,
+                        Ok(n) => match self.normalizer.push_bytes(&chunk[..n]) {
+                            Ok(events) => { for event in events { emit(event); } if self.normalizer.is_closed() { break; } }
+                            Err(ParseError::LineTooLong) => {
+                                failure = Some(format!("one stdout event exceeded the {MAX_LINE_BYTES}-byte read limit; the rest of the turn could not be read"));
+                                break;
+                            }
+                        },
+                        Err(err) => { failure = Some(format!("stdout read failed: {err}")); break; }
                     }
-                    _ = cancel.cancelled() => { cancelled = true; break; }
-                    _ = sleep_until(deadline) => { failure = Some("the turn ran past its time limit and the process was killed".into()); break; }
                 }
+                result = &mut stdin_task, if !stdin_complete => {
+                    stdin_complete = true;
+                    match result {
+                        Ok(Ok(())) => {},
+                        Ok(Err(err)) => { failure = Some(format!("stdin write failed: {err}")); break; }
+                        Err(err) => { failure = Some(format!("stdin task failed: {err}")); break; }
+                    }
+                }
+                _ = cancel.cancelled() => { cancelled = true; break; }
+                _ = sleep_until(deadline) => { failure = Some("the turn ran past its time limit and the process was killed".into()); break; }
             }
         }
+        // EOF can arrive while a large prompt is still being consumed.
+        // A successful turn requires both streams to have finished.
+        if failure.is_none() && !cancelled && !self.normalizer.is_closed() && !stdin_complete {
+            tokio::select! {
+                result = &mut stdin_task => {
+                    stdin_complete = true;
+                    match result {
+                        Ok(Ok(())) => {},
+                        Ok(Err(err)) => failure = Some(format!("stdin write failed: {err}")),
+                        Err(err) => failure = Some(format!("stdin task failed: {err}")),
+                    }
+                }
+                _ = cancel.cancelled() => { cancelled = true; }
+                _ = sleep_until(deadline) => { failure = Some("the turn ran past its time limit and the process was killed".into()); }
+            }
+        }
+        if !stdin_complete { stdin_task.abort(); }
         if failure.is_none() && !cancelled && !self.normalizer.is_closed() {
             tokio::select! {
                 status = child.wait() => {

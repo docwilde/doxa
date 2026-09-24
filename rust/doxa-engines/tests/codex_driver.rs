@@ -134,3 +134,40 @@ async fn signaled_process_is_a_failed_turn() {
     assert_eq!(output.last().unwrap().data["is_error"], true);
     assert!(output.last().unwrap().data["error"].as_str().unwrap().contains("signal"));
 }
+
+#[tokio::test]
+async fn drains_stdout_while_writing_prompt_larger_than_pipe_capacity() {
+    let dir = TempDir::new().unwrap();
+    let received = dir.path().join("prompt-bytes.txt");
+    let script = fake_script(dir.path(), &format!(
+        "i=0\nwhile [ $i -lt 5000 ]; do echo '{{\"type\":\"future.event\"}}'; i=$((i+1)); done\nwc -c > '{}'\necho '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"received\"}}}}'",
+        received.display(),
+    ));
+    let mut opts = options(&dir, script);
+    opts.turn_timeout = Duration::from_secs(3);
+    let mut driver = CodexCliDriver::new(opts, str::to_owned);
+    let prompt = "P".repeat(256 * 1024);
+    let (result, output) = tokio::time::timeout(Duration::from_secs(5), events(&mut driver, &prompt)).await.unwrap();
+    assert!(result.is_ok());
+    assert_eq!(fs::read_to_string(&received).unwrap().trim(), prompt.len().to_string());
+    assert_eq!(output.iter().filter(|event| event.kind == "turn_done").count(), 1);
+    assert_eq!(output.last().unwrap().data["is_error"], false);
+    assert_eq!(output[0].data["text"], "received");
+}
+
+#[tokio::test]
+async fn terminal_error_while_stdin_is_blocked_emits_one_turn_done() {
+    let dir = TempDir::new().unwrap();
+    let script = fake_script(dir.path(), "echo '{\"type\":\"turn.failed\",\"message\":\"fixture-secret denied\"}'\nsleep 30");
+    let mut driver = CodexCliDriver::new(options(&dir, script), |text| text.replace("fixture-secret", "[redacted]"));
+    let prompt = "P".repeat(256 * 1024);
+    let mut output = Vec::new();
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        driver.run_turn(&prompt, &CancellationToken::new(), |event| output.push(event)),
+    ).await.unwrap();
+    assert!(result.is_ok());
+    assert_eq!(output.iter().filter(|event| event.kind == "turn_done").count(), 1);
+    assert_eq!(output.last().unwrap().data["is_error"], true);
+    assert_eq!(output.last().unwrap().data["error"], "[redacted] denied");
+}
