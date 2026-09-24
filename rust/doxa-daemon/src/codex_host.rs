@@ -18,6 +18,7 @@ pub struct CodexHost {
     active: Mutex<Option<CancellationToken>>,
     scrub_failed: Arc<AtomicBool>,
     lore: Arc<Mutex<LoreClient>>,
+    closing: AtomicBool,
 }
 
 impl CodexHost {
@@ -41,7 +42,7 @@ impl CodexHost {
         };
         Ok(Self {
             driver: Mutex::new(CodexCliDriver::new(options, scrub)),
-            active: Mutex::new(None), scrub_failed, lore,
+            active: Mutex::new(None), scrub_failed, lore, closing: AtomicBool::new(false),
         })
     }
 
@@ -52,6 +53,7 @@ impl CodexHost {
     /// Give the driver time to reap its child process group before the daemon
     /// exits; process exit alone would leave a running Codex descendant.
     pub fn shutdown(&self) -> bool {
+        self.closing.store(true, Ordering::Release);
         self.cancel();
         let deadline = Instant::now() + Duration::from_secs(5);
         while self.active.lock().unwrap().is_some() {
@@ -64,8 +66,17 @@ impl CodexHost {
 
 impl Host for CodexHost {
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        if self.closing.load(Ordering::Acquire) {
+            emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Codex session is stopping"}}));
+            return;
+        }
         let token = CancellationToken::new();
         *self.active.lock().unwrap() = Some(token.clone());
+        if self.closing.load(Ordering::Acquire) {
+            *self.active.lock().unwrap() = None;
+            emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Codex session is stopping"}}));
+            return;
+        }
         // Never echo raw prompts into provider events; the socket already
         // received them from its authenticated local client.
         emit(json!({"type":"turn_started","data":{}}));
@@ -105,13 +116,14 @@ impl Host for CodexHost {
 
     fn call(&self, method: &str, _: &Value) -> Result<Value, String> {
         match method {
-            "interrupt" | "stop" => { self.cancel(); Ok(json!({})) },
+            "interrupt" => { self.cancel(); Ok(json!({})) },
+            "stop" => { self.closing.store(true, Ordering::Release); self.cancel(); Ok(json!({})) },
             _ => Err(format!("{method} is unavailable in the native Codex host")),
         }
     }
 
     fn public_prompt(&self, text: &str) -> Result<String, String> {
-        if self.scrub_failed.load(Ordering::Acquire) {
+        if self.closing.load(Ordering::Acquire) || self.scrub_failed.load(Ordering::Acquire) {
             return Err("LORE scrub unavailable".to_owned());
         }
         self.lore.lock().unwrap().scrub(text).map_err(|_| {
