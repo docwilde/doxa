@@ -79,10 +79,15 @@ provider events and fails the turn. The Python sidecar is a temporary
 dependency while Rust memory integration is built.
 
 Codex turns use `codex exec --json` and resume subsequent turns using the
-provider thread ID. `interrupt` cancels the running CLI process group, and
-`stop` cancels it and closes the daemon. The native Codex host does not yet
-persist transcripts or thread IDs across daemon restarts, register MCP,
-integrate LORE context/review/indexing, or implement peer messaging. The
+provider thread ID. User and assistant text is appended to Python 1.19-shaped
+JSONL under LORE's project directory, and `<session-id>.codex.json` records the
+provider thread for a later daemon started with the same `--session-id`.
+The LORE sidecar supplies the exact project identity and scrubs every persisted
+string; failure to scrub leaves the new record unwritten. An existing transcript
+without a thread ID refuses a fresh Codex thread. `interrupt` cancels the
+running CLI process group, and `stop` cancels it and closes the daemon. The
+native Codex host does not yet register MCP, integrate LORE context/review/indexing,
+or implement peer messaging. The
 registry reports the selected engine. Only `status`, `interrupt` (Codex),
 and `stop` are supported; other calls return an explicit error. The
 `socket_path` is suitable for local TUI or Python `EngineClient` attach, but
@@ -99,7 +104,6 @@ an atomic replacement. Files and the project directory must belong to the
 current user; symlink and hard-link file targets are refused.
 
 Run `cargo test --locked --manifest-path rust/doxa-transcript/Cargo.toml`.
-The crate is not yet wired into the daemon or UI. The caller still supplies
-Python's `project_slug(cwd)` result and the engine's actual scrubber, and must
-decide whether a persistence error affects an active session. The Python
-vendor `.messages.json` replay file is outside this crate's current scope.
+The native Codex host uses this crate. The Rust UI still relies on its existing
+transcript reader. The Python vendor `.messages.json` replay file is outside
+this crate's current scope.

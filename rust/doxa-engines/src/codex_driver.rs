@@ -22,7 +22,11 @@ const STDERR_TAIL_BYTES: usize = 64 * 1024;
 const STDERR_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SandboxMode { ReadOnly, WorkspaceWrite, DangerFullAccess }
+pub enum SandboxMode {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
 
 impl SandboxMode {
     fn config_value(self) -> &'static str {
@@ -50,28 +54,40 @@ pub struct DriverOptions {
 impl DriverOptions {
     pub fn new(cwd: PathBuf) -> Self {
         Self {
-            executable: PathBuf::from("codex"), cwd, model: None,
+            executable: PathBuf::from("codex"),
+            cwd,
+            model: None,
             sandbox: SandboxMode::WorkspaceWrite,
             turn_timeout: Duration::from_secs(3600),
-            resume_thread: None, require_resume: false,
+            resume_thread: None,
+            require_resume: false,
         }
     }
 
     /// The same shape is used for first turns and `exec resume`. Every
     /// argument is passed as a distinct OS string; the prompt is stdin.
     pub fn argv(&self, thread_id: Option<&str>) -> Result<Vec<String>, DriverError> {
-        if self.require_resume && thread_id.is_none() { return Err(DriverError::MissingResumeThread); }
+        if self.require_resume && thread_id.is_none() {
+            return Err(DriverError::MissingResumeThread);
+        }
         let mut args = vec!["exec".to_owned()];
         if let Some(id) = thread_id {
-            if !valid_thread_id(id) { return Err(DriverError::InvalidThreadId); }
+            if !valid_thread_id(id) {
+                return Err(DriverError::InvalidThreadId);
+            }
             args.extend(["resume".to_owned(), id.to_owned()]);
         }
         args.extend([
-            "--json".to_owned(), "--skip-git-repo-check".to_owned(),
-            "-c".to_owned(), "approval_policy=\"never\"".to_owned(),
-            "-c".to_owned(), format!("sandbox_mode=\"{}\"", self.sandbox.config_value()),
+            "--json".to_owned(),
+            "--skip-git-repo-check".to_owned(),
+            "-c".to_owned(),
+            "approval_policy=\"never\"".to_owned(),
+            "-c".to_owned(),
+            format!("sandbox_mode=\"{}\"", self.sandbox.config_value()),
         ]);
-        if let Some(model) = &self.model { args.extend(["-m".to_owned(), model.clone()]); }
+        if let Some(model) = &self.model {
+            args.extend(["-m".to_owned(), model.clone()]);
+        }
         args.push("-".to_owned());
         Ok(args)
     }
@@ -81,8 +97,12 @@ impl DriverOptions {
 /// or path-like token. Codex IDs are UUIDs today; this allows their safe
 /// ASCII token subset without claiming to validate an account's existence.
 pub fn valid_thread_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 128 && !id.starts_with('-')
-        && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    !id.is_empty()
+        && id.len() <= 128
+        && !id.starts_with('-')
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 #[derive(Debug)]
@@ -107,35 +127,69 @@ pub struct CodexCliDriver {
 }
 
 impl CodexCliDriver {
-    pub fn new(options: DriverOptions, scrub: impl Fn(&str) -> String + Send + Sync + 'static) -> Self {
-        Self { options, normalizer: CodexJsonlNormalizer::new(scrub), turns_finished: 0 }
+    pub fn new(
+        options: DriverOptions,
+        scrub: impl Fn(&str) -> String + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            options,
+            normalizer: CodexJsonlNormalizer::new(scrub),
+            turns_finished: 0,
+        }
     }
 
     pub fn thread_id(&self) -> Option<&str> {
-        self.normalizer.thread_id().or(self.options.resume_thread.as_deref()).filter(|id| valid_thread_id(id))
+        self.normalizer
+            .thread_id()
+            .or(self.options.resume_thread.as_deref())
+            .filter(|id| valid_thread_id(id))
     }
 
     pub async fn run_turn(
         &mut self,
         prompt: &str,
         cancel: &CancellationToken,
+        emit: impl FnMut(EngineEvent),
+    ) -> Result<TurnOutcome, DriverError> {
+        self.run_turn_with_thread(prompt, cancel, emit, |_| {})
+            .await
+    }
+
+    /// Persist the thread identity as soon as Codex announces it. A daemon
+    /// can be stopped mid-turn, before any assistant text or terminal event.
+    pub async fn run_turn_with_thread(
+        &mut self,
+        prompt: &str,
+        cancel: &CancellationToken,
         mut emit: impl FnMut(EngineEvent),
+        mut on_thread: impl FnMut(&str),
     ) -> Result<TurnOutcome, DriverError> {
         // Once a first turn ran, silently starting a fresh thread would
         // make the DOXA session look resumed when it is not.
-        let thread = self.thread_id();
-        if self.turns_finished > 0 && thread.is_none() { return Err(DriverError::MissingResumeThread); }
-        let argv = self.options.argv(thread)?;
+        let thread = self.thread_id().map(str::to_owned);
+        if self.turns_finished > 0 && thread.is_none() {
+            return Err(DriverError::MissingResumeThread);
+        }
+        let argv = self.options.argv(thread.as_deref())?;
+        let mut announced = thread;
         let started = Instant::now();
         let deadline = TokioInstant::now() + self.options.turn_timeout;
         let mut command = Command::new(&self.options.executable);
-        command.args(&argv).current_dir(&self.options.cwd)
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        command
+            .args(&argv)
+            .current_dir(&self.options.cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         #[cfg(unix)]
         unsafe {
             command.as_std_mut().pre_exec(|| {
-                if libc::setsid() == -1 { Err(io::Error::last_os_error()) } else { Ok(()) }
+                if libc::setsid() == -1 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
             });
         }
         let mut child = command.spawn().map_err(DriverError::Spawn)?;
@@ -165,7 +219,16 @@ impl CodexCliDriver {
                     match read {
                         Ok(0) => break,
                         Ok(n) => match self.normalizer.push_bytes(&chunk[..n]) {
-                            Ok(events) => { for event in events { emit(event); } if self.normalizer.is_closed() { break; } }
+                            Ok(events) => {
+                                if let Some(id) = self.normalizer.thread_id().filter(|id| valid_thread_id(id)) {
+                                    if announced.as_deref() != Some(id) {
+                                        on_thread(id);
+                                        announced = Some(id.to_owned());
+                                    }
+                                }
+                                for event in events { emit(event); }
+                                if self.normalizer.is_closed() { break; }
+                            }
                             Err(ParseError::LineTooLong) => {
                                 failure = Some(format!("one stdout event exceeded the {MAX_LINE_BYTES}-byte read limit; the rest of the turn could not be read"));
                                 break;
@@ -202,7 +265,9 @@ impl CodexCliDriver {
                 _ = sleep_until(deadline) => { failure = Some("the turn ran past its time limit and the process was killed".into()); }
             }
         }
-        if !stdin_complete { stdin_task.abort(); }
+        if !stdin_complete {
+            stdin_task.abort();
+        }
         if failure.is_none() && !cancelled && !self.normalizer.is_closed() {
             tokio::select! {
                 status = child.wait() => {
@@ -223,24 +288,47 @@ impl CodexCliDriver {
             stderr_task.abort();
             return Err(DriverError::Cancelled);
         }
-        if signaled { failure = Some("exec terminated by signal".into()); }
-        if failure.is_none() && !self.normalizer.is_closed() && exit_code.is_some_and(|code| code != 0) {
+        if signaled {
+            failure = Some("exec terminated by signal".into());
+        }
+        if failure.is_none()
+            && !self.normalizer.is_closed()
+            && exit_code.is_some_and(|code| code != 0)
+        {
             failure = Some(format!("exec exited {}", exit_code.unwrap_or_default()));
         }
         if failure.is_some() || exit_code.is_some_and(|code| code != 0) {
             if let Ok(Ok(Ok(tail))) = timeout(STDERR_WAIT, &mut stderr_task).await {
                 if !tail.is_empty() && !signaled {
                     let text = String::from_utf8_lossy(&tail);
-                    failure = Some(text.chars().rev().take(280).collect::<String>().chars().rev().collect());
+                    failure = Some(
+                        text.chars()
+                            .rev()
+                            .take(280)
+                            .collect::<String>()
+                            .chars()
+                            .rev()
+                            .collect(),
+                    );
                 }
             }
-            if !stderr_task.is_finished() { stderr_task.abort(); }
-        } else { stderr_task.abort(); }
-        for event in self.normalizer.finish_turn(Some(duration_ms(started.elapsed())), failure.as_deref()) { emit(event); }
+            if !stderr_task.is_finished() {
+                stderr_task.abort();
+            }
+        } else {
+            stderr_task.abort();
+        }
+        for event in self
+            .normalizer
+            .finish_turn(Some(duration_ms(started.elapsed())), failure.as_deref())
+        {
+            emit(event);
+        }
         self.turns_finished += 1;
         Ok(TurnOutcome {
             thread_id: self.thread_id().map(str::to_owned),
-            usage: self.normalizer.usage().clone(), exit_code,
+            usage: self.normalizer.usage().clone(),
+            exit_code,
         })
     }
 }
@@ -250,24 +338,40 @@ async fn drain_stderr_tail(mut stderr: tokio::process::ChildStderr) -> io::Resul
     let mut chunk = [0u8; 8192];
     loop {
         let n = stderr.read(&mut chunk).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         tail.extend_from_slice(&chunk[..n]);
-        if tail.len() > STDERR_TAIL_BYTES { tail.drain(..tail.len() - STDERR_TAIL_BYTES); }
+        if tail.len() > STDERR_TAIL_BYTES {
+            tail.drain(..tail.len() - STDERR_TAIL_BYTES);
+        }
     }
     Ok(tail)
 }
 
-struct ProcessGroupGuard { pid: Option<u32> }
+struct ProcessGroupGuard {
+    pid: Option<u32>,
+}
 
 impl ProcessGroupGuard {
-    fn new(pid: Option<u32>) -> Self { Self { pid } }
-    fn disarm(&mut self) { self.pid = None; }
+    fn new(pid: Option<u32>) -> Self {
+        Self { pid }
+    }
+    fn disarm(&mut self) {
+        self.pid = None;
+    }
     fn kill(&mut self) {
         if let Some(pid) = self.pid.take() {
             #[cfg(unix)]
-            unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
         }
     }
 }
 
-impl Drop for ProcessGroupGuard { fn drop(&mut self) { self.kill(); } }
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}

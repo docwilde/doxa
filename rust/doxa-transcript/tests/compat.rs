@@ -1,21 +1,35 @@
-use doxa_transcript::{valid_session_id, TranscriptStore, MAX_TRANSCRIPT_BYTES, MAX_TRANSCRIPT_LINES};
+use doxa_transcript::{
+    valid_session_id, TranscriptStore, MAX_TRANSCRIPT_BYTES, MAX_TRANSCRIPT_LINES,
+};
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use tempfile::tempdir;
 
-fn store(root: &std::path::Path) -> TranscriptStore { TranscriptStore::new(root, "project", "session-1").unwrap() }
+fn store(root: &std::path::Path) -> TranscriptStore {
+    TranscriptStore::new(root, "project", "session-1").unwrap()
+}
 
 #[test]
 fn python_records_round_trip_and_scrubbing_covers_nested_unknown_fields() {
     let temp = tempdir().unwrap();
     let store = store(temp.path());
-    fs::write(store.transcript_path(), include_bytes!("fixtures/python-1.19.jsonl")).unwrap();
+    fs::write(
+        store.transcript_path(),
+        include_bytes!("fixtures/python-1.19.jsonl"),
+    )
+    .unwrap();
     let records = store.read_records().unwrap();
     assert_eq!(records.len(), 5);
     assert_eq!(records[0]["future"]["keep"], true);
     assert_eq!(records[2]["message"]["content"][0]["type"], "tool_result");
-    store.append(json!({"type":"user","message":{"role":"user","content":"secret"},"future":"secret"}), "codex", |s| s.replace("secret", "[redacted]")).unwrap();
+    store
+        .append(
+            json!({"type":"user","message":{"role":"user","content":"secret"},"future":"secret"}),
+            "codex",
+            |s| s.replace("secret", "[redacted]"),
+        )
+        .unwrap();
     let records = store.read_records().unwrap();
     assert_eq!(records[5]["message"]["content"], "[redacted]");
     assert_eq!(records[5]["future"], "[redacted]");
@@ -26,7 +40,11 @@ fn python_records_round_trip_and_scrubbing_covers_nested_unknown_fields() {
 fn bounded_tail_skips_torn_lines_and_partial_prefix() {
     let temp = tempdir().unwrap();
     let store = store(temp.path());
-    fs::write(store.transcript_path(), b"{bad}\n{\"type\":\"user\"}\n{\"torn\":").unwrap();
+    fs::write(
+        store.transcript_path(),
+        b"{bad}\n{\"type\":\"user\"}\n{\"torn\":",
+    )
+    .unwrap();
     assert_eq!(store.read_records().unwrap().len(), 1);
     let mut raw = vec![b'x'; MAX_TRANSCRIPT_BYTES];
     raw.extend_from_slice(b"\n{\"tail\":true}\n");
@@ -39,11 +57,20 @@ fn bounded_tail_skips_torn_lines_and_partial_prefix() {
 fn metadata_preserves_future_fields_and_refuses_corruption() {
     let temp = tempdir().unwrap();
     let store = store(temp.path());
-    fs::write(store.thread_path(), include_bytes!("fixtures/python-1.19.codex.json")).unwrap();
-    assert_eq!(store.recorded_thread_id().unwrap().unwrap(), "01999999-aaaa-bbbb-cccc-0123456789ab");
+    fs::write(
+        store.thread_path(),
+        include_bytes!("fixtures/python-1.19.codex.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        store.recorded_thread_id().unwrap().unwrap(),
+        "01999999-aaaa-bbbb-cccc-0123456789ab"
+    );
     let mut update = Map::new();
     update.insert("model".into(), Value::String("secret".into()));
-    store.write_thread(update, |s| s.replace("secret", "[redacted]")).unwrap();
+    store
+        .write_thread(update, |s| s.replace("secret", "[redacted]"))
+        .unwrap();
     let metadata = store.read_thread().unwrap().unwrap();
     assert_eq!(metadata["future"]["keep"], true);
     assert_eq!(metadata["model"], "[redacted]");
@@ -60,21 +87,31 @@ fn writes_new_python_shaped_codex_metadata() {
     let fields = serde_json::from_value::<Map<String, Value>>(json!({
         "thread_id":"thread-1", "session_id":"session-1", "model":"gpt-5",
         "cwd":"/work/project", "recorded":"2026-09-24T10:00:00Z"
-    })).unwrap();
+    }))
+    .unwrap();
     store.write_thread(fields, str::to_owned).unwrap();
-    assert_eq!(store.recorded_thread_id().unwrap().as_deref(), Some("thread-1"));
+    assert_eq!(
+        store.recorded_thread_id().unwrap().as_deref(),
+        Some("thread-1")
+    );
 }
 
 #[test]
 fn metadata_write_ignores_orphaned_pid_named_temp_file() {
     let temp = tempdir().unwrap();
     let store = store(temp.path());
-    let orphan = temp.path().join("project").join(format!(".session-1.codex.{}.tmp", std::process::id()));
+    let orphan = temp
+        .path()
+        .join("project")
+        .join(format!(".session-1.codex.{}.tmp", std::process::id()));
     fs::write(&orphan, b"orphaned write").unwrap();
     let mut fields = Map::new();
     fields.insert("thread_id".into(), Value::String("thread-1".into()));
     store.write_thread(fields, str::to_owned).unwrap();
-    assert_eq!(store.recorded_thread_id().unwrap().as_deref(), Some("thread-1"));
+    assert_eq!(
+        store.recorded_thread_id().unwrap().as_deref(),
+        Some("thread-1")
+    );
     assert_eq!(fs::read(orphan).unwrap(), b"orphaned write");
 }
 
@@ -84,8 +121,48 @@ fn append_tightens_permissions_on_legacy_transcript() {
     let store = store(temp.path());
     fs::write(store.transcript_path(), b"{\"type\":\"user\"}\n").unwrap();
     fs::set_permissions(store.transcript_path(), fs::Permissions::from_mode(0o644)).unwrap();
-    store.append(json!({"type":"assistant"}), "claude", str::to_owned).unwrap();
-    assert_eq!(fs::metadata(store.transcript_path()).unwrap().permissions().mode() & 0o777, 0o600);
+    store
+        .append(json!({"type":"assistant"}), "claude", str::to_owned)
+        .unwrap();
+    assert_eq!(
+        fs::metadata(store.transcript_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn sidecar_scrub_failure_writes_no_partial_record_or_thread() {
+    let temp = tempdir().unwrap();
+    let store = store(temp.path());
+    let record =
+        json!({"type":"assistant","message":{"content":[{"text":"safe"},{"text":"secret"}]}});
+    let result = store.try_append(record, "codex", |text| {
+        if text == "secret" {
+            Err(std::io::Error::other("scrub failed"))
+        } else {
+            Ok(text.to_owned())
+        }
+    });
+    assert!(result.is_err());
+    assert!(!store.transcript_path().exists());
+    let fields = serde_json::from_value::<Map<String, Value>>(
+        json!({"thread_id":"thread-1","model":"secret"}),
+    )
+    .unwrap();
+    assert!(store
+        .try_write_thread(fields, |text| {
+            if text == "secret" {
+                Err(std::io::Error::other("scrub failed"))
+            } else {
+                Ok(text.to_owned())
+            }
+        })
+        .is_err());
+    assert!(!store.thread_path().exists());
 }
 
 #[test]
@@ -100,7 +177,9 @@ fn rejects_unsafe_identifiers_symlink_and_hardlink_targets() {
     let target = temp.path().join("outside");
     fs::write(&target, "safe").unwrap();
     symlink(&target, store.transcript_path()).unwrap();
-    assert!(store.append(json!({"type":"user"}), "claude", str::to_owned).is_err());
+    assert!(store
+        .append(json!({"type":"user"}), "claude", str::to_owned)
+        .is_err());
     assert!(store.read_records().is_err());
     assert_eq!(fs::read_to_string(&target).unwrap(), "safe");
     fs::remove_file(store.transcript_path()).unwrap();

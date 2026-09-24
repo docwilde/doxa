@@ -15,7 +15,7 @@ from typing import Any
 
 MAX_FRAME_BYTES = 1024 * 1024
 PROTOCOL_VERSION = 1
-_OPS = ("scrub", "snapshot", "pending", "sync_state", "refresh_interval")
+_OPS = ("scrub", "snapshot", "pending", "sync_state", "refresh_interval", "transcript_identity")
 
 _PENDING_FIELDS = ("kind", "action", "scope", "project", "subject", "id",
                    "confidence", "session_id", "derived_by", "created", "writer",
@@ -108,6 +108,11 @@ def _pending(cwd: str, offset: int, limit: int, ext: tuple[Any, Any, Any, Any]) 
     return records
 
 
+def _transcript_identity(cwd: str, ext: tuple[Any, Any, Any, Any]) -> dict[str, str]:
+    from lore_core.config import PROJECTS_DIR
+    return {"projects_dir": str(PROJECTS_DIR), "slug": ext[0](cwd)}
+
+
 def serve() -> None:
     lore = _lore()
     ext = _extensions() if lore is not None else None
@@ -142,9 +147,13 @@ def serve() -> None:
                 if not cwd or len(cwd) > 4096 or "\x00" in cwd or scope not in ("all", "user", "project"):
                     raise ValueError("invalid snapshot input")
                 result = snapshot(cwd, scope=scope)
-            elif op in ("pending", "sync_state", "refresh_interval") and ext is not None:
+            elif op in ("pending", "sync_state", "refresh_interval", "transcript_identity") and ext is not None:
                 cwd = req.get("cwd")
-                if op == "pending":
+                if op == "transcript_identity":
+                    if not isinstance(cwd, str) or not cwd or len(cwd) > 4096 or "\x00" in cwd:
+                        raise ValueError("invalid transcript identity input")
+                    result = _transcript_identity(cwd, ext)
+                elif op == "pending":
                     offset, limit = req.get("offset", 0), req.get("limit", 50)
                     if (not isinstance(cwd, str) or not cwd or len(cwd) > 4096 or "\x00" in cwd
                             or type(offset) is not int or not 0 <= offset <= 10000

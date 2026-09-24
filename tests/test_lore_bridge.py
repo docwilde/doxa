@@ -83,7 +83,7 @@ def test_pending_sync_and_refresh_are_bounded_and_scoped(monkeypatch):
     monkeypatch.setattr(lore_bridge.sys, "stdout", types.SimpleNamespace(buffer=output))
     lore_bridge.serve()
     frames = [json.loads(line) for line in output.getvalue().splitlines()]
-    assert frames[0]["capabilities"] == ["scrub", "snapshot", "pending", "sync_state", "refresh_interval"]
+    assert frames[0]["capabilities"] == ["scrub", "snapshot", "pending", "sync_state", "refresh_interval", "transcript_identity"]
     assert frames[1]["value"] == [{"pid": "one", "scope": "project", "project": "this",
                                    "subject": "[redacted] subject", "confidence": 0.8,
                                    "subject_unresolved": False, "text": "[redacted] here"}]
@@ -92,6 +92,21 @@ def test_pending_sync_and_refresh_are_bounded_and_scoped(monkeypatch):
     assert frames[4]["value"] == 30
     assert frames[5]["error"] == "operation_failed"
     assert b"SECRET" not in output.getvalue()
+
+
+def test_transcript_identity_uses_lore_project_mapping(monkeypatch):
+    monkeypatch.setattr(lore_bridge, "_lore", lambda: (lambda text: text, lambda cwd, scope: ""))
+    monkeypatch.setattr(lore_bridge, "_extensions", lambda: (
+        lambda cwd: "lore-project", lambda: 30, lambda: [], (lambda text: text, lambda: None)))
+    monkeypatch.setattr(lore_bridge, "_transcript_identity", lambda cwd, ext: {
+        "projects_dir": "/lore/projects", "slug": ext[0](cwd)})
+    output = io.BytesIO()
+    monkeypatch.setattr(lore_bridge.sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(
+        lore_bridge._frame({"id": 1, "op": "transcript_identity", "cwd": "/repo"}))))
+    monkeypatch.setattr(lore_bridge.sys, "stdout", types.SimpleNamespace(buffer=output))
+    lore_bridge.serve()
+    frames = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert frames[1]["value"] == {"projects_dir": "/lore/projects", "slug": "lore-project"}
 
 
 def test_pending_scrubs_nested_allowlisted_values_before_writing(monkeypatch):

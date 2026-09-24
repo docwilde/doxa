@@ -1,7 +1,10 @@
 use doxa_engines::codex_driver::{CodexCliDriver, DriverError, DriverOptions};
 use doxa_lore::LoreClient;
 use doxa_runtime::Host;
+use doxa_transcript::TranscriptStore;
+use serde_json::Map;
 use serde_json::{json, Value};
+use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,15 +21,46 @@ pub struct CodexHost {
     active: Mutex<Option<CancellationToken>>,
     scrub_failed: Arc<AtomicBool>,
     lore: Arc<Mutex<LoreClient>>,
+    store: TranscriptStore,
+    session_id: String,
+    cwd: String,
+    model: Option<String>,
     closing: AtomicBool,
 }
 
 impl CodexHost {
-    pub fn new(options: DriverOptions, lore_python: &Path) -> Result<Self, String> {
+    pub fn new(
+        mut options: DriverOptions,
+        lore_python: &Path,
+        session_id: &str,
+    ) -> Result<Self, String> {
         let mut client = LoreClient::spawn(lore_python, Duration::from_secs(5))
             .map_err(|_| "LORE sidecar is unavailable; Codex session was not started".to_owned())?;
-        client.scrub("DOXA scrub preflight")
+        client
+            .scrub("DOXA scrub preflight")
             .map_err(|_| "LORE scrub preflight failed; Codex session was not started".to_owned())?;
+        let cwd = options.cwd.to_string_lossy().into_owned();
+        let (projects_dir, slug) = client.transcript_identity(&cwd).map_err(|_| {
+            "LORE transcript identity unavailable; Codex session was not started".to_owned()
+        })?;
+        let store = TranscriptStore::new(&projects_dir, &slug, session_id).map_err(|_| {
+            "transcript directory unavailable; Codex session was not started".to_owned()
+        })?;
+        let previous = store
+            .read_thread()
+            .map_err(|_| "Codex thread record unreadable; session was not started".to_owned())?
+            .and_then(|value| value["thread_id"].as_str().map(str::to_owned));
+        if store.transcript_path().exists() && previous.is_none() {
+            return Err(
+                "existing session has no Codex thread ID; refusing to start a new thread"
+                    .to_owned(),
+            );
+        }
+        if let Some(id) = previous {
+            options.resume_thread = Some(id);
+            options.require_resume = true;
+        }
+        let model = options.model.clone();
         let lore = Arc::new(Mutex::new(client));
         let scrub_failed = Arc::new(AtomicBool::new(false));
         let lore_for_scrub = lore.clone();
@@ -42,12 +76,51 @@ impl CodexHost {
         };
         Ok(Self {
             driver: Mutex::new(CodexCliDriver::new(options, scrub)),
-            active: Mutex::new(None), scrub_failed, lore, closing: AtomicBool::new(false),
+            active: Mutex::new(None),
+            scrub_failed,
+            lore,
+            store,
+            session_id: session_id.to_owned(),
+            cwd,
+            model,
+            closing: AtomicBool::new(false),
         })
     }
 
+    fn persist(&self, record: Value) {
+        let result = self.store.try_append(record, "codex", |text| {
+            self.lore.lock().unwrap().scrub(text).map_err(|_| {
+                self.scrub_failed.store(true, Ordering::Release);
+                io::Error::other("LORE scrub failed")
+            })
+        });
+        if let Err(error) = result {
+            eprintln!("doxa-daemon: transcript append failed: {error}");
+        }
+    }
+
+    fn persist_thread(&self, thread_id: &str) {
+        let mut fields = Map::new();
+        fields.insert("thread_id".into(), json!(thread_id));
+        fields.insert("session_id".into(), json!(self.session_id));
+        fields.insert("model".into(), json!(self.model));
+        fields.insert("cwd".into(), json!(self.cwd));
+        fields.insert("recorded".into(), json!(crate::iso_now()));
+        let result = self.store.try_write_thread(fields, |text| {
+            self.lore.lock().unwrap().scrub(text).map_err(|_| {
+                self.scrub_failed.store(true, Ordering::Release);
+                io::Error::other("LORE scrub failed")
+            })
+        });
+        if let Err(error) = result {
+            eprintln!("doxa-daemon: Codex thread write failed: {error}");
+        }
+    }
+
     fn cancel(&self) {
-        if let Some(token) = self.active.lock().unwrap().as_ref() { token.cancel(); }
+        if let Some(token) = self.active.lock().unwrap().as_ref() {
+            token.cancel();
+        }
     }
 
     /// Give the driver time to reap its child process group before the daemon
@@ -57,7 +130,9 @@ impl CodexHost {
         self.cancel();
         let deadline = Instant::now() + Duration::from_secs(5);
         while self.active.lock().unwrap().is_some() {
-            if Instant::now() >= deadline { return false; }
+            if Instant::now() >= deadline {
+                return false;
+            }
             thread::sleep(Duration::from_millis(10));
         }
         true
@@ -67,51 +142,102 @@ impl CodexHost {
 impl Host for CodexHost {
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
         if self.closing.load(Ordering::Acquire) {
-            emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Codex session is stopping"}}));
+            emit(
+                json!({"type":"turn_done","data":{"is_error":true,"error":"Codex session is stopping"}}),
+            );
             return;
         }
         let token = CancellationToken::new();
         *self.active.lock().unwrap() = Some(token.clone());
         if self.closing.load(Ordering::Acquire) {
             *self.active.lock().unwrap() = None;
-            emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Codex session is stopping"}}));
+            emit(
+                json!({"type":"turn_done","data":{"is_error":true,"error":"Codex session is stopping"}}),
+            );
             return;
         }
         let display_prompt = match self.public_prompt(text) {
             Ok(display) => display,
             Err(_) => {
                 *self.active.lock().unwrap() = None;
-                emit(json!({"type":"turn_done","data":{"is_error":true,"error":"LORE scrub failed; prompt withheld"}}));
+                emit(
+                    json!({"type":"turn_done","data":{"is_error":true,"error":"LORE scrub failed; prompt withheld"}}),
+                );
                 return;
             }
         };
         emit(json!({"type":"turn_started","data":{"prompt":display_prompt}}));
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
+        self.persist(
+            json!({"type":"user", "message":{"role":"user","content":text},
+            "cwd":self.cwd, "sessionId":self.session_id, "timestamp":crate::iso_now()}),
+        );
+        if self.scrub_failed.load(Ordering::Acquire) {
+            *self.active.lock().unwrap() = None;
+            emit(
+                json!({"type":"turn_done","data":{"is_error":true,"error":"LORE scrub failed; prompt withheld"}}),
+            );
+            return;
+        }
+        let mut assistant_text = String::new();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
         let result = match runtime {
             Ok(runtime) => {
                 let mut driver = self.driver.lock().unwrap();
-                runtime.block_on(driver.run_turn(text, &token, |event| {
-                    if self.scrub_failed.load(Ordering::Acquire) { token.cancel(); }
-                    // The normalizer scrubbed all provider strings before
-                    // this callback. Once scrubbing fails, discard output.
-                    if !self.scrub_failed.load(Ordering::Acquire) {
-                        emit(json!({"type":event.kind,"data":event.data}));
-                    }
-                }))
+                runtime.block_on(driver.run_turn_with_thread(
+                    text,
+                    &token,
+                    |event| {
+                        if self.scrub_failed.load(Ordering::Acquire) {
+                            token.cancel();
+                        }
+                        // The normalizer scrubbed all provider strings before
+                        // this callback. Once scrubbing fails, discard output.
+                        if !self.scrub_failed.load(Ordering::Acquire) {
+                            if event.kind == "text_delta" {
+                                if let Some(text) = event.data["text"].as_str() {
+                                    assistant_text.push_str(text);
+                                }
+                            }
+                            emit(json!({"type":event.kind,"data":event.data}));
+                        }
+                    },
+                    |id| {
+                        self.persist_thread(id);
+                        if self.scrub_failed.load(Ordering::Acquire) {
+                            token.cancel();
+                        }
+                    },
+                ))
             }
             Err(error) => Err(DriverError::Spawn(error)),
         };
+        if !self.scrub_failed.load(Ordering::Acquire) {
+            if !assistant_text.is_empty() {
+                self.persist(json!({"type":"assistant","message":{"role":"assistant",
+                    "content":[{"type":"text","text":assistant_text}]},
+                    "sessionId":self.session_id,"timestamp":crate::iso_now()}));
+            }
+            if let Some(id) = self.driver.lock().unwrap().thread_id().map(str::to_owned) {
+                self.persist_thread(&id);
+            }
+        }
         *self.active.lock().unwrap() = None;
         if self.scrub_failed.load(Ordering::Acquire) {
-            emit(json!({"type":"turn_done","data":{"is_error":true,"error":"LORE scrub failed; provider output withheld"}}));
+            emit(
+                json!({"type":"turn_done","data":{"is_error":true,"error":"LORE scrub failed; provider output withheld"}}),
+            );
             return;
         }
         match result {
-            Ok(_) => {}, // The driver emitted a terminal event.
+            Ok(_) => {} // The driver emitted a terminal event.
             Err(error) => {
                 let reason = match error {
                     DriverError::Cancelled => "Codex turn cancelled",
-                    DriverError::MissingResumeThread => "Codex thread ID unavailable; refusing to start a new thread",
+                    DriverError::MissingResumeThread => {
+                        "Codex thread ID unavailable; refusing to start a new thread"
+                    }
                     DriverError::InvalidThreadId => "Codex thread ID is invalid",
                     DriverError::Spawn(_) => "Codex process could not start",
                 };
@@ -122,8 +248,15 @@ impl Host for CodexHost {
 
     fn call(&self, method: &str, _: &Value) -> Result<Value, String> {
         match method {
-            "interrupt" => { self.cancel(); Ok(json!({})) },
-            "stop" => { self.closing.store(true, Ordering::Release); self.cancel(); Ok(json!({})) },
+            "interrupt" => {
+                self.cancel();
+                Ok(json!({}))
+            }
+            "stop" => {
+                self.closing.store(true, Ordering::Release);
+                self.cancel();
+                Ok(json!({}))
+            }
             _ => Err(format!("{method} is unavailable in the native Codex host")),
         }
     }
