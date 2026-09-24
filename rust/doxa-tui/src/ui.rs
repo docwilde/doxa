@@ -50,7 +50,7 @@ const ACTIONS: [(&str, &str); 10] = [
     ("Session model", "Alt+M"),
 ];
 
-const ENGINE_CHOICES: [&str; 5] = ["codex", "claude", "deepseek", "glm", "fixture"];
+const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
 
 #[derive(Debug)]
 struct ModelPicker {
@@ -1166,7 +1166,7 @@ impl App {
             KeyCode::Up => self.engine_selected = self.engine_selected.saturating_sub(1),
             KeyCode::Down => self.engine_selected = (self.engine_selected + 1).min(ENGINE_CHOICES.len() - 1),
             KeyCode::Enter => {
-                self.notice = format!("New session: doxa-rs new --engine {}", ENGINE_CHOICES[self.engine_selected]);
+                self.notice = format!("Run separately for a new session: doxa-rs new --engine {}", ENGINE_CHOICES[self.engine_selected]);
                 self.engine_picker = false;
             }
             _ => return false,
@@ -1675,7 +1675,7 @@ impl App {
                 let row = usize::from(mouse.row.saturating_sub(y + 4));
                 if row < ENGINE_CHOICES.len() {
                     self.engine_selected = row;
-                    self.notice = format!("New session: doxa-rs new --engine {}", ENGINE_CHOICES[row]);
+                    self.notice = format!("Run separately for a new session: doxa-rs new --engine {}", ENGINE_CHOICES[row]);
                     self.engine_picker = false;
                 }
                 return true;
@@ -1905,8 +1905,8 @@ impl App {
         let title;
         if self.engine_picker {
             title = " Engine · new sessions only · Esc close ";
-            lines.push(Line::from(" Current session keeps its engine."));
-            lines.push(Line::from(" Select a row for the new-session command:"));
+            lines.push(Line::from(" This picker does not launch or switch a session."));
+            lines.push(Line::from(" Select a row to show a new-session command:"));
             lines.push(Line::from(""));
             for (index, engine) in ENGINE_CHOICES.iter().enumerate() {
                 lines.push(Line::styled(format!(" {} {}", if index == self.engine_selected { '›' } else { ' ' }, engine),
@@ -2709,11 +2709,12 @@ mod tests {
 
     #[test]
     fn engine_picker_labels_new_session_scope() {
+        assert!(!ENGINE_CHOICES.contains(&"fixture"));
         let mut app = App::default();
         app.open_engine_picker();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert_eq!(app.notice, "New session: doxa-rs new --engine claude");
+        assert_eq!(app.notice, "Run separately for a new session: doxa-rs new --engine claude");
         assert!(!app.engine_picker);
     }
 

@@ -17,6 +17,77 @@ spec.loader.exec_module(sidecar)
 
 
 class IdentityTests(unittest.TestCase):
+    def test_list_models_uses_one_startup_probe_and_hides_static_fallback(self):
+        from doxa import claude_catalog, providers
+
+        class FakeEngine:
+            def __init__(self, **_options):
+                pass
+
+            async def start(self):
+                return types.SimpleNamespace(type="started", data={})
+
+            async def finalize(self):
+                return types.SimpleNamespace(type="finalized", data={})
+
+            async def peer_events(self):
+                if False:
+                    yield None
+
+        class FakeProvider:
+            def __init__(self, rows):
+                self.rows = rows
+
+            async def list_models(self):
+                return self.rows
+
+            def catalog_note(self, _models):
+                return "Claude CLI verified cache"
+
+        engine_module = types.ModuleType("doxa.engine")
+        engine_module.SessionEngine = FakeEngine
+        for rows, expected, note in [
+            ([types.SimpleNamespace(id="account-model", source="cache"),
+              types.SimpleNamespace(id="guessed-alias", source="fallback")],
+             ["account-model"], "Claude CLI verified cache"),
+            ([types.SimpleNamespace(id="guessed-alias", source="fallback")],
+             [], "No verified Claude model catalog available"),
+        ]:
+            with self.subTest(expected=expected):
+                requests = iter({"type": "request", "id": i, "method": method, "params": params}
+                                for i, (method, params) in enumerate([
+                                    ("start", {"cwd": str(SIDECAR.parent), "session_id": "catalog"}),
+                                    ("list_models", {}),
+                                    ("list_models", {}),
+                                    ("finalize", {}),
+                                ], 1))
+                replies = []
+
+                async def read_frame(_reader, _limit):
+                    try:
+                        return json.dumps(next(requests)).encode() + b"\n"
+                    except StopIteration:
+                        return b""
+
+                probe = mock.AsyncMock(return_value="refreshed")
+
+                with mock.patch.dict(sys.modules, {"doxa.engine": engine_module}), \
+                     mock.patch.object(sidecar.asyncio, "to_thread", read_frame), \
+                     mock.patch.object(sidecar, "emit", replies.append), \
+                     mock.patch.object(claude_catalog, "attempt_cli_catalog_refresh", probe) as refresh, \
+                     mock.patch.object(providers, "model_provider", return_value=FakeProvider(rows)), \
+                     mock.patch.object(providers.ClaudeProvider, "startup_catalog_checked") as checked:
+                    asyncio.run(sidecar.run())
+
+                self.assertEqual(refresh.call_count, 1)
+                checked.assert_called_with("refreshed")
+                catalog_replies = [frame for frame in replies
+                                   if frame.get("type") == "reply" and frame.get("id") in (2, 3)]
+                self.assertEqual(len(catalog_replies), 2)
+                self.assertTrue(all(frame["ok"] for frame in catalog_replies))
+                self.assertTrue(all(frame["result"]["models"] == expected for frame in catalog_replies))
+                self.assertTrue(all(frame["result"]["note"] == note for frame in catalog_replies))
+
     def test_emit_writes_complete_frame_after_partial_write(self):
         parts = []
 
