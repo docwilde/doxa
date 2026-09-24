@@ -1,7 +1,7 @@
 use doxa_peers::{now as peer_now, PeerRecord, Registry as PeerRegistry};
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -42,6 +42,7 @@ impl Process {
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
+            .env("DOXA_HOME", runtime.join("home"))
             .spawn()
             .unwrap();
         let registry = runtime.join("registry/fixture-session.json");
@@ -77,6 +78,7 @@ impl Process {
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
+            .env("DOXA_HOME", runtime.join("home"))
             .spawn()
             .unwrap();
         let registry = runtime.join("registry/codex-session.json");
@@ -291,7 +293,19 @@ fn registry_wire_prompt_and_stop() {
     let mut process = Process::start(dir.path(), "1");
     let entry = process.entry();
     assert_eq!(entry["session_id"], "fixture-session");
-    assert_eq!(entry["socket_path"], entry["daemon_socket"]);
+    assert_ne!(entry["socket_path"], entry["daemon_socket"]);
+    assert_eq!(
+        entry["daemon_socket"],
+        process.socket.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        fs::metadata(entry["socket_path"].as_str().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
     assert_eq!(entry["engine"], "fixture");
     assert_eq!(
         fs::metadata(&process.registry)
@@ -1505,7 +1519,7 @@ fn peers_rpc_fails_closed_without_lore_or_when_scrub_fails() {
     let python = dir.path().join("lore-fixture");
     fake_scrubber(&python, true);
     executable(&codex, "#!/bin/sh\nexit 0\n");
-    let (_listener, _) = registry_peer(
+    let (listener, peer_entry) = registry_peer(
         dir.path(),
         "same",
         dir.path().to_str().unwrap(),
@@ -1523,10 +1537,160 @@ fn peers_rpc_fails_closed_without_lore_or_when_scrub_fails() {
     assert_eq!(reply["ok"], false);
     assert!(reply.get("peers").is_none());
     assert!(!reply.to_string().contains("fixture-secret"));
+    let mut clean_peer: Value = serde_json::from_slice(&fs::read(&peer_entry).unwrap()).unwrap();
+    clean_peer["title"] = json!("safe title");
+    fs::write(&peer_entry, serde_json::to_vec(&clean_peer).unwrap()).unwrap();
+    send(
+        &mut socket,
+        json!({"type":"call","id":3,"method":"msg",
+        "params":{"target":"same","text":"fixture-secret message"}}),
+    );
+    let rejected = receive(&mut reader);
+    assert_eq!(rejected["ok"], false);
+    assert!(!dir.path().join("home/peers/messages.jsonl").exists());
+    listener.set_nonblocking(true).unwrap();
+    while let Ok((mut connection, _)) = listener.accept() {
+        let mut bytes = Vec::new();
+        connection.read_to_end(&mut bytes).unwrap();
+        assert!(bytes.is_empty(), "scrub failure must not send a peer frame");
+    }
     send(
         &mut socket,
         json!({"type":"call","id":2,"method":"stop","params":{}}),
     );
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
+}
+
+#[test]
+fn native_msg_sends_scrubbed_frame_records_ledger_and_denies_other_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    fake_scrubber(&python, false);
+    executable(&codex, "#!/bin/sh\nexit 0\n");
+    let (same_listener, _) =
+        registry_peer(dir.path(), "same", dir.path().to_str().unwrap(), "teammate");
+    let (_other_listener, _) = registry_peer(dir.path(), "other", "/other-project", "outsider");
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let peer_socket = PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(
+        &mut socket,
+        json!({"type":"call","id":1,"method":"msg",
+        "params":{"target":"other","text":"fixture-secret"}}),
+    );
+    let denied = receive(&mut reader);
+    assert_eq!(denied["ok"], false);
+    assert!(!dir.path().join("home/peers/messages.jsonl").exists());
+    let worker = thread::spawn(move || {
+        same_listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match same_listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(Duration::from_millis(500)))
+                        .unwrap();
+                    let mut body = String::new();
+                    stream.read_to_string(&mut body).unwrap();
+                    if !body.is_empty() {
+                        return body;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "peer frame never arrived");
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("{error}"),
+            }
+        }
+    });
+    send(
+        &mut socket,
+        json!({"type":"call","id":2,"method":"msg",
+        "params":{"target":"same","text":"fixture-secret hello"}}),
+    );
+    let mut reply = Value::Null;
+    let mut saw_sent = false;
+    for _ in 0..3 {
+        let frame = receive(&mut reader);
+        if frame["event"]["type"] == "peer_sent" {
+            saw_sent = true;
+        }
+        if frame["type"] == "reply" && frame["id"] == 2 {
+            reply = frame;
+            break;
+        }
+    }
+    if !saw_sent {
+        let sent = receive(&mut reader);
+        assert_eq!(sent["event"]["type"], "peer_sent");
+        saw_sent = true;
+    }
+    assert!(saw_sent);
+    assert_eq!(reply["ok"], true);
+    assert_eq!(reply["peer"]["session_id"], "same");
+    assert!(reply["peer"]["pid"].is_number());
+    assert!(reply["peer"]["socket_path"].is_string());
+    assert!(!reply.to_string().contains("fixture-secret"));
+    let wire = worker.join().unwrap();
+    assert!(wire.contains("[redacted] hello"));
+    assert!(!wire.contains("fixture-secret"));
+    let ledger = fs::read_to_string(dir.path().join("home/peers/messages.jsonl")).unwrap();
+    assert!(ledger.contains("[redacted] hello"));
+    assert!(!ledger.contains("fixture-secret"));
+    assert!(ledger.contains("637f5a69d3b12d04bc0050df9189dc19816f42fad4163fe35770a2c33559f152"));
+    send(
+        &mut socket,
+        json!({"type":"call","id":3,"method":"stop","params":{}}),
+    );
+    for _ in 0..3 {
+        if receive(&mut reader)["id"] == 3 {
+            break;
+        }
+    }
+    wait_until(|| process.exited());
+    assert!(!peer_socket.exists());
+}
+
+#[test]
+fn native_inbox_emits_scrubbed_peer_message_and_cleans_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    fake_scrubber(&python, false);
+    executable(&codex, "#!/bin/sh\nexit 0\n");
+    let (_sender_listener, _) =
+        registry_peer(dir.path(), "sender", dir.path().to_str().unwrap(), "sender");
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let peer_socket = PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    doxa_peers::delivery::send(
+        &peer_socket,
+        &doxa_peers::delivery::PeerFrame {
+            from_id: "sender".into(),
+            from_title: "fixture-secret title".into(),
+            sent_at: peer_now(),
+            body: "fixture-secret body".into(),
+            from_repo: Some(dir.path().display().to_string()),
+            kind: None,
+        },
+    )
+    .unwrap();
+    let event = receive(&mut reader);
+    assert_eq!(event["event"]["type"], "peer_message");
+    assert_eq!(event["event"]["data"]["body"], "[redacted] body");
+    assert!(!event.to_string().contains("fixture-secret"));
+    send(
+        &mut socket,
+        json!({"type":"call","id":4,"method":"stop","params":{}}),
+    );
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+    assert!(!peer_socket.exists());
 }

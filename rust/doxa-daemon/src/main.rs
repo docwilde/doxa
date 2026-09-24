@@ -6,6 +6,7 @@ mod vendor_host;
 use claude_host::ClaudeHost;
 use codex_host::CodexHost;
 use doxa_engines::codex_driver::{DriverOptions, SandboxMode};
+use doxa_peers::delivery::Inbox;
 use doxa_runtime::{Daemon, Host, Session};
 use doxa_vendors::Vendor;
 use peer_host::PeerHost;
@@ -17,7 +18,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use vendor_host::VendorHost;
@@ -328,10 +329,11 @@ struct Registry {
     cwd: String,
     session_id: String,
     socket: String,
+    daemon_socket: String,
     engine: Engine,
 }
 impl Registry {
-    fn new(options: &Options, socket: &Path) -> io::Result<Self> {
+    fn new(options: &Options, socket: &Path, daemon_socket: &Path) -> io::Result<Self> {
         let dir = options.runtime.join("registry");
         owned_directory(&dir)?;
         let path = dir.join(format!("{}.json", options.session_id));
@@ -372,12 +374,13 @@ impl Registry {
             cwd: options.cwd.to_string_lossy().into_owned(),
             session_id: options.session_id.clone(),
             socket: socket.to_string_lossy().into_owned(),
+            daemon_socket: daemon_socket.to_string_lossy().into_owned(),
             engine: options.engine,
         })
     }
     fn write(&mut self, clients: usize) -> io::Result<()> {
         let entry = json!({"session_id":self.session_id,"pid":std::process::id(),
-            "socket_path":self.socket,"daemon_socket":self.socket,"cwd":self.cwd,
+            "socket_path":self.socket,"daemon_socket":self.daemon_socket,"cwd":self.cwd,
             "repo_root":self.repo_root,"title":format!("DOXA Rust {} session", self.engine.name()),
             "started_at":self.started_at,"heartbeat_at":iso_now(),"clients":clients,
             "engine":self.engine.name()});
@@ -504,13 +507,17 @@ fn run() -> io::Result<()> {
         Engine::DeepSeek | Engine::Glm => options.lore_python.as_deref(),
         Engine::Fixture => None,
     };
-    let host: Arc<dyn Host> = Arc::new(PeerHost::new(
+    let (event_tx, event_rx) = mpsc::sync_channel(256);
+    let peer_host = Arc::new(PeerHost::new(
         host,
         options.runtime.clone(),
         &options.cwd,
         options.session_id.clone(),
+        format!("DOXA Rust {} session", options.engine.name()),
         scrub_python,
+        event_tx,
     )?);
+    let host: Arc<dyn Host> = peer_host.clone();
     let session = Session {
         session_id: options.session_id.clone(),
         cwd: options.cwd.to_string_lossy().into_owned(),
@@ -519,7 +526,8 @@ fn run() -> io::Result<()> {
         doxa_version: "2.0.0-alpha.3".into(),
     };
     let mut handle = Daemon::bind(&options.runtime, session, host)?.start();
-    let mut registry = Registry::new(&options, handle.socket_path())?;
+    let inbox = Inbox::bind(&options.runtime, &options.session_id)?;
+    let mut registry = Registry::new(&options, inbox.path(), handle.socket_path())?;
     registry.write(0)?;
     unsafe {
         libc::signal(
@@ -536,6 +544,14 @@ fn run() -> io::Result<()> {
     let mut last_beat = Instant::now();
     let mut previous_clients = 0;
     let result = loop {
+        while let Ok(event) = event_rx.try_recv() {
+            handle.publish(event);
+        }
+        if let Ok(Some(frame)) = inbox.poll_receive(&|s: &str| s.to_owned()) {
+            if let Ok(event) = peer_host.inbound_event(frame) {
+                handle.publish(event);
+            }
+        }
         if TERMINATE.load(Ordering::Acquire) || handle.is_stopping() {
             break Ok(());
         }

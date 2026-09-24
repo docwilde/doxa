@@ -91,6 +91,22 @@ impl Inbox {
         Ok(Self { listener, path, inode: meta.ino(), device: meta.dev() })
     }
     pub fn path(&self) -> &Path { &self.path }
+    /// Poll one connection without blocking daemon shutdown. An empty
+    /// discovery probe has no message to surface.
+    pub fn poll_receive(&self, scrubber: &impl Scrubber) -> io::Result<Option<PeerFrame>> {
+        self.listener.set_nonblocking(true)?;
+        let (mut stream, _) = match self.listener.accept() {
+            Ok(value) => value,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        same_user(&stream)?;
+        match read_frame(&mut stream) {
+            Ok(frame) => Ok(Some(frame.scrub(scrubber))),
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
     pub fn receive(&self, scrubber: &impl Scrubber) -> io::Result<PeerFrame> {
         loop {
             let (mut stream, _) = self.listener.accept()?;
@@ -117,7 +133,8 @@ use std::os::unix::ffi::OsStrExt;
 
 pub fn send(path: &Path, frame: &PeerFrame) -> io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
-    if !meta.file_type().is_socket() || meta.uid() != unsafe { libc::geteuid() } { return Err(invalid("unsafe peer socket")); }
+    if !meta.file_type().is_socket() || meta.uid() != unsafe { libc::geteuid() }
+        || meta.permissions().mode() & 0o077 != 0 { return Err(invalid("unsafe peer socket")); }
     let mut bytes = serde_json::to_vec(frame).map_err(io::Error::other)?;
     bytes.push(b'\n');
     if bytes.len() > MAX_FRAME_BYTES { return Err(invalid("peer frame too large")); }
@@ -216,10 +233,11 @@ pub fn deliver(registry: &Registry, sender: &PeerRecord, recipients: &[String], 
     }
     limiter.charge(turn_id, targets.len())?;
     let frame = PeerFrame { from_id: sender.session_id.clone(), from_title: sender.title.clone(), sent_at: now(), body: body.to_owned(),
-        from_repo: Some(sender.scope_key().to_owned()), kind: (kind != "direct").then(|| kind.to_owned()) };
+        from_repo: Some(sender.scope_key().to_owned()), kind: (kind != "direct").then(|| kind.to_owned()) }.scrub(scrubber);
     let mut result = DeliveryResult { delivered: Vec::new(), failed: Vec::new(), record: None, ledger_error: None };
     for peer in targets {
-        if send(Path::new(&peer.socket_path), &frame).is_ok() { result.delivered.push(peer.session_id.clone()); }
+        let path = Path::new(&peer.socket_path);
+        if path.parent() == Some(registry.runtime()) && send(path, &frame).is_ok() { result.delivered.push(peer.session_id.clone()); }
         else { result.failed.push(peer.session_id.clone()); }
     }
     if result.delivered.is_empty() { return Err(io::Error::new(io::ErrorKind::NotConnected, "nothing was delivered")); }
