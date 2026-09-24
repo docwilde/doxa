@@ -66,7 +66,7 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
-clickable links are still 2.0 work. The binary version is `2.0.0-alpha.3` for this
+clickable links are still 2.0 work. The binary version is `2.0.0-alpha.4` for this
 separate development line, not a DOXA 2.0 release.
 
 Alpha tags identify preview snapshots. A stable 2.0 release waits until the
@@ -169,8 +169,10 @@ supported; Claude also supports `answer_needs_input`. `peers` returns a
 read-only, same-project roster of live peer IDs and LORE-scrubbed titles (up
 to 32). It fails closed when the LORE scrubber is unavailable. Other calls
 return an explicit error. The
-`socket_path` is suitable for local TUI or Python `EngineClient` attach, but
-peer frames are not implemented. Treat this as an integration alpha.
+`daemon_socket` is suitable for local TUI or Python `EngineClient` attach.
+`socket_path` identifies the private peer inbox; `msg` sends scoped local peer
+messages. Inbound messages are surfaced as peer events. Remote peer routing and
+automatic turn handling remain open. Treat this as an integration alpha.
 
 ## Transcript persistence crate
 

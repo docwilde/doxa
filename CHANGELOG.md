@@ -5,7 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
-## 2.0.0-alpha.3 — Rust development line (unreleased)
+## 2.0.0-alpha.4 — 2026-09-24
+
+- Add native Codex, Claude, DeepSeek, and GLM session launch and resume paths,
+  with bounded transcripts and vendor history replay.
+- Add a styled action menu and an interactive peer communication map in the
+  Rust TUI, including scoped local peer messages and a private inbox.
+- Add read-only LORE context, evidence, and pending proposal snapshots with
+  secret scrubbing and guarded file reads.
+- Extend the native CLI, session state migration, and Rust CI coverage for the
+  daemon's local peer and vendor paths.
+
+## 2.0.0-alpha.3 — 2026-09-24
 
 - Keep offline archived tabs and their collection and layout metadata when the
   Rust preview saves a shared tabset from a partial live roster.
