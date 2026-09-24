@@ -66,3 +66,29 @@ print('{"type":"reply","id":999,"ok":true,"text":"wrong"}', flush=True)
     assert!(matches!(client.scrub("hello"), Err(LoreError::InvalidFrame)));
     assert!(matches!(client.scrub("again"), Err(LoreError::Closed)));
 }
+
+#[test]
+fn typed_lore_readers_and_disabled_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fake(dir.path(), r#"
+import json, sys
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','pending','sync_state','refresh_interval']}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    values = {'pending': [{'pid':'one','text':'[redacted]'}], 'sync_state': None, 'refresh_interval': 30}
+    print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':values[req['op']]}), flush=True)
+"#);
+    let mut client = LoreClient::spawn(&path, Duration::from_secs(2)).unwrap();
+    assert_eq!(client.pending("/repo", 0, 50).unwrap()[0]["pid"], "one");
+    assert!(client.sync_state().unwrap().is_none());
+    assert_eq!(client.refresh_interval().unwrap(), Some(30));
+    assert!(matches!(client.pending("/repo", 0, 51), Err(LoreError::InvalidFrame)));
+}
+
+#[test]
+fn older_sidecar_keeps_core_operations_but_disables_new_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fake(dir.path(), "print('{\"type\":\"hello\",\"proto\":1,\"capabilities\":[\"scrub\",\"snapshot\"]}', flush=True)");
+    let mut client = LoreClient::spawn(&path, Duration::from_secs(2)).unwrap();
+    assert!(matches!(client.sync_state(), Err(LoreError::Unavailable)));
+}

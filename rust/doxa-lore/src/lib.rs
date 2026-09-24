@@ -5,6 +5,7 @@
 //! returns an error; callers must not silently persist unsanitized text.
 
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
@@ -18,6 +19,14 @@ use std::time::{Duration, Instant};
 
 pub const PROTOCOL_VERSION: u64 = 1;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SyncState {
+    pub last_pull_age_s: Option<f64>,
+    pub unpushed: u64,
+    pub conflicts: u64,
+    pub unverified: u64,
+}
 
 #[derive(Debug)]
 pub enum LoreError {
@@ -56,6 +65,7 @@ pub struct LoreClient {
     timeout: Duration,
     next_id: u64,
     alive: bool,
+    capabilities: HashSet<String>,
 }
 
 impl LoreClient {
@@ -88,7 +98,7 @@ impl LoreClient {
         let stdout = child.stdout.take().ok_or(LoreError::InvalidFrame)?;
         let (tx, rx) = mpsc::channel();
         let reader = thread::spawn(move || read_frames(stdout, tx));
-        let mut client = Self { child, stdin, rx, reader: Some(reader), timeout, next_id: 1, alive: true };
+        let mut client = Self { child, stdin, rx, reader: Some(reader), timeout, next_id: 1, alive: true, capabilities: HashSet::new() };
         let hello = client.receive(timeout)?;
         if hello["type"] != "hello" || hello["proto"].as_u64() != Some(PROTOCOL_VERSION) {
             client.disable();
@@ -99,21 +109,66 @@ impl LoreClient {
             client.disable();
             return Err(LoreError::Unavailable);
         }
+        client.capabilities = caps.iter().filter_map(Value::as_str).map(str::to_owned).collect();
         Ok(client)
     }
 
     pub fn scrub(&mut self, text: &str) -> Result<String, LoreError> {
-        self.request(json!({"op":"scrub","text":text}))
+        self.request_text(json!({"op":"scrub","text":text}))
     }
 
     pub fn snapshot(&mut self, cwd: &str, scope: &str) -> Result<String, LoreError> {
         if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0') || !matches!(scope, "all" | "user" | "project") {
             return Err(LoreError::InvalidFrame);
         }
-        self.request(json!({"op":"snapshot","cwd":cwd,"scope":scope}))
+        self.request_text(json!({"op":"snapshot","cwd":cwd,"scope":scope}))
     }
 
-    fn request(&mut self, mut frame: Value) -> Result<String, LoreError> {
+    pub fn pending(&mut self, cwd: &str, offset: u16, limit: u8) -> Result<Vec<Value>, LoreError> {
+        if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0') || offset > 10000 || limit > 50 {
+            return Err(LoreError::InvalidFrame);
+        }
+        let value = self.request_value("pending", json!({"cwd":cwd,"offset":offset,"limit":limit}))?;
+        let rows = value.as_array().ok_or(LoreError::InvalidFrame)?;
+        if rows.len() > limit as usize || !rows.iter().all(|row| row.is_object() && row["pid"].is_string()) {
+            return Err(LoreError::InvalidFrame);
+        }
+        Ok(rows.clone())
+    }
+
+    pub fn sync_state(&mut self) -> Result<Option<SyncState>, LoreError> {
+        let value = self.request_value("sync_state", json!({}))?;
+        if value.is_null() { return Ok(None); }
+        let age = match &value["last_pull_age_s"] {
+            Value::Null => None,
+            v => Some(v.as_f64().filter(|n| n.is_finite() && *n >= 0.0).ok_or(LoreError::InvalidFrame)?),
+        };
+        Ok(Some(SyncState {
+            last_pull_age_s: age,
+            unpushed: value["unpushed"].as_u64().ok_or(LoreError::InvalidFrame)?,
+            conflicts: value["conflicts"].as_u64().ok_or(LoreError::InvalidFrame)?,
+            unverified: value["unverified"].as_u64().ok_or(LoreError::InvalidFrame)?,
+        }))
+    }
+
+    pub fn refresh_interval(&mut self) -> Result<Option<u64>, LoreError> {
+        let value = self.request_value("refresh_interval", json!({}))?;
+        if value.is_null() { Ok(None) } else { value.as_u64().map(Some).ok_or(LoreError::InvalidFrame) }
+    }
+
+    fn request_text(&mut self, frame: Value) -> Result<String, LoreError> {
+        let value = self.request(frame)?;
+        value["text"].as_str().map(str::to_owned).ok_or_else(|| { self.disable(); LoreError::InvalidFrame })
+    }
+
+    fn request_value(&mut self, op: &str, mut frame: Value) -> Result<Value, LoreError> {
+        if !self.capabilities.contains(op) { return Err(LoreError::Unavailable); }
+        frame["op"] = json!(op);
+        let reply = self.request(frame)?;
+        reply.get("value").cloned().ok_or_else(|| { self.disable(); LoreError::InvalidFrame })
+    }
+
+    fn request(&mut self, mut frame: Value) -> Result<Value, LoreError> {
         if !self.alive { return Err(LoreError::Closed); }
         let id = self.next_id;
         self.next_id = id.checked_add(1).ok_or(LoreError::InvalidFrame)?;
@@ -141,7 +196,7 @@ impl LoreClient {
             return Err(LoreError::InvalidFrame);
         }
         if reply["ok"] == true {
-            reply["text"].as_str().map(str::to_owned).ok_or_else(|| { self.disable(); LoreError::InvalidFrame })
+            Ok(reply)
         } else {
             let code = match reply["error"].as_str() {
                 Some("lore_unavailable") => return Err(LoreError::Unavailable),

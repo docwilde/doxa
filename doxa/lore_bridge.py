@@ -15,7 +15,13 @@ from typing import Any
 
 MAX_FRAME_BYTES = 1024 * 1024
 PROTOCOL_VERSION = 1
-_OPS = ("scrub", "snapshot")
+_OPS = ("scrub", "snapshot", "pending", "sync_state", "refresh_interval")
+
+_PENDING_FIELDS = ("kind", "action", "scope", "project", "subject", "id",
+                   "confidence", "session_id", "derived_by", "created", "writer",
+                   "origin_project", "subject_unresolved", "to")
+_PENDING_TEXT = ("text", "claim", "match", "path", "purpose", "name",
+                 "description", "evidence", "reason", "writer_evidence")
 
 
 def _frame(value: dict[str, Any]) -> bytes:
@@ -43,10 +49,46 @@ def _lore() -> tuple[Any, Any] | None:
         return None
 
 
+def _extensions() -> tuple[Any, Any, Any, Any] | None:
+    """Load optional LORE-backed readers without opening its store here."""
+    try:
+        from lore_core.config import project_slug
+        from lore_core.context import refresh_interval
+        from lore_core.pending import load_pending
+        from lore_core.scrub import scrub_secrets
+        from .lore_sync import read_state
+        return project_slug, refresh_interval, load_pending, (scrub_secrets, read_state)
+    except Exception:  # noqa: BLE001 -- older plugin builds may lack an API
+        return None
+
+
+def _pending(cwd: str, offset: int, limit: int, ext: tuple[Any, Any, Any, Any]) -> list[dict]:
+    slug = ext[0](cwd)
+    scrub = ext[3][0]
+    records: list[dict] = []
+    visible = 0
+    for pid, item in ext[2]():
+        if not isinstance(item, dict):
+            continue
+        if item.get("scope") == "project" and item.get("project") != slug:
+            continue
+        if visible < offset:
+            visible += 1
+            continue
+        if len(records) >= limit:
+            break
+        record = {"pid": pid}
+        record.update({key: item[key] for key in _PENDING_FIELDS if item.get(key) is not None})
+        record.update({key: scrub(str(item[key])) for key in _PENDING_TEXT if item.get(key)})
+        records.append(record)
+    return records
+
+
 def serve() -> None:
     lore = _lore()
+    ext = _extensions() if lore is not None else None
     _write({"type": "hello", "proto": PROTOCOL_VERSION,
-            "capabilities": list(_OPS) if lore is not None else []})
+            "capabilities": list(_OPS if ext is not None else _OPS[:2]) if lore is not None else []})
     while True:
         raw = sys.stdin.buffer.readline(MAX_FRAME_BYTES + 1)
         if not raw:
@@ -76,6 +118,27 @@ def serve() -> None:
                 if not cwd or len(cwd) > 4096 or "\x00" in cwd or scope not in ("all", "user", "project"):
                     raise ValueError("invalid snapshot input")
                 result = snapshot(cwd, scope=scope)
+            elif op in ("pending", "sync_state", "refresh_interval") and ext is not None:
+                cwd = req.get("cwd")
+                if op == "pending":
+                    offset, limit = req.get("offset", 0), req.get("limit", 50)
+                    if (not isinstance(cwd, str) or not cwd or len(cwd) > 4096 or "\x00" in cwd
+                            or type(offset) is not int or not 0 <= offset <= 10000
+                            or type(limit) is not int or not 0 <= limit <= 50):
+                        raise ValueError("invalid pending input")
+                    result = _pending(cwd, offset, limit, ext)
+                elif op == "sync_state":
+                    state = ext[3][1]()
+                    result = None if state is None else {
+                        "last_pull_age_s": state.last_pull_age_s,
+                        "unpushed": state.unpushed,
+                        "conflicts": state.conflicts,
+                        "unverified": state.unverified,
+                    }
+                else:
+                    result = ext[1]()
+                _write({"type": "reply", "id": rid, "ok": True, "value": result})
+                continue
             else:
                 _write({"type": "reply", "id": rid, "ok": False, "error": "invalid_request"})
                 continue
