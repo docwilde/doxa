@@ -23,5 +23,7 @@ jobs:
         run: rustup toolchain install stable --profile minimal
       - name: Test Rust frontend
         run: cargo +stable test --locked --manifest-path rust/doxa-tui/Cargo.toml
+      - name: Test native daemon protocol
+        run: cargo +stable test --locked --manifest-path rust/doxa-runtime/Cargo.toml
       - name: Build release binary
         run: cargo +stable build --locked --release --manifest-path rust/doxa-tui/Cargo.toml
