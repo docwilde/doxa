@@ -1827,6 +1827,7 @@ impl App {
                 return true;
             }
             if self.engine_picker {
+                if mouse.row < y + 4 { return true; }
                 let row = usize::from(mouse.row.saturating_sub(y + 4));
                 if row < ENGINE_CHOICES.len() {
                     self.engine_selected = row;
@@ -3104,6 +3105,17 @@ mod tests {
         }
         assert_eq!(app.input_requests.len(), MAX_INPUT_REQUESTS);
         assert!(app.notice.contains("Too many input requests"));
+    }
+
+    #[test]
+    fn engine_picker_header_click_does_not_select_an_engine() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 80, 24);
+        app.open_engine_picker();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10, row: 3, modifiers: KeyModifiers::NONE }));
+        assert!(app.engine_picker);
+        assert!(!app.notice.contains("doxa-rs new"));
     }
 
     #[test]
