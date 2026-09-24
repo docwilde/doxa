@@ -21,6 +21,8 @@ pub enum WorkerCommand {
     Prompt(String, String),
     Answer(String, String, Value),
     Peers(String),
+    Models(String),
+    SetModel(String, String),
 }
 
 fn revoke(guard: &Mutex<bool>) {
@@ -117,7 +119,8 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
     let router = thread::spawn(move || {
         while let Ok(command) = command_rx.recv() {
             let id = match &command {
-                WorkerCommand::Prompt(id, _) | WorkerCommand::Answer(id, _, _) | WorkerCommand::Peers(id) => id,
+                WorkerCommand::Prompt(id, _) | WorkerCommand::Answer(id, _, _) | WorkerCommand::Peers(id)
+                | WorkerCommand::Models(id) | WorkerCommand::SetModel(id, _) => id,
             };
             let Some((route, connected)) = routes.get(id) else {
                 let _ = router_frames.send(rejected(command, "Session is not attached"));
@@ -149,6 +152,10 @@ fn rejected(command: WorkerCommand, message: &str) -> Value {
         WorkerCommand::Answer(session, request, _) => json!({"type":"answer_reply", "session_id":session,
             "request_id":request, "ok":false, "message":message}),
         WorkerCommand::Peers(id) => json!({"type":"peer_roster", "session_id":id,
+            "ok":false, "error":message}),
+        WorkerCommand::Models(id) => json!({"type":"models_reply", "session_id":id,
+            "ok":false, "error":message}),
+        WorkerCommand::SetModel(id, _) => json!({"type":"set_model_reply", "session_id":id,
             "ok":false, "error":message}),
     }
 }
@@ -223,6 +230,35 @@ fn worker_loop(
         // Bound prompt work so a burst cannot starve incoming daemon events.
         for _ in 0..32 {
             match prompts.try_recv() {
+                Ok(WorkerCommand::Models(id)) => {
+                    let result = if id == session_id { client.call("list_models", Map::new()) }
+                        else { Err(TransportError::Malformed("model target is not attached")) };
+                    cursor.store(client.cursor, Ordering::Relaxed);
+                    let reply = match result {
+                        Ok(reply) => json!({"type":"models_reply", "session_id":id,
+                            "ok":reply["ok"] == true, "models":reply.get("models"),
+                            "note":reply.get("note"), "error":reply.get("error")}),
+                        Err(error) => json!({"type":"models_reply", "session_id":id,
+                            "ok":false, "error":error.to_string()}),
+                    };
+                    if frames.send(reply).is_err() { return; }
+                }
+                Ok(WorkerCommand::SetModel(id, model)) => {
+                    let result = if id == session_id {
+                        let mut params = Map::new();
+                        params.insert("model".into(), Value::String(model));
+                        client.call("set_model", params)
+                    } else { Err(TransportError::Malformed("model target is not attached")) };
+                    cursor.store(client.cursor, Ordering::Relaxed);
+                    let reply = match result {
+                        Ok(reply) => json!({"type":"set_model_reply", "session_id":id,
+                            "ok":reply["ok"] == true, "model":reply.get("model"),
+                            "error":reply.get("error")}),
+                        Err(error) => json!({"type":"set_model_reply", "session_id":id,
+                            "ok":false, "error":error.to_string()}),
+                    };
+                    if frames.send(reply).is_err() { return; }
+                }
                 Ok(WorkerCommand::Answer(session, id, answer)) => {
                     if session != session_id || !answer.is_object() {
                         let _ = frames.send(json!({"type":"answer_reply", "session_id":session,

@@ -59,9 +59,10 @@ async def run() -> None:
 
     emit({"type": "hello", "protocol": PROTOCOL, "version": VERSION,
           "capabilities": ["start", "prompt", "answer", "interrupt", "finalize",
-                           "set_model", "set_permission_mode"]})
+                           "set_model", "set_permission_mode", "list_models"]})
     engine = None
     turn = None
+    catalog_probe = None
 
     async def publish_turn(prompt: str) -> None:
         try:
@@ -124,6 +125,9 @@ async def run() -> None:
                 candidate = SessionEngine(**options)
                 started = await candidate.start()
                 engine = candidate
+                from doxa.claude_catalog import attempt_cli_catalog_refresh
+
+                catalog_probe = asyncio.create_task(attempt_cli_catalog_refresh())
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": {"event": started.type, "data": started.data,
                                  "permission_mode": getattr(candidate, "permission_mode", "default")}})
@@ -143,6 +147,26 @@ async def run() -> None:
                 applied = await engine.answer_needs_input(params["id"], answer)
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": {"applied": applied}})
+            elif method == "list_models" and engine is not None:
+                from doxa.providers import ClaudeProvider, model_provider
+
+                if catalog_probe is not None:
+                    try:
+                        status = await asyncio.wait_for(asyncio.shield(catalog_probe), 6.0)
+                    except Exception:  # optional catalog probe may time out or fail
+                        status = "unavailable"
+                    ClaudeProvider.startup_catalog_checked(status)
+
+                provider = model_provider("claude")
+                models = await provider.list_models()
+                # The provider's last-resort aliases are not evidence that
+                # this account can use them. Keep the picker empty instead.
+                available = [m for m in models if m.source != "fallback"]
+                emit({"type": "reply", "id": request_id, "ok": True,
+                      "result": {"models": [m.id for m in available[:100]
+                                            if isinstance(m.id, str) and 0 < len(m.id) <= 128],
+                                 "note": (provider.catalog_note(available) if available else
+                                          "No verified Claude model catalog available")[:500]}})
             elif method == "set_model" and engine is not None:
                 model = params["model"]
                 if model is not None and (

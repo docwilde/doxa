@@ -139,6 +139,7 @@ impl ClaudeHost {
 }
 
 impl Host for ClaudeHost {
+    fn can_set_model(&self) -> bool { self.model_control }
     fn initial_model(&self) -> Option<String> { self.initial_model.clone() }
     fn initial_permission_mode(&self) -> String { self.initial_permission_mode.clone() }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
@@ -196,6 +197,10 @@ impl Host for ClaudeHost {
 
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
+            "list_models" => {
+                if !self.model_control { return Err("Claude sidecar does not support set_model".into()); }
+                self.rpc("list_models", json!({}))
+            }
             "set_model" => {
                 if !self.model_control {
                     return Err("Claude sidecar does not support set_model".into());

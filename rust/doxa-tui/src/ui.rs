@@ -21,6 +21,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
+use unicode_width::UnicodeWidthStr;
 
 use crate::{diff_view, history, markdown, peer_map::PeerMap};
 use crate::theme;
@@ -36,7 +37,7 @@ const MAX_PENDING_PROMPTS: usize = 32;
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
 const MAX_ANSWER_BYTES: usize = 10 * 1024;
-const ACTIONS: [(&str, &str); 8] = [
+const ACTIONS: [(&str, &str); 10] = [
     ("Peer map", "Ctrl+M"),
     ("Tool activity", "Ctrl+T"),
     ("Open selected session", "rail selection"),
@@ -45,7 +46,20 @@ const ACTIONS: [(&str, &str); 8] = [
     ("Switch pane", "Shift+Tab"),
     ("Session history", "Ctrl+R"),
     ("Worktree diff", "F2"),
+    ("Engine for new session", "Alt+E"),
+    ("Session model", "Alt+M"),
 ];
+
+const ENGINE_CHOICES: [&str; 5] = ["codex", "claude", "deepseek", "glm", "fixture"];
+
+#[derive(Debug)]
+struct ModelPicker {
+    session_id: String,
+    models: Vec<String>,
+    selected: usize,
+    note: String,
+    loading: bool,
+}
 
 fn safe_label(value: &str) -> String {
     markdown::sanitize(value)
@@ -371,6 +385,12 @@ pub struct App {
     pub input: String,
     input_drafts: HashMap<(usize, String), String>,
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
+    model_capabilities: HashMap<String, bool>,
+    model_picker: Option<ModelPicker>,
+    engine_picker: bool,
+    engine_selected: usize,
+    pending_model_queries: Vec<String>,
+    pending_model_changes: Vec<(String, String)>,
     pub pending_prompts: Vec<(String, String)>,
     pub input_requests: Vec<InputRequest>,
     pub pending_answers: Vec<(String, String, serde_json::Value)>,
@@ -426,6 +446,12 @@ impl Default for App {
             input: String::new(),
             input_drafts: HashMap::new(),
             session_identity: HashMap::new(),
+            model_capabilities: HashMap::new(),
+            model_picker: None,
+            engine_picker: false,
+            engine_selected: 0,
+            pending_model_queries: Vec::new(),
+            pending_model_changes: Vec::new(),
             pending_prompts: Vec::new(),
             input_requests: Vec::new(),
             pending_answers: Vec::new(),
@@ -502,6 +528,7 @@ impl App {
                 let model = frame.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                 let engine = frame.get("engine").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                 self.session_identity.insert(id.to_owned(), (engine, model.clone()));
+                self.model_capabilities.insert(id.to_owned(), frame["can_set_model"] == true);
                 let cwd = safe_label(frame.get("cwd").and_then(|v| v.as_str()).unwrap_or(""));
                 if let Some(raw) = frame.get("cwd").and_then(|v| v.as_str()) {
                     let path = PathBuf::from(raw);
@@ -604,6 +631,8 @@ impl App {
                             {
                                 self.drag = None;
                                 self.tool_modal = false;
+                                self.model_picker = None;
+                                self.engine_picker = false;
                                 self.input_requests.push(request);
                             }
                         } else {
@@ -653,6 +682,34 @@ impl App {
                 };
                 self.peer_map.roster(id, frame)
             }
+            "models_reply" => {
+                let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else { return false; };
+                if let Some(picker) = self.model_picker.as_mut().filter(|picker| picker.session_id == id) {
+                    picker.loading = false;
+                    picker.models = if frame["ok"] == true {
+                        frame["models"].as_array().into_iter().flatten()
+                            .filter_map(|value| value.as_str())
+                            .filter(|model| !model.is_empty() && model.len() <= 128 && !model.chars().any(char::is_control))
+                            .take(100).map(safe_label).collect()
+                    } else { Vec::new() };
+                    picker.note = if frame["ok"] == true {
+                        frame["note"].as_str().map(safe_label).unwrap_or_default()
+                    } else {
+                        format!("Catalog unavailable: {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
+                    };
+                    picker.selected = 0;
+                    return true;
+                }
+                false
+            }
+            "set_model_reply" => {
+                self.notice = if frame["ok"] == true {
+                    format!("Model selected · {}", safe_label(frame["model"].as_str().unwrap_or("awaiting event")))
+                } else {
+                    format!("Model change failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
+                };
+                true
+            }
             "reply" => {
                 if let Some(status) = frame.get("status") {
                     let id = status.get("session_id").and_then(|v| v.as_str())
@@ -664,6 +721,9 @@ impl App {
                         }
                         if status.get("model").is_some() {
                             identity.1 = status.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
+                        }
+                        if let Some(can_set) = status.get("can_set_model").and_then(|v| v.as_bool()) {
+                            self.model_capabilities.insert(id.to_owned(), can_set);
                         }
                     }
                 }
@@ -822,6 +882,11 @@ impl App {
                     self.history_modal = false;
                     self.notice = "Enlarge terminal to open session history".into();
                 }
+                if (self.model_picker.is_some() || self.engine_picker) && (w < 29 || h < 11) {
+                    self.model_picker = None;
+                    self.engine_picker = false;
+                    self.notice = "Enlarge terminal to open chip picker".into();
+                }
                 true
             }
             Event::Key(key)
@@ -851,6 +916,8 @@ impl App {
         if self.active_request_index().is_some() {
             return self.request_key(key);
         }
+        if self.model_picker.is_some() { return self.model_picker_key(key); }
+        if self.engine_picker { return self.engine_picker_key(key); }
         if self.action_menu {
             return self.action_key(key);
         }
@@ -915,6 +982,8 @@ impl App {
             self.open_history();
             return true;
         }
+        if key.code == KeyCode::Char('m') && alt { self.open_model_picker(); return true; }
+        if key.code == KeyCode::Char('e') && alt { self.open_engine_picker(); return true; }
         if key.code == KeyCode::F(2) || (key.code == KeyCode::Char('g') && alt) {
             self.open_diff();
             return true;
@@ -1042,6 +1111,67 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    fn open_model_picker(&mut self) {
+        if self.size.width > 0 && (self.size.width < 29 || self.size.height < 11) {
+            self.notice = "Enlarge terminal to open model picker".into();
+            return;
+        }
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.notice = "Select a session to inspect its model".into();
+            return;
+        };
+        if !self.model_capabilities.get(&id).copied().unwrap_or(false) {
+            self.notice = "This session cannot change models".into();
+            return;
+        }
+        self.model_picker = Some(ModelPicker { session_id: id.clone(), models: Vec::new(),
+            selected: 0, note: "Loading this engine's model catalog…".into(), loading: true });
+        self.pending_model_queries.push(id);
+    }
+
+    fn model_picker_key(&mut self, key: KeyEvent) -> bool {
+        let picker = self.model_picker.as_mut().unwrap();
+        match key.code {
+            KeyCode::Esc => self.model_picker = None,
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.models.len().saturating_sub(1)),
+            KeyCode::Enter if !picker.loading => {
+                if let Some(model) = picker.models.get(picker.selected) {
+                    self.pending_model_changes.push((picker.session_id.clone(), model.clone()));
+                    self.notice = format!("Requesting model · {}", model);
+                    self.model_picker = None;
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn open_engine_picker(&mut self) {
+        if self.size.width > 0 && (self.size.width < 29 || self.size.height < 11) {
+            self.notice = "Enlarge terminal to open engine picker".into();
+            return;
+        }
+        let engine = self.groups[self.active_group].active_id()
+            .and_then(|id| self.session_identity.get(id)).and_then(|identity| identity.0.as_deref());
+        self.engine_selected = engine.and_then(|engine| ENGINE_CHOICES.iter().position(|name| *name == engine)).unwrap_or(0);
+        self.engine_picker = true;
+    }
+
+    fn engine_picker_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => self.engine_picker = false,
+            KeyCode::Up => self.engine_selected = self.engine_selected.saturating_sub(1),
+            KeyCode::Down => self.engine_selected = (self.engine_selected + 1).min(ENGINE_CHOICES.len() - 1),
+            KeyCode::Enter => {
+                self.notice = format!("New session: doxa-rs new --engine {}", ENGINE_CHOICES[self.engine_selected]);
+                self.engine_picker = false;
+            }
+            _ => return false,
+        }
+        true
     }
 
     fn history_matches(&self) -> Vec<usize> {
@@ -1244,6 +1374,8 @@ impl App {
                     }
                     6 => self.open_history(),
                     7 => self.open_diff(),
+                    8 => self.open_engine_picker(),
+                    9 => self.open_model_picker(),
                     _ => unreachable!("fixed action list"),
                 }
             }
@@ -1526,12 +1658,47 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.active_request_index().is_none()
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && (self.engine_picker || self.model_picker.is_some()) {
+            let width = self.size.width.saturating_sub(4).min(74);
+            let height = self.size.height.saturating_sub(4).min(19);
+            if width < 25 || height < 7 { return false; }
+            let x = self.size.x + (self.size.width - width) / 2;
+            let y = self.size.y + (self.size.height - height) / 2;
+            if mouse.column < x || mouse.column >= x + width || mouse.row < y || mouse.row >= y + height {
+                self.engine_picker = false;
+                self.model_picker = None;
+                return true;
+            }
+            if self.engine_picker {
+                let row = usize::from(mouse.row.saturating_sub(y + 4));
+                if row < ENGINE_CHOICES.len() {
+                    self.engine_selected = row;
+                    self.notice = format!("New session: doxa-rs new --engine {}", ENGINE_CHOICES[row]);
+                    self.engine_picker = false;
+                }
+                return true;
+            }
+            let picker = self.model_picker.as_mut().unwrap();
+            let visible = usize::from(height.saturating_sub(5));
+            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let row = start + usize::from(mouse.row.saturating_sub(y + 3));
+            if mouse.row >= y + 3 && row < picker.models.len() && !picker.loading {
+                self.pending_model_changes.push((picker.session_id.clone(), picker.models[row].clone()));
+                self.notice = format!("Requesting model · {}", picker.models[row]);
+                self.model_picker = None;
+            }
+            return true;
+        }
         if self.active_request_index().is_some()
             || self.tool_modal
             || self.map_modal
             || self.action_menu
             || self.history_modal
             || self.diff_modal
+            || self.model_picker.is_some()
+            || self.engine_picker
         {
             self.drag = None;
             return false;
@@ -1568,10 +1735,35 @@ impl App {
                     }
                 }
                 if self.drag.is_none() {
-                    if let Some(panes) = layout.panes {
-                        for (index, pane) in panes.iter().enumerate() {
+                        let pane_hits = layout.panes.map(|panes| vec![(0, panes[0]), (1, panes[1])])
+                            .unwrap_or_else(|| vec![(self.active_group, layout.body)]);
+                        for (index, pane) in pane_hits.iter().copied() {
                             if mouse.column >= pane.x && mouse.column < pane.right()
                                 && mouse.row >= pane.y && mouse.row < pane.bottom() {
+                                if mouse.row == pane.bottom().saturating_sub(1) {
+                                    self.active_group = index;
+                                    let status_width = self.groups[index].active_id()
+                                        .and_then(|id| self.sessions.iter().find(|session| session.id == id))
+                                        .map(|session| session.status.width() + 3).unwrap_or(13);
+                                    let engine_width = self.groups[index].active_id()
+                                        .and_then(|id| self.session_identity.get(id))
+                                        .and_then(|identity| identity.0.as_deref())
+                                        .map(|engine| engine.width() + 3).unwrap_or(0);
+                                    let model_width = self.groups[index].active_id()
+                                        .and_then(|id| self.session_identity.get(id))
+                                        .and_then(|identity| identity.1.as_deref())
+                                        .map(|model| model.width() + 3).unwrap_or(0);
+                                    let relative = usize::from(mouse.column.saturating_sub(pane.x));
+                                    if relative >= status_width && relative < status_width + engine_width {
+                                        self.open_engine_picker();
+                                        return true;
+                                    }
+                                    if model_width > 0 && relative >= status_width + engine_width + 1
+                                        && relative < status_width + engine_width + 1 + model_width {
+                                        self.open_model_picker();
+                                        return true;
+                                    }
+                                }
                                 self.active_group = index;
                                 self.focus = if mouse.row >= pane.bottom().saturating_sub(4) {
                                     Focus::Prompt
@@ -1581,7 +1773,6 @@ impl App {
                                 return true;
                             }
                         }
-                    }
                 }
                 self.drag.is_some()
             }
@@ -1683,7 +1874,7 @@ impl App {
         }
         frame.render_widget(
             Paragraph::new(format!(
-                "{}  |  Ctrl+P actions · Ctrl+R history · F2 diff · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
+                "{}  |  Ctrl+P actions · Alt+E engine · Alt+M model · Ctrl+R history · F2 diff · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
                 self.notice
             )).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
@@ -1699,7 +1890,47 @@ impl App {
         self.draw_actions(frame, area);
         self.draw_history(frame, area);
         self.draw_diff(frame, area);
+        self.draw_chip_picker(frame, area);
         self.draw_request(frame, area);
+    }
+
+    fn draw_chip_picker(&self, frame: &mut Frame, area: Rect) {
+        if !self.engine_picker && self.model_picker.is_none() { return; }
+        let width = area.width.saturating_sub(4).min(74);
+        let height = area.height.saturating_sub(4).min(19);
+        if width < 25 || height < 7 { return; }
+        let modal = Rect::new(area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2, width, height);
+        let mut lines = Vec::new();
+        let title;
+        if self.engine_picker {
+            title = " Engine · new sessions only · Esc close ";
+            lines.push(Line::from(" Current session keeps its engine."));
+            lines.push(Line::from(" Select a row for the new-session command:"));
+            lines.push(Line::from(""));
+            for (index, engine) in ENGINE_CHOICES.iter().enumerate() {
+                lines.push(Line::styled(format!(" {} {}", if index == self.engine_selected { '›' } else { ' ' }, engine),
+                    Style::default().fg(if index == self.engine_selected { theme::ACCENT } else { theme::SECONDARY })));
+            }
+        } else {
+            title = " Model · this session · Enter select · Esc close ";
+            let picker = self.model_picker.as_ref().unwrap();
+            lines.push(Line::from(format!(" {}", picker.note)));
+            lines.push(Line::from(""));
+            if !picker.loading && picker.models.is_empty() {
+                lines.push(Line::from(" No verified models available for this session"));
+            }
+            let visible = usize::from(height.saturating_sub(5));
+            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            for (index, model) in picker.models.iter().enumerate().skip(start).take(visible) {
+                lines.push(Line::styled(format!(" {} {}", if index == picker.selected { '›' } else { ' ' }, model),
+                    Style::default().fg(if index == picker.selected { theme::ACCENT } else { theme::SECONDARY })));
+            }
+        }
+        frame.render_widget(Clear, modal);
+        frame.render_widget(Paragraph::new(lines).block(Block::default().title(title)
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER)))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), modal);
     }
 
     fn draw_history(&self, frame: &mut Frame, area: Rect) {
@@ -2092,14 +2323,14 @@ impl App {
         )];
         if let Some(engine) = engine {
             status_spans.push(Span::styled(
-                format!(" {} ", engine),
+                format!(" {} ▾", engine),
                 Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT),
             ));
         }
         if let Some(model) = model {
             status_spans.push(Span::raw(" "));
             status_spans.push(Span::styled(
-                format!(" {} ", model),
+                format!(" {} ▾", model),
                 Style::default().fg(theme::TEXT).bg(theme::HIGHLIGHT),
             ));
         }
@@ -2261,6 +2492,7 @@ fn run_loop(
             let disconnected = dispatch_prompts(&mut app, sender);
             let disconnected = dispatch_answers(&mut app, sender) || disconnected;
             let disconnected = dispatch_peer_refresh(&mut app, sender) || disconnected;
+            let disconnected = dispatch_model_controls(&mut app, sender) || disconnected;
             if disconnected {
                 prompt_sender = None;
                 changed = true;
@@ -2375,6 +2607,42 @@ fn dispatch_answers(app: &mut App, sender: &SyncSender<crate::bridge::WorkerComm
     false
 }
 
+fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+    let mut queries = std::mem::take(&mut app.pending_model_queries).into_iter();
+    while let Some(id) = queries.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::Models(id)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::Models(id))) => {
+                app.pending_model_queries.push(id);
+                app.pending_model_queries.extend(queries);
+                break;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                app.notice = "Daemon unavailable for model catalog".into();
+                return true;
+            }
+            Err(_) => unreachable!(),
+        }
+    }
+    let mut changes = std::mem::take(&mut app.pending_model_changes).into_iter();
+    while let Some((id, model)) = changes.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::SetModel(id, model)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::SetModel(id, model))) => {
+                app.pending_model_changes.push((id, model));
+                app.pending_model_changes.extend(changes);
+                break;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                app.notice = "Daemon unavailable for model change".into();
+                return true;
+            }
+            Err(_) => unreachable!(),
+        }
+    }
+    false
+}
+
 fn dispatch_peer_refresh(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
     let Some(id) = app.pending_peer_refresh.take() else {
         return false;
@@ -2398,6 +2666,56 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use serde_json::json;
+
+    #[test]
+    fn model_picker_is_capability_gated_and_uses_only_daemon_catalog() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"codex-1",
+            "engine":"codex", "model":"current", "cwd":"/tmp", "can_set_model":false}));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT)));
+        assert!(app.model_picker.is_none());
+        assert!(app.pending_model_queries.is_empty());
+
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"claude-1",
+            "engine":"claude", "model":"old", "cwd":"/tmp", "can_set_model":true}));
+        app.groups[0].tabs = vec!["claude-1".into()];
+        app.groups[0].active = 0;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT)));
+        assert_eq!(app.pending_model_queries, vec!["claude-1"]);
+        assert!(app.model_picker.as_ref().unwrap().loading);
+        app.apply_daemon_frame(&json!({"type":"models_reply", "session_id":"codex-1",
+            "ok":true, "models":["wrong-engine"]}));
+        assert!(app.model_picker.as_ref().unwrap().models.is_empty());
+        app.apply_daemon_frame(&json!({"type":"models_reply", "session_id":"claude-1",
+            "ok":true, "models":["sonnet", "opus", "bad\nmodel", ""]}));
+        assert_eq!(app.model_picker.as_ref().unwrap().models, vec!["sonnet", "opus"]);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.pending_model_changes, vec![("claude-1".into(), "opus".into())]);
+    }
+
+    #[test]
+    fn model_catalog_failure_never_offers_a_guessed_model() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s",
+            "engine":"claude", "model":"existing", "cwd":"/tmp", "can_set_model":true}));
+        app.open_model_picker();
+        app.apply_daemon_frame(&json!({"type":"models_reply", "session_id":"s",
+            "ok":false, "error":"offline"}));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.pending_model_changes.is_empty());
+        assert!(app.model_picker.is_some());
+    }
+
+    #[test]
+    fn engine_picker_labels_new_session_scope() {
+        let mut app = App::default();
+        app.open_engine_picker();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.notice, "New session: doxa-rs new --engine claude");
+        assert!(!app.engine_picker);
+    }
 
     fn painted(app: &App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
