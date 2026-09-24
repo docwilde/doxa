@@ -10,6 +10,7 @@ name = "doxa-rs"
 path = "src/main.rs"
 
 [dependencies]
+doxa-state = { path = "../doxa-state" }
 crossterm = "0.28"
 libc = "0.2"
 pulldown-cmark = "0.13"
