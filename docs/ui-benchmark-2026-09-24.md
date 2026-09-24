@@ -65,6 +65,28 @@ files. The dependency and tests were not upgraded. Its median resize was
 faster, but append was within the source range and scrolling had a larger
 tail latency. This was one experimental pass, not a compatibility signoff.
 
+### Paired Textual 5 and Textual 8 follow-up
+
+The complete Textual 8 migration in PR #94 passed 2,842 tests (5 skipped).
+Four interaction passes alternated 5 → 8 → 5 → 8 on the same CPU 0 with the
+same fixture and zero-delay paint barriers. Each operation cell is p50 / p95
+milliseconds; each pass has 20 resizes, 100 Markdown appends, and 100 scrolls.
+
+| Runtime and pass | Resize | Append | Scroll |
+| --- | ---: | ---: | ---: |
+| Textual 5, first | 74.8 / 105.5 | 984.5 / 1,154.0 | 32.1 / 206.0 |
+| Textual 8, first | 70.1 / 94.3 | 1,149.8 / 1,400.0 | 47.4 / 560.0 |
+| Textual 5, second | 72.7 / 103.8 | 1,144.3 / 1,299.8 | 31.9 / 214.0 |
+| Textual 8, second | 69.2 / 134.8 | 1,311.7 / 1,554.7 | 46.3 / 572.0 |
+
+Textual 8's median resize gain was small in these paired runs. Markdown
+appends and scrolling were slower, especially the scroll tail. A focused
+scroll profile observed 93 full compositor-map rebuilds and 186 root
+arrangements on Textual 8, versus no full-map rebuilds and 95 arrangements
+on Textual 5. Profiling adds overhead, so it explains the direction rather
+than providing comparable absolute latency. The migration remains a separate
+choice; these runs do not support it as a performance upgrade.
+
 | Benchmark executable | Import and exit | One first frame and exit | Bundle | Build |
 | --- | ---: | ---: | ---: | ---: |
 | Source Python | 615 ms | 834 ms | — | — |
@@ -98,11 +120,13 @@ Textual figures to claim a DOXA speedup.
   so bundle sizes cannot be taken as a release artifact estimate. Nuitka's
   report confirms C compilation of DOXA and Textual modules; PyInstaller
   bundles CPython bytecode.
-- **Ratatui:** `scripts/rust_ui_bench` renders a narrower, matching-shape
-  prototype into Ratatui's in-memory `TestBackend`. It has no DOXA widget
-  behavior, Markdown parser, terminal I/O, async message pump, or engine.
-  Its times indicate renderer headroom only and are not speedup factors for
-  a finished Rust DOXA frontend.
+- **Ratatui:** `scripts/rust_ui_bench` includes the original narrow prototype
+  and a [full-screen visual shell model](../scripts/rust_ui_bench/FULL_UI.md).
+  The latter parses the accumulated Markdown source on each append and draws
+  the visible DOXA layout into Ratatui's in-memory `TestBackend`. It still
+  lacks DOXA's widget behavior, input dispatch, async message pump, full
+  Markdown presentation, terminal I/O, and engine. Its measured parser and
+  drawing costs are not speedup factors for a finished Rust frontend.
 
 ## Decision
 
@@ -113,11 +137,9 @@ that is too small relative to the remaining latency and run variation to
 justify a distribution change for speed. Nuitka costs several minutes to
 build and did not improve the measured UI work.
 
-Textual 8 is worth a focused compatibility trial for resizing: its median
-was much lower in this one run. It did not improve the long Markdown-list
-stream and had a higher scroll p95. Production use requires migration of
-DOXA's removed `Static` API accesses and existing test assertions, followed
-by broader behavior and terminal testing.
+The subsequent complete Textual 8 migration passed the local test suite, but
+paired runs found only a small resize gain and slower append and scroll work.
+There is no measured performance case for switching from Textual 5 today.
 
 The existing versioned daemon socket provides a seam for a future Rust
 frontend. The Ratatui prototype shows renderer capacity, but a real port
