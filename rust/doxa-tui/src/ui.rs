@@ -1455,11 +1455,7 @@ impl App {
             .map(|s| s.transcript.as_str())
             .unwrap_or("No session open. Select one in the rail and press Enter.");
         let lines = markdown::render(content, inner[1].width.saturating_sub(2));
-        let max_scroll = lines
-            .len()
-            .saturating_sub(inner[1].height.saturating_sub(2) as usize)
-            as u16;
-        let scroll_from_top = max_scroll.saturating_sub(group.scroll.min(max_scroll));
+        let (lines, scroll_from_top) = transcript_window(lines, inner[1].height.saturating_sub(2), group.scroll);
         frame.render_widget(
             Paragraph::new(lines)
                 .scroll((scroll_from_top, 0))
@@ -1473,6 +1469,15 @@ impl App {
             inner[2],
         );
     }
+}
+
+fn transcript_window(mut lines: Vec<Line<'static>>, viewport: u16, scroll: u16) -> (Vec<Line<'static>>, u16) {
+    // Paragraph's scroll offset is u16. Keep a tail window whose largest
+    // possible offset fits, so a long transcript always opens at its end.
+    let keep = usize::from(u16::MAX).saturating_add(usize::from(viewport));
+    if lines.len() > keep { lines = lines.split_off(lines.len() - keep); }
+    let max_scroll = lines.len().saturating_sub(usize::from(viewport)) as u16;
+    (lines, max_scroll.saturating_sub(scroll.min(max_scroll)))
 }
 
 /// Owns terminal modes so every return path, including I/O errors, restores the screen.
@@ -1704,6 +1709,17 @@ fn dispatch_answers(app: &mut App, sender: &SyncSender<crate::bridge::WorkerComm
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn long_transcript_window_keeps_newest_lines_reachable() {
+        let lines: Vec<Line<'static>> = (0..70_000).map(|i| Line::from(i.to_string())).collect();
+        let (window, at_bottom) = transcript_window(lines, 8, 0);
+        assert_eq!(window.len(), u16::MAX as usize + 8);
+        assert_eq!(at_bottom, u16::MAX);
+        assert_eq!(window[usize::from(at_bottom) + 7].to_string(), "69999");
+        let (_, at_top) = transcript_window(window, 8, u16::MAX);
+        assert_eq!(at_top, 0);
+    }
 
     #[test]
     fn incomplete_roster_retries_unchanged_layout_after_gate_opens() {
