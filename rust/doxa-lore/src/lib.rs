@@ -28,6 +28,15 @@ pub struct SyncState {
     pub unverified: u64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConsultHit {
+    pub id: u64,
+    pub claim: String,
+    pub claim_truncated: bool,
+    pub confidence: f64,
+    pub score: f64,
+}
+
 #[derive(Debug)]
 pub enum LoreError {
     Io(io::Error),
@@ -209,6 +218,93 @@ impl LoreClient {
                 .iter()
                 .all(|row| row.is_object() && row["pid"].is_string())
         {
+            return Err(LoreError::InvalidFrame);
+        }
+        Ok(rows.clone())
+    }
+
+    /// One active FTS belief. It is derived data for citation, never an instruction.
+    pub fn consult(&mut self, prompt: &str) -> Result<Option<ConsultHit>, LoreError> {
+        if prompt.is_empty() || prompt.len() > 8192 || prompt.contains('\0') {
+            return Err(LoreError::InvalidFrame);
+        }
+        let value = self.request_value("consult", json!({"prompt":prompt}))?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        if value["citation_status"] != "cite_only" {
+            return Err(LoreError::InvalidFrame);
+        }
+        let id = value["id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .ok_or(LoreError::InvalidFrame)?;
+        let claim = value["claim"]
+            .as_str()
+            .filter(|s| s.len() <= 960)
+            .ok_or(LoreError::InvalidFrame)?;
+        let claim_truncated = value["claim_truncated"]
+            .as_bool()
+            .ok_or(LoreError::InvalidFrame)?;
+        let confidence = value["confidence"]
+            .as_f64()
+            .filter(|n| n.is_finite() && (0.0..=1.0).contains(n))
+            .ok_or(LoreError::InvalidFrame)?;
+        let score = value["score"]
+            .as_f64()
+            .filter(|n| n.is_finite())
+            .ok_or(LoreError::InvalidFrame)?;
+        Ok(Some(ConsultHit {
+            id,
+            claim: claim.to_owned(),
+            claim_truncated,
+            confidence,
+            score,
+        }))
+    }
+
+    pub fn beliefs(&mut self, offset: u16, limit: u8) -> Result<Vec<Value>, LoreError> {
+        if offset > 10000 || limit > 50 {
+            return Err(LoreError::InvalidFrame);
+        }
+        let value = self.request_value("beliefs", json!({"offset":offset,"limit":limit}))?;
+        let rows = value
+            .as_array()
+            .filter(|rows| rows.len() <= limit as usize)
+            .ok_or(LoreError::InvalidFrame)?;
+        if !rows.iter().all(|row| {
+            row["id"].as_u64().is_some_and(|id| id > 0)
+                && row["subject"].is_string()
+                && row["claim"].is_string()
+                && row["claim_truncated"].is_boolean()
+                && row["confidence"]
+                    .as_f64()
+                    .is_some_and(|n| n.is_finite() && (0.0..=1.0).contains(&n))
+                && row["evidence_count"].as_u64().is_some()
+        }) {
+            return Err(LoreError::InvalidFrame);
+        }
+        Ok(rows.clone())
+    }
+
+    pub fn evidence(&mut self, belief_id: u64, limit: u8) -> Result<Vec<Value>, LoreError> {
+        if belief_id == 0 || belief_id > i64::MAX as u64 || limit > 50 {
+            return Err(LoreError::InvalidFrame);
+        }
+        let value = self.request_value("evidence", json!({"belief_id":belief_id,"limit":limit}))?;
+        let rows = value
+            .as_array()
+            .filter(|rows| rows.len() <= limit as usize)
+            .ok_or(LoreError::InvalidFrame)?;
+        if !rows.iter().all(|row| {
+            row["session_id"].is_string()
+                && row["project"].is_string()
+                && row["note"].is_string()
+                && row["note_truncated"].is_boolean()
+                && row["created"].is_string()
+                && (row.get("source_engine").is_none() || row["source_engine"].is_string())
+                && (row.get("trail_truncated").is_none() || row["trail_truncated"].is_boolean())
+        }) {
             return Err(LoreError::InvalidFrame);
         }
         Ok(rows.clone())

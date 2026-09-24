@@ -16,6 +16,7 @@ from typing import Any
 MAX_FRAME_BYTES = 1024 * 1024
 PROTOCOL_VERSION = 1
 _OPS = ("scrub", "snapshot", "pending", "sync_state", "refresh_interval", "transcript_identity")
+_READ_OPS = ("consult", "beliefs", "evidence")
 
 _PENDING_FIELDS = ("kind", "action", "scope", "project", "subject", "id",
                    "confidence", "session_id", "derived_by", "created", "writer",
@@ -60,6 +61,83 @@ def _extensions() -> tuple[Any, Any, Any, Any] | None:
         return project_slug, refresh_interval, load_pending, (scrub_secrets, read_state)
     except Exception:  # noqa: BLE001 -- older plugin builds may lack an API
         return None
+
+
+def _read_ops() -> tuple[Any, Any] | None:
+    """LORE's own database and FTS query boundary; no store files are opened here."""
+    try:
+        from lore_core.store import db_connect, fts_expr
+        return db_connect, fts_expr
+    except Exception:  # noqa: BLE001 -- older LORE may not expose FTS
+        return None
+
+
+def _valid_page(req: dict[str, Any], maximum: int) -> tuple[int, int]:
+    offset, limit = req.get("offset", 0), req.get("limit", maximum)
+    if (type(offset) is not int or not 0 <= offset <= 10000
+            or type(limit) is not int or not 0 <= limit <= maximum):
+        raise ValueError("invalid page")
+    return offset, limit
+
+
+def _consult(prompt: str, read_ops: tuple[Any, Any], scrub: Any) -> dict | None:
+    if not prompt or len(prompt) > 8192:
+        raise ValueError("invalid consult prompt")
+    expression = read_ops[1](prompt, " OR ")
+    if not expression:
+        return None
+    conn = read_ops[0]()
+    row = conn.execute(
+        "SELECT b.id, b.claim, b.confidence, bm25(belief_fts) "
+        "FROM beliefs b JOIN belief_fts f ON b.id = f.belief_id "
+        "WHERE belief_fts MATCH ? AND b.status = 'active' "
+        "ORDER BY bm25(belief_fts) LIMIT 1", (expression,),
+    ).fetchone()
+    if row is None:
+        return None
+    claim = scrub(str(row[1]))
+    return {"id": int(row[0]), "claim": claim[:240], "claim_truncated": len(claim) > 240,
+            "confidence": float(row[2]), "score": float(row[3]),
+            "citation_status": "cite_only"}
+
+
+def _beliefs(offset: int, limit: int, read_ops: tuple[Any, Any], scrub: Any) -> list[dict]:
+    conn = read_ops[0]()
+    rows = conn.execute(
+        "SELECT b.id, b.subject, b.claim, b.confidence, "
+        "(SELECT count(*) FROM belief_evidence e WHERE e.belief_id = b.id) "
+        "FROM beliefs b WHERE b.status = 'active' "
+        "ORDER BY b.updated DESC, b.id LIMIT ? OFFSET ?", (limit, offset),
+    ).fetchall()
+    result = []
+    for row in rows:
+        claim = scrub(str(row[2]))
+        result.append({"id": int(row[0]), "subject": scrub(str(row[1])),
+                       "claim": claim[:4096], "claim_truncated": len(claim) > 4096,
+                       "confidence": float(row[3]), "evidence_count": int(row[4])})
+    return result
+
+
+def _evidence(belief_id: int, limit: int, read_ops: tuple[Any, Any], scrub: Any) -> list[dict]:
+    conn = read_ops[0]()
+    have_engine = any(row[1] == "source_engine" for row in conn.execute(
+        "PRAGMA table_info(belief_evidence)").fetchall())
+    rows = conn.execute(
+        "SELECT session_id, project, note, created, "
+        f"{'source_engine' if have_engine else 'NULL'} FROM belief_evidence "
+        "WHERE belief_id = ? ORDER BY created, rowid LIMIT ?", (belief_id, limit + 1),
+    ).fetchall()
+    trail = []
+    for row in rows[:limit]:
+        note = scrub(str(row[2] or ""))
+        trail.append({"session_id": scrub(str(row[0] or "")),
+                      "project": scrub(str(row[1] or "")),
+                      "note": note[:4096], "note_truncated": len(note) > 4096,
+                      "created": scrub(str(row[3] or "")),
+                      **({"source_engine": scrub(str(row[4]))} if row[4] else {})})
+    if len(rows) > limit and trail:
+        trail[-1]["trail_truncated"] = True
+    return trail
 
 
 def _scrub_pending_value(value: Any, scrub: Any) -> Any:
@@ -116,8 +194,10 @@ def _transcript_identity(cwd: str, ext: tuple[Any, Any, Any, Any]) -> dict[str, 
 def serve() -> None:
     lore = _lore()
     ext = _extensions() if lore is not None else None
+    read_ops = _read_ops() if lore is not None else None
     _write({"type": "hello", "proto": PROTOCOL_VERSION,
-            "capabilities": list(_OPS if ext is not None else _OPS[:2]) if lore is not None else []})
+            "capabilities": (list(_OPS if ext is not None else _OPS[:2])
+                             + (list(_READ_OPS) if read_ops is not None else [])) if lore is not None else []})
     while True:
         raw = sys.stdin.buffer.readline(MAX_FRAME_BYTES + 1)
         if not raw:
@@ -170,6 +250,23 @@ def serve() -> None:
                     }
                 else:
                     result = ext[1]()
+                _write({"type": "reply", "id": rid, "ok": True, "value": result})
+                continue
+            elif op in _READ_OPS and read_ops is not None:
+                if op == "consult":
+                    prompt = req.get("prompt")
+                    if not isinstance(prompt, str):
+                        raise ValueError("invalid consult input")
+                    result = _consult(prompt, read_ops, scrub)
+                elif op == "beliefs":
+                    offset, limit = _valid_page(req, 50)
+                    result = _beliefs(offset, limit, read_ops, scrub)
+                else:
+                    belief_id = req.get("belief_id")
+                    if type(belief_id) is not int or not 0 < belief_id <= 2**63 - 1:
+                        raise ValueError("invalid belief id")
+                    _offset, limit = _valid_page(req, 50)
+                    result = _evidence(belief_id, limit, read_ops, scrub)
                 _write({"type": "reply", "id": rid, "ok": True, "value": result})
                 continue
             else:

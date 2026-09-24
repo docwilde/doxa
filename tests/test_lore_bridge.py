@@ -2,11 +2,17 @@
 
 import io
 import json
+import sqlite3
 import types
 
 import pytest
 
 from doxa import lore_bridge
+
+
+@pytest.fixture(autouse=True)
+def no_optional_read_store(monkeypatch):
+    monkeypatch.setattr(lore_bridge, "_read_ops", lambda: None)
 
 
 def test_sidecar_scrub_snapshot_and_generic_error(monkeypatch):
@@ -157,3 +163,39 @@ def test_disabled_sync_returns_null(monkeypatch):
     frames = [json.loads(line) for line in output.getvalue().splitlines()]
     assert frames[1]["value"] is None
     assert frames[2]["value"] is None
+
+
+def test_consult_beliefs_and_evidence_are_bounded_scrubbed_and_cite_only(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE beliefs(id INTEGER, subject TEXT, claim TEXT, confidence REAL, status TEXT, updated TEXT)")
+    conn.execute("CREATE TABLE belief_evidence(belief_id INTEGER, session_id TEXT, project TEXT, note TEXT, created TEXT, source_engine TEXT)")
+    conn.execute("CREATE VIRTUAL TABLE belief_fts USING fts5(belief_id UNINDEXED, claim)")
+    conn.execute("INSERT INTO beliefs VALUES(1,'user','SECRET fact',0.8,'active','2026-01-01')")
+    conn.execute("INSERT INTO belief_fts VALUES(1,'SECRET fact')")
+    for n in range(3):
+        conn.execute("INSERT INTO belief_evidence VALUES(1,'SECRET session','project','SECRET note',?, 'claude')", (str(n),))
+    monkeypatch.setattr(lore_bridge, "_lore", lambda: (lambda text: text.replace("SECRET", "[redacted]"), lambda cwd, scope: ""))
+    monkeypatch.setattr(lore_bridge, "_extensions", lambda: None)
+    monkeypatch.setattr(lore_bridge, "_read_ops", lambda: (lambda: conn, lambda text, op: text))
+    requests = [
+        {"id": 1, "op": "consult", "prompt": "fact"},
+        {"id": 2, "op": "beliefs", "offset": 0, "limit": 1},
+        {"id": 3, "op": "evidence", "belief_id": 1, "limit": 2},
+        {"id": 4, "op": "beliefs", "limit": 51},
+        {"id": 5, "op": "consult", "prompt": "SECRET" * 9000},
+    ]
+    output = io.BytesIO()
+    monkeypatch.setattr(lore_bridge.sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"".join(map(lore_bridge._frame, requests)))))
+    monkeypatch.setattr(lore_bridge.sys, "stdout", types.SimpleNamespace(buffer=output))
+    lore_bridge.serve()
+    frames = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert frames[0]["capabilities"] == ["scrub", "snapshot", "consult", "beliefs", "evidence"]
+    assert frames[1]["value"]["citation_status"] == "cite_only"
+    assert frames[1]["value"]["claim"] == "[redacted] fact"
+    assert frames[2]["value"][0]["evidence_count"] == 3
+    assert frames[2]["value"][0]["claim"] == "[redacted] fact"
+    assert len(frames[3]["value"]) == 2
+    assert frames[3]["value"][-1]["trail_truncated"] is True
+    assert frames[3]["value"][0]["session_id"] == "[redacted] session"
+    assert frames[4]["error"] == frames[5]["error"] == "operation_failed"
+    assert b"SECRET" not in output.getvalue()

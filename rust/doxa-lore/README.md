@@ -9,14 +9,17 @@ in process arguments. Sidecar stderr is suppressed so exceptions cannot echo
 prompts or credentials into terminal logs.
 
 Protocol v1 has `hello` with required `scrub` and `snapshot` capabilities and
-optional `pending`, `sync_state`, and `refresh_interval` readers. Pending rows
+optional `pending`, `sync_state`, `refresh_interval`, `consult`, `beliefs`, and
+`evidence` readers. Consult returns one active FTS belief labelled `cite_only`;
+belief and evidence pages contain at most 50 rows. Text is scrubbed before
+reply and truncated fields carry explicit markers. Pending rows
 are scoped to the requested project and paged to at most 50 records; text
 fields pass through LORE's scrubber. Sync state returns null when sync is off
 or unavailable, matching Python DOXA's hidden status chip. Older sidecars
 without the optional capabilities remain usable for scrubbing and snapshots.
 Requests and replies carry one numeric ID at a time. Frames are at most 1 MiB. Failure
 to scrub is an error that callers must handle before persistence or sending
-the text to another model. The bridge currently does not expose consult,
-review, pending approvals, belief operations, or indexing, and
+the text to another model. The bridge currently does not expose review,
+pending approvals, belief mutations, or indexing, and
 is not yet connected to the native daemon or engine adapters. Python remains
 a dependency only for this external LORE integration during the transition.
