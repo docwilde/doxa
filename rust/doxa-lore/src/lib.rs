@@ -258,6 +258,26 @@ impl LoreClient {
     /// inode against the claimed file, after the UI has actually rendered the
     /// entire `raw` value. This client intentionally exposes no mutation.
     pub fn pending_review(&mut self, cwd: &str, pid: &str) -> Result<PendingReview, LoreError> {
+        self.pending_review_request(cwd, pid, None)
+    }
+
+    /// Re-read an already displayed proposal and refuse a changed digest or
+    /// inode. The sidecar compares against a fresh same-descriptor snapshot.
+    /// This remains read-only and does not authorize approval.
+    pub fn pending_review_if_unchanged(
+        &mut self,
+        cwd: &str,
+        previous: &PendingReview,
+    ) -> Result<PendingReview, LoreError> {
+        self.pending_review_request(cwd, previous.pid(), Some(previous))
+    }
+
+    fn pending_review_request(
+        &mut self,
+        cwd: &str,
+        pid: &str,
+        previous: Option<&PendingReview>,
+    ) -> Result<PendingReview, LoreError> {
         if cwd.is_empty()
             || cwd.len() > 4096
             || cwd.contains('\0')
@@ -269,7 +289,11 @@ impl LoreClient {
         {
             return Err(LoreError::InvalidFrame);
         }
-        let value = self.request_value("pending_review_v1", json!({"cwd":cwd,"pid":pid}))?;
+        let mut frame = json!({"cwd":cwd,"pid":pid});
+        if let Some(previous) = previous {
+            frame["expected"] = json!({"sha256":previous.sha256(), "inode":previous.inode()});
+        }
+        let value = self.request_value("pending_review_v1", frame)?;
         let returned_pid = value["pid"].as_str().ok_or(LoreError::InvalidFrame)?;
         let raw = value["raw"].as_str().ok_or(LoreError::InvalidFrame)?;
         let sha256 = value["sha256"].as_str().ok_or(LoreError::InvalidFrame)?;
@@ -289,6 +313,9 @@ impl LoreClient {
             || !serde_json::from_str::<Value>(raw).is_ok_and(|item| item.is_object())
         {
             return Err(LoreError::InvalidFrame);
+        }
+        if previous.is_some_and(|old| old.sha256() != sha256 || old.inode() != inode) {
+            return Err(LoreError::Remote("pending_changed"));
         }
         Ok(PendingReview {
             pid: pid.to_owned(),
@@ -486,6 +513,9 @@ impl LoreClient {
                 Some("invalid_request") => "invalid_request",
                 Some("operation_failed") => "operation_failed",
                 Some("output_too_large") => "output_too_large",
+                Some("pending_changed") => "pending_changed",
+                Some("pending_incomplete") => "pending_incomplete",
+                Some("pending_unavailable") => "pending_unavailable",
                 _ => "remote_error",
             };
             Err(LoreError::Remote(code))

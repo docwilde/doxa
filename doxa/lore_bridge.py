@@ -10,6 +10,9 @@ exception text in an error response, stderr, or a process argument.
 from __future__ import annotations
 
 import json
+import hashlib
+import re
+import stat
 import sys
 from typing import Any
 
@@ -17,6 +20,15 @@ MAX_FRAME_BYTES = 1024 * 1024
 PROTOCOL_VERSION = 1
 _OPS = ("scrub", "snapshot", "pending", "sync_state", "refresh_interval", "transcript_identity")
 _READ_OPS = ("consult", "beliefs", "evidence")
+_REVIEW_OP = "pending_review_v1"
+_PENDING_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z", re.ASCII)
+# Leave room for JSON escaping and the rest of the reply frame.
+_MAX_REVIEW_RAW_BYTES = MAX_FRAME_BYTES // 2
+
+
+class PendingReviewError(Exception):
+    def __init__(self, code: str) -> None:
+        self.code = code
 
 _PENDING_FIELDS = ("kind", "action", "scope", "project", "subject", "id",
                    "confidence", "session_id", "derived_by", "created", "writer",
@@ -70,6 +82,68 @@ def _read_ops() -> tuple[Any, Any] | None:
         return db_connect, fts_expr
     except Exception:  # noqa: BLE001 -- older LORE may not expose FTS
         return None
+
+
+def _pending_review_reader() -> tuple[Any, Any] | None:
+    """Use LORE's one-descriptor bytes/inode snapshot when that API exists."""
+    try:
+        from lore_core.pending import ROOT, _pending_bytes_snapshot
+        return ROOT, _pending_bytes_snapshot
+    except Exception:  # noqa: BLE001 -- older LORE cannot promise this snapshot
+        return None
+
+
+def _pending_review(cwd: str, pid: str, ext: tuple[Any, Any, Any, Any],
+                    reader: tuple[Any, Any], expected: Any = None) -> dict[str, Any]:
+    if not isinstance(cwd, str) or not cwd or len(cwd) > 4096 or "\x00" in cwd:
+        raise PendingReviewError("invalid_request")
+    if not isinstance(pid, str) or _PENDING_ID.fullmatch(pid) is None:
+        raise PendingReviewError("invalid_request")
+    path = reader[0] / "pending" / f"{pid}.json"
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise PendingReviewError("pending_unavailable") from exc
+    if not stat.S_ISREG(before.st_mode):
+        raise PendingReviewError("pending_unavailable")
+    if before.st_size > _MAX_REVIEW_RAW_BYTES:
+        raise PendingReviewError("pending_incomplete")
+    snapshot = reader[1](pid)
+    if snapshot is None or not isinstance(snapshot, tuple) or len(snapshot) != 2:
+        raise PendingReviewError("pending_unavailable")
+    data, inode = snapshot
+    if not isinstance(data, bytes) or not isinstance(inode, int) or inode <= 0:
+        raise PendingReviewError("pending_incomplete")
+    # Refuse a replaced path. LORE's helper captures the bytes and inode from
+    # one descriptor; this second stat only verifies the name still points to it.
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise PendingReviewError("pending_changed") from exc
+    if len(data) > _MAX_REVIEW_RAW_BYTES:
+        raise PendingReviewError("pending_incomplete")
+    if (not stat.S_ISREG(after.st_mode) or before.st_ino != inode or after.st_ino != inode
+            or before.st_size != len(data) or after.st_size != len(data)
+            or before.st_ctime_ns != after.st_ctime_ns):
+        raise PendingReviewError("pending_changed")
+    try:
+        raw = data.decode("utf-8")
+        item = json.loads(raw)
+    except (UnicodeError, ValueError) as exc:
+        raise PendingReviewError("pending_incomplete") from exc
+    if not isinstance(item, dict):
+        raise PendingReviewError("pending_incomplete")
+    if item.get("scope") == "project" and item.get("project") != ext[0](cwd):
+        raise PendingReviewError("pending_unavailable")
+    digest = hashlib.sha256(data).hexdigest()
+    if expected is not None:
+        if (not isinstance(expected, dict) or set(expected) != {"sha256", "inode"}
+                or not isinstance(expected["sha256"], str)
+                or type(expected["inode"]) is not int or expected["inode"] <= 0):
+            raise PendingReviewError("invalid_request")
+        if expected["sha256"] != digest or expected["inode"] != inode:
+            raise PendingReviewError("pending_changed")
+    return {"pid": pid, "raw": raw, "sha256": digest, "inode": inode, "complete": True}
 
 
 def _valid_page(req: dict[str, Any], maximum: int) -> tuple[int, int]:
@@ -195,9 +269,11 @@ def serve() -> None:
     lore = _lore()
     ext = _extensions() if lore is not None else None
     read_ops = _read_ops() if lore is not None else None
+    review = _pending_review_reader() if lore is not None and ext is not None else None
     _write({"type": "hello", "proto": PROTOCOL_VERSION,
             "capabilities": (list(_OPS if ext is not None else _OPS[:2])
-                             + (list(_READ_OPS) if read_ops is not None else [])) if lore is not None else []})
+                             + (list(_READ_OPS) if read_ops is not None else [])
+                             + ([_REVIEW_OP] if review is not None else [])) if lore is not None else []})
     while True:
         raw = sys.stdin.buffer.readline(MAX_FRAME_BYTES + 1)
         if not raw:
@@ -219,6 +295,11 @@ def serve() -> None:
             continue
         scrub, snapshot = lore
         try:
+            if op == _REVIEW_OP and ext is not None and review is not None:
+                result = _pending_review(req.get("cwd"), req.get("pid"), ext, review,
+                                         req.get("expected"))
+                _write({"type": "reply", "id": rid, "ok": True, "value": result})
+                continue
             if op == "scrub" and isinstance(req.get("text"), str):
                 result = scrub(req["text"])
             elif op == "snapshot" and isinstance(req.get("cwd"), str):
@@ -275,6 +356,8 @@ def serve() -> None:
             if not isinstance(result, str):
                 raise TypeError("invalid LORE result")
             _write({"type": "reply", "id": rid, "ok": True, "text": result})
+        except PendingReviewError as exc:
+            _write({"type": "reply", "id": rid, "ok": False, "error": exc.code})
         except Exception:  # noqa: BLE001 -- never print credentials from input or LORE
             _write({"type": "reply", "id": rid, "ok": False, "error": "operation_failed"})
 

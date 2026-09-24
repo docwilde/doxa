@@ -169,6 +169,9 @@ print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','p
 raw = '{"kind":"sync","op":{"payload":"entire signed op bytes"}}\n'
 for line in sys.stdin:
     req = json.loads(line)
+    if req['pid'] == 'mutating' and 'expected' in req:
+        print(json.dumps({'type':'reply','id':req['id'],'ok':False,'error':'pending_changed'}), flush=True)
+        continue
     value = {'pid':req['pid'], 'raw':raw, 'sha256':hashlib.sha256(raw.encode()).hexdigest(), 'inode':87, 'complete':True}
     if req['pid'] == 'changed': value['sha256'] = '0' * 64
     if req['pid'] == 'partial': value['complete'] = False
@@ -183,6 +186,17 @@ for line in sys.stdin:
     assert_eq!(review.inode(), 87);
     assert!(review.raw().contains("entire signed op bytes"));
     assert_eq!(review.sha256().len(), 64);
+    assert_eq!(
+        client
+            .pending_review_if_unchanged("/repo", &review)
+            .unwrap(),
+        review
+    );
+    let mutating = client.pending_review("/repo", "mutating").unwrap();
+    assert!(matches!(
+        client.pending_review_if_unchanged("/repo", &mutating),
+        Err(LoreError::Remote("pending_changed"))
+    ));
     for pid in ["changed", "partial", "swapped", "invalid"] {
         assert!(
             matches!(

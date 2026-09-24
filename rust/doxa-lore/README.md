@@ -10,11 +10,16 @@ prompts or credentials into terminal logs.
 
 Protocol v1 has `hello` with required `scrub` and `snapshot` capabilities and
 optional `pending`, `sync_state`, `refresh_interval`, `consult`, `beliefs`, and
-`evidence` readers. A future sidecar may advertise `pending_review_v1` to
+`evidence` readers. When LORE provides its same-descriptor pending snapshot
+API, the sidecar advertises `pending_review_v1` to
 return one complete raw UTF-8 proposal, its SHA-256 digest, inode, and an
 explicit completeness marker. The client checks the raw bytes against the
 digest, verifies the requested ID, and rejects partial or malformed replies.
-The currently shipped Python bridge does not advertise this capability.
+Its raw proposal is intentionally unsummarized and may contain secrets; it is
+sent only over the local pipe for a review screen and never logged. A request
+may include `expected: {sha256, inode}` to refuse a proposal changed since a
+previous review. Missing, oversized, malformed, or changed proposals fail
+without a partial response.
 Consult returns one active FTS belief labelled `cite_only`;
 belief and evidence pages contain at most 50 rows. Text is scrubbed before
 reply and truncated fields carry explicit markers. Pending rows

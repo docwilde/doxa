@@ -1,6 +1,7 @@
 """The Rust LORE sidecar wire must never echo untrusted exception text."""
 
 import io
+import hashlib
 import json
 import sqlite3
 import types
@@ -13,6 +14,66 @@ from doxa import lore_bridge
 @pytest.fixture(autouse=True)
 def no_optional_read_store(monkeypatch):
     monkeypatch.setattr(lore_bridge, "_read_ops", lambda: None)
+    monkeypatch.setattr(lore_bridge, "_pending_review_reader", lambda: None)
+
+
+def test_pending_review_v1_uses_lore_snapshot_and_rejects_changed_proposal(monkeypatch, tmp_path):
+    from lore_core import pending as pending_mod
+
+    pending_dir = tmp_path / "pending"
+    pending_dir.mkdir()
+    proposal = pending_dir / "one.json"
+    raw = b'{"scope":"project","project":"this","kind":"sync","op":{"payload":"all bytes"}}\n'
+    proposal.write_bytes(raw)
+    monkeypatch.setattr(pending_mod, "ROOT", tmp_path)
+    monkeypatch.setattr(lore_bridge, "_pending_review_reader",
+                        lambda: (tmp_path, pending_mod._pending_bytes_snapshot))
+    monkeypatch.setattr(lore_bridge, "_lore", lambda: (lambda text: text, lambda cwd, scope: ""))
+    monkeypatch.setattr(lore_bridge, "_extensions", lambda: (
+        lambda cwd: "this", lambda: None, lambda: [], (lambda text: text, lambda: None)))
+    requests = [
+        {"id": 1, "op": "pending_review_v1", "cwd": "/repo", "pid": "one"},
+        {"id": 2, "op": "pending_review_v1", "cwd": "/repo", "pid": "one",
+         "expected": {"sha256": "0" * 64, "inode": 1}},
+        {"id": 3, "op": "pending_review_v1", "cwd": "/repo", "pid": "../one"},
+    ]
+    output = io.BytesIO()
+    monkeypatch.setattr(lore_bridge.sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(
+        b"".join(map(lore_bridge._frame, requests)))))
+    monkeypatch.setattr(lore_bridge.sys, "stdout", types.SimpleNamespace(buffer=output))
+    lore_bridge.serve()
+    frames = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert "pending_review_v1" in frames[0]["capabilities"]
+    review = frames[1]["value"]
+    assert review == {"pid": "one", "raw": raw.decode(),
+                      "sha256": hashlib.sha256(raw).hexdigest(),
+                      "inode": proposal.stat().st_ino, "complete": True}
+    assert frames[2]["error"] == "pending_changed"
+    assert frames[3]["error"] == "invalid_request"
+    proposal.write_bytes(raw + b" ")
+    with pytest.raises(lore_bridge.PendingReviewError) as changed:
+        lore_bridge._pending_review("/repo", "one", lore_bridge._extensions(),
+                                    (tmp_path, pending_mod._pending_bytes_snapshot),
+                                    {"sha256": review["sha256"], "inode": review["inode"]})
+    assert changed.value.code == "pending_changed"
+
+
+def test_pending_review_v1_never_sends_partial_or_other_project(monkeypatch, tmp_path):
+    from lore_core import pending as pending_mod
+
+    pending_dir = tmp_path / "pending"
+    pending_dir.mkdir()
+    (pending_dir / "large.json").write_bytes(b"x" * (lore_bridge._MAX_REVIEW_RAW_BYTES + 1))
+    (pending_dir / "hidden.json").write_text('{"scope":"project","project":"other","secret":"never send"}')
+    monkeypatch.setattr(pending_mod, "ROOT", tmp_path)
+    reader = (tmp_path, pending_mod._pending_bytes_snapshot)
+    ext = (lambda cwd: "this", None, None, None)
+    with pytest.raises(lore_bridge.PendingReviewError) as large:
+        lore_bridge._pending_review("/repo", "large", ext, reader)
+    assert large.value.code == "pending_incomplete"
+    with pytest.raises(lore_bridge.PendingReviewError) as hidden:
+        lore_bridge._pending_review("/repo", "hidden", ext, reader)
+    assert hidden.value.code == "pending_unavailable"
 
 
 def test_sidecar_scrub_snapshot_and_generic_error(monkeypatch):
