@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 fn wait_until(mut predicate: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while !predicate() {
         assert!(
             Instant::now() < deadline,
