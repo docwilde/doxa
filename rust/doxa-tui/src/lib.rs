@@ -6,3 +6,5 @@ pub mod history;
 pub mod discovery;
 pub mod transport;
 pub mod ui;
+
+pub mod ui_state;

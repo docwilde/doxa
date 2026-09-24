@@ -1,10 +1,13 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
 use std::io::{self, IsTerminal, Stdout};
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{
@@ -22,6 +25,7 @@ use crate::markdown;
 
 const MIN_PANE_WIDTH: u16 = 28;
 const MIN_PANE_HEIGHT: u16 = 8;
+const MIN_RAIL_WIDTH: u16 = 12;
 const MAX_PENDING_PROMPTS: usize = 32;
 // JSON may expand one input byte to a six-byte Unicode escape.
 const MAX_INPUT_BYTES: usize = 10 * 1024;
@@ -203,6 +207,20 @@ pub enum Split {
     Vertical,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DragTarget {
+    Rail,
+    Pane(Split),
+}
+
+#[derive(Clone, Copy)]
+struct PaneLayout {
+    outer: Rect,
+    rail: Option<Rect>,
+    body: Rect,
+    panes: Option<[Rect; 2]>,
+}
+
 #[derive(Clone, Debug)]
 pub struct QuestionOption {
     pub label: String,
@@ -334,13 +352,15 @@ pub struct App {
     pub rail_selected: usize,
     pub focus: Focus,
     pub input: String,
+    input_drafts: HashMap<String, String>,
     pub pending_prompts: Vec<(String, String)>,
     pub input_requests: Vec<InputRequest>,
     pub pending_answers: Vec<(String, String, serde_json::Value)>,
-    pub rejected_drafts: Vec<String>,
+    pub rejected_drafts: HashMap<String, Vec<String>>,
     pub notice: String,
     pub should_quit: bool,
     pub size: Rect,
+    drag: Option<DragTarget>,
 }
 
 impl Default for App {
@@ -367,13 +387,15 @@ impl Default for App {
             rail_selected: 0,
             focus: Focus::Prompt,
             input: String::new(),
+            input_drafts: HashMap::new(),
             pending_prompts: Vec::new(),
             input_requests: Vec::new(),
             pending_answers: Vec::new(),
-            rejected_drafts: Vec::new(),
+            rejected_drafts: HashMap::new(),
             notice: "Disconnected · waiting for daemon".into(),
             should_quit: false,
             size: Rect::default(),
+            drag: None,
         }
     }
 }
@@ -426,11 +448,13 @@ impl App {
                         .unwrap_or("session"),
                 );
                 let cwd = safe_label(frame.get("cwd").and_then(|v| v.as_str()).unwrap_or(""));
+                let transcript = self.sessions.iter().find(|s| s.id == id)
+                    .map(|s| s.transcript.clone()).unwrap_or_default();
                 self.apply_update(DaemonUpdate::Upsert(Session {
                     id: id.into(),
                     title: model.clone(),
                     collection: cwd,
-                    transcript: String::new(),
+                    transcript,
                     status: "Connected".into(),
                 }));
                 self.notice = format!("Connected · {model}");
@@ -496,6 +520,7 @@ impl App {
                                 .iter()
                                 .any(|r| r.session_id == id && r.id == request.id)
                             {
+                                self.drag = None;
                                 self.input_requests.push(request);
                             }
                         } else {
@@ -557,6 +582,9 @@ impl App {
                 true
             }
             "client_notice" => {
+                if let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) {
+                    self.apply_update(DaemonUpdate::Status { id: id.into(), text: "Disconnected".into() });
+                }
                 self.notice = safe_label(
                     frame
                         .get("message")
@@ -606,10 +634,12 @@ impl App {
                 let Some(text) = frame.get("text").and_then(|v| v.as_str()) else {
                     return false;
                 };
-                if self.input.is_empty() {
+                let active = self.groups[self.active_group].active_id().unwrap_or("");
+                let target = frame.get("session_id").and_then(|v| v.as_str()).unwrap_or(active);
+                if self.input.is_empty() && target == active {
                     self.input = text.to_owned();
                 } else {
-                    self.rejected_drafts.push(text.to_owned());
+                    self.rejected_drafts.entry(target.into()).or_default().push(text.to_owned());
                 }
                 self.notice = format!(
                     "{} · draft retained{}",
@@ -619,7 +649,7 @@ impl App {
                             .and_then(|v| v.as_str())
                             .unwrap_or("Prompt refused")
                     ),
-                    if self.rejected_drafts.is_empty() {
+                    if self.rejected_drafts.get(target).is_none_or(Vec::is_empty) {
                         ""
                     } else {
                         " (Alt+Up to restore)"
@@ -631,7 +661,9 @@ impl App {
                 let Some(text) = frame.get("text").and_then(|v| v.as_str()) else {
                     return false;
                 };
-                self.rejected_drafts.push(text.to_owned());
+                let active = self.groups[self.active_group].active_id().unwrap_or("");
+                let target = frame.get("session_id").and_then(|v| v.as_str()).unwrap_or(active);
+                self.rejected_drafts.entry(target.into()).or_default().push(text.to_owned());
                 self.notice = format!(
                     "{} · check session before Alt+Up retry",
                     safe_label(
@@ -661,9 +693,11 @@ impl App {
     }
 
     pub fn handle(&mut self, event: Event) -> bool {
-        match event {
+        let before = self.groups[self.active_group].active_id().unwrap_or("").to_owned();
+        let changed = match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
+                self.drag = None;
                 true
             }
             Event::Key(key)
@@ -671,9 +705,15 @@ impl App {
             {
                 self.key(key)
             }
-            Event::Mouse(mouse) => self.mouse(mouse.kind),
+            Event::Mouse(mouse) => self.mouse(mouse),
             _ => false,
+        };
+        let after = self.groups[self.active_group].active_id().unwrap_or("").to_owned();
+        if before != after {
+            self.input_drafts.insert(before, std::mem::take(&mut self.input));
+            self.input = self.input_drafts.remove(&after).unwrap_or_default();
         }
+        changed
     }
 
     fn key(&mut self, key: KeyEvent) -> bool {
@@ -717,10 +757,11 @@ impl App {
                 true
             }
             KeyCode::Up if alt && self.focus == Focus::Prompt => {
-                if let Some(draft) = self.rejected_drafts.pop() {
+                let target = self.groups[self.active_group].active_id().unwrap_or("").to_owned();
+                if let Some(draft) = self.rejected_drafts.get_mut(&target).and_then(Vec::pop) {
                     let current = std::mem::replace(&mut self.input, draft);
                     if !current.is_empty() {
-                        self.rejected_drafts.push(current);
+                        self.rejected_drafts.entry(target).or_default().push(current);
                     }
                     true
                 } else {
@@ -995,8 +1036,183 @@ impl App {
         p.scroll = 0;
     }
 
-    fn mouse(&mut self, kind: MouseEventKind) -> bool {
-        match kind {
+    fn layout(&self, area: Rect) -> PaneLayout {
+        let outer = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(3), Constraint::Length(1)])
+            .split(area);
+        let min_body = if self.split == Split::Vertical {
+            MIN_PANE_WIDTH * 2
+        } else {
+            MIN_PANE_WIDTH
+        };
+        let rail_width = if self.rail_visible && outer[0].width >= 70 {
+            self.rail_width
+                .clamp(MIN_RAIL_WIDTH, outer[0].width.saturating_sub(min_body).max(MIN_RAIL_WIDTH))
+        } else {
+            0
+        };
+        let (rail, body) = if rail_width > 0 {
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(rail_width), Constraint::Min(1)])
+                .split(outer[0]);
+            (Some(chunks[0]), chunks[1])
+        } else {
+            (None, outer[0])
+        };
+        let min_ok = if self.split == Split::Vertical {
+            body.width >= MIN_PANE_WIDTH * 2
+        } else {
+            body.height >= MIN_PANE_HEIGHT * 2
+        };
+        let panes = min_ok.then(|| {
+            let desired = self.pane_rects(body, self.split_percent);
+            let minimum = if self.split == Split::Vertical {
+                MIN_PANE_WIDTH
+            } else {
+                MIN_PANE_HEIGHT
+            };
+            let size = |rect: Rect| {
+                if self.split == Split::Vertical {
+                    rect.width
+                } else {
+                    rect.height
+                }
+            };
+            if size(desired[0]) >= minimum && size(desired[1]) >= minimum {
+                desired
+            } else {
+                (0..=100)
+                    .map(|percent| self.pane_rects(body, percent))
+                    .filter(|pair| size(pair[0]) >= minimum && size(pair[1]) >= minimum)
+                    .min_by_key(|pair| size(pair[0]).abs_diff(size(desired[0])))
+                    .unwrap_or(desired)
+            }
+        });
+        PaneLayout {
+            outer: outer[0],
+            rail,
+            body,
+            panes,
+        }
+    }
+
+    fn pane_rects(&self, body: Rect, percent: u16) -> [Rect; 2] {
+        let direction = if self.split == Split::Vertical {
+            Direction::Horizontal
+        } else {
+            Direction::Vertical
+        };
+        let chunks = Layout::default()
+            .direction(direction)
+            .constraints([
+                Constraint::Percentage(percent),
+                Constraint::Percentage(100 - percent),
+            ])
+            .split(body);
+        [chunks[0], chunks[1]]
+    }
+
+    fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.active_request_index().is_some() {
+            self.drag = None;
+            return false;
+        }
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.drag = None;
+                if self.size.width < 20 || self.size.height < 5 {
+                    return false;
+                }
+                let layout = self.layout(self.size);
+                let in_outer = mouse.row >= layout.outer.y && mouse.row < layout.outer.bottom();
+                if in_outer && layout.rail.is_some_and(|rail| {
+                    mouse.column == rail.right().saturating_sub(1)
+                        || mouse.column == layout.body.x
+                }) {
+                    self.drag = Some(DragTarget::Rail);
+                } else if let Some([first, second]) = layout.panes {
+                    let on_divider = if self.split == Split::Vertical {
+                        mouse.row >= layout.body.y && mouse.row < layout.body.bottom()
+                            && (mouse.column == first.right().saturating_sub(1)
+                                || mouse.column == second.x)
+                    } else {
+                        mouse.column >= layout.body.x && mouse.column < layout.body.right()
+                            && (mouse.row == first.bottom().saturating_sub(1)
+                                || mouse.row == second.y)
+                    };
+                    if on_divider {
+                        self.drag = Some(DragTarget::Pane(self.split));
+                    }
+                }
+                self.drag.is_some()
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(target) = self.drag else {
+                    return false;
+                };
+                let layout = self.layout(self.size);
+                match target {
+                    DragTarget::Rail if layout.rail.is_some() => {
+                        let min_body = if self.split == Split::Vertical {
+                            MIN_PANE_WIDTH * 2
+                        } else {
+                            MIN_PANE_WIDTH
+                        };
+                        let max = layout.outer.width.saturating_sub(min_body);
+                        self.rail_width = mouse
+                            .column
+                            .saturating_sub(layout.outer.x)
+                            .clamp(MIN_RAIL_WIDTH, max.max(MIN_RAIL_WIDTH));
+                    }
+                    DragTarget::Pane(split) if split == self.split && layout.panes.is_some() => {
+                        let (axis, length, minimum) = if split == Split::Vertical {
+                            (
+                                mouse.column.saturating_sub(layout.body.x),
+                                layout.body.width,
+                                MIN_PANE_WIDTH,
+                            )
+                        } else {
+                            (
+                                mouse.row.saturating_sub(layout.body.y),
+                                layout.body.height,
+                                MIN_PANE_HEIGHT,
+                            )
+                        };
+                        let wanted = axis.clamp(minimum, length.saturating_sub(minimum));
+                        // Match ratatui's percentage rounding while keeping both panes usable.
+                        self.split_percent = (0..=100)
+                            .filter(|&percent| {
+                                let pair = self.pane_rects(layout.body, percent);
+                                let first = if split == Split::Vertical {
+                                    pair[0].width
+                                } else {
+                                    pair[0].height
+                                };
+                                let second = if split == Split::Vertical {
+                                    pair[1].width
+                                } else {
+                                    pair[1].height
+                                };
+                                first >= minimum && second >= minimum
+                            })
+                            .min_by_key(|&percent| {
+                                let pair = self.pane_rects(layout.body, percent);
+                                let first = if split == Split::Vertical {
+                                    pair[0].width
+                                } else {
+                                    pair[0].height
+                                };
+                                first.abs_diff(wanted)
+                            })
+                            .unwrap_or(self.split_percent);
+                    }
+                    _ => self.drag = None,
+                }
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) => self.drag.take().is_some(),
             MouseEventKind::ScrollUp => {
                 let p = &mut self.groups[self.active_group];
                 p.scroll = p.scroll.saturating_add(3);
@@ -1025,44 +1241,15 @@ impl App {
                 Constraint::Length(1),
             ])
             .split(area);
-        let rail_width = if self.rail_visible && outer[0].width >= 70 {
-            self.rail_width
-                .min(outer[0].width.saturating_sub(MIN_PANE_WIDTH))
-        } else {
-            0
-        };
-        let body = if rail_width > 0 {
-            let chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(rail_width), Constraint::Min(1)])
-                .split(outer[0]);
-            self.draw_rail(frame, chunks[0]);
-            chunks[1]
-        } else {
-            outer[0]
-        };
-        let vertical = self.split == Split::Vertical;
-        let min_ok = if vertical {
-            body.width >= MIN_PANE_WIDTH * 2
-        } else {
-            body.height >= MIN_PANE_HEIGHT * 2
-        };
-        if min_ok {
-            let panes = Layout::default()
-                .direction(if vertical {
-                    Direction::Horizontal
-                } else {
-                    Direction::Vertical
-                })
-                .constraints([
-                    Constraint::Percentage(self.split_percent),
-                    Constraint::Percentage(100 - self.split_percent),
-                ])
-                .split(body);
+        let layout = self.layout(area);
+        if let Some(rail) = layout.rail {
+            self.draw_rail(frame, rail);
+        }
+        if let Some(panes) = layout.panes {
             self.draw_group(frame, panes[0], 0);
             self.draw_group(frame, panes[1], 1);
         } else {
-            self.draw_group(frame, body, self.active_group);
+            self.draw_group(frame, layout.body, self.active_group);
         }
         let prompt_title = if self.focus == Focus::Prompt {
             " Prompt ● "
@@ -1076,7 +1263,7 @@ impl App {
         );
         frame.render_widget(
             Paragraph::new(format!(
-                "{}  |  F3 rail · Shift+Tab pane · Alt+H/V split · Alt+arrows resize · Ctrl+Q quit",
+                "{}  |  F3 rail · Shift+Tab pane · Alt+H/V split · Alt+arrows/drag border resize · Ctrl+Q quit",
                 self.notice
             )),
             outer[2],
@@ -1330,7 +1517,7 @@ pub fn run() -> io::Result<()> {
 /// Drive the terminal with decoded daemon frames supplied by a reader thread.
 /// Transport can be connected without changing terminal ownership or drawing.
 pub fn run_with_frames(receiver: Receiver<serde_json::Value>) -> io::Result<()> {
-    run_loop(receiver, None)
+    run_loop(receiver, None, None)
 }
 
 /// Connect the UI to a transport reader and writer without blocking input.
@@ -1339,12 +1526,34 @@ pub fn run_with_channels(
     frames: Receiver<serde_json::Value>,
     prompts: SyncSender<crate::bridge::WorkerCommand>,
 ) -> io::Result<()> {
-    run_loop(frames, Some(prompts))
+    run_loop(frames, Some(prompts), None)
+}
+
+/// Drive a multi-session transport with a complete live-ID roster and a
+/// tabset store. The store writes only when layout state changes.
+pub fn run_with_channels_state(
+    frames: Receiver<serde_json::Value>,
+    prompts: SyncSender<crate::bridge::WorkerCommand>,
+    store: crate::ui_state::UiStateStore,
+    live_ids: Vec<String>,
+) -> io::Result<()> {
+    run_with_channels_state_guarded(frames, prompts, store, live_ids, Arc::new(Mutex::new(true)))
+}
+
+pub fn run_with_channels_state_guarded(
+    frames: Receiver<serde_json::Value>,
+    prompts: SyncSender<crate::bridge::WorkerCommand>,
+    store: crate::ui_state::UiStateStore,
+    live_ids: Vec<String>,
+    complete_roster: Arc<Mutex<bool>>,
+) -> io::Result<()> {
+    run_loop(frames, Some(prompts), Some((store, live_ids, complete_roster)))
 }
 
 fn run_loop(
     receiver: Receiver<serde_json::Value>,
     mut prompt_sender: Option<SyncSender<crate::bridge::WorkerCommand>>,
+    mut state: Option<(crate::ui_state::UiStateStore, Vec<String>, Arc<Mutex<bool>>)>,
 ) -> io::Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(io::Error::new(
@@ -1360,6 +1569,10 @@ fn run_loop(
             .map(|s| Rect::new(0, 0, s.width, s.height))?,
         ..Default::default()
     };
+    if let Some((store, live_ids, _)) = &state {
+        store.restore(&mut app, live_ids);
+    }
+    let mut saved_layout = crate::ui_state::LayoutSignature::capture(&app);
     terminal.draw(|frame| app.draw(frame))?;
     while !app.should_quit {
         let mut changed = false;
@@ -1382,6 +1595,17 @@ fn run_loop(
             }
         }
         if changed {
+            let layout = crate::ui_state::LayoutSignature::capture(&app);
+            if layout != saved_layout {
+                if let Some((store, _, complete)) = &mut state {
+                    match store.save_if_complete(&app, complete) {
+                        Ok(true) => {}
+                        Ok(false) => app.notice = "Layout save skipped · live roster incomplete".into(),
+                        Err(error) => app.notice = format!("Layout save skipped · {}", safe_label(&error.to_string())),
+                    }
+                }
+                saved_layout = layout;
+            }
             terminal.draw(|frame| app.draw(frame))?;
         }
     }
@@ -1492,10 +1716,10 @@ mod tests {
             &json!({"type":"prompt_rejected", "text":"old prompt", "message":"queue full"}),
         );
         assert_eq!(app.input, "new draft");
-        assert_eq!(app.rejected_drafts, ["old prompt"]);
+        assert_eq!(app.rejected_drafts[""], ["old prompt"]);
         app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)));
         assert_eq!(app.input, "old prompt");
-        assert_eq!(app.rejected_drafts, ["new draft"]);
+        assert_eq!(app.rejected_drafts[""], ["new draft"]);
     }
 
     #[test]
@@ -1504,9 +1728,28 @@ mod tests {
         app.apply_daemon_frame(&json!({"type":"prompt_uncertain", "text":"possibly sent",
             "message":"Prompt delivery unconfirmed"}));
         assert!(app.input.is_empty());
-        assert_eq!(app.rejected_drafts, ["possibly sent"]);
+        assert_eq!(app.rejected_drafts[""], ["possibly sent"]);
         assert!(app.notice.contains("check session"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)));
         assert_eq!(app.input, "possibly sent");
+    }
+
+    #[test]
+    fn background_session_rejection_does_not_replace_active_draft() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("a".into());
+        app.groups[1].tabs.push("b".into());
+        app.input = "draft for a".into();
+        app.apply_daemon_frame(&json!({"type":"prompt_rejected", "session_id":"b",
+            "text":"draft for b", "message":"queue full"}));
+        assert_eq!(app.input, "draft for a");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)));
+        assert_eq!(app.input, "draft for a");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        assert!(app.input.is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)));
+        assert_eq!(app.input, "draft for b");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        assert_eq!(app.input, "draft for a");
     }
 }

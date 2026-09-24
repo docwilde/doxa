@@ -118,6 +118,19 @@ installer tracks `main` by default; replace the final `sh` with
 release. Provider CLIs can be installed and signed in later. DOXA is not on
 PyPI.
 
+To compile and install the experimental Rust frontend separately, run:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/rust/2.0/scripts/install.sh | sh -s -- --rust rust/2.0
+```
+
+`--rust` defaults to the `rust/2.0` branch; an optional branch, tag, or commit
+SHA selects another ref. It requires Git and Cargo, builds a release binary,
+and installs `doxa-rs` in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). If the ref
+contains a native Rust daemon, the installer also installs it as
+`doxa-daemon-rs`. The supported Python `doxa` command is left untouched.
+The Rust frontend is a preview and currently needs an existing DOXA daemon.
+
 From a checkout:
 
 ```sh

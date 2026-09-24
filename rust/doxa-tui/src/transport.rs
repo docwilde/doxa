@@ -1,6 +1,7 @@
 //! Bounded line-JSON client for the DOXA session daemon.
 
 use serde_json::{json, Map, Value};
+use doxa_protocol::{Direction, WireError};
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -10,8 +11,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub const PROTOCOL_NAME: &str = "doxa-daemon";
-pub const PROTOCOL_VERSION: u64 = 1;
-pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+pub use doxa_protocol::{MAX_FRAME_BYTES, PROTOCOL_VERSION};
 const MAX_QUEUED_FRAMES: usize = 1024;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -156,11 +156,7 @@ impl DaemonClient {
     }
 
     fn write_json(&mut self, frame: &Value) -> Result<(), TransportError> {
-        let mut bytes = serde_json::to_vec(frame).map_err(|_| TransportError::Malformed("cannot encode request"))?;
-        bytes.push(b'\n');
-        if bytes.len() > MAX_FRAME_BYTES {
-            return Err(TransportError::FrameTooLarge);
-        }
+        let bytes = doxa_protocol::encode_line(frame, Direction::ClientToServer).map_err(map_wire_error)?;
         self.writer.write_all(&bytes)?;
         Ok(())
     }
@@ -247,40 +243,21 @@ fn validate_hello(frame: &Value) -> Result<(), TransportError> {
     if frame["type"] != "hello" {
         return Err(TransportError::Malformed("expected hello"));
     }
-    let version = frame["proto"].as_u64().ok_or(TransportError::Malformed("missing protocol version"))?;
-    if version != PROTOCOL_VERSION {
-        return Err(TransportError::ProtocolVersion(version));
-    }
-    nonempty_string(frame, "session_id")?;
-    nonempty_string(frame, "cwd")?;
-    frame["next_seq"].as_u64().ok_or(TransportError::Malformed("missing next_seq"))?;
-    for field in ["model", "engine"] {
-        if !frame[field].is_null() && frame[field].as_str().is_none() {
-            return Err(TransportError::Malformed("invalid session field"));
-        }
-    }
-    Ok(())
+    doxa_protocol::validate(frame, Direction::ServerToClient).map_err(map_wire_error)
 }
 
 fn validate_frame(frame: &Value) -> Result<(), TransportError> {
-    match frame["type"].as_str() {
-        Some("event") => {
-            frame["seq"].as_u64().ok_or(TransportError::Malformed("missing event seq"))?;
-            if !frame["turn"].is_null() && frame["turn"].as_str().is_none() {
-                return Err(TransportError::Malformed("invalid event turn"));
-            }
-            nonempty_string(&frame["event"], "type")?;
-            frame["event"]["data"].as_object().ok_or(TransportError::Malformed("missing event data"))?;
-        }
-        Some("reply") => {
-            frame["id"].as_u64().ok_or(TransportError::Malformed("missing reply id"))?;
-            frame["ok"].as_bool().ok_or(TransportError::Malformed("missing reply ok"))?;
-        }
-        _ => return Err(TransportError::Malformed("unknown frame type")),
-    }
-    Ok(())
+    if frame["type"] == "hello" { return Err(TransportError::Malformed("unexpected hello")); }
+    doxa_protocol::validate(frame, Direction::ServerToClient).map_err(map_wire_error)
 }
 
-fn nonempty_string<'a>(frame: &'a Value, key: &'static str) -> Result<&'a str, TransportError> {
-    frame[key].as_str().filter(|s| !s.is_empty()).ok_or(TransportError::Malformed(key))
+fn map_wire_error(error: WireError) -> TransportError {
+    match error {
+        WireError::FrameTooLarge => TransportError::FrameTooLarge,
+        WireError::UnsupportedVersion(version) => TransportError::ProtocolVersion(version),
+        WireError::InvalidField(field) => TransportError::Malformed(field),
+        WireError::InvalidJson => TransportError::Malformed("invalid JSON"),
+        WireError::IncompleteFrame => TransportError::Malformed("unterminated frame"),
+        WireError::UnknownType => TransportError::Malformed("unknown frame type"),
+    }
 }
