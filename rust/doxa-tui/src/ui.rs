@@ -1717,7 +1717,7 @@ mod tests {
         assert_ne!(saved, crate::ui_state::LayoutSignature::capture(&app));
         assert!(!store.path().exists());
         *complete.lock().unwrap() = true;
-        assert!(save_layout_if_changed(&mut app, &mut store, &complete, &mut saved));
+        assert!(save_layout_if_changed(&mut app, &mut store, &complete, &mut saved), "{}", app.notice);
         assert_eq!(saved, crate::ui_state::LayoutSignature::capture(&app));
         assert!(app.notice.is_empty());
         let written: serde_json::Value = serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
@@ -1733,11 +1733,13 @@ mod tests {
         let mut saved = crate::ui_state::LayoutSignature::capture(&app);
         app.rail_width = 33;
         std::fs::create_dir_all(store.path()).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(store.path().parent().unwrap(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let complete = Mutex::new(true);
         assert!(save_layout_if_changed(&mut app, &mut store, &complete, &mut saved));
         assert_ne!(saved, crate::ui_state::LayoutSignature::capture(&app));
         std::fs::remove_dir(store.path()).unwrap();
-        assert!(save_layout_if_changed(&mut app, &mut store, &complete, &mut saved));
+        assert!(save_layout_if_changed(&mut app, &mut store, &complete, &mut saved), "{}", app.notice);
         assert_eq!(saved, crate::ui_state::LayoutSignature::capture(&app));
         assert!(app.notice.is_empty());
         let written: serde_json::Value = serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
