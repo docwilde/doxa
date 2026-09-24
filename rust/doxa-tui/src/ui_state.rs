@@ -237,7 +237,7 @@ fn supported_layout(raw: &serde_json::Map<String, Value>) -> bool {
     if let Some(trees) = layout.get("trees").and_then(Value::as_array) {
         // The old tree format can have one split tree for the active tab.
         // Nested or multi-way geometry cannot be represented by this UI.
-        return trees.iter().all(|tree| supported_legacy_tree(tree));
+        return trees.iter().all(supported_legacy_tree);
     }
     true
 }

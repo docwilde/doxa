@@ -23,6 +23,9 @@ use ratatui::{Frame, Terminal};
 
 use crate::markdown;
 
+mod tool_cards;
+use tool_cards::ToolCards;
+
 const MIN_PANE_WIDTH: u16 = 28;
 const MIN_PANE_HEIGHT: u16 = 8;
 const MIN_RAIL_WIDTH: u16 = 12;
@@ -359,6 +362,10 @@ pub struct App {
     pub input_requests: Vec<InputRequest>,
     pub pending_answers: Vec<(String, String, serde_json::Value)>,
     pub rejected_drafts: HashMap<String, Vec<String>>,
+    tool_cards: ToolCards,
+    tool_modal: bool,
+    tool_selected: usize,
+    tool_scroll: u16,
     pub notice: String,
     pub should_quit: bool,
     pub size: Rect,
@@ -394,6 +401,10 @@ impl Default for App {
             input_requests: Vec::new(),
             pending_answers: Vec::new(),
             rejected_drafts: HashMap::new(),
+            tool_cards: ToolCards::default(),
+            tool_modal: false,
+            tool_selected: 0,
+            tool_scroll: 0,
             notice: "Disconnected · waiting for daemon".into(),
             should_quit: false,
             size: Rect::default(),
@@ -480,6 +491,9 @@ impl App {
                 let Some(id) = id.map(str::to_owned) else {
                     return false;
                 };
+                if self.sessions.iter().any(|session| session.id == id) {
+                    self.tool_cards.record(&id, event_type, data);
+                }
                 match event_type {
                     "text_delta" => {
                         let Some(text) = data.get("text").and_then(|v| v.as_str()) else {
@@ -523,6 +537,7 @@ impl App {
                                 .any(|r| r.session_id == id && r.id == request.id)
                             {
                                 self.drag = None;
+                                self.tool_modal = false;
                                 self.input_requests.push(request);
                             }
                         } else {
@@ -731,6 +746,15 @@ impl App {
         if self.active_request_index().is_some() {
             return self.request_key(key);
         }
+        if self.tool_modal {
+            return self.tool_key(key);
+        }
+        if key.code == KeyCode::Char('t') && ctrl {
+            self.tool_modal = true;
+            self.tool_scroll = 0;
+            self.tool_selected = self.active_tool_cards().len().saturating_sub(1);
+            return true;
+        }
         match key.code {
             KeyCode::F(3) => {
                 self.rail_visible = !self.rail_visible;
@@ -846,6 +870,34 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    fn active_tool_cards(&self) -> &[tool_cards::ToolCard] {
+        self.groups[self.active_group]
+            .active_id()
+            .map(|id| self.tool_cards.for_session(id))
+            .unwrap_or(&[])
+    }
+
+    fn tool_key(&mut self, key: KeyEvent) -> bool {
+        let count = self.active_tool_cards().len();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('t') if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.tool_modal = false;
+            }
+            KeyCode::Up => {
+                self.tool_selected = self.tool_selected.saturating_sub(1);
+                self.tool_scroll = 0;
+            }
+            KeyCode::Down => {
+                self.tool_selected = (self.tool_selected + 1).min(count.saturating_sub(1));
+                self.tool_scroll = 0;
+            }
+            KeyCode::PageUp => self.tool_scroll = self.tool_scroll.saturating_sub(10),
+            KeyCode::PageDown => self.tool_scroll = self.tool_scroll.saturating_add(10),
+            _ => return false,
+        }
+        true
     }
 
     fn active_request_index(&self) -> Option<usize> {
@@ -1120,7 +1172,7 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
-        if self.active_request_index().is_some() {
+        if self.active_request_index().is_some() || self.tool_modal {
             self.drag = None;
             return false;
         }
@@ -1268,12 +1320,53 @@ impl App {
         );
         frame.render_widget(
             Paragraph::new(format!(
-                "{}  |  F3 rail · Shift+Tab pane · Alt+H/V split · Alt+arrows/drag border resize · Ctrl+Q quit",
+                "{}  |  F3 rail · Shift+Tab pane · Ctrl+T tools · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
                 self.notice
             )),
             outer[2],
         );
+        self.draw_tool_cards(frame, area);
         self.draw_request(frame, area);
+    }
+
+    fn draw_tool_cards(&self, frame: &mut Frame, area: Rect) {
+        if !self.tool_modal { return; }
+        let width = area.width.saturating_sub(4).min(100);
+        let height = area.height.saturating_sub(4).min(28);
+        if width < 24 || height < 7 { return; }
+        let modal = Rect::new(area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2, width, height);
+        let cards = self.active_tool_cards();
+        let mut body = String::new();
+        if cards.is_empty() {
+            body.push_str("No tool activity in this session.");
+        } else {
+            let selected = self.tool_selected.min(cards.len() - 1);
+            let start = selected.saturating_sub(7).min(cards.len().saturating_sub(8));
+            for (index, card) in cards.iter().enumerate().skip(start).take(8) {
+                body.push_str(if index == selected { "▸ " } else { "  " });
+                body.push_str(&format!("{} · {}\n", card.name, card.status()));
+            }
+            let card = &cards[selected];
+            body.push_str("\nTool: ");
+            body.push_str(&card.name);
+            if let Some(parent) = &card.parent_id {
+                body.push_str("\nParent: ");
+                body.push_str(parent);
+            }
+            body.push_str("\nStatus: ");
+            body.push_str(&card.status());
+            body.push_str("\n\nInput:\n");
+            body.push_str(card.input.as_deref().unwrap_or("(unavailable)"));
+            body.push_str("\n\nResult:\n");
+            body.push_str(card.result.as_deref().unwrap_or("(pending)"));
+        }
+        frame.render_widget(Clear, modal);
+        frame.render_widget(Paragraph::new(body)
+            .wrap(Wrap { trim: false })
+            .scroll((self.tool_scroll, 0))
+            .block(Block::default().title(" Tool activity · ↑/↓ select · PgUp/PgDn scroll · Esc close ")
+                .borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan))), modal);
     }
 
     fn draw_request(&self, frame: &mut Frame, area: Rect) {
@@ -1739,8 +1832,7 @@ mod tests {
             assert!(window.len() <= u16::MAX as usize);
             assert_eq!(window[usize::from(offset)].to_string(), (69_992 - scroll).to_string());
         }
-        let mut app = App::default();
-        app.focus = Focus::Transcript;
+        let mut app = App { focus: Focus::Transcript, ..Default::default() };
         app.groups[0].scroll = usize::from(u16::MAX);
         assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))));
         assert_eq!(app.groups[0].scroll, usize::from(u16::MAX) + 5);

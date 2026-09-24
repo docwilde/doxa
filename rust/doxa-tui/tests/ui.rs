@@ -152,6 +152,31 @@ fn daemon_frames_update_visible_session() {
 }
 
 #[test]
+fn tool_activity_modal_tracks_call_result_and_blocks_layout_mouse() {
+    let mut app = App::default();
+    app.handle(Event::Resize(100, 35));
+    app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"sol"}));
+    app.apply_daemon_frame(&json!({"type":"event", "session_id":"one", "event":{
+        "type":"tool_call", "data":{"id":"call-1", "name":"Read", "input":{"file_path":"a.rs"}}
+    }}));
+    app.apply_daemon_frame(&json!({"type":"event", "session_id":"one", "event":{
+        "type":"tool_result", "data":{"id":"call-1", "name":"Read", "result_summary":"ok",
+            "is_error":false, "duration_ms":15}
+    }}));
+    assert!(app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL)));
+    let visible = screen(&app, 100, 35);
+    assert!(visible.contains("Tool activity"));
+    assert!(visible.contains("a.rs"));
+    assert!(visible.contains("finished"));
+    let width = app.rail_width;
+    assert!(!app.handle(mouse(MouseEventKind::Down(MouseButton::Left), width, 5)));
+    assert!(!app.handle(mouse(MouseEventKind::Drag(MouseButton::Left), 45, 5)));
+    assert_eq!(app.rail_width, width);
+    assert!(app.handle(key(KeyCode::Esc, KeyModifiers::NONE)));
+    assert!(!screen(&app, 100, 35).contains("Tool activity · ↑/↓"));
+}
+
+#[test]
 fn daemon_labels_and_errors_cannot_emit_terminal_controls() {
     let mut app = App::default();
     app.apply_daemon_frame(

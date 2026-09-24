@@ -122,7 +122,7 @@ fn stats(values: &[f64]) -> Value {
     sorted.sort_by(|a, b| a.total_cmp(b));
     let n = sorted.len();
     if n == 0 { return json!({"n":0}); }
-    let median = if n % 2 == 0 { (sorted[n/2 - 1] + sorted[n/2]) / 2.0 } else { sorted[n/2] };
+    let median = if n.is_multiple_of(2) { (sorted[n/2 - 1] + sorted[n/2]) / 2.0 } else { sorted[n/2] };
     json!({"n":n, "p50_ms":median, "p95_ms":sorted[(n*95/100).min(n-1)],
         "min_ms":sorted[0], "max_ms":sorted[n-1]})
 }
