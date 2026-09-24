@@ -609,7 +609,10 @@ impl App {
                     .iter_mut()
                     .find(|r| r.session_id == session && r.id == id)
                 {
-                    if !ok && !uncertain {
+                    // An AskUser answer stays on its final question until the
+                    // daemon confirms delivery. A refused or unconfirmed send
+                    // must leave that selection available for a manual retry.
+                    if !ok && (!uncertain || request.kind == "ask_user") {
                         request.sending = false;
                     }
                 }
@@ -975,13 +978,13 @@ impl App {
         request
             .answers
             .insert(question.question.clone(), serde_json::Value::String(choice));
-        request.step += 1;
-        request.selected = 1;
-        request.scroll = 0;
-        if request.step < request.questions.len() {
-            None
-        } else {
+        if request.step + 1 == request.questions.len() {
             Some(serde_json::json!({"answers": request.answers}))
+        } else {
+            request.step += 1;
+            request.selected = 1;
+            request.scroll = 0;
+            None
         }
     }
 
@@ -1594,24 +1597,46 @@ fn run_loop(
                 changed = true;
             }
         }
+        // Retry an unsaved layout on later ticks, including ticks with no new
+        // UI event (for example when the live roster becomes complete).
+        if let Some((store, _, complete)) = &mut state {
+            changed |= save_layout_if_changed(&mut app, store, complete, &mut saved_layout);
+        } else {
+            saved_layout = crate::ui_state::LayoutSignature::capture(&app);
+        }
         if changed {
-            let layout = crate::ui_state::LayoutSignature::capture(&app);
-            if layout != saved_layout {
-                if let Some((store, _, complete)) = &mut state {
-                    match store.save_if_complete(&app, complete) {
-                        Ok(true) => {}
-                        Ok(false) => app.notice = "Layout save skipped · live roster incomplete".into(),
-                        Err(error) => app.notice = format!("Layout save skipped · {}", safe_label(&error.to_string())),
-                    }
-                }
-                saved_layout = layout;
-            }
             terminal.draw(|frame| app.draw(frame))?;
         }
     }
     drop(terminal);
     drop(guard);
     Ok(())
+}
+
+fn save_layout_if_changed(
+    app: &mut App,
+    store: &mut crate::ui_state::UiStateStore,
+    complete: &Mutex<bool>,
+    saved_layout: &mut crate::ui_state::LayoutSignature,
+) -> bool {
+    let layout = crate::ui_state::LayoutSignature::capture(app);
+    if layout == *saved_layout {
+        return false;
+    }
+    let notice = match store.save_if_complete(app, complete) {
+        Ok(true) => {
+            *saved_layout = layout;
+            return false;
+        }
+        Ok(false) => "Layout save skipped · live roster incomplete".into(),
+        Err(error) => format!("Layout save skipped · {}", safe_label(&error.to_string())),
+    };
+    if app.notice == notice {
+        false
+    } else {
+        app.notice = notice;
+        true
+    }
 }
 
 /// Move only as many prompts as the bounded worker queue can accept, keeping
@@ -1674,6 +1699,44 @@ fn dispatch_answers(app: &mut App, sender: &SyncSender<crate::bridge::WorkerComm
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn incomplete_roster_retries_unchanged_layout_after_gate_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = crate::ui_state::UiStateStore::new(dir.path(), "/repo", "machine").unwrap();
+        let mut app = App::default();
+        app.groups[0].tabs.push("one".into());
+        let mut saved = crate::ui_state::LayoutSignature::capture(&app);
+        app.rail_width = 32;
+        let complete = Mutex::new(false);
+        assert!(save_layout_if_changed(&mut app, &mut store, &complete, &mut saved));
+        assert_ne!(saved, crate::ui_state::LayoutSignature::capture(&app));
+        assert!(!store.path().exists());
+        *complete.lock().unwrap() = true;
+        assert!(!save_layout_if_changed(&mut app, &mut store, &complete, &mut saved));
+        assert_eq!(saved, crate::ui_state::LayoutSignature::capture(&app));
+        let written: serde_json::Value = serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(written["rust_ui"]["rail_width"], 32);
+    }
+
+    #[test]
+    fn failed_layout_write_keeps_signature_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = crate::ui_state::UiStateStore::new(dir.path(), "/repo", "machine").unwrap();
+        let mut app = App::default();
+        app.groups[0].tabs.push("one".into());
+        let mut saved = crate::ui_state::LayoutSignature::capture(&app);
+        app.rail_width = 33;
+        std::fs::create_dir_all(store.path()).unwrap();
+        let complete = Mutex::new(true);
+        assert!(save_layout_if_changed(&mut app, &mut store, &complete, &mut saved));
+        assert_ne!(saved, crate::ui_state::LayoutSignature::capture(&app));
+        std::fs::remove_dir(store.path()).unwrap();
+        assert!(!save_layout_if_changed(&mut app, &mut store, &complete, &mut saved));
+        assert_eq!(saved, crate::ui_state::LayoutSignature::capture(&app));
+        let written: serde_json::Value = serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(written["rust_ui"]["rail_width"], 33);
+    }
 
     #[test]
     fn full_worker_queue_keeps_prompts_in_order() {
