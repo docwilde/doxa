@@ -41,6 +41,30 @@ fn finish(path: PathBuf, task: thread::JoinHandle<()>) {
 }
 
 #[test]
+fn persisted_snapshot_attaches_at_hello_head_without_ring_replay() {
+    let transcript = std::env::temp_dir().join(format!(
+        "doxa-rust-transcript-{}-{}.jsonl", std::process::id(), NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&transcript, b"{\"type\":\"user\",\"message\":{\"content\":\"saved\"}}\n").unwrap();
+    let len = std::fs::metadata(&transcript).unwrap().len();
+    let server_path = transcript.clone();
+    let (path, task) = socket(move |mut stream| {
+        send(&mut stream, json!({"type":"hello","proto":1,"session_id":"session-1",
+            "cwd":"/tmp","model":null,"engine":"doxa","next_seq":700,
+            "transcript_path":server_path,"transcript_bytes":len}));
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        assert_eq!(line(&mut reader), json!({"type":"attach","cursor":700}));
+        send(&mut stream, json!({"type":"event","seq":700,"turn":null,
+            "event":{"type":"text_delta","data":{"text":"live"}}}));
+    });
+    let (mut client, snapshot) = DaemonClient::connect_for_restore(&path).unwrap();
+    assert!(String::from_utf8(snapshot.unwrap().bytes).unwrap().contains("saved"));
+    assert_eq!(client.next_frame().unwrap()["event"]["data"]["text"], "live");
+    finish(path, task);
+    std::fs::remove_file(transcript).unwrap();
+}
+
+#[test]
 fn handshake_attach_replay_and_eof() {
     let (path, task) = socket(|mut stream| {
         hello(&mut stream);

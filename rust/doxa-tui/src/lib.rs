@@ -2,5 +2,6 @@
 
 pub mod markdown;
 pub mod bridge;
+pub mod history;
 pub mod transport;
 pub mod ui;
