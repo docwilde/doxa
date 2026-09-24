@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 MAX_FRAME = 64 * 1024
 PROTOCOL = "doxa-claude-sidecar"
 VERSION = 1
+EOF_FINALIZE_TIMEOUT = 5.0
 
 
 def validate_identity(session_id: str | None, resume: str | None) -> tuple[str | None, str | None]:
@@ -65,7 +66,11 @@ async def run() -> None:
             async for event in engine.send(prompt):
                 emit({"type": "event", "event": event.type, "data": event.data})
         except asyncio.CancelledError:
-            emit({"type": "event", "event": "turn_interrupted", "data": {}})
+            try:
+                emit({"type": "event", "event": "turn_interrupted", "data": {}})
+            except OSError:
+                # The parent may have closed stdout along with stdin.
+                pass
             raise
         except Exception:
             emit({"type": "event", "event": "turn_done",
@@ -76,9 +81,12 @@ async def run() -> None:
             emit({"type": "event", "event": event.type, "data": event.data})
 
     peer_task = None
+    reached_eof = False
+    finalized = False
     while True:
         raw = await asyncio.to_thread(sys.stdin.buffer.readline, MAX_FRAME + 1)
         if not raw:
+            reached_eof = True
             break
         if len(raw) > MAX_FRAME or not raw.endswith(b"\n"):
             emit({"type": "error", "code": "invalid_frame"})
@@ -141,6 +149,7 @@ async def run() -> None:
                 if turn and not turn.done():
                     raise ValueError("turn running")
                 done = await engine.finalize()
+                finalized = True
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": {"event": done.type, "data": done.data}})
                 break
@@ -150,10 +159,19 @@ async def run() -> None:
             # SDK exception strings can contain sensitive request material.
             emit({"type": "reply", "id": request_id, "ok": False,
                   "error": "operation_failed"})
-    if peer_task:
-        peer_task.cancel()
-    if turn and not turn.done():
-        turn.cancel()
+    running = [task for task in (peer_task, turn) if task is not None and not task.done()]
+    for task in running:
+        task.cancel()
+    if running:
+        await asyncio.wait(running, timeout=1.0)
+    if reached_eof and engine is not None and not finalized:
+        # A disappearing parent cannot send an explicit finalize request.
+        # Give the engine a bounded chance to close its SDK client, stop peer
+        # presence, and index the transcript before this process exits.
+        try:
+            await asyncio.wait_for(engine.finalize(), timeout=EOF_FINALIZE_TIMEOUT)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

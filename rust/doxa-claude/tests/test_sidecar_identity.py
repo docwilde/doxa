@@ -49,6 +49,7 @@ class IdentityTests(unittest.TestCase):
     def test_failed_start_can_be_retried(self):
         class FakeEngine:
             attempts = 0
+            finalize_calls = 0
 
             def __init__(self, **_options):
                 pass
@@ -60,6 +61,7 @@ class IdentityTests(unittest.TestCase):
                 return types.SimpleNamespace(type="started", data={})
 
             async def finalize(self):
+                FakeEngine.finalize_calls += 1
                 return types.SimpleNamespace(type="finalized", data={})
 
             async def peer_events(self):
@@ -87,8 +89,94 @@ class IdentityTests(unittest.TestCase):
              mock.patch.object(sidecar, "emit", replies.append):
             asyncio.run(sidecar.run())
         self.assertEqual(FakeEngine.attempts, 2)
+        self.assertEqual(FakeEngine.finalize_calls, 1)
         self.assertEqual([reply.get("ok") for reply in replies if reply.get("type") == "reply"],
                          [False, True, True])
+
+    def test_stdin_eof_cancels_turn_and_finalizes_once(self):
+        class FakeEngine:
+            instance = None
+
+            def __init__(self, **_options):
+                self.finalize_calls = 0
+                self.turn_cancelled = False
+                FakeEngine.instance = self
+
+            async def start(self):
+                return types.SimpleNamespace(type="started", data={})
+
+            async def send(self, _prompt):
+                try:
+                    await asyncio.sleep(3600)
+                    yield None
+                except asyncio.CancelledError:
+                    self.turn_cancelled = True
+                    raise
+
+            async def peer_events(self):
+                await asyncio.sleep(3600)
+                yield None
+
+            async def finalize(self):
+                self.finalize_calls += 1
+                return types.SimpleNamespace(type="finalized", data={})
+
+        frames = [
+            {"type": "request", "id": 1, "method": "start",
+             "params": {"cwd": str(SIDECAR.parent), "session_id": "eof"}},
+            {"type": "request", "id": 2, "method": "prompt", "params": {"text": "work"}},
+        ]
+
+        async def read_frame(_reader, _limit):
+            if not frames:
+                await asyncio.sleep(0.01)
+                return b""
+            return json.dumps(frames.pop(0)).encode() + b"\n"
+
+        engine_module = types.ModuleType("doxa.engine")
+        engine_module.SessionEngine = FakeEngine
+        with mock.patch.dict(sys.modules, {"doxa.engine": engine_module}), \
+             mock.patch.object(sidecar.asyncio, "to_thread", read_frame), \
+             mock.patch.object(sidecar, "emit"):
+            asyncio.run(sidecar.run())
+        self.assertTrue(FakeEngine.instance.turn_cancelled)
+        self.assertEqual(FakeEngine.instance.finalize_calls, 1)
+
+    def test_stdin_eof_bounds_stalled_finalize(self):
+        class FakeEngine:
+            cancelled = False
+
+            def __init__(self, **_options):
+                pass
+
+            async def start(self):
+                return types.SimpleNamespace(type="started", data={})
+
+            async def peer_events(self):
+                if False:
+                    yield None
+
+            async def finalize(self):
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    FakeEngine.cancelled = True
+                    raise
+
+        frames = [{"type": "request", "id": 1, "method": "start",
+                   "params": {"cwd": str(SIDECAR.parent), "session_id": "eof"}}]
+
+        async def read_frame(_reader, _limit):
+            return json.dumps(frames.pop(0)).encode() + b"\n" if frames else b""
+
+        engine_module = types.ModuleType("doxa.engine")
+        engine_module.SessionEngine = FakeEngine
+        with mock.patch.dict(sys.modules, {"doxa.engine": engine_module}), \
+             mock.patch.object(sidecar.asyncio, "to_thread", read_frame), \
+             mock.patch.object(sidecar, "emit"), \
+             mock.patch.object(sidecar, "EOF_FINALIZE_TIMEOUT", 0.01):
+            asyncio.run(sidecar.run())
+        self.assertTrue(FakeEngine.cancelled)
 
 
 if __name__ == "__main__":
