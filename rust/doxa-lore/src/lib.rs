@@ -1,0 +1,220 @@
+//! Bounded client for DOXA's external LORE sidecar.
+//!
+//! LORE itself remains authoritative for scrubbing and context. This crate
+//! never opens LORE's SQLite database or stores memory. A failed sidecar
+//! returns an error; callers must not silently persist unsanitized text.
+
+use serde_json::{json, Value};
+use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+use std::path::Path;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+pub const PROTOCOL_VERSION: u64 = 1;
+pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug)]
+pub enum LoreError {
+    Io(io::Error),
+    Timeout,
+    Closed,
+    InvalidFrame,
+    FrameTooLarge,
+    Unavailable,
+    Remote(&'static str),
+}
+
+impl std::fmt::Display for LoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "LORE sidecar I/O: {error}"),
+            Self::Timeout => write!(f, "LORE sidecar timed out"),
+            Self::Closed => write!(f, "LORE sidecar closed"),
+            Self::InvalidFrame => write!(f, "invalid LORE sidecar frame"),
+            Self::FrameTooLarge => write!(f, "LORE sidecar frame too large"),
+            Self::Unavailable => write!(f, "LORE is unavailable"),
+            Self::Remote(code) => write!(f, "LORE operation failed: {code}"),
+        }
+    }
+}
+
+impl std::error::Error for LoreError {}
+
+enum ReadResult { Line(Vec<u8>), Closed, TooLarge, Io }
+
+pub struct LoreClient {
+    child: Child,
+    stdin: ChildStdin,
+    rx: Receiver<ReadResult>,
+    reader: Option<JoinHandle<()>>,
+    timeout: Duration,
+    next_id: u64,
+    alive: bool,
+}
+
+impl LoreClient {
+    /// Launch the sidecar lazily, only when a session requests LORE.
+    /// `python` should point at the environment that installed DOXA and LORE.
+    pub fn spawn(python: &Path, timeout: Duration) -> Result<Self, LoreError> {
+        let mut command = Command::new(python);
+        command.args(["-m", "doxa.lore_bridge"])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        #[cfg(unix)]
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 { Err(io::Error::last_os_error()) } else { Ok(()) }
+            });
+        }
+        let mut child = command.spawn().map_err(LoreError::Io)?;
+        let stdin = child.stdin.take().ok_or(LoreError::InvalidFrame)?;
+        #[cfg(unix)]
+        {
+            let fd = stdin.as_raw_fd();
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+                let error = io::Error::last_os_error();
+                #[cfg(unix)]
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+                let _ = child.wait();
+                return Err(LoreError::Io(error));
+            }
+        }
+        let stdout = child.stdout.take().ok_or(LoreError::InvalidFrame)?;
+        let (tx, rx) = mpsc::channel();
+        let reader = thread::spawn(move || read_frames(stdout, tx));
+        let mut client = Self { child, stdin, rx, reader: Some(reader), timeout, next_id: 1, alive: true };
+        let hello = client.receive(timeout)?;
+        if hello["type"] != "hello" || hello["proto"].as_u64() != Some(PROTOCOL_VERSION) {
+            client.disable();
+            return Err(LoreError::InvalidFrame);
+        }
+        let caps = hello["capabilities"].as_array().ok_or(LoreError::InvalidFrame)?;
+        if !["scrub", "snapshot"].iter().all(|name| caps.iter().any(|cap| cap.as_str() == Some(name))) {
+            client.disable();
+            return Err(LoreError::Unavailable);
+        }
+        Ok(client)
+    }
+
+    pub fn scrub(&mut self, text: &str) -> Result<String, LoreError> {
+        self.request(json!({"op":"scrub","text":text}))
+    }
+
+    pub fn snapshot(&mut self, cwd: &str, scope: &str) -> Result<String, LoreError> {
+        if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0') || !matches!(scope, "all" | "user" | "project") {
+            return Err(LoreError::InvalidFrame);
+        }
+        self.request(json!({"op":"snapshot","cwd":cwd,"scope":scope}))
+    }
+
+    fn request(&mut self, mut frame: Value) -> Result<String, LoreError> {
+        if !self.alive { return Err(LoreError::Closed); }
+        let id = self.next_id;
+        self.next_id = id.checked_add(1).ok_or(LoreError::InvalidFrame)?;
+        frame["id"] = json!(id);
+        let bytes = encode(&frame)?;
+        let started = Instant::now();
+        let mut offset = 0;
+        while offset < bytes.len() {
+            if started.elapsed() >= self.timeout {
+                self.disable();
+                return Err(LoreError::Timeout);
+            }
+            match self.stdin.write(&bytes[offset..]) {
+                Ok(0) => { self.disable(); return Err(LoreError::Closed); }
+                Ok(n) => offset += n,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(2)),
+                Err(error) => { self.disable(); return Err(LoreError::Io(error)); }
+            }
+        }
+        let remaining = self.timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() { self.disable(); return Err(LoreError::Timeout); }
+        let reply = self.receive(remaining)?;
+        if reply["type"] != "reply" || reply["id"].as_u64() != Some(id) || !reply["ok"].is_boolean() {
+            self.disable();
+            return Err(LoreError::InvalidFrame);
+        }
+        if reply["ok"] == true {
+            reply["text"].as_str().map(str::to_owned).ok_or_else(|| { self.disable(); LoreError::InvalidFrame })
+        } else {
+            let code = match reply["error"].as_str() {
+                Some("lore_unavailable") => return Err(LoreError::Unavailable),
+                Some("invalid_request") => "invalid_request",
+                Some("operation_failed") => "operation_failed",
+                Some("output_too_large") => "output_too_large",
+                _ => "remote_error",
+            };
+            Err(LoreError::Remote(code))
+        }
+    }
+
+    fn receive(&mut self, timeout: Duration) -> Result<Value, LoreError> {
+        match self.rx.recv_timeout(timeout) {
+            Ok(ReadResult::Line(bytes)) => serde_json::from_slice::<Value>(&bytes)
+                .ok().filter(Value::is_object).ok_or_else(|| { self.disable(); LoreError::InvalidFrame }),
+            Ok(ReadResult::Closed) => { self.disable(); Err(LoreError::Closed) },
+            Ok(ReadResult::TooLarge) => { self.disable(); Err(LoreError::FrameTooLarge) },
+            Ok(ReadResult::Io) => { self.disable(); Err(LoreError::Closed) },
+            Err(RecvTimeoutError::Timeout) => { self.disable(); Err(LoreError::Timeout) },
+            Err(RecvTimeoutError::Disconnected) => { self.disable(); Err(LoreError::Closed) },
+        }
+    }
+
+    fn disable(&mut self) {
+        if self.alive {
+            self.alive = false;
+            #[cfg(unix)]
+            unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL); }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+impl Drop for LoreClient {
+    fn drop(&mut self) {
+        self.disable();
+        // A malicious descendant could keep stdout open after its parent is
+        // killed; never make drop wait indefinitely for that pipe.
+        if let Some(reader) = self.reader.take() {
+            for _ in 0..20 {
+                if reader.is_finished() { let _ = reader.join(); return; }
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}
+
+fn encode(value: &Value) -> Result<Vec<u8>, LoreError> {
+    let mut bytes = serde_json::to_vec(value).map_err(|_| LoreError::InvalidFrame)?;
+    bytes.push(b'\n');
+    if bytes.len() > MAX_FRAME_BYTES { Err(LoreError::FrameTooLarge) } else { Ok(bytes) }
+}
+
+fn read_frames(mut reader: impl Read, tx: mpsc::Sender<ReadResult>) {
+    let mut pending = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => { let _ = tx.send(ReadResult::Closed); return; }
+            Ok(n) => {
+                for byte in &chunk[..n] {
+                    if pending.len() == MAX_FRAME_BYTES {
+                        let _ = tx.send(ReadResult::TooLarge); return;
+                    }
+                    pending.push(*byte);
+                    if *byte == b'\n' {
+                        if tx.send(ReadResult::Line(std::mem::take(&mut pending))).is_err() { return; }
+                    }
+                }
+            }
+            Err(_) => { let _ = tx.send(ReadResult::Io); return; }
+        }
+    }
+}
