@@ -1,0 +1,7 @@
+# DOXA vendor chat adapter (Rust 2.0 preview)
+
+`doxa-vendors` implements one bounded chat-completions SSE request for DeepSeek and GLM. It follows the measured Python request shapes in `doxa/vendors.py`: DeepSeek nests `reasoning_effort` inside `thinking`; GLM places it at the root and refuses `none`; neither receives `max_tokens`. The API key is read from `DEEPSEEK_API_KEY` or `ZAI_API_KEY` when each request starts, passed only in the Authorization header, and never retained by a client struct. HTTP error text is discarded after parsing a bounded vendor code, so a key echoed by a provider cannot enter an error display. Streamed text and tool argument values redact the active key, including when it is split across SSE fragments.
+
+The SSE decoder caps a line at 1 MiB and a response at 64 MiB. Tool arguments cap at 1 MiB with at most 128 calls. A whole request has a timeout, and cancellation drops its HTTP future. The caller must own the 3600-second **turn** deadline across repeated requests, a 24-step tool loop, conversation history, usage accounting, price-sheet charges, and a working `ToolGate` before it offers any tool definitions. This crate returns assembled calls but never executes one or claims `mcp_tools`/`tool_gate` parity.
+
+The crate is not yet wired to the native daemon. CI uses a local fake HTTP server and synthetic keys. Live DeepSeek/GLM behavior, credentials, model catalogue changes, LORE tool gating, and multi-step provider interaction remain release gates.
