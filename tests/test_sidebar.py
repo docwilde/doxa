@@ -38,7 +38,7 @@ from doxa import triage as triage_mod
 from doxa.app import DoxaApp
 from doxa.ui import labels as labels_mod
 from doxa.ui import sidebar as sidebar_mod
-from doxa.ui.sidebar import LOOSE_HEADING, NOT_OPEN, Row, SessionSidebar, SidebarLine, build_rows
+from doxa.ui.sidebar import LOOSE_HEADING, NOT_OPEN, Row, SidebarLine, build_rows
 from doxa.ui.split import PaneGroup, SplitBox
 from tests.fakes import FakeEngine
 
@@ -517,8 +517,7 @@ async def test_f3_toggles_the_rail_and_nothing_else_claims_it(tmp_path):
     spec asks for by name -- it moved three times this release series."""
     keys = [b.key for b in DoxaApp.BINDINGS]
     assert keys.count("f3") == 1
-    # Deliverable under BOTH keyboard encodings, unlike ctrl+<digit> and
-    # alt+<letter>, which this project chose and had to walk back.
+    # F3 is available under both keyboard encodings.
     from doxa import keyboard as keyboard_mod
 
     assert keyboard_mod.unreachable_under_legacy("f3") is False
