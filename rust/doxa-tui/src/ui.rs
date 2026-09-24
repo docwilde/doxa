@@ -1,6 +1,8 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
 use std::io::{self, IsTerminal, Stdout};
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{
@@ -350,10 +352,11 @@ pub struct App {
     pub rail_selected: usize,
     pub focus: Focus,
     pub input: String,
+    input_drafts: HashMap<String, String>,
     pub pending_prompts: Vec<(String, String)>,
     pub input_requests: Vec<InputRequest>,
     pub pending_answers: Vec<(String, String, serde_json::Value)>,
-    pub rejected_drafts: Vec<String>,
+    pub rejected_drafts: HashMap<String, Vec<String>>,
     pub notice: String,
     pub should_quit: bool,
     pub size: Rect,
@@ -384,10 +387,11 @@ impl Default for App {
             rail_selected: 0,
             focus: Focus::Prompt,
             input: String::new(),
+            input_drafts: HashMap::new(),
             pending_prompts: Vec::new(),
             input_requests: Vec::new(),
             pending_answers: Vec::new(),
-            rejected_drafts: Vec::new(),
+            rejected_drafts: HashMap::new(),
             notice: "Disconnected · waiting for daemon".into(),
             should_quit: false,
             size: Rect::default(),
@@ -444,11 +448,13 @@ impl App {
                         .unwrap_or("session"),
                 );
                 let cwd = safe_label(frame.get("cwd").and_then(|v| v.as_str()).unwrap_or(""));
+                let transcript = self.sessions.iter().find(|s| s.id == id)
+                    .map(|s| s.transcript.clone()).unwrap_or_default();
                 self.apply_update(DaemonUpdate::Upsert(Session {
                     id: id.into(),
                     title: model.clone(),
                     collection: cwd,
-                    transcript: String::new(),
+                    transcript,
                     status: "Connected".into(),
                 }));
                 self.notice = format!("Connected · {model}");
@@ -576,6 +582,9 @@ impl App {
                 true
             }
             "client_notice" => {
+                if let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) {
+                    self.apply_update(DaemonUpdate::Status { id: id.into(), text: "Disconnected".into() });
+                }
                 self.notice = safe_label(
                     frame
                         .get("message")
@@ -625,10 +634,12 @@ impl App {
                 let Some(text) = frame.get("text").and_then(|v| v.as_str()) else {
                     return false;
                 };
-                if self.input.is_empty() {
+                let active = self.groups[self.active_group].active_id().unwrap_or("");
+                let target = frame.get("session_id").and_then(|v| v.as_str()).unwrap_or(active);
+                if self.input.is_empty() && target == active {
                     self.input = text.to_owned();
                 } else {
-                    self.rejected_drafts.push(text.to_owned());
+                    self.rejected_drafts.entry(target.into()).or_default().push(text.to_owned());
                 }
                 self.notice = format!(
                     "{} · draft retained{}",
@@ -638,7 +649,7 @@ impl App {
                             .and_then(|v| v.as_str())
                             .unwrap_or("Prompt refused")
                     ),
-                    if self.rejected_drafts.is_empty() {
+                    if self.rejected_drafts.get(target).is_none_or(Vec::is_empty) {
                         ""
                     } else {
                         " (Alt+Up to restore)"
@@ -650,7 +661,9 @@ impl App {
                 let Some(text) = frame.get("text").and_then(|v| v.as_str()) else {
                     return false;
                 };
-                self.rejected_drafts.push(text.to_owned());
+                let active = self.groups[self.active_group].active_id().unwrap_or("");
+                let target = frame.get("session_id").and_then(|v| v.as_str()).unwrap_or(active);
+                self.rejected_drafts.entry(target.into()).or_default().push(text.to_owned());
                 self.notice = format!(
                     "{} · check session before Alt+Up retry",
                     safe_label(
@@ -680,7 +693,8 @@ impl App {
     }
 
     pub fn handle(&mut self, event: Event) -> bool {
-        match event {
+        let before = self.groups[self.active_group].active_id().unwrap_or("").to_owned();
+        let changed = match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
                 self.drag = None;
@@ -693,7 +707,13 @@ impl App {
             }
             Event::Mouse(mouse) => self.mouse(mouse),
             _ => false,
+        };
+        let after = self.groups[self.active_group].active_id().unwrap_or("").to_owned();
+        if before != after {
+            self.input_drafts.insert(before, std::mem::take(&mut self.input));
+            self.input = self.input_drafts.remove(&after).unwrap_or_default();
         }
+        changed
     }
 
     fn key(&mut self, key: KeyEvent) -> bool {
@@ -737,10 +757,11 @@ impl App {
                 true
             }
             KeyCode::Up if alt && self.focus == Focus::Prompt => {
-                if let Some(draft) = self.rejected_drafts.pop() {
+                let target = self.groups[self.active_group].active_id().unwrap_or("").to_owned();
+                if let Some(draft) = self.rejected_drafts.get_mut(&target).and_then(Vec::pop) {
                     let current = std::mem::replace(&mut self.input, draft);
                     if !current.is_empty() {
-                        self.rejected_drafts.push(current);
+                        self.rejected_drafts.entry(target).or_default().push(current);
                     }
                     true
                 } else {
@@ -1516,13 +1537,23 @@ pub fn run_with_channels_state(
     store: crate::ui_state::UiStateStore,
     live_ids: Vec<String>,
 ) -> io::Result<()> {
-    run_loop(frames, Some(prompts), Some((store, live_ids)))
+    run_with_channels_state_guarded(frames, prompts, store, live_ids, Arc::new(Mutex::new(true)))
+}
+
+pub fn run_with_channels_state_guarded(
+    frames: Receiver<serde_json::Value>,
+    prompts: SyncSender<crate::bridge::WorkerCommand>,
+    store: crate::ui_state::UiStateStore,
+    live_ids: Vec<String>,
+    complete_roster: Arc<Mutex<bool>>,
+) -> io::Result<()> {
+    run_loop(frames, Some(prompts), Some((store, live_ids, complete_roster)))
 }
 
 fn run_loop(
     receiver: Receiver<serde_json::Value>,
     mut prompt_sender: Option<SyncSender<crate::bridge::WorkerCommand>>,
-    mut state: Option<(crate::ui_state::UiStateStore, Vec<String>)>,
+    mut state: Option<(crate::ui_state::UiStateStore, Vec<String>, Arc<Mutex<bool>>)>,
 ) -> io::Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(io::Error::new(
@@ -1538,7 +1569,7 @@ fn run_loop(
             .map(|s| Rect::new(0, 0, s.width, s.height))?,
         ..Default::default()
     };
-    if let Some((store, live_ids)) = &state {
+    if let Some((store, live_ids, _)) = &state {
         store.restore(&mut app, live_ids);
     }
     let mut saved_layout = crate::ui_state::LayoutSignature::capture(&app);
@@ -1566,9 +1597,11 @@ fn run_loop(
         if changed {
             let layout = crate::ui_state::LayoutSignature::capture(&app);
             if layout != saved_layout {
-                if let Some((store, _)) = &mut state {
-                    if let Err(error) = store.save(&app) {
-                        app.notice = format!("Layout save skipped · {}", safe_label(&error.to_string()));
+                if let Some((store, _, complete)) = &mut state {
+                    match store.save_if_complete(&app, complete) {
+                        Ok(true) => {}
+                        Ok(false) => app.notice = "Layout save skipped · live roster incomplete".into(),
+                        Err(error) => app.notice = format!("Layout save skipped · {}", safe_label(&error.to_string())),
                     }
                 }
                 saved_layout = layout;
@@ -1683,10 +1716,10 @@ mod tests {
             &json!({"type":"prompt_rejected", "text":"old prompt", "message":"queue full"}),
         );
         assert_eq!(app.input, "new draft");
-        assert_eq!(app.rejected_drafts, ["old prompt"]);
+        assert_eq!(app.rejected_drafts[""], ["old prompt"]);
         app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)));
         assert_eq!(app.input, "old prompt");
-        assert_eq!(app.rejected_drafts, ["new draft"]);
+        assert_eq!(app.rejected_drafts[""], ["new draft"]);
     }
 
     #[test]
@@ -1695,9 +1728,28 @@ mod tests {
         app.apply_daemon_frame(&json!({"type":"prompt_uncertain", "text":"possibly sent",
             "message":"Prompt delivery unconfirmed"}));
         assert!(app.input.is_empty());
-        assert_eq!(app.rejected_drafts, ["possibly sent"]);
+        assert_eq!(app.rejected_drafts[""], ["possibly sent"]);
         assert!(app.notice.contains("check session"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)));
         assert_eq!(app.input, "possibly sent");
+    }
+
+    #[test]
+    fn background_session_rejection_does_not_replace_active_draft() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("a".into());
+        app.groups[1].tabs.push("b".into());
+        app.input = "draft for a".into();
+        app.apply_daemon_frame(&json!({"type":"prompt_rejected", "session_id":"b",
+            "text":"draft for b", "message":"queue full"}));
+        assert_eq!(app.input, "draft for a");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)));
+        assert_eq!(app.input, "draft for a");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        assert!(app.input.is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)));
+        assert_eq!(app.input, "draft for b");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        assert_eq!(app.input, "draft for a");
     }
 }

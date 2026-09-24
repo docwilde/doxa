@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use doxa_state::{load_tabset, save_tabset, tabset_path, valid_session_id, Tab, TabSet};
 use serde_json::{json, Value};
@@ -49,6 +50,17 @@ impl UiStateStore {
     }
 
     pub fn path(&self) -> &Path { &self.path }
+
+    /// A partial daemon roster must never prune saved tabs or collections.
+    /// The bridge permanently revokes this capability on any attach failure.
+    pub fn save_if_complete(&mut self, app: &App, complete: &Mutex<bool>) -> io::Result<bool> {
+        // Hold the roster gate through the write. A disconnect cannot revoke
+        // completeness between the check and the tabset replacement.
+        let guard = complete.lock().map_err(|_| io::Error::other("roster guard unavailable"))?;
+        if !*guard { return Ok(false); }
+        self.save(app)?;
+        Ok(true)
+    }
 
     /// Project a saved tabset onto currently live daemon IDs. Returns false
     /// when no saved session remains live; the caller keeps its fresh layout.

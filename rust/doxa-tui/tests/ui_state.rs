@@ -3,6 +3,7 @@ use doxa_tui::ui_state::UiStateStore;
 use doxa_state::{save_tabset, Tab, TabSet};
 use serde_json::{json, Value};
 use std::fs;
+use std::sync::Mutex;
 
 fn seeded(raw: Value) -> (tempfile::TempDir, UiStateStore) {
     let dir = tempfile::tempdir().unwrap();
@@ -19,6 +20,18 @@ fn seeded(raw: Value) -> (tempfile::TempDir, UiStateStore) {
     (dir, store)
 }
 fn live(ids: &[&str]) -> Vec<String> { ids.iter().map(|s| (*s).into()).collect() }
+
+#[test]
+fn incomplete_roster_preserves_existing_tabset_byte_for_byte() {
+    let (_dir, mut store) = seeded(json!({"tabs":[{"session_id":"live"},{"session_id":"temporarily-missing"}],
+        "active_session_id":"temporarily-missing"}));
+    let original = fs::read(store.path()).unwrap();
+    let mut app = App::default();
+    assert!(store.restore(&mut app, &live(&["live"])));
+    app.rail_width = 32;
+    assert!(!store.save_if_complete(&app, &Mutex::new(false)).unwrap());
+    assert_eq!(fs::read(store.path()).unwrap(), original);
+}
 
 #[test]
 fn flat_legacy_record_restores_active_tab_and_skips_stale_ids() {
