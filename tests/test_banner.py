@@ -573,7 +573,7 @@ def test_diagnostics_report_the_real_detected_mode(monkeypatch):
     # up as one.
     assert "not measured" in rows["kgp (kitty graphics)"]
 
-    monkeypatch.delenv("DOXA_IMAGE_MODE", raising=False)
+    monkeypatch.setenv("DOXA_IMAGE_MODE", "probe")
     monkeypatch.setattr(images, "_detected", "kgp")
     rows = dict(images.diagnostics())
     assert rows["mode"] == "kgp — probed"
@@ -598,7 +598,7 @@ def test_diagnostics_report_the_real_detected_mode(monkeypatch):
 
 
 def test_renderable_modes_never_include_an_unmeasured_tier(monkeypatch):
-    monkeypatch.delenv("DOXA_IMAGE_MODE", raising=False)
+    monkeypatch.setenv("DOXA_IMAGE_MODE", "probe")
     monkeypatch.setattr(images, "_detected", "kgp")
     assert images.renderable_modes() == ("kgp", "halfblock", "text")
     # sixel was never probed under kgp, so it is never drawn.

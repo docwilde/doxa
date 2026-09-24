@@ -1359,12 +1359,13 @@ session transcript, or reaches LORE — it does not survive a tab restore.
 
 ## Images
 
-Image rendering follows a fallback ladder, probed once per process before
-the TUI takes stdin: **kitty graphics protocol → sixel → half-block cells
-→ plain text line**. `image_mode` forces a specific rung.
-`DOXA_KEYBOARD_PROTOCOL`-style overrides aside, the probe result is
-cached and never repeated (re-probing after Textual has taken over stdin
-would read a stale reply).
+Image rendering defaults to a plain text line, so a normal launch does not
+query the terminal or import the image library. Set `image_mode=probe` to
+detect the old fallback ladder once before the TUI takes stdin: **kitty
+graphics protocol → sixel → half-block cells → plain text line**. You can
+also force a specific rung. Probing after Textual takes stdin is unsafe
+because its input reader may consume the reply; changing to `probe` in
+Settings takes effect after a restart.
 
 `boot_banner` (default on) draws the DOXA mark above the opening identity
 block: a ring around a triangle, hand-authored in block characters, the
@@ -1780,6 +1781,8 @@ and in `/doctor`. A binding this terminal cannot physically send (under
 the legacy encoding there is no byte for `Ctrl+,` or for distinguishing
 `Shift+Enter` from plain Enter) is marked `✗` in `/help`. Silence from the
 terminal reads as **not measured**, never as "legacy".
+The startup query waits at most 100 ms; a slower SSH or tmux path may read
+as not measured. `DOXA_KEYBOARD_PROTOCOL` can force a known answer.
 
 `alt+<letter>` joined that list in v0.95.0, and reachability there is a
 fact about **Textual**, not about the terminal: the terminal does send
@@ -1906,7 +1909,7 @@ parse is refused rather than clobbering it.
 | `lore_root` | `LORE_ROOT` | `~/.claude/lore` | where the belief store and session index live; sticky, set by `/setup` |
 | `nerd_font` | `DOXA_NERD_FONT` | off | use a Nerd Font glyph for the branch chip |
 | `ctx_absolute` | `DOXA_CTX_ABSOLUTE` | off | print `24k/200k` beside the `ctx%` chip (below 100 columns it drops again) |
-| `image_mode` | `DOXA_IMAGE_MODE` | probe | force a rung of the image ladder (`kgp`/`sixel`/`halfblock`/`text`) |
+| `image_mode` | `DOXA_IMAGE_MODE` | text | `probe` to detect support, or force a rung (`kgp`/`sixel`/`halfblock`/`text`) |
 | `boot_banner` | `DOXA_BOOT_BANNER` | on | draw the DOXA mark above the opening identity block |
 | `sidebar` | `DOXA_SIDEBAR` | *auto* | the session rail: empty = appear once there is a collection or a second session, `1` = always, `0` = never. `f3` writes `1`/`0`, so the first toggle ends the guessing |
 | `sidebar_width` | `DOXA_SIDEBAR_WIDTH` | 25 | columns the rail occupies; clamped to 22–41 rather than rejected. Written by a drag of the rail's edge and by `alt+shift+←/→` |

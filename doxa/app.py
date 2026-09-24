@@ -1060,17 +1060,15 @@ class DoxaApp(
         # thinking marker stopped spinning: motion the user did not ask for
         # is paid for in their latency.
         self.animation_level = "none"
-        # Settle the image-mode probe NOW, while this process still owns the
-        # terminal: textual-image's TGP/sixel queries read their answer from
-        # stdin, which Textual's own reader thread will grab the moment
-        # App.run() starts (doxa/images.py's detection discipline note).
-        images_mod.detect_mode()
-        # Same window, same reason (v0.41.0): textual-image resolves the
-        # terminal's CELL SIZE with an ESC[16t query whenever ioctl cannot
-        # answer, and reads that reply off stdin as well. Settling it here
-        # keeps the query out of the opening banner's first render AND
-        # gives /img a measured cell size to report rather than a guess.
-        images_mod.cell_size()
+        # Images default to a text fallback, so do not query graphics or
+        # import textual-image on the startup path. An explicit pixel mode
+        # (or opt-in probe) still settles cell geometry before Textual owns
+        # stdin; a text launch records that it did not measure the cells.
+        if images_mod.detect_mode() == "text":
+            images_mod.settle_unmeasured_cell_size()
+        else:
+            images_mod.cell_size()
+        images_mod.close_probe_window()
         # Same window, same reason (item O): doxa.keyboard asks the terminal
         # whether it grants the kitty keyboard protocol and reads the reply
         # off stdin. Textual requests the protocol but never reports whether

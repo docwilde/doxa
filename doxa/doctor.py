@@ -275,8 +275,17 @@ def _image_protocol_check() -> Check:
     from . import images as images_mod
 
     mode = images_mod.detect_mode()
-    forced = config_mod.raw("DOXA_IMAGE_MODE").strip()
-    source = " (forced via DOXA_IMAGE_MODE)" if forced else " (auto-detected)"
+    selection = config_mod.raw("DOXA_IMAGE_MODE").strip().lower()
+    if selection == "probe":
+        source = (
+            " (probe requires restart)"
+            if images_mod.probe_requires_restart()
+            else " (probed)"
+        )
+    elif selection in images_mod.MODES:
+        source = " (forced via DOXA_IMAGE_MODE)"
+    else:
+        source = " (default, no terminal probe)"
     return Check(
         id="image-protocol", title="terminal image protocol", status=STATUS_PASS,
         detail=f"{mode}{source}",
