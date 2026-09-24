@@ -185,7 +185,7 @@ impl Registry {
             }
         }
         let after = fs::read_dir(&self.directory)?.filter_map(Result::ok).filter(|e| e.path().extension() == Some(OsStr::new("json"))).count();
-        Ok(before - after)
+        Ok(before.saturating_sub(after))
     }
     fn reap_socket(&self, name: &str, pid_dead: bool) {
         if !pid_dead { return; }
@@ -201,7 +201,10 @@ impl Registry {
         let _ = fs::remove_file(path);
     }
 }
-fn safe_id(s: &str) -> bool { !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') }
+fn safe_id(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 128 && s.bytes().enumerate().all(|(i, b)|
+        b.is_ascii_alphanumeric() || (i > 0 && b == b'-'))
+}
 fn remove_regular_entry(path: &Path) {
     if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file() && m.uid() == unsafe { libc::geteuid() }) {
         let _ = fs::remove_file(path);
@@ -210,7 +213,14 @@ fn remove_regular_entry(path: &Path) {
 fn read_one(path: &Path) -> io::Result<PeerRecord> {
     let meta = fs::symlink_metadata(path)?;
     if !meta.file_type().is_file() || meta.len() > MAX_ENTRY_BYTES || meta.uid() != unsafe { libc::geteuid() } { return Err(io::Error::new(io::ErrorKind::InvalidData, "unsafe registry entry")); }
-    let mut file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
+    // Recheck the opened inode: an entry can be swapped for a FIFO or hard
+    // link after symlink_metadata but before open. O_NONBLOCK avoids hanging.
+    let mut file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
+    let opened = file.metadata()?;
+    if !opened.file_type().is_file() || opened.uid() != unsafe { libc::geteuid() }
+        || opened.nlink() != 1 || opened.len() > MAX_ENTRY_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "unsafe registry entry"));
+    }
     let mut bytes = Vec::new();
     Read::by_ref(&mut file).take(MAX_ENTRY_BYTES + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_ENTRY_BYTES { return Err(io::Error::new(io::ErrorKind::InvalidData, "oversized registry entry")); }

@@ -54,7 +54,10 @@ fn bounded_reads_and_symlink_rejection() {
     let victim = tmp.path().join("victim"); fs::write(&victim, "keep").unwrap();
     let link = reg.directory().join("link.json"); symlink(&victim, &link).unwrap();
     assert!(reg.read(&scrub, false, false).unwrap().is_empty());
-    assert_eq!(fs::read_to_string(victim).unwrap(), "keep");
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+    for id in ["-bad", "_bad", "a_b", "../bad"] {
+        assert!(reg.write(&record(id, &victim)).is_err());
+    }
 }
 #[test]
 fn stale_live_pid_keeps_socket_dead_pid_only_removes_contained_socket() {
