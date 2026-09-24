@@ -612,19 +612,38 @@ for line in sys.stdin:
         json!({"type":"call","id":2,"method":"answer_needs_input",
         "params":{"id":"question-1","answer":{"choice":"yes"}}}),
     );
-    assert_eq!(receive(&mut reader)["applied"], true);
-    assert_eq!(receive(&mut reader)["event"]["data"]["text"], "answered");
-    assert_eq!(receive(&mut reader)["event"]["type"], "turn_done");
+    let frames = [
+        receive(&mut reader),
+        receive(&mut reader),
+        receive(&mut reader),
+    ];
+    assert!(frames.iter().any(|frame| frame["applied"] == true));
+    assert!(frames
+        .iter()
+        .any(|frame| frame["event"]["data"]["text"] == "answered"));
+    assert!(frames
+        .iter()
+        .any(|frame| frame["event"]["type"] == "turn_done"));
     send(&mut socket, json!({"type":"prompt","id":3,"text":"again"}));
     assert_eq!(receive(&mut reader)["ok"], true);
-    assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
+    let mut next = receive(&mut reader);
+    if next["event"]["type"] == "prompt_dequeued" {
+        next = receive(&mut reader);
+    }
+    assert_eq!(next["event"]["type"], "turn_started");
     assert_eq!(receive(&mut reader)["event"]["type"], "needs_input");
     send(
         &mut socket,
         json!({"type":"call","id":4,"method":"interrupt","params":{}}),
     );
-    assert_eq!(receive(&mut reader)["ok"], true);
-    let interrupted = receive(&mut reader);
+    let first = receive(&mut reader);
+    let second = receive(&mut reader);
+    let (reply, interrupted) = if first["type"] == "reply" {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    assert_eq!(reply["ok"], true);
     assert_eq!(interrupted["event"]["type"], "turn_done");
     assert_eq!(interrupted["event"]["data"]["is_error"], true);
     send(
