@@ -269,7 +269,7 @@ fn visible_prefix(prefix: &str, width: usize) -> &str {
     if cell_width(prefix) >= width { "" } else { prefix }
 }
 
-fn sanitize(text: &str) -> String {
+pub(crate) fn sanitize(text: &str) -> String {
     text.chars().map(|ch| {
         if ch == '\n' { ch }
         else if ch == '\t' { ' ' }

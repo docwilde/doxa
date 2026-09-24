@@ -18,6 +18,11 @@ use crate::markdown;
 const MIN_PANE_WIDTH: u16 = 28;
 const MIN_PANE_HEIGHT: u16 = 8;
 const MAX_PENDING_PROMPTS: usize = 32;
+const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
+
+fn safe_label(value: &str) -> String {
+    markdown::sanitize(value).replace('\n', " ").chars().take(200).collect()
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Session {
@@ -112,10 +117,10 @@ impl App {
         match kind {
             "hello" => {
                 let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else { return false };
-                let model = frame.get("model").and_then(|v| v.as_str()).unwrap_or("session");
-                let cwd = frame.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+                let model = safe_label(frame.get("model").and_then(|v| v.as_str()).unwrap_or("session"));
+                let cwd = safe_label(frame.get("cwd").and_then(|v| v.as_str()).unwrap_or(""));
                 self.apply_update(DaemonUpdate::Upsert(Session {
-                    id: id.into(), title: model.into(), collection: cwd.into(),
+                    id: id.into(), title: model.clone(), collection: cwd,
                     transcript: String::new(), status: "Connected".into(),
                 }));
                 self.notice = format!("Connected · {model}");
@@ -136,7 +141,12 @@ impl App {
                         let Some(text) = data.get("text").and_then(|v| v.as_str()) else { return false };
                         if let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) {
                             session.transcript.push_str(text);
-                            self.groups.iter_mut().filter(|g| g.active_id() == Some(&id)).for_each(|g| g.scroll = 0);
+                            if session.transcript.len() > MAX_TRANSCRIPT_BYTES {
+                                let mut start = session.transcript.len() - MAX_TRANSCRIPT_BYTES;
+                                while !session.transcript.is_char_boundary(start) { start += 1; }
+                                session.transcript.drain(..start);
+                                self.notice = "Transcript tail limited to 512 KiB".into();
+                            }
                             true
                         } else { false }
                     }
@@ -149,8 +159,13 @@ impl App {
             "reply" => {
                 let ok = frame.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
                 self.notice = if ok { "Request accepted".into() } else {
-                    format!("Request failed: {}", frame.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error"))
+                    format!("Request failed: {}", safe_label(frame.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error")))
                 };
+                true
+            }
+            "client_notice" => {
+                self.notice = safe_label(frame.get("message").and_then(|v| v.as_str())
+                    .unwrap_or("Daemon connection unavailable"));
                 true
             }
             _ => false,

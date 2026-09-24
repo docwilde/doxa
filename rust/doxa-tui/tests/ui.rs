@@ -60,6 +60,32 @@ fn daemon_frames_update_visible_session() {
 }
 
 #[test]
+fn daemon_labels_and_errors_cannot_emit_terminal_controls() {
+    let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello", "session_id":"abc", "model":"bad\u{1b}[31m", "cwd":"repo\nnext"}));
+    app.apply_daemon_frame(&json!({"type":"reply", "ok":false, "error":"oops\u{1b}[0m\u{202e}"}));
+    assert!(!app.sessions[0].title.contains('\u{1b}'));
+    assert!(!app.sessions[0].collection.contains('\n'));
+    assert!(!app.notice.contains('\u{1b}'));
+    assert!(!app.notice.contains('\u{202e}'));
+}
+
+#[test]
+fn streamed_transcript_is_bounded_without_resetting_user_scroll() {
+    let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello", "session_id":"abc", "model":"test", "cwd":"repo"}));
+    app.groups[0].scroll = 7;
+    for _ in 0..20 {
+        app.apply_daemon_frame(&json!({"type":"event", "event":{"type":"text_delta", "data":{"text":"x".repeat(32_000)}}}));
+    }
+    app.apply_daemon_frame(&json!({"type":"event", "event":{"type":"text_delta", "data":{"text":"🦀"}}}));
+    assert!(app.sessions[0].transcript.len() <= 512 * 1024);
+    assert!(app.sessions[0].transcript.ends_with("🦀"));
+    assert_eq!(app.groups[0].scroll, 7);
+    assert!(app.notice.contains("limited"));
+}
+
+#[test]
 fn test_backend_renders_groups_transcript_prompt_and_small_terminal() {
     let mut app = App::default();
     app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("one", "Work")));
