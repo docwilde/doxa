@@ -1,6 +1,7 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
 use std::collections::HashMap;
 use std::io::{self, IsTerminal, Stdout};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,7 +22,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
 
-use crate::{markdown, peer_map::PeerMap};
+use crate::{diff_view, markdown, peer_map::PeerMap};
 
 mod tool_cards;
 use tool_cards::ToolCards;
@@ -34,13 +35,15 @@ const MAX_PENDING_PROMPTS: usize = 32;
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
 const MAX_ANSWER_BYTES: usize = 10 * 1024;
-const ACTIONS: [(&str, &str); 6] = [
+const ACTIONS: [(&str, &str); 8] = [
     ("Peer map", "Ctrl+M"),
     ("Tool activity", "Ctrl+T"),
     ("Open selected session", "rail selection"),
     ("Previous tab", "active pane"),
     ("Next tab", "active pane"),
     ("Switch pane", "Shift+Tab"),
+    ("Session history", "Ctrl+R"),
+    ("Worktree diff", "F2"),
 ];
 
 fn safe_label(value: &str) -> String {
@@ -353,7 +356,7 @@ impl InputRequest {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct App {
     pub sessions: Vec<Session>,
     pub groups: [PaneGroup; 2],
@@ -378,6 +381,14 @@ pub struct App {
     map_modal: bool,
     action_menu: bool,
     action_selected: usize,
+    history_modal: bool,
+    history_query: String,
+    history_selected: usize,
+    diff_modal: bool,
+    diff_scroll: u16,
+    diff_text: String,
+    diff_pending: Option<Receiver<(String, diff_view::DiffSnapshot)>>,
+    session_cwds: HashMap<String, PathBuf>,
     pending_peer_refresh: Option<String>,
     pub notice: String,
     pub should_quit: bool,
@@ -422,6 +433,14 @@ impl Default for App {
             map_modal: false,
             action_menu: false,
             action_selected: 0,
+            history_modal: false,
+            history_query: String::new(),
+            history_selected: 0,
+            diff_modal: false,
+            diff_scroll: 0,
+            diff_text: String::new(),
+            diff_pending: None,
+            session_cwds: HashMap::new(),
             pending_peer_refresh: None,
             notice: "Disconnected · waiting for daemon".into(),
             should_quit: false,
@@ -479,6 +498,12 @@ impl App {
                         .unwrap_or("session"),
                 );
                 let cwd = safe_label(frame.get("cwd").and_then(|v| v.as_str()).unwrap_or(""));
+                if let Some(raw) = frame.get("cwd").and_then(|v| v.as_str()) {
+                    let path = PathBuf::from(raw);
+                    if path.is_absolute() && raw.len() <= 4096 {
+                        self.session_cwds.insert(id.to_owned(), path);
+                    }
+                }
                 let transcript = self
                     .sessions
                     .iter()
@@ -800,6 +825,12 @@ impl App {
         if self.action_menu {
             return self.action_key(key);
         }
+        if self.history_modal {
+            return self.history_key(key);
+        }
+        if self.diff_modal {
+            return self.diff_key(key);
+        }
         if self.map_modal {
             let owner = self.groups[self.active_group]
                 .active_id()
@@ -849,6 +880,16 @@ impl App {
             self.action_menu = true;
             self.action_selected = 0;
             self.drag = None;
+            return true;
+        }
+        if key.code == KeyCode::Char('r') && ctrl {
+            self.history_modal = true;
+            self.history_query.clear();
+            self.history_selected = 0;
+            return true;
+        }
+        if key.code == KeyCode::F(2) || (key.code == KeyCode::Char('g') && alt) {
+            self.open_diff();
             return true;
         }
         match key.code {
@@ -974,6 +1015,96 @@ impl App {
         }
     }
 
+    fn history_matches(&self) -> Vec<usize> {
+        let query = self.history_query.to_lowercase();
+        self.sessions.iter().enumerate().filter_map(|(index, session)| {
+            let mut start = session.transcript.len().saturating_sub(16 * 1024);
+            while !session.transcript.is_char_boundary(start) { start += 1; }
+            if query.is_empty() || session.title.to_lowercase().contains(&query)
+                || session.id.to_lowercase().contains(&query)
+                || session.transcript[start..].to_lowercase().contains(&query) {
+                Some(index)
+            } else { None }
+        }).take(64).collect()
+    }
+
+    fn history_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('r') if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.history_modal = false;
+            }
+            KeyCode::Up => self.history_selected = self.history_selected.saturating_sub(1),
+            KeyCode::Down => self.history_selected = (self.history_selected + 1).min(self.history_matches().len().saturating_sub(1)),
+            KeyCode::Backspace => { self.history_query.pop(); self.history_selected = 0; }
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                if self.history_query.len() + c.len_utf8() <= 200 { self.history_query.push(c); self.history_selected = 0; }
+            }
+            KeyCode::Enter => {
+                if let Some(&index) = self.history_matches().get(self.history_selected) {
+                    let id = self.sessions[index].id.clone();
+                    let tabs = &mut self.groups[self.active_group];
+                    if let Some(index) = tabs.tabs.iter().position(|tab| tab == &id) { tabs.active = index; }
+                    else { tabs.tabs.push(id); tabs.active = tabs.tabs.len() - 1; }
+                    tabs.scroll = 0;
+                    self.focus = Focus::Transcript;
+                    self.history_modal = false;
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn open_diff(&mut self) {
+        if self.diff_modal { self.diff_modal = false; return; }
+        self.diff_modal = true;
+        self.diff_scroll = 0;
+        self.diff_pending = None;
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.diff_text = "Select a session to inspect its worktree.".into();
+            return;
+        };
+        let Some(cwd) = self.session_cwds.get(&id).cloned() else {
+            self.diff_text = "This session did not provide a worktree directory.".into();
+            return;
+        };
+        self.diff_text = "Loading worktree diff…".into();
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.diff_pending = Some(rx);
+        std::thread::spawn(move || { let _ = tx.send((id, diff_view::read(&cwd))); });
+    }
+
+    fn poll_diff(&mut self) -> bool {
+        let Some(receiver) = &self.diff_pending else { return false; };
+        match receiver.try_recv() {
+            Ok((id, snapshot)) => {
+                self.diff_pending = None;
+                if self.groups[self.active_group].active_id() == Some(id.as_str()) {
+                    self.diff_text = markdown::sanitize(&snapshot.text);
+                    self.diff_scroll = 0;
+                    return true;
+                }
+                false
+            }
+            Err(TryRecvError::Disconnected) => { self.diff_pending = None; self.diff_text = "Diff worker unavailable.".into(); true }
+            Err(TryRecvError::Empty) => false,
+        }
+    }
+
+    fn diff_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc | KeyCode::F(2) => self.diff_modal = false,
+            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::ALT) => self.diff_modal = false,
+            KeyCode::Char('r' | 'R') => { self.diff_modal = false; self.open_diff(); },
+            KeyCode::Up => self.diff_scroll = self.diff_scroll.saturating_sub(1),
+            KeyCode::Down => self.diff_scroll = self.diff_scroll.saturating_add(1),
+            KeyCode::PageUp => self.diff_scroll = self.diff_scroll.saturating_sub(10),
+            KeyCode::PageDown => self.diff_scroll = self.diff_scroll.saturating_add(10),
+            _ => return false,
+        }
+        true
+    }
+
     fn active_tool_cards(&self) -> &[tool_cards::ToolCard] {
         self.groups[self.active_group]
             .active_id()
@@ -1042,6 +1173,8 @@ impl App {
                         self.active_group = 1 - self.active_group;
                         self.focus = Focus::Prompt;
                     }
+                    6 => { self.history_modal = true; self.history_query.clear(); self.history_selected = 0; },
+                    7 => self.open_diff(),
                     _ => unreachable!("fixed action list"),
                 }
             }
@@ -1332,6 +1465,8 @@ impl App {
             || self.tool_modal
             || self.map_modal
             || self.action_menu
+            || self.history_modal
+            || self.diff_modal
         {
             self.drag = None;
             return false;
@@ -1484,7 +1619,7 @@ impl App {
         );
         frame.render_widget(
             Paragraph::new(format!(
-                "{}  |  Ctrl+P actions · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
+                "{}  |  Ctrl+P actions · Ctrl+R history · F2 diff · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
                 self.notice
             )),
             outer[2],
@@ -1498,7 +1633,61 @@ impl App {
             );
         }
         self.draw_actions(frame, area);
+        self.draw_history(frame, area);
+        self.draw_diff(frame, area);
         self.draw_request(frame, area);
+    }
+
+    fn draw_history(&self, frame: &mut Frame, area: Rect) {
+        if !self.history_modal { return; }
+        let width = area.width.saturating_sub(4).min(88);
+        let height = area.height.saturating_sub(4).min(24);
+        if width < 24 || height < 8 { return; }
+        let modal = Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height);
+        let matches = self.history_matches();
+        let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&self.history_query))),
+            Line::from(" Attached sessions only · read-only transcript picker"), Line::from("")];
+        if matches.is_empty() { lines.push(Line::from(" No matching attached sessions")); }
+        let visible = usize::from(height.saturating_sub(7)).max(1);
+        let start = self.history_selected.saturating_sub(visible.saturating_sub(1));
+        for (position, &index) in matches.iter().enumerate().skip(start).take(visible) {
+            let session = &self.sessions[index];
+            let label = format!(" {} {} · {}", if position == self.history_selected { '›' } else { ' ' },
+                safe_label(&session.title), safe_label(&session.id));
+            let style = if position == self.history_selected { Style::default().fg(Color::Black).bg(Color::Cyan) }
+                else { Style::default().fg(Color::White) };
+            lines.push(Line::styled(label, style));
+        }
+        if let Some(&index) = matches.get(self.history_selected) {
+            let preview: String = self.sessions[index].transcript.chars().rev().take(240).collect::<String>().chars().rev().collect();
+            lines.push(Line::from(""));
+            lines.push(Line::from(format!(" Preview: {}", safe_label(&preview))));
+        }
+        frame.render_widget(Clear, modal);
+        frame.render_widget(Paragraph::new(lines).block(Block::default()
+            .title(" Session history · type to filter · Enter open · Esc close ")
+            .borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan))), modal);
+    }
+
+    fn draw_diff(&self, frame: &mut Frame, area: Rect) {
+        if !self.diff_modal { return; }
+        let width = area.width.saturating_sub(4).min(120);
+        let height = area.height.saturating_sub(4).min(36);
+        if width < 24 || height < 8 { return; }
+        let modal = Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height);
+        frame.render_widget(Clear, modal);
+        let rows: Vec<Line> = self.diff_text.lines()
+            .skip(usize::from(self.diff_scroll))
+            .take(usize::from(height.saturating_sub(2)))
+            .map(|line| {
+            let color = if line.starts_with('+') && !line.starts_with("+++") { Color::Green }
+                else if line.starts_with('-') && !line.starts_with("---") { Color::Red }
+                else if line.starts_with("@@") { Color::Cyan } else { Color::White };
+            Line::styled(line.to_owned(), Style::default().fg(color))
+        }).collect();
+        frame.render_widget(Paragraph::new(rows)
+            .block(Block::default().title(" Worktree diff · ↑/↓ scroll · R refresh · F2/Esc close ")
+                .borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan))), modal);
     }
 
     fn draw_actions(&self, frame: &mut Frame, area: Rect) {
@@ -1953,6 +2142,7 @@ fn run_loop(
         if event::poll(Duration::from_millis(50))? {
             changed |= app.handle(event::read()?);
         }
+        changed |= app.poll_diff();
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
                 changed |= app.peer_map.roster(&id, &serde_json::json!({"ok":false}));
@@ -2090,7 +2280,48 @@ fn dispatch_peer_refresh(app: &mut App, sender: &SyncSender<crate::bridge::Worke
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
     use serde_json::json;
+
+    fn painted(app: &App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..28).map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn history_picker_filters_attached_transcripts_and_opens_selected_tab() {
+        let mut app = App::default();
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "alpha".into(), title: "First".into(),
+            collection: "repo".into(), transcript: "red apple".into(), status: "Ready".into() }));
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "beta".into(), title: "Second".into(),
+            collection: "repo".into(), transcript: "green pear".into(), status: "Ready".into() }));
+        app.handle(Event::Resize(100, 28));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
+        for c in "pear".chars() { app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))); }
+        let view = painted(&app);
+        assert!(view.contains("Session history"));
+        assert!(view.contains("Second"));
+        assert!(!view.contains("First · alpha"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].active_id(), Some("beta"));
+        assert!(!app.history_modal);
+    }
+
+    #[test]
+    fn diff_view_is_read_only_modal_and_renders_patch_colors() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.diff_modal = true;
+        app.diff_text = "Base: HEAD\n@@ -1 +1 @@\n-old\n+new".into();
+        let view = painted(&app);
+        assert!(view.contains("Worktree diff"));
+        assert!(view.contains("+new"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!app.diff_modal);
+    }
 
     #[test]
     fn long_transcript_window_reaches_both_ends() {

@@ -3,6 +3,7 @@
 pub mod markdown;
 pub mod bridge;
 pub mod history;
+pub mod diff_view;
 pub mod discovery;
 pub mod transport;
 pub mod ui;
