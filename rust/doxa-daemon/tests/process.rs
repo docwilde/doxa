@@ -204,7 +204,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-
     let (mut reader, mut socket) = process.connect();
     assert_eq!(receive(&mut reader)["engine"], "codex");
     send(&mut socket, json!({"type":"attach","cursor":null}));
-    for (id, text) in [(1, "first prompt"), (2, "second prompt")] {
+    for (id, text) in [(1, "fixture-secret first prompt"), (2, "second prompt")] {
         send(&mut socket, json!({"type":"prompt","id":id,"text":text}));
         assert_eq!(receive(&mut reader)["ok"], true);
         let mut kinds = Vec::new();
@@ -213,6 +213,9 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-
             assert!(!frame.to_string().contains("fixture-secret"));
             let event = &frame["event"];
             kinds.push(event["type"].as_str().unwrap().to_owned());
+            if event["type"] == "turn_started" {
+                assert_eq!(event["data"]["prompt"], text.replace("fixture-secret", "[redacted]"));
+            }
             if event["type"] == "text_delta" {
                 assert_eq!(event["data"]["text"], "[redacted] answer");
             }
@@ -222,7 +225,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-
     }
     let argv = fs::read_to_string(args).unwrap();
     assert!(argv.contains("exec\nresume\nthread_1\n"));
-    assert_eq!(fs::read_to_string(prompt).unwrap(), "first promptsecond prompt");
+    assert_eq!(fs::read_to_string(prompt).unwrap(), "fixture-secret first promptsecond prompt");
     send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());

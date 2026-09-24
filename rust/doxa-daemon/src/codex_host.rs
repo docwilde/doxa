@@ -77,9 +77,15 @@ impl Host for CodexHost {
             emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Codex session is stopping"}}));
             return;
         }
-        // Never echo raw prompts into provider events; the socket already
-        // received them from its authenticated local client.
-        emit(json!({"type":"turn_started","data":{}}));
+        let display_prompt = match self.public_prompt(text) {
+            Ok(display) => display,
+            Err(_) => {
+                *self.active.lock().unwrap() = None;
+                emit(json!({"type":"turn_done","data":{"is_error":true,"error":"LORE scrub failed; prompt withheld"}}));
+                return;
+            }
+        };
+        emit(json!({"type":"turn_started","data":{"prompt":display_prompt}}));
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
         let result = match runtime {
             Ok(runtime) => {
