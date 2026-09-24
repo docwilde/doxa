@@ -2,7 +2,7 @@ use doxa_peers::{now as peer_now, PeerRecord, Registry as PeerRegistry};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -1095,8 +1095,14 @@ fn registry_write_failure_reaps_active_codex_process_group() {
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| ready.exists() && process.entry()["clients"] == 1);
 
+    let owned_inode = fs::metadata(&process.registry).unwrap().ino();
     fs::remove_file(&process.registry).unwrap();
     fs::write(&process.registry, "replacement").unwrap();
+    assert_ne!(
+        fs::metadata(&process.registry).unwrap().ino(),
+        owned_inode,
+        "the daemon must pin the owned registry inode against immediate reuse"
+    );
     let (mut second, mut second_socket) = process.connect();
     receive(&mut second);
     send(&mut second_socket, json!({"type":"attach","cursor":null}));

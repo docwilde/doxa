@@ -323,7 +323,11 @@ fn owned_directory(path: &Path) -> io::Result<()> {
 }
 struct Registry {
     path: PathBuf,
-    inode: Option<u64>,
+    identity: Option<(u64, u64)>,
+    // Keep the owned inode allocated even if another process unlinks the path.
+    // Otherwise an immediate replacement can reuse its inode number and pass
+    // the ownership check below (an ABA race).
+    owned_file: Option<File>,
     started_at: String,
     repo_root: Option<String>,
     cwd: String,
@@ -368,7 +372,8 @@ impl Registry {
             });
         Ok(Self {
             path,
-            inode: None,
+            identity: None,
+            owned_file: None,
             started_at: iso_now(),
             repo_root,
             cwd: options.cwd.to_string_lossy().into_owned(),
@@ -398,20 +403,22 @@ impl Registry {
             file.sync_all()?;
             // Refuse to overwrite another process's registry entry.
             if let Ok(meta) = fs::symlink_metadata(&self.path) {
-                if Some(meta.ino()) != self.inode {
+                if Some((meta.dev(), meta.ino())) != self.identity {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
                         "registry entry replaced",
                     ));
                 }
-            } else if self.inode.is_some() {
+            } else if self.identity.is_some() {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     "registry entry removed",
                 ));
             }
+            let meta = file.metadata()?;
             fs::rename(&tmp, &self.path)?;
-            self.inode = Some(fs::symlink_metadata(&self.path)?.ino());
+            self.identity = Some((meta.dev(), meta.ino()));
+            self.owned_file = Some(file);
             Ok(())
         })();
         if result.is_err() {
@@ -422,8 +429,8 @@ impl Registry {
 }
 impl Drop for Registry {
     fn drop(&mut self) {
-        if let (Some(inode), Ok(meta)) = (self.inode, fs::symlink_metadata(&self.path)) {
-            if meta.ino() == inode {
+        if let (Some(identity), Ok(meta)) = (self.identity, fs::symlink_metadata(&self.path)) {
+            if (meta.dev(), meta.ino()) == identity {
                 let _ = fs::remove_file(&self.path);
             }
         }
