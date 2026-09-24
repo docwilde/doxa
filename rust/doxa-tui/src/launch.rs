@@ -230,8 +230,14 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
     }
     let daemon = daemon_binary()?;
     let id = if let Some(id) = &options.resume {
-        if options.engine != Engine::Claude || !discovery::valid_id(id) {
-            return Err(invalid("Claude resume needs a valid session ID"));
+        if !matches!(
+            options.engine,
+            Engine::Claude | Engine::DeepSeek | Engine::Glm
+        ) || !discovery::valid_id(id)
+        {
+            return Err(invalid(
+                "resume needs a valid full session ID and a supported engine",
+            ));
         }
         id.clone()
     } else {
@@ -319,7 +325,6 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
                 || options.sandbox.is_some()
                 || options.claude_python.is_some()
                 || options.claude_script.is_some()
-                || options.resume.is_some()
             {
                 return Err(invalid("unsupported option for vendor engine"));
             }
@@ -344,6 +349,9 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
             }
             if let Some(effort) = &options.effort {
                 command.arg("--effort").arg(effort);
+            }
+            if options.resume.is_some() {
+                command.args(["--resume", "true"]);
             }
         }
     }

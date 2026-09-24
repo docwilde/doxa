@@ -90,7 +90,10 @@ installed. `--model` overrides the matching `deepseek` or `glm` entry under
 does not select a vendor model. `--effort low|high|max` is optional; DeepSeek
 also accepts `none`. `doxa-rs doctor --engine deepseek|glm` checks the daemon,
 LORE interpreter, provider key presence, and effort value without printing the
-key. Vendor chat has no tools, persistence, or resume in this alpha.
+key. Use `doxa-rs new --engine deepseek|glm --resume SESSION_ID` to resume an
+existing vendor session with saved messages. Pass the exact full session ID;
+the vendor and resolved model must match the saved state. Vendor chat has no
+tools in this alpha.
 
 ## Native daemon
 

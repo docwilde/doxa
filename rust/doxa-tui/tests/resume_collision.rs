@@ -5,8 +5,7 @@ use std::os::unix::net::UnixListener;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-#[test]
-fn resume_ignores_existing_same_id_daemon_from_another_pid() {
+fn assert_resume_ignores_existing_same_id_daemon(vendor: bool) {
     let dir = tempfile::tempdir().unwrap();
     let runtime = dir.path().join("runtime");
     let registry = runtime.join("registry");
@@ -45,18 +44,25 @@ fn resume_ignores_existing_same_id_daemon_from_another_pid() {
         }
         false
     });
-    let output = Command::new(env!("CARGO_BIN_EXE_doxa-rs"))
-        .args([
-            "new",
-            "--engine",
-            "claude",
+    let mut command = Command::new(env!("CARGO_BIN_EXE_doxa-rs"));
+    command.args([
+        "new",
+        "--engine",
+        if vendor { "deepseek" } else { "claude" },
+    ]);
+    if vendor {
+        command.args(["--lore-python", "/usr/bin/python3"]);
+        command.env("DEEPSEEK_API_KEY", "secret-vendor-key");
+    } else {
+        command.args([
             "--claude-python",
             "/usr/bin/python3",
             "--claude-script",
             sidecar.to_str().unwrap(),
-            "--resume",
-            id,
-        ])
+        ]);
+    }
+    let output = command
+        .args(["--resume", id])
         .env("DOXA_DAEMON_BIN", &daemon)
         .env("DOXA_RUNTIME_DIR", &runtime)
         .current_dir(dir.path())
@@ -73,4 +79,14 @@ fn resume_ignores_existing_same_id_daemon_from_another_pid() {
         !old_socket.join().unwrap(),
         "launch attached to preexisting same-ID daemon"
     );
+}
+
+#[test]
+fn resume_ignores_existing_same_id_daemon_from_another_pid() {
+    assert_resume_ignores_existing_same_id_daemon(false);
+}
+
+#[test]
+fn vendor_resume_ignores_existing_same_id_daemon_from_another_pid() {
+    assert_resume_ignores_existing_same_id_daemon(true);
 }

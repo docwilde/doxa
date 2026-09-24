@@ -149,3 +149,69 @@ fn invalid_vendor_effort_and_missing_key_never_start_daemon() {
         assert!(!capture.exists());
     }
 }
+
+#[test]
+fn vendor_resume_passes_exact_identity_and_boolean_without_credentials() {
+    for (engine, key) in [("deepseek", "DEEPSEEK_API_KEY"), ("glm", "ZAI_API_KEY")] {
+        let (dir, daemon, capture) = fixture();
+        let output = Command::new(env!("CARGO_BIN_EXE_doxa-rs"))
+            .args([
+                "new",
+                "--engine",
+                engine,
+                "--resume",
+                "vendor-session-123",
+                "--lore-python",
+                "/usr/bin/python3",
+            ])
+            .env("DOXA_DAEMON_BIN", &daemon)
+            .env("DOXA_CAPTURE_ARGS", &capture)
+            .env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))
+            .env(key, "secret-vendor-key")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let args = argv(&capture);
+        assert!(args.windows(2).any(|w| w == ["--engine", engine]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--session-id", "vendor-session-123"]));
+        assert!(args.windows(2).any(|w| w == ["--resume", "true"]));
+        assert!(!args.join(" ").contains("secret-vendor-key"));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "--codex-bin" || arg == "--claude-script"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("secret-vendor-key"));
+    }
+}
+
+#[test]
+fn vendor_resume_rejects_invalid_identity_and_non_new_command_before_spawn() {
+    let (dir, daemon, capture) = fixture();
+    for args in [
+        vec!["new", "--engine", "deepseek", "--resume", "bad/../id"],
+        vec!["new", "--engine", "glm", "--resume", "-bad"],
+        vec![
+            "doctor",
+            "--engine",
+            "glm",
+            "--resume",
+            "vendor-session-123",
+        ],
+        vec!["new", "--engine", "codex", "--resume", "vendor-session-123"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_doxa-rs"))
+            .args(args)
+            .env("DOXA_DAEMON_BIN", &daemon)
+            .env("DOXA_CAPTURE_ARGS", &capture)
+            .env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))
+            .env("DEEPSEEK_API_KEY", "secret-vendor-key")
+            .env("ZAI_API_KEY", "secret-vendor-key")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(!capture.exists());
+    }
+}

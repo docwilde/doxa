@@ -90,11 +90,13 @@ fn run(args: &[String]) -> io::Result<()> {
         return bridge::run_socket(socket);
     }
     if options.resume.is_some() && command != Some("new") {
-        return Err(invalid("--resume requires new --engine claude"));
+        return Err(invalid(
+            "--resume requires new --engine claude|deepseek|glm",
+        ));
     }
     match command {
         Some("--help") => {
-            println!("Usage: doxa-rs [new|attach [ID]|stop [ID]|list|doctor] [options]\n       doxa-rs --session ID\n       doxa-rs --socket PATH\n\nPlain doxa-rs restores live sessions in the current project, or starts a native Codex session.\nnew always starts a session. attach and stop accept a full ID or unique prefix.\nOptions for new sessions: --engine codex|claude|deepseek|glm|fixture, --model NAME, --linger SECONDS.\nCodex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH, --lore-python PATH.\nClaude: --claude-python PATH, --claude-script ABSOLUTE_PATH, --resume SESSION_ID (with new).\nDeepSeek/GLM: --lore-python PATH, --effort low|high|max (DeepSeek also none); API key in provider environment variable.\nDOXA_DAEMON_BIN selects an absolute native daemon path. Ctrl+Q detaches without stopping the daemon.");
+            println!("Usage: doxa-rs [new|attach [ID]|stop [ID]|list|doctor] [options]\n       doxa-rs --session ID\n       doxa-rs --socket PATH\n\nPlain doxa-rs restores live sessions in the current project, or starts a native Codex session.\nnew always starts a session. attach and stop accept a full ID or unique prefix.\nOptions for new sessions: --engine codex|claude|deepseek|glm|fixture, --model NAME, --linger SECONDS.\nCodex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH, --lore-python PATH.\nClaude: --claude-python PATH, --claude-script ABSOLUTE_PATH.\nDeepSeek/GLM: --lore-python PATH, --effort low|high|max (DeepSeek also none); API key in provider environment variable.\nClaude/DeepSeek/GLM: --resume FULL_SESSION_ID with new.\nDOXA_DAEMON_BIN selects an absolute native daemon path. Ctrl+Q detaches without stopping the daemon.");
             Ok(())
         }
         Some("--version") => {
