@@ -31,5 +31,7 @@ jobs:
         env:
           DOXA_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: cargo +stable test --locked --manifest-path rust/doxa-runtime/Cargo.toml
+      - name: Test Rust state compatibility
+        run: cargo +stable test --locked --manifest-path rust/doxa-state/Cargo.toml
       - name: Build release binary
         run: cargo +stable build --locked --release --manifest-path rust/doxa-tui/Cargo.toml

@@ -1,8 +1,22 @@
 # Changelog
 
 Newest first. Versions are annotated git tags on the commit that shipped
-them (`v0.1.0` … `v1.18.0`); the ranges below are derived from that history,
+them (`v0.1.0` … `v1.19.0`); the ranges below are derived from that history,
 not written from memory.
+
+## 1.19.0 — 2026-09-24
+
+**Startup shows progress sooner.**
+
+- Argument parsing no longer imports the daemon to read its linger default. The first terminal screen appears sooner, and a visible `Loading…` or `Restoring session…` status stays in place until opening panes finish.
+- Input behind the loading cover is held until the opening panes are ready, while visible confirmation dialogs remain usable.
+- Text is now the default image mode, so ordinary launches skip graphics and cell-size queries. The optional image probe remains available through Settings and takes effect after restart. An unanswered keyboard capability query waits up to 100 ms instead of 300 ms. In the paired PTY fixture, the three startup changes together cut median first-screen time from 1,215 ms to 262 ms.
+
+**Less redraw work in the existing UI.**
+
+- Repeated status and transcript updates skip unchanged content; diff refreshes are coalesced and stale search paints are prevented. The transcript remains scrollable without showing a scrollbar at its far right. F3 toggles the grouped-session rail.
+- A headless benchmark now measures the full DOXA Textual screen under fixed resize, Markdown append, and scroll workloads. Packaged Python variants and a Ratatui model of the visible screen use matching fixtures; the Rust model reparses CommonMark on each append. Its in-memory draw times are documented separately from Textual's event-to-frame latency.
+- A complete Textual 8 compatibility trial passed the local suite, but paired runs found only a small resize gain and slower Markdown append and scroll work. DOXA 1.19 stays on Textual 5.
 
 ## 1.18.0 — 2026-09-24
 
