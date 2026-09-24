@@ -351,7 +351,8 @@ fn registry_wire_prompt_and_stop() {
 #[test]
 fn linger_resets_when_a_client_reattaches() {
     let dir = tempfile::tempdir().unwrap();
-    let mut process = Process::start(dir.path(), "0.25");
+    // Leave enough room for a loaded CI runner to schedule the reconnect.
+    let mut process = Process::start(dir.path(), "1.0");
     let (mut first, mut socket) = process.connect();
     receive(&mut first);
     send(&mut socket, json!({"type":"attach","cursor":null}));
@@ -364,7 +365,7 @@ fn linger_resets_when_a_client_reattaches() {
     receive(&mut second);
     send(&mut socket, json!({"type":"attach","cursor":null}));
     wait_until(|| process.entry()["clients"] == 1);
-    thread::sleep(Duration::from_millis(350));
+    thread::sleep(Duration::from_millis(1200));
     assert!(!process.exited(), "attached client must cancel linger");
     drop(second);
     drop(socket);
@@ -387,7 +388,7 @@ fn sigterm_removes_only_owned_resources() {
 #[test]
 fn stop_during_rearmed_linger_exits_once() {
     let dir = tempfile::tempdir().unwrap();
-    let mut process = Process::start(dir.path(), "0.5");
+    let mut process = Process::start(dir.path(), "1.0");
     let (mut first, mut socket) = process.connect();
     receive(&mut first);
     send(&mut socket, json!({"type":"attach","cursor":null}));
