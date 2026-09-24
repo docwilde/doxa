@@ -99,6 +99,7 @@ from . import __version__
 from . import engines as engines_mod
 from . import notify as notify_mod
 from . import worktrees as worktrees_mod
+from .defaults import DEFAULT_LINGER_SECS
 from .identity import require_session_id
 from .engine import (
     BELIEF_EVIDENCE_LIMIT,
@@ -148,7 +149,6 @@ GATED_SOCKET_MODES = frozenset(GATED_MODES) | (
 #: reattaches.
 CLIENT_WRITE_BUFFER_MAX = 8 * 1024 * 1024
 
-DEFAULT_LINGER_SECS = 120.0
 # A freshly spawned daemon that NO client has attached to yet gets this
 # claim window (>= spawn_daemon's own wait) before giving up, regardless of
 # how short --linger is -- the linger knob times detach-to-finalize, not

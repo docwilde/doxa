@@ -1067,7 +1067,7 @@ def overridden_by_env(env_name: str) -> bool:
 def linger_secs() -> float:
     """The daemon linger knob, parsed. Garbage falls back to the default
     rather than crashing the CLI on a typo in a config file."""
-    from .daemon import DEFAULT_LINGER_SECS
+    from .defaults import DEFAULT_LINGER_SECS
 
     value = raw("DOXA_LINGER_SECS").strip()
     if not value:
