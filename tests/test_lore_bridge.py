@@ -92,6 +92,36 @@ def test_pending_sync_and_refresh_are_bounded_and_scoped(monkeypatch):
     assert b"SECRET" not in output.getvalue()
 
 
+def test_pending_scrubs_nested_allowlisted_values_before_writing(monkeypatch):
+    scrub = lambda text: text.replace("SECRET", "[redacted]")
+    monkeypatch.setattr(lore_bridge, "_lore", lambda: (scrub, lambda cwd, scope: ""))
+    monkeypatch.setattr(lore_bridge, "_extensions", lambda: (
+        lambda cwd: "this", lambda: None,
+        lambda: [("p1", {
+            "scope": "user",
+            "subject": {"SECRET key": ["SECRET value", {"nested": "SECRET again"}]},
+            "confidence": 0.8,
+            "subject_unresolved": False,
+        })],
+        (scrub, lambda: None),
+    ))
+    output = io.BytesIO()
+    monkeypatch.setattr(lore_bridge.sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(
+        lore_bridge._frame({"id": 1, "op": "pending", "cwd": "/repo"})
+    )))
+    monkeypatch.setattr(lore_bridge.sys, "stdout", types.SimpleNamespace(buffer=output))
+
+    lore_bridge.serve()
+
+    frames = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert frames[1]["value"] == [{
+        "pid": "p1", "scope": "user",
+        "subject": {"[redacted] key": ["[redacted] value", {"nested": "[redacted] again"}]},
+        "confidence": 0.8, "subject_unresolved": False,
+    }]
+    assert b"SECRET" not in output.getvalue()
+
+
 def test_disabled_sync_returns_null(monkeypatch):
     monkeypatch.setattr(lore_bridge, "_lore", lambda: (lambda text: text, lambda cwd, scope: ""))
     monkeypatch.setattr(lore_bridge, "_extensions", lambda: (
