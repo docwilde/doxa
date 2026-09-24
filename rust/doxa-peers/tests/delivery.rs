@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use doxa_peers::{delivery::*, now, PeerRecord, Registry};
 use std::fs::{self, OpenOptions};
-use std::io;
+use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -42,6 +43,30 @@ fn local_delivery_scrubs_receive_and_ledger_but_hashes_raw() -> io::Result<()> {
     assert_eq!(record.body, "[redacted]");
     assert_eq!(record.body_sha256, "0917b13a9091915d54b6336f45909539cce452b3661b21f386418a257883b30a");
     assert_eq!(record.turn.id.as_deref(), Some("turn-1"));
+    Ok(())
+}
+
+#[test]
+fn polling_idle_peer_does_not_stall_and_retains_partial_frame() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let runtime = temp.path().join("runtime");
+    let _registry = Registry::open(&runtime)?;
+    let inbox = Inbox::bind(&runtime, "recipient")?;
+    let mut client = UnixStream::connect(inbox.path())?;
+    let started = Instant::now();
+    assert!(inbox.poll_receive(&|s: &str| s.to_owned())?.is_none());
+    assert!(started.elapsed() < Duration::from_millis(250));
+    let frame = PeerFrame { from_id: "sender".into(), from_title: "test".into(),
+        sent_at: now(), body: "SECRET".into(), from_repo: None, kind: None };
+    let mut bytes = serde_json::to_vec(&frame)?;
+    bytes.push(b'\n');
+    let midpoint = bytes.len() / 2;
+    client.write_all(&bytes[..midpoint])?;
+    assert!(inbox.poll_receive(&|s: &str| s.to_owned())?.is_none());
+    client.write_all(&bytes[midpoint..])?;
+    let received = inbox.poll_receive(&|s: &str| s.replace("SECRET", "[redacted]"))?
+        .expect("complete frame after second poll");
+    assert_eq!(received.body, "[redacted]");
     Ok(())
 }
 

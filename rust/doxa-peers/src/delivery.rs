@@ -10,6 +10,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -54,9 +55,12 @@ fn same_user(stream: &UnixStream) -> io::Result<()> {
     Ok(())
 }
 fn read_frame(stream: &mut UnixStream) -> io::Result<PeerFrame> {
-    stream.set_read_timeout(Some(TIMEOUT))?;
+    let deadline = Instant::now() + TIMEOUT;
     let mut bytes = Vec::new();
     loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return Err(io::Error::new(io::ErrorKind::TimedOut, "peer frame timed out")); }
+        stream.set_read_timeout(Some(remaining))?;
         let mut buf = [0u8; 4096];
         let n = stream.read(&mut buf)?;
         if n == 0 { break; }
@@ -64,6 +68,9 @@ fn read_frame(stream: &mut UnixStream) -> io::Result<PeerFrame> {
         if bytes.len() > MAX_FRAME_BYTES { return Err(invalid("peer frame too large")); }
         if bytes.contains(&b'\n') { break; }
     }
+    parse_frame(&bytes)
+}
+fn parse_frame(bytes: &[u8]) -> io::Result<PeerFrame> {
     if bytes.is_empty() { return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "empty peer probe")); }
     if bytes.last() != Some(&b'\n') || bytes[..bytes.len()-1].contains(&b'\n') { return Err(invalid("peer frame must be one complete line")); }
     let frame: PeerFrame = serde_json::from_slice(&bytes[..bytes.len()-1]).map_err(|_| invalid("invalid peer JSON"))?;
@@ -72,7 +79,8 @@ fn read_frame(stream: &mut UnixStream) -> io::Result<PeerFrame> {
 }
 
 /// A receiving socket is created exclusively. An existing path, even a dead socket, is never unlinked by this API.
-pub struct Inbox { listener: UnixListener, path: PathBuf, inode: u64, device: u64 }
+struct PendingFrame { stream: UnixStream, bytes: Vec<u8>, started: Instant }
+pub struct Inbox { listener: UnixListener, path: PathBuf, inode: u64, device: u64, pending: Mutex<Option<PendingFrame>> }
 impl Inbox {
     pub fn bind(runtime: &Path, session_id: &str) -> io::Result<Self> {
         if session_id.is_empty() || !session_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
@@ -88,23 +96,50 @@ impl Inbox {
         let listener = UnixListener::bind(&path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         let meta = fs::symlink_metadata(&path)?;
-        Ok(Self { listener, path, inode: meta.ino(), device: meta.dev() })
+        Ok(Self { listener, path, inode: meta.ino(), device: meta.dev(), pending: Mutex::new(None) })
     }
     pub fn path(&self) -> &Path { &self.path }
-    /// Poll one connection without blocking daemon shutdown. An empty
-    /// discovery probe has no message to surface.
+    /// Poll one connection without blocking daemon shutdown. Partial frames
+    /// are retained across polls; an empty discovery probe has no message.
     pub fn poll_receive(&self, scrubber: &impl Scrubber) -> io::Result<Option<PeerFrame>> {
-        self.listener.set_nonblocking(true)?;
-        let (mut stream, _) = match self.listener.accept() {
-            Ok(value) => value,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        same_user(&stream)?;
-        match read_frame(&mut stream) {
-            Ok(frame) => Ok(Some(frame.scrub(scrubber))),
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
-            Err(error) => Err(error),
+        let mut pending = self.pending.lock().map_err(|_| io::Error::other("peer inbox lock poisoned"))?;
+        if pending.is_none() {
+            self.listener.set_nonblocking(true)?;
+            let (stream, _) = match self.listener.accept() {
+                Ok(value) => value,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            same_user(&stream)?;
+            stream.set_nonblocking(true)?;
+            *pending = Some(PendingFrame { stream, bytes: Vec::new(), started: Instant::now() });
+        }
+        let frame = pending.as_mut().expect("pending peer connection");
+        if frame.started.elapsed() >= TIMEOUT {
+            *pending = None;
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "peer frame timed out"));
+        }
+        loop {
+            let mut buf = [0u8; 4096];
+            let n = match frame.stream.read(&mut buf) {
+                Ok(n) => n,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+                Err(error) => { *pending = None; return Err(error); }
+            };
+            if n > 0 { frame.bytes.extend_from_slice(&buf[..n]); }
+            if frame.bytes.len() > MAX_FRAME_BYTES {
+                *pending = None;
+                return Err(invalid("peer frame too large"));
+            }
+            if n == 0 || frame.bytes.contains(&b'\n') {
+                let bytes = std::mem::take(&mut frame.bytes);
+                *pending = None;
+                return match parse_frame(&bytes) {
+                    Ok(frame) => Ok(Some(frame.scrub(scrubber))),
+                    Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+                    Err(error) => Err(error),
+                };
+            }
         }
     }
     pub fn receive(&self, scrubber: &impl Scrubber) -> io::Result<PeerFrame> {
