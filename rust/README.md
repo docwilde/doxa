@@ -15,11 +15,16 @@ Build from this repository:
 ```sh
 cargo build --manifest-path rust/doxa-tui/Cargo.toml
 rust/doxa-tui/target/debug/doxa-rs --socket /path/to/existing/daemon.sock
+rust/doxa-tui/target/debug/doxa-rs --list
+rust/doxa-tui/target/debug/doxa-rs --session SESSION_ID
 ```
 
-`--demo` opens the shell without a connection. `Ctrl+Q` detaches the Rust UI
+With one live daemon session, `doxa-rs` attaches to it directly. With multiple
+sessions, use `--list` and select one by full ID or unique ID prefix.
+`--socket` remains available for an explicit path. `--demo` opens the shell
+without a connection. `Ctrl+Q` detaches the Rust UI
 without stopping its daemon. The current alpha attaches to one socket and
-renders text turns; session discovery, permission dialogs, tool cards,
+renders text turns; permission dialogs, tool cards,
 clickable links, aligned Markdown tables, drag dividers, and full transcript
 restore are still 2.0 work. The binary version is `2.0.0-alpha.1` for this
 separate development line, not a DOXA 2.0 release.
