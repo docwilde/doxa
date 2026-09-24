@@ -71,6 +71,8 @@ twice would be a bug, and the shape of these strings is what prevents it.
 from __future__ import annotations
 
 import asyncio
+import fcntl
+import hashlib
 import os
 import shutil
 from typing import TYPE_CHECKING, Any
@@ -182,6 +184,58 @@ there instead of two seconds.
 
 Recomputed from ``started_at`` on every attempt, over the same registry
 scan the count cap just read; no new storage, nothing that can drift."""
+
+
+# Confirmations are asynchronous, while the caps must cover a child before
+# it has a registry entry.  A reservation lives only between the initial
+# admission check and the eventual spawn (or refusal), so two tool calls in
+# one engine cannot both be admitted against the same empty registry.
+_PENDING_SPAWNS: "dict[str, set[object]]" = {}
+
+
+class _SpawnReservation:
+    """One pending spawn's in-process token and cross-process file lock."""
+
+    def __init__(self, scope: str, token: object, fd: int) -> None:
+        self.scope = scope
+        self.token = token
+        self.fd = fd
+
+
+def _pending_count(scope: str) -> int:
+    return len(_PENDING_SPAWNS.get(scope, ()))
+
+
+def _reserve(scope: str) -> "_SpawnReservation | None":
+    token = object()
+    _PENDING_SPAWNS.setdefault(scope, set()).add(token)
+    digest = hashlib.sha256(scope.encode("utf-8", "surrogateescape")).hexdigest()
+    path = peers_mod.registry_dir() / f"spawn-{digest}.lock"
+    fd: "int | None" = None
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        if fd is not None:
+            os.close(fd)
+        _release(scope, token)
+        return None
+    return _SpawnReservation(scope, token, fd)
+
+
+def _release(scope: str, reservation: "_SpawnReservation | object") -> None:
+    token = reservation.token if isinstance(reservation, _SpawnReservation) else reservation
+    if isinstance(reservation, _SpawnReservation):
+        try:
+            os.close(reservation.fd)
+        except OSError:
+            pass
+    pending = _PENDING_SPAWNS.get(scope)
+    if pending is None:
+        return
+    pending.discard(token)
+    if not pending:
+        _PENDING_SPAWNS.pop(scope, None)
 
 
 # -- the disk preflight ------------------------------------------------
@@ -403,21 +457,22 @@ def _spawn_session(
     peers = peers_mod.list_peers(scope, self_id=op_ctx.session_id)
 
     # -- bound 2: live sessions in this repo scope ---------------------
+    pending = _pending_count(scope)
     live = len(peers) + 1  # + this session, which list_peers excludes
-    if live >= MAX_LIVE_SESSIONS:
+    if live + pending >= MAX_LIVE_SESSIONS:
         return {"error": (
             f"spawn_session: session limit reached ({MAX_LIVE_SESSIONS}) -- "
-            f"{live} live sessions in this repo already")}
+            f"{live + pending} live sessions in this repo already")}
 
     # -- bound 3: rate over the same scan ------------------------------
     recent = [
         p for p in peers
         if peers_mod.age_secs(p.started_at) <= SPAWN_RATE_WINDOW_SECS
     ]
-    if len(recent) >= MAX_SPAWNS_PER_WINDOW:
+    if len(recent) + pending >= MAX_SPAWNS_PER_WINDOW:
         return {"error": (
             f"spawn_session: rate limit reached ({MAX_SPAWNS_PER_WINDOW} per "
-            f"{SPAWN_RATE_WINDOW_SECS:.0f}s) -- {len(recent)} session(s) "
+            f"{SPAWN_RATE_WINDOW_SECS:.0f}s) -- {len(recent) + pending} session(s) "
             "started in this repo within that window")}
 
     # -- the disk preflight --------------------------------------------
@@ -458,48 +513,94 @@ async def _spawn_after_confirm(
     session waiting for its user is idle, not spinning."""
     from .daemon import spawn_daemon  # local: doxa.daemon imports the engine
 
+    reservation = _reserve(scope)
+    if reservation is None:
+        return {"error": (
+            "spawn_session: another spawn in this repo is awaiting approval -- "
+            "wait for that decision before starting another")}
     confirm = getattr(op_ctx, "spawn_confirm", None)
     if confirm is None:
         # No confirmation channel wired (a headless embedding, a test that
         # forgot). Refuse rather than spawn unasked -- the dialog is the
         # actual containment this design rests on, not decoration.
+        _release(scope, reservation)
         return {"error": (
             "spawn_session: no approval channel in this session -- refusing "
             "to start a session nobody could say no to")}
 
-    answer = await confirm({
-        "task": task,
-        "model": model,
-        "base_branch": base_branch,
-        "live_sessions": live,
-        "max_live_sessions": MAX_LIVE_SESSIONS,
-        "depth": depth,
-        "child_depth": depth + 1,
-        "max_depth": MAX_SPAWN_DEPTH,
-        "free_bytes": free,
-        "worktrees_root": str(worktrees_mod.worktrees_root()),
-        "scope": scope,
-    })
-    if not isinstance(answer, dict) or answer.get("decision") != "allow":
-        # A declined spawn is the gate working. Same soft shape as a cap.
-        return {"error": "spawn_session: the user declined this spawn"}
+    try:
+        # Reserve before asking the human, then check against the fresh
+        # registry.  A second concurrent coroutine reaches this point with
+        # the first reservation visible and is refused before it can open a
+        # second approval dialog.
+        peers = peers_mod.list_peers(scope, self_id=op_ctx.session_id)
+        now_live = len(peers) + 1 + _pending_count(scope)
+        if now_live > MAX_LIVE_SESSIONS:
+            return {"error": (
+                f"spawn_session: session limit reached ({MAX_LIVE_SESSIONS}) -- "
+                f"{now_live} live sessions in this repo already")}
+        now_recent = sum(
+            peers_mod.age_secs(p.started_at) <= SPAWN_RATE_WINDOW_SECS
+            for p in peers
+        ) + _pending_count(scope)
+        if now_recent > MAX_SPAWNS_PER_WINDOW:
+            return {"error": (
+                f"spawn_session: rate limit reached ({MAX_SPAWNS_PER_WINDOW} per "
+                f"{SPAWN_RATE_WINDOW_SECS:.0f}s) -- {now_recent} session(s) "
+                "started in this repo within that window")}
 
-    # The child spawns from the MAIN checkout of the parent's repo, not
-    # from the parent's own linked worktree: worktrees.create is per
-    # session and keyed off the main root, and a worktree of a worktree is
-    # not a shape it promises. Either way this is derived from
-    # op_ctx.cwd -- the sidecar -- and never from anything the model wrote.
-    child_cwd = scope
-    session_id, daemon_socket = await asyncio.to_thread(
-        spawn_daemon,
-        child_cwd,
-        model=model or None,
-        base_branch=base_branch or None,
-        spawn_depth=depth + 1,
-        parent_session_id=op_ctx.session_id,
-        task=task,
-    )
-    return {
+        answer = await confirm({
+            "task": task,
+            "model": model,
+            "base_branch": base_branch,
+            "live_sessions": live,
+            "max_live_sessions": MAX_LIVE_SESSIONS,
+            "depth": depth,
+            "child_depth": depth + 1,
+            "max_depth": MAX_SPAWN_DEPTH,
+            "free_bytes": free,
+            "worktrees_root": str(worktrees_mod.worktrees_root()),
+            "scope": scope,
+        })
+        if not isinstance(answer, dict) or answer.get("decision") != "allow":
+            # A declined spawn is the gate working. Same soft shape as a cap.
+            return {"error": "spawn_session: the user declined this spawn"}
+
+        # The registry may have changed while the approval dialog was open.
+        # Recheck it before starting a process; our own reservation remains
+        # counted so another pending approval cannot slip through this gap.
+        peers = peers_mod.list_peers(scope, self_id=op_ctx.session_id)
+        now_live = len(peers) + 1 + _pending_count(scope)
+        if now_live > MAX_LIVE_SESSIONS:
+            return {"error": (
+                f"spawn_session: session limit reached ({MAX_LIVE_SESSIONS}) -- "
+                f"{now_live} live sessions in this repo already")}
+        now_recent = sum(
+            peers_mod.age_secs(p.started_at) <= SPAWN_RATE_WINDOW_SECS
+            for p in peers
+        ) + _pending_count(scope)
+        if now_recent > MAX_SPAWNS_PER_WINDOW:
+            return {"error": (
+                f"spawn_session: rate limit reached ({MAX_SPAWNS_PER_WINDOW} per "
+                f"{SPAWN_RATE_WINDOW_SECS:.0f}s) -- {now_recent} session(s) "
+                "started in this repo within that window")}
+
+        # The child spawns from the MAIN checkout of the parent's repo, not
+        # from the parent's own linked worktree: worktrees.create is per
+        # session and keyed off the main root, and a worktree of a worktree is
+        # not a shape it promises. Either way this is derived from
+        # op_ctx.cwd -- the sidecar -- and never from anything the model wrote.
+        child_cwd = scope
+        session_id, daemon_socket = await asyncio.to_thread(
+            spawn_daemon,
+            child_cwd,
+            model=model or None,
+            base_branch=base_branch or None,
+            spawn_depth=depth + 1,
+            parent_session_id=op_ctx.session_id,
+            task=task,
+        )
+        return {
         "session_id": session_id,
         "daemon_socket": daemon_socket,
         "cwd": child_cwd,
@@ -518,7 +619,9 @@ async def _spawn_after_confirm(
             "own doxa/<short> branch in its own worktree, which you can "
             "git log and git diff whenever you want."
         ),
-    }
+        }
+    finally:
+        _release(scope, reservation)
 
 
 _SPAWN_SESSION = Operator(

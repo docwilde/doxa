@@ -201,6 +201,7 @@ import asyncio
 import json
 import os
 import re
+import signal
 import shutil
 import sys
 import time
@@ -864,6 +865,10 @@ class CodexEngine:
         self._finalized = False
         self._started = False
         self._proc: Any = None
+        # Set only after the child proves it owns the process group created
+        # by start_new_session.  Never infer a group from a dead pid: pid
+        # reuse could otherwise signal an unrelated process group.
+        self._proc_group: "int | None" = None
         self._turn_closed = False
         # Unreadable stdout lines seen during the CURRENT turn, and the
         # first of them. Reset per turn by send(), which is also what
@@ -1075,10 +1080,20 @@ class CodexEngine:
 
     async def _kill_turn(self) -> None:
         proc, self._proc = self._proc, None
-        if proc is None or proc.returncode is not None:
+        group, self._proc_group = self._proc_group, None
+        if proc is None:
             return
         try:
-            proc.kill()
+            # Every real turn starts a new session, so its process group is
+            # exactly the Codex parent and every command it launched.  Killing
+            # only the parent leaves background servers and inherited pipe
+            # holders behind after timeout or cancellation.
+            if group is not None and proc.returncode is None:
+                # The leader is still known alive, so this recorded group
+                # cannot have been recycled for an unrelated process.
+                os.killpg(group, signal.SIGKILL)
+            elif proc.returncode is None:
+                proc.kill()
             await proc.wait()
         except Exception:  # noqa: BLE001
             pass
@@ -1490,11 +1505,21 @@ class CodexEngine:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self.cwd,
+            # Own a process group so _kill_turn can reliably reap commands
+            # Codex launches as well as the Codex parent itself.
+            start_new_session=True,
             # Without this the reader is asyncio's 64 KiB default and one
             # oversized event ENDS the turn. See STREAM_LIMIT_BYTES.
             limit=STREAM_LIMIT_BYTES,
         )
         self._proc = proc
+        pid = getattr(proc, "pid", None)
+        if os.name == "posix" and isinstance(pid, int):
+            try:
+                if os.getpgid(pid) == pid:
+                    self._proc_group = pid
+            except ProcessLookupError:
+                pass
         self._turn_closed = False
         self._bad_frames = 0
         self._bad_sample = ""

@@ -319,10 +319,15 @@ class PeerDelivery:
         if not body.strip():
             raise peers_mod.PeerSendError("refusing to send an empty message")
 
+        # A delivery crosses several awaits.  Its turn is the turn in which
+        # it started, even if the engine starts or finishes another turn
+        # while a peer socket or ledger lock is pending.
+        turn = self.turn_ref()
+
         # 1. the limit, before a byte moves
         decision = self.limiter.charge(
             recipients=[peer.session_id for peer in targets],
-            turn_id=self.current_turn_id(),
+            turn_id=turn.id if turn.state == "running" else None,
         )
         decision.raise_if_refused()
 
@@ -359,7 +364,7 @@ class PeerDelivery:
                 body=body,
                 kind=kind,
                 in_reply_to=in_reply_to,
-                turn=self.turn_ref(),
+                turn=turn,
             )
         except Exception as exc:  # noqa: BLE001 -- a full ledger must not eat a delivered message
             # The message HAS been delivered; refusing to return now would

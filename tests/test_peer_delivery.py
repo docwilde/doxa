@@ -270,6 +270,27 @@ async def test_a_vendor_msg_is_ledgered_like_a_human_typed_claude_one(
         await eng.finalize()
 
 
+async def test_a_send_keeps_the_turn_it_started_in_across_transport_awaits(
+    tmp_path, monkeypatch,
+):
+    """The ledger must not read a later engine turn after delivery waits."""
+    eng, _transport = await _vendor(tmp_path, monkeypatch, peer_send=True)
+    try:
+        _peer_entry(tmp_path / "rt", "target01", scope="/repo/t")
+        eng._turn_id = "turn-before-send"
+
+        async def delayed_send(*_args, **_kwargs):
+            eng._turn_id = "turn-after-send"
+
+        monkeypatch.setattr("doxa.peerdelivery.peers_mod.send_message", delayed_send)
+        await eng.send_peer_message("target01", "keep attribution")
+
+        record = eng._peer_delivery.ledger.recent(limit=1)[0]
+        assert record.turn.id == "turn-before-send"
+    finally:
+        await eng.finalize()
+
+
 async def test_a_vendor_msg_that_the_limit_refuses_raises_the_error_msg_handles(
     tmp_path, monkeypatch,
 ):
