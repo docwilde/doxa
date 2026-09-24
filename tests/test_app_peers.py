@@ -236,12 +236,22 @@ async def test_a_peer_body_of_rich_markup_renders_literally(monkeypatch, tmp_pat
         block = blocks[0]
         # Not interpreted: the widget was told the content is not markup.
         assert block._render_markup is False
+        # Mounting can complete before Textual has laid out the new block.
+        # At that point its minimum width is six cells (border + padding),
+        # and render_lines sees only the border, even though the body arrived.
+        for _ in range(100):
+            if block.region.width >= 60:
+                break
+            await pilot.pause(0.02)
+        assert block.region.width >= 60
         # And it actually paints, rather than raising on the stray bracket.
         from textual.geometry import Region
 
         strip_text = "".join(
             segment.text
-            for strip in block.render_lines(Region(0, 0, 120, 6))
+            for strip in block.render_lines(
+                Region(0, 0, block.region.width, block.region.height)
+            )
             for segment in strip
         )
         assert "[bold red]ALERT[/]" in strip_text
