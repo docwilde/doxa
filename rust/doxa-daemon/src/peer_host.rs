@@ -41,6 +41,9 @@ impl PeerHost {
             .unwrap_or_else(|| {
                 PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".doxa")
             });
+        if !home.is_absolute() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "DOXA home must be absolute"));
+        }
         Ok(Self {
             inner,
             lore: Mutex::new(None),
@@ -202,10 +205,6 @@ impl PeerHost {
             engine: None,
             parent_session_id: None,
         };
-        let mut limiter = self
-            .limiter
-            .lock()
-            .map_err(|_| "peer rate limiter unavailable")?;
         let scope = self.scope.clone();
         let raw_body = body.to_owned();
         let result = delivery::deliver(
@@ -215,7 +214,7 @@ impl PeerHost {
             body,
             "direct",
             None,
-            &mut limiter,
+            &self.limiter,
             &self.ledger,
             &move |text: &str| {
                 if text == raw_body {

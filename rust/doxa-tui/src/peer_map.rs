@@ -102,7 +102,6 @@ impl PeerMap {
         } else {
             "Peer discovery returned no valid entries".into()
         };
-        self.selected = self.selected.min(scope.peers.len().saturating_sub(1));
         true
     }
 
@@ -120,18 +119,22 @@ impl PeerMap {
                 else {
                     return false;
                 };
-                if scope.peers.iter().any(|peer| peer.id == id) {
-                    return false;
-                }
-                if scope.peers.len() >= MAX_PEERS {
-                    return false;
-                }
                 let title = data
                     .get("title")
                     .and_then(Value::as_str)
                     .map(label)
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| id.chars().take(12).collect());
+                if let Some(peer) = scope.peers.iter_mut().find(|peer| peer.id == id) {
+                    if peer.title == title {
+                        return false;
+                    }
+                    peer.title = title;
+                    return true;
+                }
+                if scope.peers.len() >= MAX_PEERS {
+                    return false;
+                }
                 scope.peers.push(Peer {
                     id: id.into(),
                     title,
@@ -152,7 +155,6 @@ impl PeerMap {
                 let before = scope.peers.len();
                 scope.peers.retain(|peer| peer.id != id);
                 scope.observations.retain(|(peer, _)| peer != id);
-                self.selected = self.selected.min(scope.peers.len().saturating_sub(1));
                 before != scope.peers.len()
             }
             "peer_message" => {

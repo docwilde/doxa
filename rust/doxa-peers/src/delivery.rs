@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -205,7 +205,8 @@ impl Ledger {
         let mut line = serde_json::to_vec(&message).map_err(io::Error::other)?;
         line.push(b'\n');
         let parent = self.path.parent().ok_or_else(|| invalid("ledger has no parent"))?;
-        fs::create_dir_all(parent)?;
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700).create(parent)?;
         let parent_meta = fs::symlink_metadata(parent)?;
         if !parent_meta.file_type().is_dir() || parent_meta.uid() != unsafe { libc::geteuid() } { return Err(invalid("unsafe ledger directory")); }
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
@@ -260,7 +261,7 @@ impl RateLimiter {
 pub struct DeliveryResult { pub delivered: Vec<String>, pub failed: Vec<String>, pub record: Option<Message>, pub ledger_error: Option<String> }
 /// The single local outbound path: scoped discovery, charge, send, then append only successful recipients.
 pub fn deliver(registry: &Registry, sender: &PeerRecord, recipients: &[String], body: &str, kind: &str,
-    turn_id: Option<&str>, limiter: &mut RateLimiter, ledger: &Ledger, scrubber: &impl Scrubber) -> io::Result<DeliveryResult> {
+    turn_id: Option<&str>, limiter: &Mutex<RateLimiter>, ledger: &Ledger, scrubber: &impl Scrubber) -> io::Result<DeliveryResult> {
     if body.trim().is_empty() || body.chars().count() > MAX_BODY_CHARS { return Err(invalid("invalid peer body")); }
     if !matches!(kind, "direct" | "broadcast") { return Err(invalid("invalid peer kind")); }
     let peers = registry.scoped(sender.scope_key(), Some(&sender.session_id), scrubber, true)?;
@@ -269,7 +270,8 @@ pub fn deliver(registry: &Registry, sender: &PeerRecord, recipients: &[String], 
         let peer = peers.iter().find(|p| &p.session_id == id).ok_or_else(|| invalid("recipient is not a live scoped peer"))?;
         if !targets.iter().any(|p: &&PeerRecord| p.session_id == peer.session_id) { targets.push(peer); }
     }
-    limiter.charge(turn_id, targets.len())?;
+    limiter.lock().map_err(|_| io::Error::other("peer rate limiter poisoned"))?
+        .charge(turn_id, targets.len())?;
     let frame = PeerFrame { from_id: sender.session_id.clone(), from_title: sender.title.clone(), sent_at: now(), body: body.to_owned(),
         from_repo: Some(sender.scope_key().to_owned()), kind: (kind != "direct").then(|| kind.to_owned()) }.scrub(scrubber);
     let mut result = DeliveryResult { delivered: Vec::new(), failed: Vec::new(), record: None, ledger_error: None };

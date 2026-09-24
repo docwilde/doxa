@@ -39,6 +39,9 @@ fn map_clamps_shared_selection_when_switching_to_smaller_scope() {
     assert!(map.roster("owner-a", &json!({"ok":true,"peers":many})));
     map.move_selected("owner-a", 7);
     assert!(map_screen(&map, "owner-b").contains("B 1"));
+    assert!(map.roster("owner-b", &json!({"ok":true,"peers":[{"session_id":"b-0","title":"B 0"}]})));
+    assert_eq!(map.selected, 7, "background roster must not move the active cursor");
+    assert!(map_screen(&map, "owner-a").contains("A 7"));
 }
 
 #[test]
@@ -46,6 +49,14 @@ fn invalid_event_before_roster_keeps_loading_text() {
     let mut map = PeerMap::default();
     assert!(!map.event("owner-a", "peer_left", &json!({"session_id":"unknown"})));
     assert!(map_screen(&map, "owner-a").contains("Peer map loading"));
+}
+
+#[test]
+fn peer_joined_updates_title_after_traffic_arrives_first() {
+    let mut map = PeerMap::default();
+    assert!(map.event("owner-a", "peer_sent", &json!({"to":["peer-1"]})));
+    assert!(map.event("owner-a", "peer_joined", &json!({"session_id":"peer-1","title":"Planner"})));
+    assert!(map_screen(&map, "owner-a").contains("Planner"));
 }
 
 #[test]

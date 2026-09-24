@@ -6,6 +6,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -29,8 +30,8 @@ fn local_delivery_scrubs_receive_and_ledger_but_hashes_raw() -> io::Result<()> {
     let worker = thread::spawn(move || inbox.receive(&|text: &str| text.replace("SECRET", "[redacted]")));
     let ledger_path = temp.path().join("peers/messages.jsonl");
     let ledger = Ledger::new(ledger_path.clone());
-    let mut limiter = RateLimiter::new(SendLimits::default());
-    let result = deliver(&registry, &sender, &["recipient".into()], "SECRET", "direct", Some("turn-1"), &mut limiter, &ledger,
+    let limiter = Mutex::new(RateLimiter::new(SendLimits::default()));
+    let result = deliver(&registry, &sender, &["recipient".into()], "SECRET", "direct", Some("turn-1"), &limiter, &ledger,
         &|text: &str| text.replace("SECRET", "[redacted]"))?;
     let frame = worker.join().unwrap()?;
     assert_eq!(frame.body, "[redacted]");
@@ -94,15 +95,15 @@ fn refuses_cross_scope_before_charge_and_stale_socket_is_not_removed() -> io::Re
     let inbox = Inbox::bind(&runtime, "recipient")?;
     registry.write(&peer("recipient", inbox.path(), "/elsewhere"))?;
     let ledger = Ledger::new(temp.path().join("peers/messages.jsonl"));
-    let mut limiter = RateLimiter::new(SendLimits { per_turn: 1, per_window: 1, window: Duration::from_secs(60) });
+    let limiter = Mutex::new(RateLimiter::new(SendLimits { per_turn: 1, per_window: 1, window: Duration::from_secs(60) }));
     let sender = peer("sender", Path::new("/unused"), "/repo");
-    assert!(deliver(&registry, &sender, &["recipient".into()], "hello", "direct", Some("t"), &mut limiter, &ledger, &|s: &str| s.to_owned()).is_err());
+    assert!(deliver(&registry, &sender, &["recipient".into()], "hello", "direct", Some("t"), &limiter, &ledger, &|s: &str| s.to_owned()).is_err());
     assert!(inbox.path().exists());
     // A refused target did not consume the sender's budget.
     let live = Inbox::bind(&runtime, "live")?;
     registry.write(&peer("live", live.path(), "/repo"))?;
     let worker = thread::spawn(move || live.receive(&|s: &str| s.to_owned()));
-    assert!(deliver(&registry, &sender, &["live".into()], "hello", "direct", Some("t"), &mut limiter, &ledger, &|s: &str| s.to_owned()).is_ok());
+    assert!(deliver(&registry, &sender, &["live".into()], "hello", "direct", Some("t"), &limiter, &ledger, &|s: &str| s.to_owned()).is_ok());
     worker.join().unwrap()?;
     Ok(())
 }
