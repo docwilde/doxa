@@ -21,7 +21,8 @@ Protocol (all frames are single JSON lines, <= MAX_FRAME_BYTES):
 
 server -> client
   {"type": "hello", "proto": 1, "doxa": <version>, "session_id", "model",
-   "engine", "cwd", "next_seq"}             -- version-stamped, sent on connect
+   "engine", "cwd", "next_seq", "transcript_path", "transcript_bytes"}
+                                               -- version-stamped, sent on connect
   {"type": "event", "seq": N, "turn": <id|null>,
    "event": {"type": ..., "data": {...}}}   -- one EngineEvent, live or replayed
   {"type": "reply", "id": N, "ok": bool, ...}  -- response to prompt/call
@@ -1037,6 +1038,14 @@ class SessionDaemon:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         assert self.engine is not None
+        # The snapshot boundary and next_seq are captured on the same event
+        # loop tick. A local client can read exactly this persisted prefix,
+        # then attach at next_seq without duplicating the replay ring.
+        transcript_path = getattr(self.engine, "transcript_path", None)
+        try:
+            transcript_bytes = Path(transcript_path).stat().st_size if transcript_path else 0
+        except OSError:
+            transcript_bytes = 0
         writer.write(encode_frame({
             "type": "hello",
             "proto": PROTOCOL_VERSION,
@@ -1067,6 +1076,8 @@ class SessionDaemon:
             "bypass_armed": bool(getattr(self.engine, "bypass_armed", False)),
             "cwd": self.cwd,
             "next_seq": self.ring.next_seq,
+            "transcript_path": str(transcript_path) if transcript_path else None,
+            "transcript_bytes": transcript_bytes,
         }))
         try:
             await writer.drain()
