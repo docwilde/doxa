@@ -165,6 +165,13 @@ async def main() -> None:
 
     import textual
 
+    # A source checkout otherwise starts a real background git fetch on
+    # every App mount, while frozen bundles do not. A fresh temporary home
+    # also triggers the first-run wizard once. Neither belongs in a drawing
+    # comparison, so make these test-only switches unconditional here.
+    os.environ["DOXA_SKIP_UPDATE_CHECK"] = "1"
+    os.environ["DOXA_SKIP_FIRST_RUN"] = "1"
+
     samples: dict[str, list[int]] = {
         name: [] for name in ("startup", "resize", "append", "scroll")
     }
