@@ -1,5 +1,6 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use doxa_tui::ui::App;
+use doxa_tui::peer_map::PeerMap;
 use ratatui::{backend::TestBackend, Terminal};
 use serde_json::json;
 
@@ -19,6 +20,32 @@ fn screen(app: &App, width: u16, height: u16) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn map_screen(map: &PeerMap, owner: &str) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| map.render(frame, frame.area(), owner)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..30).map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>().join("\n")
+}
+
+#[test]
+fn map_clamps_shared_selection_when_switching_to_smaller_scope() {
+    let mut map = PeerMap::default();
+    let few = (0..2).map(|n| json!({"session_id":format!("b-{n}"),"title":format!("B {n}")})).collect::<Vec<_>>();
+    let many = (0..8).map(|n| json!({"session_id":format!("a-{n}"),"title":format!("A {n}")})).collect::<Vec<_>>();
+    assert!(map.roster("owner-b", &json!({"ok":true,"peers":few})));
+    assert!(map.roster("owner-a", &json!({"ok":true,"peers":many})));
+    map.move_selected("owner-a", 7);
+    assert!(map_screen(&map, "owner-b").contains("B 1"));
+}
+
+#[test]
+fn invalid_event_before_roster_keeps_loading_text() {
+    let mut map = PeerMap::default();
+    assert!(!map.event("owner-a", "peer_left", &json!({"session_id":"unknown"})));
+    assert!(map_screen(&map, "owner-a").contains("Peer map loading"));
 }
 
 #[test]

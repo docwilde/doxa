@@ -143,6 +143,7 @@ impl Inbox {
         }
     }
     pub fn receive(&self, scrubber: &impl Scrubber) -> io::Result<PeerFrame> {
+        self.listener.set_nonblocking(false)?;
         loop {
             let (mut stream, _) = self.listener.accept()?;
             same_user(&stream)?;

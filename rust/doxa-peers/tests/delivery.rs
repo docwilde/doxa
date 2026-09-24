@@ -71,6 +71,22 @@ fn polling_idle_peer_does_not_stall_and_retains_partial_frame() -> io::Result<()
 }
 
 #[test]
+fn blocking_receive_still_waits_after_a_poll() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let runtime = temp.path().join("runtime");
+    let _registry = Registry::open(&runtime)?;
+    let inbox = Inbox::bind(&runtime, "recipient")?;
+    assert!(inbox.poll_receive(&|s: &str| s.to_owned())?.is_none());
+    let path = inbox.path().to_owned();
+    let worker = thread::spawn(move || inbox.receive(&|s: &str| s.to_owned()));
+    let frame = PeerFrame { from_id: "sender".into(), from_title: "test".into(),
+        sent_at: now(), body: "hello".into(), from_repo: None, kind: None };
+    send(&path, &frame)?;
+    assert_eq!(worker.join().unwrap()?.body, "hello");
+    Ok(())
+}
+
+#[test]
 fn refuses_cross_scope_before_charge_and_stale_socket_is_not_removed() -> io::Result<()> {
     let temp = tempfile::tempdir()?;
     let runtime = temp.path().join("runtime");

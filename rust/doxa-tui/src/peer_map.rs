@@ -179,9 +179,9 @@ impl PeerMap {
                 let mut seen = HashSet::new();
                 for id in ids
                     .iter()
-                    .take(MAX_PEERS)
                     .filter_map(Value::as_str)
                     .filter(|id| safe_id(id) && *id != owner && seen.insert(*id))
+                    .take(MAX_PEERS)
                 {
                     changed |= observe(scope, id, id, true);
                 }
@@ -234,7 +234,12 @@ impl PeerMap {
             return;
         };
         if !scope.available {
-            frame.render_widget(Paragraph::new(scope.reason.as_str()), inside);
+            let reason = if scope.reason.is_empty() {
+                "Peer map loading · request a refresh with R"
+            } else {
+                scope.reason.as_str()
+            };
+            frame.render_widget(Paragraph::new(reason), inside);
             return;
         }
         if scope.peers.is_empty() {
@@ -249,10 +254,11 @@ impl PeerMap {
             .constraints([Constraint::Min(4), Constraint::Length(4)])
             .split(inside);
         let visible = scope.peers.len().min(6);
-        let start = self.selected.saturating_sub(visible.saturating_sub(1));
+        let selected = self.selected.min(scope.peers.len() - 1);
+        let start = selected.saturating_sub(visible.saturating_sub(1));
         let shown = &scope.peers[start..(start + visible).min(scope.peers.len())];
         if rows[0].width >= 48 && rows[0].height >= 12 {
-            render_graph(frame, rows[0], shown, self.selected - start);
+            render_graph(frame, rows[0], shown, selected - start);
         } else {
             let listing = shown
                 .iter()
@@ -260,7 +266,7 @@ impl PeerMap {
                 .map(|(index, peer)| {
                     format!(
                         "{} {} · {}",
-                        if start + index == self.selected {
+                        if start + index == selected {
                             "▸"
                         } else {
                             " "
@@ -273,7 +279,7 @@ impl PeerMap {
                 .join("\n");
             frame.render_widget(Paragraph::new(listing).wrap(Wrap { trim: true }), rows[0]);
         }
-        let peer = &scope.peers[self.selected.min(scope.peers.len() - 1)];
+        let peer = &scope.peers[selected];
         let detail = format!("{} · {}\nObserved: {} sent / {} received · last {} events\n↑/↓ select peer · lines show observed traffic, not delivery guarantees",
             peer.title, peer.id, peer.sent, peer.received, scope.observations.len());
         frame.render_widget(
@@ -288,9 +294,11 @@ fn observe(scope: &mut Scope, id: &str, title: &str, outbound: bool) -> bool {
     let index = match index {
         Some(index) => index,
         None if scope.peers.len() < MAX_PEERS => {
+            let title = label(title);
+            let title = if title.is_empty() { id.chars().take(12).collect() } else { title };
             scope.peers.push(Peer {
                 id: id.into(),
-                title: title.into(),
+                title,
                 sent: 0,
                 received: 0,
             });
