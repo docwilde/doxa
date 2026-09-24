@@ -2,7 +2,7 @@
 //! Git runs on a worker thread; painting never waits for a repository.
 
 use std::fs::OpenOptions;
-use std::io::Read;
+use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -32,12 +32,18 @@ fn git_output(cwd: &Path, args: &[&str], limit: usize) -> Result<(Vec<u8>, bool)
         let mut bytes = Vec::new();
         let mut stdout = stdout;
         let mut chunk = [0u8; 8192];
-        while let Ok(count) = stdout.read(&mut chunk) {
-            if count == 0 { break; }
-            let remaining = (limit + 1).saturating_sub(bytes.len());
-            bytes.extend_from_slice(&chunk[..count.min(remaining)]);
+        loop {
+            match stdout.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(count) => {
+                    let remaining = (limit + 1).saturating_sub(bytes.len());
+                    bytes.extend_from_slice(&chunk[..count.min(remaining)]);
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
         }
-        bytes
+        Ok(bytes)
     });
     let deadline = Instant::now() + GIT_TIMEOUT;
     let status = loop {
@@ -47,7 +53,8 @@ fn git_output(cwd: &Path, args: &[&str], limit: usize) -> Result<(Vec<u8>, bool)
             _ => { let _ = child.kill(); let _ = child.wait(); break None; }
         }
     };
-    let bytes = reader.join().unwrap_or_default();
+    let bytes = reader.join().map_err(|_| "Git output reader stopped unexpectedly.".to_owned())?
+        .map_err(|_| "Git output could not be read.".to_owned())?;
     let Some(status) = status else { return Err("Git timed out or exceeded the bounded view.".into()); };
     if !status.success() { return Err("Git could not inspect this worktree.".into()); }
     let truncated = bytes.len() > limit;
@@ -57,21 +64,31 @@ fn git_output(cwd: &Path, args: &[&str], limit: usize) -> Result<(Vec<u8>, bool)
 fn untracked_names(bytes: &[u8], truncated: bool) -> String {
     let mut out = String::from("\nUntracked files (names only; contents are not read):\n");
     let mut shown = 0;
+    let mut omitted = truncated;
     // A bounded read can end inside a pathname. Never show a partial name.
     let complete = if truncated { &bytes[..bytes.iter().rposition(|byte| *byte == 0).unwrap_or(0)] } else { bytes };
     for raw in complete.split(|byte| *byte == 0) {
         if raw.is_empty() { continue; }
-        if shown == MAX_UNTRACKED_FILES { break; }
+        if shown == MAX_UNTRACKED_FILES { omitted = true; break; }
         let name = String::from_utf8_lossy(raw);
-        let escaped: String = name.chars().flat_map(char::escape_default).take(300).collect();
+        let mut escaped = String::new();
+        let mut name_truncated = false;
+        for character in name.chars() {
+            let part = character.escape_default().to_string();
+            if escaped.len() + part.len() > 300 {
+                name_truncated = true;
+                break;
+            }
+            escaped.push_str(&part);
+        }
         out.push_str("  ");
         out.push_str(&escaped);
-        if escaped.chars().count() == 300 { out.push_str("…"); }
+        if name_truncated { out.push_str("…"); }
         out.push('\n');
         shown += 1;
     }
     if shown == 0 { out.push_str("  None\n"); }
-    if truncated || shown == MAX_UNTRACKED_FILES {
+    if omitted {
         out.push_str("[Additional untracked names omitted from this view.]\n");
     }
     out
@@ -200,6 +217,18 @@ mod tests {
         assert!(names.contains("line\\nbreak"));
         assert!(!names.contains("partial"));
         assert!(names.contains("Additional untracked names omitted"));
+    }
+
+    #[test]
+    fn untracked_names_report_only_actual_omissions() {
+        let exact = format!("{}\0", "x".repeat(300));
+        let rendered = untracked_names(exact.as_bytes(), false);
+        assert!(rendered.contains(&"x".repeat(300)));
+        assert!(!rendered.contains('…'));
+        let hundred = (0..MAX_UNTRACKED_FILES).map(|i| format!("{i}\0")).collect::<String>();
+        assert!(!untracked_names(hundred.as_bytes(), false).contains("Additional untracked"));
+        let more = format!("{hundred}extra\0");
+        assert!(untracked_names(more.as_bytes(), false).contains("Additional untracked"));
     }
 
     #[test]
