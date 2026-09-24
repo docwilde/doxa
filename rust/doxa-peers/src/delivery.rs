@@ -138,7 +138,7 @@ pub struct Message {
     pub to: Vec<String>, pub kind: String, pub in_reply_to: Option<String>,
     pub body: String, pub body_sha256: String, pub latency_ms: Option<u64>, pub turn: TurnRef,
 }
-pub struct Ledger { path: PathBuf, ceiling: u64 }
+pub struct Ledger { pub(crate) path: PathBuf, pub(crate) ceiling: u64 }
 impl Ledger {
     pub fn new(path: PathBuf) -> Self { Self { path, ceiling: MAX_LEDGER_BYTES } }
     pub fn with_ceiling(path: PathBuf, ceiling: u64) -> Self { Self { path, ceiling } }
