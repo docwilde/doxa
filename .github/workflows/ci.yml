@@ -34,17 +34,6 @@ env:
   LORE_REF: main
 
 jobs:
-  rust-daemon:
-    name: Rust native daemon
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - name: Test native daemon and runtime
-        run: |
-          cargo test --locked --manifest-path rust/doxa-runtime/Cargo.toml
-          cargo test --locked --manifest-path rust/doxa-daemon/Cargo.toml
-
   test:
     # Named per leg, because two of the three now run the same Python and
     # differ only in whether a LORE plugin is present.

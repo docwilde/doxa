@@ -23,5 +23,15 @@ jobs:
         run: rustup toolchain install stable --profile minimal
       - name: Test Rust frontend
         run: cargo +stable test --locked --manifest-path rust/doxa-tui/Cargo.toml
+      - name: Install uv for Python client integration
+        uses: astral-sh/setup-uv@v10.0.1
+      - name: Sync Python client dependencies
+        run: uv sync --frozen --python 3.12
+      - name: Test native daemon protocol
+        env:
+          DOXA_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: cargo +stable test --locked --manifest-path rust/doxa-runtime/Cargo.toml
+      - name: Test native daemon binary
+        run: cargo +stable test --locked --manifest-path rust/doxa-daemon/Cargo.toml
       - name: Build release binary
         run: cargo +stable build --locked --release --manifest-path rust/doxa-tui/Cargo.toml
