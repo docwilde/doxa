@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Python-compatible, local peer presence registry. Messaging and remote peers are separate ports.
+//! Python-compatible, local peer presence registry and bounded local messaging.
+pub mod delivery;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
