@@ -7,8 +7,8 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 struct Fixture { gate: (Mutex<bool>, Condvar), prompts: Mutex<Vec<String>> }
 impl Fixture {
@@ -47,6 +47,52 @@ fn recv(reader: &mut BufReader<UnixStream>) -> Value {
 fn send(writer: &mut UnixStream, frame: Value) {
     writer.write_all(serde_json::to_string(&frame).unwrap().as_bytes()).unwrap();
     writer.write_all(b"\n").unwrap();
+}
+
+struct BlockingControl {
+    entered: AtomicBool,
+    gate: (Mutex<bool>, Condvar),
+}
+
+impl Host for BlockingControl {
+    fn prompt(&self, _: &str, emit: &mut dyn FnMut(Value)) {
+        emit(json!({"type":"turn_done","data":{}}));
+    }
+    fn call(&self, method: &str, _: &Value) -> Result<Value, String> {
+        if method != "set_model" { return Err("unknown method".into()); }
+        self.entered.store(true, Ordering::Release);
+        let mut ready = self.gate.0.lock().unwrap();
+        while !*ready { ready = self.gate.1.wait(ready).unwrap(); }
+        Ok(json!({"model":"test-model"}))
+    }
+}
+
+#[test]
+fn slow_model_control_does_not_block_other_clients_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(BlockingControl { entered: AtomicBool::new(false), gate: (Mutex::new(false), Condvar::new()) });
+    let handle = Daemon::bind(dir.path(), session(), host.clone()).unwrap().start();
+    let (mut control_reader, mut control_writer) = connect(handle.socket_path());
+    let (mut status_reader, mut status_writer) = connect(handle.socket_path());
+    recv(&mut control_reader);
+    recv(&mut status_reader);
+    send(&mut control_writer, json!({"type":"attach","cursor":null}));
+    send(&mut status_writer, json!({"type":"attach","cursor":null}));
+    send(&mut control_writer, json!({"type":"call","id":1,"method":"set_model","params":{"model":"test-model"}}));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !host.entered.load(Ordering::Acquire) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(host.entered.load(Ordering::Acquire));
+    send(&mut status_writer, json!({"type":"call","id":2,"method":"status","params":{}}));
+    let mut line = String::new();
+    let status = status_reader.read_line(&mut line);
+    *host.gate.0.lock().unwrap() = true;
+    host.gate.1.notify_all();
+    assert!(status.is_ok() && !line.is_empty(), "status blocked behind slow control RPC: {status:?}");
+    let frame: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(frame["status"]["model"], Value::Null);
+    assert_eq!(recv(&mut control_reader)["model"], "test-model");
 }
 
 #[test]
