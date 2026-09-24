@@ -4,6 +4,7 @@
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Read;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -33,18 +34,37 @@ pub fn runtime_dir(home: &Path, doxa_runtime_dir: Option<&str>, xdg_runtime_dir:
     home.join(".local/share/doxa")
 }
 
+/// Upper bound for one advisory presence file. The Python writer emits only a few KB.
+pub const MAX_REGISTRY_BYTES: u64 = 64 * 1024;
+
+fn scrub_strings(value: &mut Value, scrub: &impl Fn(&str) -> String) {
+    match value {
+        Value::String(s) => *s = scrub(s),
+        Value::Array(items) => items.iter_mut().for_each(|item| scrub_strings(item, scrub)),
+        Value::Object(map) => map.values_mut().for_each(|item| scrub_strings(item, scrub)),
+        _ => {}
+    }
+}
+
 /// Read valid live daemon entries, in newest-first order, without modifying registry files.
-/// Optional scope filtering matches `doxa.peers.list_daemons`.
-pub fn list_daemons(registry_dir: &Path, scope: Option<&str>) -> Vec<Value> {
+/// The required scrubber runs over every returned string, including nested future fields.
+/// Supply the same redactor used for other untrusted session text before display or logging.
+pub fn list_daemons(registry_dir: &Path, scope: Option<&str>, scrub: impl Fn(&str) -> String) -> Vec<Value> {
     let mut peers = Vec::new();
     let Ok(paths) = fs::read_dir(registry_dir) else { return peers };
     for entry in paths.flatten() {
         if entry.path().extension().and_then(|s| s.to_str()) != Some("json") { continue; }
-        let Ok(raw) = fs::read(entry.path()) else { continue; };
-        let Ok(value) = serde_json::from_slice::<Value>(&raw) else { continue; };
+        let Ok(meta) = fs::symlink_metadata(entry.path()) else { continue; };
+        if !meta.file_type().is_file() || meta.len() > MAX_REGISTRY_BYTES { continue; }
+        use std::os::unix::fs::OpenOptionsExt;
+        let Ok(file) = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(entry.path()) else { continue; };
+        let mut raw = Vec::new();
+        if file.take(MAX_REGISTRY_BYTES + 1).read_to_end(&mut raw).is_err() || raw.len() as u64 > MAX_REGISTRY_BYTES { continue; }
+        let Ok(mut value) = serde_json::from_slice::<Value>(&raw) else { continue; };
         let Some(map) = value.as_object() else { continue; };
         if !["session_id", "pid", "socket_path", "cwd", "repo_root", "title", "started_at", "heartbeat_at"]
             .iter().all(|key| map.contains_key(*key)) { continue; }
+        if !map.get("session_id").and_then(Value::as_str).is_some_and(valid_session_id) { continue; }
         if map.get("daemon_socket").and_then(Value::as_str).filter(|s| !s.is_empty()).is_none() { continue; }
         let Some(pid) = map.get("pid").and_then(Value::as_i64) else { continue; };
         if pid <= 0 || pid > i32::MAX as i64 { continue; }
@@ -59,6 +79,7 @@ pub fn list_daemons(registry_dir: &Path, scope: Option<&str>) -> Vec<Value> {
         let scope_key = map.get("repo_root").and_then(Value::as_str).filter(|s| !s.is_empty())
             .or_else(|| map.get("cwd").and_then(Value::as_str));
         if scope.is_some() && scope != scope_key { continue; }
+        scrub_strings(&mut value, &scrub);
         peers.push(value);
     }
     peers.sort_by(|a, b| b.get("started_at").and_then(Value::as_str).cmp(&a.get("started_at").and_then(Value::as_str)));
@@ -151,6 +172,23 @@ pub fn save_tabset(path: &Path, record: &TabSet) -> io::Result<()> {
     if record.scope_key.is_empty() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty scope key")); }
     if record.tabs.iter().any(|t| !valid_session_id(&t.session_id)) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid session id"));
+    }
+    // Until layout and collection pruning is ported, changing membership would
+    // leave stale session references inside their Python-owned structures.
+    let has_structure = record.raw.get("layout").and_then(Value::as_object)
+        .is_some_and(|layout| layout.contains_key("trees") || layout.contains_key("groups"))
+        || record.raw.contains_key("collections");
+    if has_structure {
+        let old: Vec<&str> = record.raw.get("tabs").and_then(Value::as_array)
+            .into_iter().flatten()
+            .filter_map(|row| row.get("session_id").and_then(Value::as_str))
+            .filter(|id| valid_session_id(id))
+            .collect();
+        let new: Vec<&str> = record.tabs.iter().map(|tab| tab.session_id.as_str()).collect();
+        if old != new {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                "cannot change tab IDs while layout or collections require pruning"));
+        }
     }
     let mut data = record.raw.clone();
     let rows: Vec<Value> = record.tabs.iter().map(|t| serde_json::json!({"session_id":t.session_id,"pinned_name":t.pinned_name,"cwd":t.cwd})).collect();

@@ -64,8 +64,39 @@ fn registry_filters_dead_and_malformed_entries() {
     let entry = json!({"session_id":"s1","pid":std::process::id(),"socket_path":"/tmp/sock","cwd":"/repo","repo_root":"/repo","title":"ok","started_at":stamp,"heartbeat_at":stamp,"daemon_socket":"/tmp/daemon"});
     fs::write(dir.path().join("ok.json"), entry.to_string()).unwrap();
     fs::write(dir.path().join("bad.json"), "{").unwrap();
-    assert_eq!(list_daemons(dir.path(), Some("/repo")).len(), 1);
-    assert!(list_daemons(dir.path(), Some("/other")).is_empty());
+    assert_eq!(list_daemons(dir.path(), Some("/repo"), str::to_owned).len(), 1);
+    assert!(list_daemons(dir.path(), Some("/other"), str::to_owned).is_empty());
+}
+
+#[test]
+fn registry_rejects_symlinks_oversize_and_bad_ids_and_scrubs_nested_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = time::OffsetDateTime::now_utc();
+    let stamp = now.format(&time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:6]Z")).unwrap();
+    let mut entry = json!({"session_id":"safe","pid":std::process::id(),"socket_path":"/tmp/sock","cwd":"/repo/SECRET","repo_root":"/repo","title":"SECRET","started_at":stamp,"heartbeat_at":stamp,"daemon_socket":"/tmp/daemon","future":{"label":"SECRET"}});
+    fs::write(dir.path().join("safe.json"), entry.to_string()).unwrap();
+    entry["session_id"] = json!("../bad");
+    fs::write(dir.path().join("bad-id.json"), entry.to_string()).unwrap();
+    fs::write(dir.path().join("huge.json"), vec![b'a'; MAX_REGISTRY_BYTES as usize + 1]).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("safe.json"), dir.path().join("link.json")).unwrap();
+    let found = list_daemons(dir.path(), Some("/repo"), |s| s.replace("SECRET", "[redacted]"));
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0]["title"], "[redacted]");
+    assert_eq!(found[0]["cwd"], "/repo/[redacted]");
+    assert_eq!(found[0]["future"]["label"], "[redacted]");
+}
+
+#[test]
+fn tabset_refuses_membership_change_with_unparsed_layout() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("record.json");
+    let original = json!({"scope_key":"/repo","tabs":[{"session_id":"s1"}],"layout":{"kind":"tabs","groups":{"kind":"future"}},"collections":[{"name":"work","sessions":["s1"]}]});
+    fs::write(&path, original.to_string()).unwrap();
+    let mut record = load_tabset(&path, "/repo").unwrap();
+    record.tabs.clear();
+    record.tabs.push(Tab { session_id: "s2".into(), pinned_name: None, cwd: None });
+    assert!(save_tabset(&path, &record).is_err());
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap(), original);
 }
 
 #[test]
