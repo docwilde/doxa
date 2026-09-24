@@ -39,7 +39,7 @@ fn flat_legacy_record_restores_active_tab_and_skips_stale_ids() {
 #[test]
 fn grouped_split_restores_geometry_and_preserves_leaf_metadata() {
     let (_dir, mut store) = seeded(json!({"tabs":[{"session_id":"a"},{"session_id":"b"},{"session_id":"c"}],"active_session_id":"c",
-      "layout":{"kind":"tabs","groups":{"kind":"split","orientation":"horizontal","weights":[0.7,0.3],"children":[
+      "layout":{"kind":"tabs","groups":{"kind":"split","orientation":"column","weights":[0.7,0.3],"children":[
         {"kind":"group","active":1,"tabs":[{"kind":"leaf","session_id":"a","view":"diff"},{"kind":"leaf","session_id":"b","prompt_ratio":0.3}]},
         {"kind":"group","active":0,"tabs":[{"kind":"leaf","session_id":"c"}]}
       ]}},"collections":[{"name":"work","sessions":["a","stale"]}],"future_key":42}));
@@ -56,6 +56,7 @@ fn grouped_split_restores_geometry_and_preserves_leaf_metadata() {
     store.save(&app).unwrap();
     let saved: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
     assert_eq!(saved["layout"]["groups"]["weights"][0], 0.62);
+    assert_eq!(saved["layout"]["groups"]["orientation"], "column");
     assert_eq!(saved["layout"]["groups"]["children"][0]["tabs"][0]["view"], "diff");
     assert_eq!(saved["layout"]["groups"]["children"][0]["tabs"][1]["prompt_ratio"], 0.3);
     assert_eq!(saved["collections"][0]["sessions"], json!(["a"]));
@@ -72,7 +73,7 @@ fn grouped_split_restores_geometry_and_preserves_leaf_metadata() {
 #[test]
 fn old_tree_layout_restores_two_panes_and_flat_extra_tabs() {
     let (_dir, store) = seeded(json!({"tabs":[{"session_id":"a"},{"session_id":"b"},{"session_id":"c"}],"active_session_id":"b",
-        "layout":{"kind":"tabs","trees":[{"kind":"split","orientation":"vertical","weights":[0.4,0.6],"children":[
+        "layout":{"kind":"tabs","trees":[{"kind":"split","orientation":"row","weights":[0.4,0.6],"children":[
         {"kind":"leaf","session_id":"a"},{"kind":"leaf","session_id":"b"}]}]}}));
     let mut app = App::default();
     assert!(store.restore(&mut app, &live(&["a", "b", "c"])));
@@ -86,7 +87,7 @@ fn old_tree_layout_restores_two_panes_and_flat_extra_tabs() {
 #[test]
 fn complex_future_layout_is_readable_but_never_rewritten() {
     let (_dir, mut store) = seeded(json!({"tabs":[{"session_id":"a"},{"session_id":"b"}],"active_session_id":"a",
-        "layout":{"kind":"tabs","groups":{"kind":"split","orientation":"vertical","weights":[0.2,0.3,0.5],"children":[
+        "layout":{"kind":"tabs","groups":{"kind":"split","orientation":"row","weights":[0.2,0.3,0.5],"children":[
             {"kind":"group","tabs":[{"kind":"leaf","session_id":"a"}]},
             {"kind":"group","tabs":[{"kind":"leaf","session_id":"b"}]},
             {"kind":"group","tabs":[{"kind":"leaf","session_id":"z"}]}
@@ -105,4 +106,37 @@ fn no_live_saved_tab_leaves_fresh_app_untouched() {
     let mut app = App::default();
     assert!(!store.restore(&mut app, &live(&["current"])));
     assert!(app.groups.iter().all(|g| g.tabs.is_empty()));
+}
+
+#[test]
+fn transcript_scroll_does_not_count_as_layout_change() {
+    let mut app = App::default();
+    let before = doxa_tui::ui_state::LayoutSignature::capture(&app);
+    app.groups[0].scroll = 100;
+    assert_eq!(before, doxa_tui::ui_state::LayoutSignature::capture(&app));
+}
+
+#[test]
+fn duplicate_session_in_two_panes_cannot_corrupt_group_record() {
+    let (_dir, mut store) = seeded(json!({"tabs":[{"session_id":"a"}]}));
+    let original = fs::read(store.path()).unwrap();
+    let mut app = App::default();
+    app.groups[0].tabs.push("a".into());
+    app.groups[1].tabs.push("a".into());
+    assert!(store.save(&app).is_err());
+    assert_eq!(fs::read(store.path()).unwrap(), original);
+}
+
+#[test]
+fn stale_first_pane_collapses_to_live_second_pane() {
+    let (_dir, store) = seeded(json!({"tabs":[{"session_id":"old"},{"session_id":"live"}],"active_session_id":"live",
+        "layout":{"kind":"tabs","groups":{"kind":"split","orientation":"row","weights":[0.5,0.5],"children":[
+            {"kind":"group","active":0,"tabs":[{"kind":"leaf","session_id":"old"}]},
+            {"kind":"group","active":0,"tabs":[{"kind":"leaf","session_id":"live"}]}
+        ]}}}));
+    let mut app = App::default();
+    assert!(store.restore(&mut app, &live(&["live"])));
+    assert_eq!(app.groups[0].tabs, ["live"]);
+    assert!(app.groups[1].tabs.is_empty());
+    assert_eq!(app.active_group, 0);
 }

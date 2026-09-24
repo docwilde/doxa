@@ -1496,7 +1496,7 @@ pub fn run() -> io::Result<()> {
 /// Drive the terminal with decoded daemon frames supplied by a reader thread.
 /// Transport can be connected without changing terminal ownership or drawing.
 pub fn run_with_frames(receiver: Receiver<serde_json::Value>) -> io::Result<()> {
-    run_loop(receiver, None)
+    run_loop(receiver, None, None)
 }
 
 /// Connect the UI to a transport reader and writer without blocking input.
@@ -1505,12 +1505,24 @@ pub fn run_with_channels(
     frames: Receiver<serde_json::Value>,
     prompts: SyncSender<crate::bridge::WorkerCommand>,
 ) -> io::Result<()> {
-    run_loop(frames, Some(prompts))
+    run_loop(frames, Some(prompts), None)
+}
+
+/// Drive a multi-session transport with a complete live-ID roster and a
+/// tabset store. The store writes only when layout state changes.
+pub fn run_with_channels_state(
+    frames: Receiver<serde_json::Value>,
+    prompts: SyncSender<crate::bridge::WorkerCommand>,
+    store: crate::ui_state::UiStateStore,
+    live_ids: Vec<String>,
+) -> io::Result<()> {
+    run_loop(frames, Some(prompts), Some((store, live_ids)))
 }
 
 fn run_loop(
     receiver: Receiver<serde_json::Value>,
     mut prompt_sender: Option<SyncSender<crate::bridge::WorkerCommand>>,
+    mut state: Option<(crate::ui_state::UiStateStore, Vec<String>)>,
 ) -> io::Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(io::Error::new(
@@ -1526,6 +1538,10 @@ fn run_loop(
             .map(|s| Rect::new(0, 0, s.width, s.height))?,
         ..Default::default()
     };
+    if let Some((store, live_ids)) = &state {
+        store.restore(&mut app, live_ids);
+    }
+    let mut saved_layout = crate::ui_state::LayoutSignature::capture(&app);
     terminal.draw(|frame| app.draw(frame))?;
     while !app.should_quit {
         let mut changed = false;
@@ -1548,6 +1564,15 @@ fn run_loop(
             }
         }
         if changed {
+            let layout = crate::ui_state::LayoutSignature::capture(&app);
+            if layout != saved_layout {
+                if let Some((store, _)) = &mut state {
+                    if let Err(error) = store.save(&app) {
+                        app.notice = format!("Layout save skipped · {}", safe_label(&error.to_string()));
+                    }
+                }
+                saved_layout = layout;
+            }
             terminal.draw(|frame| app.draw(frame))?;
         }
     }

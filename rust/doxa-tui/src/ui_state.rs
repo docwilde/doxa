@@ -12,6 +12,22 @@ use serde_json::{json, Value};
 
 use crate::ui::{App, PaneGroup, Split};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LayoutSignature {
+    groups: [(Vec<String>, usize); 2],
+    active_group: usize,
+    split: Split,
+    split_percent: u16,
+    rail_visible: bool,
+    rail_width: u16,
+}
+impl LayoutSignature {
+    pub fn capture(app: &App) -> Self {
+        Self { groups: app.groups.clone().map(|g| (g.tabs, g.active)), active_group: app.active_group, split: app.split,
+            split_percent: app.split_percent, rail_visible: app.rail_visible, rail_width: app.rail_width }
+    }
+}
+
 pub struct UiStateStore {
     path: PathBuf,
     scope_key: String,
@@ -76,6 +92,9 @@ impl UiStateStore {
         for id in ids {
             if seen.insert(id.clone()) { groups[0].tabs.push(id); }
         }
+        if groups[0].tabs.is_empty() && !groups[1].tabs.is_empty() {
+            groups.swap(0, 1);
+        }
         if let Some(id) = active {
             for (index, group) in groups.iter_mut().enumerate() {
                 if let Some(tab) = group.tabs.iter().position(|tab| tab == id) {
@@ -115,6 +134,9 @@ impl UiStateStore {
             }
         }
         if tabs.is_empty() { return Ok(()); }
+        if tabs.len() != app.groups.iter().map(|g| g.tabs.len()).sum::<usize>() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "same session shown in multiple pane groups"));
+        }
         let active = app.groups.get(app.active_group).and_then(|g| g.tabs.get(g.active)).cloned();
         let mut record = self.record.clone().unwrap_or_else(|| TabSet { scope_key: self.scope_key.clone(), active_session_id: None, tabs: Vec::new(), raw: Default::default() });
         record.scope_key = self.scope_key.clone();
@@ -151,8 +173,8 @@ impl UiStateStore {
 }
 
 fn empty_group() -> PaneGroup { PaneGroup { tabs: Vec::new(), active: 0, scroll: 0 } }
-fn orientation(split: Split) -> &'static str { match split { Split::Horizontal => "horizontal", Split::Vertical => "vertical" } }
-fn parse_orientation(raw: &Value) -> Option<Split> { match raw.as_str()? { "horizontal" => Some(Split::Horizontal), "vertical" => Some(Split::Vertical), _ => None } }
+fn orientation(split: Split) -> &'static str { match split { Split::Horizontal => "column", Split::Vertical => "row" } }
+fn parse_orientation(raw: &Value) -> Option<Split> { match raw.as_str()? { "column" => Some(Split::Horizontal), "row" => Some(Split::Vertical), _ => None } }
 fn leaf(record: &TabSet, id: &str) -> Value {
     let old = record.tabs.iter().find(|t| t.session_id == id);
     let mut row = record.raw.get("layout").and_then(|layout| layout.get("groups"))
