@@ -228,7 +228,8 @@ async def run():
 
 print(json.dumps(asyncio.run(asyncio.wait_for(run(), 8))))
 "#;
-    let output = Command::new("python3").arg("-c").arg(script).arg(handle.socket_path())
+    let python = std::env::var("DOXA_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    let output = Command::new(python).arg("-c").arg(script).arg(handle.socket_path())
         .env("PYTHONPATH", repo_root).output().unwrap();
     assert!(output.status.success(), "Python EngineClient failed: {}",
         String::from_utf8_lossy(&output.stderr));
