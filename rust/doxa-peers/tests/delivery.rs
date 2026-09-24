@@ -101,5 +101,8 @@ fn ledger_refuses_symlink_and_ceiling() -> io::Result<()> {
     fs::remove_file(&p)?;
     assert!(Ledger::with_ceiling(p.clone(), 1).append(sample(), &|s: &str| s.to_owned()).is_err());
     assert_eq!(fs::metadata(&p)?.len(), 0);
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o644))?;
+    Ledger::new(p.clone()).append(sample(), &|s: &str| s.to_owned())?;
+    assert_eq!(fs::metadata(&p)?.permissions().mode() & 0o777, 0o600);
     Ok(())
 }

@@ -160,6 +160,9 @@ impl Ledger {
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK).open(&self.path)?;
         let meta = file.metadata()?;
         if !meta.file_type().is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.nlink() != 1 { return Err(invalid("unsafe ledger file")); }
+        if meta.permissions().mode() & 0o777 != 0o600 {
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 { return Err(io::Error::last_os_error()); }
         let size = file.metadata()?.len();
         if size.saturating_add(line.len() as u64) > self.ceiling { return Err(io::Error::new(io::ErrorKind::OutOfMemory, "peer ledger full")); }
