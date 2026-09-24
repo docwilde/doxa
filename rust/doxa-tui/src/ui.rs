@@ -1,5 +1,5 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, IsTerminal, Stdout};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
@@ -21,8 +21,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
+use unicode_width::UnicodeWidthStr;
 
-use crate::{diff_view, markdown, peer_map::PeerMap};
+use crate::{diff_view, history, markdown, peer_map::PeerMap};
 use crate::theme;
 
 mod tool_cards;
@@ -32,11 +33,12 @@ const MIN_PANE_WIDTH: u16 = 28;
 const MIN_PANE_HEIGHT: u16 = 8;
 const MIN_RAIL_WIDTH: u16 = 12;
 const MAX_PENDING_PROMPTS: usize = 32;
+const MAX_INPUT_REQUESTS: usize = 32;
 // JSON may expand one input byte to a six-byte Unicode escape.
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
 const MAX_ANSWER_BYTES: usize = 10 * 1024;
-const ACTIONS: [(&str, &str); 8] = [
+const ACTIONS: [(&str, &str); 11] = [
     ("Peer map", "Ctrl+M"),
     ("Tool activity", "Ctrl+T"),
     ("Open selected session", "rail selection"),
@@ -45,7 +47,33 @@ const ACTIONS: [(&str, &str); 8] = [
     ("Switch pane", "Shift+Tab"),
     ("Session history", "Ctrl+R"),
     ("Worktree diff", "F2"),
+    ("Engine for new session", "Alt+E"),
+    ("Session model", "Alt+M"),
+    ("Claude permissions", "Alt+P"),
 ];
+
+const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
+const PERMISSION_CHOICES: [(&str, &str); 5] = [
+    ("default", "Ask before dangerous calls"),
+    ("acceptEdits", "Allow file edits; ask for other calls"),
+    ("plan", "Planning only; no tools run"),
+    ("auto", "Model classifier decides each call"),
+    ("dontAsk", "Deny unapproved calls without asking"),
+];
+
+fn permission_index(mode: &str) -> Option<usize> {
+    PERMISSION_CHOICES.iter().position(|(candidate, _)| *candidate == mode)
+}
+
+#[derive(Debug)]
+struct ModelPicker {
+    session_id: String,
+    models: Vec<String>,
+    selected: usize,
+    note: String,
+    loading: bool,
+    catalog_pending: bool,
+}
 
 fn safe_label(value: &str) -> String {
     markdown::sanitize(value)
@@ -101,17 +129,28 @@ fn event_string(data: &serde_json::Value, key: &str) -> Option<String> {
         .map(event_field)
 }
 
+fn transcript_tail(text: &str) -> &str {
+    if text.len() <= MAX_TRANSCRIPT_BYTES { return text; }
+    let mut start = text.len() - MAX_TRANSCRIPT_BYTES;
+    while !text.is_char_boundary(start) { start += 1; }
+    &text[start..]
+}
+
 fn append_transcript(session: &mut Session, text: &str) -> bool {
+    if text.len() >= MAX_TRANSCRIPT_BYTES {
+        session.transcript.clear();
+        session.transcript.push_str(transcript_tail(text));
+        return true;
+    }
+    let keep_existing = MAX_TRANSCRIPT_BYTES - text.len();
+    let clipped = session.transcript.len() > keep_existing;
+    if clipped {
+        let mut start = session.transcript.len() - keep_existing;
+        while !session.transcript.is_char_boundary(start) { start += 1; }
+        session.transcript.drain(..start);
+    }
     session.transcript.push_str(text);
-    if session.transcript.len() <= MAX_TRANSCRIPT_BYTES {
-        return false;
-    }
-    let mut start = session.transcript.len() - MAX_TRANSCRIPT_BYTES;
-    while !session.transcript.is_char_boundary(start) {
-        start += 1;
-    }
-    session.transcript.drain(..start);
-    true
+    clipped
 }
 
 fn structured_event(event_type: &str, data: &serde_json::Value) -> Option<String> {
@@ -371,6 +410,18 @@ pub struct App {
     pub input: String,
     input_drafts: HashMap<(usize, String), String>,
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
+    model_capabilities: HashMap<String, bool>,
+    permission_capabilities: HashMap<String, bool>,
+    permission_modes: HashMap<String, String>,
+    session_activity: HashMap<String, (bool, usize)>,
+    permission_picker: Option<(String, usize)>,
+    permission_confirm_dont_ask: bool,
+    pending_permission_changes: Vec<(String, String)>,
+    model_picker: Option<ModelPicker>,
+    engine_picker: bool,
+    engine_selected: usize,
+    pending_model_queries: Vec<String>,
+    pending_model_changes: Vec<(String, String)>,
     pub pending_prompts: Vec<(String, String)>,
     pub input_requests: Vec<InputRequest>,
     pub pending_answers: Vec<(String, String, serde_json::Value)>,
@@ -386,6 +437,8 @@ pub struct App {
     history_modal: bool,
     history_query: String,
     history_selected: usize,
+    history_pending: Option<Receiver<Vec<history::OfflineSession>>>,
+    offline_ids: HashSet<String>,
     diff_modal: bool,
     diff_scroll: u16,
     diff_text: String,
@@ -424,6 +477,18 @@ impl Default for App {
             input: String::new(),
             input_drafts: HashMap::new(),
             session_identity: HashMap::new(),
+            model_capabilities: HashMap::new(),
+            permission_capabilities: HashMap::new(),
+            permission_modes: HashMap::new(),
+            session_activity: HashMap::new(),
+            permission_picker: None,
+            permission_confirm_dont_ask: false,
+            pending_permission_changes: Vec::new(),
+            model_picker: None,
+            engine_picker: false,
+            engine_selected: 0,
+            pending_model_queries: Vec::new(),
+            pending_model_changes: Vec::new(),
             pending_prompts: Vec::new(),
             input_requests: Vec::new(),
             pending_answers: Vec::new(),
@@ -439,6 +504,8 @@ impl Default for App {
             history_modal: false,
             history_query: String::new(),
             history_selected: 0,
+            history_pending: None,
+            offline_ids: HashSet::new(),
             diff_modal: false,
             diff_scroll: 0,
             diff_text: String::new(),
@@ -456,7 +523,9 @@ impl Default for App {
 impl App {
     pub fn apply_update(&mut self, update: DaemonUpdate) {
         match update {
-            DaemonUpdate::Upsert(session) => {
+            DaemonUpdate::Upsert(mut session) => {
+                session.transcript = transcript_tail(&session.transcript).to_owned();
+                self.offline_ids.remove(&session.id);
                 if let Some(existing) = self.sessions.iter_mut().find(|s| s.id == session.id) {
                     *existing = session;
                 } else {
@@ -469,7 +538,7 @@ impl App {
             }
             DaemonUpdate::Transcript { id, markdown } => {
                 if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
-                    s.transcript = markdown;
+                    s.transcript = transcript_tail(&markdown).to_owned();
                 }
             }
             DaemonUpdate::Status { id, text } => {
@@ -497,6 +566,13 @@ impl App {
                 let model = frame.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                 let engine = frame.get("engine").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                 self.session_identity.insert(id.to_owned(), (engine, model.clone()));
+                self.model_capabilities.insert(id.to_owned(), frame["can_set_model"] == true);
+                self.permission_capabilities.insert(id.to_owned(), frame["can_set_permission_mode"] == true);
+                if let Some(mode) = frame["permission_mode"].as_str().filter(|mode| permission_index(mode).is_some()) {
+                    self.permission_modes.insert(id.to_owned(), mode.to_owned());
+                }
+                self.session_activity.insert(id.to_owned(), (frame["running"] == true,
+                    frame["queued"].as_u64().unwrap_or(0) as usize));
                 let cwd = safe_label(frame.get("cwd").and_then(|v| v.as_str()).unwrap_or(""));
                 if let Some(raw) = frame.get("cwd").and_then(|v| v.as_str()) {
                     let path = PathBuf::from(raw);
@@ -528,14 +604,9 @@ impl App {
                     return false;
                 };
                 let data = &event["data"];
-                // A transport reader may serve several sockets. The frame itself
-                // lacks a session id, so a reader can add one before delivery.
-                let id = frame
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| self.groups[self.active_group].active_id())
-                    .or_else(|| self.sessions.first().map(|s| s.id.as_str()));
-                let Some(id) = id.map(str::to_owned) else {
+                // The transport tags every socket frame before delivery. An
+                // untagged frame must not alter the currently focused session.
+                let Some(id) = frame.get("session_id").and_then(|v| v.as_str()).map(str::to_owned) else {
                     return false;
                 };
                 if self.sessions.iter().any(|session| session.id == id) {
@@ -556,6 +627,12 @@ impl App {
                         }
                         true
                     }
+                    "permission_mode_changed" => {
+                        if let Some(mode) = data["mode"].as_str().filter(|mode| permission_index(mode).is_some()) {
+                            self.permission_modes.insert(id, mode.to_owned());
+                        }
+                        true
+                    }
                     "text_delta" => {
                         let Some(text) = data.get("text").and_then(|v| v.as_str()) else {
                             return false;
@@ -570,6 +647,7 @@ impl App {
                         }
                     }
                     "turn_started" => {
+                        self.session_activity.entry(id.clone()).or_default().0 = true;
                         self.apply_update(DaemonUpdate::Status {
                             id,
                             text: "Running".into(),
@@ -577,6 +655,7 @@ impl App {
                         true
                     }
                     "turn_done" => {
+                        self.session_activity.entry(id.clone()).or_default().0 = false;
                         let status = if data.get("is_error").and_then(|v| v.as_bool()) == Some(true)
                         {
                             "Error"
@@ -599,7 +678,15 @@ impl App {
                             {
                                 self.drag = None;
                                 self.tool_modal = false;
-                                self.input_requests.push(request);
+                                self.model_picker = None;
+                                self.permission_picker = None;
+                                self.permission_confirm_dont_ask = false;
+                                self.engine_picker = false;
+                                if self.input_requests.len() < MAX_INPUT_REQUESTS {
+                                    self.input_requests.push(request);
+                                } else {
+                                    self.notice = "Too many input requests · inspect the session directly".into();
+                                }
                             }
                         } else {
                             self.notice = "Invalid input request · inspect another client".into();
@@ -639,6 +726,15 @@ impl App {
                         });
                         self.append_event(&id, event_type, data)
                     }
+                    "prompt_queued" => {
+                        self.session_activity.entry(id.clone()).or_default().1 += 1;
+                        self.append_event(&id, event_type, data)
+                    }
+                    "prompt_dequeued" | "prompt_cancelled" | "prompt_discarded" => {
+                        let activity = self.session_activity.entry(id.clone()).or_default();
+                        activity.1 = activity.1.saturating_sub(1);
+                        self.append_event(&id, event_type, data)
+                    }
                     _ => self.append_event(&id, event_type, data),
                 }
             }
@@ -648,7 +744,46 @@ impl App {
                 };
                 self.peer_map.roster(id, frame)
             }
+            "models_reply" => {
+                let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else { return false; };
+                if let Some(picker) = self.model_picker.as_mut().filter(|picker| picker.session_id == id) {
+                    picker.loading = false;
+                    picker.catalog_pending = frame["loading"] == true;
+                    picker.models = if frame["ok"] == true {
+                        frame["models"].as_array().into_iter().flatten()
+                            .filter_map(|value| value.as_str())
+                            .filter(|model| !model.is_empty() && model.len() <= 128 && !model.chars().any(char::is_control))
+                            .take(100).map(safe_label).collect()
+                    } else { Vec::new() };
+                    picker.note = if frame["ok"] == true {
+                        frame["note"].as_str().map(safe_label).unwrap_or_default()
+                    } else {
+                        format!("Catalog unavailable: {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
+                    };
+                    picker.selected = 0;
+                    return true;
+                }
+                false
+            }
+            "set_model_reply" => {
+                self.notice = if frame["ok"] == true {
+                    format!("Model selected · {}", safe_label(frame["model"].as_str().unwrap_or("awaiting event")))
+                } else {
+                    format!("Model change failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
+                };
+                true
+            }
+            "set_permission_mode_reply" => {
+                self.notice = if frame["ok"] == true {
+                    format!("Permission mode selected · {}", safe_label(frame["mode"].as_str().unwrap_or("awaiting event")))
+                } else {
+                    format!("Permission change failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
+                };
+                true
+            }
             "reply" => {
+                // Both native and Python daemons broadcast prompt_queued after
+                // the enqueue reply. Count that event once, not this reply.
                 if let Some(status) = frame.get("status") {
                     let id = status.get("session_id").and_then(|v| v.as_str())
                         .or_else(|| frame.get("session_id").and_then(|v| v.as_str()));
@@ -659,6 +794,18 @@ impl App {
                         }
                         if status.get("model").is_some() {
                             identity.1 = status.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
+                        }
+                        if let Some(can_set) = status.get("can_set_model").and_then(|v| v.as_bool()) {
+                            self.model_capabilities.insert(id.to_owned(), can_set);
+                        }
+                        if let Some(can_set) = status.get("can_set_permission_mode").and_then(|v| v.as_bool()) {
+                            self.permission_capabilities.insert(id.to_owned(), can_set);
+                        }
+                        if let Some(mode) = status["permission_mode"].as_str().filter(|mode| permission_index(mode).is_some()) {
+                            self.permission_modes.insert(id.to_owned(), mode.to_owned());
+                        }
+                        if let (Some(running), Some(queued)) = (status["running"].as_bool(), status["queued"].as_u64()) {
+                            self.session_activity.insert(id.to_owned(), (running, queued as usize));
                         }
                     }
                 }
@@ -737,11 +884,10 @@ impl App {
                 let Some(text) = frame.get("text").and_then(|v| v.as_str()) else {
                     return false;
                 };
+                let Some(target) = frame.get("session_id").and_then(|v| v.as_str()) else {
+                    return false;
+                };
                 let active = self.groups[self.active_group].active_id().unwrap_or("");
-                let target = frame
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(active);
                 if self.input.is_empty() && target == active {
                     self.input = text.to_owned();
                 } else {
@@ -770,11 +916,9 @@ impl App {
                 let Some(text) = frame.get("text").and_then(|v| v.as_str()) else {
                     return false;
                 };
-                let active = self.groups[self.active_group].active_id().unwrap_or("");
-                let target = frame
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(active);
+                let Some(target) = frame.get("session_id").and_then(|v| v.as_str()) else {
+                    return false;
+                };
                 self.rejected_drafts
                     .entry(target.into())
                     .or_default()
@@ -817,6 +961,14 @@ impl App {
                     self.history_modal = false;
                     self.notice = "Enlarge terminal to open session history".into();
                 }
+                if ((self.model_picker.is_some() || self.engine_picker) && (w < 29 || h < 11))
+                    || (self.permission_picker.is_some() && (w < 60 || h < 15)) {
+                    self.model_picker = None;
+                    self.engine_picker = false;
+                    self.permission_picker = None;
+                    self.permission_confirm_dont_ask = false;
+                    self.notice = "Enlarge terminal to open chip picker".into();
+                }
                 true
             }
             Event::Key(key)
@@ -846,6 +998,9 @@ impl App {
         if self.active_request_index().is_some() {
             return self.request_key(key);
         }
+        if self.model_picker.is_some() { return self.model_picker_key(key); }
+        if self.permission_picker.is_some() { return self.permission_picker_key(key); }
+        if self.engine_picker { return self.engine_picker_key(key); }
         if self.action_menu {
             return self.action_key(key);
         }
@@ -910,6 +1065,9 @@ impl App {
             self.open_history();
             return true;
         }
+        if key.code == KeyCode::Char('m') && alt { self.open_model_picker(); return true; }
+        if key.code == KeyCode::Char('p') && alt { self.open_permission_picker(); return true; }
+        if key.code == KeyCode::Char('e') && alt { self.open_engine_picker(); return true; }
         if key.code == KeyCode::F(2) || (key.code == KeyCode::Char('g') && alt) {
             self.open_diff();
             return true;
@@ -1020,7 +1178,9 @@ impl App {
             KeyCode::Enter if self.focus == Focus::Prompt => {
                 if !self.input.is_empty() {
                     if let Some(id) = self.groups[self.active_group].active_id() {
-                        if self.pending_prompts.len() < MAX_PENDING_PROMPTS {
+                        if self.offline_ids.contains(id) {
+                            self.notice = "Archived transcript is read-only".into();
+                        } else if self.pending_prompts.len() < MAX_PENDING_PROMPTS {
                             self.pending_prompts
                                 .push((id.to_owned(), std::mem::take(&mut self.input)));
                             self.notice = "Prompt queued".into();
@@ -1037,6 +1197,124 @@ impl App {
         }
     }
 
+    fn open_model_picker(&mut self) {
+        if self.size.width > 0 && (self.size.width < 29 || self.size.height < 11) {
+            self.notice = "Enlarge terminal to open model picker".into();
+            return;
+        }
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.notice = "Select a session to inspect its model".into();
+            return;
+        };
+        if !self.model_capabilities.get(&id).copied().unwrap_or(false) {
+            self.notice = "This session cannot change models".into();
+            return;
+        }
+        self.model_picker = Some(ModelPicker { session_id: id.clone(), models: Vec::new(),
+            selected: 0, note: "Loading this engine's model catalog…".into(),
+            loading: true, catalog_pending: false });
+        self.pending_model_queries.push(id);
+    }
+
+    fn open_permission_picker(&mut self) {
+        if self.size.width > 0 && (self.size.width < 60 || self.size.height < 15) {
+            self.notice = "Enlarge terminal to open permission picker".into();
+            return;
+        }
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.notice = "Select a session to inspect permissions".into();
+            return;
+        };
+        if !self.permission_capabilities.get(&id).copied().unwrap_or(false) {
+            self.notice = "This session cannot change permission modes".into();
+            return;
+        }
+        let selected = self.permission_modes.get(&id).and_then(|mode| permission_index(mode)).unwrap_or(0);
+        self.permission_picker = Some((id, selected));
+        self.permission_confirm_dont_ask = false;
+    }
+
+    fn select_permission_mode(&mut self) {
+        let Some((id, selected)) = self.permission_picker.as_ref() else { return; };
+        let mode = PERMISSION_CHOICES[*selected].0;
+        if mode == "dontAsk" && self.permission_modes.get(id).is_none_or(|current| current != mode)
+            && !self.session_activity.get(id).is_some_and(|(busy, queued)| !busy && *queued == 0) {
+            self.notice = "dontAsk requires an idle session with no queued prompts".into();
+            return;
+        }
+        if mode == "dontAsk" && self.permission_modes.get(id).is_none_or(|current| current != mode)
+            && !self.permission_confirm_dont_ask {
+            self.permission_confirm_dont_ask = true;
+            self.notice = "dontAsk denies unapproved calls silently; press Enter again to confirm".into();
+            return;
+        }
+        self.pending_permission_changes.push((id.clone(), mode.to_owned()));
+        self.notice = format!("Requesting permission mode · {mode}");
+        self.permission_picker = None;
+        self.permission_confirm_dont_ask = false;
+    }
+
+    fn permission_picker_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => { self.permission_picker = None; self.permission_confirm_dont_ask = false; }
+            KeyCode::Up => { if let Some((_, selected)) = &mut self.permission_picker { *selected = selected.saturating_sub(1); self.permission_confirm_dont_ask = false; } }
+            KeyCode::Down => { if let Some((_, selected)) = &mut self.permission_picker { *selected = (*selected + 1).min(PERMISSION_CHOICES.len() - 1); self.permission_confirm_dont_ask = false; } }
+            KeyCode::Enter => self.select_permission_mode(),
+            _ => return false,
+        }
+        true
+    }
+
+    fn model_picker_key(&mut self, key: KeyEvent) -> bool {
+        let picker = self.model_picker.as_mut().unwrap();
+        match key.code {
+            KeyCode::Esc => self.model_picker = None,
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.models.len().saturating_sub(1)),
+            KeyCode::Char('r' | 'R') if !picker.loading => {
+                picker.loading = true;
+                picker.catalog_pending = false;
+                picker.note = "Refreshing this engine's model catalog…".into();
+                picker.models.clear();
+                self.pending_model_queries.push(picker.session_id.clone());
+            }
+            KeyCode::Enter if !picker.loading => {
+                if let Some(model) = picker.models.get(picker.selected) {
+                    self.pending_model_changes.push((picker.session_id.clone(), model.clone()));
+                    self.notice = format!("Requesting model · {}", model);
+                    self.model_picker = None;
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn open_engine_picker(&mut self) {
+        if self.size.width > 0 && (self.size.width < 29 || self.size.height < 11) {
+            self.notice = "Enlarge terminal to open engine picker".into();
+            return;
+        }
+        let engine = self.groups[self.active_group].active_id()
+            .and_then(|id| self.session_identity.get(id)).and_then(|identity| identity.0.as_deref());
+        self.engine_selected = engine.and_then(|engine| ENGINE_CHOICES.iter().position(|name| *name == engine)).unwrap_or(0);
+        self.engine_picker = true;
+    }
+
+    fn engine_picker_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => self.engine_picker = false,
+            KeyCode::Up => self.engine_selected = self.engine_selected.saturating_sub(1),
+            KeyCode::Down => self.engine_selected = (self.engine_selected + 1).min(ENGINE_CHOICES.len() - 1),
+            KeyCode::Enter => {
+                self.notice = format!("Run separately for a new session: doxa-rs new --engine {}", ENGINE_CHOICES[self.engine_selected]);
+                self.engine_picker = false;
+            }
+            _ => return false,
+        }
+        true
+    }
+
     fn history_matches(&self) -> Vec<usize> {
         let query = self.history_query.to_lowercase();
         self.sessions.iter().enumerate().filter_map(|(index, session)| {
@@ -1047,7 +1325,7 @@ impl App {
                 || session.transcript[start..].to_lowercase().contains(&query) {
                 Some(index)
             } else { None }
-        }).take(64).collect()
+        }).take(128).collect()
     }
 
     fn history_fits(&self) -> bool {
@@ -1062,6 +1340,31 @@ impl App {
         self.history_modal = true;
         self.history_query.clear();
         self.history_selected = 0;
+        if self.history_pending.is_none() {
+            let (tx, rx) = mpsc::sync_channel(1);
+            self.history_pending = Some(rx);
+            std::thread::spawn(move || { let _ = tx.send(history::discover()); });
+        }
+    }
+
+    fn poll_history(&mut self) -> bool {
+        let Some(receiver) = &self.history_pending else { return false; };
+        let found = match receiver.try_recv() {
+            Ok(found) => found,
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => { self.history_pending = None; return false; }
+        };
+        self.history_pending = None;
+        let mut changed = false;
+        for entry in found {
+            if self.sessions.iter().any(|session| session.id == entry.id) { continue; }
+            self.offline_ids.insert(entry.id.clone());
+            self.sessions.push(Session { id: entry.id.clone(), title: entry.id,
+                collection: safe_label(&entry.project), transcript: transcript_tail(&entry.markdown).to_owned(),
+                status: "Archived · read-only".into() });
+            changed = true;
+        }
+        changed
     }
 
     fn history_key(&mut self, key: KeyEvent) -> bool {
@@ -1213,6 +1516,9 @@ impl App {
                     }
                     6 => self.open_history(),
                     7 => self.open_diff(),
+                    8 => self.open_engine_picker(),
+                    9 => self.open_model_picker(),
+                    10 => self.open_permission_picker(),
                     _ => unreachable!("fixed action list"),
                 }
             }
@@ -1495,12 +1801,66 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.active_request_index().is_none()
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && (self.engine_picker || self.model_picker.is_some() || self.permission_picker.is_some()) {
+            let width = self.size.width.saturating_sub(4).min(74);
+            let height = self.size.height.saturating_sub(4).min(19);
+            if width < 25 || height < 7 { return false; }
+            let x = self.size.x + (self.size.width - width) / 2;
+            let y = self.size.y + (self.size.height - height) / 2;
+            if mouse.column < x || mouse.column >= x + width || mouse.row < y || mouse.row >= y + height {
+                self.engine_picker = false;
+                self.model_picker = None;
+                self.permission_picker = None;
+                self.permission_confirm_dont_ask = false;
+                return true;
+            }
+            if self.engine_picker {
+                if mouse.row < y + 4 { return true; }
+                let row = usize::from(mouse.row.saturating_sub(y + 4));
+                if row < ENGINE_CHOICES.len() {
+                    self.engine_selected = row;
+                    self.notice = format!("Run separately for a new session: doxa-rs new --engine {}", ENGINE_CHOICES[row]);
+                    self.engine_picker = false;
+                }
+                return true;
+            }
+            if let Some((_, selected)) = &mut self.permission_picker {
+                if mouse.row >= y + 4 {
+                    let row = usize::from(mouse.row - (y + 4));
+                    if row < PERMISSION_CHOICES.len() {
+                        *selected = row;
+                        self.permission_confirm_dont_ask = false;
+                        if PERMISSION_CHOICES[row].0 == "dontAsk" {
+                            self.notice = "dontAsk denies unapproved calls silently; press Enter twice to confirm".into();
+                        } else {
+                            self.select_permission_mode();
+                        }
+                    }
+                }
+                return true;
+            }
+            let picker = self.model_picker.as_mut().unwrap();
+            let visible = usize::from(height.saturating_sub(5));
+            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let row = start + usize::from(mouse.row.saturating_sub(y + 3));
+            if mouse.row >= y + 3 && row < picker.models.len() && !picker.loading {
+                self.pending_model_changes.push((picker.session_id.clone(), picker.models[row].clone()));
+                self.notice = format!("Requesting model · {}", picker.models[row]);
+                self.model_picker = None;
+            }
+            return true;
+        }
         if self.active_request_index().is_some()
             || self.tool_modal
             || self.map_modal
             || self.action_menu
             || self.history_modal
             || self.diff_modal
+            || self.model_picker.is_some()
+            || self.permission_picker.is_some()
+            || self.engine_picker
         {
             self.drag = None;
             return false;
@@ -1537,10 +1897,44 @@ impl App {
                     }
                 }
                 if self.drag.is_none() {
-                    if let Some(panes) = layout.panes {
-                        for (index, pane) in panes.iter().enumerate() {
+                        let pane_hits = layout.panes.map(|panes| vec![(0, panes[0]), (1, panes[1])])
+                            .unwrap_or_else(|| vec![(self.active_group, layout.body)]);
+                        for (index, pane) in pane_hits.iter().copied() {
                             if mouse.column >= pane.x && mouse.column < pane.right()
                                 && mouse.row >= pane.y && mouse.row < pane.bottom() {
+                                if mouse.row == pane.bottom().saturating_sub(1) {
+                                    self.active_group = index;
+                                    let status_width = self.groups[index].active_id()
+                                        .and_then(|id| self.sessions.iter().find(|session| session.id == id))
+                                        .map(|session| session.status.width() + 3).unwrap_or(13);
+                                    let engine_width = self.groups[index].active_id()
+                                        .and_then(|id| self.session_identity.get(id))
+                                        .and_then(|identity| identity.0.as_deref())
+                                        .map(|engine| engine.width() + 3).unwrap_or(0);
+                                    let model_width = self.groups[index].active_id()
+                                        .and_then(|id| self.session_identity.get(id))
+                                        .and_then(|identity| identity.1.as_deref())
+                                        .map(|model| model.width() + 3).unwrap_or(0);
+                                    let permission_width = self.groups[index].active_id()
+                                        .and_then(|id| self.permission_modes.get(id))
+                                        .map(|mode| mode.width() + 3).unwrap_or(0);
+                                    let relative = usize::from(mouse.column.saturating_sub(pane.x));
+                                    if relative >= status_width && relative < status_width + engine_width {
+                                        self.open_engine_picker();
+                                        return true;
+                                    }
+                                    if model_width > 0 && relative >= status_width + engine_width + 1
+                                        && relative < status_width + engine_width + 1 + model_width {
+                                        self.open_model_picker();
+                                        return true;
+                                    }
+                                    let permission_start = status_width + engine_width + 1 + model_width + 1;
+                                    if permission_width > 0 && relative >= permission_start
+                                        && relative < permission_start + permission_width {
+                                        self.open_permission_picker();
+                                        return true;
+                                    }
+                                }
                                 self.active_group = index;
                                 self.focus = if mouse.row >= pane.bottom().saturating_sub(4) {
                                     Focus::Prompt
@@ -1550,7 +1944,6 @@ impl App {
                                 return true;
                             }
                         }
-                    }
                 }
                 self.drag.is_some()
             }
@@ -1652,7 +2045,7 @@ impl App {
         }
         frame.render_widget(
             Paragraph::new(format!(
-                "{}  |  Ctrl+P actions · Ctrl+R history · F2 diff · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
+                "{}  |  Ctrl+P actions · Alt+E engine · Alt+M model · Alt+P permissions · Ctrl+R history · F2 diff · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
                 self.notice
             )).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
@@ -1668,7 +2061,64 @@ impl App {
         self.draw_actions(frame, area);
         self.draw_history(frame, area);
         self.draw_diff(frame, area);
+        self.draw_chip_picker(frame, area);
         self.draw_request(frame, area);
+    }
+
+    fn draw_chip_picker(&self, frame: &mut Frame, area: Rect) {
+        if !self.engine_picker && self.model_picker.is_none() && self.permission_picker.is_none() { return; }
+        let width = area.width.saturating_sub(4).min(74);
+        let height = area.height.saturating_sub(4).min(19);
+        if width < 25 || height < 7 { return; }
+        let modal = Rect::new(area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2, width, height);
+        let mut lines = Vec::new();
+        let title;
+        if self.engine_picker {
+            title = " Engine · new sessions only · Esc close ";
+            lines.push(Line::from(" This picker does not launch or switch a session."));
+            lines.push(Line::from(" Select a row to show a new-session command:"));
+            lines.push(Line::from(""));
+            for (index, engine) in ENGINE_CHOICES.iter().enumerate() {
+                lines.push(Line::styled(format!(" {} {}", if index == self.engine_selected { '›' } else { ' ' }, engine),
+                    Style::default().fg(if index == self.engine_selected { theme::ACCENT } else { theme::SECONDARY })));
+            }
+        } else if let Some((id, selected)) = &self.permission_picker {
+            title = " Claude permissions · this session · Enter select · Esc close ";
+            lines.push(Line::from(" Changes how Claude handles tool permission requests."));
+            lines.push(Line::from(if self.permission_confirm_dont_ask {
+                " dontAsk silently denies unapproved calls. Enter again to confirm."
+            } else {
+                " Current mode marked with ●; dontAsk requires confirmation."
+            }));
+            lines.push(Line::from(""));
+            for (index, (mode, description)) in PERMISSION_CHOICES.iter().enumerate() {
+                let current = self.permission_modes.get(id).is_some_and(|current| current == mode);
+                lines.push(Line::styled(format!(" {} {} {} · {}", if index == *selected { '›' } else { ' ' },
+                    if current { '●' } else { ' ' }, mode, description),
+                    Style::default().fg(if index == *selected { theme::ACCENT } else { theme::SECONDARY })));
+            }
+        } else {
+            title = " Model · this session · R retry · Enter select · Esc close ";
+            let picker = self.model_picker.as_ref().unwrap();
+            lines.push(Line::from(format!(" {}", picker.note)));
+            lines.push(Line::from(""));
+            if picker.catalog_pending {
+                lines.push(Line::from(" Catalog probe in progress · press R to retry"));
+            } else if !picker.loading && picker.models.is_empty() {
+                lines.push(Line::from(" No verified models available for this session"));
+            }
+            let visible = usize::from(height.saturating_sub(5));
+            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            for (index, model) in picker.models.iter().enumerate().skip(start).take(visible) {
+                lines.push(Line::styled(format!(" {} {}", if index == picker.selected { '›' } else { ' ' }, model),
+                    Style::default().fg(if index == picker.selected { theme::ACCENT } else { theme::SECONDARY })));
+            }
+        }
+        frame.render_widget(Clear, modal);
+        frame.render_widget(Paragraph::new(lines).block(Block::default().title(title)
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER)))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), modal);
     }
 
     fn draw_history(&self, frame: &mut Frame, area: Rect) {
@@ -1679,14 +2129,15 @@ impl App {
         let modal = Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height);
         let matches = self.history_matches();
         let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&self.history_query))),
-            Line::from(" Attached sessions only · read-only transcript picker"), Line::from("")];
-        if matches.is_empty() { lines.push(Line::from(" No matching attached sessions")); }
+            Line::from(" Attached and archived sessions · read-only transcript picker"), Line::from("")];
+        if matches.is_empty() { lines.push(Line::from(if self.history_pending.is_some() { " Finding saved transcripts…" } else { " No matching sessions" })); }
         let visible = usize::from(height.saturating_sub(7)).max(1);
         let start = self.history_selected.saturating_sub(visible.saturating_sub(1));
         for (position, &index) in matches.iter().enumerate().skip(start).take(visible) {
             let session = &self.sessions[index];
-            let label = format!(" {} {} · {}", if position == self.history_selected { '›' } else { ' ' },
-                safe_label(&session.title), safe_label(&session.id));
+            let label = format!(" {} {} · {}{}", if position == self.history_selected { '›' } else { ' ' },
+                safe_label(&session.title), safe_label(&session.id),
+                if self.offline_ids.contains(&session.id) { " · archived" } else { "" });
             let style = if position == self.history_selected { Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT) }
                 else { Style::default().fg(theme::SECONDARY) };
             lines.push(Line::styled(label, style));
@@ -2060,16 +2511,21 @@ impl App {
         )];
         if let Some(engine) = engine {
             status_spans.push(Span::styled(
-                format!(" {} ", engine),
+                format!(" {} ▾", engine),
                 Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT),
             ));
         }
         if let Some(model) = model {
             status_spans.push(Span::raw(" "));
             status_spans.push(Span::styled(
-                format!(" {} ", model),
+                format!(" {} ▾", model),
                 Style::default().fg(theme::TEXT).bg(theme::HIGHLIGHT),
             ));
+        }
+        if let Some(mode) = group.active_id().and_then(|id| self.permission_modes.get(id)) {
+            status_spans.push(Span::raw(" "));
+            status_spans.push(Span::styled(format!(" {} ▾", mode),
+                Style::default().fg(theme::TEXT).bg(theme::HIGHLIGHT)));
         }
         frame.render_widget(
             Paragraph::new(Line::from(status_spans)).style(Style::default().bg(theme::RAISED)),
@@ -2219,6 +2675,7 @@ fn run_loop(
             changed |= app.handle(event::read()?);
         }
         changed |= app.poll_diff();
+        changed |= app.poll_history();
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
                 changed |= app.peer_map.roster(&id, &serde_json::json!({"ok":false}));
@@ -2228,6 +2685,7 @@ fn run_loop(
             let disconnected = dispatch_prompts(&mut app, sender);
             let disconnected = dispatch_answers(&mut app, sender) || disconnected;
             let disconnected = dispatch_peer_refresh(&mut app, sender) || disconnected;
+            let disconnected = dispatch_model_controls(&mut app, sender) || disconnected;
             if disconnected {
                 prompt_sender = None;
                 changed = true;
@@ -2257,6 +2715,13 @@ fn save_layout_if_changed(
 ) -> bool {
     let layout = crate::ui_state::LayoutSignature::capture(app);
     if layout == *saved_layout {
+        return false;
+    }
+    if app.groups.iter().any(|group| group.tabs.iter().any(|id| app.offline_ids.contains(id))) {
+        if app.notice != "Layout save skipped · archived tabs are read-only" {
+            app.notice = "Layout save skipped · archived tabs are read-only".into();
+            return true;
+        }
         return false;
     }
     let notice = match store.save_if_complete(app, complete) {
@@ -2335,6 +2800,58 @@ fn dispatch_answers(app: &mut App, sender: &SyncSender<crate::bridge::WorkerComm
     false
 }
 
+fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+    let mut queries = std::mem::take(&mut app.pending_model_queries).into_iter();
+    while let Some(id) = queries.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::Models(id)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::Models(id))) => {
+                app.pending_model_queries.push(id);
+                app.pending_model_queries.extend(queries);
+                break;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                app.notice = "Daemon unavailable for model catalog".into();
+                return true;
+            }
+            Err(_) => unreachable!(),
+        }
+    }
+    let mut changes = std::mem::take(&mut app.pending_model_changes).into_iter();
+    while let Some((id, model)) = changes.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::SetModel(id, model)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::SetModel(id, model))) => {
+                app.pending_model_changes.push((id, model));
+                app.pending_model_changes.extend(changes);
+                break;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                app.notice = "Daemon unavailable for model change".into();
+                return true;
+            }
+            Err(_) => unreachable!(),
+        }
+    }
+    let mut permissions = std::mem::take(&mut app.pending_permission_changes).into_iter();
+    while let Some((id, mode)) = permissions.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::SetPermissionMode(id, mode)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::SetPermissionMode(id, mode))) => {
+                app.pending_permission_changes.push((id, mode));
+                app.pending_permission_changes.extend(permissions);
+                break;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                app.notice = "Daemon unavailable for permission change".into();
+                return true;
+            }
+            Err(_) => unreachable!(),
+        }
+    }
+    false
+}
+
 fn dispatch_peer_refresh(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
     let Some(id) = app.pending_peer_refresh.take() else {
         return false;
@@ -2358,6 +2875,171 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use serde_json::json;
+
+    #[test]
+    fn model_picker_is_capability_gated_and_uses_only_daemon_catalog() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"codex-1",
+            "engine":"codex", "model":"current", "cwd":"/tmp", "can_set_model":false}));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT)));
+        assert!(app.model_picker.is_none());
+        assert!(app.pending_model_queries.is_empty());
+
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"claude-1",
+            "engine":"claude", "model":"old", "cwd":"/tmp", "can_set_model":true}));
+        app.groups[0].tabs = vec!["claude-1".into()];
+        app.groups[0].active = 0;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT)));
+        assert_eq!(app.pending_model_queries, vec!["claude-1"]);
+        assert!(app.model_picker.as_ref().unwrap().loading);
+        app.apply_daemon_frame(&json!({"type":"models_reply", "session_id":"codex-1",
+            "ok":true, "models":["wrong-engine"]}));
+        assert!(app.model_picker.as_ref().unwrap().models.is_empty());
+        app.apply_daemon_frame(&json!({"type":"models_reply", "session_id":"claude-1",
+            "ok":true, "models":["sonnet", "opus", "bad\nmodel", ""]}));
+        assert_eq!(app.model_picker.as_ref().unwrap().models, vec!["sonnet", "opus"]);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.pending_model_changes, vec![("claude-1".into(), "opus".into())]);
+    }
+
+    #[test]
+    fn permission_picker_requires_capability_and_tracks_daemon_state() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 80, 24);
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"codex-1",
+            "engine":"codex", "permission_mode":"default", "can_set_permission_mode":false}));
+        app.groups[0].tabs = vec!["codex-1".into()];
+        app.open_permission_picker();
+        assert!(app.permission_picker.is_none());
+
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"claude-1",
+            "engine":"claude", "permission_mode":"plan", "running":false, "queued":0,
+            "can_set_permission_mode":true}));
+        app.groups[0].tabs = vec!["claude-1".into()];
+        app.open_permission_picker();
+        assert_eq!(app.permission_picker.as_ref().unwrap().1, 2);
+        app.permission_picker.as_mut().unwrap().1 = 1;
+        app.permission_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.pending_permission_changes, vec![("claude-1".into(), "acceptEdits".into())]);
+        assert_eq!(app.permission_modes["claude-1"], "plan");
+        app.apply_daemon_frame(&json!({"type":"set_permission_mode_reply", "session_id":"claude-1",
+            "ok":false, "error":"sidecar unavailable"}));
+        assert!(app.notice.contains("failed"));
+        assert_eq!(app.permission_modes["claude-1"], "plan");
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"claude-1",
+            "event":{"type":"permission_mode_changed", "data":{"mode":"acceptEdits"}}}));
+        assert_eq!(app.permission_modes["claude-1"], "acceptEdits");
+    }
+
+    #[test]
+    fn dont_ask_requires_idle_and_empty_queue() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 80, 24);
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "engine":"claude",
+            "permission_mode":"default", "running":true, "queued":0,
+            "can_set_permission_mode":true}));
+        app.groups[0].tabs = vec!["s".into()];
+        app.open_permission_picker();
+        app.permission_picker.as_mut().unwrap().1 = 4;
+        app.select_permission_mode();
+        assert!(app.pending_permission_changes.is_empty());
+        app.apply_daemon_frame(&json!({"type":"reply", "session_id":"s", "ok":true,
+            "status":{"session_id":"s", "running":false, "queued":1}}));
+        app.select_permission_mode();
+        assert!(app.pending_permission_changes.is_empty());
+        app.apply_daemon_frame(&json!({"type":"reply", "session_id":"s", "ok":true,
+            "status":{"session_id":"s", "running":false, "queued":0}}));
+        app.select_permission_mode();
+        assert!(app.pending_permission_changes.is_empty());
+        assert!(app.permission_confirm_dont_ask);
+        app.select_permission_mode();
+        assert_eq!(app.pending_permission_changes, vec![("s".into(), "dontAsk".into())]);
+        assert!(app.permission_picker.is_none());
+    }
+
+    #[test]
+    fn dont_ask_confirmation_clears_on_selection_change_and_mouse_cannot_submit() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 80, 24);
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "engine":"claude",
+            "permission_mode":"default", "running":false, "queued":0,
+            "can_set_permission_mode":true}));
+        app.groups[0].tabs = vec!["s".into()];
+        app.open_permission_picker();
+        app.permission_picker.as_mut().unwrap().1 = 4;
+        app.permission_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.permission_confirm_dont_ask);
+        app.permission_picker_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert!(!app.permission_confirm_dont_ask);
+        app.permission_picker_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: 8, row: 10, modifiers: KeyModifiers::NONE }));
+        assert!(app.pending_permission_changes.is_empty());
+        assert!(!app.permission_confirm_dont_ask);
+    }
+
+    #[test]
+    fn permission_picker_mouse_selects_mode_and_outside_click_closes() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 80, 24);
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "engine":"claude",
+            "permission_mode":"default", "running":false, "queued":0,
+            "can_set_permission_mode":true}));
+        app.groups[0].tabs = vec!["s".into()];
+        app.open_permission_picker();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: 8, row: 8, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.pending_permission_changes, vec![("s".into(), "plan".into())]);
+        app.open_permission_picker();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0, row: 0, modifiers: KeyModifiers::NONE }));
+        assert!(app.permission_picker.is_none());
+    }
+
+    #[test]
+    fn model_catalog_failure_never_offers_a_guessed_model() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s",
+            "engine":"claude", "model":"existing", "cwd":"/tmp", "can_set_model":true}));
+        app.open_model_picker();
+        app.apply_daemon_frame(&json!({"type":"models_reply", "session_id":"s",
+            "ok":false, "error":"offline"}));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.pending_model_changes.is_empty());
+        assert!(app.model_picker.is_some());
+    }
+
+    #[test]
+    fn model_picker_retries_in_progress_catalog_with_r() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s",
+            "engine":"claude", "model":"existing", "cwd":"/tmp", "can_set_model":true}));
+        app.open_model_picker();
+        app.pending_model_queries.clear();
+        app.apply_daemon_frame(&json!({"type":"models_reply", "session_id":"s",
+            "ok":true, "loading":true, "models":[],
+            "note":"Claude model catalog is loading; press R to retry"}));
+        assert!(app.model_picker.as_ref().unwrap().catalog_pending);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)));
+        assert_eq!(app.pending_model_queries, vec!["s"]);
+        app.apply_daemon_frame(&json!({"type":"models_reply", "session_id":"s",
+            "ok":true, "models":["verified"], "note":"Claude CLI cache"}));
+        assert!(!app.model_picker.as_ref().unwrap().catalog_pending);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.pending_model_changes, vec![("s".into(), "verified".into())]);
+    }
+
+    #[test]
+    fn engine_picker_labels_new_session_scope() {
+        assert!(!ENGINE_CHOICES.contains(&"fixture"));
+        let mut app = App::default();
+        app.open_engine_picker();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.notice, "Run separately for a new session: doxa-rs new --engine claude");
+        assert!(!app.engine_picker);
+    }
 
     fn painted(app: &App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
@@ -2384,6 +3066,67 @@ mod tests {
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.groups[0].active_id(), Some("beta"));
         assert!(!app.history_modal);
+    }
+
+    #[test]
+    fn restored_and_appended_transcripts_keep_only_bounded_utf8_tail() {
+        let mut app = App::default();
+        let long = format!("{}éEND", "a".repeat(MAX_TRANSCRIPT_BYTES));
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "s".into(), title: "S".into(),
+            collection: "repo".into(), transcript: long.clone(), status: "Ready".into() }));
+        assert!(app.sessions[0].transcript.len() <= MAX_TRANSCRIPT_BYTES);
+        assert!(app.sessions[0].transcript.ends_with("éEND"));
+        app.apply_update(DaemonUpdate::Transcript { id: "s".into(), markdown: long.clone() });
+        assert!(app.sessions[0].transcript.len() <= MAX_TRANSCRIPT_BYTES);
+        let session = &mut app.sessions[0];
+        assert!(append_transcript(session, &long));
+        assert!(session.transcript.len() <= MAX_TRANSCRIPT_BYTES);
+        assert!(session.transcript.ends_with("éEND"));
+    }
+
+    #[test]
+    fn input_requests_have_a_visible_capacity_limit() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "engine":"claude"}));
+        for index in 0..=MAX_INPUT_REQUESTS {
+            app.apply_daemon_frame(&json!({"type":"event", "session_id":"s",
+                "event":{"type":"needs_input", "data":{"id":format!("request-{index}"),
+                    "kind":"permission", "title":"Approve?"}}}));
+        }
+        assert_eq!(app.input_requests.len(), MAX_INPUT_REQUESTS);
+        assert!(app.notice.contains("Too many input requests"));
+    }
+
+    #[test]
+    fn engine_picker_header_click_does_not_select_an_engine() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 80, 24);
+        app.open_engine_picker();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10, row: 3, modifiers: KeyModifiers::NONE }));
+        assert!(app.engine_picker);
+        assert!(!app.notice.contains("doxa-rs new"));
+    }
+
+    #[test]
+    fn offline_history_opens_read_only_and_never_queues_prompt() {
+        let mut app = App::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.history_pending = Some(rx);
+        tx.send(vec![history::OfflineSession { id: "saved-1".into(),
+            project: "project\u{1b}[31m".into(), markdown: "**You:** saved".into() }]).unwrap();
+        assert!(app.poll_history());
+        assert!(app.offline_ids.contains("saved-1"));
+        assert!(!app.sessions[0].collection.contains('\u{1b}'));
+        app.handle(Event::Resize(100, 28));
+        app.open_history();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].active_id(), Some("saved-1"));
+        app.focus = Focus::Prompt;
+        app.input = "do not send".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.pending_prompts.is_empty());
+        assert_eq!(app.notice, "Archived transcript is read-only");
     }
 
     #[test]
@@ -2593,7 +3336,7 @@ mod tests {
             ..Default::default()
         };
         app.apply_daemon_frame(
-            &json!({"type":"prompt_rejected", "text":"old prompt", "message":"queue full"}),
+            &json!({"type":"prompt_rejected", "session_id":"", "text":"old prompt", "message":"queue full"}),
         );
         assert_eq!(app.input, "new draft");
         assert_eq!(app.rejected_drafts[""], ["old prompt"]);
@@ -2605,7 +3348,7 @@ mod tests {
     #[test]
     fn unconfirmed_prompt_requires_deliberate_recovery_before_retry() {
         let mut app = App::default();
-        app.apply_daemon_frame(&json!({"type":"prompt_uncertain", "text":"possibly sent",
+        app.apply_daemon_frame(&json!({"type":"prompt_uncertain", "session_id":"", "text":"possibly sent",
             "message":"Prompt delivery unconfirmed"}));
         assert!(app.input.is_empty());
         assert_eq!(app.rejected_drafts[""], ["possibly sent"]);
@@ -2631,5 +3374,30 @@ mod tests {
         assert_eq!(app.input, "draft for b");
         app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
         assert_eq!(app.input, "draft for a");
+    }
+
+    #[test]
+    fn untagged_event_or_rejection_cannot_change_the_active_session() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"a", "model":"model"}));
+        let original = app.sessions[0].transcript.clone();
+        assert!(!app.apply_daemon_frame(&json!({"type":"event",
+            "event":{"type":"text_delta", "data":{"text":"wrong session"}}})));
+        assert!(!app.apply_daemon_frame(&json!({"type":"prompt_rejected", "text":"wrong draft"})));
+        assert_eq!(app.sessions[0].transcript, original);
+        assert!(app.rejected_drafts.is_empty());
+    }
+
+    #[test]
+    fn queued_reply_and_broadcast_count_one_prompt() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"a", "queued":0}));
+        app.apply_daemon_frame(&json!({"type":"reply", "session_id":"a", "ok":true, "queued":true}));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"a",
+            "event":{"type":"prompt_queued", "data":{"id":"q"}}}));
+        assert_eq!(app.session_activity["a"].1, 1);
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"a",
+            "event":{"type":"prompt_dequeued", "data":{"id":"q"}}}));
+        assert_eq!(app.session_activity["a"].1, 0);
     }
 }

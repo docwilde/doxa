@@ -41,17 +41,31 @@ def validate_identity(session_id: str | None, resume: str | None) -> tuple[str |
     return session_id, resume
 
 
-def emit(frame: dict) -> None:
+def emit(frame: dict) -> bool:
     raw = json.dumps(frame, ensure_ascii=False, separators=(",", ":")).encode()
-    if len(raw) + 1 > MAX_FRAME:
-        # Do not truncate a JSON event into a misleading partial result.
-        raw = json.dumps({"type": "error", "code": "frame_too_large"}).encode()
+    complete = len(raw) + 1 <= MAX_FRAME
+    if not complete:
+        # Keep correlation and terminal semantics even when SDK data is huge.
+        if frame.get("type") == "reply":
+            frame = {"type": "reply", "id": frame.get("id"), "ok": False,
+                     "error": "frame_too_large"}
+        elif frame.get("type") == "event":
+            data = {"truncated": True, "error": "frame_too_large"}
+            if frame.get("event") in ("turn_done", "turn_refused", "session_done"):
+                data["is_error"] = True
+            frame = {"type": "event", "event": frame.get("event"), "data": data}
+        else:
+            frame = {"type": "error", "code": "frame_too_large"}
+        raw = json.dumps(frame, ensure_ascii=False, separators=(",", ":")).encode()
+        if len(raw) + 1 > MAX_FRAME:
+            raise ValueError("sidecar frame metadata exceeds cap")
     data = memoryview(raw + b"\n")
     while data:
         written = os.write(sys.stdout.fileno(), data)
         if written <= 0:
             raise OSError("sidecar stdout closed")
         data = data[written:]
+    return complete
 
 
 async def run() -> None:
@@ -59,9 +73,32 @@ async def run() -> None:
 
     emit({"type": "hello", "protocol": PROTOCOL, "version": VERSION,
           "capabilities": ["start", "prompt", "answer", "interrupt", "finalize",
-                           "set_model", "set_permission_mode"]})
+                           "set_model", "set_permission_mode", "list_models"]})
     engine = None
     turn = None
+    catalog_task = None
+
+    async def load_catalog() -> dict:
+        """Prepare one account-scoped snapshot off the request path."""
+        from doxa.claude_catalog import attempt_cli_catalog_refresh
+        from doxa.providers import ClaudeProvider, model_provider
+
+        try:
+            status = await attempt_cli_catalog_refresh()
+        except Exception:  # optional CLI probe
+            status = "unavailable"
+        ClaudeProvider.startup_catalog_checked(status)
+        try:
+            provider = model_provider("claude")
+            models = await provider.list_models()
+            # Static aliases are not proof this account can use them.
+            available = [m for m in models if m.source != "fallback"]
+            return {"models": [m.id for m in available[:100]
+                               if isinstance(m.id, str) and 0 < len(m.id) <= 128],
+                    "note": (provider.catalog_note(available) if available else
+                             "No verified Claude model catalog available")[:500]}
+        except Exception:  # optional catalog discovery must not stop the session
+            return {"models": [], "note": "No verified Claude model catalog available"}
 
     async def publish_turn(prompt: str) -> None:
         try:
@@ -78,9 +115,20 @@ async def run() -> None:
             emit({"type": "event", "event": "turn_done",
                   "data": {"is_error": True, "error": "Claude turn failed"}})
 
+    peer_failed = False
+
     async def publish_out_of_band() -> None:
-        async for event in engine.peer_events():
-            emit({"type": "event", "event": event.type, "data": event.data})
+        nonlocal peer_failed
+        try:
+            async for event in engine.peer_events():
+                emit({"type": "event", "event": event.type, "data": event.data})
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            peer_failed = True
+            # Do not expose SDK exception text, and tell the parent that the
+            # out-of-band stream can no longer be trusted.
+            emit({"type": "error", "code": "peer_pump_failed"})
 
     peer_task = None
     reached_eof = False
@@ -107,6 +155,10 @@ async def run() -> None:
         except (ValueError, KeyError, TypeError):
             emit({"type": "error", "code": "invalid_request"})
             continue
+        if peer_failed:
+            emit({"type": "reply", "id": request_id, "ok": False,
+                  "error": "peer_pump_failed"})
+            break
         try:
             if method == "start" and engine is None:
                 cwd = params["cwd"]
@@ -123,10 +175,24 @@ async def run() -> None:
                     options["model"] = model
                 candidate = SessionEngine(**options)
                 started = await candidate.start()
+                try:
+                    complete = emit({"type": "reply", "id": request_id, "ok": True,
+                                     "result": {"event": started.type, "data": started.data,
+                                                "permission_mode": getattr(candidate, "permission_mode", "default")}})
+                except Exception:
+                    try:
+                        await asyncio.wait_for(candidate.finalize(), timeout=EOF_FINALIZE_TIMEOUT)
+                    except Exception:
+                        pass
+                    raise
+                if complete is False:
+                    try:
+                        await asyncio.wait_for(candidate.finalize(), timeout=EOF_FINALIZE_TIMEOUT)
+                    except Exception:
+                        pass
+                    continue
                 engine = candidate
-                emit({"type": "reply", "id": request_id, "ok": True,
-                      "result": {"event": started.type, "data": started.data,
-                                 "permission_mode": getattr(candidate, "permission_mode", "default")}})
+                catalog_task = asyncio.create_task(load_catalog())
                 peer_task = asyncio.create_task(publish_out_of_band())
             elif method == "prompt" and engine is not None:
                 prompt = params["text"]
@@ -143,6 +209,12 @@ async def run() -> None:
                 applied = await engine.answer_needs_input(params["id"], answer)
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": {"applied": applied}})
+            elif method == "list_models" and engine is not None:
+                result = (catalog_task.result() if catalog_task.done() else
+                          {"models": [], "loading": True,
+                           "note": "Claude model catalog is loading; press R to retry"})
+                emit({"type": "reply", "id": request_id, "ok": True,
+                      "result": result})
             elif method == "set_model" and engine is not None:
                 model = params["model"]
                 if model is not None and (
@@ -187,15 +259,17 @@ async def run() -> None:
             # SDK exception strings can contain sensitive request material.
             emit({"type": "reply", "id": request_id, "ok": False,
                   "error": "operation_failed"})
-    running = [task for task in (peer_task, turn) if task is not None and not task.done()]
+    running = [task for task in (peer_task, turn, catalog_task)
+               if task is not None and not task.done()]
     for task in running:
         task.cancel()
     settled = True
     if running:
         _, pending = await asyncio.wait(running, timeout=TASK_CANCEL_TIMEOUT)
-        settled = not pending
-    if reached_eof and engine is not None and not finalized and settled:
-        # A disappearing parent cannot send an explicit finalize request.
+        settled = not any(task in pending for task in (peer_task, turn))
+    if (reached_eof or peer_failed) and engine is not None and not finalized and settled:
+        # A disappearing parent or failed peer pump cannot safely keep the
+        # session active.
         # Give the engine a bounded chance to close its SDK client, stop peer
         # presence, and index the transcript before this process exits. A
         # cancellation-resistant task may still be using the SDK; do not run

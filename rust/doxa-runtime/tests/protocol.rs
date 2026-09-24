@@ -7,9 +7,96 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+
+struct CapabilityProbe(Mutex<Option<Arc<dyn Fn() + Send + Sync>>>);
+impl CapabilityProbe {
+    fn check(&self) {
+        if let Some(probe) = self.0.lock().unwrap().as_ref() { probe(); }
+    }
+}
+impl Host for CapabilityProbe {
+    fn prompt(&self, _: &str, _: &mut dyn FnMut(Value)) {}
+    fn call(&self, _: &str, _: &Value) -> Result<Value, String> { Ok(json!({})) }
+    fn transcript_snapshot(&self) -> std::io::Result<Option<(std::path::PathBuf, u64)>> {
+        self.check();
+        Ok(None)
+    }
+    fn can_set_model(&self) -> bool { self.check(); true }
+    fn can_set_permission_mode(&self) -> bool { self.check(); true }
+}
+
+#[test]
+fn hello_and_status_capabilities_can_access_session_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(CapabilityProbe(Mutex::new(None)));
+    let handle = Arc::new(Daemon::bind(dir.path(), session(), host.clone()).unwrap().start());
+    let probe_handle = handle.clone();
+    *host.0.lock().unwrap() = Some(Arc::new(move || {
+        let (tx, rx) = mpsc::channel();
+        let handle = probe_handle.clone();
+        std::thread::spawn(move || { tx.send(handle.attached_clients()).unwrap(); });
+        assert!(rx.recv_timeout(Duration::from_secs(1)).is_ok(), "host capability ran under state lock");
+    }));
+    let (mut reader, mut writer) = connect(handle.socket_path());
+    assert_eq!(recv(&mut reader)["type"], "hello");
+    send(&mut writer, json!({"type":"attach","cursor":null}));
+    send(&mut writer, json!({"type":"call","id":1,"method":"status","params":{}}));
+    assert_eq!(recv(&mut reader)["status"]["can_set_model"], true);
+    *host.0.lock().unwrap() = None;
+}
+
+struct PanicControl(AtomicUsize);
+impl Host for PanicControl {
+    fn prompt(&self, _: &str, _: &mut dyn FnMut(Value)) {}
+    fn call(&self, method: &str, _: &Value) -> Result<Value, String> {
+        if method == "set_model" {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 { panic!("control host panicked"); }
+            return Ok(json!({"model":"recovered"}));
+        }
+        Err("unknown method".into())
+    }
+}
+
+#[test]
+fn panicking_control_returns_error_and_next_control_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = Daemon::bind(dir.path(), session(), Arc::new(PanicControl(AtomicUsize::new(0)))).unwrap().start();
+    let (mut reader, mut writer) = connect(handle.socket_path());
+    recv(&mut reader);
+    send(&mut writer, json!({"type":"attach","cursor":null}));
+    send(&mut writer, json!({"type":"call","id":1,"method":"set_model","params":{}}));
+    assert_eq!(recv(&mut reader)["error"], "host panicked");
+    send(&mut writer, json!({"type":"call","id":2,"method":"set_model","params":{}}));
+    assert_eq!(recv(&mut reader)["model"], "recovered");
+    assert_eq!(recv(&mut reader)["event"]["type"], "model_changed");
+}
+
+struct PanicPublicPrompt(AtomicUsize);
+impl Host for PanicPublicPrompt {
+    fn prompt(&self, _: &str, emit: &mut dyn FnMut(Value)) { emit(json!({"type":"turn_done","data":{}})); }
+    fn call(&self, _: &str, _: &Value) -> Result<Value, String> { Ok(json!({})) }
+    fn public_prompt(&self, text: &str) -> Result<String, String> {
+        if self.0.fetch_add(1, Ordering::SeqCst) == 0 { panic!("scrubber panicked"); }
+        Ok(text.into())
+    }
+}
+
+#[test]
+fn panicking_immediate_scrubber_rejects_prompt_but_keeps_client_alive() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = Daemon::bind(dir.path(), session(), Arc::new(PanicPublicPrompt(AtomicUsize::new(0)))).unwrap().start();
+    let (mut reader, mut writer) = connect(handle.socket_path());
+    recv(&mut reader);
+    send(&mut writer, json!({"type":"attach","cursor":null}));
+    send(&mut writer, json!({"type":"prompt","id":1,"text":"first"}));
+    assert_eq!(recv(&mut reader)["error"], "prompt could not be scrubbed");
+    send(&mut writer, json!({"type":"prompt","id":2,"text":"second"}));
+    assert_eq!(recv(&mut reader)["ok"], true);
+    assert_eq!(recv(&mut reader)["event"]["type"], "turn_done");
+}
 
 struct Fixture { gate: (Mutex<bool>, Condvar), prompts: Mutex<Vec<String>> }
 impl Fixture {

@@ -231,10 +231,10 @@ fn daemon_frames_update_visible_session() {
         &json!({"type":"hello", "session_id":"abc", "model":"sol", "cwd":"repo"})
     ));
     assert!(app.apply_daemon_frame(
-        &json!({"type":"event", "event":{"type":"text_delta", "data":{"text":"hello"}}})
+        &json!({"type":"event", "session_id":"abc", "event":{"type":"text_delta", "data":{"text":"hello"}}})
     ));
     assert!(
-        app.apply_daemon_frame(&json!({"type":"event", "event":{"type":"turn_done", "data":{}}}))
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"abc", "event":{"type":"turn_done", "data":{}}}))
     );
     assert_eq!(app.sessions[0].transcript, "hello");
     assert_eq!(app.sessions[0].status, "Ready");
@@ -368,10 +368,10 @@ fn streamed_transcript_is_bounded_without_resetting_user_scroll() {
     );
     app.groups[0].scroll = 7;
     for _ in 0..20 {
-        app.apply_daemon_frame(&json!({"type":"event", "event":{"type":"text_delta", "data":{"text":"x".repeat(32_000)}}}));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"abc", "event":{"type":"text_delta", "data":{"text":"x".repeat(32_000)}}}));
     }
     app.apply_daemon_frame(
-        &json!({"type":"event", "event":{"type":"text_delta", "data":{"text":"🦀"}}}),
+        &json!({"type":"event", "session_id":"abc", "event":{"type":"text_delta", "data":{"text":"🦀"}}}),
     );
     assert!(app.sessions[0].transcript.len() <= 512 * 1024);
     assert!(app.sessions[0].transcript.ends_with("🦀"));
@@ -444,7 +444,7 @@ fn structured_event_fields_are_escaped_and_bounded() {
     let mut app = App::default();
     app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));
     let hostile = format!("**bold**\u{1b}[31m\u{202e}{}", "x".repeat(2000));
-    assert!(app.apply_daemon_frame(&json!({"type":"event", "event":{"type":"tool_result", "data":{"name":"Read", "result_summary":hostile}}})));
+    assert!(app.apply_daemon_frame(&json!({"type":"event", "session_id":"one", "event":{"type":"tool_result", "data":{"name":"Read", "result_summary":hostile}}})));
     let transcript = &app.sessions[0].transcript;
     assert!(transcript.contains("\\*\\*bold\\*\\*"));
     assert!(!transcript.contains('\u{1b}'));
@@ -452,7 +452,7 @@ fn structured_event_fields_are_escaped_and_bounded() {
     assert!(transcript.contains('…'));
     assert!(transcript.len() < 700);
     assert!(!app.apply_daemon_frame(
-        &json!({"type":"event", "event":{"type":"future_event", "data":{"text":"ignored"}}})
+        &json!({"type":"event", "session_id":"one", "event":{"type":"future_event", "data":{"text":"ignored"}}})
     ));
 }
 

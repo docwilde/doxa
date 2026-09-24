@@ -27,8 +27,9 @@ _INDEX_OP = "index_transcript_v1"
 _PENDING_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z", re.ASCII)
 _SESSION_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z-]{0,127}\Z", re.ASCII)
 _MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024
-# Leave room for JSON escaping and the rest of the reply frame.
-_MAX_REVIEW_RAW_BYTES = MAX_FRAME_BYTES // 2
+# A raw ASCII control byte can expand to six JSON bytes (\\u00XX). Reserve
+# reply metadata too; review must return the exact bytes for SHA/inode checks.
+_MAX_REVIEW_RAW_BYTES = (MAX_FRAME_BYTES - 512) // 6
 
 
 class PendingReviewError(Exception):
@@ -90,12 +91,45 @@ def _read_ops() -> tuple[Any, Any] | None:
 
 
 def _index_ops() -> tuple[Any, Any] | None:
-    """Use LORE's incremental indexer; DOXA never writes its store directly."""
+    """Require LORE's descriptor-based indexer; never pass a checked path to reopen."""
     try:
-        from lore_core.store import db_connect, index_live
-        return db_connect, index_live
+        from lore_core.store import db_connect, index_live_fd
+        return db_connect, index_live_fd
     except Exception:  # noqa: BLE001 -- optional on older LORE builds
         return None
+
+
+def _open_transcript_fd(root: Path, slug: str, session_id: str) -> int:
+    """Walk directories without following links and verify the opened inode."""
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    components = root.parts[1:]
+    if root.anchor != "/" or not components or any(part in ("", ".", "..") for part in components):
+        raise ValueError("unsafe transcript directory")
+    directory_fd = os.open("/", directory_flags)
+    try:
+        for index, component in enumerate((*components, slug)):
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+            if index >= len(components) - 1:
+                metadata = os.fstat(directory_fd)
+                if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid()
+                        or metadata.st_mode & 0o002):
+                    raise ValueError("unsafe transcript directory")
+        transcript_fd = os.open(f"{session_id}.jsonl", file_flags, dir_fd=directory_fd)
+        try:
+            metadata = os.fstat(transcript_fd)
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid()
+                    or metadata.st_mode & 0o002 or metadata.st_nlink != 1
+                    or metadata.st_size > _MAX_TRANSCRIPT_BYTES):
+                raise ValueError("unsafe transcript file")
+            return transcript_fd
+        except BaseException:
+            os.close(transcript_fd)
+            raise
+    finally:
+        os.close(directory_fd)
 
 
 def _index_transcript(cwd: str, session_id: str, ext: tuple[Any, Any, Any, Any],
@@ -111,21 +145,17 @@ def _index_transcript(cwd: str, session_id: str, ext: tuple[Any, Any, Any, Any],
         raise ValueError("invalid project identity")
     project = root / slug
     transcript = project / f"{session_id}.jsonl"
-    # The caller supplies only cwd and session ID. Resolve project naming via
-    # LORE and reject obvious links, foreign-owned, or world-writable paths.
-    # LORE currently reopens by path; these checks cannot prevent a same-UID
-    # or group member from swapping an entry after this check.
-    for directory in (root, project):
-        metadata = directory.lstat()
-        if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid()
-                or metadata.st_mode & 0o002):
-            raise ValueError("unsafe transcript directory")
-    metadata = transcript.lstat()
-    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
-            or metadata.st_mode & 0o002
-            or metadata.st_size > _MAX_TRANSCRIPT_BYTES):
-        raise ValueError("unsafe transcript file")
-    indexed, consumed = ops[1](ops[0](), transcript)
+    # LORE derives the project location; the opened descriptor pins the inode
+    # while the logical path remains the stable database cursor key.
+    transcript_fd = _open_transcript_fd(root, slug, session_id)
+    try:
+        conn = ops[0]()
+        try:
+            indexed, consumed = ops[1](conn, transcript_fd, transcript)
+        finally:
+            conn.close()
+    finally:
+        os.close(transcript_fd)
     if (type(indexed) is not int or type(consumed) is not int
             or indexed < 0 or consumed < 0):
         raise TypeError("invalid index result")
@@ -177,7 +207,7 @@ def _pending_review(cwd: str, pid: str, ext: tuple[Any, Any, Any, Any],
     try:
         raw = data.decode("utf-8")
         item = json.loads(raw)
-    except (UnicodeError, ValueError) as exc:
+    except (UnicodeError, ValueError, RecursionError) as exc:
         raise PendingReviewError("pending_incomplete") from exc
     if not isinstance(item, dict):
         raise PendingReviewError("pending_incomplete")
@@ -209,12 +239,15 @@ def _consult(prompt: str, read_ops: tuple[Any, Any], scrub: Any) -> dict | None:
     if not expression:
         return None
     conn = read_ops[0]()
-    row = conn.execute(
-        "SELECT b.id, b.claim, b.confidence, bm25(belief_fts) "
-        "FROM beliefs b JOIN belief_fts f ON b.id = f.belief_id "
-        "WHERE belief_fts MATCH ? AND b.status = 'active' "
-        "ORDER BY bm25(belief_fts) LIMIT 1", (expression,),
-    ).fetchone()
+    try:
+        row = conn.execute(
+            "SELECT b.id, b.claim, b.confidence, bm25(belief_fts) "
+            "FROM beliefs b JOIN belief_fts f ON b.id = f.belief_id "
+            "WHERE belief_fts MATCH ? AND b.status = 'active' "
+            "ORDER BY bm25(belief_fts) LIMIT 1", (expression,),
+        ).fetchone()
+    finally:
+        conn.close()
     if row is None:
         return None
     claim = scrub(str(row[1]))
@@ -225,12 +258,15 @@ def _consult(prompt: str, read_ops: tuple[Any, Any], scrub: Any) -> dict | None:
 
 def _beliefs(offset: int, limit: int, read_ops: tuple[Any, Any], scrub: Any) -> list[dict]:
     conn = read_ops[0]()
-    rows = conn.execute(
-        "SELECT b.id, b.subject, b.claim, b.confidence, "
-        "(SELECT count(*) FROM belief_evidence e WHERE e.belief_id = b.id) "
-        "FROM beliefs b WHERE b.status = 'active' "
-        "ORDER BY b.updated DESC, b.id LIMIT ? OFFSET ?", (limit, offset),
-    ).fetchall()
+    try:
+        rows = conn.execute(
+            "SELECT b.id, b.subject, b.claim, b.confidence, "
+            "(SELECT count(*) FROM belief_evidence e WHERE e.belief_id = b.id) "
+            "FROM beliefs b WHERE b.status = 'active' "
+            "ORDER BY b.updated DESC, b.id LIMIT ? OFFSET ?", (limit, offset),
+        ).fetchall()
+    finally:
+        conn.close()
     result = []
     for row in rows:
         claim = scrub(str(row[2]))
@@ -240,15 +276,19 @@ def _beliefs(offset: int, limit: int, read_ops: tuple[Any, Any], scrub: Any) -> 
     return result
 
 
-def _evidence(belief_id: int, limit: int, read_ops: tuple[Any, Any], scrub: Any) -> list[dict]:
+def _evidence(belief_id: int, offset: int, limit: int, read_ops: tuple[Any, Any], scrub: Any) -> list[dict]:
     conn = read_ops[0]()
-    have_engine = any(row[1] == "source_engine" for row in conn.execute(
-        "PRAGMA table_info(belief_evidence)").fetchall())
-    rows = conn.execute(
-        "SELECT session_id, project, note, created, "
-        f"{'source_engine' if have_engine else 'NULL'} FROM belief_evidence "
-        "WHERE belief_id = ? ORDER BY created, rowid LIMIT ?", (belief_id, limit + 1),
-    ).fetchall()
+    try:
+        have_engine = any(row[1] == "source_engine" for row in conn.execute(
+            "PRAGMA table_info(belief_evidence)").fetchall())
+        rows = conn.execute(
+            "SELECT session_id, project, note, created, "
+            f"{'source_engine' if have_engine else 'NULL'} FROM belief_evidence "
+            "WHERE belief_id = ? ORDER BY created, rowid LIMIT ? OFFSET ?",
+            (belief_id, limit + 1, offset),
+        ).fetchall()
+    finally:
+        conn.close()
     trail = []
     for row in rows[:limit]:
         note = scrub(str(row[2] or ""))
@@ -332,7 +372,7 @@ def serve() -> None:
             return  # The stream is no longer framed; do not resynchronize blindly.
         try:
             req = json.loads(raw)
-        except (ValueError, UnicodeError):
+        except (ValueError, UnicodeError, RecursionError):
             continue
         if not isinstance(req, dict):
             continue
@@ -400,8 +440,8 @@ def serve() -> None:
                     belief_id = req.get("belief_id")
                     if type(belief_id) is not int or not 0 < belief_id <= 2**63 - 1:
                         raise ValueError("invalid belief id")
-                    _offset, limit = _valid_page(req, 50)
-                    result = _evidence(belief_id, limit, read_ops, scrub)
+                    offset, limit = _valid_page(req, 50)
+                    result = _evidence(belief_id, offset, limit, read_ops, scrub)
                 _write({"type": "reply", "id": rid, "ok": True, "value": result})
                 continue
             else:
