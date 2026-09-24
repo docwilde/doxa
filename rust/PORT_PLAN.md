@@ -202,7 +202,7 @@ external-LORE integration suite; peer/remote threat tests; terminal
 interaction suite; opt-in live Claude/Codex/chat smoke runs; clean
 `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` for the
 workspace and supported-platform build; documented rollback rehearsal.
-No release tag while the native runtime still requires the Python DOXA
+No stable 2.0 release tag while the native runtime still requires the Python DOXA
 daemon, while any supported 1.x command has no Rust path, or while LORE
 failure can prevent transcript persistence.
 

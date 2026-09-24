@@ -4,6 +4,7 @@ use doxa_lore::{LoreClient, LoreError, MAX_FRAME_BYTES};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::thread;
 use std::time::{Duration, Instant};
 
 fn fake(dir: &Path, body: &str) -> std::path::PathBuf {
@@ -13,6 +14,26 @@ fn fake(dir: &Path, body: &str) -> std::path::PathBuf {
     perms.set_mode(0o700);
     fs::set_permissions(&path, perms).unwrap();
     path
+}
+
+#[test]
+fn transient_busy_interpreter_is_retried() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fake(dir.path(), r#"
+import json, sys
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot']}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    print(json.dumps({'type':'reply','id':req['id'],'ok':True,'text':req['text']}), flush=True)
+"#);
+    let writer = fs::OpenOptions::new().write(true).open(&path).unwrap();
+    let release = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(30));
+        drop(writer);
+    });
+    let mut client = LoreClient::spawn(&path, Duration::from_secs(2)).unwrap();
+    release.join().unwrap();
+    assert_eq!(client.scrub("safe").unwrap(), "safe");
 }
 
 #[test]

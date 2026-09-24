@@ -211,7 +211,7 @@ fn run() -> io::Result<()> {
         }
     };
     let session = Session { session_id: options.session_id.clone(), cwd: options.cwd.to_string_lossy().into_owned(),
-        model: options.model.clone(), engine: options.engine.name().into(), doxa_version: "2.0.0-alpha.2".into() };
+        model: options.model.clone(), engine: options.engine.name().into(), doxa_version: "2.0.0-alpha.3".into() };
     let mut handle = Daemon::bind(&options.runtime, session, host)?.start();
     let mut registry = Registry::new(&options, handle.socket_path())?;
     registry.write(0)?;

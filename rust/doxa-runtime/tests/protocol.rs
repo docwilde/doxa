@@ -30,7 +30,7 @@ impl Host for Fixture {
     }
 }
 fn session() -> Session { Session { session_id:"test-session".into(), cwd:"/tmp".into(), model:None,
-    engine:"fixture".into(), doxa_version:"2.0.0-alpha.2".into() } }
+    engine:"fixture".into(), doxa_version:"2.0.0-alpha.3".into() } }
 fn connect(path: &Path) -> (BufReader<UnixStream>, UnixStream) {
     let stream = UnixStream::connect(path).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();

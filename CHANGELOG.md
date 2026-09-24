@@ -2,7 +2,14 @@
 
 Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
-history, not written from memory. The Rust 2.0 development line is untagged.
+history, not written from memory. Rust alpha tags identify preview snapshots;
+the stable 2.0 release has not been cut.
+
+## 2.0.0-alpha.3 — Rust development line (unreleased)
+
+- Keep offline archived tabs and their collection and layout metadata when the
+  Rust preview saves a shared tabset from a partial live roster.
+- Retry a briefly busy LORE interpreter during sidecar startup.
 
 ## 2.0.0-alpha.2 — Rust development line (unreleased)
 
