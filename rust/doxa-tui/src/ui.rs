@@ -69,6 +69,7 @@ pub struct App {
     pub split: Split,
     pub split_percent: u16,
     pub rail_visible: bool,
+    pub rail_width: u16,
     pub rail_selected: usize,
     pub focus: Focus,
     pub input: String,
@@ -85,7 +86,7 @@ impl Default for App {
             sessions: Vec::new(),
             groups: [PaneGroup { tabs: vec![], active: 0, scroll: 0 }, PaneGroup { tabs: vec![], active: 0, scroll: 0 }],
             active_group: 0, split: Split::Vertical, split_percent: 50,
-            rail_visible: true, rail_selected: 0, focus: Focus::Prompt,
+            rail_visible: true, rail_width: 25, rail_selected: 0, focus: Focus::Prompt,
             input: String::new(), pending_prompts: Vec::new(), rejected_drafts: Vec::new(), notice: "Disconnected · waiting for daemon".into(),
             should_quit: false, size: Rect::default(),
         }
@@ -311,7 +312,9 @@ impl App {
         let outer = Layout::default().direction(Direction::Vertical)
             .constraints([Constraint::Min(3), Constraint::Length(3), Constraint::Length(1)])
             .split(area);
-        let rail_width = if self.rail_visible && outer[0].width >= 70 { 25 } else { 0 };
+        let rail_width = if self.rail_visible && outer[0].width >= 70 {
+            self.rail_width.min(outer[0].width.saturating_sub(MIN_PANE_WIDTH))
+        } else { 0 };
         let body = if rail_width > 0 {
             let chunks = Layout::default().direction(Direction::Horizontal)
                 .constraints([Constraint::Length(rail_width), Constraint::Min(1)]).split(outer[0]);
