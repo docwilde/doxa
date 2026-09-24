@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -40,7 +40,9 @@ pub struct ClaudeHost {
     commands: Sender<Command>,
     worker: Mutex<Option<JoinHandle<()>>>,
     active: AtomicBool,
+    turn_running: Arc<AtomicBool>,
     closing: AtomicBool,
+    admission: Mutex<()>,
     model_control: bool,
     permission_control: bool,
     initial_model: Option<String>,
@@ -93,12 +95,16 @@ impl ClaudeHost {
         }
         let initial_permission_mode = initial_permission_mode.to_owned();
         let (tx, rx) = mpsc::channel();
-        let worker = thread::spawn(move || broker(bridge, rx));
+        let turn_running = Arc::new(AtomicBool::new(false));
+        let broker_turn_running = Arc::clone(&turn_running);
+        let worker = thread::spawn(move || broker(bridge, rx, broker_turn_running));
         Ok(Self {
             commands: tx,
             worker: Mutex::new(Some(worker)),
             active: AtomicBool::new(false),
+            turn_running,
             closing: AtomicBool::new(false),
+            admission: Mutex::new(()),
             model_control,
             permission_control,
             initial_model,
@@ -120,21 +126,27 @@ impl ClaudeHost {
     }
 
     pub fn shutdown(&self) -> bool {
-        self.closing.store(true, Ordering::Release);
-        if self.active.load(Ordering::Acquire) {
+        {
+            let _admission = self.admission.lock().unwrap();
+            self.closing.store(true, Ordering::Release);
+        }
+        if self.turn_active() {
             let _ = self.rpc("interrupt", json!({}));
         }
         let deadline = Instant::now() + Duration::from_secs(5);
-        while self.active.load(Ordering::Acquire) && Instant::now() < deadline {
+        while self.turn_active() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
-        let finalized =
-            !self.active.load(Ordering::Acquire) && self.rpc("finalize", json!({})).is_ok();
+        let finalized = !self.turn_active() && self.rpc("finalize", json!({})).is_ok();
         let _ = self.commands.send(Command::Close);
         if let Some(worker) = self.worker.lock().unwrap().take() {
             let _ = worker.join();
         }
         finalized
+    }
+
+    fn turn_active(&self) -> bool {
+        self.active.load(Ordering::Acquire) || self.turn_running.load(Ordering::Acquire)
     }
 }
 
@@ -144,24 +156,31 @@ impl Host for ClaudeHost {
     fn initial_model(&self) -> Option<String> { self.initial_model.clone() }
     fn initial_permission_mode(&self) -> String { self.initial_permission_mode.clone() }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
-        if self.closing.load(Ordering::Acquire) {
-            emit(done("Claude session is stopping"));
-            return;
-        }
-        self.active.store(true, Ordering::Release);
         let (events_tx, events_rx) = mpsc::sync_channel(EVENT_QUEUE);
         let (reply_tx, reply_rx) = mpsc::channel();
-        if self
-            .commands
-            .send(Command::Prompt {
-                text: text.to_owned(),
-                events: events_tx,
-                reply: reply_tx,
-            })
-            .is_err()
-        {
-            self.active.store(false, Ordering::Release);
-            emit(done("Claude sidecar closed"));
+        let admitted = {
+            let _admission = self.admission.lock().unwrap();
+            if self.closing.load(Ordering::Acquire) {
+                Err("Claude session is stopping")
+            } else if self.active.swap(true, Ordering::AcqRel) {
+                Err("Claude turn already running")
+            } else if self
+                .commands
+                .send(Command::Prompt {
+                    text: text.to_owned(),
+                    events: events_tx,
+                    reply: reply_tx,
+                })
+                .is_err()
+            {
+                self.active.store(false, Ordering::Release);
+                Err("Claude sidecar closed")
+            } else {
+                Ok(())
+            }
+        };
+        if let Err(reason) = admitted {
+            emit(done(reason));
             return;
         }
         match reply_rx.recv_timeout(RPC_TIMEOUT) {
@@ -212,7 +231,11 @@ impl Host for ClaudeHost {
                     return Err("invalid model".into());
                 }
                 let result = self.rpc("set_model", json!({"model":model}))?;
-                let selected = result["model"].as_str().ok_or("invalid model reply")?;
+                let selected = if model.is_null() && result["model"].is_null() {
+                    "default"
+                } else {
+                    result["model"].as_str().ok_or("invalid model reply")?
+                };
                 Ok(json!({"model":selected}))
             }
             "set_permission_mode" => {
@@ -223,10 +246,13 @@ impl Host for ClaudeHost {
                 if !matches!(mode, "default" | "acceptEdits" | "plan" | "auto" | "dontAsk") {
                     return Err("invalid or unavailable permission mode".into());
                 }
-                if mode == "dontAsk" && self.active.load(Ordering::Acquire) {
-                    return Err("dontAsk requires an idle Claude turn".into());
-                }
-                let result = self.rpc("set_permission_mode", json!({"mode":mode}))?;
+                let result = {
+                    let _admission = self.admission.lock().unwrap();
+                    if mode == "dontAsk" && self.active.load(Ordering::Acquire) {
+                        return Err("dontAsk requires an idle Claude turn".into());
+                    }
+                    self.rpc("set_permission_mode", json!({"mode":mode}))?
+                };
                 if result["mode"] != mode {
                     return Err("invalid permission mode reply".into());
                 }
@@ -247,8 +273,11 @@ impl Host for ClaudeHost {
                 Ok(json!({}))
             }
             "stop" => {
-                self.closing.store(true, Ordering::Release);
-                if self.active.load(Ordering::Acquire) {
+                {
+                    let _admission = self.admission.lock().unwrap();
+                    self.closing.store(true, Ordering::Release);
+                }
+                if self.turn_active() {
                     let _ = self.rpc("interrupt", json!({}));
                 }
                 Ok(json!({}))
@@ -262,7 +291,12 @@ fn done(message: &str) -> Value {
     json!({"type":"turn_done","data":{"is_error":true,"error":message}})
 }
 
-fn broker(mut bridge: Bridge, commands: Receiver<Command>) {
+fn broker(bridge: Bridge, commands: Receiver<Command>, turn_running: Arc<AtomicBool>) {
+    broker_loop(bridge, commands, &turn_running);
+    turn_running.store(false, Ordering::Release);
+}
+
+fn broker_loop(mut bridge: Bridge, commands: Receiver<Command>, turn_running: &AtomicBool) {
     let mut pending: HashMap<u64, Pending> = HashMap::new();
     let mut events: Option<SyncSender<Value>> = None;
     loop {
@@ -273,12 +307,13 @@ fn broker(mut bridge: Bridge, commands: Receiver<Command>) {
                     events: sink,
                     reply,
                 }) => {
-                    if events.is_some() {
+                    if turn_running.load(Ordering::Acquire) {
                         let _ = reply.send(Err("Claude turn already running".into()));
                         continue;
                     }
                     match bridge.request("prompt", json!({"text":text})) {
                         Ok(id) => {
+                            turn_running.store(true, Ordering::Release);
                             events = Some(sink);
                             pending.insert(
                                 id,
@@ -298,21 +333,30 @@ fn broker(mut bridge: Bridge, commands: Receiver<Command>) {
                     method,
                     params,
                     reply,
-                }) => match bridge.request(method, params) {
-                    Ok(id) => {
-                        pending.insert(
-                            id,
-                            Pending {
-                                reply,
-                                prompt: false,
-                            },
-                        );
+                }) => {
+                    if method == "set_permission_mode"
+                        && params["mode"] == "dontAsk"
+                        && turn_running.load(Ordering::Acquire)
+                    {
+                        let _ = reply.send(Err("dontAsk requires an idle Claude turn".into()));
+                        continue;
                     }
-                    Err(_) => {
-                        let _ = reply.send(Err("Claude request failed".into()));
-                        return;
+                    match bridge.request(method, params) {
+                        Ok(id) => {
+                            pending.insert(
+                                id,
+                                Pending {
+                                    reply,
+                                    prompt: false,
+                                },
+                            );
+                        }
+                        Err(_) => {
+                            let _ = reply.send(Err("Claude request failed".into()));
+                            return;
+                        }
                     }
-                },
+                }
                 Ok(Command::Close) | Err(mpsc::TryRecvError::Disconnected) => return,
                 Err(mpsc::TryRecvError::Empty) => break,
             }
@@ -323,7 +367,9 @@ fn broker(mut bridge: Bridge, commands: Receiver<Command>) {
                     return;
                 };
                 let Some(pending_reply) = pending.remove(&id) else {
-                    return;
+                    // A caller may have timed out; duplicate or late replies do
+                    // not invalidate other pending requests or the event stream.
+                    continue;
                 };
                 if frame["ok"] == true {
                     let _ = pending_reply.reply.send(Ok(frame["result"].clone()));
@@ -333,6 +379,7 @@ fn broker(mut bridge: Bridge, commands: Receiver<Command>) {
                         .send(Err("Claude sidecar operation failed".into()));
                     if pending_reply.prompt {
                         events = None;
+                        turn_running.store(false, Ordering::Release);
                     }
                 }
             }
@@ -353,6 +400,7 @@ fn broker(mut bridge: Bridge, commands: Receiver<Command>) {
                 }
                 if terminal {
                     events = None;
+                    turn_running.store(false, Ordering::Release);
                 }
             }
             Ok(frame) if frame["type"] == "error" => return,
@@ -360,5 +408,96 @@ fn broker(mut bridge: Bridge, commands: Receiver<Command>) {
             Err(Error::Timeout) => {}
             Err(_) => return,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::{mpsc, Arc};
+
+    fn fixture(script: &str) -> (tempfile::TempDir, Arc<ClaudeHost>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sidecar.py");
+        fs::write(&path, script).unwrap();
+        let host = ClaudeHost::new(Path::new("python3"), &path, dir.path(), "test", false, None)
+            .unwrap();
+        (dir, Arc::new(host))
+    }
+
+    #[test]
+    fn rejected_prompt_does_not_clear_running_turn_and_late_reply_is_ignored() {
+        let (_dir, host) = fixture(r#"import json, sys
+print(json.dumps({"type":"hello","protocol":"doxa-claude-sidecar","version":1,
+                  "capabilities":["set_model","set_permission_mode"]}), flush=True)
+for line in sys.stdin:
+    frame = json.loads(line)
+    method, ident = frame["method"], frame["id"]
+    result = {"data":{"model":"opus"},"permission_mode":"plan"} if method == "start" else {}
+    if method == "set_model": result = {"model":None}
+    if method == "set_permission_mode": result = {"mode":frame["params"]["mode"]}
+    print(json.dumps({"type":"reply","id":ident,"ok":True,"result":result}), flush=True)
+    if method == "prompt":
+        print(json.dumps({"type":"event","event":"needs_input","data":{"id":"q"}}), flush=True)
+    if method == "set_model":
+        print(json.dumps({"type":"reply","id":ident,"ok":True,"result":result}), flush=True)
+    if method == "interrupt":
+        print(json.dumps({"type":"event","event":"turn_done","data":{}}), flush=True)
+"#);
+        assert_eq!(host.call("set_model", &json!({"model":null})).unwrap()["model"], "default");
+        // The duplicate set_model reply must not kill the broker.
+        assert_eq!(host.call("set_permission_mode", &json!({"mode":"plan"})).unwrap()["mode"], "plan");
+        let (seen_tx, seen_rx) = mpsc::channel();
+        let running = Arc::clone(&host);
+        let turn = thread::spawn(move || running.prompt("first", &mut |event| {
+            if event["type"] == "needs_input" { let _ = seen_tx.send(()); }
+        }));
+        seen_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut rejected = Vec::new();
+        host.prompt("second", &mut |event| rejected.push(event));
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0]["data"]["error"], "Claude turn already running");
+        assert!(host.active.load(Ordering::Acquire));
+        assert!(host.call("set_permission_mode", &json!({"mode":"dontAsk"})).is_err());
+        host.call("interrupt", &json!({})).unwrap();
+        turn.join().unwrap();
+        assert!(host.shutdown());
+    }
+
+    #[test]
+    fn full_event_queue_keeps_sidecar_turn_busy_until_terminal() {
+        let (_dir, host) = fixture(r#"import json, sys, time
+print(json.dumps({"type":"hello","protocol":"doxa-claude-sidecar","version":1,
+                  "capabilities":["set_permission_mode"]}), flush=True)
+for line in sys.stdin:
+    frame = json.loads(line)
+    method, ident = frame["method"], frame["id"]
+    result = {"permission_mode":"plan"} if method == "start" else {}
+    if method == "set_permission_mode": result = {"mode":frame["params"]["mode"]}
+    print(json.dumps({"type":"reply","id":ident,"ok":True,"result":result}), flush=True)
+    if method == "prompt":
+        for i in range(200):
+            print(json.dumps({"type":"event","event":"text_delta","data":{"text":str(i)}}), flush=True)
+        time.sleep(0.5)
+        print(json.dumps({"type":"event","event":"turn_done","data":{}}), flush=True)
+"#);
+        let mut terminal = Value::Null;
+        host.prompt("first", &mut |event| {
+            if event["type"] == "text_delta" { thread::sleep(Duration::from_millis(2)); }
+            if event["type"] == "turn_done" { terminal = event; }
+        });
+        assert_eq!(terminal["data"]["error"], "Claude event stream closed");
+        assert!(host.call("set_permission_mode", &json!({"mode":"dontAsk"})).is_err());
+        let mut rejected = Vec::new();
+        host.prompt("too early", &mut |event| rejected.push(event));
+        assert_eq!(rejected[0]["data"]["error"], "Claude sidecar refused prompt");
+        // Queue saturation closes only this event receiver. The broker waits
+        // for the sidecar terminal before admitting a new turn.
+        thread::sleep(Duration::from_millis(600));
+        let mut second = Vec::new();
+        host.prompt("second", &mut |event| second.push(event));
+        assert_eq!(second.last().unwrap()["type"], "turn_done");
+        assert!(host.shutdown());
     }
 }
