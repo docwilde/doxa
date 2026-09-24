@@ -41,9 +41,9 @@ fn tool_kinds_keep_codex_names_and_scrub_output() {
     let mut parser = parser();
     parser.begin_turn();
     let lines = [
-        json!({"type":"item.started","item":{"id":"m","type":"mcp_tool_call","server":"doxa","tool":"lookup","arguments":{"q":"x"}}}),
+        json!({"type":"item.started","item":{"id":"m","type":"mcp_tool_call","server":"doxa","tool":"lookup","arguments":{"q":"x","nested":[{"token":"fixture-secret"}]}}}),
         json!({"type":"item.completed","item":{"id":"m","type":"mcp_tool_call","result":{"content":[{"text":"fixture-secret"}]}}}),
-        json!({"type":"item.started","item":{"id":"f","type":"file_change","changes":[{"path":"a.txt"}]}}),
+        json!({"type":"item.started","item":{"id":"f","type":"file_change","changes":[{"path":"fixture-secret/a.txt"}]}}),
         json!({"type":"item.completed","item":{"id":"f","type":"file_change","changes":[{"path":"a.txt"}]}}),
         json!({"type":"item.started","item":{"id":"w","type":"web_search","query":"fixture-secret"}}),
         json!({"type":"item.completed","item":{"id":"w","type":"web_search","status":"failed","error":{"message":"fixture-secret unavailable"}}}),
@@ -51,9 +51,9 @@ fn tool_kinds_keep_codex_names_and_scrub_output() {
     let mut events = Vec::new();
     for frame in lines { events.extend(parser.push_bytes(format!("{frame}\n").as_bytes()).unwrap()); }
     assert_eq!(events[0].data["name"], "doxa/lookup");
-    assert_eq!(events[0].data["input"], json!({"arguments":{"q":"x"}}));
+    assert_eq!(events[0].data["input"], json!({"arguments":{"q":"x","nested":[{"token":"[redacted]"}]}}));
     assert_eq!(events[1].data["result_summary"], "[redacted]");
-    assert_eq!(events[2].data["input"], json!({"paths":["a.txt"]}));
+    assert_eq!(events[2].data["input"], json!({"paths":["[redacted]/a.txt"]}));
     assert_eq!(events[3].data["result_summary"], "1 file(s) changed");
     assert_eq!(events[4].data["input"]["query"], "[redacted]");
     assert_eq!(events[5].data["is_error"], true);
