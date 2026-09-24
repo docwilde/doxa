@@ -244,6 +244,10 @@ async def test_each_tab_carries_its_own_label(monkeypatch, tmp_path):
         first = app.active_pane
         assert await _settled(pilot, app, first)
 
+        prompt = first.query_one("#prompt-input")
+        prompt.focus()
+        await pilot.pause()
+        assert app.focused is prompt
         await pilot.press("ctrl+t")
         for _ in range(200):
             if len(app.panes()) == 2:
@@ -756,7 +760,13 @@ async def test_out_of_repo_tab_is_named_from_the_first_turn(
         # Provisional: the dirname, never blank and never spinning.
         assert _tab_label(app, pane) == "Opus@scratch-dir"
 
-        app.query_one("#prompt-input").value = "help me rewire the flux capacitor"
+        # A painted tab can precede the app's initial prompt focus. Give
+        # this keyboard gesture the same focus a user has when typing it.
+        prompt = pane.query_one("#prompt-input")
+        prompt.focus()
+        await pilot.pause()
+        assert app.focused is prompt
+        prompt.value = "help me rewire the flux capacitor"
         await pilot.press("enter")
         for _ in range(200):
             if pane.generated_name:
