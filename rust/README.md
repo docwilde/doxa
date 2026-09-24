@@ -50,7 +50,11 @@ With one live daemon session, `doxa-rs` attaches to it directly. With multiple
 sessions, use `--list` and select one by full ID or unique ID prefix.
 `--socket` remains available for an explicit path. `--demo` opens the shell
 without a connection. `Ctrl+Q` detaches the Rust UI
-without stopping its daemon. On attach, the frontend restores prompts and
+without stopping its daemon. `Ctrl+M` opens the read-only peer communications
+map; Up/Down selects a peer, R refreshes the live roster, and Esc closes it.
+The map uses `tui-nodes` 0.9 with the Rust frontend's Ratatui 0.29.
+Lines show observed traffic and the detail row names sent and received counts.
+Native daemons without peer support show an unavailable state. On attach, the frontend restores prompts and
 assistant text from the daemon's persisted JSONL file, then follows live
 events from the same snapshot boundary. The visible view is limited to the
 latest 40 turns, 20,000 assistant characters per turn, an 8 MiB file tail,

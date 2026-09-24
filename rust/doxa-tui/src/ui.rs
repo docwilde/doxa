@@ -21,7 +21,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
 
-use crate::markdown;
+use crate::{markdown, peer_map::PeerMap};
 
 mod tool_cards;
 use tool_cards::ToolCards;
@@ -366,6 +366,9 @@ pub struct App {
     tool_modal: bool,
     tool_selected: usize,
     tool_scroll: u16,
+    peer_map: PeerMap,
+    map_modal: bool,
+    pending_peer_refresh: Option<String>,
     pub notice: String,
     pub should_quit: bool,
     pub size: Rect,
@@ -405,6 +408,9 @@ impl Default for App {
             tool_modal: false,
             tool_selected: 0,
             tool_scroll: 0,
+            peer_map: PeerMap::default(),
+            map_modal: false,
+            pending_peer_refresh: None,
             notice: "Disconnected · waiting for daemon".into(),
             should_quit: false,
             size: Rect::default(),
@@ -493,6 +499,7 @@ impl App {
                 };
                 if self.sessions.iter().any(|session| session.id == id) {
                     self.tool_cards.record(&id, event_type, data);
+                    self.peer_map.event(&id, event_type, data);
                 }
                 match event_type {
                     "text_delta" => {
@@ -580,6 +587,10 @@ impl App {
                     }
                     _ => self.append_event(&id, event_type, data),
                 }
+            }
+            "peer_roster" => {
+                let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else { return false; };
+                self.peer_map.roster(id, frame)
             }
             "reply" => {
                 let ok = frame.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -745,6 +756,25 @@ impl App {
         }
         if self.active_request_index().is_some() {
             return self.request_key(key);
+        }
+        if self.map_modal {
+            let owner = self.groups[self.active_group].active_id().unwrap_or("").to_owned();
+            return match key.code {
+                KeyCode::Esc | KeyCode::Char('m') if key.code == KeyCode::Esc || ctrl => {
+                    self.map_modal = false;
+                    true
+                }
+                KeyCode::Up => { self.peer_map.move_selected(&owner, -1); true }
+                KeyCode::Down => { self.peer_map.move_selected(&owner, 1); true }
+                KeyCode::Char('r' | 'R') => { self.pending_peer_refresh = Some(owner); true }
+                _ => false,
+            };
+        }
+        if key.code == KeyCode::Char('m') && ctrl {
+            self.map_modal = true;
+            self.peer_map.selected = 0;
+            self.pending_peer_refresh = Some(self.groups[self.active_group].active_id().unwrap_or("").to_owned());
+            return true;
         }
         if self.tool_modal {
             return self.tool_key(key);
@@ -1320,12 +1350,15 @@ impl App {
         );
         frame.render_widget(
             Paragraph::new(format!(
-                "{}  |  F3 rail · Shift+Tab pane · Ctrl+T tools · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
+                "{}  |  F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
                 self.notice
             )),
             outer[2],
         );
         self.draw_tool_cards(frame, area);
+        if self.map_modal {
+            self.peer_map.render(frame, area, self.groups[self.active_group].active_id().unwrap_or(""));
+        }
         self.draw_request(frame, area);
     }
 
@@ -1696,9 +1729,15 @@ fn run_loop(
         if event::poll(Duration::from_millis(50))? {
             changed |= app.handle(event::read()?);
         }
+        if prompt_sender.is_none() {
+            if let Some(id) = app.pending_peer_refresh.take() {
+                changed |= app.peer_map.roster(&id, &serde_json::json!({"ok":false}));
+            }
+        }
         if let Some(sender) = &prompt_sender {
             let disconnected = dispatch_prompts(&mut app, sender);
             let disconnected = dispatch_answers(&mut app, sender) || disconnected;
+            let disconnected = dispatch_peer_refresh(&mut app, sender) || disconnected;
             if disconnected {
                 prompt_sender = None;
                 changed = true;
@@ -1804,6 +1843,20 @@ fn dispatch_answers(app: &mut App, sender: &SyncSender<crate::bridge::WorkerComm
         }
     }
     false
+}
+
+fn dispatch_peer_refresh(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+    let Some(id) = app.pending_peer_refresh.take() else { return false; };
+    if id.is_empty() { return false; }
+    match sender.try_send(crate::bridge::WorkerCommand::Peers(id)) {
+        Ok(()) => false,
+        Err(TrySendError::Full(crate::bridge::WorkerCommand::Peers(id))) => {
+            app.pending_peer_refresh = Some(id);
+            false
+        }
+        Err(TrySendError::Disconnected(crate::bridge::WorkerCommand::Peers(_))) => true,
+        Err(_) => unreachable!(),
+    }
 }
 
 #[cfg(test)]

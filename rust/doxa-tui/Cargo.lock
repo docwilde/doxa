@@ -187,6 +187,7 @@ dependencies = [
  "tempfile",
  "time",
  "toml",
+ "tui-nodes",
  "unicode-width 0.2.0",
 ]
 
@@ -793,6 +794,16 @@ name = "toml_write"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
+
+[[package]]
+name = "tui-nodes"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a48253c4027b483ce44a8318c6b3513fe0bc0692757a6bc7e22a23e76b25b016"
+dependencies = [
+ "log",
+ "ratatui",
+]
 
 [[package]]
 name = "typenum"
