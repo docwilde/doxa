@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -24,11 +25,18 @@ pub struct CodexHost {
     active: Mutex<Option<CancellationToken>>,
     scrub_failed: Arc<AtomicBool>,
     lore: Arc<Mutex<LoreClient>>,
+    index_tx: Sender<IndexCommand>,
+    index_worker: Mutex<Option<thread::JoinHandle<()>>>,
     store: TranscriptStore,
     session_id: String,
     cwd: String,
     model: Option<String>,
     closing: AtomicBool,
+}
+
+enum IndexCommand {
+    Index,
+    Stop,
 }
 
 impl CodexHost {
@@ -65,6 +73,29 @@ impl CodexHost {
         }
         let model = options.model.clone();
         let lore = Arc::new(Mutex::new(client));
+        let (index_tx, index_rx) = mpsc::channel();
+        let index_lore = lore.clone();
+        let index_cwd = cwd.clone();
+        let index_session_id = session_id.to_owned();
+        let index_worker = thread::spawn(move || {
+            for command in index_rx {
+                if matches!(command, IndexCommand::Stop) {
+                    break;
+                }
+                // A dedicated worker keeps a slow external index request out
+                // of the turn-completion path. Requests stay ordered, and a
+                // final pass is queued before shutdown joins the worker.
+                let result = index_lore
+                    .lock()
+                    .unwrap()
+                    .index_transcript(&index_cwd, &index_session_id);
+                if let Err(error) = result {
+                    if !matches!(error, LoreError::Unavailable) {
+                        eprintln!("doxa-daemon: LORE transcript indexing failed");
+                    }
+                }
+            }
+        });
         let scrub_failed = Arc::new(AtomicBool::new(false));
         let lore_for_scrub = lore.clone();
         let failure_for_scrub = scrub_failed.clone();
@@ -82,6 +113,8 @@ impl CodexHost {
             active: Mutex::new(None),
             scrub_failed,
             lore,
+            index_tx,
+            index_worker: Mutex::new(Some(index_worker)),
             store,
             session_id: session_id.to_owned(),
             cwd,
@@ -132,16 +165,7 @@ impl CodexHost {
         }
         // The Rust writer has already scrubbed every persisted record. LORE
         // owns the incremental index and scrubs again before inserting rows.
-        let result = self
-            .lore
-            .lock()
-            .unwrap()
-            .index_transcript(&self.cwd, &self.session_id);
-        if let Err(error) = result {
-            if !matches!(error, LoreError::Unavailable) {
-                eprintln!("doxa-daemon: LORE transcript indexing failed");
-            }
-        }
+        let _ = self.index_tx.send(IndexCommand::Index);
     }
 
     /// Codex has no system-message channel. Send memory only when creating a
@@ -173,7 +197,12 @@ impl CodexHost {
             thread::sleep(Duration::from_millis(10));
         }
         self.index_transcript();
-        true
+        let _ = self.index_tx.send(IndexCommand::Stop);
+        self.index_worker
+            .lock()
+            .unwrap()
+            .take()
+            .is_some_and(|worker| worker.join().is_ok())
     }
 }
 

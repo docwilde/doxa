@@ -519,11 +519,12 @@ fn codex_host_indexes_completed_turn_and_finalized_transcript() {
     let codex = dir.path().join("codex-fixture");
     let python = dir.path().join("lore-fixture");
     let index_log = dir.path().join("index-requests.jsonl");
+    let index_done = dir.path().join("index-done");
     executable(
         &python,
         &format!(
             r#"#!/usr/bin/env python3
-import json, sys
+import json, sys, time
 print(json.dumps({{"type":"hello","proto":1,"capabilities":["scrub","snapshot","transcript_identity","index_transcript_v1"]}}), flush=True)
 for line in sys.stdin:
     frame = json.loads(line)
@@ -534,12 +535,15 @@ for line in sys.stdin:
     elif op == "index_transcript_v1":
         with open({:?}, "a") as out:
             out.write(json.dumps(frame) + "\n")
+        time.sleep(0.8)
+        open({:?}, "w").close()
         reply = {{"value":{{"indexed":2,"consumed":2}}}}
     else:
         reply = {{"text":frame.get("text", "")}}
     print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,**reply}}), flush=True)
 "#,
-            index_log.to_str().unwrap()
+            index_log.to_str().unwrap(),
+            index_done.to_str().unwrap()
         ),
     );
     executable(
@@ -558,6 +562,11 @@ for line in sys.stdin:
         }
     }
     wait_until(|| index_log.exists());
+    // The sidecar is still indexing. Completion must already be visible to
+    // the runtime rather than keeping the session busy for its round trip.
+    send(&mut socket, json!({"type":"call","id":3,"method":"status","params":{}}));
+    assert_eq!(receive(&mut reader)["status"]["running"], false);
+    assert!(!index_done.exists(), "turn completion waited for LORE indexing");
     send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
