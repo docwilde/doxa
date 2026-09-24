@@ -1,13 +1,14 @@
 # DOXA 2.0: full Rust port plan
 
-Status: planning document for `rust/2.0` at `ed75e27` (2026-09-24).
+Status: planning document for `rust/2.0`; PR status snapshot at
+2026-09-24 15:52 UTC.
 DOXA 1.x remains the behavior reference. **LORE remains an external
 integration**: DOXA owns the adapter and its failure behavior, but does not
 reimplement LORE's store, derivation, index, scrubber, or sync engine.
 
 ## Starting point and PR accounting
 
-The current tree has one crate, `rust/doxa-tui`, whose `doxa-rs` binary can
+The current base tree has one crate, `rust/doxa-tui`, whose `doxa-rs` binary can
 discover live Python daemon sockets (`src/discovery.rs`), attach to protocol
 v1 (`src/transport.rs`), send prompts (`src/bridge.rs`), and render text and
 some structured events (`src/ui.rs`, `src/markdown.rs`). It is a client, not
@@ -22,8 +23,8 @@ transcript; neither is a substitute for DOXA's persisted state.
 | #98 | merged | Registry discovery and session selection in Rust; scope-aware startup, spawn, and resume remain. |
 | #99 | merged | Text rows for structured daemon events; interactive cards, full event state, and persisted transcript remain. |
 | #100 | open | Persisted transcript restore on attach; integrate only after merge and verify with both engine formats. |
-| #101 | open | Sync Python 1.19.0 into this branch; re-audit parity against the merged Python tree. |
-| #102 | open | Markdown table/link display; merge and terminal safety checks still gate parity. |
+| #101 | merged | Python 1.19.0 source is now on this branch; re-audit parity against it during implementation. |
+| #102 | merged | Markdown table alignment and safe link targets; integrated terminal checks still gate parity. |
 | #103 | open | Interactive `needs_input` answer UI; verify multi-client resolution and detached replay after merge. |
 | #104 | open | Mouse drag for dividers and rail width; save/restore geometry still required. |
 
@@ -37,7 +38,7 @@ engine hosts, peer fabric, session storage, or LORE boundary to Rust.
 | --- | --- | --- |
 | CLI/startup | `doxa/cli.py`, `launcher.py`, `config.py`, `setup.py`, `doctor.py`, `cli_isolation.py` | `doxa` commands `new`, `attach`, `stop`, `doctor`, `launcher`; default scope restore or spawn; `--engine`, `--model`, `--linger`, `--branch`, `--checkout`; config precedence and atomic writes; first-run and diagnostics. Replace development-only `doxa-rs` naming only at release cutover. |
 | Daemon/lifecycle | `doxa/daemon.py`, `client.py`, `events.py`, `promptqueue.py`, `notify.py` | Native process per session, attach/detach, bounded replay ring, queued prompts, linger/last-client finalize, signal cleanup, notification ownership, typed RPC errors. Keep v1 wire compatibility during migration. |
-| Engine abstraction | `doxa/engines.py`, `engine.py`, `codex.py`, `vendors.py`, `providers.py`, `claude_catalog.py`, `budget.py`, `prices.py` | Capability-driven `Engine` trait and providers for Claude SDK, Codex CLI, and configured chat APIs; identical event semantics, usage/cost provenance, budget refusals, model and permission changes. |
+| Engine abstraction | `doxa/engines.py`, `engine.py`, `codex.py`, `vendors.py`, `providers.py`, `claude_catalog.py`, `budget.py`, `prices.py` | Capability-driven `Engine` trait and adapters for Claude, Codex CLI, and configured chat APIs; identical event semantics, usage/cost provenance, budget refusals, model and permission changes. Claude's bridge remains an explicit decision gate. |
 | Session persistence | `doxa/engine.py` (`_append_record`, `finalize`), `codex.py`, `vendors.py`, `transcript.py`, `history.py`, `naming.py`, `tabsets.py` | Keep existing JSONL session records and Codex thread identity, search/resume/read-only history, stable titles, atomic tabset records and old layout formats. Ring replay is only recent live events. |
 | Peer coordination | `doxa/peers.py`, `peerdelivery.py`, `peerledger.py`, `peernet.py`, `meshgraph.py`, `fleet.py`, `fleetsession.py`, `session_ops.py`, `worktrees.py` | Same-user registry/heartbeat, scoped discovery, peer sockets and sidecar delivery, append-only ledger/rate limits, remote peer bridge, mesh view, fleet barrier/approval desk, spawn reservations, and safe worktree cleanup. |
 | TUI | `doxa/app.py`, `appwindow/{actions,panetree,restore,sidebar,tabs}.py`, `session/{pane,runtime,commands,chips}.py`, `ui/*.py`, `layout.py`, `tabsets.py` | Multiple attached sessions, arbitrary group/split tree, tab and rail operations, focus/keyboard/mouse, draft/queue, status chips, tool/permission cards, transcript/diff/history views, pickers and commands, restart restore. |
@@ -53,17 +54,21 @@ Rust UI cannot reach feature parity by adding daemon `call` buttons alone.
 
 Turn `rust/` into one workspace. Keep `doxa-tui` as the executable crate
 during development; extract code in dependency order, not by copying
-Python file boundaries verbatim.
+Python file boundaries verbatim. The native socket foundation is being
+implemented as the `rust/doxa-runtime` **library**. `doxa-daemon` below is a
+later production **binary** that supplies real engines and process lifecycle
+to that library; do not rename the foundation or count it as the full host.
 
 | Crate | Owns | May depend on |
 | --- | --- | --- |
-| `doxa-protocol` | Versioned frame/event/RPC types, codec, size limits, compatibility fixtures | `serde` only |
+| `doxa-protocol` | Event/RPC types and compatibility fixtures, extracted from `doxa-runtime` when two consumers need stable shared types | `serde` only |
 | `doxa-state` | Config, session identity, transcript/history/tabset parsers, atomic files, migration readers | protocol; no engine or terminal |
 | `doxa-security` | Secret-scrub adapter contract, peer/remote policy, path and socket checks, prompt/tool trust labels | protocol, state |
 | `doxa-lore` | Client for external LORE service/sidecar, capability negotiation, timeout/error mapping | protocol, security |
 | `doxa-peers` | Registry, peer host/delivery, ledger, control socket, rate limiter | state, security, protocol |
 | `doxa-engines` | `Engine` trait, event normalization, Claude/Codex/chat-provider adapters, tool gate and MCP projection | protocol, state, security, lore, peers |
-| `doxa-daemon` | Session host, socket acceptor, replay ring, RPC router, prompt queue, lifecycle | engines, peers, state, protocol |
+| `doxa-runtime` | Reusable v1 Unix socket host, frame bounds, replay ring, prompt queue, `Host` trait; initial implementation has no engine, registry, persistence, LORE, signals, or linger | protocol when extracted; no terminal |
+| `doxa-daemon` | Production binary: instantiate engine host, full RPC routing, registry, attach lifecycle, linger/finalize/signals, notifications | runtime, engines, peers, state |
 | `doxa-tui` | Terminal model/rendering/input, CLI entry point, client transport and startup UX | protocol, state, security; daemon through wire only |
 
 Keep `doxa-tui` independently attachable to a Python v1 daemon until the
@@ -114,18 +119,23 @@ records must not make sessions disappear.
 1. **Contract baseline.** Capture sanitized fixtures for every frame/RPC,
    engine event, transcript variant, registry entry, tabset era, and ledger
    row. Write Rust decoder/encoder tests against Python-generated fixtures
-   and Python client tests against a small Rust fixture server. Record
-   behavior after #101 lands. Gate: every existing v1 fixture round-trips
+   and Python client tests against a small Rust fixture server. Include
+   the Python 1.19.0 tree merged in #101. Gate: every v1 fixture round-trips
    within the 64 KiB bound; unknown optional fields are tolerated.
-2. **State and security.** Extract `doxa-protocol` and `doxa-state`; port
+2. **State and security.** Stabilize `doxa-runtime`'s v1 types, then extract
+   `doxa-protocol` if sharing them prevents duplication; add `doxa-state`; port
    config precedence, atomic 0600 writes, transcript/history readers,
    tabsets and worktree metadata. Add `doxa-security` with owner/mode/path
    checks and untrusted text handling. Gate: Python→Rust→Python golden-file
    migration, concurrent writer tests, and denial cases for symlinks,
    foreign owners, malformed JSON and oversized inputs.
-3. **Native daemon shell.** Implement registry presence, v1 hello/attach,
-   replay ring, bounded output, prompt queue and lifecycle around a fake
-   engine. Gate: Python `EngineClient` and Rust TUI both attach to the Rust
+3. **Native daemon shell.** Complete the `doxa-runtime` socket foundation
+   around a fake `Host`, then build `doxa-daemon` with registry presence,
+   full RPC dispatch, session lifecycle and a fake engine. The foundation
+   already targets v1 hello/attach/event/reply, a 512-event ring, eight-item
+   FIFO, 64 KiB frames, per-client bounded queues and private socket paths;
+   it does **not** yet supply the production behaviors in this step.
+   Gate: Python `EngineClient` and Rust TUI both attach to the Rust
    daemon; reconnect recovers from cursor or persisted transcript; one
    stalled client does not stall turns; detach/linger/stop/SIGTERM finalize
    exactly once. Run corresponding `tests/test_daemon.py`,
@@ -135,6 +145,12 @@ records must not make sessions disappear.
    the same `Engine` trait. Preserve Codex per-turn `exec --json`/`resume`
    streaming and stdin prompts; preserve Claude session hooks and
    interactive permission flow; preserve vendor capability omissions.
+   Anthropic's [Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview)
+   currently documents Python and TypeScript SDKs and recommends the CLI
+   subprocess for other languages. Validate a CLI protocol that covers
+   DOXA's hooks, tool calls, cancellation, resume, and approvals, or use a
+   temporary external SDK sidecar; do not claim Claude parity from a
+   direct Messages API client or an unvalidated CLI wrapper.
    Gate: same fixtures for tool calls/results, usage, spend ceiling,
    cancel, model/mode/branch changes, crash/restart, and no duplicate turn
    on uncertain prompt acknowledgment. Run live opt-in smoke tests for
@@ -151,7 +167,8 @@ records must not make sessions disappear.
    disabled/unavailable LORE still permits local transcript and resume;
    peer scope, stale reaping, delivery attribution and rate-limit tests
    match `tests/test_peers.py`, `test_peerledger.py`, `test_peerdelivery.py`.
-6. **Full TUI and orchestration.** Integrate #100, #102–#104 after merge.
+6. **Full TUI and orchestration.** Integrate #100, #103, and #104 after merge;
+   include #102 in terminal rendering verification.
    Port arbitrary pane group tree, tabset restore, keyboard/mouse focus,
    command palette, pickers, queue/needs-input status, tool cards, diff,
    history, fleet/mesh and remote status surfaces. Wire native CLI spawn,
