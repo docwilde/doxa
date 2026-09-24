@@ -4,7 +4,8 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::Duration;
 
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{
@@ -22,6 +23,7 @@ use crate::markdown;
 
 const MIN_PANE_WIDTH: u16 = 28;
 const MIN_PANE_HEIGHT: u16 = 8;
+const MIN_RAIL_WIDTH: u16 = 12;
 const MAX_PENDING_PROMPTS: usize = 32;
 // JSON may expand one input byte to a six-byte Unicode escape.
 const MAX_INPUT_BYTES: usize = 10 * 1024;
@@ -203,6 +205,20 @@ pub enum Split {
     Vertical,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DragTarget {
+    Rail,
+    Pane(Split),
+}
+
+#[derive(Clone, Copy)]
+struct PaneLayout {
+    outer: Rect,
+    rail: Option<Rect>,
+    body: Rect,
+    panes: Option<[Rect; 2]>,
+}
+
 #[derive(Clone, Debug)]
 pub struct InputRequest {
     pub session_id: String,
@@ -319,6 +335,7 @@ pub struct App {
     pub notice: String,
     pub should_quit: bool,
     pub size: Rect,
+    drag: Option<DragTarget>,
 }
 
 impl Default for App {
@@ -352,6 +369,7 @@ impl Default for App {
             notice: "Disconnected · waiting for daemon".into(),
             should_quit: false,
             size: Rect::default(),
+            drag: None,
         }
     }
 }
@@ -474,6 +492,7 @@ impl App {
                                 .iter()
                                 .any(|r| r.session_id == id && r.id == request.id)
                             {
+                                self.drag = None;
                                 self.input_requests.push(request);
                             }
                         } else {
@@ -642,6 +661,7 @@ impl App {
         match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
+                self.drag = None;
                 true
             }
             Event::Key(key)
@@ -649,7 +669,7 @@ impl App {
             {
                 self.key(key)
             }
-            Event::Mouse(mouse) => self.mouse(mouse.kind),
+            Event::Mouse(mouse) => self.mouse(mouse),
             _ => false,
         }
     }
@@ -956,8 +976,183 @@ impl App {
         p.scroll = 0;
     }
 
-    fn mouse(&mut self, kind: MouseEventKind) -> bool {
-        match kind {
+    fn layout(&self, area: Rect) -> PaneLayout {
+        let outer = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(3), Constraint::Length(1)])
+            .split(area);
+        let min_body = if self.split == Split::Vertical {
+            MIN_PANE_WIDTH * 2
+        } else {
+            MIN_PANE_WIDTH
+        };
+        let rail_width = if self.rail_visible && outer[0].width >= 70 {
+            self.rail_width
+                .clamp(MIN_RAIL_WIDTH, outer[0].width.saturating_sub(min_body).max(MIN_RAIL_WIDTH))
+        } else {
+            0
+        };
+        let (rail, body) = if rail_width > 0 {
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(rail_width), Constraint::Min(1)])
+                .split(outer[0]);
+            (Some(chunks[0]), chunks[1])
+        } else {
+            (None, outer[0])
+        };
+        let min_ok = if self.split == Split::Vertical {
+            body.width >= MIN_PANE_WIDTH * 2
+        } else {
+            body.height >= MIN_PANE_HEIGHT * 2
+        };
+        let panes = min_ok.then(|| {
+            let desired = self.pane_rects(body, self.split_percent);
+            let minimum = if self.split == Split::Vertical {
+                MIN_PANE_WIDTH
+            } else {
+                MIN_PANE_HEIGHT
+            };
+            let size = |rect: Rect| {
+                if self.split == Split::Vertical {
+                    rect.width
+                } else {
+                    rect.height
+                }
+            };
+            if size(desired[0]) >= minimum && size(desired[1]) >= minimum {
+                desired
+            } else {
+                (0..=100)
+                    .map(|percent| self.pane_rects(body, percent))
+                    .filter(|pair| size(pair[0]) >= minimum && size(pair[1]) >= minimum)
+                    .min_by_key(|pair| size(pair[0]).abs_diff(size(desired[0])))
+                    .unwrap_or(desired)
+            }
+        });
+        PaneLayout {
+            outer: outer[0],
+            rail,
+            body,
+            panes,
+        }
+    }
+
+    fn pane_rects(&self, body: Rect, percent: u16) -> [Rect; 2] {
+        let direction = if self.split == Split::Vertical {
+            Direction::Horizontal
+        } else {
+            Direction::Vertical
+        };
+        let chunks = Layout::default()
+            .direction(direction)
+            .constraints([
+                Constraint::Percentage(percent),
+                Constraint::Percentage(100 - percent),
+            ])
+            .split(body);
+        [chunks[0], chunks[1]]
+    }
+
+    fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.active_request_index().is_some() {
+            self.drag = None;
+            return false;
+        }
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.drag = None;
+                if self.size.width < 20 || self.size.height < 5 {
+                    return false;
+                }
+                let layout = self.layout(self.size);
+                let in_outer = mouse.row >= layout.outer.y && mouse.row < layout.outer.bottom();
+                if in_outer && layout.rail.is_some_and(|rail| {
+                    mouse.column == rail.right().saturating_sub(1)
+                        || mouse.column == layout.body.x
+                }) {
+                    self.drag = Some(DragTarget::Rail);
+                } else if let Some([first, second]) = layout.panes {
+                    let on_divider = if self.split == Split::Vertical {
+                        mouse.row >= layout.body.y && mouse.row < layout.body.bottom()
+                            && (mouse.column == first.right().saturating_sub(1)
+                                || mouse.column == second.x)
+                    } else {
+                        mouse.column >= layout.body.x && mouse.column < layout.body.right()
+                            && (mouse.row == first.bottom().saturating_sub(1)
+                                || mouse.row == second.y)
+                    };
+                    if on_divider {
+                        self.drag = Some(DragTarget::Pane(self.split));
+                    }
+                }
+                self.drag.is_some()
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(target) = self.drag else {
+                    return false;
+                };
+                let layout = self.layout(self.size);
+                match target {
+                    DragTarget::Rail if layout.rail.is_some() => {
+                        let min_body = if self.split == Split::Vertical {
+                            MIN_PANE_WIDTH * 2
+                        } else {
+                            MIN_PANE_WIDTH
+                        };
+                        let max = layout.outer.width.saturating_sub(min_body);
+                        self.rail_width = mouse
+                            .column
+                            .saturating_sub(layout.outer.x)
+                            .clamp(MIN_RAIL_WIDTH, max.max(MIN_RAIL_WIDTH));
+                    }
+                    DragTarget::Pane(split) if split == self.split && layout.panes.is_some() => {
+                        let (axis, length, minimum) = if split == Split::Vertical {
+                            (
+                                mouse.column.saturating_sub(layout.body.x),
+                                layout.body.width,
+                                MIN_PANE_WIDTH,
+                            )
+                        } else {
+                            (
+                                mouse.row.saturating_sub(layout.body.y),
+                                layout.body.height,
+                                MIN_PANE_HEIGHT,
+                            )
+                        };
+                        let wanted = axis.clamp(minimum, length.saturating_sub(minimum));
+                        // Match ratatui's percentage rounding while keeping both panes usable.
+                        self.split_percent = (0..=100)
+                            .filter(|&percent| {
+                                let pair = self.pane_rects(layout.body, percent);
+                                let first = if split == Split::Vertical {
+                                    pair[0].width
+                                } else {
+                                    pair[0].height
+                                };
+                                let second = if split == Split::Vertical {
+                                    pair[1].width
+                                } else {
+                                    pair[1].height
+                                };
+                                first >= minimum && second >= minimum
+                            })
+                            .min_by_key(|&percent| {
+                                let pair = self.pane_rects(layout.body, percent);
+                                let first = if split == Split::Vertical {
+                                    pair[0].width
+                                } else {
+                                    pair[0].height
+                                };
+                                first.abs_diff(wanted)
+                            })
+                            .unwrap_or(self.split_percent);
+                    }
+                    _ => self.drag = None,
+                }
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) => self.drag.take().is_some(),
             MouseEventKind::ScrollUp => {
                 let p = &mut self.groups[self.active_group];
                 p.scroll = p.scroll.saturating_add(3);
@@ -986,44 +1181,15 @@ impl App {
                 Constraint::Length(1),
             ])
             .split(area);
-        let rail_width = if self.rail_visible && outer[0].width >= 70 {
-            self.rail_width
-                .min(outer[0].width.saturating_sub(MIN_PANE_WIDTH))
-        } else {
-            0
-        };
-        let body = if rail_width > 0 {
-            let chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(rail_width), Constraint::Min(1)])
-                .split(outer[0]);
-            self.draw_rail(frame, chunks[0]);
-            chunks[1]
-        } else {
-            outer[0]
-        };
-        let vertical = self.split == Split::Vertical;
-        let min_ok = if vertical {
-            body.width >= MIN_PANE_WIDTH * 2
-        } else {
-            body.height >= MIN_PANE_HEIGHT * 2
-        };
-        if min_ok {
-            let panes = Layout::default()
-                .direction(if vertical {
-                    Direction::Horizontal
-                } else {
-                    Direction::Vertical
-                })
-                .constraints([
-                    Constraint::Percentage(self.split_percent),
-                    Constraint::Percentage(100 - self.split_percent),
-                ])
-                .split(body);
+        let layout = self.layout(area);
+        if let Some(rail) = layout.rail {
+            self.draw_rail(frame, rail);
+        }
+        if let Some(panes) = layout.panes {
             self.draw_group(frame, panes[0], 0);
             self.draw_group(frame, panes[1], 1);
         } else {
-            self.draw_group(frame, body, self.active_group);
+            self.draw_group(frame, layout.body, self.active_group);
         }
         let prompt_title = if self.focus == Focus::Prompt {
             " Prompt ● "
@@ -1037,7 +1203,7 @@ impl App {
         );
         frame.render_widget(
             Paragraph::new(format!(
-                "{}  |  F3 rail · Shift+Tab pane · Alt+H/V split · Alt+arrows resize · Ctrl+Q quit",
+                "{}  |  F3 rail · Shift+Tab pane · Alt+H/V split · Alt+arrows/drag border resize · Ctrl+Q quit",
                 self.notice
             )),
             outer[2],
