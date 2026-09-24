@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
+
 import pytest
 
 from doxa import diff as diff_mod
@@ -57,6 +60,56 @@ async def test_identical_diff_result_does_not_rebuild(monkeypatch):
     await pane.refresh_diff()
     assert calls == [True]
     assert pane.result == changed
+
+
+@pytest.mark.asyncio
+async def test_diff_refresh_burst_has_one_active_compute_and_one_followup(monkeypatch):
+    pane = diffview.DiffPane("session", "/tmp")
+    monkeypatch.setattr(diffview.DiffPane, "is_mounted", property(lambda _self: True))
+    started = threading.Event()
+    release = threading.Event()
+    guard = threading.Lock()
+    calls = 0
+    active = 0
+    peak = 0
+    painted = []
+    workers = []
+
+    def compute(_cwd):
+        nonlocal calls, active, peak
+        with guard:
+            calls += 1
+            number = calls
+            active += 1
+            peak = max(peak, active)
+        if number == 1:
+            started.set()
+            release.wait(timeout=5)
+        with guard:
+            active -= 1
+        return diff_mod.DiffResult(base=f"version-{number}")
+
+    async def repaint(self):
+        painted.append(self.result.base)
+
+    def run_worker(coro, **_kwargs):
+        workers.append(asyncio.create_task(coro))
+
+    monkeypatch.setattr(diffview.diff_mod, "compute", compute)
+    monkeypatch.setattr(diffview.DiffPane, "_repaint", repaint)
+    monkeypatch.setattr(pane, "run_worker", run_worker)
+    pane.schedule_refresh()
+    try:
+        assert await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=2)
+        for _ in range(20):
+            pane.schedule_refresh()
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*workers), timeout=5)
+    finally:
+        release.set()
+    assert calls == 2
+    assert peak == 1
+    assert painted == ["version-2"]
 
 
 def test_status_tooltip_parses_markup_once_until_it_changes(monkeypatch):
