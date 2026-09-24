@@ -66,19 +66,23 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
-clickable links are still 2.0 work. The binary version is `2.0.0-alpha.5` for this
+clickable links are still 2.0 work. The binary version is `2.0.0-alpha.6` for this
 separate development line, not a DOXA 2.0 release.
 
-`Ctrl+R` opens a searchable picker for attached sessions and their bounded
-transcript tails. `F2` (or `Alt+G`) opens a read-only, 256 KiB worktree diff in
-an asynchronous modal. The diff compares tracked changes with the recorded
-worktree base when one exists, or with `HEAD`; untracked files are omitted.
-Offline session search and a persistent diff pane remain future work.
+`Ctrl+R` opens a searchable picker for attached and archived sessions with
+bounded transcript tails. Archived transcripts open read-only and never receive
+prompts. `F2` (or `Alt+G`) opens a read-only, 256 KiB worktree diff in an
+asynchronous modal. It compares tracked changes with the recorded worktree
+base when one exists, or with `HEAD`, and lists bounded untracked filenames
+without reading their contents. A persistent diff pane remains future work.
 Each split pane has its own prompt and keeps a draft for its active session.
 Its status row shows engine and model chips from that session's daemon hello,
-status, and model change events. The chips display current values; model and
-engine picker interactions remain future work in the native frontend. The
-colors follow Python DOXA's warm dark palette.
+status, and model change events. `Alt+E` opens an engine picker for the next
+session and shows the exact command to launch it; the active session's engine
+cannot be switched. `Alt+M` opens the live model picker when the daemon
+advertises model control. Claude catalog choices come from a bounded startup
+CLI probe; an unavailable catalog offers no guessed models. The colors follow
+Python DOXA's warm dark palette.
 
 Alpha tags identify preview snapshots. A stable 2.0 release waits until the
 frontend reaches feature parity and passes end-to-end terminal and daemon
@@ -185,8 +189,9 @@ displayed prompt and transcript, and a resumed provider thread receives no
 duplicate. If the snapshot is unavailable or too large, the turn proceeds
 without context; LORE scrubbing remains required for visible and persisted
 text. After each native Codex turn and at shutdown, the external LORE sidecar
-incrementally indexes its verified transcript descriptor when LORE exposes
-`index_live_fd`. Automatic Codex proposal
+incrementally indexes its verified transcript descriptor when LORE 0.58.4 or
+newer exposes `index_live_fd`. Older installed LORE plugins still provide
+scrubbing and snapshots but cannot advertise transcript indexing. Automatic Codex proposal
 review remains unavailable, matching the Python Codex host; MCP registration
 is still open. The registry reports the selected engine. `status`, `interrupt`,
 and `stop` are supported; Claude also supports `answer_needs_input`,

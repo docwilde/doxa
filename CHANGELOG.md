@@ -5,7 +5,17 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
-## 2.0.0-alpha.5 — development
+## 2.0.0-alpha.6 — development
+
+- Index native Codex transcripts through LORE's verified-descriptor API. The
+  sidecar opens each path component without following links and passes the
+  opened file to LORE, closing the path-replacement gap in live indexing.
+- Search bounded archived session transcripts in the Rust history picker
+  without attaching them, and list untracked filenames in the read-only diff.
+- Add interactive engine and model chips. Claude models come from one bounded
+  startup CLI catalog probe; unavailable catalogs offer no guessed choices.
+
+## 2.0.0-alpha.5 — 2026-09-25
 
 - Add live model and permission mode controls to native Claude sessions with
   capability checks and current status broadcasts. Bypass mode remains
