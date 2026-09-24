@@ -183,13 +183,22 @@ impl CodexJsonlNormalizer {
             "command_execution" => json!({"command": (self.scrub)(&string(item.get("command")))}),
             "file_change" => {
                 let paths: Vec<String> = item.get("changes").and_then(Value::as_array).into_iter().flatten()
-                    .filter_map(Value::as_object).map(|row| string(row.get("path"))).collect();
+                    .filter_map(Value::as_object).map(|row| (self.scrub)(&string(row.get("path")))).collect();
                 json!({"paths":paths})
             }
-            "mcp_tool_call" => json!({"arguments": item.get("arguments").and_then(Value::as_object).cloned().unwrap_or_default()}),
+            "mcp_tool_call" => json!({"arguments": self.scrub_value(&Value::Object(item.get("arguments").and_then(Value::as_object).cloned().unwrap_or_default()))}),
             "todo_list" => json!({"steps": item.get("items").and_then(Value::as_array).map_or(0, Vec::len)}),
             "web_search" => json!({"query": (self.scrub)(&string(item.get("query")))}),
             _ => json!({}),
+        }
+    }
+
+    fn scrub_value(&self, value: &Value) -> Value {
+        match value {
+            Value::String(text) => Value::String((self.scrub)(text)),
+            Value::Array(items) => Value::Array(items.iter().map(|item| self.scrub_value(item)).collect()),
+            Value::Object(fields) => Value::Object(fields.iter().map(|(key, value)| (key.clone(), self.scrub_value(value))).collect()),
+            _ => value.clone(),
         }
     }
 
