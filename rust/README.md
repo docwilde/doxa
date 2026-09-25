@@ -115,6 +115,14 @@ absence of a ceiling and `--force` only to override the memory estimate.
 `--sessions` counts every daemon, including a supervisor when present.
 This preview does not verify provider pricing or approval behavior; the live
 start still uses the Python harness for those controls.
+The native daemon captures `DOXA_SESSION_BUDGET_USD` at startup for Claude
+sessions and refuses the next turn once reported USD spend reaches the ceiling.
+If a completed budgeted turn has no valid cost, further turns are refused.
+Budgeted native Codex and vendor sessions are rejected at startup until their
+priced token accounting is implemented. A truthy
+`DOXA_PEER_INBOUND_TURNS` is also rejected: native peer messages currently
+render as events but do not start turns. Python fleet start remains the live
+path for inbound peer turns and full run supervision.
 `doxa-rs fleet stop RUN_ID` sends stop requests to the run's validated live
 slot sockets and waits up to 60 seconds for each daemon connection to close.
 It reports slots with missing sockets or unconfirmed shutdown separately; it

@@ -93,7 +93,11 @@ impl Process {
         }
     }
     fn start_claude(runtime: &Path, script: &Path) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        Self::start_claude_with_budget(runtime, script, None)
+    }
+    fn start_claude_with_budget(runtime: &Path, script: &Path, budget: Option<&str>) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"));
+        command
             .args([
                 "--runtime-dir",
                 runtime.to_str().unwrap(),
@@ -111,9 +115,9 @@ impl Process {
                 script.to_str().unwrap(),
             ])
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped());
+        if let Some(budget) = budget { command.env("DOXA_SESSION_BUDGET_USD", budget); }
+        let child = command.spawn().unwrap();
         let registry = runtime.join("registry/claude-session.json");
         wait_until(|| registry.exists());
         let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
@@ -541,6 +545,49 @@ fn rejects_traversal_and_existing_registry() {
         libc::kill(process.child.id() as libc::pid_t, libc::SIGTERM);
     }
     wait_until(|| process.exited());
+}
+
+#[test]
+fn rejects_unsupported_fleet_turn_starting_before_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot"])
+        .env("DOXA_PEER_INBOUND_TURNS", "yes")
+        .output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("inbound turn-starting is not implemented"));
+    assert!(!dir.path().join("registry/fleet-slot.json").exists());
+}
+
+#[test]
+fn rejects_invalid_ceiling_before_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    for value in ["NaN", "-2", "not-a-number"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+            .args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot"])
+            .env("DOXA_SESSION_BUDGET_USD", value)
+            .output().unwrap();
+        assert!(!output.status.success(), "{value}");
+        assert!(!dir.path().join("registry/fleet-slot.json").exists());
+    }
+}
+
+#[test]
+fn rejects_budgeted_codex_until_native_price_basis_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    executable(&codex, "#!/bin/sh\nexit 0\n");
+    fake_scrubber(&python, false);
+    let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot",
+            "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
+            "--lore-python", python.to_str().unwrap()])
+        .env("DOXA_SESSION_BUDGET_USD", "1.0")
+        .output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires reported USD cost"));
+    assert!(!dir.path().join("registry/fleet-slot.json").exists());
 }
 
 #[test]
@@ -1198,6 +1245,35 @@ for line in sys.stdin:
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
     assert!(finalized.exists());
+}
+
+#[test]
+fn claude_reported_spend_blocks_next_prompt_over_daemon_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("claude-cost.py");
+    fs::write(&script, r#"import json, sys
+print(json.dumps({"type":"hello","protocol":"doxa-claude-sidecar","version":1}),flush=True)
+for line in sys.stdin:
+    frame=json.loads(line)
+    print(json.dumps({"type":"reply","id":frame["id"],"ok":True,"result":{}}),flush=True)
+    if frame["method"] == "prompt":
+        print(json.dumps({"type":"event","event":"turn_done","data":{"cost_usd":1.1}}),flush=True)
+"#).unwrap();
+    let mut process = Process::start_claude_with_budget(dir.path(), &script, Some("1.0"));
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"first"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    assert_eq!(receive(&mut reader)["event"]["type"], "turn_done");
+    send(&mut socket, json!({"type":"prompt","id":2,"text":"second"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    let refusal = receive(&mut reader);
+    assert_eq!(refusal["event"]["type"], "turn_refused");
+    assert_eq!(refusal["event"]["data"]["reason"], "budget");
+    assert_eq!(refusal["event"]["data"]["spent_usd"], 1.1);
+    unsafe { libc::kill(process.child.id() as libc::pid_t, libc::SIGTERM); }
+    wait_until(|| process.exited());
 }
 
 #[test]

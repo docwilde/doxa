@@ -1,10 +1,12 @@
 //! Native DOXA protocol host. The fixture remains an explicit test mode.
 mod claude_host;
+mod budget_host;
 mod codex_host;
 mod peer_host;
 mod vendor_host;
 mod vendor_tools;
 use claude_host::ClaudeHost;
+use budget_host::BudgetHost;
 use codex_host::CodexHost;
 use doxa_engines::codex_driver::{DriverOptions, SandboxMode};
 use doxa_peers::delivery::Inbox;
@@ -468,6 +470,27 @@ impl Drop for Registry {
 }
 fn run() -> io::Result<()> {
     let mut options = options()?;
+    // Python 1.19 can let an inbound peer message start a turn. Native
+    // handling cannot yet honor that fleet contract, so refuse it.
+    let inbound = env::var("DOXA_PEER_INBOUND_TURNS").unwrap_or_default();
+    if !inbound.trim().is_empty()
+        && !matches!(inbound.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off") {
+        return Err(invalid("native peer inbound turn-starting is not implemented; use the Python fleet harness"));
+    }
+    let ceiling = match env::var("DOXA_SESSION_BUDGET_USD") {
+        Ok(raw) if !raw.trim().is_empty() => {
+            let value: f64 = raw.trim().parse().map_err(|_| invalid("invalid session budget"))?;
+            if !value.is_finite() || value <= 0.0 { return Err(invalid("invalid session budget")); }
+            if options.engine != Engine::Claude && options.engine != Engine::Fixture {
+                return Err(invalid("native session budget requires reported USD cost; use the Python fleet harness"));
+            }
+            if options.resume {
+                return Err(invalid("budgeted native resume requires durable spend accounting"));
+            }
+            Some(value)
+        }
+        _ => None,
+    };
     // Fixture sessions normally retain the exact cwd named by tests. An
     // explicit DOXA_WORKTREE=1 opts the fixture into lifecycle testing.
     let manage_fixture = options.engine == Engine::Fixture
@@ -553,6 +576,10 @@ fn run() -> io::Result<()> {
             vendor_host = Some(host.clone());
             host
         }
+    };
+    let host: Arc<dyn Host> = match ceiling {
+        Some(value) => Arc::new(BudgetHost::new(host, value)),
+        None => host,
     };
     let scrub_python = match options.engine {
         Engine::Codex => options.lore_python.as_deref(),
