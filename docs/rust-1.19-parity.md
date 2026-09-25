@@ -2,17 +2,17 @@
 
 Baseline: the `v1.19.0` Python tag, especially `doxa/commands.py`, its session
 command handlers, and the 1.19 worktree and fleet contracts. This records the
-Rust branch's behavior after `v2.0.0-alpha.10`; it is a release gate, not a
+Rust branch's behavior at `v2.0.0-alpha.11`; it is a release gate, not a
 claim that all Python behavior has been ported.
 
 | Area | Rust state | Remaining 1.19 behavior |
 | --- | --- | --- |
-| Core sessions | Native daemon, Codex and vendor hosts, Claude SDK sidecar; new, attach, stop, list and restore | Full setup/auth flow and live attachment of other discovered sessions inside an open TUI |
+| Core sessions | Native daemon, Codex and vendor hosts, Claude SDK sidecar; new, attach, stop, list and restore; TUI `/attach` by live ID prefix | Full setup/auth flow and a title-searchable TUI attach picker for multiple detached sessions |
 | Window and prompt | Two split panes, tabs, grouped rail, per-session drafts, mouse selection and resize, inline questions, Markdown and tool cards | More than two pane groups, moving a tab across groups, pinned tab names and sidebar collections |
-| Commands | Local bare commands, `/msg`, `/mesh`, `/pane 1|2`, sidebar controls and `/dir` | Many argument forms and the full generated command palette; see table below |
-| Worktrees and diffs | Managed per-session Git checkout, guarded clean cleanup, diff pane and idle tracked-hunk rejection | Worktree base switching, queued rejection during a turn, rejection reasons, complete orphan cleanup |
+| Commands | Local bare commands, `/msg`, `/mesh`, `/pane 1|2`, sidebar controls, `/dir`, `/attach` and `/rename` | Many argument forms and the full generated command palette; see table below |
+| Worktrees and diffs | Managed per-session Git checkout, guarded clean cleanup, `new --branch`, diff pane and tracked-hunk rejection with queued active-turn feedback and a reason | Live worktree base switching and complete orphan cleanup |
 | LORE | Context/scrub via sidecar, belief/evidence, full proposal review and exact-snapshot approve/reject with LORE 0.58.5 | Writable belief actions beyond pending resolution; older LORE builds remain read only |
-| Peers and fleets | Peer map and direct message; Python fleet inspection/attach; validated slot stop; native read-only preflight | Native spend/turn enforcement, fleet supervisor/barrier/approval desk, live fleet tab and remote routing |
+| Peers and fleets | Peer map and direct message; optional native inbound peer turns; Python fleet start/inspection/attach; validated slot stop; native read-only preflight and Claude spend ceiling | Native priced budget support for Codex/vendors, fleet supervisor/barrier/approval desk, live fleet tab and remote routing |
 | Operational UI | Native doctor and install launcher | 1.19 setup/settings/update/login/logout/plugin screens and detailed usage/context screens |
 
 ## Slash command coverage
@@ -27,16 +27,16 @@ commands still pass to the active engine.
 | --- | --- | --- |
 | `/split`, `/vsplit`, `/pane`, `/sidebar`, `/detach`, `/dir` | Local | More pane groups and complete sidebar sizing/restore semantics |
 | `/peers`, `/mesh`, `/msg` | Local or partial | Rich peer details, browser mesh and remote peers |
-| `/diff` | Partial | Queued rejections and a user-entered reason |
+| `/diff` | Partial | Full 1.19 diff command options and worktree controls |
 | `/fleet` | Bridge or partial | Native supervisor, approval desk, barrier, budgets and fleet tab |
 | `/model`, `/engine`, `/mode` | Local picker for bare form | Supported argument forms and provider-specific capabilities |
 | `/beliefs`, `/pending` | Belief reading and staged approve/reject after complete raw review | Belief confirm/contradict/stale/retract controls |
-| `/sessions`, `/search`, `/resume`, `/attach` | History search and CLI attach/Claude resume | Full cross-session search, live TUI attach and resume in a new tab |
+| `/sessions`, `/search`, `/resume`, `/attach` | History search, CLI attach/Claude resume and TUI attach by live ID | Full cross-session search, multi-result TUI attach picker and resume in a new tab |
 | `/usage`, `/context`, `/queue` | Summary chips/queued prompt transport | Detailed screens and queue cancellation |
 | `/help`, `/about` | Local action menu/version | Registry-wide help and full diagnostics |
 | `/compact` | Blocked locally | LORE review before provider compaction |
-| `/movepane`, `/collection`, `/rename`, `/cd`, `/clear` | Missing | Tab/collection state and safe new-session directory controls |
-| `/branch`, `/effort` | Missing | New-session base and effort controls |
+| `/movepane`, `/collection`, `/rename`, `/cd`, `/clear` | `/rename` local; others missing | Tab/collection state and safe new-session directory controls |
+| `/branch`, `/effort` | `new --branch` CLI only | Live base and effort controls |
 | `/login`, `/logout`, `/settings`, `/setup`, `/doctor`, `/update` | CLI doctor only | Interactive operations and 1.19 setup checks |
 | `/plugins`, `/reload-plugins` | Missing | Plugin discovery, adoption policy and refresh |
 | `/img` | Missing | Terminal image capability/reporting if required for stable parity |

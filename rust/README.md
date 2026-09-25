@@ -27,7 +27,7 @@ Build the native frontend and daemon from this repository:
 commands build incrementally before running and accept the corresponding
 `doxa-rs` options, such as `./task new --engine claude --model NAME`.
 `./task build --release` and `DOXA_TASK_PROFILE=release ./task run` select a
-release build. `./task test` runs the TUI, daemon, and Claude sidecar tests;
+release build. `./task test` runs all Rust crate and Claude sidecar tests;
 `./task clean` removes only its build directory (`target/rust-task` by default).
 The script selects `.venv/bin/python` when present, then `python3`, for LORE
 and Claude. Set `DOXA_LORE_PYTHON=/absolute/path/to/python` or pass
@@ -54,7 +54,8 @@ The daemon executable is located beside `doxa-rs`, then on `PATH`; an absolute
 Native sessions started in a Git checkout now get a linked worktree under
 `$DOXA_HOME/worktrees/<repo>-<session-prefix>` on a `doxa/<session-prefix>`
 branch. A sidecar in `worktrees/.meta` records the original repository and
-base branch. The new checkout starts at that branch tip; uncommitted changes
+base branch and pins its starting commit for stable diff comparisons. The new
+checkout starts at that branch tip; uncommitted changes
 in the launch directory stay there. `DOXA_WORKTREE=0` or `worktree_per_session = false` in
 `$DOXA_HOME/config.toml` runs in the launch directory; outside Git, sessions
 also run there. Detaching keeps the worktree. When the daemon actually exits,
@@ -151,7 +152,7 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
-clickable links are still 2.0 work. The binary version is `2.0.0-alpha.10`;
+clickable links are still 2.0 work. The binary version is `2.0.0-alpha.11`;
 this is an alpha release.
 
 `Ctrl+R` opens a searchable picker for attached and archived sessions with
@@ -170,7 +171,9 @@ is idle. The frontend checks that the same patch still exists, reverse-applies j
 the session's normal prompt path. Hunks with rename, copy, creation, deletion,
 or mode metadata are excluded because reversing them can change the whole file.
 If the hunk has changed, it leaves the file
-alone and asks for a refresh. Duplicate queued hunks are refused. Pending
+alone and asks for a refresh. A file with staged changes must be unstaged
+before a hunk can be rejected, so the rejected edit cannot remain in Git's
+index. Duplicate queued hunks are refused. Pending
 rejections block closing the diff or leaving the UI until they finish, and are
 cancelled if the session ends. The diff pane requires enough
 terminal space for two panes. Each split pane has its own prompt and keeps a draft for its active

@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: AGPL-3.0-only
-# Local development commands for the separate DOXA Rust 2.0 preview.
+# Local development commands for DOXA Rust 2.0.
 set -eu
 
 fail() { printf 'task: %s\n' "$*" >&2; exit 1; }
@@ -26,7 +26,7 @@ Usage: ./task COMMAND [arguments]
   run [doxa-rs args]    Build and run the frontend in the current directory
   new [doxa-rs args]    Build and start a new session in the current directory
   doctor [args]         Build and check the native launch dependencies
-  test                  Run both Rust crate test suites and Claude sidecar tests
+  test                  Run all Rust crate and Claude sidecar tests
   clean                 Remove the task's local Rust build directory
   help                  Show this help
 
@@ -154,8 +154,16 @@ case $command in
     command -v cargo >/dev/null 2>&1 || fail 'cargo is required (install Rust first)'
     mkdir -p "$target_dir"
     : > "$target_dir/.doxa-task-build"
-    cargo test --locked --manifest-path "$tui_manifest"
-    cargo test --locked --manifest-path "$daemon_manifest"
+    for crate in doxa-tui doxa-engines doxa-lore doxa-peers doxa-protocol \
+      doxa-claude doxa-transcript doxa-state doxa-runtime doxa-daemon \
+      doxa-worktrees doxa-vendors; do
+      case $crate in
+        doxa-daemon|doxa-vendors)
+          cargo test --locked --features local-test-server \
+            --manifest-path "$root/rust/$crate/Cargo.toml" ;;
+        *) cargo test --locked --manifest-path "$root/rust/$crate/Cargo.toml" ;;
+      esac
+    done
     "$(python_bin)" -m unittest discover -s "$root/rust/doxa-claude/tests" -p 'test_*.py' ;;
   clean)
     [ "$#" -eq 0 ] || fail 'clean takes no arguments'

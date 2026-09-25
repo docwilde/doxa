@@ -5,6 +5,21 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.11 — 2026-09-25
+
+- Add managed per-session Git worktrees with guarded cleanup and an explicit
+  `new --branch` base selector. Allow tracked diff hunks to be rejected with a
+  reason, including queued rejection after an active turn completes.
+- Add local TUI commands for panes, sidebar, directory, detachment, live
+  session attachment, and persistent tab renaming. Keep unsupported DOXA
+  commands out of model prompts.
+- Add scoped peer messaging and optional inbound native peer turns. Extend
+  fleet inspection, Python-backed start, guarded stop, and native preflight.
+  Enforce native Claude spend ceilings and refuse unsupported budgeted hosts.
+- Show full raw LORE proposals before a human confirms approve or reject.
+  Resolve the exact reviewed snapshot through LORE 0.58.5's atomic API.
+- Expand Rust CI to cover the managed worktree crate and pinned LORE bridge.
+
 ## 2.0.0-alpha.10 — 2026-09-25
 
 - Make Rust the main `doxa` frontend and installer path. Retire the Python
