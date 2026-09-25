@@ -93,6 +93,13 @@ struct Options {
     vendor_endpoint: Option<String>,
     sandbox: SandboxMode,
 }
+fn linger_duration(value: &str) -> io::Result<Duration> {
+    let seconds: f64 = value.parse().map_err(|_| invalid("invalid linger"))?;
+    if !seconds.is_finite() || !(0.0..=31_536_000.0).contains(&seconds) {
+        return Err(invalid("linger must be between 0 and 31536000 seconds"));
+    }
+    Ok(Duration::from_secs_f64(seconds))
+}
 fn options() -> io::Result<Options> {
     let mut runtime = env::var_os("DOXA_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -168,10 +175,7 @@ fn options() -> io::Result<Options> {
                 _ => return Err(invalid("invalid sandbox")),
             },
             Some("--linger") => {
-                let seconds: f64 = value.to_str().ok_or_else(|| invalid("invalid linger"))?
-                    .parse().map_err(|_| invalid("invalid linger"))?;
-                if !seconds.is_finite() || seconds < 0.0 { return Err(invalid("invalid linger")); }
-                linger = Duration::from_secs_f64(seconds);
+                linger = linger_duration(value.to_str().ok_or_else(|| invalid("invalid linger"))?)?;
             }
             _ => return Err(invalid("usage: doxa-daemon [--runtime-dir PATH] [--cwd PATH] [--session-id ID] [--base-branch REF] [--linger SECONDS] [--engine fixture|codex|claude|deepseek|glm] [--codex-bin PATH --lore-python PATH --claude-python PATH --claude-script PATH --model MODEL --effort EFFORT --sandbox MODE --resume true|false]")),
         }
@@ -780,6 +784,14 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linger_rejects_values_that_would_overflow_or_stall_shutdown() {
+        assert_eq!(linger_duration("31536000").unwrap(), Duration::from_secs(31_536_000));
+        assert!(linger_duration("1e308").is_err());
+        assert!(linger_duration("31536001").is_err());
+        assert!(linger_duration("NaN").is_err());
+    }
 
     #[test]
     fn python_validation_keeps_venv_link_and_imports_outside_checkout() {

@@ -3660,6 +3660,7 @@ impl App {
             self.notice = "Enlarge active pane to search sessions".into();
             return;
         }
+        self.prune_unopened_history();
         self.history_modal = true;
         self.history_resume = false;
         self.history_explicit = false;
@@ -3700,7 +3701,27 @@ impl App {
         // bounded file/sidecar work may finish, but can no longer paint UI.
         self.history_pending = None;
         self.history_scan_query = None;
+        self.prune_unopened_history();
         self.history_query_due = (!self.history_query.trim().is_empty()).then_some(now + SEARCH_DEBOUNCE);
+    }
+
+    fn prune_unopened_history(&mut self) {
+        // Search hits are display cache, not tabs. Keep a bounded recent
+        // inventory so reopening search can reuse results, while repeated
+        // distinct queries cannot retain unbounded transcript tails.
+        const MAX_CACHED_ARCHIVED: usize = 64;
+        let open: HashSet<String> = self.groups.iter()
+            .flat_map(|group| group.tabs.iter().cloned()).collect();
+        let unopened: Vec<_> = self.sessions.iter().filter(|session|
+            self.offline_ids.contains(&session.id) && !open.contains(&session.id))
+            .map(|session| session.id.clone()).collect();
+        let excess = unopened.len().saturating_sub(MAX_CACHED_ARCHIVED);
+        let evict: HashSet<_> = unopened.into_iter().take(excess).collect();
+        if evict.is_empty() { return; }
+        self.sessions.retain(|session| !evict.contains(&session.id));
+        self.offline_ids.retain(|id| !evict.contains(id));
+        self.history_entries.retain(|id, _| !evict.contains(id));
+        self.history_scanned_matches.retain(|id, _| !evict.contains(id));
     }
 
     fn cancel_history_query(&mut self) {
@@ -3894,7 +3915,9 @@ impl App {
     }
 
     fn poll_memory(&mut self) -> bool {
-        let mut changed = false;
+        // A completed scan can change excerpts or the loading indicator even
+        // when every hit is already present in the session list.
+        let mut changed = true;
         if let Some((id, cwd, receiver)) = self.memory_pending.take() {
             match receiver.try_recv() {
                 Ok(result) => {
@@ -4415,6 +4438,7 @@ impl App {
                 status: "Archived · read-only".into() });
             changed = true;
         }
+        self.prune_unopened_history();
         if self.history_modal && self.history_resume && self.history_explicit {
             match self.history_matches().len() {
                 0 => {
@@ -4454,6 +4478,7 @@ impl App {
             KeyCode::Esc | KeyCode::Char('r') if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.history_modal = false;
                 self.cancel_history_query();
+                self.prune_unopened_history();
             }
             KeyCode::Up => self.history_selected = self.history_selected.saturating_sub(1),
             KeyCode::Down => self.history_selected = (self.history_selected + 1).min(self.history_matches().len().saturating_sub(1)),
@@ -9590,6 +9615,34 @@ for line in sys.stdin:
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.pending_prompts.is_empty());
         assert_eq!(app.notice, "Archived transcript is read-only");
+    }
+
+    #[test]
+    fn repeated_history_results_keep_a_bounded_unopened_cache() {
+        let mut app = App::default();
+        for number in 0..80 {
+            let (tx, rx) = mpsc::sync_channel(1);
+            app.history_pending = Some(rx);
+            tx.send(vec![history::OfflineSession { id: format!("archive-{number}"),
+                project: "project".into(), markdown: "x".repeat(4096),
+                search_snippets: Vec::new(), cwd: None }]).unwrap();
+            assert!(app.poll_history());
+        }
+        assert_eq!(app.offline_ids.len(), 64);
+        assert_eq!(app.history_entries.len(), 64);
+        assert!(!app.offline_ids.contains("archive-0"));
+        assert!(app.offline_ids.contains("archive-79"));
+        app.groups[0].tabs.push("archive-79".into());
+        for number in 80..160 {
+            let (tx, rx) = mpsc::sync_channel(1);
+            app.history_pending = Some(rx);
+            tx.send(vec![history::OfflineSession { id: format!("archive-{number}"),
+                project: "project".into(), markdown: "saved".into(),
+                search_snippets: Vec::new(), cwd: None }]).unwrap();
+            assert!(app.poll_history());
+        }
+        assert!(app.offline_ids.contains("archive-79"));
+        assert!(app.offline_ids.len() <= 65);
     }
 
     #[test]

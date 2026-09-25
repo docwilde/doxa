@@ -405,6 +405,9 @@ fn handle_prompt(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, client_id: u64, f
     // before this lock so a slow sidecar cannot block unrelated controls.
     let _control_guard = inner.controls.lock().unwrap();
     let mut state = inner.state.lock().unwrap();
+    if inner.stopping.load(Ordering::Acquire) {
+        send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"daemon is stopping"})); return;
+    }
     if state.busy {
         if state.prompts.len() == PROMPT_QUEUE_CAPACITY {
             send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"prompt queue full"})); return;
@@ -443,7 +446,7 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
     let Some(req_id) = frame["id"].as_u64() else { return; };
     let Some(method) = frame["method"].as_str() else { return; };
     let params = frame.get("params").filter(|v| v.is_object()).cloned().unwrap_or_else(|| json!({}));
-    let _control_guard = matches!(method, "set_model" | "set_effort" | "set_permission_mode" | "switch_branch")
+    let _control_guard = matches!(method, "set_model" | "set_effort" | "set_permission_mode" | "switch_branch" | "stop_if_idle")
         .then(|| inner.controls.lock().unwrap());
     let (result, changed) = if method == "queue" {
         let state = inner.state.lock().unwrap();
@@ -473,6 +476,16 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
                 None => (Err("no such queued prompt (already started, cancelled, or discarded)".into()), None),
             } }
         }
+    } else if method == "stop_if_idle" {
+        // Prompt admission (including peers) holds the same control lock.
+        // Check the authoritative queue before stopping, then keep the lock
+        // through the host call and shutdown flag so no turn can slip in.
+        let state = inner.state.lock().unwrap();
+        let idle = !state.busy && state.prompts.is_empty()
+            && !inner.stopping.load(Ordering::Acquire);
+        drop(state);
+        if idle { (inner.host.call("stop", &params), None) }
+        else { (Err("clear requires an idle session with no queued prompts".into()), None) }
     } else if method == "status" {
         let can_set_model = inner.host.can_set_model();
         let can_set_permission_mode = inner.host.can_set_permission_mode();
@@ -564,7 +577,8 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
             (result, changed)
         }
     } else { (inner.host.call(method, &params), None) };
-    let stop_ok = method == "stop" && matches!(&result, Ok(value) if value.is_object());
+    let stop_ok = matches!(method, "stop" | "stop_if_idle")
+        && matches!(&result, Ok(value) if value.is_object());
     match result {
         Ok(extra) if extra.is_object() => {
             let mut reply = json!({"type":"reply","id":req_id,"ok":true});
@@ -622,6 +636,47 @@ fn read_bounded(reader: &mut BufReader<UnixStream>, line: &mut Vec<u8>) -> io::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct StopHost(AtomicUsize);
+    impl Host for StopHost {
+        fn prompt(&self, _: &str, _: &mut dyn FnMut(Value)) {}
+        fn call(&self, method: &str, _: &Value) -> Result<Value, String> {
+            if method == "stop" { self.0.fetch_add(1, Ordering::Relaxed); }
+            Ok(json!({}))
+        }
+    }
+
+    #[test]
+    fn clear_stop_is_rejected_for_busy_or_queued_session_and_closes_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = Arc::new(StopHost(AtomicUsize::new(0)));
+        let daemon = Daemon::bind(dir.path(), Session {
+            session_id: "clear-stop-test".into(), cwd: "/tmp".into(), model: None,
+            engine: "test".into(), doxa_version: "test".into(),
+        }, host.clone()).unwrap();
+        let (tx, rx) = mpsc::sync_channel(CLIENT_QUEUE_CAPACITY);
+        let call = json!({"id":1,"method":"stop_if_idle","params":{}});
+        daemon.inner.state.lock().unwrap().busy = true;
+        handle_call(&daemon.inner, &tx, &call);
+        assert_eq!(serde_json::from_slice::<Value>(&rx.try_recv().unwrap()).unwrap()["ok"], false);
+        assert_eq!(host.0.load(Ordering::Relaxed), 0);
+        {
+            let mut state = daemon.inner.state.lock().unwrap();
+            state.busy = false;
+            state.prompts.push_back(Prompt { text: "queued".into(), public_text: "queued".into(),
+                queue_id: "q1".into(), peer_origin: None });
+        }
+        handle_call(&daemon.inner, &tx, &call);
+        assert_eq!(serde_json::from_slice::<Value>(&rx.try_recv().unwrap()).unwrap()["ok"], false);
+        assert_eq!(host.0.load(Ordering::Relaxed), 0);
+        daemon.inner.state.lock().unwrap().prompts.clear();
+        handle_call(&daemon.inner, &tx, &call);
+        assert_eq!(serde_json::from_slice::<Value>(&rx.try_recv().unwrap()).unwrap()["ok"], true);
+        assert_eq!(host.0.load(Ordering::Relaxed), 1);
+        let prompt = json!({"id":2,"text":"late prompt"});
+        handle_prompt(&daemon.inner, &tx, 1, &prompt);
+        assert_eq!(serde_json::from_slice::<Value>(&rx.try_recv().unwrap()).unwrap()["ok"], false);
+    }
 
     struct NoopHost;
     impl Host for NoopHost {

@@ -186,9 +186,9 @@ fn edit_setting(path: &Path, key: &str, value: Option<&str>, env_override: Optio
         ("linger_secs", Some(value)) => {
             let seconds: f64 = value.parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput,
                 "linger_secs must be a nonnegative finite number"))?;
-            if !seconds.is_finite() || seconds < 0.0 {
+            if !seconds.is_finite() || !(0.0..=crate::launch::MAX_LINGER_SECS).contains(&seconds) {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput,
-                    "linger_secs must be a nonnegative finite number"));
+                    "linger_secs must be a finite number between 0 and 31536000 seconds"));
             }
             Some(toml::Value::Float(seconds))
         }
@@ -318,6 +318,7 @@ mod tests {
         malformed.insert("worktree_per_session".into(), toml::Value::Integer(0));
         assert_eq!(effective_setting(&malformed, "worktree_per_session"), "on (config.toml)");
         assert!(edit_setting(&path, "linger_secs", Some("NaN"), None).is_err());
+        assert!(edit_setting(&path, "linger_secs", Some("1e308"), None).is_err());
         assert!(edit_setting(&path, "worktree_per_session", Some("maybe"), None).is_err());
         assert!(edit_setting(&path, "linger_secs", Some("10"), Some("7")).is_err());
         assert_eq!(doxa_state::load_config_checked(&path).unwrap(), config);

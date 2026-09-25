@@ -119,6 +119,7 @@ sign-in commands; DOXA does not handle credentials.
 `doxa settings set linger_secs 45`,
 `doxa settings set worktree_per_session off`, or
 `doxa settings unset worktree_per_session` to change future sessions.
+`linger_secs` accepts 0 through 31,536,000 seconds (one year).
 Active environment overrides must be removed before changing their stored
 value. Other Python 1.19 settings are still outside this native CLI.
 `doxa auth status [claude|codex]` observes only provider CLI exit status;

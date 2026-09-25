@@ -14,6 +14,10 @@ the stable 2.0 release has not been cut.
 - Add `doxa settings` to inspect and safely persist native linger and
   per-session worktree preferences. `doxa setup` now points to provider CLI
   sign-in commands without handling credentials.
+- Bound cached archived search results and refresh the picker when an indexed
+  hit updates an already loaded session.
+- Reject excessive linger values before launch, and make `/clear` finalization
+  conditional on an authoritative idle and empty-queue check in the daemon.
 
 ## 2.0.0-alpha.23 — 2026-09-25
 

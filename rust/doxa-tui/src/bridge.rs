@@ -419,7 +419,7 @@ fn worker_loop(
                             "ok":false, "error":"Stop target is not attached"}));
                         continue;
                     }
-                    let result = client.call("stop", Map::new());
+                    let result = client.call(if for_clear { "stop_if_idle" } else { "stop" }, Map::new());
                     cursor.store(client.cursor, Ordering::Relaxed);
                     let accepted = result.as_ref().is_ok_and(|reply| reply["ok"] == true);
                     let error = match &result {
@@ -786,7 +786,7 @@ mod tests {
             line.clear();
             reader.read_line(&mut line).unwrap();
             let call: Value = serde_json::from_str(&line).unwrap();
-            assert_eq!(call["method"], "stop");
+            assert_eq!(call["method"], "stop_if_idle");
             writeln!(socket, "{}", json!({"type":"reply", "id":call["id"], "ok":true})).unwrap();
         });
         let session = Session { id:"old".into(), title:String::new(), socket:path,
