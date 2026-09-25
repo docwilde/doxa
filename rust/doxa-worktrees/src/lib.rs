@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -110,6 +111,20 @@ fn base_ref(cwd: &Path) -> Option<String> {
         .or_else(|| git_text(cwd, &["rev-parse", "HEAD"]))
         .filter(|value| safe_ref(value))
 }
+/// Resolve only an existing local or remote-tracking branch. A matching local
+/// branch wins over `origin/name`, matching Python 1.19 spawn semantics.
+pub fn resolve_base(cwd: &Path, requested: &str) -> Option<String> {
+    if !safe_ref(requested) { return None; }
+    let main = main_root(cwd)?;
+    let exists = |name: &str| git_text(&main, &["show-ref", "--verify", "--quiet", name]).is_some();
+    if exists(&format!("refs/heads/{requested}")) { return Some(requested.into()); }
+    if exists(&format!("refs/remotes/{requested}")) {
+        let local = requested.split_once('/')?.1;
+        if exists(&format!("refs/heads/{local}")) { return Some(local.into()); }
+        return Some(requested.into());
+    }
+    None
+}
 fn short_id(id: &str) -> String {
     let short: String = id.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
     if short.is_empty() { "session".into() } else { short }
@@ -121,8 +136,19 @@ fn owned_dir(path: &Path) -> Option<()> {
     Some(())
 }
 fn ensure_owned_dir(path: &Path) -> Option<PathBuf> {
-    fs::create_dir_all(path).ok()?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).ok()?;
+    match fs::symlink_metadata(path) {
+        Ok(meta) if !meta.file_type().is_dir() || meta.uid() != unsafe { libc::geteuid() } => return None,
+        Ok(_) => {},
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir_all(path).ok()?,
+        Err(_) => return None,
+    }
+    // Open the directory itself without following a symlink; fchmod acts on
+    // that inode even if another process replaces the pathname afterward.
+    let dir = OpenOptions::new().read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(path).ok()?;
+    let meta = dir.metadata().ok()?;
+    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } { return None; }
+    if unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) } != 0 { return None; }
     owned_dir(path)?;
     path.canonicalize().ok()
 }
@@ -191,22 +217,38 @@ fn branch_occupied_or_unknown(main: &Path, branch: &str) -> bool {
     let Some(list) = git_text(main, &["worktree", "list", "--porcelain"]) else { return true; };
     list.lines().any(|line| line == format!("branch refs/heads/{branch}"))
 }
+fn delete_if_unchanged(main: &Path, branch: &str, expected_oid: &str) -> bool {
+    let full_ref = format!("refs/heads/{branch}");
+    git(main, &["update-ref", "-d", &full_ref, expected_oid], Duration::from_secs(10))
+        .is_some_and(|(ok, _)| ok)
+}
 
 /// Create a linked checkout for a session. None means run in the original cwd.
 /// Existing worktrees are reused only with an exact matching sidecar, and
 /// are not automatically finalized by the new daemon instance.
 pub fn create(cwd: &Path, id: &str) -> Option<Managed> {
+    create_from(cwd, id, None)
+}
+
+/// `requested_base` must be a validated local or remote-tracking ref. An
+/// explicit choice never silently falls back to the launch directory.
+pub fn create_from(cwd: &Path, id: &str, requested_base: Option<&str>) -> Option<Managed> {
     if !enabled() { return None; }
     let main = main_root(cwd)?;
-    let base = base_ref(cwd)?;
+    let base = match requested_base {
+        Some(requested) => resolve_base(cwd, requested)?,
+        None => base_ref(cwd)?,
+    };
     let short = short_id(id);
     let branch = format!("doxa/{short}");
+    if branch == base { return None; }
     let repo = main.file_name()?.to_str()?;
     let worktrees = ensure_owned_dir(&root()?)?;
     let path = worktrees.join(format!("{repo}-{short}"));
     if let Some(existing) = worktree_for_branch(&main, &branch) {
-        let (record, _, _) = read_record(&existing)?;
-        if record.path != existing.canonicalize().ok()? || record.session_id != id || record.path != path {
+        let (record, old_base, _) = read_record(&existing)?;
+        if record.path != existing.canonicalize().ok()? || record.session_id != id || record.path != path
+            || requested_base.is_some() && old_base != base {
             return None;
         }
         return Some(Managed { path: record.path, created: false, finished: false });
@@ -221,6 +263,7 @@ pub fn create(cwd: &Path, id: &str) -> Option<Managed> {
     let path = path.canonicalize().ok()?;
     if write_record(&path, &main, &branch, &base, id).is_none() {
         eprintln!("doxa-daemon: worktree metadata unavailable; keeping {}", path.display());
+        if requested_base.is_some() { return None; }
         return Some(Managed { path, created: false, finished: false });
     }
     Some(Managed { path, created: true, finished: false })
@@ -252,7 +295,7 @@ pub fn finalize(path: &Path) -> String {
         || branch_occupied_or_unknown(&main, &record.branch) {
         return format!("kept branch {} after its worktree closed; branch changed during cleanup", record.branch);
     }
-    if !git(&main, &["branch", "-D", &record.branch], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
+    if !delete_if_unchanged(&main, &record.branch, &before) {
         return format!("kept branch {} after its worktree closed; branch deletion failed", record.branch);
     }
     if let Some(meta) = meta_path(&record.path) { let _ = fs::remove_file(meta); }
@@ -298,6 +341,21 @@ mod tests {
         fs::write(main.join("file.txt"), "base\n").unwrap();
         run_git(&main, &["add", "file.txt"]);
         run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: baseline"]);
+        run_git(&main, &["checkout", "-qb", "feature"]);
+        fs::write(main.join("file.txt"), "feature\n").unwrap();
+        run_git(&main, &["add", "file.txt"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: feature"]);
+        run_git(&main, &["update-ref", "refs/remotes/origin/feature", "HEAD"]);
+        run_git(&main, &["update-ref", "refs/remotes/origin/remote-only", "HEAD"]);
+        run_git(&main, &["checkout", "-q", "main"]);
+        assert_eq!(resolve_base(&main, "origin/feature").as_deref(), Some("feature"));
+        assert_eq!(resolve_base(&main, "origin/remote-only").as_deref(), Some("origin/remote-only"));
+        assert!(resolve_base(&main, "--output=/tmp/unsafe").is_none());
+        assert!(resolve_base(&main, "missing").is_none());
+        let mut chosen = create_from(&main, "g1b2c3d4chosen", Some("origin/feature")).unwrap();
+        assert_eq!(fs::read_to_string(chosen.path().join("file.txt")).unwrap(), "feature\n");
+        assert_eq!(read_record(chosen.path()).unwrap().1, "feature");
+        assert!(chosen.finish().is_empty());
 
         let mut clean = create(&main, "a1b2c3d4clean").unwrap();
         let clean_path = clean.path().to_path_buf();
@@ -317,6 +375,8 @@ mod tests {
         assert_eq!(reused.path(), dirty_path);
         drop(reused); // a restarted daemon must not delete another instance's tree
         assert!(dirty_path.join("untracked.txt").exists());
+        assert!(create_from(&main, "b1b2c3d4dirty", Some("feature")).is_none());
+        assert_eq!(read_record(&dirty_path).unwrap().1, "main");
 
         let mut switched = create(&main, "e1b2c3d4switched").unwrap();
         let switched_path = switched.path().to_path_buf();
@@ -347,6 +407,25 @@ mod tests {
         assert!(!enabled());
         env::set_var("DOXA_WORKTREE", "1");
         assert!(enabled());
+        let victim = dir.path().join("victim");
+        fs::create_dir(&victim).unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o755)).unwrap();
+        let fake_home = dir.path().join("symlink-home");
+        fs::create_dir(&fake_home).unwrap();
+        std::os::unix::fs::symlink(&victim, fake_home.join("worktrees")).unwrap();
+        env::set_var("DOXA_HOME", &fake_home);
+        assert!(create(&main, "f1b2c3d4symlink").is_none());
+        assert_eq!(fs::metadata(&victim).unwrap().permissions().mode() & 0o777, 0o755);
+        env::set_var("DOXA_HOME", &home);
+
+        run_git(&main, &["branch", "race"]);
+        let old_oid = git_text(&main, &["rev-parse", "race"]).unwrap();
+        fs::write(main.join("file.txt"), "new base\n").unwrap();
+        run_git(&main, &["add", "file.txt"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: move branch"]);
+        run_git(&main, &["update-ref", "refs/heads/race", "HEAD"]);
+        assert!(!delete_if_unchanged(&main, "race", &old_oid));
+        assert!(git_text(&main, &["rev-parse", "race"]).is_some());
         env::remove_var("DOXA_HOME");
         env::remove_var("DOXA_WORKTREE");
     }

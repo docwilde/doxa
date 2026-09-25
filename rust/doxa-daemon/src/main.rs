@@ -76,6 +76,7 @@ struct Options {
     runtime: PathBuf,
     cwd: PathBuf,
     session_id: String,
+    base_branch: Option<String>,
     linger: Duration,
     engine: Engine,
     codex_bin: Option<PathBuf>,
@@ -99,6 +100,7 @@ fn options() -> io::Result<Options> {
     let mut cwd = env::current_dir()?;
     let mut session_id = random_id()?;
     let mut explicit_session_id = false;
+    let mut base_branch = None;
     let mut linger = Duration::from_secs(120);
     let mut engine = Engine::Fixture;
     let mut codex_bin = None;
@@ -119,6 +121,7 @@ fn options() -> io::Result<Options> {
         match arg.to_str() {
             Some("--runtime-dir") => runtime = PathBuf::from(value),
             Some("--cwd") => cwd = PathBuf::from(value),
+            Some("--base-branch") => base_branch = Some(value.into_string().map_err(|_| invalid("invalid base branch"))?),
             Some("--session-id") => {
                 session_id = value.into_string().map_err(|_| invalid("invalid session id"))?;
                 explicit_session_id = true;
@@ -167,7 +170,7 @@ fn options() -> io::Result<Options> {
                 if !seconds.is_finite() || seconds < 0.0 { return Err(invalid("invalid linger")); }
                 linger = Duration::from_secs_f64(seconds);
             }
-            _ => return Err(invalid("usage: doxa-daemon [--runtime-dir PATH] [--cwd PATH] [--session-id ID] [--linger SECONDS] [--engine fixture|codex|claude|deepseek|glm] [--codex-bin PATH --lore-python PATH --claude-python PATH --claude-script PATH --model MODEL --effort EFFORT --sandbox MODE --resume true|false]")),
+            _ => return Err(invalid("usage: doxa-daemon [--runtime-dir PATH] [--cwd PATH] [--session-id ID] [--base-branch REF] [--linger SECONDS] [--engine fixture|codex|claude|deepseek|glm] [--codex-bin PATH --lore-python PATH --claude-python PATH --claude-script PATH --model MODEL --effort EFFORT --sandbox MODE --resume true|false]")),
         }
     }
     // Do not let registry entries claim an unvalidated path or identity.
@@ -187,6 +190,17 @@ fn options() -> io::Result<Options> {
     }
     if !runtime.is_absolute() {
         return Err(invalid("runtime directory must be absolute"));
+    }
+    if let Some(requested) = &mut base_branch {
+        if resume { return Err(invalid("--base-branch cannot change the base of a resumed session")); }
+        if !doxa_worktrees::enabled() {
+            return Err(invalid("--base-branch needs worktree_per_session enabled"));
+        }
+        if engine == Engine::Fixture && env::var("DOXA_WORKTREE").as_deref() != Ok("1") {
+            return Err(invalid("fixture --base-branch needs DOXA_WORKTREE=1"));
+        }
+        *requested = doxa_worktrees::resolve_base(&cwd, requested)
+            .ok_or_else(|| invalid("--base-branch must name an existing local or remote-tracking branch"))?;
     }
     if engine == Engine::Codex {
         if effort.is_some() {
@@ -256,6 +270,7 @@ fn options() -> io::Result<Options> {
         runtime,
         cwd,
         session_id,
+        base_branch,
         linger,
         engine,
         codex_bin,
@@ -459,8 +474,11 @@ fn run() -> io::Result<()> {
         && env::var("DOXA_WORKTREE").is_ok_and(|value| value == "1");
     let use_worktrees = options.engine != Engine::Fixture || manage_fixture;
     let mut managed = if use_worktrees {
-        doxa_worktrees::create(&options.cwd, &options.session_id)
+        doxa_worktrees::create_from(&options.cwd, &options.session_id, options.base_branch.as_deref())
     } else { None };
+    if options.base_branch.is_some() && managed.is_none() {
+        return Err(invalid("requested branch could not be opened in a managed worktree; original checkout was not changed"));
+    }
     if use_worktrees && managed.is_none() && doxa_worktrees::enabled()
         && doxa_worktrees::is_supported_checkout(&options.cwd) {
         eprintln!("doxa-daemon: managed worktree unavailable; using launch directory {}", options.cwd.display());

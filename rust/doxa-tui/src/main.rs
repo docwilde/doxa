@@ -38,7 +38,7 @@ fn run(args: &[String]) -> io::Result<()> {
             }
             "--session" | "--socket" | "--engine" | "--model" | "--effort" | "--linger"
             | "--sandbox" | "--codex-bin" | "--lore-python" | "--claude-python"
-            | "--claude-script" | "--resume" => {
+            | "--claude-script" | "--resume" | "--branch" => {
                 index += 1;
                 let value = args
                     .get(index)
@@ -74,6 +74,7 @@ fn run(args: &[String]) -> io::Result<()> {
                     "--claude-python" => options.claude_python = Some(PathBuf::from(value)),
                     "--claude-script" => options.claude_script = Some(PathBuf::from(value)),
                     "--resume" => options.resume = Some(value.clone()),
+                    "--branch" => options.branch = Some(value.clone()),
                     _ => unreachable!(),
                 }
             }
@@ -100,9 +101,12 @@ fn run(args: &[String]) -> io::Result<()> {
             "--resume requires new --engine claude|deepseek|glm",
         ));
     }
+    if options.branch.is_some() && command != Some("new") {
+        return Err(invalid("--branch requires new"));
+    }
     match command {
         Some("--help") => {
-            println!("Usage: doxa-rs [new|attach [ID]|stop [ID]|list|doctor] [options]\n       doxa-rs fleet start PYTHON_FLEET_OPTIONS\n       doxa-rs fleet runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]\n       doxa-rs --session ID\n       doxa-rs --socket PATH\n\nPlain doxa-rs restores live sessions in the current project, or starts a native Codex session.\nnew always starts a session. attach and stop accept a full ID or unique prefix.\nOptions for new sessions: --engine codex|claude|deepseek|glm|fixture, --model NAME, --linger SECONDS.\nCodex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH, --lore-python PATH.\nClaude: --claude-python PATH, --claude-script ABSOLUTE_PATH.\nDeepSeek/GLM: --lore-python PATH, --effort low|high|max (DeepSeek also none); API key in provider environment variable.\nClaude/DeepSeek/GLM: --resume FULL_SESSION_ID with new.\nDOXA_DAEMON_BIN selects an absolute native daemon path. Ctrl+Q detaches without stopping the daemon.");
+            println!("Usage: doxa-rs [new|attach [ID]|stop [ID]|list|doctor] [options]\n       doxa-rs fleet start PYTHON_FLEET_OPTIONS\n       doxa-rs fleet runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]\n       doxa-rs --session ID\n       doxa-rs --socket PATH\n\nPlain doxa-rs restores live sessions in the current project, or starts a native Codex session.\nnew always starts a session. attach and stop accept a full ID or unique prefix.\nOptions for new sessions: --engine codex|claude|deepseek|glm|fixture, --model NAME, --linger SECONDS, --branch LOCAL_OR_REMOTE.\nCodex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH, --lore-python PATH.\nClaude: --claude-python PATH, --claude-script ABSOLUTE_PATH.\nDeepSeek/GLM: --lore-python PATH, --effort low|high|max (DeepSeek also none); API key in provider environment variable.\nClaude/DeepSeek/GLM: --resume FULL_SESSION_ID with new.\nDOXA_DAEMON_BIN selects an absolute native daemon path. Ctrl+Q detaches without stopping the daemon.");
             println!("Fleet safety preview: doxa-rs fleet preflight --sessions N --run-budget USD [--root ABSOLUTE_PATH] [--run-id ID] [--force|--allow-unbudgeted]");
             Ok(())
         }

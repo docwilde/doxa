@@ -42,6 +42,7 @@ impl Engine {
 #[derive(Debug, Default, Clone)]
 pub struct LaunchOptions {
     pub engine: Engine,
+    pub branch: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub linger: Option<f64>,
@@ -203,6 +204,22 @@ fn random_id() -> io::Result<String> {
 
 pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
     let cwd = fs::canonicalize(env::current_dir()?)?;
+    let branch = if let Some(requested) = options.branch.as_deref() {
+        if !doxa_worktrees::enabled() {
+            return Err(invalid("--branch needs worktree_per_session; turn it on or change your checkout explicitly with git"));
+        }
+        if options.engine == Engine::Fixture && env::var("DOXA_WORKTREE").as_deref() != Ok("1") {
+            return Err(invalid("fixture --branch needs DOXA_WORKTREE=1"));
+        }
+        if !doxa_worktrees::is_supported_checkout(&cwd) {
+            return Err(invalid("--branch needs a Git checkout"));
+        }
+        Some(doxa_worktrees::resolve_base(&cwd, requested)
+            .ok_or_else(|| invalid(format!("no such local or remote-tracking branch: {requested}")))?)
+    } else { None };
+    if branch.is_some() && options.resume.is_some() {
+        return Err(invalid("--branch cannot change the base of a resumed session"));
+    }
     let runtime = discovery::runtime_dir()?;
     if !runtime.is_absolute() {
         return Err(invalid("runtime directory must be absolute"));
@@ -281,6 +298,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
         "--linger",
         &linger.to_string(),
     ]);
+    if let Some(base) = &branch { command.args(["--base-branch", base]); }
     match options.engine {
         Engine::Fixture => {
             if options.model.is_some()
@@ -405,6 +423,11 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
             return Ok(session);
         }
         if let Some(status) = child.try_wait()? {
+            if branch.is_some() {
+                return Err(io::Error::other(format!(
+                    "native daemon exited before startup ({status}); check provider dependencies and whether the requested branch can open in a managed worktree"
+                )));
+            }
             return Err(io::Error::other(format!(
                 "native daemon exited before startup ({status}); check {} dependencies",
                 match options.engine {

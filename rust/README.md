@@ -64,6 +64,11 @@ metadata, and failed Git checks are kept for manual review. `doxa doctor`
 lists verified managed worktrees with no live session and never deletes them.
 Fixture sessions keep their supplied directory unless `DOXA_WORKTREE=1` is
 set explicitly for integration testing.
+`doxa new --branch NAME` starts the managed worktree from an existing local or
+remote-tracking branch. It prefers a same-named local branch over
+`origin/NAME`. An unknown branch, disabled worktrees, or a request combined
+with `--resume` fails before starting the session; the launch checkout is
+never switched. Live `/branch` listing and base switching remain to be ported.
 
 Or compile and install the main line with the POSIX installer:
 

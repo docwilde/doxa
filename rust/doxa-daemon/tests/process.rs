@@ -238,6 +238,57 @@ fn daemon_runs_in_managed_worktree_and_cleans_it_on_real_exit() {
     assert_eq!(fs::read_to_string(kept.join("user.txt")).unwrap(), "work to keep\n");
     assert!(home.join("worktrees/.meta/repo-session2.json").exists());
 }
+
+#[test]
+fn requested_base_branch_is_honored_and_invalid_requests_never_fall_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("repo");
+    let runtime = dir.path().join("runtime");
+    let home = dir.path().join("home");
+    fs::create_dir(&main).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").args(args).current_dir(&main).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    };
+    git(&["init", "-q", "-b", "main"]);
+    fs::write(main.join("README"), "main\n").unwrap();
+    git(&["add", "README"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: main"]);
+    git(&["checkout", "-qb", "feature"]);
+    fs::write(main.join("README"), "feature\n").unwrap();
+    git(&["add", "README"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: feature"]);
+    git(&["checkout", "-q", "main"]);
+    let args = ["--runtime-dir", runtime.to_str().unwrap(), "--cwd", main.to_str().unwrap(),
+        "--session-id", "branch123", "--linger", "10", "--base-branch", "feature"];
+    let mut child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon")).args(args)
+        .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "1")
+        .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry = runtime.join("registry/branch123.json");
+    wait_until(|| registry.exists());
+    let worktree = home.join("worktrees/repo-branch12");
+    assert_eq!(fs::read_to_string(worktree.join("README")).unwrap(), "feature\n");
+    let meta: Value = serde_json::from_slice(&fs::read(home.join("worktrees/.meta/repo-branch12.json")).unwrap()).unwrap();
+    assert_eq!(meta["base_ref"], "feature");
+    assert_eq!(fs::read_to_string(main.join("README")).unwrap(), "main\n");
+    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM); }
+    wait_until(|| child.try_wait().unwrap().is_some());
+
+    for bad in ["missing", "--output=/tmp/unsafe"] {
+        let result = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+            .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", main.to_str().unwrap(),
+                "--session-id", "badbranch", "--base-branch", bad])
+            .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "1").output().unwrap();
+        assert!(!result.status.success());
+        assert!(!runtime.join("registry/badbranch.json").exists());
+    }
+    let disabled = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", main.to_str().unwrap(),
+            "--session-id", "badbranch", "--base-branch", "feature"])
+        .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "0").output().unwrap();
+    assert!(!disabled.status.success());
+    assert!(!runtime.join("registry/badbranch.json").exists());
+}
 fn executable(path: &Path, body: &str) {
     fs::write(path, body).unwrap();
     let mut perms = fs::metadata(path).unwrap().permissions();
