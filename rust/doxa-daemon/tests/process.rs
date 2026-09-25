@@ -509,6 +509,40 @@ fn registry_wire_prompt_and_stop() {
 }
 
 #[test]
+fn concurrent_process_cannot_claim_same_session_and_lock_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut first = Process::start(dir.path(), "10");
+    let owner = first.entry();
+    let second = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", "/tmp",
+            "--session-id", "fixture-session", "--linger", "10"])
+        .env("DOXA_HOME", dir.path().join("home"))
+        .output().unwrap();
+    assert!(!second.status.success());
+    assert!(String::from_utf8_lossy(&second.stderr).contains("session is already active"),
+        "{}", String::from_utf8_lossy(&second.stderr));
+    assert!(!first.exited());
+    assert_eq!(first.entry()["pid"], owner["pid"]);
+
+    let (mut reader, mut socket) = first.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"call","id":1,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| first.exited());
+    wait_until(|| !first.registry.exists());
+    assert!(dir.path().join("registry/fixture-session.lock").exists());
+    let mut restarted = Process::start(dir.path(), "10");
+    assert_ne!(restarted.entry()["pid"], owner["pid"]);
+    let (mut reader, mut socket) = restarted.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"call","id":1,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| restarted.exited());
+}
+
+#[test]
 fn linger_resets_when_a_client_reattaches() {
     let dir = tempfile::tempdir().unwrap();
     // Leave enough room for a loaded CI runner to schedule the reconnect.

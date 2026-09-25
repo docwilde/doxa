@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -353,6 +354,33 @@ fn owned_directory(path: &Path) -> io::Result<()> {
     }
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
+/// A stable, private lock inode prevents two daemon processes from opening
+/// the same conversation state. Keep the file: unlinking a held lock would let
+/// another process create and lock a different inode before shutdown finishes.
+struct SessionClaim { _file: File }
+impl SessionClaim {
+    fn acquire(runtime: &Path, session_id: &str) -> io::Result<Self> {
+        owned_directory(runtime)?;
+        let dir = runtime.join("registry");
+        owned_directory(&dir)?;
+        let path = dir.join(format!("{session_id}.lock"));
+        let file = OpenOptions::new().read(true).write(true).create(true).mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK).open(path)?;
+        let meta = file.metadata()?;
+        if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() }
+            || meta.nlink() != 1 || meta.permissions().mode() & 0o077 != 0 {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unsafe session claim file"));
+        }
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::WouldBlock {
+                return Err(io::Error::new(io::ErrorKind::AlreadyExists, "session is already active"));
+            }
+            return Err(error);
+        }
+        Ok(Self { _file: file })
+    }
+}
 struct Registry {
     path: PathBuf,
     identity: Option<(u64, u64)>,
@@ -470,6 +498,9 @@ impl Drop for Registry {
 }
 fn run() -> io::Result<()> {
     let mut options = options()?;
+    // Acquire before constructing a host: vendor and Claude resume open the
+    // saved conversation state during host startup, before registry publish.
+    let _claim = SessionClaim::acquire(&options.runtime, &options.session_id)?;
     // Match Python 1.19's explicit-truthy switch. Claude keeps its own Python
     // sidecar peer loop; starting a second native loop there would duplicate
     // delivery, so only native hosts with a LORE scrubber accept this switch.
