@@ -4,6 +4,7 @@ use doxa_runtime::Host;
 use doxa_transcript::TranscriptStore;
 use serde_json::Map;
 use serde_json::{json, Value};
+use std::cell::Cell;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +25,7 @@ pub struct CodexHost {
     driver: Mutex<CodexCliDriver>,
     active: Mutex<Option<CancellationToken>>,
     scrub_failed: Arc<AtomicBool>,
+    persistence_failed: AtomicBool,
     lore: Arc<Mutex<LoreClient>>,
     index_tx: Sender<IndexCommand>,
     index_worker: Mutex<Option<thread::JoinHandle<()>>>,
@@ -57,9 +59,16 @@ impl CodexHost {
         let store = TranscriptStore::new(&projects_dir, &slug, session_id).map_err(|_| {
             "transcript directory unavailable; Codex session was not started".to_owned()
         })?;
-        let previous = store
+        let thread_record = store
             .read_thread()
-            .map_err(|_| "Codex thread record unreadable; session was not started".to_owned())?
+            .map_err(|_| "Codex thread record unreadable; session was not started".to_owned())?;
+        if thread_record
+            .as_ref()
+            .is_some_and(|value| value["turn_incomplete"] == true)
+        {
+            return Err("Codex transcript is incomplete; refusing to resume the thread".to_owned());
+        }
+        let previous = thread_record
             .and_then(|value| value["thread_id"].as_str().map(str::to_owned));
         if store.transcript_path().exists() && previous.is_none() {
             return Err(
@@ -112,6 +121,7 @@ impl CodexHost {
             driver: Mutex::new(CodexCliDriver::new(options, scrub)),
             active: Mutex::new(None),
             scrub_failed,
+            persistence_failed: AtomicBool::new(false),
             lore,
             index_tx,
             index_worker: Mutex::new(Some(index_worker)),
@@ -123,21 +133,24 @@ impl CodexHost {
         })
     }
 
-    fn persist(&self, record: Value) {
+    fn persist(&self, record: Value) -> io::Result<()> {
         let result = self.store.try_append(record, "codex", |text| {
             self.lore.lock().unwrap().scrub(text).map_err(|_| {
                 self.scrub_failed.store(true, Ordering::Release);
                 io::Error::other("LORE scrub failed")
             })
         });
-        if let Err(error) = result {
+        if let Err(error) = &result {
             eprintln!("doxa-daemon: transcript append failed: {error}");
+            self.persistence_failed.store(true, Ordering::Release);
         }
+        result
     }
 
-    fn persist_thread(&self, thread_id: &str) {
+    fn persist_thread(&self, thread_id: &str, turn_incomplete: bool) -> io::Result<()> {
         let mut fields = Map::new();
         fields.insert("thread_id".into(), json!(thread_id));
+        fields.insert("turn_incomplete".into(), json!(turn_incomplete));
         fields.insert("session_id".into(), json!(self.session_id));
         fields.insert("model".into(), json!(self.model));
         fields.insert("cwd".into(), json!(self.cwd));
@@ -148,9 +161,11 @@ impl CodexHost {
                 io::Error::other("LORE scrub failed")
             })
         });
-        if let Err(error) = result {
+        if let Err(error) = &result {
             eprintln!("doxa-daemon: Codex thread write failed: {error}");
+            self.persistence_failed.store(true, Ordering::Release);
         }
+        result
     }
 
     fn cancel(&self) {
@@ -160,7 +175,9 @@ impl CodexHost {
     }
 
     fn index_transcript(&self) {
-        if self.scrub_failed.load(Ordering::Acquire) {
+        if self.scrub_failed.load(Ordering::Acquire)
+            || self.persistence_failed.load(Ordering::Acquire)
+        {
             return;
         }
         // The Rust writer has already scrubbed every persisted record. LORE
@@ -214,6 +231,10 @@ impl Host for CodexHost {
         self.store.transcript_snapshot()
     }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        if self.persistence_failed.load(Ordering::Acquire) {
+            emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Codex persistence failed; session cannot safely continue"}}));
+            return;
+        }
         if self.closing.load(Ordering::Acquire) {
             emit(
                 json!({"type":"turn_done","data":{"is_error":true,"error":"Codex session is stopping"}}),
@@ -240,18 +261,30 @@ impl Host for CodexHost {
             }
         };
         emit(json!({"type":"turn_started","data":{"prompt":display_prompt}}));
-        self.persist(
-            json!({"type":"user", "message":{"role":"user","content":text},
-            "cwd":self.cwd, "sessionId":self.session_id, "timestamp":crate::iso_now()}),
-        );
-        if self.scrub_failed.load(Ordering::Acquire) {
+        let user_record = json!({"type":"user", "message":{"role":"user","content":text},
+            "cwd":self.cwd, "sessionId":self.session_id, "timestamp":crate::iso_now()});
+        if self.persist(user_record).is_err() {
             *self.active.lock().unwrap() = None;
+            let reason = if self.scrub_failed.load(Ordering::Acquire) {
+                "LORE scrub failed; prompt withheld"
+            } else {
+                "Codex prompt could not be persisted; prompt withheld"
+            };
             emit(
-                json!({"type":"turn_done","data":{"is_error":true,"error":"LORE scrub failed; prompt withheld"}}),
+                json!({"type":"turn_done","data":{"is_error":true,"error":reason}}),
             );
             return;
         }
+        if let Some(id) = self.driver.lock().unwrap().thread_id().map(str::to_owned) {
+            if self.persist_thread(&id, true).is_err() {
+                *self.active.lock().unwrap() = None;
+                emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Codex thread state could not be persisted; prompt withheld"}}));
+                return;
+            }
+        }
         let mut assistant_text = String::new();
+        let thread_write_failed = Cell::new(false);
+        let mut terminal_event = None;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build();
@@ -278,12 +311,17 @@ impl Host for CodexHost {
                                     assistant_text.push_str(text);
                                 }
                             }
-                            emit(json!({"type":event.kind,"data":event.data}));
+                            let frame = json!({"type":event.kind,"data":event.data});
+                            if event.kind == "turn_done" {
+                                terminal_event = Some(frame);
+                            } else if !thread_write_failed.get() {
+                                emit(frame);
+                            }
                         }
                     },
                     |id| {
-                        self.persist_thread(id);
-                        if self.scrub_failed.load(Ordering::Acquire) {
+                        if self.persist_thread(id, true).is_err() {
+                            thread_write_failed.set(true);
                             token.cancel();
                         }
                     },
@@ -292,13 +330,16 @@ impl Host for CodexHost {
             Err(error) => Err(DriverError::Spawn(error)),
         };
         if !self.scrub_failed.load(Ordering::Acquire) {
-            if !assistant_text.is_empty() {
-                self.persist(json!({"type":"assistant","message":{"role":"assistant",
+            if !thread_write_failed.get() && !assistant_text.is_empty() {
+                let _ = self.persist(json!({"type":"assistant","message":{"role":"assistant",
                     "content":[{"type":"text","text":assistant_text}]},
                     "sessionId":self.session_id,"timestamp":crate::iso_now()}));
             }
             if let Some(id) = self.driver.lock().unwrap().thread_id().map(str::to_owned) {
-                self.persist_thread(&id);
+                let _ = self.persist_thread(&id, self.persistence_failed.load(Ordering::Acquire));
+            } else {
+                eprintln!("doxa-daemon: Codex turn ended without a thread ID");
+                self.persistence_failed.store(true, Ordering::Release);
             }
         }
         if self.scrub_failed.load(Ordering::Acquire) {
@@ -308,10 +349,19 @@ impl Host for CodexHost {
             );
             return;
         }
+        if self.persistence_failed.load(Ordering::Acquire) {
+            *self.active.lock().unwrap() = None;
+            emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Codex persistence failed; session cannot safely continue"}}));
+            return;
+        }
         self.index_transcript();
         *self.active.lock().unwrap() = None;
         match result {
-            Ok(_) => {} // The driver emitted a terminal event.
+            Ok(_) => {
+                if let Some(event) = terminal_event {
+                    emit(event);
+                }
+            }
             Err(error) => {
                 let reason = match error {
                     DriverError::Cancelled => "Codex turn cancelled",
