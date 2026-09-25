@@ -13,13 +13,18 @@ the stable 2.0 release has not been cut.
 - Resume verified saved Claude and vendor sessions from a TUI picker; attach
   live sessions by full ID. Search farther back through bounded archived
   transcripts while keeping matching results visible.
-- List safe local branch bases with `doxa-rs branch`, and direct new sessions
+- List safe local branch bases with `doxa branch`, and direct new sessions
   to `new --branch` rather than switching a live checkout's base.
 - List queued prompts and cancel by stable ID. Reject stale positions rather
   than cancelling a different prompt when the queue changes.
-- Replace the model token-usage chip with `p≈X/u≈Y` for project and user
-  curated memory. LORE supplies exact entry character counts; the displayed
-  token counts are estimates and refresh outside the draw loop.
+- Replace the model token-usage chip with `p X%/u Y%` for project and user
+  curated memory. LORE supplies exact entry character counts and separate
+  scope caps; the fill percentages refresh outside the draw loop.
+- Make chip hover tips and clicks follow the rendered pane geometry, including
+  narrow and split layouts. Put read-only chip details above the prompt.
+- Fix pane and prompt hotkeys, including BackTab and Alt+Up split resizing.
+  Make `doxa help` the documented help command and add `doxa update` for an
+  installed Rust launcher.
 - Claim each session before opening saved state, preventing two daemons from
   resuming the same session at once. Reject a live legacy registry before host
   startup; keep a private reusable claim file across shutdown and test the

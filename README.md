@@ -94,6 +94,8 @@ builds committed `HEAD` with the same locked sidecars and launcher as the
 release installer. If an existing local `main` predates the Rust files, run
 `git pull --ff-only` after checking it out; `git checkout main` alone does not
 fetch newer commits.
+Use `doxa help` for commands and `doxa update` to rebuild an installed Rust
+launcher from `main`.
 
 ## Quickstart
 
