@@ -5,7 +5,32 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
-## 2.0.0-alpha.6 — development
+## 2.0.0-alpha.9 — 2026-09-25
+
+- Lead the README with the Rust preview and add six reproducible screenshots
+  rendered by its Ratatui UI. Keep Python 1.x screenshots labeled separately.
+- Add cursor-aware multiline prompts and bounded bracketed paste; reserve
+  `Ctrl+C` for terminal copy.
+- Fail closed on native Codex transcript and thread-state write errors. Mark
+  interrupted or failed turns incomplete so unsafe thread resume is refused.
+- Report the native daemon's package version in its hello frame.
+
+## 2.0.0-alpha.8 — 2026-09-25
+
+- Bundle the Claude SDK sidecar with the Rust preview installer and restore
+  previous installed files after an ordinary interrupted install.
+- Add a read-only LORE belief and evidence picker, file and hunk navigation
+  in the worktree diff, and a confirmed active-session stop action.
+- Cancel a stop confirmation if the terminal becomes too small to show it.
+
+## 2.0.0-alpha.7 — 2026-09-25
+
+- Start a new session from the TUI with engine, model, and first prompt.
+- Show scoped context, token, cost, and LORE chips with explicit unknown values.
+- Add a persistent read-only diff pane and an opt-in, bounded workspace-read
+  tool for vendor sessions.
+
+## 2.0.0-alpha.6 — 2026-09-25
 
 - Index native Codex transcripts through LORE's verified-descriptor API. The
   sidecar opens each path component without following links and passes the
