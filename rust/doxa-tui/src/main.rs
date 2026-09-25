@@ -53,7 +53,7 @@ Claude: --claude-python PATH, --claude-script ABSOLUTE_PATH.
 DeepSeek/GLM: --effort low|high|max (DeepSeek also none).
 Use --lore-python PATH for the LORE sidecar; API keys come from provider env vars.
 
-Fleet: doxa fleet preflight --sessions N --run-budget USD [--root PATH]
+Fleet: doxa fleet preflight --sessions N --run-budget USD [--supervisor ENGINE[:MODEL]] [--approve none|peer|all] [--approval-grace SECONDS] [--root PATH]
        doxa fleet start [Python fleet options]
        doxa fleet runs | status RUN_ID | stop RUN_ID | attach RUN_ID SLOT
 
@@ -514,7 +514,7 @@ fn fleet(args: &[String]) -> io::Result<()> {
             let (socket, session_id) = fleet_view::slot_socket(&root, run, slot)?;
             return bridge::run_socket_expected(socket, Some(&session_id));
         }
-        _ => return Err(invalid("usage: doxa fleet start PYTHON_FLEET_OPTIONS|preflight --sessions N --run-budget USD [--root ABSOLUTE_PATH]|runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]")),
+        _ => return Err(invalid("usage: doxa fleet start PYTHON_FLEET_OPTIONS|preflight --sessions N --run-budget USD [--supervisor ENGINE[:MODEL]] [--approve none|peer|all] [--approval-grace SECONDS] [--root ABSOLUTE_PATH]|runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]")),
     }
     Ok(())
 }
