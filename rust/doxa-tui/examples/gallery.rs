@@ -75,6 +75,13 @@ fn scene(name: &str) -> App {
                     {"id":"q7","preview":"Summarize the test failures and proposed fix"}
                 ]}));
         }
+        "memory" => {
+            app.groups[0].tabs = vec!["demo-codex-01".into()];
+            app.show_memory_menu_fixture(0,
+                &["- Prefer concise explanations [source: codex]", "- Keep test evidence in reports"],
+                &["- Run parser checks before release", "- Keep reconnect behavior stable"],
+                &["- testing: Reconnect must preserve the transcript", "- release: Cite checks before publishing"]);
+        }
         _ => panic!("unknown scene: {name}"),
     }
     app
@@ -93,7 +100,7 @@ fn rgb(color: Color) -> [u8; 3] {
 fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
-        "hero" | "tool-activity" | "needs-input" | "permissions" | "history" | "queue" => (126,31),
+        "hero" | "tool-activity" | "needs-input" | "permissions" | "history" | "queue" | "memory" => (126,31),
         _ => panic!("unknown scene"),
     };
     let app = scene(&name);

@@ -2751,6 +2751,26 @@ impl App {
         self.repo_cache.insert(id.to_owned(), (Some(status), Instant::now()));
     }
 
+    /// Deterministic gallery state for the read-only memory menu. Live menus
+    /// always use the LORE sidecar through `open_memory_menu`.
+    #[doc(hidden)]
+    pub fn show_memory_menu_fixture(&mut self, group: usize, user: &[&str], project: &[&str], beliefs: &[&str]) {
+        if group >= self.groups.len() { return; }
+        self.open_chip_info("memory", group);
+        let Some(info) = self.chip_info.as_mut() else { return; };
+        info.owner = self.groups[group].active_id().and_then(|id|
+            self.session_cwds.get(id).and_then(|cwd| cwd.to_str()).map(|cwd| (id.to_owned(), cwd.to_owned())));
+        let mut lines = vec!["## User memory".to_owned()];
+        lines.extend(user.iter().take(8).map(|line| clipped_title(line, 120).0));
+        lines.extend([String::new(), "## Project memory".to_owned()]);
+        lines.extend(project.iter().take(8).map(|line| clipped_title(line, 120).0));
+        lines.extend([String::new(), "## Global active LORE beliefs · retrieved on demand".to_owned()]);
+        lines.extend(beliefs.iter().take(8).map(|line| clipped_title(line, 120).0));
+        info.lines = lines;
+        info.scroll = 0;
+        self.memory_menu_pending = None;
+    }
+
     fn poll_memory(&mut self) -> bool {
         let mut changed = false;
         if let Some((id, cwd, receiver)) = self.memory_pending.take() {
@@ -6145,6 +6165,20 @@ mod tests {
         let rendered = painted_at(&app, 160, 32);
         assert!(rendered.contains("Session changed; reopen memory"));
         assert!(!rendered.contains("verified folder fact"));
+    }
+
+    #[test]
+    fn memory_gallery_fixture_renders_curated_and_global_sections_without_lore_worker() {
+        let mut app = App::default();
+        app.handle(Event::Resize(120, 32));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"gallery","cwd":"/demo/project"}));
+        app.show_memory_menu_fixture(0, &["- User entry"], &["- Project entry"], &["- Global belief"]);
+        assert!(app.memory_menu_pending.is_none());
+        let rendered = painted_at(&app, 120, 32);
+        assert!(rendered.contains("User entry"), "{rendered}");
+        assert!(rendered.contains("Project entry"), "{rendered}");
+        assert!(rendered.contains("Global active LORE beliefs"), "{rendered}");
+        assert!(rendered.contains("Global belief"), "{rendered}");
     }
 
     #[test]
