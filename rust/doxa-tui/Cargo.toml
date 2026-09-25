@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 doxa-state = { path = "../doxa-state" }
+doxa-lore = { path = "../doxa-lore" }
 crossterm = "0.28"
 doxa-protocol = { path = "../doxa-protocol" }
 libc = "0.2"

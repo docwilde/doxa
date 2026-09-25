@@ -153,6 +153,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "doxa-lore"
+version = "2.0.0-alpha.7"
+dependencies = [
+ "libc",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "doxa-protocol"
 version = "2.0.0-alpha.7"
 dependencies = [
@@ -177,6 +186,7 @@ name = "doxa-tui"
 version = "2.0.0-alpha.7"
 dependencies = [
  "crossterm",
+ "doxa-lore",
  "doxa-protocol",
  "doxa-state",
  "libc",
