@@ -2,7 +2,7 @@
 
 Baseline: the `v1.19.0` Python tag, especially `doxa/commands.py`, its session
 command handlers, and the 1.19 worktree and fleet contracts. This records the
-Rust branch's behavior at `v2.0.0-alpha.14`; it is a release gate, not a
+Rust branch's behavior at `v2.0.0-alpha.15`; it is a release gate, not a
 claim that all Python behavior has been ported.
 
 | Area | Rust state | Remaining 1.19 behavior |
