@@ -18,8 +18,9 @@ the stable 2.0 release has not been cut.
 - List queued prompts and cancel by stable ID. Reject stale positions rather
   than cancelling a different prompt when the queue changes.
 - Claim each session before opening saved state, preventing two daemons from
-  resuming the same session at once. Keep a private reusable claim file across
-  shutdown and test the lifecycle.
+  resuming the same session at once. Reject a live legacy registry before host
+  startup; keep a private reusable claim file across shutdown and test the
+  lifecycle.
 
 ## 2.0.0-alpha.11 — 2026-09-25
 
