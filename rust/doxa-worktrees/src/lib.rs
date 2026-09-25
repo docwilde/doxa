@@ -610,12 +610,18 @@ pub fn cleanup_orphan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // These fixtures set DOXA_HOME/DOXA_WORKTREE for the whole test process.
+    static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
     fn run_git(cwd: &Path, args: &[&str]) {
         let result = Command::new("git").args(args).current_dir(cwd).output().unwrap();
         assert!(result.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&result.stderr));
     }
     #[test]
     fn live_switch_updates_base_and_preserves_dirty_or_unique_work() {
+        let _serial = TEST_ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let dir = tempfile::tempdir().unwrap();
         env::set_var("DOXA_HOME", dir.path().join("home"));
         env::set_var("DOXA_WORKTREE", "1");
@@ -664,6 +670,7 @@ mod tests {
     }
     #[test]
     fn switch_does_not_replay_old_base_commits_when_base_advanced() {
+        let _serial = TEST_ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let dir = tempfile::tempdir().unwrap();
         env::set_var("DOXA_HOME", dir.path().join("home"));
         env::set_var("DOXA_WORKTREE", "1");
@@ -697,6 +704,7 @@ mod tests {
     }
     #[test]
     fn switch_refuses_ignored_files_that_target_would_overwrite() {
+        let _serial = TEST_ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let dir = tempfile::tempdir().unwrap();
         env::set_var("DOXA_HOME", dir.path().join("home"));
         env::set_var("DOXA_WORKTREE", "1");
@@ -722,6 +730,7 @@ mod tests {
     }
     #[test]
     fn clean_tree_is_removed_but_dirty_and_committed_work_are_kept() {
+        let _serial = TEST_ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         env::set_var("DOXA_HOME", &home);
