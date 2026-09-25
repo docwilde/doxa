@@ -66,7 +66,7 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
-clickable links are still 2.0 work. The binary version is `2.0.0-alpha.6` for this
+clickable links are still 2.0 work. The binary version is `2.0.0-alpha.7` for this
 separate development line, not a DOXA 2.0 release.
 
 `Ctrl+R` opens a searchable picker for attached and archived sessions with
@@ -78,12 +78,14 @@ without reading their contents. `F4` keeps that diff visible beside the active
 session while its prompt stays usable; `F5` refreshes it and `Alt+PageUp` /
 `Alt+PageDown` scroll it. The other session pane reappears when the diff pane
 closes. The diff pane is read-only and requires enough terminal space for two
-panes.
-Each split pane has its own prompt and keeps a draft for its active session.
-Its status row shows engine and model chips from that session's daemon hello,
-status, and model change events. `Alt+E` opens an engine picker for the next
-session and shows the exact command to launch it; the active session's engine
-cannot be switched. `Alt+M` opens the live model picker when the daemon
+panes. Each split pane has its own prompt and keeps a draft for its active
+session. Its status rows show engine and model chips, plus context, token usage,
+cost, and LORE status when the daemon reports them. Unknown values display `?`;
+token scope and estimated cost are labeled. `Alt+E` opens an engine picker,
+then a model and first-prompt form that starts a new session in the selected
+pane. A blank model uses the configured default. To start Claude from this
+form, set `DOXA_CLAUDE_SCRIPT` to the absolute sidecar path. The active
+session's engine cannot be switched. `Alt+M` opens the live model picker when the daemon
 advertises model control. Claude catalog choices come from a bounded startup
 CLI probe; an unavailable catalog offers no guessed models. The colors follow
 Python DOXA's warm dark palette.
