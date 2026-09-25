@@ -2,13 +2,37 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+const BELIEF_LIMIT: u8 = 20;
+
+fn bounded_line(value: &str, limit: usize) -> String {
+    let clean = crate::markdown::sanitize(value).replace('\n', " ");
+    let mut chars = clean.chars();
+    let mut line: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() { line.push('…'); }
+    line
+}
+
+fn belief_lines(beliefs: Vec<crate::lore_picker::Belief>) -> Vec<String> {
+    let mut lines = vec![format!("## Global active LORE beliefs (newest up to {BELIEF_LIMIT}; retrieved on demand)")];
+    if beliefs.is_empty() {
+        lines.push("No active beliefs".to_owned());
+    } else {
+        for belief in beliefs {
+            let subject = bounded_line(&belief.subject, 80);
+            let claim = bounded_line(&belief.claim, 400);
+            lines.push(format!("- {subject}: {claim}{}", if belief.truncated { "…" } else { "" }));
+        }
+    }
+    lines
+}
+
 fn section(snapshot: &str, prefix: &str) -> Option<Vec<String>> {
     let mut lines = snapshot.lines();
     let heading = lines.by_ref().find(|line| line.starts_with(prefix))?;
-    let mut rows = vec![heading.to_owned()];
+    let mut rows = vec![bounded_line(heading, 400)];
     for line in lines {
         if line.is_empty() || line.starts_with("## ") { break; }
-        rows.push(line.to_owned());
+        rows.push(bounded_line(line, 400));
     }
     Some(rows)
 }
@@ -39,7 +63,18 @@ pub fn fetch(python: &Path, cwd: &Path) -> Result<Vec<String>, &'static str> {
     rows.extend(scoped);
     if let Some(hint) = project_snapshot.lines().find(|line| line.starts_with("Belief store:")) {
         rows.push(String::new());
-        rows.push(hint.to_owned());
+        rows.push(bounded_line(hint, 400));
+    }
+    rows.push(String::new());
+    let beliefs = lore.beliefs(0, BELIEF_LIMIT)
+        .map_err(|_| "Global beliefs unavailable")
+        .and_then(|rows| crate::lore_picker::parse_beliefs(rows).map_err(|_| "Global beliefs unavailable"));
+    match beliefs {
+        Ok(beliefs) => rows.extend(belief_lines(beliefs)),
+        Err(message) => {
+            rows.push("## Global active LORE beliefs".to_owned());
+            rows.push(message.to_owned());
+        }
     }
     if rows.len() > 400 || rows.iter().map(String::len).sum::<usize>() > 32 * 1024 {
         return Err("LORE memory entries exceed menu limit");
@@ -58,9 +93,13 @@ mod tests {
         let script = dir.join("fake-lore");
         fs::write(&script, r#"#!/usr/bin/env python3
 import json, sys
-print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot']}), flush=True)
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','beliefs']}), flush=True)
 for line in sys.stdin:
     req = json.loads(line)
+    if req['op'] == 'beliefs':
+        value = [{'id':4,'subject':'global','claim':'remember to cite evidence','claim_truncated':False,'confidence':0.9,'evidence_count':2}]
+        print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
+        continue
     if req['scope'] == 'user':
         text = '## User memory (10/100 chars)\n- prefers concise text [source: codex]\n\nRules:\n'
     else:
@@ -85,12 +124,41 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn bounds_and_sanitizes_snapshot_and_global_belief_rows() {
+        let snapshot = format!("## User memory\n- useful\u{1b}[31m{}\n\nRules:\n", "x".repeat(2000));
+        let rows = section(&snapshot, "## User memory").unwrap();
+        assert!(rows[1].starts_with("- useful�[31m"));
+        assert!(rows[1].ends_with('…'));
+        assert!(rows[1].chars().count() <= 401);
+        let beliefs = belief_lines(vec![crate::lore_picker::Belief {
+            id: 4, subject: "all\nusers".into(), claim: format!("safe\u{1b}[31m{}", "x".repeat(2000)),
+            truncated: false, confidence: 0.9, evidence_count: Some(2),
+        }]);
+        assert!(beliefs[0].starts_with("## Global active LORE beliefs"));
+        assert!(beliefs[1].starts_with("- all users: safe�[31m"));
+        assert!(beliefs[1].ends_with('…'));
+        assert!(beliefs[1].chars().count() <= 490);
+    }
+
+    #[test]
+    fn unavailable_global_beliefs_do_not_hide_scoped_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = fake_lore(dir.path());
+        let source = fs::read_to_string(&script).unwrap();
+        fs::write(&script, source.replace("'ok':True,'value':value", "'ok':False,'error':'unavailable'")).unwrap();
+        let rows = fetch(&script, dir.path()).unwrap();
+        assert!(rows.iter().any(|row| row.contains("- run checks")));
+        assert!(rows.iter().any(|row| row == "Global beliefs unavailable"));
+    }
+
+    #[test]
     fn plain_directory_keeps_lore_folder_scope_without_claiming_repo() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(scope_path(dir.path()), (dir.path().to_path_buf(), false));
         let rows = fetch(&fake_lore(dir.path()), dir.path()).unwrap();
         assert!(rows.iter().any(|row| row.starts_with("## Folder memory")));
         assert!(rows.iter().any(|row| row.contains("- run checks")));
+        assert!(rows.iter().any(|row| row.contains("global: remember to cite evidence")));
         assert!(!rows.iter().any(|row| row.starts_with("## Project memory")));
     }
 
@@ -115,6 +183,8 @@ for line in sys.stdin:
         assert!(rows.iter().any(|row| row.contains("[source: codex]")));
         assert!(rows.iter().any(|row| row.contains(main.to_str().unwrap())));
         assert!(rows.iter().any(|row| row.starts_with("Belief store: 3 active beliefs")));
+        assert!(rows.iter().any(|row| row.starts_with("## Global active LORE beliefs")));
+        assert!(rows.iter().any(|row| row.contains("global: remember to cite evidence")));
         assert!(!rows.iter().any(|row| row.contains(tree.to_str().unwrap())));
     }
 }
