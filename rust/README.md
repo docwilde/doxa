@@ -1,5 +1,8 @@
 # DOXA Rust 2.0
 
+The [1.19 parity tracker](../docs/rust-1.19-parity.md) names the remaining
+features before a stable Rust 2.0 release.
+
 Rust 2.0 is the main DOXA frontend. The installer exposes it as `doxa`; the
 build artifact is still named `doxa-rs` for source builds. The Python 1.x
 frontend is retired from the current installer. Python remains in a private
