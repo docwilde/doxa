@@ -2,7 +2,7 @@
 use doxa_lore::LoreClient;
 use doxa_runtime::Host;
 use doxa_transcript::TranscriptStore;
-use doxa_vendors::{Error, Vendor, MAX_TURN_DURATION};
+use doxa_vendors::{Delta, Error, Vendor, MAX_TURN_DURATION};
 use crate::vendor_tools::WorkspaceReadGate;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -11,6 +11,20 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
+
+const EVENT_TEXT_CHUNK_BYTES: usize = 8 * 1024;
+
+fn emit_content_chunks(kind: &str, content: &str, approx_tokens: u64, emit: &mut dyn FnMut(Value)) {
+    let mut start = 0;
+    while start < content.len() {
+        let mut end = (start + EVENT_TEXT_CHUNK_BYTES).min(content.len());
+        while !content.is_char_boundary(end) { end -= 1; }
+        let chunk = &content[start..end];
+        emit(json!({"type":kind,"data":{"text":chunk,"approx_tokens":approx_tokens,
+            "final":end == content.len()}}));
+        start = end;
+    }
+}
 
 pub struct VendorHost {
     vendor: Vendor,
@@ -209,6 +223,22 @@ impl Host for VendorHost {
         let scrub_tool = |value: &str| self.scrub(value);
         let mut gate = WorkspaceReadGate::new(Path::new(&self.cwd), &scrub_tool);
         let gate = if self.workspace_read { Some(&mut gate as &mut dyn doxa_vendors::ToolGate) } else { None };
+        let mut reasoning_chars = 0u64;
+        let mut reported_tokens = 0u64;
+        let mut last_progress = Instant::now();
+        let mut on_delta = |delta: Delta| {
+            if let Delta::Reasoning(text) = delta {
+                reasoning_chars = reasoning_chars.saturating_add(text.chars().count() as u64);
+                let estimate = reasoning_chars.div_ceil(4);
+                if estimate > reported_tokens && last_progress.elapsed() >= Duration::from_millis(100) {
+                    reported_tokens = estimate;
+                    last_progress = Instant::now();
+                    // Only the count crosses this boundary before LORE has
+                    // scrubbed the complete reasoning stream.
+                    emit(json!({"type":"reasoning_progress","data":{"approx_tokens":estimate}}));
+                }
+            }
+        };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build();
@@ -226,7 +256,7 @@ impl Host for VendorHost {
                         gate,
                         cancel,
                         MAX_TURN_DURATION,
-                        |_| {},
+                        &mut on_delta,
                     ))
                 } else {
                     runtime.block_on(doxa_vendors::run_turn(
@@ -238,7 +268,7 @@ impl Host for VendorHost {
                         gate,
                         cancel,
                         MAX_TURN_DURATION,
-                        |_| {},
+                        &mut on_delta,
                     ))
                 }
                 #[cfg(not(feature = "local-test-server"))]
@@ -251,11 +281,14 @@ impl Host for VendorHost {
                     gate,
                     cancel,
                     MAX_TURN_DURATION,
-                    |_| {},
+                    &mut on_delta,
                 ))
             }
             Err(_) => Err(Error::Transport),
         };
+        if reasoning_chars > 0 && reasoning_chars.div_ceil(4) > reported_tokens {
+            emit(json!({"type":"reasoning_progress","data":{"approx_tokens":reasoning_chars.div_ceil(4)}}));
+        }
         *self.active.lock().unwrap() = None;
         match result {
             Ok(outcome) => {
@@ -314,10 +347,10 @@ impl Host for VendorHost {
                     self.committed_bytes
                         .store(committed_bytes, Ordering::Release);
                     if !reasoning.is_empty() {
-                        emit(json!({"type":"reasoning_delta","data":{"text":reasoning}}));
+                        emit_content_chunks("reasoning_delta", &reasoning, reasoning_chars.div_ceil(4), emit);
                     }
                     if !text.is_empty() {
-                        emit(json!({"type":"text_delta","data":{"text":text}}));
+                        emit_content_chunks("text_delta", &text, 0, emit);
                     }
                     let turns = self.turns.fetch_add(1, Ordering::AcqRel) + 1;
                     self.refresh_balance();
@@ -381,4 +414,22 @@ impl Host for VendorHost {
 fn done(message: &str) -> Value {
     json!({"type":"turn_done","data":{"is_error":true,"error":message,
         "cost_usd":null,"session_cost_usd":null}})
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    #[test]
+    fn scrubbed_reasoning_chunks_keep_utf8_and_final_boundary() {
+        let text = format!("{}end", "é".repeat(25_000));
+        let mut frames = Vec::new();
+        emit_content_chunks("reasoning_delta", &text, 12_500, &mut |frame| frames.push(frame));
+        assert!(frames.len() > 1);
+        let rebuilt: String = frames.iter().map(|frame| frame["data"]["text"].as_str().unwrap()).collect();
+        assert_eq!(rebuilt, text);
+        assert!(frames.iter().all(|frame| serde_json::to_vec(frame).unwrap().len() < doxa_runtime::MAX_FRAME_BYTES));
+        assert!(frames[..frames.len() - 1].iter().all(|frame| frame["data"]["final"] == false));
+        assert_eq!(frames.last().unwrap()["data"]["final"], true);
+    }
 }

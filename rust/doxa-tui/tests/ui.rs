@@ -612,7 +612,8 @@ fn structured_events_render_in_target_pane_and_track_status() {
     assert_eq!(app.sessions[1].status, "Error");
     assert!(app.sessions[0].transcript.is_empty());
     let rendered = screen(&app, 110, 30);
-    assert!(rendered.contains("Reasoning:"));
+    assert!(rendered.contains("Reasoning/Thinking"));
+    assert!(!rendered.contains("Checking the repository"));
     assert!(rendered.contains("1 tool call"));
     assert!(rendered.contains("Peer Worker:"));
     assert!(app.sessions[1].transcript.contains("Turn failed: failed"));

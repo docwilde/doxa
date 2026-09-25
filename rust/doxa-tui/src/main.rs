@@ -33,7 +33,9 @@ Commands:
   stop [ID]            Stop a live session
   list                 List live sessions
   branch [NAME]        List branches; use NAME --session ID to switch an idle session
-  worktrees            List orphaned managed worktrees for manual review
+  worktrees [list]     Preview orphaned managed worktrees
+  worktrees cleanup FULL_ID --confirm
+                       Remove one verified clean Rust orphan
   doctor               Check provider and launcher dependencies
   fleet ...            Inspect or start Python-backed fleet runs
 
@@ -411,15 +413,36 @@ fn run(args: &[String]) -> io::Result<()> {
 }
 
 fn worktrees(args: &[String]) -> io::Result<()> {
-    if !(args.is_empty() || matches!(args, [action] if action == "list")) {
-        return Err(invalid("usage: doxa worktrees [list]"));
-    }
+    let cleanup_id = match args {
+        [] => None,
+        [action] if action == "list" => None,
+        [action, id, confirm] if action == "cleanup" && confirm == "--confirm" && !id.is_empty() => Some(id.as_str()),
+        _ => return Err(invalid("usage: doxa worktrees [list] | cleanup FULL_SESSION_ID --confirm")),
+    };
     let live: HashSet<String> = discovery::sessions()?.into_iter().map(|session| session.id).collect();
     let previews = doxa_worktrees::preview_orphans(&live);
+    if let Some(id) = cleanup_id {
+        let mut matches = previews.into_iter().filter(|preview| preview.record.session_id == id);
+        let preview = matches.next().ok_or_else(|| invalid("no verified orphan has that full session ID"))?;
+        if matches.next().is_some() {
+            return Err(invalid("more than one orphan has that session ID; cleanup refused"));
+        }
+        match doxa_worktrees::cleanup_orphan(&preview, || {
+            discovery::sessions().ok().map(|sessions| sessions.into_iter().map(|session| session.id).collect())
+        }) {
+            doxa_worktrees::CleanupResult::Removed => {
+                println!("removed clean orphan {} ({})", id, preview.record.branch);
+                return Ok(());
+            }
+            doxa_worktrees::CleanupResult::Kept(reason) => {
+                return Err(io::Error::other(format!("kept {id}: {reason}")));
+            }
+        }
+    }
     println!("managed worktrees without an attachable session: {}", previews.len());
     for preview in previews {
         let state = match preview.state {
-            doxa_worktrees::OrphanState::Ready { .. } => "clean; review manually",
+            doxa_worktrees::OrphanState::Ready { .. } => "clean; eligible for explicit cleanup",
             doxa_worktrees::OrphanState::Dirty => "dirty; kept",
             doxa_worktrees::OrphanState::UniqueCommits => "unique commits; kept",
             doxa_worktrees::OrphanState::Uncertain => "uncertain; kept",

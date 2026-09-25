@@ -45,6 +45,7 @@ const SPINNER_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 // JSON may expand one input byte to a six-byte Unicode escape.
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
+const MAX_REASONING_DISPLAY_CHARS: usize = 48 * 1024;
 const MAX_ANSWER_BYTES: usize = 10 * 1024;
 // Reserve metadata wrapping even in a narrow review modal. This is also the
 // number used by the read-through gate, so it never credits hidden raw rows.
@@ -63,6 +64,21 @@ const ACTIONS: [(&str, &str); 13] = [
     ("Session model", "Alt+M"),
     ("Claude permissions", "Alt+P"),
     ("Stop active session", "Alt+X"),
+];
+const SLASH_COMMANDS: [(&str, &str); 25] = [
+    ("/help", "Open actions"), ("/about", "Show Rust version"),
+    ("/sessions", "Browse sessions"), ("/search", "Search saved sessions"),
+    ("/resume", "Resume saved session"), ("/attach", "Attach live session"),
+    ("/queue", "Queued prompts"), ("/pending", "LORE proposals"),
+    ("/model", "Select model"), ("/effort", "Reasoning effort"),
+    ("/engine", "Select engine"), ("/mode", "Permissions"),
+    ("/beliefs", "LORE beliefs"), ("/diff", "Worktree diff"),
+    ("/peers", "Peer map"), ("/mesh", "Peer map"),
+    ("/msg", "Message a peer"), ("/branch", "Switch branch"),
+    ("/rename", "Rename session"), ("/split", "Horizontal split"),
+    ("/vsplit", "Vertical split"), ("/pane", "Switch pane"),
+    ("/sidebar", "Session rail"), ("/detach", "Close tab"),
+    ("/dir", "Session directory"),
 ];
 
 const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
@@ -426,10 +442,44 @@ fn append_turn_heading(session: &mut Session, heading: &str) -> bool {
     append_transcript(session, &format!("{separator}**{heading}:**\n\n"))
 }
 
+#[derive(Default)]
+struct ReasoningStream {
+    text: String,
+    tokens: u64,
+    visible: bool,
+    streaming: bool,
+}
+impl std::fmt::Debug for ReasoningStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReasoningStream")
+            .field("text_chars", &self.text.chars().count())
+            .field("tokens", &self.tokens)
+            .field("visible", &self.visible)
+            .field("streaming", &self.streaming)
+            .finish()
+    }
+}
+
+fn set_reasoning_marker(session: &mut Session, stream: &ReasoningStream) {
+    let marker = format!("{}{}", transcript_tools::REASONING_PREFIX,
+        serde_json::json!({"text":stream.text,"tokens":stream.tokens,"streaming":stream.streaming}));
+    if stream.visible {
+        if let Some(start) = session.transcript.rfind(transcript_tools::REASONING_PREFIX) {
+            let end = session.transcript[start..].find("\n\n")
+                .map(|offset| start + offset).unwrap_or(session.transcript.len());
+            session.transcript.replace_range(start..end, &marker);
+            if session.transcript.len() > MAX_TRANSCRIPT_BYTES {
+                session.transcript = transcript_tail(&session.transcript).to_owned();
+            }
+            return;
+        }
+    }
+    append_transcript(session, &format!("\n\n{marker}\n\n"));
+}
+
 fn structured_event(event_type: &str, data: &serde_json::Value) -> Option<String> {
     let field = |key| event_string(data, key).unwrap_or_default();
     let row = match event_type {
-        "reasoning_delta" => format!("Reasoning: {}", field("text")),
         "tool_call" => {
             let name = field("name");
             let input = data
@@ -488,7 +538,14 @@ fn structured_event(event_type: &str, data: &serde_json::Value) -> Option<String
         }
         _ => return None,
     };
-    Some(format!("\n\n{row}\n\n"))
+    let identity = if matches!(event_type, "tool_call" | "tool_result") {
+        data.get("id").and_then(|value| value.as_str())
+            .filter(|id| !id.is_empty() && id.len() <= 200 && !id.chars().any(char::is_control))
+            .map(|id| format!("{}{}", transcript_tools::TOOL_ID_PREFIX,
+                serde_json::to_string(id).unwrap_or_default()))
+            .unwrap_or_default()
+    } else { String::new() };
+    Some(format!("\n\n{row}{identity}\n\n"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -861,6 +918,7 @@ pub struct App {
     permission_modes: HashMap<String, String>,
     session_activity: HashMap<String, (bool, usize)>,
     streaming_text: HashSet<String>,
+    reasoning_streams: HashMap<String, ReasoningStream>,
     spinner_at: Instant,
     spinner_frame: usize,
     permission_picker: Option<(String, usize)>,
@@ -899,6 +957,8 @@ pub struct App {
     map_modal: bool,
     action_menu: bool,
     action_selected: usize,
+    slash_selected: usize,
+    slash_dismissed: bool,
     history_modal: bool,
     history_resume: bool,
     history_explicit: bool,
@@ -985,6 +1045,7 @@ impl Default for App {
             permission_modes: HashMap::new(),
             session_activity: HashMap::new(),
             streaming_text: HashSet::new(),
+            reasoning_streams: HashMap::new(),
             spinner_at: Instant::now(),
             spinner_frame: 0,
             permission_picker: None,
@@ -1023,6 +1084,8 @@ impl Default for App {
             map_modal: false,
             action_menu: false,
             action_selected: 0,
+            slash_selected: 0,
+            slash_dismissed: false,
             history_modal: false,
             history_resume: false,
             history_explicit: false,
@@ -1277,11 +1340,13 @@ impl App {
                 let Some(id) = frame.get("session_id").and_then(|v| v.as_str()).map(str::to_owned) else {
                     return false;
                 };
+                let mut tool_updated = false;
                 if self.sessions.iter().any(|session| session.id == id) {
-                    self.tool_cards.record(&id, event_type, data);
+                    tool_updated = self.tool_cards.record(&id, event_type, data);
                     self.peer_map.event(&id, event_type, data);
                 }
                 match event_type {
+                    "tool_result_detail" => tool_updated,
                     "branch_changed" => {
                         self.invalidate_repo(&id);
                         true
@@ -1332,8 +1397,11 @@ impl App {
                             false
                         }
                     }
+                    "reasoning_progress" => self.append_reasoning(&id, data, true),
+                    "reasoning_delta" => self.append_reasoning(&id, data, false),
                     "turn_started" => {
                         self.streaming_text.remove(&id);
+                        self.reasoning_streams.remove(&id);
                         if let Some(prompt) = data.get("prompt").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
                             if let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) {
                                 let prompt = markdown::sanitize(prompt);
@@ -1350,6 +1418,12 @@ impl App {
                     }
                     "turn_done" => {
                         self.streaming_text.remove(&id);
+                        if let Some(stream) = self.reasoning_streams.get_mut(&id) {
+                            stream.streaming = false;
+                            if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
+                                set_reasoning_marker(session, stream);
+                            }
+                        }
                         self.session_telemetry.entry(id.clone()).or_default().update_turn(data);
                         self.session_activity.entry(id.clone()).or_default().0 = false;
                         let status = if data.get("is_error").and_then(|v| v.as_bool()) == Some(true)
@@ -1721,7 +1795,7 @@ impl App {
         let Some(row) = structured_event(event_type, data) else {
             return false;
         };
-        let heading_needed = matches!(event_type, "reasoning_delta" | "tool_call" | "tool_result")
+        let heading_needed = matches!(event_type, "tool_call" | "tool_result")
             && self.streaming_text.insert(id.to_owned());
         let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) else {
             return false;
@@ -1730,6 +1804,33 @@ impl App {
         if append_transcript(session, &row) {
             self.notice = "Transcript tail limited to 512 KiB".into();
         }
+        true
+    }
+
+    fn append_reasoning(&mut self, id: &str, data: &serde_json::Value, progress: bool) -> bool {
+        let stream = self.reasoning_streams.entry(id.to_owned()).or_default();
+        if let Some(tokens) = data.get("approx_tokens").and_then(|value| value.as_u64()) {
+            stream.tokens = stream.tokens.max(tokens);
+        }
+        if progress {
+            stream.streaming = true;
+        } else {
+            let Some(text) = data.get("text").and_then(|value| value.as_str()) else { return false; };
+            let clean = markdown::sanitize(text);
+            let remaining = MAX_REASONING_DISPLAY_CHARS.saturating_sub(stream.text.chars().count());
+            stream.text.extend(clean.chars().take(remaining));
+            if clean.chars().count() > remaining && !stream.text.ends_with("[Reasoning display limit reached]") {
+                stream.text.push_str("\n[Reasoning display limit reached]");
+            }
+            stream.tokens = stream.tokens.max(stream.text.chars().count().div_ceil(4) as u64);
+            stream.streaming = data.get("final").and_then(|value| value.as_bool()) == Some(false);
+        }
+        let first = !stream.visible;
+        let heading_needed = first && self.streaming_text.insert(id.to_owned());
+        let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) else { return false; };
+        if heading_needed { append_turn_heading(session, "Assistant"); }
+        set_reasoning_marker(session, stream);
+        stream.visible = true;
         true
     }
 
@@ -1790,6 +1891,8 @@ impl App {
             self.input_drafts
                 .insert(before, (std::mem::take(&mut self.input), self.input_cursor));
             (self.input, self.input_cursor) = self.input_drafts.remove(&after).unwrap_or_default();
+            self.slash_selected = 0;
+            self.slash_dismissed = false;
         }
         changed
     }
@@ -1830,6 +1933,8 @@ impl App {
         if !clean.is_empty() {
             self.input.insert_str(self.input_cursor, &clean);
             self.input_cursor += clean.len();
+            self.slash_selected = 0;
+            self.slash_dismissed = false;
         }
         if truncated { self.notice = "Prompt input limit reached · paste truncated".into(); }
         !clean.is_empty() || truncated
@@ -1852,7 +1957,34 @@ impl App {
         } else {
             self.input.insert(self.input_cursor, ch);
             self.input_cursor += ch.len_utf8();
+            self.slash_selected = 0;
+            self.slash_dismissed = false;
         }
+        true
+    }
+
+    fn slash_suggestions(&self) -> Vec<(&'static str, &'static str)> {
+        if self.focus != Focus::Prompt || self.slash_dismissed
+            || self.active_request_index().is_some() || self.stop_confirmation.is_some()
+            || self.chip_info.is_some() || self.lore_picker.is_some()
+            || self.new_session.is_some() || self.model_picker.is_some()
+            || self.effort_picker.is_some() || self.permission_picker.is_some()
+            || self.engine_picker || self.action_menu || self.history_modal
+            || self.queue_picker.is_some() || self.attach_picker.is_some()
+            || self.diff_modal || self.map_modal || self.tool_modal {
+            return Vec::new();
+        }
+        let query = self.input.as_str();
+        if !query.starts_with('/') || query.chars().any(char::is_whitespace) { return Vec::new(); }
+        SLASH_COMMANDS.iter().copied().filter(|(name, _)| name.starts_with(query)).collect()
+    }
+
+    fn complete_slash(&mut self) -> bool {
+        let matches = self.slash_suggestions();
+        let Some((command, _)) = matches.get(self.slash_selected.min(matches.len().saturating_sub(1))) else { return false; };
+        self.input = (*command).to_owned();
+        self.input_cursor = self.input.len();
+        self.slash_dismissed = true;
         true
     }
 
@@ -2133,6 +2265,30 @@ impl App {
                 _ => {}
             }
         }
+        if !ctrl && !alt && !key.modifiers.contains(KeyModifiers::SHIFT) {
+            let suggestions = self.slash_suggestions();
+            if !suggestions.is_empty() {
+                match key.code {
+                    KeyCode::Up => {
+                        self.slash_selected = self.slash_selected.saturating_sub(1);
+                        return true;
+                    }
+                    KeyCode::Down => {
+                        self.slash_selected = (self.slash_selected + 1).min(suggestions.len() - 1);
+                        return true;
+                    }
+                    KeyCode::Tab => return self.complete_slash(),
+                    KeyCode::Esc => {
+                        self.slash_dismissed = true;
+                        return true;
+                    }
+                    KeyCode::Enter if suggestions[self.slash_selected.min(suggestions.len() - 1)].0 != self.input => {
+                        return self.complete_slash();
+                    }
+                    _ => {}
+                }
+            }
+        }
         match key.code {
             KeyCode::F(3) => {
                 self.rail_visible = !self.rail_visible;
@@ -2260,12 +2416,16 @@ impl App {
                 if let Some((index, _)) = self.input[..self.input_cursor].char_indices().next_back() {
                     self.input.drain(index..self.input_cursor);
                     self.input_cursor = index;
+                    self.slash_selected = 0;
+                    self.slash_dismissed = false;
                     true
                 } else { false }
             }
             KeyCode::Delete if self.focus == Focus::Prompt => {
                 if let Some(ch) = self.input[self.input_cursor..].chars().next() {
                     self.input.drain(self.input_cursor..self.input_cursor + ch.len_utf8());
+                    self.slash_selected = 0;
+                    self.slash_dismissed = false;
                     true
                 } else { false }
             }
@@ -4480,6 +4640,8 @@ impl App {
             (picker.rows.len() + 3).clamp(5, 15) as u16
         } else if self.attach_picker.is_some() {
             (self.attach_matches().len() + 3).clamp(5, 15) as u16
+        } else if !self.slash_suggestions().is_empty() {
+            (self.slash_suggestions().len() + 2).clamp(5, 10) as u16
         } else {
             return None;
         };
@@ -4768,6 +4930,34 @@ impl App {
                 self.memory_menu_pending = None;
                 if inside { return true; }
             } else { return false; }
+        }
+        let suggestions = self.slash_suggestions();
+        if !suggestions.is_empty() {
+            if let Some(menu) = self.active_chooser_rect() {
+                if menu.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            let visible = usize::from(menu.height.saturating_sub(2)).max(1);
+                            let start = self.slash_selected.saturating_sub(visible.saturating_sub(1));
+                            let position = start + usize::from(mouse.row.saturating_sub(menu.y + 1));
+                            if mouse.row > menu.y && position < suggestions.len() {
+                                self.slash_selected = position;
+                                self.complete_slash();
+                            }
+                            return true;
+                        }
+                        MouseEventKind::ScrollUp => {
+                            self.slash_selected = self.slash_selected.saturating_sub(1);
+                            return true;
+                        }
+                        MouseEventKind::ScrollDown => {
+                            self.slash_selected = (self.slash_selected + 1).min(suggestions.len() - 1);
+                            return true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
         if self.attach_picker.is_some() {
             let Some(menu) = self.active_chooser_rect() else { return false; };
@@ -5466,6 +5656,27 @@ impl App {
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
     }
 
+    fn draw_slash_suggestions(&self, frame: &mut Frame, area: Rect) {
+        let matches = self.slash_suggestions();
+        if matches.is_empty() { return; }
+        let visible = usize::from(area.height.saturating_sub(2)).max(1);
+        let selected = self.slash_selected.min(matches.len() - 1);
+        let start = selected.saturating_sub(visible.saturating_sub(1));
+        let rows: Vec<Line> = matches.iter().enumerate().skip(start).take(visible)
+            .map(|(index, (command, description))| {
+                let label = format!(" {} {:<12} {}", if index == selected { '›' } else { ' ' }, command, description);
+                let label = clipped_title(&label, usize::from(area.width.saturating_sub(2))).0;
+                let style = if index == selected {
+                    Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD)
+                } else { Style::default().fg(theme::SECONDARY) };
+                Line::styled(label, style)
+            }).collect();
+        frame.render_widget(Paragraph::new(rows).block(Block::default()
+            .title(" Commands · ↑/↓ select · Tab complete ")
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
+            .style(Style::default().bg(theme::RAISED)), area);
+    }
+
     fn draw_queue_picker(&self, frame: &mut Frame, area: Rect) {
         let Some(picker) = &self.queue_picker else { return; };
         let mut lines = vec![Line::from(if picker.loading { " Refreshing queue…" }
@@ -5907,16 +6118,13 @@ impl App {
         .block(
             Block::default()
                 .title(format!(
-                    " Pane {}{}{} ",
+                    " Pane {}{} ",
                     index + 1,
                     if self.active_group == index {
                         " ●"
                     } else {
                         ""
                     },
-                    group.active_id().and_then(|id| self.activity_label(id))
-                        .map(|label| format!(" · {} {label}", SPINNER_FRAMES[self.spinner_frame]))
-                        .unwrap_or_default(),
                 ))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(if group.active_id().is_some_and(|id| self.waiting_for_input(id)) && self.blink_on {
@@ -5928,14 +6136,23 @@ impl App {
             .map(|s| s.transcript.as_str())
             .unwrap_or("No session open. Select one in the rail and press Enter.");
         let id = group.active_id().unwrap_or("");
-        let (lines, sections) = transcript_tools::render(
+        let (mut lines, sections) = transcript_tools::render_with_cards(
             content,
             inner[1].width.saturating_sub(2),
             self.expanded_tool_sections.get(id),
             (active && self.focus == Focus::Transcript)
                 .then(|| self.selected_tool_sections.get(id).copied())
                 .flatten(),
+            self.tool_cards.for_session(id),
         );
+        if self.activity_label(id) == Some("Processing") {
+            lines.push(Line::styled(
+                format!(" {} Processing…", SPINNER_FRAMES[self.spinner_frame]),
+                Style::default().fg(theme::ACCENT),
+            ));
+        } else if self.activity_label(id) == Some("Queued") {
+            lines.push(Line::styled(" Queued", Style::default().fg(theme::SECONDARY)));
+        }
         let top = lines.len().saturating_sub(usize::from(inner[1].height))
             .saturating_sub(group.scroll.min(lines.len().saturating_sub(usize::from(inner[1].height))));
         for section in sections {
@@ -5978,6 +6195,8 @@ impl App {
                 self.draw_queue_picker(frame, inner[2]);
             } else if self.attach_picker.is_some() {
                 self.draw_attach_picker(frame, inner[2]);
+            } else if !self.slash_suggestions().is_empty() {
+                self.draw_slash_suggestions(frame, inner[2]);
             }
         }
         let mut chip_spans = Vec::new();
@@ -7485,6 +7704,50 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn slash_autocomplete_appears_above_prompt_and_completes_without_sending() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("s".into());
+        app.handle(Event::Resize(100, 28));
+        for ch in "/he".chars() {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+        }
+        assert_eq!(app.slash_suggestions(), vec![("/help", "Open actions")]);
+        assert!(painted(&app).contains("Commands"));
+        assert!(app.active_chooser_rect().is_some());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        assert_eq!(app.input, "/help");
+        assert!(app.slash_suggestions().is_empty());
+        assert!(app.pending_prompts.is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.action_menu);
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn slash_autocomplete_mouse_choice_and_escape_preserve_draft() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("s".into());
+        app.handle(Event::Resize(100, 28));
+        for ch in "/mo".chars() {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+        }
+        assert_eq!(app.slash_suggestions().len(), 2);
+        painted(&app);
+        let menu = app.active_chooser_rect().unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.x + 2, row: menu.y + 2, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.input, "/mode");
+        assert!(app.slash_suggestions().is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
+        assert_eq!(app.input, "/mod");
+        assert!(!app.slash_suggestions().is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert_eq!(app.input, "/mod");
+        assert!(app.slash_suggestions().is_empty());
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
     fn bare_doxa_commands_stay_local_and_unknown_provider_commands_pass_through() {
         let mut app = App::default();
         app.groups[0].tabs.push("s".into());
@@ -8575,6 +8838,38 @@ for line in sys.stdin:
         app.session_activity.insert("s".into(), (false, 0));
         assert!(!app.tick_spinner(start + SPINNER_INTERVAL * 2));
         assert!(!painted(&app).contains("Processing"));
+    }
+
+    #[test]
+    fn streamed_reasoning_counts_live_then_reveals_only_on_expand() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s"}));
+        let event = |kind: &str, data: serde_json::Value| json!({"type":"event", "session_id":"s",
+            "event":{"type":kind,"data":data}});
+        app.apply_daemon_frame(&event("turn_started", json!({"prompt":"check"})));
+        app.apply_daemon_frame(&event("reasoning_progress", json!({"approx_tokens":37})));
+        let transcript = &app.sessions[0].transcript;
+        let (live, sections) = transcript_tools::render(transcript, 80, None, None);
+        assert_eq!(sections.len(), 1);
+        assert!(live.iter().any(|line| line.to_string().contains("~37 tokens · receiving")));
+        app.apply_daemon_frame(&event("reasoning_delta", json!({"text":"scrubbed thought","approx_tokens":42,"final":true})));
+        app.apply_daemon_frame(&event("text_delta", json!({"text":"Answer"})));
+        app.apply_daemon_frame(&event("turn_done", json!({"is_error":false})));
+        let transcript = &app.sessions[0].transcript;
+        let (collapsed, _) = transcript_tools::render(transcript, 80, None, None);
+        assert!(!collapsed.iter().any(|line| line.to_string().contains("scrubbed thought")));
+        assert!(collapsed.iter().any(|line| line.to_string().contains("~42 tokens")));
+        let (expanded, _) = transcript_tools::render(transcript, 80, Some(&HashSet::from([0])), None);
+        assert!(expanded.iter().any(|line| line.to_string().contains("scrubbed thought")));
+        assert!(expanded.iter().any(|line| line.to_string().contains("Answer")));
+        app.handle(Event::Resize(100, 28));
+        painted(&app);
+        let hit = app.visible_tool_sections.borrow().iter()
+            .find(|(_, _, session, section)| session == "s" && *section == 0)
+            .map(|(rect, _, _, _)| *rect).unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.x + 1, row: hit.y, modifiers: KeyModifiers::NONE }));
+        assert!(app.expanded_tool_sections["s"].contains(&0));
     }
 
     #[test]

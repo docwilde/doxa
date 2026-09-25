@@ -1,12 +1,18 @@
 //! Fold tool activity into one expandable section per conversation turn.
-//! The transcript remains the source of truth; expansion changes only rendering.
+//! The transcript locates each section; live scrubbed tool cards supply its
+//! expanded details. Expansion changes only rendering.
 
 use std::collections::HashSet;
 
 use ratatui::{style::{Modifier, Style}, text::Line};
+use unicode_width::UnicodeWidthChar;
 
 use crate::{markdown, theme};
 use super::transcript_roles::{self, Speaker};
+use super::tool_cards::ToolCard;
+
+pub(super) const REASONING_PREFIX: &str = "\u{001e}DOXA_REASONING:";
+pub(super) const TOOL_ID_PREFIX: &str = "\u{001f}DOXA_TOOL_ID:";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Section {
@@ -18,9 +24,20 @@ enum Block<'a> {
     Prose(&'a str),
     Heading(&'a str),
     Tools(Vec<&'a str>),
+    Reasoning { text: String, tokens: u64, streaming: bool },
+}
+
+fn reasoning_block(paragraph: &str) -> Option<Block<'_>> {
+    let data: serde_json::Value = serde_json::from_str(paragraph.strip_prefix(REASONING_PREFIX)?).ok()?;
+    Some(Block::Reasoning {
+        text: data.get("text")?.as_str()?.to_owned(),
+        tokens: data.get("tokens")?.as_u64()?,
+        streaming: data.get("streaming")?.as_bool()?,
+    })
 }
 
 fn is_tool_row(paragraph: &str) -> bool {
+    let paragraph = paragraph.split_once(TOOL_ID_PREFIX).map_or(paragraph, |(display, _)| display);
     if paragraph.contains('\n') { return false; }
     let Some(row) = paragraph.strip_prefix("Tool: ") else {
         return paragraph.starts_with("[Tool: ") && paragraph.ends_with(']');
@@ -29,6 +46,7 @@ fn is_tool_row(paragraph: &str) -> bool {
 }
 
 fn tool_name(row: &str) -> &str {
+    let row = row.split_once(TOOL_ID_PREFIX).map_or(row, |(display, _)| display);
     let row = row.strip_prefix("Tool: ").or_else(|| row.strip_prefix("[Tool: "))
         .unwrap_or("Tool");
     row.split_once(" started").or_else(|| row.split_once(" finished"))
@@ -36,9 +54,34 @@ fn tool_name(row: &str) -> &str {
         .map(|(name, _)| name).unwrap_or_else(|| row.trim_end_matches(']'))
 }
 
+fn tool_identity(row: &str) -> (&str, Option<String>) {
+    let Some((display, encoded)) = row.split_once(TOOL_ID_PREFIX) else { return (row, None); };
+    (display, serde_json::from_str::<String>(encoded).ok())
+}
+
+fn plain_detail(lines: &mut Vec<Line<'static>>, label: &str, value: &str, width: u16) {
+    lines.push(Line::styled(format!("  {label}:"), Style::default().fg(theme::ACCENT)));
+    let width = usize::from(width.saturating_sub(2).max(1));
+    for source in value.lines() {
+        let mut row = String::from("  ");
+        let mut used = 0;
+        for ch in source.chars() {
+            let cells = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + cells > width && used > 0 {
+                lines.push(Line::styled(row, Style::default().fg(theme::SECONDARY)));
+                row = String::from("  ");
+                used = 0;
+            }
+            row.push(ch);
+            used += cells;
+        }
+        lines.push(Line::styled(row, Style::default().fg(theme::SECONDARY)));
+    }
+}
+
 fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                sections: &mut Vec<Section>, width: u16,
-               expanded: Option<&HashSet<usize>>, selected: Option<usize>) {
+               expanded: Option<&HashSet<usize>>, selected: Option<usize>, cards: &[ToolCard]) {
     let mut prose = String::new();
     let mut speaker = None;
     let flush_prose = |prose: &mut String, lines: &mut Vec<Line<'static>>, speaker| {
@@ -78,7 +121,46 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                     Style::default().fg(theme::SECONDARY)
                 };
                 lines.push(Line::styled(format!(" {summary}"), style));
-                if open { lines.extend(markdown::render(&tools.join("\n\n"), width)); }
+                if open {
+                    let mut seen = HashSet::new();
+                    for row in tools {
+                        let (display, id) = tool_identity(row);
+                        if let Some(card) = id.as_deref().and_then(|id| cards.iter().find(|card| card.id == id)) {
+                            if !seen.insert(card.id.as_str()) { continue; }
+                            lines.push(Line::styled(format!("  {} · {}", card.name, card.status()),
+                                Style::default().fg(theme::ACCENT)));
+                            if let Some(input) = &card.input { plain_detail(lines, "Input", input, width); }
+                            if let Some(result) = &card.result { plain_detail(lines, "Result", result, width); }
+                        } else {
+                            lines.extend(markdown::render(display, width));
+                        }
+                    }
+                }
+            }
+            Block::Reasoning { text, tokens, streaming } => {
+                flush_prose(&mut prose, lines, speaker);
+                speaker = Some(Speaker::Assistant);
+                let index = sections.len();
+                sections.push(Section { index, line: lines.len() });
+                let open = expanded.is_some_and(|set| set.contains(&index));
+                let marker = if open { "▾" } else { "▸" };
+                let label = format!(" {marker} Reasoning/Thinking · ~{tokens} tokens{}",
+                    if streaming { " · receiving" } else { "" });
+                let style = if selected == Some(index) {
+                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+                } else { Style::default().fg(theme::SECONDARY) };
+                lines.push(Line::styled(label, style));
+                if open {
+                    if text.is_empty() {
+                        lines.push(Line::styled(if streaming {
+                            "  Waiting for scrubbed content"
+                        } else {
+                            "  Reasoning content unavailable"
+                        }, Style::default().fg(theme::SECONDARY)));
+                    } else {
+                        lines.extend(markdown::render(&text, width));
+                    }
+                }
             }
         }
     }
@@ -91,6 +173,16 @@ pub(super) fn render(
     expanded: Option<&HashSet<usize>>,
     selected: Option<usize>,
 ) -> (Vec<Line<'static>>, Vec<Section>) {
+    render_with_cards(source, width, expanded, selected, &[])
+}
+
+pub(super) fn render_with_cards(
+    source: &str,
+    width: u16,
+    expanded: Option<&HashSet<usize>>,
+    selected: Option<usize>,
+    cards: &[ToolCard],
+) -> (Vec<Line<'static>>, Vec<Section>) {
     let mut lines = Vec::new();
     let mut sections = Vec::new();
     let mut blocks = Vec::new();
@@ -101,10 +193,12 @@ pub(super) fn render(
         if paragraph.is_empty() { continue; }
         if fence.is_none() && matches!(paragraph, "**You:**" | "**Assistant:**") {
             if paragraph == "**You:**" {
-                render_turn(&mut blocks, &mut lines, &mut sections, width, expanded, selected);
+                render_turn(&mut blocks, &mut lines, &mut sections, width, expanded, selected, cards);
                 tool_index = None;
             }
             blocks.push(Block::Heading(paragraph));
+        } else if fence.is_none() && paragraph.starts_with(REASONING_PREFIX) {
+            blocks.push(reasoning_block(paragraph).unwrap_or(Block::Prose("Reasoning unavailable")));
         } else if fence.is_none() && is_tool_row(paragraph) {
             if let Some(index) = tool_index {
                 let Block::Tools(tools) = &mut blocks[index] else { unreachable!() };
@@ -127,13 +221,15 @@ pub(super) fn render(
             }
         }
     }
-    render_turn(&mut blocks, &mut lines, &mut sections, width, expanded, selected);
+    render_turn(&mut blocks, &mut lines, &mut sections, width, expanded, selected, cards);
     (lines, sections)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::tool_cards::ToolCards;
+    use serde_json::json;
 
     fn shown(lines: &[Line<'_>]) -> String {
         lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")
@@ -151,6 +247,41 @@ mod tests {
         let text = shown(&lines);
         assert!(text.contains("first-input") && text.contains("first-result") && text.contains("second-input"));
         assert!(!text.contains("third-input"));
+    }
+
+    #[test]
+    fn reasoning_stays_collapsed_with_a_live_token_count() {
+        let marker = format!("{REASONING_PREFIX}{}", serde_json::json!({
+            "text":"private reasoning\nwith a second line", "tokens":42, "streaming":true
+        }));
+        let source = format!("**You:**\n\nQuestion\n\n**Assistant:**\n\n{marker}\n\nAnswer");
+        let (lines, sections) = render(&source, 80, None, None);
+        assert_eq!(sections.len(), 1);
+        assert!(shown(&lines).contains("Reasoning/Thinking · ~42 tokens · receiving"));
+        assert!(!shown(&lines).contains("private reasoning"));
+        assert!(shown(&lines).contains("Answer"));
+        let (expanded, _) = render(&source, 80, Some(&HashSet::from([0])), Some(0));
+        assert!(shown(&expanded).contains("private reasoning"));
+        assert!(shown(&expanded).contains("with a second line"));
+    }
+
+    #[test]
+    fn expanded_tool_section_uses_scrubbed_detail_instead_of_short_summary() {
+        let mut cards = ToolCards::default();
+        cards.record("s", "tool_call", &json!({"id":"call-1","name":"Read","input":{"path":"a.rs"}}));
+        cards.record("s", "tool_result", &json!({"id":"call-1","name":"Read","result_summary":"short"}));
+        let detail = "long result ".repeat(80);
+        cards.record("s", "tool_result_detail", &json!({"id":"call-1","text":detail}));
+        let source = format!("**Assistant:**\n\nTool: Read started{TOOL_ID_PREFIX}\"call-1\"\n\nTool: Read finished · short{TOOL_ID_PREFIX}\"call-1\"");
+        let (collapsed, sections) = render_with_cards(&source, 80, None, None, cards.for_session("s"));
+        assert_eq!(sections.len(), 1);
+        assert!(!shown(&collapsed).contains("long result"));
+        let (expanded, _) = render_with_cards(&source, 80, Some(&HashSet::from([0])), None, cards.for_session("s"));
+        let visible = shown(&expanded);
+        assert!(visible.contains("a.rs"));
+        assert!(visible.contains("long result"));
+        assert!(!visible.contains(TOOL_ID_PREFIX));
+        assert!(!visible.contains("finished · short"));
     }
 
     #[test]

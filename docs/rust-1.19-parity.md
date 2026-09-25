@@ -2,15 +2,15 @@
 
 Baseline: the `v1.19.0` Python tag, especially `doxa/commands.py`, its session
 command handlers, and the 1.19 worktree and fleet contracts. This records the
-Rust branch's behavior at `v2.0.0-alpha.17`; it is a release gate, not a
+Rust branch's behavior at `v2.0.0-alpha.18`; it is a release gate, not a
 claim that all Python behavior has been ported.
 
 | Area | Rust state | Remaining 1.19 behavior |
 | --- | --- | --- |
 | Core sessions | Native daemon, Codex and vendor hosts, Claude SDK sidecar; new, attach, stop, list and restore; TUI `/attach` for live sessions and `/resume` for verified saved Claude/Codex/vendor sessions, including recovery of a missing managed checkout with pinned metadata | Full setup/auth flow; recovery of deleted uncommitted changes is impossible |
-| Window and prompt | Two split panes, persistent named tabs, grouped rail, per-session drafts, mouse selection and resize, inline questions, Markdown and tool cards; active-session repo/worktree chip | More than two pane groups, moving a tab across groups and sidebar collections |
-| Commands | Local bare commands, `/msg`, `/mesh`, `/pane 1|2`, sidebar controls, `/dir`, `/attach` and `/rename` | Many argument forms and the full generated command palette; see table below |
-| Worktrees and diffs | Managed per-session Git checkout, guarded clean finalization, `new --branch`, idle live base switching, read-only orphan preview CLI, guarded missing-checkout recovery, diff pane and tracked-hunk rejection with queued active-turn feedback and a reason | Safe orphan deletion across Rust and legacy Python sessions, plus recovery when ownership or pinned Git metadata cannot be verified |
+| Window and prompt | Two split panes, persistent named tabs, grouped rail, per-session drafts, mouse selection and resize, inline questions, Markdown, expandable tool detail and reasoning, processing spinner inside transcript; active-session repo/worktree chip | More than two pane groups, moving a tab across groups and sidebar collections |
+| Commands | Local bare commands, `/msg`, `/mesh`, `/pane 1|2`, sidebar controls, `/dir`, `/attach` and `/rename`; inline autocomplete for supported slash commands | Many argument forms and the full generated command palette; see table below |
+| Worktrees and diffs | Managed per-session Git checkout, guarded clean finalization, `new --branch`, idle live base switching, orphan preview and explicit verified Rust-orphan cleanup CLI, guarded missing-checkout recovery, diff pane and tracked-hunk rejection with queued active-turn feedback and a reason | Shared lifecycle lock before cleanup of legacy Python sidecars, plus recovery when ownership or pinned Git metadata cannot be verified |
 | LORE | Context/scrub via sidecar, scoped curated memory and up to 20 global beliefs in an inline chip menu, belief/evidence picker, exact belief review and confirm/contradict/stale/retract actions, full proposal review and exact-snapshot approve/reject with LORE 0.58.5 | Older LORE builds remain read only; broader 1.19 memory management screens |
 | Peers and fleets | Peer map and direct message; optional native inbound peer turns; Python fleet start/inspection/attach; validated slot stop; native read-only preflight and Claude spend ceiling | Native priced budget support for Codex/vendors, fleet supervisor/barrier/approval desk, live fleet tab and remote routing |
 | Operational UI | Native doctor and install launcher | 1.19 setup/settings/update/login/logout/plugin screens and detailed usage/context screens |
@@ -43,7 +43,7 @@ commands still pass to the active engine.
 
 ## Stable 2.0 gates
 
-1. Share a lifecycle lock with legacy Python before orphan deletion. Keep the
+1. Share a lifecycle lock with legacy Python before legacy orphan deletion. Keep the
    LORE 0.58.5 atomic review boundary covered as later versions are adopted.
 2. Port or explicitly scope every user-facing 1.19 command and window action;
    ensure DOXA commands never accidentally become model prompts.

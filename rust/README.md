@@ -71,10 +71,12 @@ it removes only a verified clean checkout whose recorded branch has no commits
 ahead of its base. Dirty trees, unique commits, branch switches, unreadable
 metadata, and failed Git checks are kept for manual review. `doxa doctor`
 lists verified managed worktrees with no live session and never deletes them.
-`doxa worktrees list` previews managed worktrees without an attachable session
-for manual review. A listed checkout may still belong to a legacy Python
-session. Automatic orphan deletion stays disabled until both runtimes share a
-worktree lock.
+`doxa worktrees list` previews managed worktrees without an attachable session.
+`doxa worktrees cleanup FULL_SESSION_ID --confirm` removes one eligible clean
+orphan after rechecking its branch, pinned base, Git status, live session
+registry, and advisory lock. It never removes dirty or uniquely committed
+work, and it requires the full ID printed by `list`. Legacy Python 1.19
+sidecars lack the pinned base and shared lock, so they remain survey only.
 Fixture sessions keep their supplied directory unless `DOXA_WORKTREE=1` is
 set explicitly for integration testing.
 `doxa new --branch NAME` starts the managed worktree from an existing local or
@@ -178,15 +180,27 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
-clickable links are still 2.0 work. The binary version is `2.0.0-alpha.17`;
+clickable links are still 2.0 work. The binary version is `2.0.0-alpha.18`;
 this is an alpha release.
 
 In the transcript, user messages have an accent heading and highlighted body;
 assistant replies keep the normal Markdown surface. Each turn's tool activity
 starts collapsed into one section. Focus the transcript with `Tab`, select a
 section with `[` or `]`, and press `Enter` to expand it, or click the section.
-Expanded sections show bounded tool inputs and results from the recorded
-transcript. `Ctrl+T`
+Codex and Claude tool results carry scrubbed detail in chunks; the short row
+remains a summary, while the expanded section shows up to 256 KiB per result
+and marks larger results explicitly. During DeepSeek and GLM SSE responses and
+Claude thinking streams, `Reasoning/Thinking` shows an approximate live token
+count. Its text becomes available only after the completed stream is scrubbed;
+Codex reasoning summaries fold into the same row. Select the row
+and press `Enter` or click to expand it. The processing spinner appears below
+the transcript while a turn is running.
+Typing `/` at the start of the prompt shows matching DOXA commands above the
+prompt. Use Up/Down or the mouse to choose one and Tab to complete it. The
+completed command runs only when you press Enter; unknown provider and plugin
+slash commands continue through the normal prompt path.
+Expanded sections show bounded live tool inputs and results from the daemon
+event stream. `Ctrl+T`
 remains the separate tool activity card view.
 
 `Ctrl+R` opens a searchable picker for attached and archived sessions with

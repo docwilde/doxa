@@ -12,17 +12,30 @@ use crate::markdown;
 
 const MAX_CARDS_PER_SESSION: usize = 64;
 const MAX_SESSIONS: usize = 64;
-const MAX_DETAIL_CHARS: usize = 4096;
+const MAX_DETAIL_CHARS: usize = 256 * 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct ToolCard {
-    id: String,
+    pub id: String,
     pub name: String,
     pub input: Option<String>,
     pub result: Option<String>,
     pub failed: bool,
     pub duration_ms: Option<u64>,
     pub parent_id: Option<String>,
+    result_detail_started: bool,
+}
+
+impl std::fmt::Debug for ToolCard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolCard")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("input_chars", &self.input.as_ref().map(|text| text.chars().count()))
+            .field("result_chars", &self.result.as_ref().map(|text| text.chars().count()))
+            .field("failed", &self.failed)
+            .finish()
+    }
 }
 
 impl ToolCard {
@@ -53,7 +66,7 @@ impl ToolCards {
     /// Records Python DOXA's common Claude, Codex, and vendor tool event shape.
     /// Malformed IDs cannot create unbounded or unmatchable cards.
     pub fn record(&mut self, session_id: &str, kind: &str, data: &Value) -> bool {
-        if !matches!(kind, "tool_call" | "tool_result") || session_id.is_empty() {
+        if !matches!(kind, "tool_call" | "tool_result" | "tool_result_detail") || session_id.is_empty() {
             return false;
         }
         let Some(id) = data
@@ -80,6 +93,7 @@ impl ToolCards {
                 failed: false,
                 duration_ms: None,
                 parent_id: None,
+                result_detail_started: false,
             });
         }
         let selected = index.unwrap_or(cards.len() - 1);
@@ -110,6 +124,7 @@ impl ToolCards {
                 }
             }
             "tool_result" => {
+                card.result_detail_started = false;
                 card.result = Some(clean(
                     data.get("result_summary")
                         .and_then(Value::as_str)
@@ -118,6 +133,20 @@ impl ToolCards {
                 ));
                 card.failed = data.get("is_error").and_then(Value::as_bool) == Some(true);
                 card.duration_ms = data.get("duration_ms").and_then(Value::as_u64);
+            }
+            "tool_result_detail" => {
+                if let Some(chunk) = data.get("text").and_then(Value::as_str) {
+                    if !card.result_detail_started {
+                        card.result = Some(String::new());
+                        card.result_detail_started = true;
+                    }
+                    let result = card.result.get_or_insert_with(String::new);
+                    let remaining = MAX_DETAIL_CHARS.saturating_sub(result.chars().count());
+                    result.extend(markdown::sanitize(chunk).chars().take(remaining));
+                    if chunk.chars().count() > remaining && !result.ends_with("[Tool detail display limit reached]") {
+                        result.push_str("\n[Tool detail display limit reached]");
+                    }
+                }
             }
             _ => unreachable!(),
         }
