@@ -43,8 +43,8 @@ commands still pass to the active engine.
 
 ## Stable 2.0 gates
 
-1. Finish worktree lifecycle and branch controls, and verify the LORE 0.58.5
-   dependency after both repositories merge.
+1. Finish live worktree branch controls and orphan cleanup. Keep the LORE
+   0.58.5 atomic review boundary covered as later versions are adopted.
 2. Port or explicitly scope every user-facing 1.19 command and window action;
    ensure DOXA commands never accidentally become model prompts.
 3. Add end-to-end startup, daemon, and terminal tests for the supported hosts,

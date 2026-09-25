@@ -58,7 +58,9 @@ base branch and pins its starting commit for stable diff comparisons. The new
 checkout starts at that branch tip; uncommitted changes
 in the launch directory stay there. `DOXA_WORKTREE=0` or `worktree_per_session = false` in
 `$DOXA_HOME/config.toml` runs in the launch directory; outside Git, sessions
-also run there. Detaching keeps the worktree. When the daemon actually exits,
+also run there. In a supported Git checkout, failure to create or verify the
+managed worktree stops session launch and reports an error. Detaching keeps the
+worktree. When the daemon actually exits,
 it removes only a verified clean checkout whose recorded branch has no commits
 ahead of its base. Dirty trees, unique commits, branch switches, unreadable
 metadata, and failed Git checks are kept for manual review. `doxa doctor`

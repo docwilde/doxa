@@ -11,7 +11,8 @@ the stable 2.0 release has not been cut.
   `new --branch` base selector. Allow tracked diff hunks to be rejected with a
   reason, including queued rejection after an active turn completes.
 - Add local TUI commands for panes, sidebar, directory, detachment, live
-  session attachment, and persistent tab renaming. Keep unsupported DOXA
+  session attachment, and persistent tab renaming. Bare `/attach` now expands
+  a searchable live-session picker above the prompt. Keep unsupported DOXA
   commands out of model prompts.
 - Add scoped peer messaging and optional inbound native peer turns. Extend
   fleet inspection, Python-backed start, guarded stop, and native preflight.
@@ -19,6 +20,9 @@ the stable 2.0 release has not been cut.
 - Show full raw LORE proposals before a human confirms approve or reject.
   Resolve the exact reviewed snapshot through LORE 0.58.5's atomic API.
 - Expand Rust CI to cover the managed worktree crate and pinned LORE bridge.
+- Fail launch when a supported Git checkout cannot create its managed worktree,
+  and show the startup error in the TUI. Pin each worktree's starting commit
+  for diffs; reject staged hunks safely instead of leaving them in the index.
 
 ## 2.0.0-alpha.10 — 2026-09-25
 
