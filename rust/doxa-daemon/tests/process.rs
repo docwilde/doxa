@@ -2578,3 +2578,48 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
 }
+
+#[test]
+fn native_daemon_queue_rpc_scrubs_and_cancels_before_turn_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let ready = dir.path().join("provider-ready");
+    let release = dir.path().join("provider-release");
+    fake_scrubber(&python, false);
+    executable(&codex, &format!(r#"#!/bin/sh
+cat >/dev/null
+touch '{}'
+while [ ! -f '{}' ]; do sleep 0.01; done
+echo '{{"type":"thread.started","thread_id":"thread_1"}}'
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
+"#, ready.display(), release.display()));
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"first"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
+    wait_until(|| ready.exists());
+    send(&mut socket, json!({"type":"prompt","id":2,"text":"fixture-secret queued"}));
+    assert_eq!(receive(&mut reader)["queue_id"], "q1");
+    send(&mut socket, json!({"type":"call","id":3,"method":"queue","params":{}}));
+    let queued = receive(&mut reader);
+    assert_eq!(queued["queue"], json!([{"id":"q1","text":"[redacted] queued"}]));
+    assert!(!queued.to_string().contains("fixture-secret"));
+    send(&mut socket, json!({"type":"call","id":4,"method":"cancel_queued","params":{"id":"q1"}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    let cancelled = receive(&mut reader);
+    assert_eq!(cancelled["event"]["type"], "prompt_cancelled");
+    assert_eq!(cancelled["event"]["data"]["text"], "[redacted] queued");
+    send(&mut socket, json!({"type":"call","id":5,"method":"queue","params":{}}));
+    assert_eq!(receive(&mut reader)["queue"], json!([]));
+    fs::write(&release, "go").unwrap();
+    loop {
+        if receive(&mut reader)["event"]["type"] == "turn_done" { break; }
+    }
+    send(&mut socket, json!({"type":"call","id":6,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+}
