@@ -5,6 +5,20 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.21 — 2026-09-25
+
+- Open a fresh session tab in a verified directory with `/cd <path>` while
+  keeping the current session and its working directory intact.
+- Add read-only CLI setup, provider authentication status, and Claude Code
+  plugin inventory diagnostics. Provider output and credentials are suppressed.
+- Permit explicit Claude `/compact` only after a synchronous LORE review
+  succeeds. Missing LORE, old sidecars, timeout, and Codex/vendor compaction
+  remain blocked; automatic Claude compaction still uses its existing hook.
+- Add native DeepSeek and GLM session spend ceilings for models with known
+  dated prices and complete per-request usage. Charge input at the full rate,
+  refuse unpriced models and model switching, and stop later turns if usage
+  becomes uncertain. Codex and budgeted resume remain unavailable.
+
 ## 2.0.0-alpha.20 — 2026-09-25
 
 - Persist scrubbed, bounded Codex tool input and result records so newly
