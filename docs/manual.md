@@ -1,11 +1,10 @@
-# DOXA manual
+# DOXA Python 1.x manual
 
-Reference for what DOXA does today. Everything here is true of the current
-code — verified against source, not transcribed from release notes; this
-document was last read against **1.9.3** end to end. For the pitch and the
-install instructions, see [README.md](../README.md). For designs that are
-**not** built yet, see [docs/plans/](plans/) — this manual never documents
-a plan as if it were shipped.
+Historical reference for the Python 1.x frontend. Rust 2.0 is the main line;
+use the [Rust guide](../rust/README.md) for current capabilities and setup.
+This document was last read against Python **1.9.3** end to end and does not
+describe the Rust frontend. For designs that are still being ported, see
+[docs/plans/](plans/).
 
 ## Contents
 
