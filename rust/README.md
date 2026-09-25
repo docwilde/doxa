@@ -100,7 +100,8 @@ sessions, use `--list` and select one by full ID or unique ID prefix.
 `--socket` remains available for an explicit path. `--demo` opens the shell
 without a connection. `Ctrl+P` opens the action menu; use Up/Down, Enter, and
 Esc to navigate the peer map, tool activity, session rail selection, tabs, and
-panes. `Ctrl+M` and `Ctrl+T` remain direct shortcuts. `Ctrl+Q` detaches the Rust UI
+panes. `Shift+Tab` switches panes, including when the terminal reports it as
+`BackTab`. `Ctrl+M` and `Ctrl+T` remain direct shortcuts. `Ctrl+Q` detaches the Rust UI
 without stopping its daemon; `Ctrl+W` detaches only the active tab and leaves
 its session running. `Ctrl+C` is left available for terminal copy.
 Bare `/help`, `/about`, `/sessions`, `/model`, `/engine`, `/mode`, `/beliefs`,
@@ -199,7 +200,9 @@ and user memory, based on exact character counts from LORE's canonical entries
 at four characters per token. Provider tokenizers may count differently; `?`
 means LORE could not report a scope. Estimated cost is labeled. In a prompt, `Enter` submits, while
 `Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` also works when
-reported distinctly by the terminal). Arrow keys move the cursor across
+reported distinctly by the terminal). An ambiguous `Ctrl+Enter` report never
+submits a prompt; use `Alt+Enter` for a newline. `Alt+Up` restores a rejected
+draft when one exists, and otherwise resizes the split. Arrow keys move the cursor across
 lines; `Home`, `End`, `Backspace`, and `Delete` edit at the cursor. Bracketed
 paste preserves line breaks, removes terminal control characters, and never
 submits. Prompts are capped at 10 KiB; an oversized paste is truncated with a

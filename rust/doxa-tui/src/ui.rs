@@ -1836,7 +1836,8 @@ impl App {
                 self.rail_visible = !self.rail_visible;
                 true
             }
-            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::BackTab | KeyCode::Tab if key.code == KeyCode::BackTab
+                || key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.active_group = 1 - self.active_group;
                 self.split_requested = true;
                 self.focus = Focus::Prompt;
@@ -1880,7 +1881,7 @@ impl App {
                     }
                     true
                 } else {
-                    false
+                    self.adjust_split(-5)
                 }
             }
             KeyCode::Left if alt => self.adjust_split(-5),
@@ -1967,6 +1968,12 @@ impl App {
                 } else { false }
             }
             KeyCode::Enter if self.focus == Focus::Prompt && (key.modifiers.contains(KeyModifiers::SHIFT) || alt) => self.insert_input('\n'),
+            KeyCode::Enter if self.focus == Focus::Prompt && ctrl => {
+                // Ctrl+Enter and a terminal-normalized control newline can
+                // share this code. Neither may submit a prompt by accident.
+                self.notice = "Ctrl+Enter is ambiguous here · use Alt+Enter for a newline".into();
+                true
+            }
             KeyCode::Char('j') if self.focus == Focus::Prompt && ctrl => self.insert_input('\n'),
             KeyCode::Char(c) if self.focus == Focus::Prompt && !ctrl && !alt => {
                 if unsafe_input_char(c) { false } else { self.insert_input(c) }

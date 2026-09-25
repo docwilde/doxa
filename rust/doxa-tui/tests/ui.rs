@@ -420,6 +420,40 @@ fn action_menu_opens_views_and_navigates_sessions_without_leaking_keys_to_prompt
 }
 
 #[test]
+fn terminal_backtab_switches_panes_and_plain_tab_keeps_focus_navigation() {
+    let mut app = App::default();
+    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("one", "Work")));
+    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("two", "Work")));
+    assert!(app.handle(key(KeyCode::BackTab, KeyModifiers::NONE)));
+    assert_eq!(app.active_group, 1);
+    assert_eq!(app.focus, Focus::Prompt);
+    assert!(app.handle(key(KeyCode::Tab, KeyModifiers::NONE)));
+    assert_eq!(app.focus, Focus::Transcript);
+    assert!(app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT)));
+    assert_eq!(app.active_group, 0);
+    assert_eq!(app.focus, Focus::Prompt);
+}
+
+#[test]
+fn alt_up_resizes_without_rejected_draft_and_control_enter_cannot_submit() {
+    let mut app = App::default();
+    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("one", "Work")));
+    app.handle(key(KeyCode::Char('h'), KeyModifiers::ALT));
+    assert_eq!(app.split_percent, 50);
+    assert!(app.handle(key(KeyCode::Up, KeyModifiers::ALT)));
+    assert_eq!(app.split_percent, 45);
+    app.handle(Event::Paste("draft".into()));
+    assert!(app.handle(key(KeyCode::Enter, KeyModifiers::CONTROL)));
+    assert_eq!(app.input, "draft");
+    assert!(app.pending_prompts.is_empty());
+    assert!(app.notice.contains("Alt+Enter"));
+    assert!(app.handle(key(KeyCode::Char('j'), KeyModifiers::CONTROL)));
+    assert_eq!(app.input, "draft\n");
+    assert!(app.handle(key(KeyCode::Enter, KeyModifiers::ALT)));
+    assert_eq!(app.input, "draft\n\n");
+}
+
+#[test]
 fn action_menu_stays_bounded_on_tiny_terminal_and_blocks_mouse_drag() {
     let mut app = App::default();
     app.handle(Event::Resize(20, 5));
