@@ -46,6 +46,7 @@ impl CodexHost {
         mut options: DriverOptions,
         lore_python: &Path,
         session_id: &str,
+        resume: bool,
     ) -> Result<Self, String> {
         let mut client = LoreClient::spawn(lore_python, Duration::from_secs(5))
             .map_err(|_| "LORE sidecar is unavailable; Codex session was not started".to_owned())?;
@@ -59,23 +60,39 @@ impl CodexHost {
         let store = TranscriptStore::new(&projects_dir, &slug, session_id).map_err(|_| {
             "transcript directory unavailable; Codex session was not started".to_owned()
         })?;
+        let transcript = store.transcript_snapshot()
+            .map_err(|_| "Codex transcript unsafe; session was not started".to_owned())?;
         let thread_record = store
             .read_thread()
             .map_err(|_| "Codex thread record unreadable; session was not started".to_owned())?;
-        if thread_record
-            .as_ref()
-            .is_some_and(|value| value["turn_incomplete"] == true)
-        {
-            return Err("Codex transcript is incomplete; refusing to resume the thread".to_owned());
-        }
-        let previous = thread_record
-            .and_then(|value| value["thread_id"].as_str().map(str::to_owned));
-        if store.transcript_path().exists() && previous.is_none() {
-            return Err(
-                "existing session has no Codex thread ID; refusing to start a new thread"
-                    .to_owned(),
-            );
-        }
+        let previous = if let Some(value) = thread_record {
+            if value.get("turn_incomplete").is_some_and(|flag| flag != false) {
+                return Err("Codex transcript is incomplete; refusing to resume the thread".to_owned());
+            }
+            if value["session_id"].as_str() != Some(session_id)
+                || value["cwd"].as_str() != Some(cwd.as_str())
+                || transcript.as_ref().is_none_or(|(_, len)| *len == 0) {
+                return Err("Codex thread record does not match this session".to_owned());
+            }
+            let recorded_model = match value.get("model") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(model)) if !model.is_empty() && model.len() <= 128
+                    && !model.chars().any(char::is_control) => Some(model.as_str()),
+                _ => return Err("Codex thread record has invalid model".to_owned()),
+            };
+            if resume && options.model.as_deref().is_some_and(|model| Some(model) != recorded_model) {
+                return Err("Codex resume model does not match the saved thread".to_owned());
+            }
+            let thread = value["thread_id"].as_str()
+                .filter(|id| doxa_engines::codex_driver::valid_thread_id(id))
+                .ok_or("existing session has no valid Codex thread ID")?;
+            Some(thread.to_owned())
+        } else {
+            if resume || transcript.is_some() {
+                return Err("existing session has no Codex thread ID; refusing to start a new thread".to_owned());
+            }
+            None
+        };
         if let Some(id) = previous {
             options.resume_thread = Some(id);
             options.require_resume = true;

@@ -215,7 +215,10 @@ fn options() -> io::Result<Options> {
         lore_python = Some(python_executable(
             lore_python.ok_or_else(|| invalid("Codex needs --lore-python"))?,
         )?);
-        if claude_python.is_some() || claude_script.is_some() || resume {
+        if resume && !explicit_session_id {
+            return Err(invalid("Codex resume needs --session-id"));
+        }
+        if claude_python.is_some() || claude_script.is_some() {
             return Err(invalid("Claude options require --engine claude"));
         }
     } else if engine == Engine::Claude {
@@ -574,6 +577,7 @@ fn run() -> io::Result<()> {
                         .as_ref()
                         .expect("validated LORE interpreter"),
                     &options.session_id,
+                    options.resume,
                 )
                 .map_err(io::Error::other)?,
             );

@@ -18,6 +18,7 @@ const MAX_PROJECTS: usize = 128;
 const MAX_FILES: usize = 2048;
 const MAX_OFFLINE: usize = 64;
 const MAX_FILE_BYTES: u64 = 512 * 1024;
+const MAX_CODEX_METADATA_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct OfflineSession {
@@ -47,6 +48,12 @@ fn open_at(parent: &File, name: &OsStr, flags: i32) -> Option<File> {
     let name = std::ffi::CString::new(name.as_bytes()).ok()?;
     let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
     if fd < 0 { None } else { Some(unsafe { File::from_raw_fd(fd) }) }
+}
+
+fn entry_present(parent: &File, name: &OsStr) -> bool {
+    let Ok(name) = std::ffi::CString::new(name.as_bytes()) else { return true; };
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    unsafe { libc::fstatat(parent.as_raw_fd(), name.as_ptr(), stat.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW) == 0 }
 }
 
 fn names_in(open_dir: &File, limit: usize, accept: impl Fn(&OsStr) -> bool) -> Vec<OsString> {
@@ -85,6 +92,11 @@ fn valid_transcript_name(name: &OsStr) -> bool {
     let path = Path::new(name);
     path.extension().is_some_and(|ext| ext == "jsonl")
         && path.file_stem().and_then(|stem| stem.to_str()).is_some_and(crate::discovery::valid_id)
+}
+
+fn valid_codex_thread_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && !id.starts_with('-')
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 type Candidate = (Option<SystemTime>, String, String, File);
@@ -201,8 +213,7 @@ fn discover_in(root: &Path, prefix: Option<&str>, query: Option<&str>) -> Vec<Of
 }
 
 /// Verify the session's recorded cwd maps back to this transcript directory,
-/// then require the original engine's replay artefact. Codex archives remain
-/// readable until the native Codex launcher supports thread resume.
+/// then require the original engine's replay artefact.
 pub fn resume_plan(entry: &OfflineSession, python: &Path) -> Result<LaunchOptions, &'static str> {
     let root = projects_dir().ok_or("transcript root unavailable")?;
     let claude = claude_store_root().ok_or("DOXA home unavailable")?;
@@ -250,15 +261,45 @@ fn resume_plan_in(entry: &OfflineSession, python: &Path, expected_root: &Path, c
     let transcript_name = format!("{}.jsonl", entry.id);
     let transcript = open_at(&dir, OsStr::new(&transcript_name), libc::O_RDONLY | libc::O_NONBLOCK)
         .ok_or("session transcript is no longer available")?;
-    if !transcript.metadata().is_ok_and(|meta| meta.is_file() && meta.uid() == uid && meta.len() > 0) {
+    if !transcript.metadata().is_ok_and(|meta| meta.is_file() && meta.uid() == uid && meta.nlink() == 1 && meta.len() > 0) {
         return Err("session transcript is unsafe or empty");
+    }
+    let codex_name = format!("{}.codex.json", entry.id);
+    if entry_present(&dir, OsStr::new(&codex_name))
+        && open_at(&dir, OsStr::new(&codex_name), libc::O_RDONLY | libc::O_NONBLOCK).is_none() {
+        return Err("unsafe Codex thread record");
+    }
+    if let Some(mut record) = open_at(&dir, OsStr::new(&codex_name), libc::O_RDONLY | libc::O_NONBLOCK) {
+        let vendor_name = format!("{}.messages.json", entry.id);
+        if entry_present(&dir, OsStr::new(&vendor_name))
+            || claude_history_present(claude_root, &entry.id, uid) {
+            return Err("ambiguous session engine state");
+        }
+        let meta = record.metadata().map_err(|_| "unreadable Codex thread record")?;
+        if !meta.is_file() || meta.uid() != uid || meta.nlink() != 1
+            || meta.len() == 0 || meta.len() > MAX_CODEX_METADATA_BYTES {
+            return Err("unsafe Codex thread record");
+        }
+        let mut bytes = Vec::new();
+        record.read_to_end(&mut bytes).map_err(|_| "unreadable Codex thread record")?;
+        let state: Value = serde_json::from_slice(&bytes).map_err(|_| "invalid Codex thread record")?;
+        if state["session_id"].as_str() != Some(&entry.id)
+            || state["cwd"].as_str() != cwd.to_str()
+            || state.get("turn_incomplete").is_some_and(|flag| flag != false)
+            || !state["thread_id"].as_str().is_some_and(valid_codex_thread_id) {
+            return Err("Codex thread record does not match this session");
+        }
+        let model = match state.get("model") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(model)) if !model.is_empty() && model.len() <= 128
+                && !model.chars().any(char::is_control) => Some(model.clone()),
+            _ => return Err("invalid Codex model in thread record"),
+        };
+        return Ok(LaunchOptions { engine: Engine::Codex, cwd: Some(cwd), model,
+            resume: Some(entry.id.clone()), ..LaunchOptions::default() });
     }
     let name = format!("{}.messages.json", entry.id);
     let Some(mut saved) = open_at(&dir, OsStr::new(&name), libc::O_RDONLY | libc::O_NONBLOCK) else {
-        let codex = format!("{}.codex.json", entry.id);
-        if open_at(&dir, OsStr::new(&codex), libc::O_RDONLY | libc::O_NONBLOCK).is_some() {
-            return Err("native Codex thread resume is not available");
-        }
         if claude_history_present(claude_root, &entry.id, uid) {
             return Ok(LaunchOptions { engine: Engine::Claude, cwd: Some(cwd),
                 resume: Some(entry.id.clone()), ..LaunchOptions::default() });
@@ -498,7 +539,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn claude_resume_requires_isolated_cli_history_and_codex_is_rejected() {
+    fn claude_resume_requires_isolated_cli_history_and_codex_ambiguity_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("projects");
         fs::create_dir_all(root.join("project")).unwrap();
@@ -515,7 +556,39 @@ for line in sys.stdin:
         let plan = resume_plan_in(&entry, &script, &root, &cli).unwrap();
         assert_eq!(plan.engine, Engine::Claude);
         fs::write(root.join("project/saved-1.codex.json"), b"{}").unwrap();
-        assert!(resume_plan_in(&entry, &script, &root, &cli).unwrap_err().contains("Codex"));
+        assert!(resume_plan_in(&entry, &script, &root, &cli).unwrap_err().contains("ambiguous"));
+    }
+
+    #[test]
+    fn codex_resume_requires_matching_owned_complete_thread_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("projects");
+        fs::create_dir_all(root.join("project")).unwrap();
+        let cwd = temp.path().join("checkout");
+        fs::create_dir(&cwd).unwrap();
+        let script = fake_lore(temp.path(), &root);
+        let entry = OfflineSession { id: "saved-1".into(), project: "project".into(),
+            markdown: String::new(), cwd: Some(cwd.clone()) };
+        fs::write(root.join("project/saved-1.jsonl"), b"saved transcript\n").unwrap();
+        let record = root.join("project/saved-1.codex.json");
+        let state = serde_json::json!({"thread_id":"thread-123", "session_id":"saved-1",
+            "cwd":cwd, "model":"gpt-test", "turn_incomplete":false});
+        fs::write(&record, state.to_string()).unwrap();
+        let plan = resume_plan_in(&entry, &script, &root, &temp.path().join("cli-projects")).unwrap();
+        assert_eq!(plan.engine, Engine::Codex);
+        assert_eq!(plan.resume.as_deref(), Some("saved-1"));
+        assert_eq!(plan.model.as_deref(), Some("gpt-test"));
+        for bad in [
+            serde_json::json!({"thread_id":"-unsafe", "session_id":"saved-1", "cwd":cwd}),
+            serde_json::json!({"thread_id":"thread-123", "session_id":"other", "cwd":cwd}),
+            serde_json::json!({"thread_id":"thread-123", "session_id":"saved-1", "cwd":cwd, "turn_incomplete":true}),
+        ] {
+            fs::write(&record, bad.to_string()).unwrap();
+            assert!(resume_plan_in(&entry, &script, &root, &temp.path().join("cli-projects")).is_err());
+        }
+        fs::remove_file(&record).unwrap();
+        symlink(temp.path().join("outside"), &record).unwrap();
+        assert!(resume_plan_in(&entry, &script, &root, &temp.path().join("cli-projects")).is_err());
     }
 
     #[test]

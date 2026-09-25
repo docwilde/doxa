@@ -193,7 +193,7 @@ fn run(args: &[String]) -> io::Result<()> {
     }
     if options.resume.is_some() && command != Some("new") {
         return Err(invalid(
-            "--resume requires new --engine claude|deepseek|glm",
+            "--resume requires new --engine codex|claude|deepseek|glm",
         ));
     }
     if options.branch.is_some() && command != Some("new") {

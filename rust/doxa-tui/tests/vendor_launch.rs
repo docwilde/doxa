@@ -199,7 +199,6 @@ fn vendor_resume_rejects_invalid_identity_and_non_new_command_before_spawn() {
             "--resume",
             "vendor-session-123",
         ],
-        vec!["new", "--engine", "codex", "--resume", "vendor-session-123"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_doxa-rs"))
             .args(args)
