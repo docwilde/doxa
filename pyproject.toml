@@ -82,9 +82,9 @@ build-backend = "hatchling.build"
 # `lore-core @ git+https://...` is a PEP 508 direct reference, which
 # hatchling refuses by default -- the guard exists because PyPI rejects a
 # distribution carrying one, and it is worth being told rather than
-# finding out at upload. DOXA is not on PyPI and never will be (the
-# installer runs `uv tool install git+https://github.com/docwilde/doxa`),
-# so the guard is describing a rule that does not apply here.
+# finding out at upload. DOXA is not on PyPI; the Rust installer syncs this
+# internal sidecar package from a locked repository checkout, so the guard
+# describes a rule that does not apply here.
 [tool.hatch.metadata]
 allow-direct-references = true
 

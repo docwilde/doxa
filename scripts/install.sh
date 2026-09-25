@@ -148,6 +148,11 @@ SH
   installing=0
   new_sidecar=""
   printf 'doxa-install: installed Rust doxa at %s/doxa\n' "$bin_dir"
+  resolved_doxa=$(command -v doxa 2>/dev/null || :)
+  if [ "$resolved_doxa" != "$bin_dir/doxa" ]; then
+    printf 'doxa-install: PATH resolves doxa to %s; add %s before older installs or run %s/doxa directly\n' \
+      "${resolved_doxa:-nothing}" "$bin_dir" "$bin_dir" >&2
+  fi
   "$bin_dir/doxa" doctor --engine codex || true
 }
 
