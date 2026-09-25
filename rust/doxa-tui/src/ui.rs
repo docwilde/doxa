@@ -3449,8 +3449,11 @@ impl App {
                 let (tx, rx) = mpsc::sync_channel(1);
                 self.history_pending = Some(rx);
                 let query = query.to_owned();
+                let cwd = self.groups[self.active_group].active_id()
+                    .and_then(|id| self.session_cwds.get(id)).cloned()
+                    .or_else(|| std::env::current_dir().ok()).unwrap_or_default();
                 self.history_scan_query = Some(query.to_lowercase());
-                std::thread::spawn(move || { let _ = tx.send(history::discover_query(&query)); });
+                std::thread::spawn(move || { let _ = tx.send(history::discover_query(&query, &cwd)); });
             }
         }
     }

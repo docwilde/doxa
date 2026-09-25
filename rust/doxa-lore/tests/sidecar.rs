@@ -17,6 +17,28 @@ fn fake(dir: &Path, body: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn session_search_requires_capability_and_checks_bounded_hit_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fake(dir.path(), r#"
+import json, sys
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','session_search_v1']}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    assert req['op'] == 'session_search_v1'
+    value = [{'session_id':'saved-1','project':'repo','snippet':'[needle]'}]
+    if req['query'] == 'bad': value[0]['project'] = '../escape'
+    print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
+"#);
+    let mut client = LoreClient::spawn(&path, Duration::from_secs(2)).unwrap();
+    assert_eq!(client.session_search("/repo", "needle").unwrap()[0].session_id, "saved-1");
+    assert!(matches!(client.session_search("/repo", "bad"), Err(LoreError::InvalidFrame)));
+    assert!(matches!(client.session_search("/repo", "\n"), Err(LoreError::InvalidFrame)));
+    let old = fake(dir.path(), "print('{\"type\":\"hello\",\"proto\":1,\"capabilities\":[\"scrub\",\"snapshot\"]}', flush=True)");
+    let mut older = LoreClient::spawn(&old, Duration::from_secs(2)).unwrap();
+    assert!(matches!(older.session_search("/repo", "needle"), Err(LoreError::Unavailable)));
+}
+
+#[test]
 fn belief_action_requires_review_capability_and_reports_retirement() {
     let dir = tempfile::tempdir().unwrap();
     let path = fake(dir.path(), r#"
