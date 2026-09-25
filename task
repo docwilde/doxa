@@ -1,0 +1,166 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
+# Local development commands for the separate DOXA Rust 2.0 preview.
+set -eu
+
+fail() { printf 'task: %s\n' "$*" >&2; exit 1; }
+info() { printf 'task: %s\n' "$*" >&2; }
+
+case $0 in
+  */*) script_dir=${0%/*} ;;
+  *) script_dir=. ;;
+esac
+root=$(CDPATH= cd -- "$script_dir" && pwd -P) || fail 'cannot find repository root'
+tui_manifest=$root/rust/doxa-tui/Cargo.toml
+daemon_manifest=$root/rust/doxa-daemon/Cargo.toml
+sidecar=$root/rust/doxa-claude/claude_sidecar.py
+[ -f "$tui_manifest" ] && [ -f "$daemon_manifest" ] && [ -f "$sidecar" ] ||
+  fail 'run this script from the DOXA Rust source checkout'
+
+usage() {
+  cat <<'EOF'
+Usage: ./task COMMAND [arguments]
+
+  build [--release]     Build the Rust frontend and daemon (debug by default)
+  install               Build and install committed HEAD as the Rust doxa launcher
+  run [doxa-rs args]    Build and run the frontend in the current directory
+  new [doxa-rs args]    Build and start a new session in the current directory
+  doctor [args]         Build and check the native launch dependencies
+  test                  Run both Rust crate test suites and Claude sidecar tests
+  clean                 Remove the task's local Rust build directory
+  help                  Show this help
+
+DOXA_TASK_TARGET_DIR defaults to <repo>/target/rust-task.
+DOXA_TASK_PROFILE=release selects release binaries for run/new/doctor.
+DOXA_LORE_PYTHON selects the LORE/Claude Python interpreter; otherwise
+<repo>/.venv/bin/python is used when present, then python3 on PATH.
+DOXA_RUST_BIN_DIR defaults to ~/.local/bin. install uses the locked sidecar
+dependencies and writes the Rust doxa launcher from committed HEAD.
+Pass --lore-python or --claude-python to override Python for one launch.
+EOF
+}
+
+case ${DOXA_TASK_TARGET_DIR:-$root/target/rust-task} in
+  /*) target_dir=${DOXA_TASK_TARGET_DIR:-$root/target/rust-task} ;;
+  *) target_dir=$root/${DOXA_TASK_TARGET_DIR} ;;
+esac
+export CARGO_TARGET_DIR=$target_dir
+
+profile=${DOXA_TASK_PROFILE:-debug}
+case $profile in debug|release) : ;; *) fail 'DOXA_TASK_PROFILE must be debug or release' ;; esac
+
+build() {
+  mode=$1
+  command -v cargo >/dev/null 2>&1 || fail 'cargo is required (install Rust first)'
+  mkdir -p "$target_dir"
+  : > "$target_dir/.doxa-task-build"
+  if [ "$mode" = release ]; then
+    info 'building release frontend and daemon'
+    cargo build --release --locked --manifest-path "$tui_manifest" --bin doxa-rs
+    cargo build --release --locked --manifest-path "$daemon_manifest" --bin doxa-daemon
+  else
+    info 'building debug frontend and daemon'
+    cargo build --locked --manifest-path "$tui_manifest" --bin doxa-rs
+    cargo build --locked --manifest-path "$daemon_manifest" --bin doxa-daemon
+  fi
+}
+
+python_bin() {
+  if [ -n "${DOXA_LORE_PYTHON:-}" ]; then
+    candidate=$DOXA_LORE_PYTHON
+  elif [ -x "$root/.venv/bin/python" ]; then
+    candidate=$root/.venv/bin/python
+  else
+    candidate=$(command -v python3 || :)
+  fi
+  [ -n "$candidate" ] || fail 'Python is required; set DOXA_LORE_PYTHON'
+  case $candidate in
+    /*) : ;;
+    *) candidate=$(command -v "$candidate" || :) ;;
+  esac
+  [ -n "$candidate" ] && [ -x "$candidate" ] || fail 'DOXA_LORE_PYTHON is not executable'
+  case $candidate in
+    /*) : ;;
+    */*) candidate=$(CDPATH= cd -- "${candidate%/*}" && pwd -P)/${candidate##*/} ;;
+    *) fail 'could not resolve Python to an absolute path' ;;
+  esac
+  printf '%s\n' "$candidate"
+}
+
+launch() {
+  verb=$1
+  shift
+  build "$profile"
+  binary=$target_dir/$profile/doxa-rs
+  daemon=$target_dir/$profile/doxa-daemon
+  [ -x "$binary" ] && [ -x "$daemon" ] || fail 'Cargo produced no runnable frontend or daemon'
+  export DOXA_DAEMON_BIN=$daemon
+  export DOXA_CLAUDE_SCRIPT=$sidecar
+
+  engine=codex
+  has_lore=0
+  has_claude=0
+  expect_engine=0
+  for arg do
+    if [ "$expect_engine" -eq 1 ]; then
+      engine=$arg
+      expect_engine=0
+      continue
+    fi
+    case $arg in
+      --engine) expect_engine=1 ;;
+      --lore-python) has_lore=1 ;;
+      --claude-python) has_claude=1 ;;
+    esac
+  done
+  [ "$expect_engine" -eq 0 ] || fail 'missing value for --engine'
+  if [ "$engine" = claude ]; then
+    if [ "$has_claude" -eq 0 ]; then
+      set -- "$@" --claude-python "$(python_bin)"
+    fi
+  elif [ "$engine" != fixture ] && [ "$has_lore" -eq 0 ]; then
+    set -- "$@" --lore-python "$(python_bin)"
+  fi
+
+  case $verb in
+    run) exec "$binary" "$@" ;;
+    *) exec "$binary" "$verb" "$@" ;;
+  esac
+}
+
+install_committed() {
+  command -v git >/dev/null 2>&1 || fail 'git is required to install this checkout'
+  revision=$(git -C "$root" rev-parse HEAD) || fail 'cannot resolve checkout HEAD'
+  if ! git -C "$root" diff --quiet || ! git -C "$root" diff --cached --quiet; then
+    info 'install uses committed HEAD; working-tree changes are not included'
+  fi
+  DOXA_RUST_REPO_URL="$root" sh "$root/scripts/install.sh" "$revision"
+}
+
+command=${1:-help}
+[ "$#" -eq 0 ] || shift
+case $command in
+  help|-h|--help) [ "$#" -eq 0 ] || fail 'help takes no arguments'; usage ;;
+  build)
+    case ${1:-} in
+      '') [ "$#" -eq 0 ] || fail 'usage: ./task build [--release]'; build debug ;;
+      --release) [ "$#" -eq 1 ] || fail 'usage: ./task build [--release]'; build release ;;
+      *) fail 'usage: ./task build [--release]' ;;
+    esac ;;
+  install) [ "$#" -eq 0 ] || fail 'install takes no arguments'; install_committed ;;
+  run|new|doctor) launch "$command" "$@" ;;
+  test)
+    [ "$#" -eq 0 ] || fail 'test takes no arguments'
+    command -v cargo >/dev/null 2>&1 || fail 'cargo is required (install Rust first)'
+    mkdir -p "$target_dir"
+    : > "$target_dir/.doxa-task-build"
+    cargo test --locked --manifest-path "$tui_manifest"
+    cargo test --locked --manifest-path "$daemon_manifest"
+    "$(python_bin)" -m unittest discover -s "$root/rust/doxa-claude/tests" -p 'test_*.py' ;;
+  clean)
+    [ "$#" -eq 0 ] || fail 'clean takes no arguments'
+    [ -z "${DOXA_TASK_TARGET_DIR:-}" ] || fail 'clean requires the default target directory'
+    [ -f "$target_dir/.doxa-task-build" ] || fail 'target directory was not created by ./task'
+    rm -rf "$target_dir" ;;
+  *) fail "unknown command: $command (run ./task help)" ;;
+esac

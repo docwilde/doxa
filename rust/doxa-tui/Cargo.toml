@@ -1,0 +1,28 @@
+[package]
+name = "doxa-tui"
+version = "2.0.0-alpha.10"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-only"
+
+[[bin]]
+name = "doxa-rs"
+path = "src/main.rs"
+
+[dependencies]
+doxa-state = { path = "../doxa-state" }
+doxa-lore = { path = "../doxa-lore" }
+crossterm = "0.28"
+doxa-protocol = { path = "../doxa-protocol" }
+libc = "0.2"
+pulldown-cmark = "0.13"
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+toml = "0.8"
+unicode-width = "0.2"
+tui-nodes = "=0.9.0"
+
+[dev-dependencies]
+tempfile = "3"

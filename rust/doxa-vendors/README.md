@@ -1,0 +1,11 @@
+# DOXA vendor chat adapter (Rust 2.0 preview)
+
+`doxa-vendors` implements bounded chat-completions SSE requests and a multi-request turn loop for DeepSeek and GLM. It follows the measured Python request shapes in `doxa/vendors.py`: DeepSeek nests `reasoning_effort` inside `thinking`; GLM places it at the root and refuses `none`; neither receives `max_tokens`. The API key is read from `DEEPSEEK_API_KEY` or `ZAI_API_KEY` when each request starts, passed only in the Authorization header, and never retained by a client struct. HTTP error text is discarded after parsing a bounded vendor code, so a key echoed by a provider cannot enter an error display. Streamed text and tool argument values redact the active key, including when it is split across SSE fragments.
+
+The SSE decoder caps a line at 1 MiB and a response at 64 MiB. Tool arguments cap at 1 MiB with at most 128 calls. Cancellation drops an in-flight HTTP request.
+
+`run_turn` now owns a bounded multi-request turn: it carries chat-completions history across tool steps, sums provider-reported prompt and completion tokens, and applies one deadline (at most 3600 seconds) across requests and tool execution. It caps tool steps at 24, history at 512 messages/8 MiB, and each tool result at 1 MiB. History is committed only on success. A failed turn may have already executed a tool, so callers must not blindly retry it.
+
+Tool definitions are sent only when the caller supplies a concrete `ToolGate`. The gate must own permission checks and safe tool execution; the crate validates offered names and refuses unoffered calls. Its errors are not sent to the provider. The active API key is scrubbed from tool results before they are added to history. Callers must still scrub other secrets in prompts, definitions, history, and results. This crate does not claim `mcp_tools`/`tool_gate` parity until a production gate is connected.
+
+The crate is not yet wired to the native daemon. CI enables a loopback-only test transport and uses a local fake HTTP server with synthetic keys. The production entry point fixes provider URLs, so an arbitrary endpoint cannot receive an API key. Live DeepSeek/GLM behavior, credentials, model catalogue changes, LORE tool gating, and price-sheet charges remain release gates.

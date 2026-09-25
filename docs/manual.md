@@ -1,11 +1,10 @@
-# DOXA manual
+# DOXA Python 1.x manual
 
-Reference for what DOXA does today. Everything here is true of the current
-code — verified against source, not transcribed from release notes; this
-document was last read against **1.9.3** end to end. For the pitch and the
-install instructions, see [README.md](../README.md). For designs that are
-**not** built yet, see [docs/plans/](plans/) — this manual never documents
-a plan as if it were shipped.
+Historical reference for the Python 1.x frontend. Rust 2.0 is the main line;
+use the [Rust guide](../rust/README.md) for current capabilities and setup.
+This document was last read against Python **1.9.3** end to end and does not
+describe the Rust frontend. For designs that are still being ported, see
+[docs/plans/](plans/).
 
 ## Contents
 
@@ -29,7 +28,6 @@ a plan as if it were shipped.
 - [Keyboard protocol](#keyboard-protocol)
 - [Commands](#commands)
 - [Settings](#settings)
-- [Screenshots](#screenshots)
 
 ## Sessions and the daemon
 
@@ -1948,59 +1946,3 @@ daemon sockets and the peer registry, kept out of the home directory
 because home directories can be network-mounted (Unix sockets misbehave
 there). The LORE store is neither — it stays `lore_core`'s own path,
 shared with the Claude Code LORE plugin on purpose.
-
-## Screenshots
-
-Every still and GIF under [`assets/shots/`](../assets/shots/) is generated
-headlessly from the real app by
-[`scripts/screenshot.py`](../scripts/screenshot.py) and
-[`scripts/record_gif.py`](../scripts/record_gif.py) — a scripted session,
-no spend, fake account numbers — and each still keeps its source SVG
-committed beside its PNG. `mesh.png` is the one exception on both counts:
-it is a browser page, so [`scripts/mesh_shot.py`](../scripts/mesh_shot.py)
-drives Chrome over a real graph server instead, and it has no SVG twin.
-The browser itself is driven by [`scripts/cdp.py`](../scripts/cdp.py), the
-repository's one DevTools-protocol client — shared with
-`tests/test_mesh_page.py`, which loads the same page in the same way and
-asserts on what it renders, so the driver behind the picture is the
-driver the suite exercises.
-**Thirty-four images, each named exactly once** — the
-[README](../README.md#gallery) captions sixteen of them, counting the
-hero, and the other eighteen are catalogued below so that **no rendered
-asset is left unnamed by any document**. That is the exact
-condition `beliefs-browser.png` needed to sit wrong for eighteen releases
-before v0.87.0 deleted it. All thirty-four are 3068x1734, but they are not
-all from one pass: an image that still matches the feature it shows is
-left alone rather than re-rendered, so the gallery sits at mixed versions
-by design.
-
-Every scene renders the app inside **the checkout the script runs from**,
-so the identity block, the tab labels and the `repo ⎇ branch` chip carry
-that checkout's own branch and path. Capture from `main`, on a clean tree
-— a throwaway clone is the reliable way to have both — or a working branch
-name ends up baked into nineteen of the twenty-one stills, and an
-uncommitted edit paints a `diff` chip that belongs to the capture, not to
-the feature. Two stills carry neither: `folder-chip`, whose whole subject
-is a session that is not in a repository, and `mesh`, which is a browser
-page with no identity block to carry one.
-
-| asset | shows |
-|---|---|
-| [`split-panes.gif`](../assets/shots/split-panes.gif) | one pane becoming two — the keystroke, and the pane arriving |
-| [`markdown-stream.gif`](../assets/shots/markdown-stream.gif) | a reply streaming as real markdown, a table row at a time |
-| [`subagent-tracker.png`](../assets/shots/subagent-tracker.png) | a running subagent's status row and its own tab |
-| [`trace.png`](../assets/shots/trace.png) | a subagent's activity as a tree under its parent `Task` chip |
-| [`error-block.png`](../assets/shots/error-block.png) | a caught exception as a collapsible red-ruled transcript block |
-| [`chip-picker.gif`](../assets/shots/chip-picker.gif) | the shared selector picker, opened from the branch chip |
-| [`tab-lifecycle.gif`](../assets/shots/tab-lifecycle.gif) | a background tab amber while running, green once finished unseen |
-| [`search.gif`](../assets/shots/search.gif) | `/search` over every past session, live as you type |
-| [`settings.png`](../assets/shots/settings.png) | the settings modal, each row's effective value and its source |
-| [`reasoning.gif`](../assets/shots/reasoning.gif) | the reasoning fold ticking, then the phase flipping to `generating` |
-| [`sessions.png`](../assets/shots/sessions.png) | `/sessions`, attached and detached |
-| [`clock.png`](../assets/shots/clock.png) | the upper-right clock |
-| [`palette.gif`](../assets/shots/palette.gif) | the `ctrl+p` command palette |
-| [`rename.gif`](../assets/shots/rename.gif) | renaming a tab by double-clicking its header |
-| [`attention-blink.gif`](../assets/shots/attention-blink.gif) | a tab blinking for attention |
-| [`image-support.png`](../assets/shots/image-support.png) | `/img`'s tier table — the rung in use, and every rung it could not measure labelled as such rather than guessed |
-| [`banner-blocks.png`](../assets/shots/banner-blocks.png) | the boot banner, drawn in block characters on every terminal alike |
-| [`transparent.png`](../assets/shots/transparent.png) | the transparent-background setting |
