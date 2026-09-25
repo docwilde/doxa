@@ -52,7 +52,15 @@ jobs:
         run: cargo +stable test --locked --manifest-path rust/doxa-runtime/Cargo.toml
       - name: Test native daemon hosts and peer RPC
         run: cargo +stable test --locked --features local-test-server --manifest-path rust/doxa-daemon/Cargo.toml
-      - name: Build release binary
-        run: cargo +stable build --locked --release --manifest-path rust/doxa-tui/Cargo.toml
+      - name: Smoke installed Rust launcher and locked sidecars
+        run: |
+          smoke_dir=$(mktemp -d)
+          DOXA_RUST_REPO_URL="$GITHUB_WORKSPACE" \
+            DOXA_HOME="$smoke_dir/home" \
+            DOXA_RUST_BIN_DIR="$smoke_dir/bin" \
+            sh scripts/install.sh HEAD
+          (cd / && "$smoke_dir/bin/doxa" --version)
+          (cd / && "$smoke_dir/home/sidecars/$(git rev-parse HEAD)/bin/python" \
+            -c 'import doxa.lore_bridge, doxa.engine, lore_core, claude_agent_sdk')
       - name: Test vendor chat adapter
         run: cargo +stable test --locked --features local-test-server --manifest-path rust/doxa-vendors/Cargo.toml
