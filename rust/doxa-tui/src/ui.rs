@@ -204,7 +204,7 @@ fn chip_hint(kind: &str) -> &'static str {
         "model" => "Model for this session · click to choose",
         "repo" => "This session's repository and base branch · click for worktree details",
         "directory" => "This session's directory; no Git repository is active",
-        "effort" => "This session's reasoning effort · click or Alt+F to set a default for new sessions",
+        "effort" => "Daemon-reported effort · Alt+F sets a new-session default where supported",
         "context" => "Current session context usage · click for details",
         "memory" => "User and scoped LORE memory · click to view entries",
         "beliefs" => "LORE beliefs · click to browse",
@@ -325,6 +325,8 @@ fn wrapped_rows(text: &str, width: usize) -> usize {
 fn chip_text(kind: &str, label: &str) -> String {
     if kind == "more" {
         format!(" {label} › ")
+    } else if kind == "effort" && label == "Effort ?" {
+        format!(" {label} ")
     } else if matches!(kind, "engine" | "model" | "effort" | "permission" | "beliefs") {
         format!(" {label} ▾ ")
     } else {
