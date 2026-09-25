@@ -39,6 +39,11 @@ jobs:
         uses: astral-sh/setup-uv@v10.0.1
       - name: Sync Python client dependencies
         run: uv sync --frozen --python 3.12
+      - name: Check release installer and task entry points
+        run: |
+          sh -n scripts/install.sh task
+          ./task help
+          uv run pytest tests/test_install_rust.py -q
       - name: Test native LORE sidecar boundary
         run: uv run pytest tests/test_lore_bridge.py -q
       - name: Test native daemon protocol
