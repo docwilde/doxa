@@ -127,7 +127,7 @@ impl Host for BudgetHost {
     }
     fn initial_model(&self) -> Option<String> { self.inner.initial_model() }
     fn initial_permission_mode(&self) -> String { self.inner.initial_permission_mode() }
-    fn can_set_model(&self) -> bool { self.inner.can_set_model() }
+    fn can_set_model(&self) -> bool { self.pricing.is_none() && self.inner.can_set_model() }
     fn can_set_permission_mode(&self) -> bool { self.inner.can_set_permission_mode() }
     fn billing_snapshot(&self) -> Option<Value> { self.inner.billing_snapshot() }
     fn lore_scrub_status(&self) -> Option<&'static str> { self.inner.lore_scrub_status() }
@@ -168,6 +168,7 @@ mod tests {
             emit(json!({"type":"turn_done","data":self.0}));
         }
         fn call(&self, _: &str, _: &Value) -> Result<Value, String> { Ok(json!({})) }
+        fn can_set_model(&self) -> bool { true }
     }
     fn priced_event() -> Value {
         json!({"model":"deepseek-flash","model_consistent":true,
@@ -186,6 +187,7 @@ mod tests {
         assert_eq!(events[0]["data"]["price_read_on"], "2026-09-21");
         assert_eq!(events[1]["type"], "turn_refused");
         assert!(host.call("set_model", &json!({"model":"glm-5-turbo"})).is_err());
+        assert!(!host.can_set_model());
     }
     #[test]
     fn priced_vendor_requires_complete_usage_and_consistent_model() {
