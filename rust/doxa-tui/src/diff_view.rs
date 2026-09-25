@@ -133,7 +133,8 @@ fn rejectable_hunks(bytes: &[u8]) -> Vec<RejectableHunk> {
             hunk.extend_from_slice(line);
         } else if !file_header.is_empty() {
             if line.starts_with(b"+++ ") {
-                path = String::from_utf8_lossy(&line[4..]).trim_end().trim_start_matches("b/").to_owned();
+                path = String::from_utf8_lossy(&line[4..]).trim_end()
+                    .strip_prefix("b/").unwrap_or("").to_owned();
             }
             file_header.extend_from_slice(line);
         }
@@ -179,9 +180,29 @@ pub fn reject(snapshot: &DiffSnapshot, index: usize) -> Result<String, String> {
     if truncated || !rejectable_hunks(&current).iter().any(|candidate| candidate.patch == hunk.patch) {
         return Err("This hunk changed; refresh the diff before rejecting it.".into());
     }
+    // The displayed comparison includes staged edits, but plain `git apply`
+    // would only change the worktree. Verify the raw path against Git's NUL
+    // separated list so quoted or non-UTF8 diff headers cannot bypass this
+    // check, then refuse a file with any staged edits. The user can unstage it
+    // and retry; a rejected edit must never remain in the next commit.
+    let (changed, changed_truncated) = git_output(cwd,
+        &["--no-pager", "diff", "--name-only", "-z", "--no-ext-diff", &base, "--"], MAX_DIFF_BYTES)?;
+    if changed_truncated || !nul_paths(&changed).any(|path| path == hunk.path.as_bytes()) {
+        return Err("Cannot verify this hunk's exact file path; refresh the diff.".into());
+    }
+    let (staged, staged_truncated) = git_output(cwd,
+        &["--no-pager", "diff", "--cached", "--name-only", "-z", "--no-ext-diff", "--"], MAX_DIFF_BYTES)?;
+    if staged_truncated { return Err("Too many staged paths to verify this hunk safely.".into()); }
+    if nul_paths(&staged).any(|path| path == hunk.path.as_bytes()) {
+        return Err("This file has staged changes; unstage it before rejecting a hunk.".into());
+    }
     apply_patch(cwd, &hunk.patch, true)?;
     apply_patch(cwd, &hunk.patch, false)?;
     Ok(format!("Reverted {}", hunk.header))
+}
+
+fn nul_paths(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    bytes.split(|byte| *byte == 0).filter(|path| !path.is_empty())
 }
 
 fn git_output(cwd: &Path, args: &[&str], limit: usize) -> Result<(Vec<u8>, bool), String> {
@@ -279,10 +300,25 @@ fn safe_ref(value: &str) -> bool {
         && !value.contains("..")
 }
 
+fn valid_oid(value: &str) -> bool {
+    (value.len() == 40 || value.len() == 64)
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn commit_oid(cwd: &Path, revision: &str) -> Result<String, String> {
+    let spec = format!("{revision}^{{commit}}");
+    let (bytes, truncated) = git_output(cwd, &["rev-parse", "--verify", &spec], 80)?;
+    let oid = String::from_utf8(bytes).map_err(|_| "Git returned an invalid base commit.".to_owned())?;
+    let oid = oid.trim();
+    if truncated || !valid_oid(oid) { return Err("Git returned an invalid base commit.".into()); }
+    Ok(oid.to_owned())
+}
+
 fn base_for(cwd: &Path) -> Result<(String, &'static str), String> {
-    let Some(path) = sidecar(cwd) else { return Ok(("HEAD".into(), "HEAD (uncommitted only)")); };
+    let head = || commit_oid(cwd, "HEAD").map(|oid| (oid, "HEAD (uncommitted only)"));
+    let Some(path) = sidecar(cwd) else { return head(); };
     let Ok(file) = OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW).open(path)
-        else { return Ok(("HEAD".into(), "HEAD (uncommitted only)")); };
+        else { return head(); };
     if file.metadata().map(|meta| !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.len() > 16 * 1024).unwrap_or(true) {
         return Err("Worktree base metadata is too large".into());
     }
@@ -294,12 +330,24 @@ fn base_for(cwd: &Path) -> Result<(String, &'static str), String> {
         return Err("Worktree base metadata is invalid".into());
     };
     let base = meta["base_ref"].as_str().unwrap_or("");
-    if base.is_empty() { return Ok(("HEAD".into(), "HEAD (uncommitted only)")); }
+    if base.is_empty() { return head(); }
     if !safe_ref(base) { return Err("Worktree base reference is invalid".into()); }
     if meta["branch"].as_str() == Some(base) {
         return Err("Recorded base equals this worktree's branch; committed changes cannot be shown".into());
     }
-    Ok((base.into(), "recorded worktree base"))
+    if let Some(oid) = meta.get("base_oid") {
+        let value = oid.as_str().ok_or("Worktree base commit is invalid")?;
+        if !valid_oid(value) { return Err("Worktree base commit is invalid".into()); }
+        return commit_oid(cwd, value).map(|oid| (oid, "recorded worktree base"));
+    }
+    // Python 1.19 and older Rust sidecars have only a branch name. Its tip
+    // can move after creation, so compare from the current branch's common
+    // ancestor rather than treating upstream changes as session edits.
+    let (bytes, truncated) = git_output(cwd, &["merge-base", base, "HEAD"], 80)?;
+    let oid = String::from_utf8(bytes).map_err(|_| "Git returned an invalid worktree ancestor.".to_owned())?;
+    let oid = oid.trim();
+    if truncated || !valid_oid(oid) { return Err("Git returned an invalid worktree ancestor.".into()); }
+    Ok((oid.to_owned(), "recorded worktree ancestor"))
 }
 
 /// Capture a bounded unified diff. The caller must run this off the UI thread.
@@ -473,5 +521,63 @@ mod tests {
         std::fs::write(dir.path().join("tracked.txt"), "agent changed again\n").unwrap();
         assert!(reject(&snapshot, 0).unwrap_err().contains("changed"));
         assert_eq!(std::fs::read_to_string(dir.path().join("tracked.txt")).unwrap(), "agent changed again\n");
+    }
+
+    #[test]
+    fn staged_hunk_is_not_reverted_only_in_the_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(dir.path()).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("tracked.txt"), "old\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: baseline"]);
+        std::fs::write(dir.path().join("tracked.txt"), "new\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        let snapshot = read(dir.path());
+        assert_eq!(snapshot.rejectable.len(), 1);
+        assert!(reject(&snapshot, 0).unwrap_err().contains("staged changes"));
+        assert_eq!(std::fs::read_to_string(dir.path().join("tracked.txt")).unwrap(), "new\n");
+        let cached = Command::new("git").args(["show", ":tracked.txt"])
+            .current_dir(dir.path()).output().unwrap();
+        assert_eq!(cached.stdout, b"new\n");
+    }
+
+    #[test]
+    fn moving_base_branch_does_not_create_false_hunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let main = dir.path().join("repo");
+        let worktree = home.join("worktrees/repo-session");
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::create_dir_all(worktree.parent().unwrap().join(".meta")).unwrap();
+        let git = |cwd: &Path, args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(cwd).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&main, &["init", "-q", "-b", "main"]);
+        std::fs::write(main.join("tracked.txt"), "old\n").unwrap();
+        git(&main, &["add", "tracked.txt"]);
+        git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: baseline"]);
+        let base_oid = git(&main, &["rev-parse", "HEAD"]);
+        git(&main, &["worktree", "add", "-q", "-b", "doxa/session", worktree.to_str().unwrap()]);
+        let meta_path = worktree.parent().unwrap().join(".meta/repo-session.json");
+        let old_home = std::env::var_os("DOXA_HOME");
+        std::env::set_var("DOXA_HOME", &home);
+        std::fs::write(&meta_path, r#"{"base_ref":"main","branch":"doxa/session"}"#).unwrap();
+        std::fs::write(main.join("tracked.txt"), "upstream\n").unwrap();
+        git(&main, &["add", "tracked.txt"]);
+        git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: upstream"]);
+        let legacy = read(&worktree);
+        assert!(legacy.text.contains("No tracked changes"), "{}", legacy.text);
+        assert!(legacy.rejectable.is_empty());
+        std::fs::write(&meta_path, serde_json::json!({"base_ref":"main", "branch":"doxa/session", "base_oid":base_oid}).to_string()).unwrap();
+        let pinned = read(&worktree);
+        assert!(pinned.text.contains("No tracked changes"), "{}", pinned.text);
+        assert!(pinned.rejectable.is_empty());
+        match old_home { Some(value) => std::env::set_var("DOXA_HOME", value), None => std::env::remove_var("DOXA_HOME") }
     }
 }
