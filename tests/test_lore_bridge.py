@@ -96,6 +96,7 @@ def test_partial_archive_failure_is_returned_without_retry_or_item_text(monkeypa
 @pytest.fixture(autouse=True)
 def no_optional_read_store(monkeypatch):
     monkeypatch.setattr(lore_bridge, "_read_ops", lambda: None)
+    monkeypatch.setattr(lore_bridge, "_belief_action_ops", lambda: None)
     monkeypatch.setattr(lore_bridge, "_index_ops", lambda: None)
     monkeypatch.setattr(lore_bridge, "_pending_review_reader", lambda: None)
 
@@ -577,3 +578,72 @@ def test_consult_beliefs_and_evidence_are_bounded_scrubbed_and_cite_only(monkeyp
     assert frames[4]["value"][0]["trail_truncated"] is True
     assert frames[5]["error"] == frames[6]["error"] == "operation_failed"
     assert b"SECRET" not in output.getvalue()
+
+
+def test_belief_actions_use_exact_review_and_canonical_lore_mutators(tmp_path):
+    db = tmp_path / "beliefs.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE beliefs(id INTEGER PRIMARY KEY, uid TEXT, subject TEXT, claim TEXT, status TEXT)")
+    conn.execute("INSERT INTO beliefs VALUES(1,'uid-one','project:my-project','SECRET fact','active')")
+    conn.commit()
+    conn.close()
+    calls = []
+
+    def outcome(conn, bid, event, source, *, note):
+        calls.append((bid, event, source, note))
+        if event == "contradicted":
+            conn.execute("UPDATE beliefs SET status='dormant' WHERE id=?", (bid,))
+
+    def retract(conn, bid, reason):
+        calls.append((bid, "retract", reason))
+        conn.execute("UPDATE beliefs SET status='retracted' WHERE id=?", (bid,))
+        return True
+
+    ops = (lambda cwd: "my-project", lambda: sqlite3.connect(db), retract,
+           lambda conn, bid: (0, 1, 0), outcome)
+    review = lore_bridge._belief_review({"cwd": "/repo", "belief_id": 1}, ops,
+                                        lambda text: text.replace("SECRET", "[redacted]"))
+    assert review["claim"] == "[redacted] fact"
+    assert review["claim_sha256"] == hashlib.sha256(b"SECRET fact").hexdigest()
+    expected = {key: review[key] for key in ("uid", "subject", "claim_sha256")}
+    request = {"cwd": "/repo", "belief_id": 1, "expected": expected,
+               "action": "contradicted", "note": "Observed failure"}
+    result = lore_bridge._belief_action(request, ops)
+    assert result == {"status": "dormant", "retired": True, "confirmed": 0,
+                      "contradicted": 1, "stale": 0}
+    assert calls == [(1, "contradicted", "user", "Observed failure")]
+    with pytest.raises(lore_bridge.BeliefActionError) as changed:
+        lore_bridge._belief_action(request, ops)
+    assert changed.value.code == "belief_changed"
+    assert len(calls) == 1
+
+
+def test_belief_review_and_action_refuse_foreign_missing_and_changed_rows(tmp_path):
+    db = tmp_path / "beliefs.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE beliefs(id INTEGER PRIMARY KEY, uid TEXT, subject TEXT, claim TEXT, status TEXT)")
+    conn.executemany("INSERT INTO beliefs VALUES(?,?,?,?,?)", [
+        (1, "one", "project:other", "foreign", "active"),
+        (2, "two", "user", "original", "active"),
+    ])
+    conn.commit()
+    conn.close()
+    calls = []
+    ops = (lambda cwd: "my-project", lambda: sqlite3.connect(db),
+           lambda *args: calls.append("retract"), lambda conn, bid: (0, 0, 0),
+           lambda *args, **kwargs: calls.append("outcome"))
+    for bid in (1, 99):
+        with pytest.raises(lore_bridge.BeliefActionError) as error:
+            lore_bridge._belief_review({"cwd": "/repo", "belief_id": bid}, ops, str)
+        assert error.value.code == "belief_unavailable"
+    review = lore_bridge._belief_review({"cwd": "/repo", "belief_id": 2}, ops, str)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE beliefs SET claim='changed' WHERE id=2")
+    conn.commit()
+    conn.close()
+    with pytest.raises(lore_bridge.BeliefActionError) as error:
+        lore_bridge._belief_action({"cwd": "/repo", "belief_id": 2,
+            "expected": {key: review[key] for key in ("uid", "subject", "claim_sha256")},
+            "action": "confirmed", "note": "checked"}, ops)
+    assert error.value.code == "belief_changed"
+    assert calls == []
