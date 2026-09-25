@@ -25,6 +25,9 @@ def _source_repo(tmp_path: Path, *, daemon: bool = False, tui: bool = True) -> P
         manifest = repo / "rust/doxa-daemon/Cargo.toml"
         manifest.parent.mkdir(parents=True)
         manifest.write_text("[package]\nname = 'doxa-daemon'\nversion = '0.1.0'\n")
+    sidecar = repo / "rust/doxa-claude/claude_sidecar.py"
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text("# test Claude sidecar\n")
     (repo / "README.md").write_text("source")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(
@@ -40,12 +43,23 @@ def _run(
     repo: Path,
     *args: str,
     cargo: bool = True,
+    fail_install_name: str | None = None,
     extra_env: dict[str, str] | None = None,
 ):
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     bindir = tmp_path / "fakebin"
     bindir.mkdir(exist_ok=True)
+    if fail_install_name:
+        mv_script = bindir / "mv"
+        mv_script.write_text(
+            "#!/bin/sh\n"
+            "case $2 in\n"
+            f"  */.doxa-install.*/{fail_install_name}) exit 73 ;;\n"
+            "esac\n"
+            "exec /usr/bin/mv \"$@\"\n"
+        )
+        mv_script.chmod(0o755)
     rustc_script = bindir / "rustc"
     rustc_script.write_text("#!/bin/sh\nprintf 'host: test-host-target\\n'\n")
     rustc_script.chmod(rustc_script.stat().st_mode | stat.S_IXUSR)
@@ -152,6 +166,35 @@ def test_rust_switch_replaces_preview_links_without_overwriting_python_doxa(tmp_
     assert not (bin_dir / "doxa-daemon-rs").is_symlink()
     assert (bin_dir / "doxa-rs").is_file()
     assert (bin_dir / "doxa-daemon-rs").is_file()
+
+
+@pytest.mark.parametrize("failed_name", ["doxa-claude-sidecar.py", "doxa-daemon-rs"])
+def test_rust_install_failure_restores_all_previous_files_and_links(tmp_path, failed_name):
+    repo = _source_repo(tmp_path, daemon=True)
+    bin_dir = tmp_path / "home/.local/bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "doxa-rs").write_bytes(b"old tui")
+    (bin_dir / "doxa-claude-sidecar.py").write_bytes(b"old sidecar")
+    (bin_dir / "old-daemon").write_bytes(b"old daemon")
+    (bin_dir / "doxa-daemon-rs").symlink_to("old-daemon")
+
+    proc, _, _ = _run(tmp_path, repo, fail_install_name=failed_name)
+    assert proc.returncode != 0
+    assert (bin_dir / "doxa-rs").read_bytes() == b"old tui"
+    assert (bin_dir / "doxa-claude-sidecar.py").read_bytes() == b"old sidecar"
+    assert (bin_dir / "doxa-daemon-rs").is_symlink()
+    assert os.readlink(bin_dir / "doxa-daemon-rs") == "old-daemon"
+    assert not list(bin_dir.glob(".doxa-install.*"))
+
+
+def test_rust_install_without_daemon_removes_obsolete_daemon(tmp_path):
+    repo = _source_repo(tmp_path)
+    bin_dir = tmp_path / "home/.local/bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "doxa-daemon-rs").write_bytes(b"obsolete")
+    proc, _, _ = _run(tmp_path, repo)
+    assert proc.returncode == 0, proc.stderr
+    assert not (bin_dir / "doxa-daemon-rs").exists()
 
 
 @pytest.mark.parametrize("ref", ["--upload-pack=evil", "../../etc", "rust/2.0;evil", "@{upstream}"])

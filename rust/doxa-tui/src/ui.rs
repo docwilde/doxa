@@ -23,7 +23,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
 use unicode_width::UnicodeWidthStr;
 
-use crate::{diff_view, history, launch, markdown, peer_map::PeerMap};
+use crate::{diff_view, history, launch, lore_picker, markdown, peer_map::PeerMap};
 use crate::theme;
 
 mod tool_cards;
@@ -38,7 +38,7 @@ const MAX_INPUT_REQUESTS: usize = 32;
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
 const MAX_ANSWER_BYTES: usize = 10 * 1024;
-const ACTIONS: [(&str, &str); 11] = [
+const ACTIONS: [(&str, &str); 13] = [
     ("Peer map", "Ctrl+M"),
     ("Tool activity", "Ctrl+T"),
     ("Open selected session", "rail selection"),
@@ -46,10 +46,12 @@ const ACTIONS: [(&str, &str); 11] = [
     ("Next tab", "active pane"),
     ("Switch pane", "Shift+Tab"),
     ("Session history", "Ctrl+R"),
+    ("LORE beliefs", "Alt+L"),
     ("Worktree diff", "F2"),
     ("Engine for new session", "Alt+E"),
     ("Session model", "Alt+M"),
     ("Claude permissions", "Alt+P"),
+    ("Stop active session", "Alt+X"),
 ];
 
 const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
@@ -73,6 +75,17 @@ struct ModelPicker {
     note: String,
     loading: bool,
     catalog_pending: bool,
+}
+
+#[derive(Debug)]
+struct LorePicker {
+    query: String,
+    rows: Vec<lore_picker::Belief>,
+    selected: usize,
+    offset: u16,
+    evidence: Option<(u64, Vec<lore_picker::Evidence>)>,
+    status: String,
+    pending: Option<Receiver<Result<lore_picker::ResultPage, &'static str>>>,
 }
 
 #[derive(Debug)]
@@ -521,7 +534,10 @@ pub struct App {
     permission_picker: Option<(String, usize)>,
     permission_confirm_dont_ask: bool,
     pending_permission_changes: Vec<(String, String)>,
+    stop_confirmation: Option<String>,
+    pending_stops: Vec<String>,
     model_picker: Option<ModelPicker>,
+    lore_picker: Option<LorePicker>,
     engine_picker: bool,
     engine_selected: usize,
     new_session: Option<NewSession>,
@@ -549,8 +565,10 @@ pub struct App {
     diff_modal: bool,
     diff_pane: bool,
     diff_target: Option<String>,
-    diff_scroll: u16,
+    diff_scroll: usize,
     diff_text: String,
+    diff_files: Vec<usize>,
+    diff_hunks: Vec<usize>,
     diff_pending: Option<Receiver<(String, diff_view::DiffSnapshot)>>,
     session_cwds: HashMap<String, PathBuf>,
     pending_peer_refresh: Option<String>,
@@ -594,7 +612,10 @@ impl Default for App {
             permission_picker: None,
             permission_confirm_dont_ask: false,
             pending_permission_changes: Vec::new(),
+            stop_confirmation: None,
+            pending_stops: Vec::new(),
             model_picker: None,
+            lore_picker: None,
             engine_picker: false,
             engine_selected: 0,
             new_session: None,
@@ -624,6 +645,8 @@ impl Default for App {
             diff_target: None,
             diff_scroll: 0,
             diff_text: String::new(),
+            diff_files: Vec::new(),
+            diff_hunks: Vec::new(),
             diff_pending: None,
             session_cwds: HashMap::new(),
             pending_peer_refresh: None,
@@ -832,6 +855,7 @@ impl App {
                                 self.permission_picker = None;
                                 self.permission_confirm_dont_ask = false;
                                 self.engine_picker = false;
+                                self.stop_confirmation = None;
                                 if self.input_requests.len() < MAX_INPUT_REQUESTS {
                                     self.input_requests.push(request);
                                 } else {
@@ -929,6 +953,18 @@ impl App {
                 } else {
                     format!("Permission change failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
                 };
+                true
+            }
+            "stop_reply" => {
+                let Some(id) = frame["session_id"].as_str().filter(|id| self.sessions.iter().any(|s| s.id == *id)) else { return false; };
+                if frame["ok"] == true {
+                    self.offline_ids.insert(id.to_owned());
+                    self.input_requests.retain(|request| request.session_id != id);
+                    self.apply_update(DaemonUpdate::Status { id: id.to_owned(), text: "Stopping".into() });
+                    self.notice = format!("Stop accepted · {}", safe_label(id));
+                } else {
+                    self.notice = format!("Stop failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")));
+                }
                 true
             }
             "telemetry_unavailable" => {
@@ -1125,6 +1161,14 @@ impl App {
                     self.history_modal = false;
                     self.notice = "Enlarge terminal to open session history".into();
                 }
+                if self.lore_picker.is_some() && (w < 34 || h < 13) {
+                    self.lore_picker = None;
+                    self.notice = "Enlarge terminal to open LORE beliefs".into();
+                }
+                if self.stop_confirmation.is_some() && !self.stop_confirmation_fits() {
+                    self.stop_confirmation = None;
+                    self.notice = "Session stop cancelled · enlarge terminal to confirm".into();
+                }
                 if ((self.model_picker.is_some() || self.engine_picker || self.new_session.is_some()) && (w < 29 || h < 11))
                     || (self.permission_picker.is_some() && (w < 60 || h < 15)) {
                     self.model_picker = None;
@@ -1163,6 +1207,8 @@ impl App {
         if self.active_request_index().is_some() {
             return self.request_key(key);
         }
+        if self.stop_confirmation.is_some() { return self.stop_confirmation_key(key); }
+        if self.lore_picker.is_some() { return self.lore_picker_key(key); }
         if self.new_session.is_some() { return self.new_session_key(key); }
         if self.model_picker.is_some() { return self.model_picker_key(key); }
         if self.permission_picker.is_some() { return self.permission_picker_key(key); }
@@ -1231,9 +1277,11 @@ impl App {
             self.open_history();
             return true;
         }
+        if key.code == KeyCode::Char('l') && alt { self.open_lore_picker(); return true; }
         if key.code == KeyCode::Char('m') && alt { self.open_model_picker(); return true; }
         if key.code == KeyCode::Char('p') && alt { self.open_permission_picker(); return true; }
         if key.code == KeyCode::Char('e') && alt { self.open_engine_picker(); return true; }
+        if key.code == KeyCode::Char('x') && alt { self.open_stop_confirmation(); return true; }
         if key.code == KeyCode::F(2) || (key.code == KeyCode::Char('g') && alt) {
             self.open_diff();
             return true;
@@ -1252,6 +1300,10 @@ impl App {
                 KeyCode::F(5) => { self.load_diff(); return true; }
                 KeyCode::PageUp if alt => { self.diff_scroll = self.diff_scroll.saturating_sub(10); return true; }
                 KeyCode::PageDown if alt => { self.diff_scroll = self.diff_scroll.saturating_add(10); return true; }
+                KeyCode::Char('n' | 'N') if alt => { self.jump_diff(true, true); return true; }
+                KeyCode::Char('b' | 'B') if alt => { self.jump_diff(true, false); return true; }
+                KeyCode::Char('j' | 'J') if alt => { self.jump_diff(false, true); return true; }
+                KeyCode::Char('k' | 'K') if alt => { self.jump_diff(false, false); return true; }
                 _ => {}
             }
         }
@@ -1577,6 +1629,115 @@ impl App {
         }
     }
 
+    fn open_lore_picker(&mut self) {
+        self.lore_picker = Some(LorePicker {
+            query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
+            evidence: None, status: String::new(), pending: None,
+        });
+        self.load_lore(lore_picker::Query::Beliefs(0));
+    }
+
+    fn load_lore(&mut self, query: lore_picker::Query) {
+        let Some(picker) = &mut self.lore_picker else { return; };
+        picker.status = "Loading from LORE…".into();
+        picker.pending = None;
+        let python = std::env::var_os("DOXA_LORE_PYTHON")
+            .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"));
+        let (tx, rx) = mpsc::sync_channel(1);
+        picker.pending = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(lore_picker::fetch(&python, query));
+        });
+    }
+
+    fn poll_lore(&mut self) -> bool {
+        let Some(picker) = &mut self.lore_picker else { return false; };
+        let Some(receiver) = &picker.pending else { return false; };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => Err("LORE worker unavailable"),
+        };
+        picker.pending = None;
+        match result {
+            Ok(lore_picker::ResultPage::Beliefs(rows)) => {
+                picker.rows = rows;
+                picker.selected = 0;
+                picker.evidence = None;
+                picker.status = if picker.rows.is_empty() { "No active beliefs on this page" } else { "Active beliefs · newest first" }.into();
+            }
+            Ok(lore_picker::ResultPage::Search(hit)) => {
+                picker.rows = hit.map(|hit| lore_picker::Belief {
+                    id: hit.id, subject: "Search match".into(), claim: hit.claim,
+                    truncated: hit.claim_truncated, confidence: hit.confidence,
+                    evidence_count: None,
+                }).into_iter().collect();
+                picker.selected = 0;
+                picker.evidence = None;
+                picker.status = if picker.rows.is_empty() { "No active belief matched" } else { "LORE search result · cite as a claim" }.into();
+            }
+            Ok(lore_picker::ResultPage::Evidence(id, rows)) => {
+                if picker.rows.iter().any(|row| row.id == id) {
+                    picker.evidence = Some((id, rows));
+                    picker.status = "Evidence trail · read only".into();
+                }
+            }
+            Err(message) => {
+                picker.status = message.into();
+                picker.rows.clear();
+                picker.evidence = None;
+            }
+        }
+        true
+    }
+
+    fn lore_picker_key(&mut self, key: KeyEvent) -> bool {
+        let picker = self.lore_picker.as_mut().unwrap();
+        match key.code {
+            KeyCode::Esc => {
+                if picker.evidence.is_some() { picker.evidence = None; }
+                else { self.lore_picker = None; }
+            }
+            KeyCode::Up if picker.evidence.is_none() => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down if picker.evidence.is_none() => picker.selected = (picker.selected + 1).min(picker.rows.len().saturating_sub(1)),
+            KeyCode::Right if picker.evidence.is_none() => {
+                if let Some(id) = picker.rows.get(picker.selected).map(|row| row.id) {
+                    self.load_lore(lore_picker::Query::Evidence(id));
+                }
+            }
+            KeyCode::Backspace if picker.evidence.is_none() => { picker.query.pop(); },
+            KeyCode::F(5) if picker.evidence.is_none() => {
+                picker.query.clear();
+                let offset = picker.offset;
+                self.load_lore(lore_picker::Query::Beliefs(offset));
+            }
+            KeyCode::Char(c) if picker.evidence.is_none() && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                if picker.query.len() + c.len_utf8() <= 512 { picker.query.push(c); }
+            }
+            KeyCode::Enter if picker.evidence.is_none() => {
+                if !picker.query.trim().is_empty() {
+                    let query = picker.query.clone();
+                    self.load_lore(lore_picker::Query::Search(query));
+                } else if let Some(id) = picker.rows.get(picker.selected).map(|row| row.id) {
+                    self.load_lore(lore_picker::Query::Evidence(id));
+                }
+            }
+            KeyCode::PageDown if picker.evidence.is_none() && picker.query.is_empty() => {
+                picker.offset = picker.offset.saturating_add(lore_picker::PAGE_SIZE as u16).min(10000);
+                let offset = picker.offset;
+                self.load_lore(lore_picker::Query::Beliefs(offset));
+            }
+            KeyCode::PageUp if picker.evidence.is_none() && picker.query.is_empty() => {
+                picker.offset = picker.offset.saturating_sub(lore_picker::PAGE_SIZE as u16);
+                let offset = picker.offset;
+                self.load_lore(lore_picker::Query::Beliefs(offset));
+            }
+            KeyCode::Enter if picker.evidence.is_some() => picker.evidence = None,
+            _ => return false,
+        }
+        true
+    }
+
     fn poll_history(&mut self) -> bool {
         let Some(receiver) = &self.history_pending else { return false; };
         let found = match receiver.try_recv() {
@@ -1632,6 +1793,8 @@ impl App {
 
     fn load_diff(&mut self) {
         self.diff_scroll = 0;
+        self.diff_files.clear();
+        self.diff_hunks.clear();
         self.diff_pending = None;
         let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
             self.diff_target = None;
@@ -1660,6 +1823,8 @@ impl App {
                 self.diff_pending = None;
                 if self.groups[self.active_group].active_id() == Some(id.as_str()) {
                     self.diff_text = markdown::sanitize(&snapshot.text);
+                    self.diff_files = snapshot.files;
+                    self.diff_hunks = snapshot.hunks;
                     self.diff_scroll = 0;
                     return true;
                 }
@@ -1681,9 +1846,29 @@ impl App {
             KeyCode::Down => self.diff_scroll = self.diff_scroll.saturating_add(1),
             KeyCode::PageUp => self.diff_scroll = self.diff_scroll.saturating_sub(10),
             KeyCode::PageDown => self.diff_scroll = self.diff_scroll.saturating_add(10),
+            KeyCode::Char('n' | 'N') => self.jump_diff(true, true),
+            KeyCode::Char('p' | 'P') => self.jump_diff(true, false),
+            KeyCode::Char('j' | 'J') => self.jump_diff(false, true),
+            KeyCode::Char('k' | 'K') => self.jump_diff(false, false),
             _ => return false,
         }
         true
+    }
+
+    fn jump_diff(&mut self, file: bool, forward: bool) {
+        let marks = if file { &self.diff_files } else { &self.diff_hunks };
+        let current = self.diff_scroll;
+        let target = if forward {
+            marks.iter().copied().find(|&row| row > current)
+        } else {
+            marks.iter().copied().rev().find(|&row| row < current)
+        };
+        if let Some(row) = target {
+            self.diff_scroll = row;
+        } else {
+            self.notice = format!("No {} {} in this diff", if forward { "next" } else { "previous" },
+                if file { "file" } else { "hunk" });
+        }
     }
 
     fn active_tool_cards(&self) -> &[tool_cards::ToolCard] {
@@ -1755,14 +1940,51 @@ impl App {
                         self.focus = Focus::Prompt;
                     }
                     6 => self.open_history(),
-                    7 => self.open_diff(),
-                    8 => self.open_engine_picker(),
-                    9 => self.open_model_picker(),
-                    10 => self.open_permission_picker(),
+                    7 => self.open_lore_picker(),
+                    8 => self.open_diff(),
+                    9 => self.open_engine_picker(),
+                    10 => self.open_model_picker(),
+                    11 => self.open_permission_picker(),
+                    12 => self.open_stop_confirmation(),
                     _ => unreachable!("fixed action list"),
                 }
             }
             _ => {}
+        }
+        true
+    }
+
+    fn stop_confirmation_fits(&self) -> bool {
+        self.size.width >= 40 && self.size.height >= 12
+    }
+
+    fn open_stop_confirmation(&mut self) {
+        if !self.stop_confirmation_fits() {
+            self.notice = "Enlarge terminal to confirm session stop".into();
+            return;
+        }
+        let Some(id) = self.groups[self.active_group].active_id() else {
+            self.notice = "Select a session to stop".into();
+            return;
+        };
+        if self.offline_ids.contains(id) {
+            self.notice = "This session is already stopped or archived".into();
+            return;
+        }
+        self.stop_confirmation = Some(id.to_owned());
+        self.drag = None;
+    }
+
+    fn stop_confirmation_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('n' | 'N') => self.stop_confirmation = None,
+            KeyCode::Char('y' | 'Y') if (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+                && self.stop_confirmation_fits() => {
+                let id = self.stop_confirmation.take().unwrap();
+                self.pending_stops.push(id.clone());
+                self.notice = format!("Requesting stop · {}", safe_label(&id));
+            }
+            _ => return false,
         }
         true
     }
@@ -2098,10 +2320,12 @@ impl App {
             || self.map_modal
             || self.action_menu
             || self.history_modal
+            || self.lore_picker.is_some()
             || self.diff_modal
             || self.model_picker.is_some()
             || self.permission_picker.is_some()
             || self.engine_picker
+            || self.stop_confirmation.is_some()
             || self.new_session.is_some()
         {
             self.drag = None;
@@ -2307,7 +2531,7 @@ impl App {
         }
         frame.render_widget(
             Paragraph::new(format!(
-                "{}  |  Ctrl+P actions · Alt+E engine · Alt+M model · Alt+P permissions · Ctrl+R history · F2 diff · F4 diff pane · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
+                "{}  |  Ctrl+P actions · Alt+X stop · Alt+L LORE · Alt+E engine · Alt+M model · Alt+P permissions · Ctrl+R history · F2 diff · F4 diff pane · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
                 self.notice
             )).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
@@ -2322,9 +2546,29 @@ impl App {
         }
         self.draw_actions(frame, area);
         self.draw_history(frame, area);
+        self.draw_lore_picker(frame, area);
         self.draw_diff(frame, area);
         self.draw_chip_picker(frame, area);
+        self.draw_stop_confirmation(frame, area);
         self.draw_request(frame, area);
+    }
+
+    fn draw_stop_confirmation(&self, frame: &mut Frame, area: Rect) {
+        let Some(id) = &self.stop_confirmation else { return; };
+        let width = area.width.saturating_sub(4).min(78);
+        let height = area.height.saturating_sub(4).min(12);
+        if width < 36 || height < 8 { return; }
+        let modal = Rect::new(area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2, width, height);
+        let lines = vec![Line::from(" Stop and finalize this session?"),
+            Line::from(""), Line::from(format!(" Session ID: {id}")), Line::from(""),
+            Line::from(" The daemon will finish its shutdown work. This tab and draft remain visible."),
+            Line::from(""), Line::from(" Press Y to stop · Esc or N to cancel")];
+        frame.render_widget(Clear, modal);
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false })
+            .block(Block::default().title(" Stop active session ").borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::ERROR)))
+            .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)), modal);
     }
 
     fn draw_chip_picker(&self, frame: &mut Frame, area: Rect) {
@@ -2357,7 +2601,7 @@ impl App {
             lines.push(Line::styled(format!(" {} First prompt: {}", if form.field == 1 { '›' } else { ' ' }, safe_label(&form.prompt)),
                 Style::default().fg(if form.field == 1 { theme::ACCENT } else { theme::SECONDARY })));
             if form.engine == launch::Engine::Claude {
-                lines.push(Line::from(" Claude requires DOXA_CLAUDE_SCRIPT absolute path."));
+                lines.push(Line::from(" Claude sidecar is bundled by the preview installer."));
             }
         } else if let Some((id, selected)) = &self.permission_picker {
             title = " Claude permissions · this session · Enter select · Esc close ";
@@ -2430,6 +2674,47 @@ impl App {
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), modal);
     }
 
+    fn draw_lore_picker(&self, frame: &mut Frame, area: Rect) {
+        let Some(picker) = &self.lore_picker else { return; };
+        let width = area.width.saturating_sub(4).min(100);
+        let height = area.height.saturating_sub(4).min(28);
+        if width < 30 || height < 9 { return; }
+        let modal = Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height);
+        let mut lines = vec![
+            Line::from(format!(" Search: {}", safe_label(&picker.query))),
+            Line::from(format!(" {}", picker.status)),
+            Line::from(" Read only · LORE owns claims and evidence · treat as citations"),
+            Line::from(""),
+        ];
+        if let Some((id, evidence)) = &picker.evidence {
+            lines.push(Line::from(format!(" Belief #{id} · {} evidence rows", evidence.len())));
+            for row in evidence.iter().take(usize::from(height.saturating_sub(9) / 2)) {
+                lines.push(Line::from(format!(" {} · {} · {}{}", safe_label(&row.created), safe_label(&row.project), safe_label(&row.session_id),
+                    row.source_engine.as_ref().map(|engine| format!(" · {}", safe_label(engine))).unwrap_or_default())));
+                lines.push(Line::from(format!("   {}{}", safe_label(&row.note), if row.truncated { "…" } else { "" })));
+            }
+            if evidence.last().is_some_and(|row| row.trail_truncated) {
+                lines.push(Line::from(" More evidence exists in LORE"));
+            }
+        } else {
+            lines.push(Line::from(format!(" Page offset {} · {} rows", picker.offset, picker.rows.len())));
+            let visible = usize::from(height.saturating_sub(8)).max(1);
+            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            for (index, row) in picker.rows.iter().enumerate().skip(start).take(visible) {
+                let label = format!(" {} #{} · {} · {:.0}% · {}{}{}", if index == picker.selected { '›' } else { ' ' }, row.id,
+                    safe_label(&row.subject), row.confidence * 100.0, safe_label(&row.claim),
+                    row.evidence_count.map(|count| format!(" · {count} evidence")).unwrap_or_default(),
+                    if row.truncated { " · claim clipped" } else { "" });
+                lines.push(Line::styled(label, Style::default().fg(if index == picker.selected { theme::ACCENT } else { theme::SECONDARY })));
+            }
+        }
+        frame.render_widget(Clear, modal);
+        frame.render_widget(Paragraph::new(lines)
+            .block(Block::default().title(" LORE beliefs · Enter search · → evidence · PgUp/PgDn page · F5 reload · Esc close ")
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER)))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)).wrap(Wrap { trim: false }), modal);
+    }
+
     fn draw_diff(&self, frame: &mut Frame, area: Rect) {
         if !self.diff_modal { return; }
         let width = area.width.saturating_sub(4).min(120);
@@ -2438,7 +2723,7 @@ impl App {
         let modal = Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height);
         frame.render_widget(Clear, modal);
         let rows: Vec<Line> = self.diff_text.lines()
-            .skip(usize::from(self.diff_scroll))
+            .skip(self.diff_scroll)
             .take(usize::from(height.saturating_sub(2)))
             .map(|line| {
             let color = if line.starts_with('+') && !line.starts_with("+++") { theme::SUCCESS }
@@ -2447,14 +2732,14 @@ impl App {
             Line::styled(line.to_owned(), Style::default().fg(color))
         }).collect();
         frame.render_widget(Paragraph::new(rows)
-            .block(Block::default().title(" Worktree diff · ↑/↓ scroll · R refresh · F2/Esc close ")
+            .block(Block::default().title(" Worktree diff · N/P files · J/K hunks · R refresh · F2/Esc close ")
                 .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), modal);
     }
 
     fn draw_diff_pane(&self, frame: &mut Frame, area: Rect) {
         let rows: Vec<Line> = self.diff_text.lines()
-            .skip(usize::from(self.diff_scroll))
+            .skip(self.diff_scroll)
             .take(usize::from(area.height.saturating_sub(2)))
             .map(|line| {
                 let color = if line.starts_with('+') && !line.starts_with("+++") { theme::SUCCESS }
@@ -2463,7 +2748,7 @@ impl App {
                 Line::styled(line.to_owned(), Style::default().fg(color))
             }).collect();
         frame.render_widget(Paragraph::new(rows)
-            .block(Block::default().title(" Worktree diff · F5 refresh · Alt+PgUp/PgDn scroll · F4 close ")
+            .block(Block::default().title(" Worktree diff · Alt+N/B files · Alt+J/K hunks · F5 refresh · F4 close ")
                 .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER)))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), area);
     }
@@ -2975,6 +3260,7 @@ fn run_loop(
         }
         changed |= app.poll_diff();
         changed |= app.poll_history();
+        changed |= app.poll_lore();
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
                 changed |= app.peer_map.roster(&id, &serde_json::json!({"ok":false}));
@@ -2985,6 +3271,11 @@ fn run_loop(
                 app.notice = "Session launch unavailable · daemon connection closed".into();
                 changed = true;
             }
+            if !app.pending_stops.is_empty() {
+                app.pending_stops.clear();
+                app.notice = "Session stop unavailable · daemon connection closed".into();
+                changed = true;
+            }
         }
         if let Some(sender) = &prompt_sender {
             let disconnected = dispatch_launches(&mut app, sender);
@@ -2992,6 +3283,7 @@ fn run_loop(
             let disconnected = dispatch_answers(&mut app, sender) || disconnected;
             let disconnected = dispatch_peer_refresh(&mut app, sender) || disconnected;
             let disconnected = dispatch_model_controls(&mut app, sender) || disconnected;
+            let disconnected = dispatch_stops(&mut app, sender) || disconnected;
             if disconnected {
                 prompt_sender = None;
                 changed = true;
@@ -3025,6 +3317,26 @@ fn dispatch_launches(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCom
             Err(TrySendError::Disconnected(_)) => {
                 app.launching = false;
                 app.notice = "Session launch unavailable".into();
+                return true;
+            }
+            Err(_) => unreachable!(),
+        }
+    }
+    false
+}
+
+fn dispatch_stops(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+    let mut stops = std::mem::take(&mut app.pending_stops).into_iter();
+    while let Some(id) = stops.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::Stop(id)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::Stop(id))) => {
+                app.pending_stops.extend(std::iter::once(id).chain(stops));
+                app.notice = "Daemon writer busy · stop request retained".into();
+                return false;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                app.notice = "Session stop unavailable · daemon connection closed".into();
                 return true;
             }
             Err(_) => unreachable!(),
@@ -3201,6 +3513,56 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use serde_json::json;
+
+    #[test]
+    fn stop_requires_confirmation_and_preserves_the_target_and_draft() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 28);
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"first", "model":"one"}));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"second", "model":"two"}));
+        app.groups[0].tabs = vec!["first".into(), "second".into()];
+        app.groups[0].active = 0;
+        app.input = "unsent draft".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)));
+        assert_eq!(app.stop_confirmation.as_deref(), Some("first"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.pending_stops.is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)));
+        assert_eq!(app.pending_stops, vec!["first"]);
+        assert_eq!(app.input, "unsent draft");
+        app.apply_daemon_frame(&json!({"type":"stop_reply", "session_id":"first", "ok":true}));
+        assert!(app.offline_ids.contains("first"));
+        assert_eq!(app.groups[0].active_id(), Some("first"));
+        assert_eq!(app.input, "unsent draft");
+        app.open_stop_confirmation();
+        assert!(app.stop_confirmation.is_none());
+    }
+
+    #[test]
+    fn refused_stop_keeps_session_live_and_draft_intact() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"first"}));
+        app.input = "keep this".into();
+        app.apply_daemon_frame(&json!({"type":"stop_reply", "session_id":"first", "ok":false,
+            "error":"busy"}));
+        assert!(!app.offline_ids.contains("first"));
+        assert_eq!(app.input, "keep this");
+        assert!(app.notice.contains("busy"));
+    }
+
+    #[test]
+    fn shrinking_terminal_cancels_hidden_stop_confirmation() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"first"}));
+        app.open_stop_confirmation();
+        assert_eq!(app.stop_confirmation.as_deref(), Some("first"));
+        app.handle(Event::Resize(39, 11));
+        assert!(app.stop_confirmation.is_none());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)));
+        assert!(app.pending_stops.is_empty());
+    }
 
     #[test]
     fn model_picker_is_capability_gated_and_uses_only_daemon_catalog() {
@@ -3635,6 +3997,46 @@ mod tests {
     }
 
     #[test]
+    fn diff_navigation_jumps_files_and_hunks_without_editing_prompt() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.diff_pane = true;
+        app.diff_text = "Base: HEAD\ndiff --git a/one b/one\n@@ first\n line\n@@ second\ndiff --git a/two b/two\n@@ third".into();
+        app.diff_files = vec![1, 5];
+        app.diff_hunks = vec![2, 4, 6];
+        app.input = "draft".into();
+        let alt = KeyModifiers::ALT;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('j'), alt)));
+        assert_eq!(app.diff_scroll, 2);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('j'), alt)));
+        assert_eq!(app.diff_scroll, 4);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('n'), alt)));
+        assert_eq!(app.diff_scroll, 5);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('k'), alt)));
+        assert_eq!(app.diff_scroll, 4);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('b'), alt)));
+        assert_eq!(app.diff_scroll, 1);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('b'), alt)));
+        assert_eq!(app.diff_scroll, 1);
+        assert!(app.notice.contains("No previous file"));
+        assert_eq!(app.input, "draft");
+
+        app.diff_modal = true;
+        app.diff_scroll = 0;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)));
+        assert_eq!(app.diff_scroll, 1);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+        assert_eq!(app.diff_scroll, 2);
+        app.diff_hunks.push(70_000);
+        app.diff_scroll = 6;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+        assert_eq!(app.diff_scroll, 70_000);
+        app.load_diff();
+        assert!(app.diff_files.is_empty());
+        assert!(app.diff_hunks.is_empty());
+    }
+
+    #[test]
     fn long_transcript_window_reaches_both_ends() {
         let lines: Vec<Line<'static>> = (0..70_000).map(|i| Line::from(i.to_string())).collect();
         let (window, at_bottom) = transcript_window(lines.clone(), 8, 0, 0);
@@ -3831,5 +4233,28 @@ mod tests {
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"a",
             "event":{"type":"prompt_dequeued", "data":{"id":"q"}}}));
         assert_eq!(app.session_activity["a"].1, 0);
+    }
+
+    #[test]
+    fn lore_picker_keeps_prompt_and_displays_only_read_results() {
+        let mut app = App { input: "unsent draft".into(), ..Default::default() };
+        app.lore_picker = Some(LorePicker {
+            query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
+            evidence: None, status: String::new(), pending: None,
+        });
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.lore_picker.as_mut().unwrap().pending = Some(rx);
+        tx.send(Ok(lore_picker::ResultPage::Beliefs(vec![lore_picker::Belief {
+            id: 7, subject: "user".into(), claim: "safe".into(), truncated: false,
+            confidence: 0.8, evidence_count: Some(1),
+        }]))).unwrap();
+        assert!(app.poll_lore());
+        assert_eq!(app.lore_picker.as_ref().unwrap().rows[0].id, 7);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)));
+        assert_eq!(app.lore_picker.as_ref().unwrap().query, "r");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.lore_picker.is_none());
+        assert_eq!(app.input, "unsent draft");
+        assert!(app.pending_prompts.is_empty());
     }
 }

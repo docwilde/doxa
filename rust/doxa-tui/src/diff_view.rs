@@ -16,6 +16,37 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug)]
 pub struct DiffSnapshot {
     pub text: String,
+    /// Zero-based display rows from the same git output as `text`.
+    pub files: Vec<usize>,
+    pub hunks: Vec<usize>,
+}
+
+impl DiffSnapshot {
+    fn message(text: String) -> Self {
+        Self { text, files: Vec::new(), hunks: Vec::new() }
+    }
+}
+
+fn landmarks(patch: &str, truncated: bool) -> (Vec<usize>, Vec<usize>) {
+    let mut files = Vec::new();
+    let mut hunks = Vec::new();
+    let mut in_file = false;
+    let mut has_content_header = false;
+    let complete = if truncated && !patch.ends_with('\n') {
+        patch.rsplit_once('\n').map_or("", |(head, _)| head)
+    } else { patch };
+    for (index, line) in complete.lines().enumerate() {
+        if line.starts_with("diff --git ") {
+            files.push(index + 1); // The rendered Base line precedes the patch.
+            in_file = true;
+            has_content_header = false;
+        } else if in_file && line.starts_with("+++ ") {
+            has_content_header = true;
+        } else if has_content_header && line.starts_with("@@ ") && line[3..].contains(" @@") {
+            hunks.push(index + 1);
+        }
+    }
+    (files, hunks)
 }
 
 fn git_output(cwd: &Path, args: &[&str], limit: usize) -> Result<(Vec<u8>, bool), String> {
@@ -139,18 +170,19 @@ fn base_for(cwd: &Path) -> Result<(String, &'static str), String> {
 /// Capture a bounded unified diff. The caller must run this off the UI thread.
 pub fn read(cwd: &Path) -> DiffSnapshot {
     let Some(cwd) = cwd.canonicalize().ok().filter(|p| p.is_dir()) else {
-        return DiffSnapshot { text: "Cannot read this session's worktree directory.".into() };
+        return DiffSnapshot::message("Cannot read this session's worktree directory.".into());
     };
     let (base, source) = match base_for(&cwd) {
         Ok(pair) => pair,
-        Err(note) => return DiffSnapshot { text: format!("Cannot determine a safe diff base: {note}") },
+        Err(note) => return DiffSnapshot::message(format!("Cannot determine a safe diff base: {note}")),
     };
     let (bytes, truncated) = match git_output(&cwd,
         &["--no-pager", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--find-renames", "--unified=3", &base, "--"], MAX_DIFF_BYTES) {
         Ok(result) => result,
-        Err(note) => return DiffSnapshot { text: format!("Git could not compare this worktree with {base}: {note}") },
+        Err(note) => return DiffSnapshot::message(format!("Git could not compare this worktree with {base}: {note}")),
     };
     let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_DIFF_BYTES)]);
+    let (files, hunks) = landmarks(&text, truncated);
     let mut out = format!("Base: {base} ({source})\n");
     if text.is_empty() { out.push_str("No tracked changes in this comparison.\n"); }
     else { out.push_str(&text); }
@@ -159,7 +191,7 @@ pub fn read(cwd: &Path) -> DiffSnapshot {
         Ok((names, truncated)) => out.push_str(&untracked_names(&names, truncated)),
         Err(_) => out.push_str("\n[Untracked names unavailable.]\n"),
     }
-    DiffSnapshot { text: out }
+    DiffSnapshot { text: out, files, hunks }
 }
 
 #[cfg(test)]
@@ -205,9 +237,21 @@ mod tests {
         assert!(result.text.contains("untracked.txt"));
         assert!(!result.text.contains("untracked\n"));
         assert!(result.text.contains("names only; contents are not read"));
+        assert_eq!(result.files, [1]);
+        assert_eq!(result.hunks.len(), 1);
+        assert!(result.text.lines().nth(result.hunks[0]).unwrap().starts_with("@@ "));
         let staged = Command::new("git").args(["diff", "--cached", "--name-only"])
             .current_dir(dir.path()).output().unwrap();
         assert!(staged.stdout.is_empty());
+    }
+
+    #[test]
+    fn landmarks_ignore_patch_body_and_untracked_name_lookalikes() {
+        let patch = "diff --git a/one b/one\n--- a/one\n+++ b/one\n@@ -1 +1,3 @@\n old\n+diff --git a/fake b/fake\n+@@ -1 +1 @@\ndiff --git a/two b/two\n--- a/two\n+++ b/two\n@@ -1 +1 @@\n-old\n+new\n";
+        let (files, hunks) = landmarks(patch, false);
+        assert_eq!(files, [1, 8]);
+        assert_eq!(hunks, [4, 11]);
+        assert_eq!(landmarks("diff --git a/cut b/cut", true), (vec![], vec![]));
     }
 
     #[test]

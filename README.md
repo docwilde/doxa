@@ -128,7 +128,8 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/rust/2.0/scripts/inst
 SHA selects another ref. It requires Git and Cargo, builds a release binary,
 and installs `doxa-rs` in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). If the ref
 contains a native Rust daemon, the installer also installs it as
-`doxa-daemon-rs`. The supported Python `doxa` command is left untouched.
+`doxa-daemon-rs`, along with the Claude sidecar. The supported Python `doxa`
+command is left untouched.
 The Rust preview can start its native daemon for Codex, Claude, DeepSeek, and
 GLM sessions, or attach to an existing DOXA daemon. See [the Rust development
 guide](rust/README.md) for current capabilities and setup.

@@ -153,11 +153,7 @@ fn run(args: &[String]) -> io::Result<()> {
                     ));
                     checks.push((
                         "claude sidecar",
-                        options
-                            .claude_script
-                            .as_deref()
-                            .ok_or_else(|| invalid("Claude needs --claude-script PATH"))
-                            .and_then(launch::claude_script),
+                        launch::resolve_claude_script(&options),
                     ));
                 }
                 launch::Engine::Fixture => {}

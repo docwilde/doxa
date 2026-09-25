@@ -127,3 +127,41 @@ fn partial_roster_cannot_claim_complete_layout() {
     bridge.shutdown();
     server.join().unwrap();
 }
+
+#[test]
+fn stop_targets_only_selected_socket_and_other_session_keeps_prompting() {
+    let dir = tempfile::tempdir().unwrap();
+    let path_a = dir.path().join("a.sock");
+    let path_b = dir.path().join("b.sock");
+    let listener_a = UnixListener::bind(&path_a).unwrap();
+    let listener_b = UnixListener::bind(&path_b).unwrap();
+    let server_a = thread::spawn(move || {
+        let mut socket = accept(&listener_a, "session-a", 0, None);
+        let request = read_request(&socket);
+        assert_eq!(request["type"], "call");
+        assert_eq!(request["method"], "stop");
+        assert_eq!(request["params"], json!({}));
+        writeln!(socket, "{}", json!({"type":"reply","id":request["id"],"ok":true})).unwrap();
+    });
+    let server_b = thread::spawn(move || {
+        let mut socket = accept(&listener_b, "session-b", 0, None);
+        let request = read_request(&socket);
+        assert_eq!(request["type"], "prompt");
+        assert_eq!(request["text"], "still live");
+        writeln!(socket, "{}", json!({"type":"reply","id":request["id"],"ok":true})).unwrap();
+        thread::sleep(Duration::from_millis(100));
+    });
+    let bridge = connect_sessions(&[session("session-a", path_a), session("session-b", path_b)]).unwrap();
+    for _ in 0..2 { until(&bridge.frames, |f| f["type"] == "hello"); }
+    bridge.commands.send(WorkerCommand::Stop("session-a".into())).unwrap();
+    let stopped = until(&bridge.frames, |f| f["type"] == "stop_reply");
+    assert_eq!(stopped["session_id"], "session-a");
+    assert_eq!(stopped["ok"], true);
+    assert!(!*bridge.complete.lock().unwrap());
+    bridge.commands.send(WorkerCommand::Prompt("session-b".into(), "still live".into())).unwrap();
+    let reply = until(&bridge.frames, |f| f["type"] == "reply");
+    assert_eq!(reply["session_id"], "session-b");
+    bridge.shutdown();
+    server_a.join().unwrap();
+    server_b.join().unwrap();
+}

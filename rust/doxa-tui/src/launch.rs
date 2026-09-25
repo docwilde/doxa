@@ -96,6 +96,20 @@ pub fn claude_script(input: &Path) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+fn claude_script_at(options: &LaunchOptions, override_path: Option<PathBuf>, executable: &Path) -> io::Result<PathBuf> {
+    let candidate = options.claude_script.clone()
+        .or(override_path)
+        .unwrap_or_else(|| executable.with_file_name("doxa-claude-sidecar.py"));
+    if options.claude_script.is_none() && !candidate.exists() {
+        return Err(invalid("Claude sidecar missing; install the Rust preview or set DOXA_CLAUDE_SCRIPT"));
+    }
+    claude_script(&candidate)
+}
+
+pub fn resolve_claude_script(options: &LaunchOptions) -> io::Result<PathBuf> {
+    claude_script_at(options, env::var_os("DOXA_CLAUDE_SCRIPT").map(PathBuf::from), &env::current_exe()?)
+}
+
 pub fn claude_dependencies(options: &LaunchOptions) -> io::Result<(PathBuf, PathBuf)> {
     let python = executable(
         options
@@ -103,11 +117,7 @@ pub fn claude_dependencies(options: &LaunchOptions) -> io::Result<(PathBuf, Path
             .as_deref()
             .unwrap_or(Path::new("python3")),
     )?;
-    let script = options
-        .claude_script
-        .as_deref()
-        .ok_or_else(|| invalid("Claude needs --claude-script PATH"))?;
-    Ok((python, claude_script(script)?))
+    Ok((python, resolve_claude_script(options)?))
 }
 
 pub fn vendor_effort(options: &LaunchOptions) -> io::Result<()> {
@@ -490,6 +500,25 @@ mod tests {
         symlink(&script, &link).unwrap();
         assert_eq!(executable(&link).unwrap(), script);
         assert!(executable(&dir.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn claude_sidecar_resolution_prefers_explicit_then_override_then_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("doxa-rs");
+        let bundled = dir.path().join("doxa-claude-sidecar.py");
+        let override_path = dir.path().join("override.py");
+        let explicit = dir.path().join("explicit.py");
+        for path in [&bundled, &override_path, &explicit] {
+            fs::write(path, "# safe fixture\n").unwrap();
+        }
+        let mut options = LaunchOptions::default();
+        assert_eq!(claude_script_at(&options, None, &executable).unwrap(), bundled);
+        assert_eq!(claude_script_at(&options, Some(override_path.clone()), &executable).unwrap(), override_path);
+        options.claude_script = Some(explicit.clone());
+        assert_eq!(claude_script_at(&options, Some(override_path), &executable).unwrap(), explicit);
+        options.claude_script = Some(PathBuf::from("relative.py"));
+        assert!(claude_script_at(&options, None, &executable).is_err());
     }
 
     #[test]

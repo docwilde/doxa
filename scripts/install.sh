@@ -61,7 +61,33 @@ main() {
     esac
     rust_tmp=$(mktemp -d) || _fail "could not create a temporary checkout"
     rust_stage=""
-    trap '[ -z "$rust_stage" ] || rm -rf "$rust_stage"; rm -rf "$rust_tmp"' EXIT HUP INT TERM
+    rust_installing=0
+    _rust_cleanup() {
+      trap - EXIT HUP INT TERM
+      if [ "$rust_installing" -eq 1 ]; then
+        rust_restore_failed=0
+        # All originals were copied before the first destination changed.
+        # Restore every entry, including links and an absent old daemon.
+        for rust_name in doxa-rs doxa-claude-sidecar.py doxa-daemon-rs; do
+          if ! rm -f "$rust_bin_dir/$rust_name"; then
+            _warn "could not clear $rust_bin_dir/$rust_name for rollback"
+            rust_restore_failed=1
+            continue
+          fi
+          if [ -e "$rust_stage/backup/$rust_name" ] || [ -L "$rust_stage/backup/$rust_name" ]; then
+            mv "$rust_stage/backup/$rust_name" "$rust_bin_dir/$rust_name" ||
+              { _warn "could not restore $rust_bin_dir/$rust_name; backup remains in $rust_stage/backup"; rust_restore_failed=1; }
+          fi
+        done
+        [ "$rust_restore_failed" -eq 1 ] || rust_installing=0
+      fi
+      if [ "$rust_installing" -eq 0 ]; then
+        [ -z "$rust_stage" ] || rm -rf "$rust_stage"
+      fi
+      rm -rf "$rust_tmp"
+    }
+    trap '_rust_cleanup' EXIT
+    trap 'exit 1' HUP INT TERM
     rust_repo="${DOXA_RUST_REPO_URL:-$DOXA_REPO_URL}"
     _info "fetching Rust preview ref: ${rust_ref}"
     git -C "$rust_tmp" init -q || _fail "could not initialize temporary checkout"
@@ -71,6 +97,8 @@ main() {
 
     tui_manifest="$rust_tmp/rust/doxa-tui/Cargo.toml"
     [ -f "$tui_manifest" ] || _fail "Rust ref '${rust_ref}' has no rust/doxa-tui/Cargo.toml"
+    claude_sidecar="$rust_tmp/rust/doxa-claude/claude_sidecar.py"
+    [ -f "$claude_sidecar" ] || _fail "Rust ref '${rust_ref}' has no Claude sidecar"
     _info "building release doxa-rs"
     CARGO_TARGET_DIR="$rust_tmp/target" cargo build --release --locked --target "$host_target" --manifest-path "$tui_manifest" --bin doxa-rs || _fail "Rust TUI build failed"
     tui_bin="$rust_tmp/target/$host_target/release/doxa-rs"
@@ -90,17 +118,31 @@ main() {
     mkdir -p "$rust_bin_dir" || _fail "could not create ${rust_bin_dir}"
     [ ! -d "$rust_bin_dir/doxa-rs" ] || _fail "${rust_bin_dir}/doxa-rs is a directory"
     [ ! -d "$rust_bin_dir/doxa-daemon-rs" ] || _fail "${rust_bin_dir}/doxa-daemon-rs is a directory"
+    [ ! -d "$rust_bin_dir/doxa-claude-sidecar.py" ] || _fail "${rust_bin_dir}/doxa-claude-sidecar.py is a directory"
     rust_stage=$(mktemp -d "$rust_bin_dir/.doxa-install.XXXXXXXX") || _fail "could not stage Rust binaries"
     cp "$tui_bin" "$rust_stage/doxa-rs" || _fail "could not stage doxa-rs"
     chmod 755 "$rust_stage/doxa-rs" || _fail "could not make doxa-rs executable"
+    cp "$claude_sidecar" "$rust_stage/doxa-claude-sidecar.py" || _fail "could not stage Claude sidecar"
+    chmod 644 "$rust_stage/doxa-claude-sidecar.py" || _fail "could not set Claude sidecar permissions"
     if [ -f "$daemon_manifest" ]; then
       cp "$daemon_bin" "$rust_stage/doxa-daemon-rs" || _fail "could not stage doxa-daemon-rs"
       chmod 755 "$rust_stage/doxa-daemon-rs" || _fail "could not make doxa-daemon-rs executable"
     fi
+    mkdir "$rust_stage/backup" || _fail "could not create Rust install backup"
+    for rust_name in doxa-rs doxa-claude-sidecar.py doxa-daemon-rs; do
+      if [ -e "$rust_bin_dir/$rust_name" ] || [ -L "$rust_bin_dir/$rust_name" ]; then
+        cp -Pp "$rust_bin_dir/$rust_name" "$rust_stage/backup/$rust_name" || _fail "could not back up $rust_name"
+      fi
+    done
+    rust_installing=1
     mv -f "$rust_stage/doxa-rs" "$rust_bin_dir/doxa-rs" || _fail "could not install doxa-rs"
+    mv -f "$rust_stage/doxa-claude-sidecar.py" "$rust_bin_dir/doxa-claude-sidecar.py" || _fail "could not install Claude sidecar"
     if [ -f "$daemon_manifest" ]; then
       mv -f "$rust_stage/doxa-daemon-rs" "$rust_bin_dir/doxa-daemon-rs" || _fail "could not install doxa-daemon-rs"
+    else
+      rm -f "$rust_bin_dir/doxa-daemon-rs" || _fail "could not remove obsolete Rust daemon"
     fi
+    rust_installing=0
     _info "installed Rust preview in ${rust_bin_dir}; run: doxa-rs"
   }
 

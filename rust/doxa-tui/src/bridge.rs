@@ -26,6 +26,7 @@ pub enum WorkerCommand {
     Models(String),
     SetModel(String, String),
     SetPermissionMode(String, String),
+    Stop(String),
 }
 
 fn attach_worker(session: &Session, frames: &SyncSender<Value>, guard: &Arc<Mutex<bool>>)
@@ -43,10 +44,18 @@ fn attach_worker(session: &Session, frames: &SyncSender<Value>, guard: &Arc<Mute
     let guard = Arc::clone(guard);
     let worker = thread::spawn(move || {
         let cursor = AtomicU64::new(client.cursor);
+        let stopped = AtomicBool::new(false);
         let mut current = (client, snapshot);
         loop {
-            worker_loop(current.0, current.1, &frames, &rx, &cursor, Some(&guard));
+            worker_loop(current.0, current.1, &frames, &rx, &cursor, Some(&guard), &stopped);
             connected_worker.store(false, Ordering::Release);
+            if stopped.load(Ordering::Acquire) {
+                revoke(&guard);
+                while let Ok(command) = rx.try_recv() {
+                    let _ = frames.send(rejected(command, "Session is stopping"));
+                }
+                return;
+            }
             revoke(&guard);
             if frames.send(json!({"type":"client_notice", "session_id":id,
                 "message":"Daemon disconnected; reconnecting"})).is_err() { return; }
@@ -181,6 +190,7 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
                 WorkerCommand::Prompt(id, _) | WorkerCommand::Answer(id, _, _) | WorkerCommand::Peers(id)
                 | WorkerCommand::Models(id) | WorkerCommand::SetModel(id, _)
                 | WorkerCommand::SetPermissionMode(id, _) => id,
+                WorkerCommand::Stop(id) => id,
                 WorkerCommand::Launch(_, _, _) => unreachable!(),
             };
             let Some((route, connected)) = routes.get(id) else {
@@ -223,6 +233,8 @@ fn rejected(command: WorkerCommand, message: &str) -> Value {
         WorkerCommand::SetModel(id, _) => json!({"type":"set_model_reply", "session_id":id,
             "ok":false, "error":message}),
         WorkerCommand::SetPermissionMode(id, _) => json!({"type":"set_permission_mode_reply", "session_id":id,
+            "ok":false, "error":message}),
+        WorkerCommand::Stop(id) => json!({"type":"stop_reply", "session_id":id,
             "ok":false, "error":message}),
     }
 }
@@ -268,7 +280,8 @@ fn spawn_worker_with_snapshot(client: DaemonClient, snapshot: Option<crate::tran
     let (prompt_tx, prompt_rx) = mpsc::sync_channel(32);
     let worker = thread::spawn(move || {
         let cursor = AtomicU64::new(client.cursor);
-        worker_loop(client, snapshot, &frame_tx, &prompt_rx, &cursor, None);
+        let stopped = AtomicBool::new(false);
+        worker_loop(client, snapshot, &frame_tx, &prompt_rx, &cursor, None, &stopped);
     });
     (frame_rx, prompt_tx, worker)
 }
@@ -280,6 +293,7 @@ fn worker_loop(
     prompts: &Receiver<WorkerCommand>,
     cursor: &AtomicU64,
     roster_guard: Option<&Mutex<bool>>,
+    stopped: &AtomicBool,
 ) {
     let session_id = client.hello["session_id"]
         .as_str()
@@ -300,6 +314,30 @@ fn worker_loop(
         // Bound prompt work so a burst cannot starve incoming daemon events.
         for _ in 0..32 {
             match prompts.try_recv() {
+                Ok(WorkerCommand::Stop(id)) => {
+                    if id != session_id {
+                        let _ = frames.send(json!({"type":"stop_reply", "session_id":id,
+                            "ok":false, "error":"Stop target is not attached"}));
+                        continue;
+                    }
+                    let result = client.call("stop", Map::new());
+                    cursor.store(client.cursor, Ordering::Relaxed);
+                    let accepted = result.as_ref().is_ok_and(|reply| reply["ok"] == true);
+                    let error = match &result {
+                        Ok(reply) => reply["error"].as_str().unwrap_or("Daemon refused stop").to_owned(),
+                        Err(error) => error.to_string(),
+                    };
+                    if accepted {
+                        stopped.store(true, Ordering::Release);
+                        if let Some(guard) = roster_guard { revoke(guard); }
+                    }
+                    if frames.send(json!({"type":"stop_reply", "session_id":id,
+                        "ok":accepted, "error":error})).is_err() { return; }
+                    if accepted {
+                        return;
+                    }
+                    if matches!(result, Err(TransportError::Closed)) { return; }
+                }
                 Ok(WorkerCommand::Launch(_, _, group)) => {
                     let _ = frames.send(json!({"type":"launch_reply", "ok":false,
                         "message":"Session launch is unavailable on this connection", "group":group}));
