@@ -86,12 +86,18 @@ fn doxa_home() -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "DOXA_HOME and HOME are unset"))
 }
 
+fn safe_report_value(value: &str) -> String {
+    value.chars().filter(|c| !c.is_control()
+        && !matches!(*c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+        .take(200).collect()
+}
+
 fn preference(config: &toml::Table, key: &str, env: &str) -> String {
     if let Some(value) = std::env::var(env).ok().filter(|value| !value.trim().is_empty()) {
-        return format!("{value} (environment)");
+        return format!("{} (environment)", safe_report_value(&value));
     }
     if let Some(value) = config.get(key).and_then(toml::Value::as_str).filter(|value| !value.is_empty()) {
-        return format!("{value} (config.toml)");
+        return format!("{} (config.toml)", safe_report_value(value));
     }
     "(CLI default)".to_owned()
 }
@@ -100,15 +106,15 @@ pub fn setup_report() -> io::Result<String> {
     let home = doxa_home()?;
     let config = doxa_state::load_config(&home.join("config.toml"));
     let lore = if let Some(root) = std::env::var("LORE_ROOT").ok().filter(|root| !root.trim().is_empty()) {
-        format!("{root} (environment)")
+        format!("{} (environment)", safe_report_value(&root))
     } else if let Some(root) = config.get("lore_root").and_then(toml::Value::as_str).filter(|root| !root.is_empty()) {
-        format!("{root} (config.toml)")
+        format!("{} (config.toml)", safe_report_value(root))
     } else {
         let plugin = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude/lore"));
         if let Some(path) = plugin.filter(|path| path.is_dir()) {
-            format!("unselected; existing Claude LORE store at {}", path.display())
+            format!("unselected; existing Claude LORE store at {}", safe_report_value(&path.display().to_string()))
         } else {
-            format!("unselected; suggested DOXA store at {}", home.join("lore").display())
+            format!("unselected; suggested DOXA store at {}", safe_report_value(&home.join("lore").display().to_string()))
         }
     };
     Ok(format!(
@@ -201,6 +207,11 @@ mod tests {
         config.insert("model".into(), toml::Value::String("stored".into()));
         assert_eq!(preference(&config, "model", "DOXA_TEST_MISSING_PREFERENCE"), "stored (config.toml)");
         assert_eq!(preference(&config, "missing", "DOXA_TEST_MISSING_PREFERENCE"), "(CLI default)");
+    }
+
+    #[test]
+    fn report_values_cannot_inject_terminal_control_sequences() {
+        assert_eq!(safe_report_value("model\u{1b}[31m\nnext\u{202e}"), "model[31mnext");
     }
 
     #[test]
