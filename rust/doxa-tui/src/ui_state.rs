@@ -54,6 +54,20 @@ pub struct UiStateStore {
 }
 
 impl UiStateStore {
+    /// A clear may finalize its old daemon only when replacing the tab can
+    /// be persisted from a complete live view of a representable layout.
+    pub fn clear_preflight(&self, app: &App, complete: &Mutex<bool>) -> Result<(), &'static str> {
+        if !*complete.lock().map_err(|_| "live roster guard unavailable")? {
+            return Err("live roster incomplete");
+        }
+        if !self.writable_layout { return Err("saved layout has more than two panes"); }
+        if app.has_offline_open_tabs() { return Err("archived tabs are read-only"); }
+        if self.record.as_ref().is_some_and(|record| record.tabs.iter().any(|tab|
+            !app.groups.iter().any(|group| group.tabs.contains(&tab.session_id)))) {
+            return Err("saved layout includes offline tabs");
+        }
+        Ok(())
+    }
     /// Create the machine identity when needed and adopt a safe pre-1.10
     /// tabset before the native UI restores this project's layout.
     pub fn for_scope(home: &Path, scope_key: &str) -> io::Result<Self> {
@@ -636,5 +650,21 @@ mod tests {
         let saved: Value = serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
         assert_eq!(saved["tabs"][0]["session_id"], "fresh");
         assert_eq!(saved["layout"]["groups"]["tabs"][0]["session_id"], "fresh");
+    }
+
+    #[test]
+    fn clear_preflight_requires_complete_roster_and_every_saved_tab() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = UiStateStore::new(temp.path(), "/project", "machine").unwrap();
+        let mut app = App::default();
+        app.groups[0].tabs.push("old".into());
+        store.save(&app).unwrap();
+        let complete = Mutex::new(true);
+        assert!(store.clear_preflight(&app, &complete).is_ok());
+        *complete.lock().unwrap() = false;
+        assert_eq!(store.clear_preflight(&app, &complete), Err("live roster incomplete"));
+        *complete.lock().unwrap() = true;
+        app.groups[0].tabs.clear();
+        assert_eq!(store.clear_preflight(&app, &complete), Err("saved layout includes offline tabs"));
     }
 }

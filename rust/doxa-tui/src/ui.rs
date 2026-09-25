@@ -235,6 +235,14 @@ struct ClearPending {
 }
 
 #[derive(Debug)]
+struct ClearSwap {
+    old_id: String,
+    new_id: String,
+    group: usize,
+    position: usize,
+}
+
+#[derive(Debug)]
 struct EffortPicker { session_id: String, engine: String, model: String,
     levels: Vec<String>, selected: usize }
 
@@ -1110,6 +1118,8 @@ pub struct App {
     pending_clear_finalizes: Vec<String>,
     pub(crate) clear_stop_after_save: Vec<String>,
     clear_pending: Option<ClearPending>,
+    clear_swap: Option<ClearSwap>,
+    clear_preflight_error: Option<&'static str>,
     model_picker: Option<ModelPicker>,
     effort_picker: Option<EffortPicker>,
     attach_picker: Option<AttachPicker>,
@@ -1247,6 +1257,8 @@ impl Default for App {
             pending_clear_finalizes: Vec::new(),
             clear_stop_after_save: Vec::new(),
             clear_pending: None,
+            clear_swap: None,
+            clear_preflight_error: Some("persistent tabset unavailable"),
             model_picker: None,
             effort_picker: None,
             attach_picker: None,
@@ -1459,6 +1471,8 @@ impl App {
                                         *member = id.to_owned();
                                     }
                                 }
+                                self.clear_swap = Some(ClearSwap { old_id: clear.old_id.clone(),
+                                    new_id: id.to_owned(), group: clear.group, position });
                                 self.clear_stop_after_save.push(clear.old_id);
                                 self.notice = format!("Fresh session ready · {}", safe_label(id));
                                 return true;
@@ -2999,9 +3013,56 @@ impl App {
         self.notice = format!("Attaching · {}", safe_label(id));
     }
 
+    pub(crate) fn has_offline_open_tabs(&self) -> bool {
+        self.groups.iter().any(|group| group.tabs.iter().any(|id| self.offline_ids.contains(id)))
+    }
+
+    fn rollback_clear(&mut self, swap: ClearSwap) {
+        for group in &mut self.groups {
+            if let Some(index) = group.tabs.iter().position(|tab| tab == &swap.new_id) {
+                group.tabs.remove(index);
+                group.active = group.active.min(group.tabs.len().saturating_sub(1));
+            }
+        }
+        let group = &mut self.groups[swap.group];
+        if let Some(index) = group.tabs.iter().position(|tab| tab == &swap.old_id) {
+            group.active = index;
+        } else {
+            let position = swap.position.min(group.tabs.len());
+            group.tabs.insert(position, swap.old_id.clone());
+            group.active = position;
+        }
+        group.scroll = 0;
+        self.active_group = swap.group;
+        for collection in &mut self.collections {
+            if let Some(member) = collection.sessions.iter_mut().find(|member| member.as_str() == swap.new_id) {
+                *member = swap.old_id.clone();
+            }
+        }
+        self.clear_stop_after_save.retain(|id| id != &swap.old_id);
+        self.pending_clear_finalizes.push(swap.new_id);
+        self.notice = "Clear cancelled · tabset could not be saved; previous session preserved".into();
+    }
+
+    fn finish_clear_swap(&mut self, persisted: bool) -> bool {
+        let Some(swap) = self.clear_swap.take() else { return false; };
+        if persisted {
+            self.clear_stop_after_save.retain(|id| id != &swap.old_id);
+            self.pending_clear_finalizes.push(swap.old_id);
+            self.notice = "Fresh session ready · finalizing previous session".into();
+        } else {
+            self.rollback_clear(swap);
+        }
+        true
+    }
+
     fn local_clear(&mut self, args: &str) {
         if !args.trim().is_empty() {
             self.notice = "Usage: /clear".into();
+            return;
+        }
+        if let Some(reason) = self.clear_preflight_error {
+            self.notice = format!("clear unavailable · {reason}");
             return;
         }
         if self.launching {
@@ -7136,6 +7197,9 @@ fn run_loop(
             terminal.draw(|frame| app.draw(frame))?;
             changed = false;
         }
+        app.clear_preflight_error = state.as_ref()
+            .map_or(Some("persistent tabset unavailable"), |(store, _, complete)|
+                store.clear_preflight(&app, complete).err());
         if event::poll(Duration::from_millis(10))? {
             changed |= app.handle(event::read()?);
         }
@@ -7230,13 +7294,9 @@ fn run_loop(
         } else {
             saved_layout = crate::ui_state::LayoutSignature::capture(&app);
         }
+        changed |= app.finish_clear_swap(state.is_some()
+            && saved_layout == crate::ui_state::LayoutSignature::capture(&app));
         if let Some(sender) = &prompt_sender {
-            if !app.clear_stop_after_save.is_empty()
-                && saved_layout == crate::ui_state::LayoutSignature::capture(&app) {
-                app.pending_clear_finalizes.append(&mut app.clear_stop_after_save);
-                app.notice = "Fresh session ready · finalizing previous session".into();
-                changed = true;
-            }
             if dispatch_stops(&mut app, sender) || dispatch_clear_finalizes(&mut app, sender) {
                 prompt_sender = None;
                 changed = true;
@@ -8257,6 +8317,7 @@ for line in sys.stdin:
     #[test]
     fn clear_replaces_only_active_tab_after_launch_and_defers_finalization() {
         let mut app = App::default();
+        app.clear_preflight_error = None;
         app.groups[0].tabs = vec!["other".into(), "old".into()];
         app.groups[0].active = 1;
         app.session_identity.insert("old".into(), (Some("codex".into()), Some("old-model".into())));
@@ -8275,11 +8336,15 @@ for line in sys.stdin:
         assert_eq!(app.collections[0].sessions, ["fresh"]);
         assert_eq!(app.clear_stop_after_save, ["old"]);
         assert!(app.pending_stops.is_empty());
+        assert!(app.finish_clear_swap(true));
+        assert_eq!(app.pending_clear_finalizes, ["old"]);
+        assert!(app.clear_stop_after_save.is_empty());
     }
 
     #[test]
     fn clear_failure_and_unsupported_forms_preserve_the_old_session() {
         let mut app = App::default();
+        app.clear_preflight_error = None;
         app.groups[0].tabs = vec!["old".into()];
         app.session_identity.insert("old".into(), (Some("codex".into()), None));
         app.session_cwds.insert("old".into(), PathBuf::from("/repo"));
@@ -8300,6 +8365,27 @@ for line in sys.stdin:
         assert!(app.submit_local_command());
         assert!(app.notice.contains("wait for the current turn"));
         assert!(app.pending_launches.is_empty());
+    }
+
+    #[test]
+    fn clear_requires_persistent_state_and_rolls_back_unsaved_swap() {
+        let mut app = App::default();
+        app.groups[0].tabs = vec!["old".into()];
+        app.session_identity.insert("old".into(), (Some("codex".into()), None));
+        app.session_cwds.insert("old".into(), PathBuf::from("/repo"));
+        app.input = "/clear".into();
+        assert!(app.submit_local_command());
+        assert!(app.notice.contains("persistent tabset unavailable"));
+        assert!(app.pending_launches.is_empty());
+
+        app.clear_preflight_error = None;
+        app.input = "/clear".into();
+        assert!(app.submit_local_command());
+        app.apply_daemon_frame(&json!({"type":"launch_reply","ok":true,"session_id":"fresh","group":0}));
+        assert!(app.finish_clear_swap(false));
+        assert_eq!(app.groups[0].tabs, ["old"]);
+        assert!(app.clear_stop_after_save.is_empty());
+        assert_eq!(app.pending_clear_finalizes, ["fresh"]);
     }
 
     #[test]
