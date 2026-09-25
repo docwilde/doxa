@@ -5,6 +5,7 @@
 
 main() {
   set -eu
+  umask 077
 
   repo_url="${DOXA_RUST_REPO_URL:-https://github.com/docwilde/doxa}"
   ref="${1:-main}"
@@ -72,7 +73,7 @@ main() {
   tui_manifest="$checkout/rust/doxa-tui/Cargo.toml"
   daemon_manifest="$checkout/rust/doxa-daemon/Cargo.toml"
   claude_script="$checkout/rust/doxa-claude/claude_sidecar.py"
-  for required_file in "$tui_manifest" "$daemon_manifest" "$claude_script" "$checkout/pyproject.toml"; do
+  for required_file in "$tui_manifest" "$daemon_manifest" "$claude_script" "$checkout/pyproject.toml" "$checkout/uv.lock"; do
     [ -f "$required_file" ] || { printf 'doxa-install: missing %s\n' "$required_file" >&2; exit 1; }
   done
 
@@ -89,18 +90,25 @@ main() {
   # The Python package remains private to this versioned environment. The
   # launcher puts it first on PATH so Rust's python3 resolution finds it from
   # every working directory, without exposing the retired Python doxa CLI.
-  if [ ! -d "$doxa_home" ]; then
-    mkdir -p "$doxa_home" || exit 1
-    chmod 700 "$doxa_home" || exit 1
-  fi
+  [ ! -L "$doxa_home" ] || { printf 'doxa-install: DOXA_HOME must not be a symlink\n' >&2; exit 1; }
+  mkdir -p "$doxa_home" || exit 1
+  chmod 700 "$doxa_home" || exit 1
   sidecar_root="$doxa_home/sidecars"
+  [ ! -L "$sidecar_root" ] || { printf 'doxa-install: sidecar root must not be a symlink\n' >&2; exit 1; }
   mkdir -p "$sidecar_root" || exit 1
+  chmod 700 "$sidecar_root" || exit 1
   sidecar_env="$sidecar_root/$sha"
-  if [ ! -d "$sidecar_env" ]; then
+  [ ! -L "$sidecar_env" ] || { printf 'doxa-install: sidecar environment must not be a symlink\n' >&2; exit 1; }
+  if [ -e "$sidecar_env" ] || [ -L "$sidecar_env" ]; then
+    [ -d "$sidecar_env" ] && [ ! -L "$sidecar_env" ] || {
+      printf 'doxa-install: sidecar path is not a directory: %s\n' "$sidecar_env" >&2; exit 1;
+    }
+  else
     new_sidecar="$sidecar_env"
     uv venv --python python3 "$sidecar_env" || exit 1
-    uv pip install --python "$sidecar_env/bin/python" "$checkout" || exit 1
+    VIRTUAL_ENV="$sidecar_env" uv sync --frozen --active --no-dev --no-editable --project "$checkout" || exit 1
   fi
+  chmod 700 "$sidecar_env" || exit 1
   "$sidecar_env/bin/python" -c 'import doxa.lore_bridge, doxa.engine, lore_core, claude_agent_sdk' || {
     printf 'doxa-install: sidecar import check failed\n' >&2; exit 1;
   }

@@ -22,7 +22,7 @@ usage() {
 Usage: ./task COMMAND [arguments]
 
   build [--release]     Build the Rust frontend and daemon (debug by default)
-  install               Build and install the release preview in DOXA_RUST_BIN_DIR
+  install               Build and install committed HEAD as the Rust doxa launcher
   run [doxa-rs args]    Build and run the frontend in the current directory
   new [doxa-rs args]    Build and start a new session in the current directory
   doctor [args]         Build and check the native launch dependencies
@@ -34,8 +34,8 @@ DOXA_TASK_TARGET_DIR defaults to <repo>/target/rust-task.
 DOXA_TASK_PROFILE=release selects release binaries for run/new/doctor.
 DOXA_LORE_PYTHON selects the LORE/Claude Python interpreter; otherwise
 <repo>/.venv/bin/python is used when present, then python3 on PATH.
-DOXA_RUST_BIN_DIR defaults to ~/.local/bin. install writes doxa-rs,
-doxa-daemon-rs, and doxa-claude-sidecar.py only; it never replaces doxa.
+DOXA_RUST_BIN_DIR defaults to ~/.local/bin. install uses the locked sidecar
+dependencies and writes the Rust doxa launcher from committed HEAD.
 Pass --lore-python or --claude-python to override Python for one launch.
 EOF
 }
@@ -128,47 +128,13 @@ launch() {
   esac
 }
 
-install_preview() {
-  build release
-  bin_dir=${DOXA_RUST_BIN_DIR:-${HOME:-}/.local/bin}
-  case $bin_dir in /*) : ;; *) fail 'DOXA_RUST_BIN_DIR must be an absolute path' ;; esac
-  [ -n "${HOME:-}" ] || [ -n "${DOXA_RUST_BIN_DIR:-}" ] || fail 'HOME or DOXA_RUST_BIN_DIR is required'
-  mkdir -p "$bin_dir"
-  for name in doxa-rs doxa-daemon-rs doxa-claude-sidecar.py; do
-    [ ! -d "$bin_dir/$name" ] || fail "$bin_dir/$name is a directory"
-  done
-  stage=$(mktemp -d "$bin_dir/.doxa-task.XXXXXXXX") || fail 'cannot stage install'
-  mkdir "$stage/new" "$stage/old"
-  cp "$target_dir/release/doxa-rs" "$stage/new/doxa-rs"
-  cp "$target_dir/release/doxa-daemon" "$stage/new/doxa-daemon-rs"
-  cp "$sidecar" "$stage/new/doxa-claude-sidecar.py"
-  chmod 755 "$stage/new/doxa-rs" "$stage/new/doxa-daemon-rs"
-  chmod 644 "$stage/new/doxa-claude-sidecar.py"
-  installing=1
-  installed_names=
-  rollback() {
-    if [ "$installing" -eq 1 ]; then
-      for name in $installed_names; do
-        rm -f "$bin_dir/$name"
-      done
-      for name in doxa-rs doxa-daemon-rs doxa-claude-sidecar.py; do
-        [ ! -e "$stage/old/$name" ] && [ ! -L "$stage/old/$name" ] ||
-          mv -f "$stage/old/$name" "$bin_dir/$name"
-      done
-    fi
-    rm -rf "$stage"
-  }
-  trap 'rollback' 0
-  trap 'exit 1' 1 2 3 15
-  for name in doxa-rs doxa-daemon-rs doxa-claude-sidecar.py; do
-    if [ -e "$bin_dir/$name" ] || [ -L "$bin_dir/$name" ]; then
-      mv "$bin_dir/$name" "$stage/old/$name"
-    fi
-    installed_names="$installed_names $name"
-    mv "$stage/new/$name" "$bin_dir/$name"
-  done
-  installing=0
-  info "installed preview in $bin_dir (run $bin_dir/doxa-rs)"
+install_committed() {
+  command -v git >/dev/null 2>&1 || fail 'git is required to install this checkout'
+  revision=$(git -C "$root" rev-parse HEAD) || fail 'cannot resolve checkout HEAD'
+  if ! git -C "$root" diff --quiet || ! git -C "$root" diff --cached --quiet; then
+    info 'install uses committed HEAD; working-tree changes are not included'
+  fi
+  DOXA_RUST_REPO_URL=$root sh "$root/scripts/install.sh" "$revision"
 }
 
 command=${1:-help}
@@ -181,7 +147,7 @@ case $command in
       --release) [ "$#" -eq 1 ] || fail 'usage: ./task build [--release]'; build release ;;
       *) fail 'usage: ./task build [--release]' ;;
     esac ;;
-  install) [ "$#" -eq 0 ] || fail 'install takes no arguments'; install_preview ;;
+  install) [ "$#" -eq 0 ] || fail 'install takes no arguments'; install_committed ;;
   run|new|doctor) launch "$command" "$@" ;;
   test)
     [ "$#" -eq 0 ] || fail 'test takes no arguments'

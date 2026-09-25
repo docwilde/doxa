@@ -24,6 +24,7 @@ def _source_repo(tmp_path: Path) -> Path:
     script.parent.mkdir(parents=True)
     script.write_text("# Claude sidecar fixture\n")
     (repo / "pyproject.toml").write_text("[project]\nname = 'doxa'\nversion = '2.0.0'\n")
+    (repo / "uv.lock").write_text("# locked fixture\n")
     package = repo / "doxa"
     package.mkdir()
     for name in ("__init__", "lore_bridge", "engine"):
@@ -86,9 +87,9 @@ def _run(tmp_path: Path, repo: Path, *args: str, fail_install_name: str | None =
         "#!/bin/sh\n"
         "case $1 in\n"
         "  venv) python3 -m venv \"$4\" ;;\n"
-        "  pip)\n"
-        "    site=$($4 -c 'import site; print(site.getsitepackages()[0])')\n"
-        "    cp -R \"$5/doxa\" \"$5/lore_core\" \"$5/claude_agent_sdk\" \"$site/\" ;;\n"
+        "  sync)\n"
+        "    site=$($VIRTUAL_ENV/bin/python -c 'import site; print(site.getsitepackages()[0])')\n"
+        "    cp -R \"$7/doxa\" \"$7/lore_core\" \"$7/claude_agent_sdk\" \"$site/\" ;;\n"
         "esac\n"
     )
     uv.chmod(0o755)
@@ -159,3 +160,22 @@ def test_missing_cargo_fails_before_mutation(tmp_path):
     assert proc.returncode != 0
     assert "cargo is required" in proc.stderr
     assert not (home / ".local/bin").exists()
+
+
+@pytest.mark.parametrize("link", ["home", "sidecars"])
+def test_rejects_symlinked_sidecar_directories(tmp_path, link):
+    repo = _source_repo(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if link == "home":
+        (home / ".doxa").symlink_to(outside, target_is_directory=True)
+    else:
+        (home / ".doxa").mkdir()
+        (home / ".doxa/sidecars").symlink_to(outside, target_is_directory=True)
+
+    proc, _, _ = _run(tmp_path, repo)
+    assert proc.returncode != 0
+    assert "symlink" in proc.stderr
+    assert not (home / ".local/bin/doxa").exists()
