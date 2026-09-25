@@ -1263,9 +1263,9 @@ impl App {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
                 self.drag = None;
-                if self.history_modal && !self.history_fits() {
+                if self.history_modal && self.active_chooser_rect().is_none() {
                     self.history_modal = false;
-                    self.notice = "Enlarge terminal to open session history".into();
+                    self.notice = "Enlarge active pane to search sessions".into();
                 }
                 if self.lore_picker.is_some() && (w < 34 || h < 13) {
                     self.lore_picker = None;
@@ -1812,17 +1812,24 @@ impl App {
     }
 
     fn history_fits(&self) -> bool {
-        self.size.width >= 28 && self.size.height >= 12
+        let layout = self.layout(self.size);
+        let pane = layout.panes.map_or(layout.body, |panes| panes[self.active_group]);
+        pane.width >= 20 && pane.height >= 11
     }
 
     fn open_history(&mut self) {
         if !self.history_fits() {
-            self.notice = "Enlarge terminal to open session history".into();
+            self.notice = "Enlarge active pane to search sessions".into();
             return;
         }
         self.history_modal = true;
         self.history_query.clear();
         self.history_selected = 0;
+        if self.active_chooser_rect().is_none() {
+            self.history_modal = false;
+            self.notice = "Enlarge active pane to search sessions".into();
+            return;
+        }
         if self.history_pending.is_none() {
             let (tx, rx) = mpsc::sync_channel(1);
             self.history_pending = Some(rx);
@@ -1971,19 +1978,23 @@ impl App {
                 if self.history_query.len() + c.len_utf8() <= 200 { self.history_query.push(c); self.history_selected = 0; }
             }
             KeyCode::Enter => {
-                if let Some(&index) = self.history_matches().get(self.history_selected) {
-                    let id = self.sessions[index].id.clone();
-                    let tabs = &mut self.groups[self.active_group];
-                    if let Some(index) = tabs.tabs.iter().position(|tab| tab == &id) { tabs.active = index; }
-                    else { tabs.tabs.push(id); tabs.active = tabs.tabs.len() - 1; }
-                    tabs.scroll = 0;
-                    self.focus = Focus::Transcript;
-                    self.history_modal = false;
-                }
+                self.open_selected_history();
             }
             _ => return false,
         }
         true
+    }
+
+    fn open_selected_history(&mut self) {
+        if let Some(&index) = self.history_matches().get(self.history_selected) {
+            let id = self.sessions[index].id.clone();
+            let tabs = &mut self.groups[self.active_group];
+            if let Some(index) = tabs.tabs.iter().position(|tab| tab == &id) { tabs.active = index; }
+            else { tabs.tabs.push(id); tabs.active = tabs.tabs.len() - 1; }
+            tabs.scroll = 0;
+            self.focus = Focus::Transcript;
+            self.history_modal = false;
+        }
     }
 
     fn open_diff(&mut self) {
@@ -2537,6 +2548,8 @@ impl App {
             }
         } else if self.action_menu {
             (ACTIONS.len() + 2).min(15) as u16
+        } else if self.history_modal {
+            (self.history_matches().len() + 3).clamp(5, 15) as u16
         } else {
             return None;
         };
@@ -2651,6 +2664,39 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.history_modal {
+            let Some(menu) = self.active_chooser_rect() else { return false; };
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if mouse.column < menu.x || mouse.column >= menu.right()
+                        || mouse.row < menu.y || mouse.row >= menu.bottom() {
+                        self.history_modal = false;
+                        return true;
+                    }
+                    let first_row = menu.y.saturating_add(2);
+                    if mouse.row >= first_row && mouse.row < menu.bottom().saturating_sub(1) {
+                        let visible = usize::from(menu.height.saturating_sub(3)).max(1);
+                        let start = self.history_selected.saturating_sub(visible.saturating_sub(1));
+                        let position = start + usize::from(mouse.row - first_row);
+                        if position < self.history_matches().len() {
+                            self.history_selected = position;
+                            self.open_selected_history();
+                        }
+                    }
+                    return true;
+                }
+                MouseEventKind::ScrollUp => {
+                    self.history_selected = self.history_selected.saturating_sub(1);
+                    return true;
+                }
+                MouseEventKind::ScrollDown => {
+                    self.history_selected = (self.history_selected + 1)
+                        .min(self.history_matches().len().saturating_sub(1));
+                    return true;
+                }
+                _ => return false,
+            }
+        }
         if self.active_request_index().is_none()
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && (self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.permission_picker.is_some()) {
@@ -2960,7 +3006,6 @@ impl App {
                 self.groups[self.active_group].active_id().unwrap_or(""),
             );
         }
-        self.draw_history(frame, area);
         self.draw_diff(frame, area);
         self.draw_stop_confirmation(frame, area);
         if !self.active_request_index().is_some_and(|index| self.input_requests[index].kind == "ask_user")
@@ -3067,35 +3112,26 @@ impl App {
 
     fn draw_history(&self, frame: &mut Frame, area: Rect) {
         if !self.history_modal { return; }
-        let width = area.width.saturating_sub(4).min(88);
-        let height = area.height.saturating_sub(4).min(24);
-        if width < 24 || height < 8 { return; }
-        let modal = Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height);
         let matches = self.history_matches();
-        let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&self.history_query))),
-            Line::from(" Attached and archived sessions · read-only transcript picker"), Line::from("")];
+        let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&self.history_query)))];
         if matches.is_empty() { lines.push(Line::from(if self.history_pending.is_some() { " Finding saved transcripts…" } else { " No matching sessions" })); }
-        let visible = usize::from(height.saturating_sub(7)).max(1);
+        let visible = usize::from(area.height.saturating_sub(3)).max(1);
         let start = self.history_selected.saturating_sub(visible.saturating_sub(1));
         for (position, &index) in matches.iter().enumerate().skip(start).take(visible) {
             let session = &self.sessions[index];
             let label = format!(" {} {} · {}{}", if position == self.history_selected { '›' } else { ' ' },
                 safe_label(&session.title), safe_label(&session.id),
                 if self.offline_ids.contains(&session.id) { " · archived" } else { "" });
-            let style = if position == self.history_selected { Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT) }
+            let style = if position == self.history_selected { Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD) }
                 else { Style::default().fg(theme::SECONDARY) };
-            lines.push(Line::styled(label, style));
+            let label = clipped_title(&label, usize::from(area.width.saturating_sub(2))).0;
+            let padded = format!("{label}{}", " ".repeat(usize::from(area.width.saturating_sub(2)).saturating_sub(label.width())));
+            lines.push(Line::styled(padded, style));
         }
-        if let Some(&index) = matches.get(self.history_selected) {
-            let preview: String = self.sessions[index].transcript.chars().rev().take(240).collect::<String>().chars().rev().collect();
-            lines.push(Line::from(""));
-            lines.push(Line::from(format!(" Preview: {}", safe_label(&preview))));
-        }
-        frame.render_widget(Clear, modal);
         frame.render_widget(Paragraph::new(lines).block(Block::default()
-            .title(" Session history · type to filter · Enter open · Esc close ")
-            .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER))
-            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), modal);
+            .title(" Session history · type to filter ")
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
     }
 
     fn draw_lore_picker(&self, frame: &mut Frame, area: Rect) {
@@ -3493,6 +3529,8 @@ impl App {
                 self.draw_lore_picker(frame, inner[2]);
             } else if self.action_menu {
                 self.draw_actions(frame, inner[2]);
+            } else if self.history_modal {
+                self.draw_history(frame, inner[2]);
             }
         }
         let mut chip_spans = Vec::new();
@@ -4375,6 +4413,58 @@ mod tests {
     }
 
     #[test]
+    fn history_search_stays_above_active_prompt_and_mouse_opens_result() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "alpha".into(), title: "First".into(),
+            collection: "repo".into(), transcript: "red apple".into(), status: "Ready".into() }));
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "beta".into(), title: "Second".into(),
+            collection: "repo".into(), transcript: "green pear".into(), status: "Ready".into() }));
+        app.groups[0].tabs.push("alpha".into());
+        app.groups[1].tabs.push("beta".into());
+        app.handle(Event::Resize(100, 28));
+        let panes = app.layout(app.size).panes.unwrap();
+        let mut before = Terminal::new(TestBackend::new(100, 28)).unwrap();
+        before.draw(|frame| app.draw(frame)).unwrap();
+
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
+        let menu = app.active_chooser_rect().unwrap();
+        assert_eq!(menu.x, panes[0].x);
+        assert_eq!(menu.width, panes[0].width);
+        assert!(menu.bottom() < panes[0].bottom());
+        let mut after = Terminal::new(TestBackend::new(100, 28)).unwrap();
+        after.draw(|frame| app.draw(frame)).unwrap();
+        for y in panes[1].y..panes[1].bottom() {
+            for x in panes[1].x..panes[1].right() {
+                assert_eq!(before.backend().buffer()[(x, y)], after.backend().buffer()[(x, y)]);
+            }
+        }
+        assert_eq!(after.backend().buffer()[(menu.x + 2, menu.y + 2)].bg, theme::HIGHLIGHT);
+
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.x + 2, row: menu.y + 3, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.groups[0].active_id(), Some("beta"));
+        assert!(!app.history_modal);
+    }
+
+    #[test]
+    fn history_search_closes_outside_panel_and_on_narrow_pane_resize() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 28));
+        app.open_history();
+        let menu = app.active_chooser_rect().unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.right(), row: menu.y + 2, modifiers: KeyModifiers::NONE }));
+        assert!(!app.history_modal);
+        app.open_history();
+        app.handle(Event::Resize(100, 18));
+        assert!(app.history_modal);
+        app.handle(Event::Resize(100, 10));
+        assert!(!app.history_modal);
+    }
+
+    #[test]
     fn restored_and_appended_transcripts_keep_only_bounded_utf8_tail() {
         let mut app = App::default();
         let long = format!("{}éEND", "a".repeat(MAX_TRANSCRIPT_BYTES));
@@ -4614,7 +4704,7 @@ mod tests {
         app.handle(Event::Resize(27, 11));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
         assert!(!app.history_modal);
-        assert!(app.notice.contains("Enlarge terminal"));
+        assert!(app.notice.contains("Enlarge active pane"));
         app.handle(Event::Resize(100, 28));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
         assert!(app.history_modal);
