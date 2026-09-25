@@ -1,22 +1,25 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/status-beta-f59f00" alt="beta: config keys and the socket protocol can still change">
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.9-f59f00" alt="Rust 2.0 alpha.9 is the leading development line">
   <a href="https://github.com/docwilde/doxa/releases"><img src="https://img.shields.io/github/v/release/docwilde/doxa?label=release&color=e8590c" alt="latest release"></a>
-  <a href="https://github.com/docwilde/doxa/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/ci.yml?branch=main&label=tests" alt="CI status on main"></a>
-  <img src="https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/built%20on-Claude%20Agent%20SDK-d97757" alt="built on Claude Agent SDK">
+  <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=rust%2F2.0&label=Rust%20CI" alt="Rust CI status"></a>
+  <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
   <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
 </p>
 
 > [!WARNING]
-> **Beta.** Config and on-disk formats can change between releases. Agents
+> **Alpha.** The Rust 2.0 preview is the leading development line; Python 1.x
+> remains available for features still being ported. Config and on-disk formats
+> can change between releases. Agents
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-**DOXA** is a terminal for coding agents built on Textual and the Claude
-Agent SDK. Run Claude, Codex, DeepSeek, or GLM in separate sessions; close
-the terminal and reattach to their daemons later. [LORE](https://github.com/docwilde/LORE)
+**DOXA** is a terminal for coding agents. Development now leads with the
+**Rust 2.0 alpha**, built with Ratatui and a native daemon. Run Claude, Codex,
+DeepSeek, or GLM in separate sessions; close the terminal and reattach to their
+daemons later. Claude currently uses a bundled Python SDK sidecar.
+[LORE](https://github.com/docwilde/LORE)
 shares user and repo memory across DOXA, Claude Code, and Codex, with
 evidence-backed beliefs and an informational source-engine label. See the
 [engine capabilities](docs/manual.md#engine-capabilities) and
@@ -30,17 +33,16 @@ spend, fake account numbers. See
 
 ## What you get
 
-- **[Four engines.](docs/manual.md#engine-capabilities)** Choose Claude, Codex, DeepSeek, or GLM per session.
-- **[Persistent sessions.](docs/manual.md#sessions-and-the-daemon)** Detach and reattach without losing the transcript.
-- **[Reviewable work.](docs/manual.md#the-live-diff)** Inspect turns and tool calls, view live diffs, and reject hunks.
-- **[Parallel sessions.](docs/manual.md#worktrees-and-finalize)** Split panes and isolate branches in worktrees.
-- **[Shared memory.](docs/manual.md#lore-integration)** Review LORE facts and evidence-backed beliefs across engines.
-- **[Controlled execution.](docs/manual.md#permission-modes)** Gate tool calls and track available usage and costs.
-- **[Coordination.](docs/manual.md#search-resume-and-peers)** Queue prompts or send opt-in messages between sessions.
-- **[Fleets.](docs/fleet.md)** Run mixed-engine pools with budgets or a supervisor.
-- **[Remote access.](docs/plans/remote.md)** Control local sessions from a browser through opt-in Tailscale Serve.
+**Rust 2.0 alpha:** Launch and reattach [four engines](rust/README.md), work
+across grouped tabs and two-pane splits with separate prompts, inspect bounded
+worktree diffs and tool cards, change supported models and permissions, and
+browse LORE beliefs and peer activity. The [Rust guide](rust/README.md)
+describes its current capabilities and limits.
 
-The [manual](docs/manual.md) covers commands, keybindings, and engine-specific limits.
+**Python 1.x:** Keep using the [manual](docs/manual.md) for worktree creation
+and cleanup, diff hunk rejection, LORE proposal approval, the full command
+palette, [fleets](docs/fleet.md), and [remote access](docs/plans/remote.md)
+while those workflows move to Rust.
 
 ## Gallery
 
@@ -108,31 +110,30 @@ More screenshots are catalogued in the [manual](docs/manual.md#screenshots).
 
 ## Install
 
+### Rust 2.0 alpha (leading development line)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/rust/2.0/scripts/install.sh | sh -s -- --rust v2.0.0-alpha.9
+```
+
+This builds the tagged Rust preview with Git and Cargo and installs `doxa-rs`,
+`doxa-daemon-rs`, and the Claude sidecar in `~/.local/bin` (or
+`DOXA_RUST_BIN_DIR`). Use `--rust rust/2.0` to track the development branch.
+The current alpha still needs a Python environment with DOXA and LORE for its
+memory bridge, and the Claude Agent SDK for Claude sessions. Run
+`doxa-rs doctor --engine codex` to check your setup; see the
+[Rust guide](rust/README.md) for interpreter and provider setup. The Python
+`doxa` command is installed separately.
+
+### Python 1.x (full feature fallback)
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh
 ```
 
-Requires Python 3.11+, [`uv`](https://docs.astral.sh/uv/), and Git. The
-installer tracks `main` by default; replace the final `sh` with
-`sh -s -- v1.19.0` to pin this
-release. Provider CLIs can be installed and signed in later. DOXA is not on
-PyPI.
-
-To compile and install the experimental Rust frontend separately, run:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/rust/2.0/scripts/install.sh | sh -s -- --rust rust/2.0
-```
-
-`--rust` defaults to the `rust/2.0` branch; an optional branch, tag, or commit
-SHA selects another ref. It requires Git and Cargo, builds a release binary,
-and installs `doxa-rs` in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). If the ref
-contains a native Rust daemon, the installer also installs it as
-`doxa-daemon-rs`, along with the Claude sidecar. The supported Python `doxa`
-command is left untouched.
-The Rust preview can start its native daemon for Codex, Claude, DeepSeek, and
-GLM sessions, or attach to an existing DOXA daemon. See [the Rust development
-guide](rust/README.md) for current capabilities and setup.
+This requires Python 3.11+, [`uv`](https://docs.astral.sh/uv/), and Git. The
+installer tracks `main` by default; `sh -s -- v1.19.0` pins that release.
+Provider CLIs can be installed and signed in later. DOXA is not on PyPI.
 
 From a checkout:
 
@@ -148,6 +149,17 @@ An install tracking `main` can use `/update` or `/update --restart` in the
 TUI. Tag-pinned installs stay pinned.
 
 ## Quickstart
+
+For the Rust alpha, check the bridge and start or attach to a session:
+
+```sh
+doxa-rs doctor --engine codex
+doxa-rs new --engine codex --lore-python /absolute/path/to/python-with-doxa-and-lore
+doxa-rs list
+```
+
+The [Rust guide](rust/README.md) covers Claude, DeepSeek, and GLM setup.
+For Python 1.x, use:
 
 ```sh
 uv run doxa                         # open or restore this repo's sessions
@@ -174,18 +186,21 @@ running on this machine. `/help` lists TUI commands and available keys.
 
 ## Status
 
-DOXA is beta. The features above are on `main`; the
-[changelog](CHANGELOG.md) tracks releases, and the [manual](docs/manual.md)
-covers behavior and limits. The installer tracks `main` unless you pin a tag.
+Rust 2.0 alpha is the leading development line on `rust/2.0`. It is not yet
+at Python 1.x feature parity. The Python release remains on `main`; the
+[changelog](CHANGELOG.md) and [manual](docs/manual.md) cover that line.
+
+For Python 1.x:
 
 - **Remote control:** the browser bridge is opt-in and still lacks rich diffs, images, and notifications. See the [remote plan](docs/plans/remote.md).
 - **Fleets:** mixed-engine runs and a supervisor mode are available; engines without reported costs need explicit budget opt-in. See the [fleet guide](docs/fleet.md).
 - **Older sessions:** Claude sessions created before v0.56.0 may be read-only on resume.
 - **Plans:** [`docs/plans/`](docs/plans/) separates shipped work from designs still in progress.
 
-Run `uv run pytest` for the suite. Browser tests skip when Chrome is not
-available; see the [manual](docs/manual.md#screenshots) for screenshot and
-browser-test details.
+Rust CI tests the frontend, native daemon, protocol, LORE bridge, and
+compatibility paths. For Python 1.x, run `uv run pytest`; browser tests skip
+when Chrome is unavailable. See the [manual](docs/manual.md#screenshots)
+for screenshot and browser-test details.
 
 ## Non-goals
 
