@@ -259,7 +259,7 @@ fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"vendor","engine":"glm"}));
     app.groups[1].tabs.push("vendor".into());
     let unknown = screen(&app, 300, 24);
-    assert!(unknown.contains("Plan unknown · quota unknown"), "{unknown}");
+    assert!(!unknown.contains("Plan ?") && !unknown.contains("quota ?"), "{unknown}");
     assert!(unknown.contains("Beliefs ▾   $?   LORE ?"), "{unknown}");
     app.apply_daemon_frame(&json!({"type":"event","session_id":"codex","event":{"type":"turn_done","data":{
         "input_tokens":120,"output_tokens":30,"usage_scope":"session","usage_source":"codex_cli_turn_completed",
@@ -275,7 +275,7 @@ fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
     assert!(rendered.contains("p 0%/u 40%"), "{rendered}");
     assert!(!rendered.contains("Tokens "), "{rendered}");
     assert!(rendered.contains("Ctx ?"), "{rendered}");
-    assert!(rendered.contains("Plan unknown · quota unknown"), "{rendered}");
+    assert!(!rendered.contains("Plan ?") && !rendered.contains("quota ?"), "{rendered}");
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{"session_id":"codex","lore_scrub":"unavailable"}}));
     let rendered = screen(&app, 300, 24);
     assert!(rendered.contains("LORE scrub unavailable"), "{rendered}");
@@ -312,6 +312,17 @@ fn telemetry_status_restores_reported_values_without_inventing_zero_usage() {
 #[test]
 fn subscription_billing_uses_provider_snapshot_and_never_displays_list_price_as_spend() {
     let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"unknown-plan","engine":"claude",
+        "billing":{"mode":"subscription","type":"subscription","quota":null}}));
+    let rendered = screen(&app, 300, 24);
+    assert!(!rendered.contains("Sub ?") && !rendered.contains("quota ?"), "{rendered}");
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"known-plan","engine":"claude",
+        "billing":{"mode":"subscription","type":"pro","quota":null}}));
+    app.groups[1].tabs.push("known-plan".into());
+    let rendered = screen(&app, 300, 24);
+    assert!(rendered.contains("Sub pro · quota ?"), "{rendered}");
+
+    let mut app = App::default();
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"claude-1","engine":"claude",
         "billing":{"mode":"subscription","type":"max 20x","quota":"s:9% w:48%~"}}));
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{"session_id":"claude-1",
@@ -325,7 +336,7 @@ fn subscription_billing_uses_provider_snapshot_and_never_displays_list_price_as_
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{"session_id":"codex-1",
         "total_cost_usd":9.8765}}));
     let rendered = screen(&app, 300, 24);
-    assert!(rendered.contains("Plan unknown · quota unknown"), "{rendered}");
+    assert!(!rendered.contains("Plan ?") && !rendered.contains("quota ?"), "{rendered}");
     assert!(!rendered.contains("$9.8765"), "{rendered}");
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{"session_id":"codex-1",
         "billing":{"mode":"api"},"total_cost_usd":9.8765}}));

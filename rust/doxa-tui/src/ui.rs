@@ -490,10 +490,13 @@ impl SessionTelemetry {
             Some("deepseek" | "glm") => Some(self.cost.clone().unwrap_or_else(|| "$?".into())),
             Some("codex" | "claude") => match self.billing_mode.as_deref() {
                 Some("api") => Some(self.cost.clone().unwrap_or_else(|| "$?".into())),
-                Some("subscription") => Some(format!("Sub {} · {}",
-                    self.subscription_type.as_deref().filter(|tier| *tier != "subscription").unwrap_or("unknown"),
-                    self.quota.as_deref().unwrap_or("quota unknown"))),
-                _ => Some("Plan unknown · quota unknown".into()),
+                Some("subscription") => {
+                    let tier = self.subscription_type.as_deref().filter(|tier| *tier != "subscription");
+                    if tier.is_none() && self.quota.is_none() { return None; }
+                    Some(format!("Sub {} · {}", tier.unwrap_or("?"),
+                        self.quota.as_deref().unwrap_or("quota ?")))
+                }
+                _ => None,
             },
             _ => None,
         }
@@ -3852,7 +3855,6 @@ impl App {
         if let Some(label) = telemetry.and_then(|value| value.billing_label(engine))
             .or_else(|| match engine {
                 Some("deepseek" | "glm") => Some("$?".into()),
-                Some("codex" | "claude") => Some("Plan unknown · quota unknown".into()),
                 _ => None,
             }) {
             chips.push(("cost", label));

@@ -206,8 +206,13 @@ index. Duplicate queued hunks are refused. Pending
 rejections block closing the diff or leaving the UI until they finish, and are
 cancelled if the session ends. The diff pane requires enough
 terminal space for two panes. Each split pane has its own prompt and keeps a draft for its active
-session. Its status rows show engine and model chips, plus context, cost, and
-LORE status. The `p X%/u Y%` chip shows curated project and user memory fill
+session. Its status rows show engine and model chips, plus context, billing, and
+LORE status. Dollar cost appears only for API-billed sessions. A connected
+Claude subscription shows its reported plan and cached quota when the local
+CLI cache belongs to the same account; `~` marks stale cached usage. Codex
+plan and quota remain unknown until its daemon has a verified provider source,
+so no subscription pill is shown for it yet.
+The `p X%/u Y%` chip shows curated project and user memory fill
 against each scope's cap. Both counts and caps come from LORE; `?` means LORE
 could not report usage. Hover over a chip for its meaning, or click a read-only
 chip to see details above the prompt. Estimated cost is labeled. In a prompt, `Enter` submits, while

@@ -19,6 +19,9 @@ the stable 2.0 release has not been cut.
   worktree lock.
 - Hit-test chip hover and clicks against the painted frame so resizing and
   pane separators cannot activate the wrong chip.
+- Show dollar costs only for API-billed sessions. For a verified Claude
+  subscription, show its connected account's plan and same-account cached
+  quota; show unknowns when a provider does not report billing or quota.
 
 ## 2.0.0-alpha.12 — 2026-09-25
 
