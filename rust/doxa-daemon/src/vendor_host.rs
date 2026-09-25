@@ -1,8 +1,9 @@
-//! Plain-chat DeepSeek/GLM host. No model tools are advertised or executed.
+//! DeepSeek/GLM host with an explicitly enabled, read-only workspace tool.
 use doxa_lore::LoreClient;
 use doxa_runtime::Host;
 use doxa_transcript::TranscriptStore;
 use doxa_vendors::{Error, Vendor, MAX_TURN_DURATION};
+use crate::vendor_tools::WorkspaceReadGate;
 use serde_json::{json, Value};
 use std::path::Path;
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ pub struct VendorHost {
     history: Mutex<Vec<Value>>,
     store: TranscriptStore,
     cwd: String,
+    workspace_read: bool,
     storage_uncertain: AtomicBool,
     committed_bytes: AtomicU64,
     active: Mutex<Option<watch::Sender<bool>>>,
@@ -46,6 +48,12 @@ impl VendorHost {
                 vendor.env_var()
             ));
         }
+        let workspace_read = match std::env::var("DOXA_VENDOR_TOOLS") {
+            Err(std::env::VarError::NotPresent) => false,
+            Ok(value) if value.is_empty() => false,
+            Ok(value) if value == "workspace-read" => true,
+            _ => return Err("DOXA_VENDOR_TOOLS must be unset or workspace-read".to_owned()),
+        };
         doxa_vendors::request_body(vendor, &model, &[], &effort)
             .map_err(|_| "invalid vendor effort".to_owned())?;
         let mut lore = LoreClient::spawn(lore_python, Duration::from_secs(5)).map_err(|_| {
@@ -101,6 +109,7 @@ impl VendorHost {
             history: Mutex::new(history),
             store,
             cwd: cwd.into_owned(),
+            workspace_read,
             storage_uncertain: AtomicBool::new(false),
             committed_bytes: AtomicU64::new(committed_bytes),
             active: Mutex::new(None),
@@ -161,8 +170,13 @@ impl Host for VendorHost {
             self.cancel();
         }
         let started = Instant::now();
-        emit(json!({"type":"turn_started","data":{"prompt":prompt}}));
+        emit(json!({"type":"turn_started","data":{"prompt":prompt,
+            "vendor_tools":if self.workspace_read { "workspace-read" } else { "none" }}}));
         let mut history = self.history.lock().unwrap().clone();
+        let saved_history = history.clone();
+        let scrub_tool = |value: &str| self.scrub(value);
+        let mut gate = WorkspaceReadGate::new(Path::new(&self.cwd), &scrub_tool);
+        let gate = if self.workspace_read { Some(&mut gate as &mut dyn doxa_vendors::ToolGate) } else { None };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build();
@@ -177,7 +191,7 @@ impl Host for VendorHost {
                         &self.effort,
                         &mut history,
                         &prompt,
-                        None,
+                        gate,
                         cancel,
                         MAX_TURN_DURATION,
                         |_| {},
@@ -189,7 +203,7 @@ impl Host for VendorHost {
                         &self.effort,
                         &mut history,
                         &prompt,
-                        None,
+                        gate,
                         cancel,
                         MAX_TURN_DURATION,
                         |_| {},
@@ -202,7 +216,7 @@ impl Host for VendorHost {
                     &self.effort,
                     &mut history,
                     &prompt,
-                    None,
+                    gate,
                     cancel,
                     MAX_TURN_DURATION,
                     |_| {},
@@ -215,13 +229,16 @@ impl Host for VendorHost {
             Ok(outcome) => {
                 // The crate masks its API key; LORE must scrub every other
                 // secret before output is displayed or reused as history.
-                let text = self.scrub(&outcome.text);
+                // Tool messages are intentionally turn-local: the replay format
+                // stores only paired user and final assistant messages.
+                let final_text = history.last().and_then(|message| message["content"].as_str());
+                let text = final_text.ok_or(()).and_then(|text| self.scrub(text));
                 let reasoning = self.scrub(&outcome.reasoning);
                 let model = self.scrub(outcome.model.as_deref().unwrap_or(&self.model));
                 if let (Ok(text), Ok(reasoning), Ok(model)) = (text, reasoning, model) {
-                    if let Some(last) = history.last_mut() {
-                        last["content"] = json!(text);
-                    }
+                    history = saved_history;
+                    history.push(json!({"role":"user","content":prompt}));
+                    history.push(json!({"role":"assistant","content":text}));
                     let timestamp = crate::iso_now();
                     if self
                         .store

@@ -124,8 +124,11 @@ also accepts `none`. `doxa-rs doctor --engine deepseek|glm` checks the daemon,
 LORE interpreter, provider key presence, and effort value without printing the
 key. Use `doxa-rs new --engine deepseek|glm --resume SESSION_ID` to resume an
 existing vendor session with saved messages. Pass the exact full session ID;
-the vendor and resolved model must match the saved state. Vendor chat has no
-tools in this alpha.
+the vendor and resolved model must match the saved state. Native vendor tools
+are disabled by default. Set `DOXA_VENDOR_TOOLS=workspace-read` when launching
+the session to allow the model to read UTF-8 files below the workspace. File
+contents are sent to the model provider after LORE scrubbing. This is a
+session-wide opt-in; there is no per-call approval in this preview.
 
 ## Native daemon
 
@@ -165,7 +168,14 @@ with `--lore-python /absolute/path/to/python`; the interpreter must have DOXA
 and LORE installed. Keys come only from `DEEPSEEK_API_KEY` or `ZAI_API_KEY` in
 the environment. `--model` and `--effort low|high|max` are optional; DeepSeek
 also accepts `--effort none`. Provider endpoints are fixed in production.
-The host advertises no tools and rejects any provider tool call. It persists
+By default the host advertises no tools and rejects provider tool calls. With
+`DOXA_VENDOR_TOOLS=workspace-read`, it advertises one read-only tool. It accepts
+relative paths only, rejects hidden path components and symlinks, and reads at
+most 64 KiB from a regular UTF-8 file. It cannot write files, run commands, or
+call LORE and peer operators. Tool exchanges are kept only in the active turn;
+saved history and transcripts contain the prompt and final response. The tool
+does not provide file access controls within the workspace, so enable it only
+when workspace files may be sent to the vendor. The host persists
 bounded plain-chat history beside the Python transcript as
 `<session-id>.messages.json`. Restart with the same `--session-id ID --resume
 true`; missing, corrupt, wrong-engine, or wrong-model state refuses resume.

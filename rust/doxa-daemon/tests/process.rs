@@ -1275,11 +1275,16 @@ mod vendor_process {
     use std::net::TcpListener;
 
     fn fake_vendor(count: usize, answer: &'static str) -> (String, thread::JoinHandle<Vec<Value>>) {
+        let body = format!("data: {{\"model\":\"resolved-model\",\"choices\":[{{\"finish_reason\":\"stop\",\"delta\":{{\"content\":\"{answer}\"}}}}],\"usage\":{{\"prompt_tokens\":3,\"completion_tokens\":4}}}}\n\ndata: [DONE]\n\n");
+        fake_vendor_frames(vec![body; count])
+    }
+
+    fn fake_vendor_frames(frames: Vec<String>) -> (String, thread::JoinHandle<Vec<Value>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}/chat/completions", listener.local_addr().unwrap());
         let task = thread::spawn(move || {
             let mut requests = Vec::new();
-            for _ in 0..count {
+            for body in frames {
                 let (mut socket, _) = listener.accept().unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(3)))
@@ -1315,7 +1320,6 @@ mod vendor_process {
                         }
                     }
                 }
-                let body = format!("data: {{\"model\":\"resolved-model\",\"choices\":[{{\"finish_reason\":\"stop\",\"delta\":{{\"content\":\"{answer}\"}}}}],\"usage\":{{\"prompt_tokens\":3,\"completion_tokens\":4}}}}\n\ndata: [DONE]\n\n");
                 write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             }
             requests
@@ -1333,6 +1337,17 @@ mod vendor_process {
         endpoint: &str,
         lore: &Path,
         resume: bool,
+    ) -> Process {
+        start_vendor_resume_tools(runtime, vendor, endpoint, lore, resume, false)
+    }
+
+    fn start_vendor_resume_tools(
+        runtime: &Path,
+        vendor: &str,
+        endpoint: &str,
+        lore: &Path,
+        resume: bool,
+        tools: bool,
     ) -> Process {
         let child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
             .args([
@@ -1355,6 +1370,7 @@ mod vendor_process {
             ])
             .env("DEEPSEEK_API_KEY", "test-key-1234")
             .env("ZAI_API_KEY", "test-key-1234")
+            .env("DOXA_VENDOR_TOOLS", if tools { "workspace-read" } else { "" })
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
@@ -1433,6 +1449,38 @@ mod vendor_process {
                 0
             );
         }
+    }
+
+    #[test]
+    fn vendor_workspace_read_is_opt_in_scrubbed_and_turn_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let lore = dir.path().join("lore-fixture");
+        fake_scrubber(&lore, false);
+        fs::write(dir.path().join("note.txt"), "fixture-secret workspace note").unwrap();
+        let tool = "data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"workspace_read\",\"arguments\":\"{\\\"path\\\":\\\"note.txt\\\"}\"}}]}}]}\n\ndata: [DONE]\n\n";
+        let answer = "data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"Final answer\"}}]}\n\ndata: [DONE]\n\n";
+        let (endpoint, server) = fake_vendor_frames(vec![tool.into(), answer.into()]);
+        let mut process = start_vendor_resume_tools(dir.path(), "deepseek", &endpoint, &lore, false, true);
+        let (mut reader, mut socket) = process.connect();
+        receive(&mut reader);
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        send(&mut socket, json!({"type":"prompt","id":1,"text":"read note"}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        let started = receive(&mut reader);
+        assert_eq!(started["event"]["data"]["vendor_tools"], "workspace-read");
+        assert_eq!(receive(&mut reader)["event"]["data"]["text"], "Final answer");
+        assert_eq!(receive(&mut reader)["event"]["data"]["is_error"], false);
+        send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        wait_until(|| process.exited());
+        let requests = server.join().unwrap();
+        assert_eq!(requests[0]["tools"][0]["function"]["name"], "workspace_read");
+        let result = requests[1]["messages"][2]["content"].as_str().unwrap();
+        assert!(result.contains("[redacted] workspace note"));
+        assert!(!requests[1].to_string().contains("fixture-secret"));
+        let saved: Value = serde_json::from_slice(&fs::read(dir.path().join("project/vendor-session.messages.json")).unwrap()).unwrap();
+        assert_eq!(saved["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(saved["messages"][1]["content"], "Final answer");
     }
 
     #[test]
