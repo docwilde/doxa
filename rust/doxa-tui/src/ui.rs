@@ -655,6 +655,7 @@ pub struct App {
     input_cursor: usize,
     input_drafts: HashMap<(usize, String), (String, usize)>,
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
+    pub(crate) custom_names: HashMap<String, String>,
     session_telemetry: HashMap<String, SessionTelemetry>,
     chip_offsets: [usize; 2],
     blink_on: bool,
@@ -674,6 +675,8 @@ pub struct App {
     engine_selected: usize,
     new_session: Option<NewSession>,
     pending_launches: Vec<(launch::LaunchOptions, Option<String>, usize)>,
+    pending_attaches: Vec<(String, usize)>,
+    attaching_ids: HashSet<String>,
     launching: bool,
     pending_model_queries: Vec<String>,
     pending_model_changes: Vec<(String, String)>,
@@ -745,6 +748,7 @@ impl Default for App {
             input_cursor: 0,
             input_drafts: HashMap::new(),
             session_identity: HashMap::new(),
+            custom_names: HashMap::new(),
             session_telemetry: HashMap::new(),
             chip_offsets: [0, 0],
             blink_on: true,
@@ -764,6 +768,8 @@ impl Default for App {
             engine_selected: 0,
             new_session: None,
             pending_launches: Vec::new(),
+            pending_attaches: Vec::new(),
+            attaching_ids: HashSet::new(),
             launching: false,
             pending_model_queries: Vec::new(),
             pending_model_changes: Vec::new(),
@@ -848,6 +854,30 @@ impl App {
             return false;
         };
         match kind {
+            "attach_reply" => {
+                let Some(reply_id) = frame["session_id"].as_str() else { return false; };
+                if !self.attaching_ids.remove(reply_id) { return false; }
+                if frame["ok"] == true {
+                    if let Some(id) = frame["session_id"].as_str().filter(|id| crate::discovery::valid_id(id)) {
+                        let target = frame["group"].as_u64().filter(|group| *group < 2)
+                            .map(|group| group as usize).unwrap_or(self.active_group);
+                        if target != 0 {
+                            if let Some(index) = self.groups[0].tabs.iter().position(|tab| tab == id) {
+                                self.groups[0].tabs.remove(index);
+                                self.groups[0].active = self.groups[0].active.min(self.groups[0].tabs.len().saturating_sub(1));
+                            }
+                        }
+                        let group = &mut self.groups[target];
+                        if !group.tabs.iter().any(|tab| tab == id) { group.tabs.push(id.to_owned()); }
+                        group.active = group.tabs.iter().position(|tab| tab == id).unwrap_or(group.active);
+                        self.active_group = target;
+                        self.notice = format!("Attached · {}", safe_label(id));
+                    }
+                } else {
+                    self.notice = format!("Attach failed · {}", safe_label(frame["message"].as_str().unwrap_or("unknown error")));
+                }
+                true
+            }
             "launch_reply" => {
                 if !self.launching { return false; }
                 self.launching = false;
@@ -911,7 +941,7 @@ impl App {
                     .unwrap_or_default();
                 self.apply_update(DaemonUpdate::Upsert(Session {
                     id: id.into(),
-                    title: model.clone().unwrap_or_else(|| safe_label(id)),
+                    title: self.custom_names.get(id).cloned().unwrap_or_else(|| model.clone().unwrap_or_else(|| safe_label(id))),
                     collection: cwd,
                     transcript,
                     status: "Connected".into(),
@@ -944,7 +974,8 @@ impl App {
                             identity.1 = new_model.clone();
                         }
                         if let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) {
-                            if old_model.as_deref() == Some(session.title.as_str()) {
+                            if !self.custom_names.contains_key(&id)
+                                && old_model.as_deref() == Some(session.title.as_str()) {
                                 if let Some(model) = new_model { session.title = model; }
                             }
                         }
@@ -1809,10 +1840,8 @@ impl App {
                 if unsafe_input_char(c) { false } else { self.insert_input(c) }
             }
             KeyCode::Enter if self.focus == Focus::Prompt => {
-                if self.input.trim() == "/pending" {
-                    self.input.clear();
-                    self.input_cursor = 0;
-                    self.open_pending_picker();
+                if self.input.trim_start().starts_with('/') {
+                    self.submit_local_command();
                     return true;
                 }
                 if !self.input.is_empty() {
@@ -1857,6 +1886,101 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    fn submit_local_command(&mut self) {
+        let line = self.input.trim().to_owned();
+        let (command, args) = line.split_once(char::is_whitespace).unwrap_or((line.as_str(), ""));
+        match command {
+            "/pending" if args.trim().is_empty() => {
+                self.input.clear();
+                self.input_cursor = 0;
+                self.open_pending_picker();
+            }
+            "/attach" => self.local_attach(args),
+            "/rename" => self.local_rename(args),
+            _ => self.notice = format!("Local command unavailable: {}", safe_label(command)),
+        }
+    }
+
+    fn local_attach(&mut self, args: &str) {
+        let prefix = args.trim();
+        if !prefix.is_empty() && !crate::discovery::valid_id(prefix) {
+            self.notice = "attach: use one session ID prefix".into();
+            return;
+        }
+        let live = match crate::discovery::sessions() {
+            Ok(rows) => rows,
+            Err(error) => { self.notice = format!("attach: discovery failed · {}", safe_label(&error.to_string())); return; }
+        };
+        let candidates: Vec<_> = live.iter().filter(|session| {
+            (prefix.is_empty() && !self.groups.iter().any(|group| group.tabs.contains(&session.id)))
+                || (!prefix.is_empty() && session.id.starts_with(prefix))
+        }).collect();
+        let session = match candidates.as_slice() {
+            [] => { self.notice = if prefix.is_empty() { "attach: no detached live sessions".into() }
+                else { format!("attach: no live session matches {}", safe_label(prefix)) }; return; }
+            [one] => *one,
+            many => {
+                let ids = many.iter().take(5).map(|s| s.id.chars().take(8).collect::<String>())
+                    .collect::<Vec<_>>().join(", ");
+                self.notice = format!("attach: {} sessions match · {} · enter a longer ID", many.len(), ids);
+                return;
+            }
+        };
+        self.attach_selected(&session.id);
+    }
+
+    fn attach_selected(&mut self, id: &str) {
+        for (group_index, group) in self.groups.iter_mut().enumerate() {
+            if let Some(index) = group.tabs.iter().position(|tab| tab == id) {
+                group.active = index;
+                self.active_group = group_index;
+                self.input.clear();
+                self.input_cursor = 0;
+                self.notice = format!("Already open · {}", safe_label(id));
+                return;
+            }
+        }
+        if self.attaching_ids.contains(id) {
+            self.notice = format!("Already attaching · {}", safe_label(id));
+            return;
+        }
+        self.attaching_ids.insert(id.to_owned());
+        self.pending_attaches.push((id.to_owned(), self.active_group));
+        self.input.clear();
+        self.input_cursor = 0;
+        self.notice = format!("Attaching · {}", safe_label(id));
+    }
+
+    fn local_rename(&mut self, args: &str) {
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.notice = "rename: select a tab".into();
+            return;
+        };
+        if args.len() > 200 || args.chars().any(unsafe_input_char) {
+            self.notice = "rename: name must be at most 200 bytes without control characters".into();
+            return;
+        }
+        let name = args.trim();
+        if name.is_empty() {
+            self.custom_names.remove(&id);
+            let automatic = self.session_identity.get(&id).and_then(|identity| identity.1.as_deref())
+                .map(safe_label).unwrap_or_else(|| safe_label(&id));
+            if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
+                session.title = automatic;
+            }
+            self.notice = "Tab name cleared".into();
+        } else {
+            let name = name.to_owned();
+            self.custom_names.insert(id.clone(), name.clone());
+            if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
+                session.title = name;
+            }
+            self.notice = "Tab renamed and pinned".into();
+        }
+        self.input.clear();
+        self.input_cursor = 0;
     }
 
     fn open_model_picker(&mut self) {
@@ -4282,6 +4406,12 @@ fn run_loop(
                 app.notice = "Session launch unavailable · daemon connection closed".into();
                 changed = true;
             }
+            if !app.pending_attaches.is_empty() {
+                app.pending_attaches.clear();
+                app.attaching_ids.clear();
+                app.notice = "Session attach unavailable · daemon connection closed".into();
+                changed = true;
+            }
             if !app.pending_stops.is_empty() {
                 app.pending_stops.clear();
                 app.notice = "Session stop unavailable · daemon connection closed".into();
@@ -4297,6 +4427,7 @@ fn run_loop(
         }
         if let Some(sender) = &prompt_sender {
             let disconnected = dispatch_launches(&mut app, sender);
+            let disconnected = dispatch_attaches(&mut app, sender) || disconnected;
             let disconnected = dispatch_prompts(&mut app, sender) || disconnected;
             let disconnected = dispatch_answers(&mut app, sender) || disconnected;
             let disconnected = dispatch_peer_refresh(&mut app, sender) || disconnected;
@@ -4334,8 +4465,28 @@ fn dispatch_launches(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCom
                 return false;
             }
             Err(TrySendError::Disconnected(_)) => {
+                app.attaching_ids.clear();
                 app.launching = false;
                 app.notice = "Session launch unavailable".into();
+                return true;
+            }
+            Err(_) => unreachable!(),
+        }
+    }
+    false
+}
+
+fn dispatch_attaches(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+    let mut attaches = std::mem::take(&mut app.pending_attaches).into_iter();
+    while let Some((id, group)) = attaches.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::Attach(id, group)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::Attach(id, group))) => {
+                app.pending_attaches.extend(std::iter::once((id, group)).chain(attaches));
+                return false;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                app.notice = "Session attach unavailable".into();
                 return true;
             }
             Err(_) => unreachable!(),
@@ -5961,6 +6112,49 @@ for line in sys.stdin:
         assert!(app.lore_picker.as_ref().unwrap().proposal_mode);
         assert!(app.input.is_empty());
         assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn attach_selection_queues_new_tab_and_focuses_existing_tab() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"current", "model":"model"}));
+        app.input = "/attach detached".into();
+        app.attach_selected("detached");
+        assert_eq!(app.pending_attaches, [("detached".into(), 0)]);
+        assert_eq!(app.groups[0].active_id(), Some("current"));
+        assert!(app.pending_prompts.is_empty());
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"detached", "model":"other"}));
+        app.apply_daemon_frame(&json!({"type":"attach_reply", "ok":true,
+            "session_id":"detached", "group":0}));
+        assert_eq!(app.groups[0].active_id(), Some("detached"));
+        assert_eq!(app.groups[0].tabs, ["current", "detached"]);
+        app.groups[0].active = 0;
+        app.attach_selected("detached");
+        assert_eq!(app.groups[0].active_id(), Some("detached"));
+        assert_eq!(app.groups[0].tabs.len(), 2);
+    }
+
+    #[test]
+    fn rename_pins_label_until_cleared_and_slash_commands_never_queue_prompts() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "model":"old"}));
+        app.input = "/rename A useful name".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.custom_names.get("s").map(String::as_str), Some("A useful name"));
+        assert_eq!(app.sessions[0].title, "A useful name");
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"s",
+            "event":{"type":"model_changed", "data":{"model":"new"}}}));
+        assert_eq!(app.sessions[0].title, "A useful name");
+        app.input = "/rename".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.custom_names.is_empty());
+        assert_eq!(app.sessions[0].title, "new");
+        for command in ["/attach bad/id", "/detach", "/pending unsupported"] {
+            app.input = command.into();
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+            assert!(app.notice.contains("attach:") || app.notice.contains("unavailable"));
+            assert!(app.pending_prompts.is_empty());
+        }
     }
 
     #[test]

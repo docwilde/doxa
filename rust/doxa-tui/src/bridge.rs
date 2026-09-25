@@ -20,6 +20,7 @@ use crate::launch::{self, LaunchOptions};
 
 pub enum WorkerCommand {
     Launch(LaunchOptions, Option<String>, usize),
+    Attach(String, usize),
     Prompt(String, String),
     Answer(String, String, Value),
     Peers(String),
@@ -174,6 +175,35 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
             let command = match command {
+                WorkerCommand::Attach(id, group) => {
+                    if routes.contains_key(&id) {
+                        let _ = router_frames.send(json!({"type":"attach_reply", "ok":true,
+                            "session_id":id, "group":group}));
+                        continue;
+                    }
+                    if routes.len() >= 64 {
+                        let _ = router_frames.send(json!({"type":"attach_reply", "ok":false,
+                            "message":"64 attached sessions is the limit"}));
+                        continue;
+                    }
+                    // Re-read the trusted registry at dispatch time. The UI's earlier
+                    // discovery result is only a selection hint, never a socket path.
+                    let live = crate::discovery::sessions();
+                    let session = live.as_ref().ok().and_then(|rows| rows.iter().find(|s| s.id == id));
+                    let result = session.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound,
+                        "session is no longer live")).and_then(|s| attach_worker(s, &router_frames, &router_guard));
+                    match result {
+                        Ok((tx, connected, worker)) => {
+                            routes.insert(id.clone(), (tx, connected));
+                            added_workers.push(worker);
+                            let _ = router_frames.send(json!({"type":"attach_reply", "ok":true,
+                                "session_id":id, "group":group}));
+                        }
+                        Err(error) => { let _ = router_frames.send(json!({"type":"attach_reply", "ok":false,
+                            "message":error.to_string()})); }
+                    }
+                    continue;
+                }
                 WorkerCommand::Launch(options, prompt, group) => {
                     if routes.len().saturating_add(launches_in_flight) >= 64 {
                         let _ = router_frames.send(json!({"type":"launch_reply", "ok":false,
@@ -192,7 +222,7 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
                 | WorkerCommand::Models(id) | WorkerCommand::SetModel(id, _)
                 | WorkerCommand::SetPermissionMode(id, _) => id,
                 WorkerCommand::Message(id, _, _) | WorkerCommand::Stop(id) => id,
-                WorkerCommand::Launch(_, _, _) => unreachable!(),
+                WorkerCommand::Launch(_, _, _) | WorkerCommand::Attach(_, _) => unreachable!(),
             };
             let Some((route, connected)) = routes.get(id) else {
                 let _ = router_frames.send(rejected(command, "Session is not attached"));
@@ -223,6 +253,8 @@ fn rejected(command: WorkerCommand, message: &str) -> Value {
     match command {
         WorkerCommand::Launch(_, _, group) => json!({"type":"launch_reply", "ok":false,
             "message":message, "group":group}),
+        WorkerCommand::Attach(id, group) => json!({"type":"attach_reply", "ok":false,
+            "session_id":id, "message":message, "group":group}),
         WorkerCommand::Prompt(id, text) => json!({"type":"prompt_rejected", "session_id":id,
             "text":text, "message":message}),
         WorkerCommand::Answer(session, request, _) => json!({"type":"answer_reply", "session_id":session,
@@ -352,6 +384,10 @@ fn worker_loop(
                 Ok(WorkerCommand::Launch(_, _, group)) => {
                     let _ = frames.send(json!({"type":"launch_reply", "ok":false,
                         "message":"Session launch is unavailable on this connection", "group":group}));
+                }
+                Ok(WorkerCommand::Attach(id, group)) => {
+                    let _ = frames.send(json!({"type":"attach_reply", "ok":false,
+                        "session_id":id, "message":"Session attach is unavailable on this connection", "group":group}));
                 }
                 Ok(WorkerCommand::Models(id)) => {
                     let result = if id == session_id { client.call("list_models", Map::new()) }

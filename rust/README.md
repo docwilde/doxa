@@ -205,6 +205,15 @@ retried automatically. The local `/pending` command opens the proposal picker
 without sending a prompt to the model. `Alt+X` asks for confirmation before
 stopping the active session; the session stays visible as read-only after a
 successful stop.
+The local `/attach ID-PREFIX` command selects an unambiguous live daemon from
+the trusted registry, rechecks it before connecting, and opens it in a new tab.
+If that session is already open, the command focuses its tab. Bare `/attach`
+attaches the sole detached session; when several are detached, it lists short
+IDs and asks for a longer prefix. It currently matches IDs, not titles, and
+does not offer Python's bare attach picker. `/rename NAME` pins the active
+tab's label in the shared tabset; bare `/rename` restores its automatic label.
+Unimplemented slash commands remain in the draft with a visible error and
+are never submitted as model prompts.
 The diff view supports file and hunk navigation with `N`/`P` and `J`/`K`
 in its modal, or `Alt+N`/`Alt+B` and `Alt+J`/`Alt+K` in the persistent pane.
 
