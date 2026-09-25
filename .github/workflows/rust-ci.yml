@@ -61,6 +61,8 @@ jobs:
             DOXA_RUST_BIN_DIR="$smoke_dir/bin" \
             sh scripts/install.sh HEAD
           (cd / && "$smoke_dir/bin/doxa" --version)
+          doctor_output=$(cd / && "$smoke_dir/bin/doxa" doctor --engine deepseek || true)
+          printf '%s\n' "$doctor_output" | grep -F "ok lore python: $smoke_dir/home/sidecars/$smoke_sha/bin/python"
           (cd / && "$smoke_dir/home/sidecars/$smoke_sha/bin/python" \
             -c 'import doxa.lore_bridge, doxa.engine, lore_core, claude_agent_sdk')
       - name: Test vendor chat adapter
