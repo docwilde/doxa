@@ -1,7 +1,7 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::cell::RefCell;
-use std::io::{self, IsTerminal, Stdout};
+use std::io::{self, IsTerminal, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -28,6 +28,7 @@ use crate::{diff_view, history, launch, lore_picker, markdown, peer_map::PeerMap
 use crate::theme;
 
 mod tool_cards;
+mod links;
 mod transcript_roles;
 pub(crate) mod transcript_tools;
 use tool_cards::ToolCards;
@@ -907,6 +908,9 @@ pub struct App {
     repo_epoch: HashMap<String, u64>,
     chip_offsets: [usize; 2],
     chip_hover: Option<ChipHit>,
+    link_hover: Option<String>,
+    visible_links: RefCell<Vec<(Rect, String)>>,
+    pending_open_urls: Vec<String>,
     chip_info: Option<ChipInfo>,
     // Mouse coordinates must come from the last painted frame, which may
     // differ from the terminal size reported by an earlier resize event.
@@ -1036,6 +1040,9 @@ impl Default for App {
             repo_epoch: HashMap::new(),
             chip_offsets: [0, 0],
             chip_hover: None,
+            link_hover: None,
+            visible_links: RefCell::new(Vec::new()),
+            pending_open_urls: Vec::new(),
             chip_info: None,
             rendered_chip_hits: RefCell::new(None),
             blink_on: true,
@@ -1841,6 +1848,8 @@ impl App {
                 self.size = Rect::new(0, 0, w, h);
                 self.drag = None;
                 self.chip_hover = None;
+                self.link_hover = None;
+                self.visible_links.borrow_mut().clear();
                 *self.rendered_chip_hits.borrow_mut() = None;
                 if self.chip_info.is_some() && self.active_chooser_rect().is_none() {
                     self.chip_info = None;
@@ -4841,6 +4850,22 @@ impl App {
         None
     }
 
+    fn link_at(&self, column: u16, row: u16) -> Option<String> {
+        self.visible_links.borrow().iter().find(|(rect, _)| rect.contains(
+            ratatui::layout::Position::new(column, row)))
+            .map(|(_, url)| url.clone())
+    }
+
+    fn link_interaction_blocked(&self) -> bool {
+        self.active_chooser_rect().is_some() || self.active_request_index().is_some()
+            || self.map_modal || self.diff_modal || self.tool_modal || self.action_menu
+            || self.history_modal || self.queue_picker.is_some() || self.attach_picker.is_some()
+            || self.lore_picker.is_some() || self.model_picker.is_some()
+            || self.effort_picker.is_some() || self.permission_picker.is_some()
+            || self.engine_picker || self.new_session.is_some()
+            || self.chip_info.is_some() || self.stop_confirmation.is_some()
+    }
+
     fn repo_detail(&self, group: usize) -> Option<String> {
         let id = self.groups[group].active_id()?;
         let (Some(doxa_worktrees::RepoStatus::Repository { base, checked_out, worktree, .. }), _) = self.repo_cache.get(id)? else {
@@ -4897,13 +4922,22 @@ impl App {
 
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
         if mouse.kind == MouseEventKind::Moved {
-            let next = if self.active_chooser_rect().is_some() || self.active_request_index().is_some()
-                || self.map_modal || self.diff_modal || self.tool_modal || self.stop_confirmation.is_some() {
-                None
-            } else { self.chip_hit_at(mouse.column, mouse.row) };
-            if self.chip_hover == next { return false; }
-            self.chip_hover = next;
-            return true;
+            let overlay = self.link_interaction_blocked();
+            let chip = (!overlay).then(|| self.chip_hit_at(mouse.column, mouse.row)).flatten();
+            let link = (!overlay).then(|| self.link_at(mouse.column, mouse.row)).flatten();
+            let changed = self.chip_hover != chip || self.link_hover != link;
+            self.chip_hover = chip;
+            self.link_hover = link;
+            return changed;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && mouse.modifiers.contains(KeyModifiers::CONTROL)
+            && !self.link_interaction_blocked()
+        {
+            if let Some(url) = self.link_at(mouse.column, mouse.row) {
+                self.pending_open_urls.push(url);
+                return true;
+            }
         }
         if self.chip_info.is_some() {
             let inside_menu = self.active_chooser_rect().is_some_and(|area| area.contains(
@@ -5390,6 +5424,7 @@ impl App {
     pub fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
         self.visible_tool_sections.borrow_mut().clear();
+        self.visible_links.borrow_mut().clear();
         *self.rendered_chip_hits.borrow_mut() = Some(Vec::new());
         frame.render_widget(Block::default().style(Style::default().bg(theme::BASE).fg(theme::TEXT)), area);
         if area.width < 20 || area.height < 5 {
@@ -6165,6 +6200,19 @@ impl App {
                 ));
             }
         }
+        let content_width = usize::from(inner[1].width.saturating_sub(2));
+        let visible_end = (top + usize::from(inner[1].height)).min(lines.len());
+        let mut visible_links = self.visible_links.borrow_mut();
+        for hit in links::hits(&lines[top..visible_end], content_width) {
+            if hit.end > hit.start {
+                visible_links.push((
+                    Rect::new(inner[1].x.saturating_add(1).saturating_add(hit.start as u16),
+                        inner[1].y.saturating_add(hit.row as u16),
+                        (hit.end - hit.start) as u16, 1),
+                    hit.url,
+                ));
+            }
+        }
         let (lines, scroll_from_top) =
             transcript_window(lines, inner[1].height, inner[1].y, group.scroll);
         frame.render_widget(
@@ -6304,6 +6352,8 @@ impl TerminalGuard {
 }
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        let _ = self.out.write_all(pointer_shape(false));
+        let _ = self.out.flush();
         if self.paste {
             let _ = execute!(self.out, DisableBracketedPaste);
         }
@@ -6317,6 +6367,26 @@ impl Drop for TerminalGuard {
             let _ = terminal::disable_raw_mode();
         }
     }
+}
+
+/// OSC 22 is a no-op in terminals without pointer-shape support.
+fn pointer_shape(link: bool) -> &'static [u8] {
+    if link { b"\x1b]22;pointer\x1b\\" } else { b"\x1b]22;\x1b\\" }
+}
+
+fn open_link(url: &str) -> io::Result<()> {
+    if !links::safe_url(url) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsupported link"));
+    }
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(not(target_os = "macos"))]
+    let opener = "xdg-open";
+    std::process::Command::new(opener).arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn().map(|_| ())
 }
 
 pub fn run() -> io::Result<()> {
@@ -6388,6 +6458,7 @@ fn run_loop(
     }
     let mut saved_layout = crate::ui_state::LayoutSignature::capture(&app);
     terminal.draw(|frame| app.draw(frame))?;
+    let mut pointer_on_link = false;
     while !app.should_quit {
         let mut changed = false;
         // Bound work per tick so a busy daemon cannot starve keyboard input.
@@ -6405,6 +6476,19 @@ fn run_loop(
         }
         if event::poll(Duration::from_millis(10))? {
             changed |= app.handle(event::read()?);
+        }
+        let next_pointer = app.link_hover.is_some() && !app.link_interaction_blocked();
+        if next_pointer != pointer_on_link {
+            let mut out = io::stdout();
+            out.write_all(pointer_shape(next_pointer))?;
+            out.flush()?;
+            pointer_on_link = next_pointer;
+        }
+        for url in std::mem::take(&mut app.pending_open_urls) {
+            if open_link(&url).is_err() {
+                app.notice = "Could not open link in browser".into();
+                changed = true;
+            }
         }
         changed |= app.poll_diff();
         changed |= app.poll_history();
@@ -7679,6 +7763,38 @@ for line in sys.stdin:
             column: permission.rect.x + 1, row: permission.rect.y,
             modifiers: KeyModifiers::NONE }));
         assert!(app.permission_picker.is_some());
+    }
+
+    #[test]
+    fn transcript_links_hover_and_open_only_on_ctrl_left_click() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 28));
+        app.apply_update(DaemonUpdate::Upsert(Session {
+            id: "links".into(), title: "links".into(), collection: "repo".into(),
+            transcript: "**Assistant:**\n\nRead [the guide](https://example.com/docs).".into(),
+            status: "Idle".into(),
+        }));
+        app.groups[0].tabs = vec!["links".into()];
+        let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let (rect, url) = app.visible_links.borrow().iter()
+            .find(|(_, url)| url == "https://example.com/docs").cloned().unwrap();
+        assert_eq!(url, "https://example.com/docs");
+        assert!(app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: rect.x, row: rect.y, modifiers: KeyModifiers::NONE })));
+        assert_eq!(app.link_hover.as_deref(), Some(url.as_str()));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x, row: rect.y, modifiers: KeyModifiers::NONE }));
+        assert!(app.pending_open_urls.is_empty());
+        assert!(app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x, row: rect.y, modifiers: KeyModifiers::CONTROL })));
+        assert_eq!(app.pending_open_urls, vec![url]);
+        assert!(app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: rect.x, row: rect.y + 1, modifiers: KeyModifiers::NONE })));
+        assert!(app.link_hover.is_none());
+        assert_eq!(pointer_shape(true), b"\x1b]22;pointer\x1b\\");
+        assert_eq!(pointer_shape(false), b"\x1b]22;\x1b\\");
     }
 
     #[test]

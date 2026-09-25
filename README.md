@@ -47,7 +47,9 @@ alpha. Native fleet supervision and remote control are still being ported.
 Processing appears inside each transcript; reasoning is folded behind a live
 token counter, and expanded tool activity shows scrubbed result detail.
 Restored Claude sessions keep expandable tool details in the bounded transcript
-view.
+view. User turns are highlighted without visible role headings. Transcript
+HTTP(S) links open in the browser with Ctrl+left click and show a pointer cursor
+in supporting terminals.
 
 ## Gallery
 

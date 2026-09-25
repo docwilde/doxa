@@ -109,9 +109,11 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
         match block {
             Block::Heading(paragraph) => {
                 flush_prose(&mut prose, lines, speaker);
-                let (next_speaker, heading) = transcript_roles::heading(paragraph)
+                if !lines.is_empty() && !lines.last().is_some_and(|line| line.spans.is_empty()) {
+                    lines.push(Line::default());
+                }
+                let next_speaker = transcript_roles::heading(paragraph)
                     .expect("heading blocks contain a recognized role");
-                lines.push(heading);
                 speaker = Some(next_speaker);
             }
             Block::Prose(paragraph) => {
@@ -335,10 +337,11 @@ mod tests {
         let source = "**You:**\n\nCheck **this**.\n\n**Assistant:**\n\nWorking.\n\nTool: Read started · hidden-path\n\nDone.";
         let (lines, sections) = render(source, 40, None, None);
         assert_eq!(sections.len(), 1);
-        assert_eq!(lines[0].to_string(), "❯ You");
+        assert!(lines[0].to_string().starts_with("│ Check this."));
         assert!(lines.iter().any(|line| line.to_string().starts_with("│ Check this.")
             && line.style.bg == Some(theme::HIGHLIGHT)));
-        assert!(lines.iter().any(|line| line.to_string() == "● Assistant"));
+        assert!(!shown(&lines).contains("● Assistant"));
+        assert!(!shown(&lines).contains("❯ You"));
         assert!(shown(&lines).contains("1 tool call"));
         assert!(!shown(&lines).contains("hidden-path"));
         assert!(shown(&lines).contains("Done."));
@@ -366,7 +369,7 @@ mod tests {
     fn code_fence_role_label_is_not_a_message_heading() {
         let (lines, sections) = render("**Assistant:**\n\n```text\n\n**You:**\n\n```\n\nDone.", 80, None, None);
         assert!(sections.is_empty());
-        assert_eq!(shown(&lines).matches("● Assistant").count(), 1);
+        assert!(!shown(&lines).contains("● Assistant"));
         assert!(!shown(&lines).contains("❯ You"));
         assert!(shown(&lines).contains("**You:**"));
         assert!(shown(&lines).contains("Done."));
