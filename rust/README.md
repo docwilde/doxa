@@ -205,7 +205,7 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards.
-The binary version is `2.0.0-alpha.24`;
+The binary version is `2.0.0-alpha.25`;
 this is an alpha release.
 
 In the transcript, user messages have a highlighted body and a left rule;
@@ -225,6 +225,9 @@ count. Its text becomes available only after the completed stream is scrubbed;
 Codex reasoning summaries fold into the same row. Select the row
 and press `Enter` or click to expand it. The processing spinner appears below
 the transcript while a turn is running.
+The Codex CLI JSON stream does not provide live reasoning deltas, so its
+reasoning count becomes available only when the provider reports completed
+turn usage.
 Typing `/` at the start of the prompt shows matching DOXA commands above the
 prompt. Use Up/Down or the mouse to choose one and Tab to complete it. The
 completed command runs only when you press Enter; unknown provider and plugin
@@ -270,6 +273,11 @@ Claude subscription shows its reported plan and cached quota when the local
 CLI cache belongs to the same account; `~` marks stale cached usage. Codex
 plan and quota remain unknown until its daemon has a verified provider source,
 so no subscription pill is shown for it yet.
+After a Codex turn, DOXA reads the latest token count and model window from
+that session's verified Codex rollout to show current context fill. The
+session's cumulative token totals stay in `/usage`. If the rollout is absent,
+changed before the turn boundary was recorded, or compacted without a newer
+count, the context chip shows `?`.
 The `p X%/u Y%` chip shows curated project and user memory fill
 against each scope's cap. A folder outside Git uses `f` in place of `p`.
 Both counts and caps come from LORE; `?` means LORE could not report usage.
@@ -279,7 +287,8 @@ global, while project memory follows the main repository when the session runs
 in a worktree. The separate beliefs picker can page beyond the first 20.
 The repository chip shows the base branch, checked-out worktree branch, and
 commit for the active session. A plain folder shows `dir NAME`. Hover over a
-chip for its meaning, or click a read-only chip to see details above the
+chip for its meaning, click the repo chip to browse directories for a new
+session tab, or click a read-only chip to see details above the
 prompt. Estimated cost is labeled. In a prompt, `Enter` submits, while
 `Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` also works when
 reported distinctly by the terminal). An ambiguous `Ctrl+Enter` report never
@@ -292,6 +301,8 @@ notice. Drafts and cursor positions stay with each session pane.
 Permission, engine, model, effort, repository, and LORE chips share one row directly above
 each pane's prompt. Their pickers, the action menu, and daemon question choices
 expand upward in the active pane, leaving its prompt and the other pane visible.
+Selectable rows highlight on hover. Drag an expanded picker's upper border
+to adjust how many rows it shows.
 `Alt+E` opens an engine picker,
 then a model, reasoning effort, and first-prompt form that starts a new session
 in the selected pane. DeepSeek and GLM model choices follow the selected

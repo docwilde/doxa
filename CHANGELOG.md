@@ -5,6 +5,21 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.25 — 2026-09-26
+
+- Report Codex context from the current owned rollout's last token count and
+  model window after a turn, keeping cumulative session usage separate. If
+  rollout ownership or the preturn boundary cannot be verified, show unknown.
+- Invalidate context after Codex compaction until a fresh token count arrives,
+  and open rollout files through pinned directory handles to reject symlink
+  redirects.
+- Open a directory picker from the repository chip, with keyboard and mouse
+  selection, hover highlighting, and a draggable upper border.
+- Highlight selectable rows under the pointer across the inline pickers.
+- Replace the installed sidecar pointer on upgrade even when the old pointer
+  is a symlink to a directory; verify it points to the new build before
+  completing installation.
+
 ## 2.0.0-alpha.24 — 2026-09-26
 
 - Debounce live session search, discard stale results, and show grouped,
