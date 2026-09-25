@@ -285,7 +285,7 @@ fn resume_plan_in(entry: &OfflineSession, python: &Path, expected_root: &Path, c
         let state: Value = serde_json::from_slice(&bytes).map_err(|_| "invalid Codex thread record")?;
         if state["session_id"].as_str() != Some(&entry.id)
             || state["cwd"].as_str() != cwd.to_str()
-            || state.get("turn_incomplete").is_some_and(|flag| flag != false)
+            || state.get("turn_incomplete") != Some(&Value::Bool(false))
             || !state["thread_id"].as_str().is_some_and(valid_codex_thread_id) {
             return Err("Codex thread record does not match this session");
         }
@@ -581,6 +581,7 @@ for line in sys.stdin:
         for bad in [
             serde_json::json!({"thread_id":"-unsafe", "session_id":"saved-1", "cwd":cwd}),
             serde_json::json!({"thread_id":"thread-123", "session_id":"other", "cwd":cwd}),
+            serde_json::json!({"thread_id":"thread-123", "session_id":"saved-1", "cwd":cwd}),
             serde_json::json!({"thread_id":"thread-123", "session_id":"saved-1", "cwd":cwd, "turn_incomplete":true}),
         ] {
             fs::write(&record, bad.to_string()).unwrap();

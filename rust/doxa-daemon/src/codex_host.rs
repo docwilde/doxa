@@ -66,7 +66,7 @@ impl CodexHost {
             .read_thread()
             .map_err(|_| "Codex thread record unreadable; session was not started".to_owned())?;
         let previous = if let Some(value) = thread_record {
-            if value.get("turn_incomplete").is_some_and(|flag| flag != false) {
+            if value.get("turn_incomplete") != Some(&Value::Bool(false)) {
                 return Err("Codex transcript is incomplete; refusing to resume the thread".to_owned());
             }
             if value["session_id"].as_str() != Some(session_id)
@@ -80,8 +80,11 @@ impl CodexHost {
                     && !model.chars().any(char::is_control) => Some(model.as_str()),
                 _ => return Err("Codex thread record has invalid model".to_owned()),
             };
-            if resume && options.model.as_deref().is_some_and(|model| Some(model) != recorded_model) {
+            if options.model.as_deref().is_some_and(|model| Some(model) != recorded_model) {
                 return Err("Codex resume model does not match the saved thread".to_owned());
+            }
+            if options.model.is_none() {
+                options.model = recorded_model.map(str::to_owned);
             }
             let thread = value["thread_id"].as_str()
                 .filter(|id| doxa_engines::codex_driver::valid_thread_id(id))

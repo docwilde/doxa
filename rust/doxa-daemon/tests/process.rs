@@ -1280,6 +1280,7 @@ fn explicit_codex_resume_requires_matching_thread_metadata() {
         json!({"thread_id":"thread_1","session_id":"other","cwd":dir.path()}),
         json!({"thread_id":"thread_1","session_id":"codex-session","cwd":"/wrong"}),
         json!({"thread_id":"-unsafe","session_id":"codex-session","cwd":dir.path()}),
+        json!({"thread_id":"thread_1","session_id":"codex-session","cwd":dir.path()}),
         json!({"thread_id":"thread_1","session_id":"codex-session","cwd":dir.path(),"turn_incomplete":true}),
     ] {
         fs::write(&thread, state.to_string()).unwrap();
