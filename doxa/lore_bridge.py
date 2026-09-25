@@ -163,20 +163,17 @@ def _session_search(cwd: str, query: str, ops: tuple[Any, Any],
                 rows = conn.execute(sql, params).fetchall()
                 if rows:
                     hits: list[dict[str, str]] = []
-                    seen: set[tuple[str, str]] = set()
                     for session_id, project, snippet in rows:
                         if (not isinstance(session_id, str) or _SESSION_ID.fullmatch(session_id) is None
                                 or not isinstance(project, str) or not project
                                 or len(project.encode("utf-8")) > 255 or "/" in project
-                                or "\\" in project or any(ord(ch) < 32 for ch in project)
-                                or (project, session_id) in seen):
+                                or "\\" in project or any(ord(ch) < 32 for ch in project)):
                             continue
                         safe = scrub(str(snippet or ""))
                         if not isinstance(safe, str):
                             raise TypeError("invalid scrub result")
                         hits.append({"session_id": session_id, "project": project,
                                      "snippet": " ".join(safe.split())[:280]})
-                        seen.add((project, session_id))
                     return hits
     finally:
         conn.close()

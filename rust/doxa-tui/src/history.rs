@@ -14,7 +14,6 @@ use std::time::SystemTime;
 use crate::launch::{Engine, LaunchOptions};
 use std::time::Duration;
 use doxa_lore::{LoreClient, SessionSearchHit};
-use std::collections::HashSet;
 
 const MAX_PROJECTS: usize = 128;
 const MAX_FILES: usize = 2048;
@@ -27,6 +26,8 @@ pub struct OfflineSession {
     pub id: String,
     pub project: String,
     pub markdown: String,
+    /// At most three scrubbed, bounded FTS excerpts from this search.
+    pub search_snippets: Vec<String>,
     /// Cwd from the first DOXA user record. It is a hint until resume preflight.
     pub cwd: Option<PathBuf>,
 }
@@ -185,13 +186,20 @@ fn indexed_hits_in(root: &Path, hits: Vec<SessionSearchHit>) -> Vec<OfflineSessi
         else { return Vec::new(); };
     if !owned_dir(&root, uid) { return Vec::new(); }
     let mut found = Vec::new();
-    let mut seen = HashSet::new();
+    let mut positions = std::collections::HashMap::new();
     for hit in hits {
         if !crate::discovery::valid_id(&hit.session_id)
             || hit.project.is_empty() || hit.project.len() > 255
             || hit.project.contains('/') || hit.project.contains('\\')
             || hit.project.chars().any(char::is_control) { continue; }
-        if !seen.insert((hit.project.clone(), hit.session_id.clone())) { continue; }
+        let key = (hit.project.clone(), hit.session_id.clone());
+        if let Some(&position) = positions.get(&key) {
+            let entry: &mut OfflineSession = &mut found[position];
+            if entry.search_snippets.len() < 3 && !entry.search_snippets.contains(&hit.snippet) {
+                entry.search_snippets.push(hit.snippet);
+            }
+            continue;
+        }
         let Some(dir) = open_at(&root, OsStr::new(&hit.project), libc::O_RDONLY | libc::O_DIRECTORY) else { continue; };
         if !owned_dir(&dir, uid) { continue; }
         let name = format!("{}.jsonl", hit.session_id);
@@ -199,7 +207,10 @@ fn indexed_hits_in(root: &Path, hits: Vec<SessionSearchHit>) -> Vec<OfflineSessi
         if !file.metadata().is_ok_and(|meta| meta.is_file() && meta.uid() == uid) { continue; }
         let cwd = recorded_cwd(&mut file);
         if let Some(markdown) = read_offline(file, uid) {
-            found.push(OfflineSession { id: hit.session_id, project: hit.project, markdown, cwd });
+            let snippet = if hit.snippet.is_empty() { Vec::new() } else { vec![hit.snippet] };
+            positions.insert(key, found.len());
+            found.push(OfflineSession { id: hit.session_id, project: hit.project, markdown,
+                search_snippets: snippet, cwd });
         }
     }
     found
@@ -248,7 +259,7 @@ fn discover_in(root: &Path, prefix: Option<&str>, query: Option<&str>) -> Vec<Of
     candidates.into_iter().filter_map(|(_, id, project, mut file)| {
         let cwd = recorded_cwd(&mut file);
         let markdown = read_offline(file, uid)?;
-        Some(OfflineSession { id, project, markdown, cwd })
+        Some(OfflineSession { id, project, markdown, search_snippets: Vec::new(), cwd })
     }).collect()
 }
 
@@ -766,7 +777,7 @@ for line in sys.stdin:
         fs::create_dir(&cwd).unwrap();
         let script = fake_lore(temp.path(), &root);
         let entry = OfflineSession { id: "saved-1".into(), project: "project".into(),
-            markdown: String::new(), cwd: Some(cwd.clone()) };
+            markdown: String::new(), search_snippets: Vec::new(), cwd: Some(cwd.clone()) };
         fs::write(root.join("project/saved-1.jsonl"), b"saved transcript\n").unwrap();
         let replay = root.join("project/saved-1.messages.json");
         fs::write(&replay, br#"{"engine":"deepseek","session_id":"saved-1","model":"deepseek-chat","messages":[]}"#).unwrap();
@@ -793,7 +804,7 @@ for line in sys.stdin:
         fs::create_dir_all(cli.join("encoded-cwd")).unwrap();
         let script = fake_lore(temp.path(), &root);
         let entry = OfflineSession { id: "saved-1".into(), project: "project".into(),
-            markdown: String::new(), cwd: Some(cwd) };
+            markdown: String::new(), search_snippets: Vec::new(), cwd: Some(cwd) };
         fs::write(root.join("project/saved-1.jsonl"), b"saved transcript\n").unwrap();
         assert!(resume_plan_in(&entry, &script, &root, &cli).is_err());
         fs::write(cli.join("encoded-cwd/saved-1.jsonl"), b"saved CLI history\n").unwrap();
@@ -812,7 +823,7 @@ for line in sys.stdin:
         fs::create_dir(&cwd).unwrap();
         let script = fake_lore(temp.path(), &root);
         let entry = OfflineSession { id: "saved-1".into(), project: "project".into(),
-            markdown: String::new(), cwd: Some(cwd.clone()) };
+            markdown: String::new(), search_snippets: Vec::new(), cwd: Some(cwd.clone()) };
         fs::write(root.join("project/saved-1.jsonl"), b"saved transcript\n").unwrap();
         let record = root.join("project/saved-1.codex.json");
         let state = serde_json::json!({"thread_id":"thread-123", "session_id":"saved-1",
@@ -844,7 +855,7 @@ for line in sys.stdin:
         let cwd = temp.path().join("missing-checkout");
         let script = fake_lore(temp.path(), &root);
         let entry = OfflineSession { id: "saved-1".into(), project: "project".into(),
-            markdown: String::new(), cwd: Some(cwd.clone()) };
+            markdown: String::new(), search_snippets: Vec::new(), cwd: Some(cwd.clone()) };
         fs::write(root.join("project/saved-1.jsonl"), b"saved transcript\n").unwrap();
         fs::write(root.join("project/saved-1.codex.json"),
             serde_json::json!({"thread_id":"thread-123", "session_id":"other",
@@ -908,7 +919,7 @@ for line in sys.stdin:
         let record = root.join("project/saved123-session.codex.json");
         fs::write(&transcript, b"saved transcript\n").unwrap();
         let entry = OfflineSession { id: "saved123-session".into(), project: "project".into(),
-            markdown: String::new(), cwd: Some(cwd.clone()) };
+            markdown: String::new(), search_snippets: Vec::new(), cwd: Some(cwd.clone()) };
         fs::write(&record, serde_json::json!({"thread_id":"thread-123",
             "session_id":"other", "cwd":cwd, "turn_incomplete":false}).to_string()).unwrap();
         assert!(resume_plan_in(&entry, &script, &root, &temp.path().join("claude"))
@@ -969,9 +980,12 @@ for line in sys.stdin:
         }
         let hit = SessionSearchHit { session_id: "old-archive".into(), project: "project".into(),
             snippet: "indexed history".into() };
-        let found = indexed_hits_in(&root, vec![hit.clone()]);
+        let mut second = hit.clone();
+        second.snippet = "another indexed excerpt".into();
+        let found = indexed_hits_in(&root, vec![hit.clone(), second]);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "old-archive");
+        assert_eq!(found[0].search_snippets, ["indexed history", "another indexed excerpt"]);
         assert!(found[0].markdown.contains("indexed history"));
         fs::remove_file(root.join("project/old-archive.jsonl")).unwrap();
         symlink(temp.path().join("outside.jsonl"), root.join("project/old-archive.jsonl")).unwrap();

@@ -5,6 +5,7 @@ use std::io::{self, IsTerminal, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -43,6 +44,8 @@ const MAX_INPUT_REQUESTS: usize = 32;
 const INPUT_BLINK_INTERVAL: Duration = Duration::from_millis(650);
 const SPINNER_INTERVAL: Duration = Duration::from_millis(120);
 const SPINNER_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(130);
+const MAX_SEARCH_WORKERS: usize = 2;
 // JSON may expand one input byte to a six-byte Unicode escape.
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
@@ -1162,6 +1165,8 @@ pub struct App {
     history_selected: usize,
     history_pending: Option<Receiver<Vec<history::OfflineSession>>>,
     history_scan_query: Option<String>,
+    history_query_due: Option<Instant>,
+    history_search_inflight: Arc<AtomicUsize>,
     history_scanned_matches: HashMap<String, String>,
     history_entries: HashMap<String, history::OfflineSession>,
     resume_pending: Option<Receiver<(String, Result<launch::LaunchOptions, &'static str>)>>,
@@ -1301,6 +1306,8 @@ impl Default for App {
             history_selected: 0,
             history_pending: None,
             history_scan_query: None,
+            history_query_due: None,
+            history_search_inflight: Arc::new(AtomicUsize::new(0)),
             history_scanned_matches: HashMap::new(),
             history_entries: HashMap::new(),
             resume_pending: None,
@@ -2132,6 +2139,7 @@ impl App {
                 }
                 if self.history_modal && self.active_chooser_rect().is_none() {
                     self.history_modal = false;
+                    self.cancel_history_query();
                     self.notice = "Enlarge active pane to search sessions".into();
                 }
                 if self.attach_picker.is_some() && self.active_chooser_rect().is_none() {
@@ -3613,6 +3621,32 @@ impl App {
         }).take(128).collect()
     }
 
+    fn history_snippets(&self, id: &str) -> &[String] {
+        if self.history_resume || self.history_scanned_matches.get(id)
+            != Some(&self.history_query.to_lowercase()) { return &[]; }
+        self.history_entries.get(id).map_or(&[], |entry| entry.search_snippets.as_slice())
+    }
+
+    /// One session header followed by at most two indexed excerpts. Row
+    /// positions are shared by paint and mouse hit testing.
+    fn history_rows(&self, visible: usize) -> Vec<(usize, bool, String)> {
+        let matches = self.history_matches();
+        let mut rows = Vec::new();
+        for (position, &index) in matches.iter().enumerate().skip(self.history_selected) {
+            if rows.len() >= visible { break; }
+            let session = &self.sessions[index];
+            let label = format!(" {} {} · {}{}", if position == self.history_selected { '›' } else { ' ' },
+                safe_label(&session.title), safe_label(&session.id),
+                if self.offline_ids.contains(&session.id) { " · archived" } else { "" });
+            rows.push((position, true, label));
+            for snippet in self.history_snippets(&session.id).iter().take(2) {
+                if rows.len() >= visible { break; }
+                rows.push((position, false, format!("    ↳ {}", safe_label(snippet))));
+            }
+        }
+        rows
+    }
+
     fn history_fits(&self) -> bool {
         let layout = self.layout(self.size);
         let pane = layout.panes.map_or(layout.body, |panes| panes[self.active_group]);
@@ -3628,6 +3662,7 @@ impl App {
         self.history_resume = false;
         self.history_explicit = false;
         self.history_scan_query = None;
+        self.history_query_due = None;
         self.history_query.clear();
         self.history_selected = 0;
         if self.active_chooser_rect().is_none() {
@@ -3653,17 +3688,47 @@ impl App {
         self.open_history();
         if self.history_modal {
             self.history_query = query.to_owned();
-            if !query.is_empty() {
-                let (tx, rx) = mpsc::sync_channel(1);
-                self.history_pending = Some(rx);
-                let query = query.to_owned();
-                let cwd = self.groups[self.active_group].active_id()
-                    .and_then(|id| self.session_cwds.get(id)).cloned()
-                    .or_else(|| std::env::current_dir().ok()).unwrap_or_default();
-                self.history_scan_query = Some(query.to_lowercase());
-                std::thread::spawn(move || { let _ = tx.send(history::discover_query(&query, &cwd)); });
-            }
+            self.schedule_history_query(Instant::now());
         }
+    }
+
+    fn schedule_history_query(&mut self, now: Instant) {
+        if self.history_resume { return; }
+        // Dropping the receiver cancels delivery from an older worker. Its
+        // bounded file/sidecar work may finish, but can no longer paint UI.
+        self.history_pending = None;
+        self.history_scan_query = None;
+        self.history_query_due = (!self.history_query.trim().is_empty()).then_some(now + SEARCH_DEBOUNCE);
+    }
+
+    fn cancel_history_query(&mut self) {
+        self.history_pending = None;
+        self.history_scan_query = None;
+        self.history_query_due = None;
+    }
+
+    fn start_due_history_query(&mut self, now: Instant) -> bool {
+        if !self.history_modal || self.history_resume || self.history_pending.is_some()
+            || !self.history_query_due.is_some_and(|due| now >= due)
+            || self.history_search_inflight.load(Ordering::Acquire) >= MAX_SEARCH_WORKERS {
+            return false;
+        }
+        self.history_query_due = None;
+        let query = self.history_query.clone();
+        let cwd = self.groups[self.active_group].active_id()
+            .and_then(|id| self.session_cwds.get(id)).cloned()
+            .or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.history_pending = Some(rx);
+        self.history_scan_query = Some(query.to_lowercase());
+        let in_flight = self.history_search_inflight.clone();
+        in_flight.fetch_add(1, Ordering::AcqRel);
+        std::thread::spawn(move || {
+            let found = history::discover_query(&query, &cwd);
+            in_flight.fetch_sub(1, Ordering::AcqRel);
+            let _ = tx.send(found);
+        });
+        true
     }
 
     fn local_resume(&mut self, args: &str) {
@@ -4323,14 +4388,18 @@ impl App {
     }
 
     fn poll_history(&mut self) -> bool {
+        let started = self.start_due_history_query(Instant::now());
         let Some(receiver) = &self.history_pending else { return false; };
         let found = match receiver.try_recv() {
             Ok(found) => found,
-            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Empty) => return started,
             Err(TryRecvError::Disconnected) => { self.history_pending = None; return false; }
         };
         self.history_pending = None;
         let scan_query = self.history_scan_query.take();
+        if scan_query.as_deref().is_some_and(|query| query != self.history_query.to_lowercase()) {
+            return true;
+        }
         let mut changed = false;
         for entry in found {
             if let Some(query) = &scan_query {
@@ -4362,12 +4431,15 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('r') if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.history_modal = false;
+                self.cancel_history_query();
             }
             KeyCode::Up => self.history_selected = self.history_selected.saturating_sub(1),
             KeyCode::Down => self.history_selected = (self.history_selected + 1).min(self.history_matches().len().saturating_sub(1)),
-            KeyCode::Backspace => { self.history_query.pop(); self.history_selected = 0; }
+            KeyCode::Backspace => { self.history_query.pop(); self.history_selected = 0;
+                self.schedule_history_query(Instant::now()); }
             KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
-                if self.history_query.len() + c.len_utf8() <= 200 { self.history_query.push(c); self.history_selected = 0; }
+                if self.history_query.len() + c.len_utf8() <= 200 { self.history_query.push(c); self.history_selected = 0;
+                    self.schedule_history_query(Instant::now()); }
             }
             KeyCode::Enter => {
                 self.open_selected_history();
@@ -4382,6 +4454,7 @@ impl App {
             let id = self.sessions[index].id.clone();
             if self.history_resume {
                 self.history_modal = false;
+                self.cancel_history_query();
                 self.history_resume = false;
                 if self.groups.iter().any(|group| group.tabs.iter().any(|tab| tab == &id)) {
                     for (group_index, group) in self.groups.iter_mut().enumerate() {
@@ -4415,6 +4488,7 @@ impl App {
             tabs.scroll = 0;
             self.focus = Focus::Transcript;
             self.history_modal = false;
+            self.cancel_history_query();
         }
     }
 
@@ -5264,7 +5338,9 @@ impl App {
                 (info.lines.len() + 2).clamp(7, 19) as u16
             } else { 5 })
         } else if self.history_modal {
-            (self.history_matches().len() + 3).clamp(5, 15) as u16
+            let rows: usize = self.history_matches().iter().map(|&index|
+                1 + self.history_snippets(&self.sessions[index].id).len().min(2)).sum();
+            (rows + 3).clamp(5, 15) as u16
         } else if let Some(picker) = &self.queue_picker {
             (picker.rows.len() + 3).clamp(5, 15) as u16
         } else if self.attach_picker.is_some() {
@@ -5731,16 +5807,16 @@ impl App {
                     if mouse.column < menu.x || mouse.column >= menu.right()
                         || mouse.row < menu.y || mouse.row >= menu.bottom() {
                         self.history_modal = false;
+                        self.cancel_history_query();
                         return true;
                     }
                     let first_row = menu.y.saturating_add(2);
                     if mouse.row >= first_row && mouse.row < menu.bottom().saturating_sub(1) {
                         let visible = usize::from(menu.height.saturating_sub(3)).max(1);
-                        let start = self.history_selected.saturating_sub(visible.saturating_sub(1));
-                        let position = start + usize::from(mouse.row - first_row);
-                        if position < self.history_matches().len() {
-                            self.history_selected = position;
-                            self.open_selected_history();
+                        if let Some((position, header, _)) = self.history_rows(visible)
+                            .get(usize::from(mouse.row - first_row)) {
+                            self.history_selected = *position;
+                            if *header { self.open_selected_history(); }
                         }
                     }
                     return true;
@@ -6387,16 +6463,12 @@ impl App {
         if !self.history_modal { return; }
         let matches = self.history_matches();
         let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&self.history_query)))];
-        if matches.is_empty() { lines.push(Line::from(if self.history_pending.is_some() { " Finding saved transcripts…" } else { " No matching sessions" })); }
+        if matches.is_empty() { lines.push(Line::from(if self.history_pending.is_some() || self.history_query_due.is_some() { " Finding saved transcripts…" } else { " No matching sessions" })); }
         let visible = usize::from(area.height.saturating_sub(3)).max(1);
-        let start = self.history_selected.saturating_sub(visible.saturating_sub(1));
-        for (position, &index) in matches.iter().enumerate().skip(start).take(visible) {
-            let session = &self.sessions[index];
-            let label = format!(" {} {} · {}{}", if position == self.history_selected { '›' } else { ' ' },
-                safe_label(&session.title), safe_label(&session.id),
-                if self.offline_ids.contains(&session.id) { " · archived" } else { "" });
-            let style = if position == self.history_selected { Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD) }
-                else { Style::default().fg(theme::SECONDARY) };
+        for (position, header, label) in self.history_rows(visible) {
+            let style = if header && position == self.history_selected { Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD) }
+                else if header { Style::default().fg(theme::SECONDARY) }
+                else { Style::default().fg(theme::MUTED) };
             let label = clipped_title(&label, usize::from(area.width.saturating_sub(2))).0;
             let padded = format!("{label}{}", " ".repeat(usize::from(area.width.saturating_sub(2)).saturating_sub(label.width())));
             lines.push(Line::styled(padded, style));
@@ -9483,7 +9555,7 @@ for line in sys.stdin:
         let (tx, rx) = mpsc::sync_channel(1);
         app.history_pending = Some(rx);
         tx.send(vec![history::OfflineSession { id: "saved-1".into(),
-            project: "project\u{1b}[31m".into(), markdown: "**You:** saved".into(), cwd: None }]).unwrap();
+            project: "project\u{1b}[31m".into(), markdown: "**You:** saved".into(), search_snippets: Vec::new(), cwd: None }]).unwrap();
         assert!(app.poll_history());
         assert!(app.offline_ids.contains("saved-1"));
         assert!(!app.sessions[0].collection.contains('\u{1b}'));
@@ -9509,7 +9581,7 @@ for line in sys.stdin:
         let (tx, rx) = mpsc::sync_channel(1);
         app.history_pending = Some(rx);
         tx.send(vec!["saved-1", "saved-2"].into_iter().map(|id| history::OfflineSession {
-            id: id.into(), project: "project".into(), markdown: "**You:** old turn".into(), cwd: None,
+            id: id.into(), project: "project".into(), markdown: "**You:** old turn".into(), search_snippets: Vec::new(), cwd: None,
         }).collect()).unwrap();
         assert!(app.poll_history());
         assert_eq!(app.history_matches().len(), 2);
@@ -9530,7 +9602,7 @@ for line in sys.stdin:
         let (tx, rx) = mpsc::sync_channel(1);
         app.history_pending = Some(rx);
         tx.send(vec![history::OfflineSession { id: "archive-1".into(), project: "project".into(),
-            markdown: "**You:** hidden needle".into(), cwd: None }]).unwrap();
+            markdown: "**You:** hidden needle".into(), search_snippets: Vec::new(), cwd: None }]).unwrap();
         app.poll_history();
         app.input = "/search needle".into();
         assert!(app.submit_local_command());
@@ -9546,12 +9618,53 @@ for line in sys.stdin:
         app.local_search("needle");
         let (tx, rx) = mpsc::sync_channel(1);
         app.history_pending = Some(rx);
+        app.history_scan_query = Some("needle".into());
         tx.send(vec![history::OfflineSession { id: "old-archive".into(), project: "project".into(),
-            markdown: "**You:** recent visible turn".into(), cwd: None }]).unwrap();
+            markdown: "**You:** recent visible turn".into(), search_snippets: Vec::new(), cwd: None }]).unwrap();
         assert!(app.poll_history());
         assert_eq!(app.history_matches().len(), 1, "raw JSONL scan found an older hidden turn");
         app.history_query = "different".into();
         assert!(app.history_matches().is_empty(), "scan hit must not satisfy a different query");
+    }
+
+    #[test]
+    fn live_search_debounces_and_discards_older_query_result() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.local_search("first");
+        let due = app.history_query_due.unwrap();
+        assert!(!app.start_due_history_query(due - Duration::from_millis(1)));
+        app.history_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(app.history_query, "firstx");
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.history_pending = Some(rx);
+        app.history_scan_query = Some("first".into());
+        tx.send(vec![history::OfflineSession { id: "stale-1".into(), project: "project".into(),
+            markdown: "old".into(), search_snippets: vec!["first".into()], cwd: None }]).unwrap();
+        assert!(app.poll_history());
+        assert!(!app.history_entries.contains_key("stale-1"));
+        assert!(app.history_query_due.is_some());
+    }
+
+    #[test]
+    fn indexed_excerpts_group_under_session_and_strip_terminal_controls() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.local_search("needle");
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.history_pending = Some(rx);
+        app.history_scan_query = Some("needle".into());
+        tx.send(vec![history::OfflineSession { id: "saved-1".into(), project: "project".into(),
+            markdown: "recent visible turn".into(),
+            search_snippets: vec!["first [needle] \u{1b}[31m".into(), "second [needle]".into()], cwd: None }]).unwrap();
+        assert!(app.poll_history());
+        let rows = app.history_rows(8);
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].1);
+        assert!(!rows[1].1 && !rows[2].1);
+        assert!(rows[1].2.contains("first [needle]"));
+        assert!(!rows[1].2.contains('\u{1b}'));
+        assert!(painted(&app).contains("second [needle]"));
     }
 
     #[test]
