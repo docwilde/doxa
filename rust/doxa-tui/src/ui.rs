@@ -156,6 +156,9 @@ struct LorePicker {
 struct NewSession {
     engine: launch::Engine,
     model: String,
+    models: Vec<String>,
+    catalog_note: String,
+    catalog_pending: bool,
     effort: Option<String>,
     prompt: String,
     field: usize,
@@ -844,6 +847,7 @@ pub struct App {
     engine_picker: bool,
     engine_selected: usize,
     new_session: Option<NewSession>,
+    vendor_catalog_pending: Option<(launch::Engine, Receiver<Option<Vec<String>>>)>,
     pending_launches: Vec<(launch::LaunchOptions, Option<String>, usize)>,
     pending_attaches: Vec<(String, usize)>,
     attaching_ids: HashSet<String>,
@@ -962,6 +966,7 @@ impl Default for App {
             engine_picker: false,
             engine_selected: 0,
             new_session: None,
+            vendor_catalog_pending: None,
             pending_launches: Vec::new(),
             pending_attaches: Vec::new(),
             attaching_ids: HashSet::new(),
@@ -2614,7 +2619,59 @@ impl App {
         let effort = self.next_efforts.get(engine_id)
             .filter(|level| effort_choices(engine_id, &model).contains(&level.as_str()))
             .cloned().or_else(|| (!models.is_empty()).then(|| "high".to_owned()));
-        self.new_session = Some(NewSession { engine, model, effort, prompt: String::new(), field: 0 });
+        self.vendor_catalog_pending = None;
+        let mut catalog_pending = false;
+        if let Some(vendor) = match engine {
+            launch::Engine::DeepSeek => Some(doxa_vendors::Vendor::DeepSeek),
+            launch::Engine::Glm => Some(doxa_vendors::Vendor::Glm),
+            _ => None,
+        } {
+            if !cfg!(test) && std::env::var(vendor.env_var()).is_ok_and(|key| !key.is_empty()) {
+                let (tx, rx) = mpsc::sync_channel(1);
+                std::thread::spawn(move || {
+                    let result = tokio::runtime::Builder::new_current_thread().enable_all().build()
+                        .ok().and_then(|runtime| runtime.block_on(doxa_vendors::catalog_models(vendor)));
+                    let _ = tx.send(result);
+                });
+                self.vendor_catalog_pending = Some((engine, rx));
+                catalog_pending = true;
+            }
+        }
+        self.new_session = Some(NewSession { engine, model,
+            models: models.iter().map(|name| (*name).to_owned()).collect(),
+            catalog_note: if catalog_pending { "Checking vendor model catalog…".into() }
+                else { "Static fallback; vendor catalog unavailable".into() },
+            catalog_pending, effort, prompt: String::new(), field: 0 });
+    }
+
+    fn poll_vendor_catalog(&mut self) -> bool {
+        let result = match self.vendor_catalog_pending.as_ref() {
+            Some((engine, rx)) => match rx.try_recv() {
+                Ok(result) => Some((*engine, result)),
+                Err(TryRecvError::Disconnected) => Some((*engine, None)),
+                Err(TryRecvError::Empty) => None,
+            },
+            None => None,
+        };
+        let Some((engine, result)) = result else { return false; };
+        self.vendor_catalog_pending = None;
+        let Some(form) = self.new_session.as_mut().filter(|form| form.engine == engine) else { return false; };
+        form.catalog_pending = false;
+        if let Some(live) = result {
+            let vetted = vendor_models(engine);
+            form.models = live.into_iter().filter(|id| vetted.contains(&id.as_str())).collect();
+            form.catalog_note = "Live vendor catalog · vetted effort-capable models".into();
+            if !form.models.contains(&form.model) {
+                form.model = form.models.first().cloned().unwrap_or_default();
+            }
+            if form.effort.as_deref().is_some_and(|level|
+                !effort_choices(engine_name(engine), &form.model).contains(&level)) {
+                form.effort = None;
+            }
+        } else {
+            form.catalog_note = "Static fallback; vendor catalog unavailable".into();
+        }
+        true
     }
 
     fn new_session_key(&mut self, key: KeyEvent) -> bool {
@@ -2628,11 +2685,12 @@ impl App {
             KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
             KeyCode::Left | KeyCode::Right if vendor && form.field <= 1 => {
                 if form.field == 0 {
-                    let choices = vendor_models(form.engine);
+                    let choices = &form.models;
+                    if choices.is_empty() { return true; }
                     let current = choices.iter().position(|model| *model == form.model).unwrap_or(0);
                     let next = if key.code == KeyCode::Right { (current + 1) % choices.len() }
                         else { (current + choices.len() - 1) % choices.len() };
-                    form.model = choices[next].into();
+                    form.model = choices[next].clone();
                     // Discard an effort no longer supported by the new model.
                     if form.effort.as_deref().is_some_and(|level| !effort_choices(engine_name(form.engine), &form.model).contains(&level)) {
                         form.effort = None;
@@ -2662,12 +2720,20 @@ impl App {
                     self.notice = "Session launch already in progress".into();
                     return true;
                 }
+                if vendor && form.catalog_pending {
+                    self.notice = "Waiting for vendor model catalog".into();
+                    return true;
+                }
+                if vendor && form.models.is_empty() {
+                    self.notice = "No verified models with effort capability are available".into();
+                    return true;
+                }
                 let form = self.new_session.take().unwrap();
                 let mut options = launch::LaunchOptions { engine: form.engine, ..Default::default() };
                 if !form.model.trim().is_empty() { options.model = Some(form.model.trim().to_owned()); }
                 if vendor {
                     let allowed = effort_choices(engine_name(form.engine), &form.model);
-                    if !vendor_models(form.engine).contains(&form.model.as_str()) ||
+                    if !form.models.contains(&form.model) ||
                         form.effort.as_deref().is_some_and(|level| !allowed.contains(&level)) {
                         self.notice = "Model or effort capability changed; session was not started".into();
                         return true;
@@ -4896,10 +4962,13 @@ impl App {
             if height >= 8 {
                 lines.push(Line::from(if vendor_models(form.engine).is_empty() {
                     " Blank model uses configured engine default."
-                } else { " Left/Right choose catalog fallback model and effort." }));
-                lines.push(Line::from(""));
+                } else { " Left/Right choose vendor model and effort." }));
+                lines.push(Line::from(if vendor_models(form.engine).is_empty() {
+                    "".to_owned()
+                } else { format!(" {}", safe_label(&form.catalog_note)) }));
             }
-            lines.push(Line::styled(format!(" {} Model: {}", if form.field == 0 { '›' } else { ' ' }, safe_label(&form.model)),
+            lines.push(Line::styled(format!(" {} Model: {}", if form.field == 0 { '›' } else { ' ' },
+                safe_label(&form.model)),
                 Style::default().fg(if form.field == 0 { theme::ACCENT } else { theme::SECONDARY })));
             let prompt_field = if vendor_models(form.engine).is_empty() { 1 } else { 2 };
             if prompt_field == 2 {
@@ -5733,6 +5802,7 @@ fn run_loop(
         changed |= app.poll_memory();
         changed |= app.poll_repo();
         changed |= app.poll_memory_menu();
+        changed |= app.poll_vendor_catalog();
         changed |= app.tick_blink(Instant::now());
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
@@ -6588,6 +6658,50 @@ mod tests {
         let form = app.new_session.as_ref().unwrap();
         assert!(!vendor_models(form.engine).contains(&"deepseek-v4-pro"));
         assert!(!effort_choices(engine_name(form.engine), &form.model).contains(&"none"));
+    }
+
+    #[test]
+    fn live_vendor_catalog_refresh_filters_models_and_switch_discards_stale_rows() {
+        let mut app = App::default();
+        app.engine_selected = 2;
+        app.select_new_engine();
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.vendor_catalog_pending = Some((launch::Engine::DeepSeek, rx));
+        app.new_session.as_mut().unwrap().catalog_pending = true;
+        tx.send(Some(vec!["glm-5.3-flash".into(), "deepseek-v4-pro".into()])).unwrap();
+        assert!(app.poll_vendor_catalog());
+        let form = app.new_session.as_ref().unwrap();
+        assert_eq!(form.models, ["deepseek-v4-pro"]);
+        assert_eq!(form.model, "deepseek-v4-pro");
+        assert!(form.catalog_note.contains("Live vendor"));
+
+        let (stale_tx, stale_rx) = mpsc::sync_channel(1);
+        app.vendor_catalog_pending = Some((launch::Engine::DeepSeek, stale_rx));
+        app.engine_selected = 3;
+        app.select_new_engine();
+        assert!(stale_tx.send(Some(vec!["deepseek-flash".into()])).is_err());
+        assert_eq!(app.new_session.as_ref().unwrap().model, "glm-5.3-flash");
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.vendor_catalog_pending = Some((launch::Engine::Glm, rx));
+        app.new_session.as_mut().unwrap().catalog_pending = true;
+        tx.send(Some(vec!["unknown-glm".into()])).unwrap();
+        assert!(app.poll_vendor_catalog());
+        assert!(app.new_session.as_ref().unwrap().models.is_empty());
+        assert!(app.new_session.as_ref().unwrap().model.is_empty());
+        app.new_session.as_mut().unwrap().field = 2;
+        app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.pending_launches.is_empty());
+        assert!(app.notice.contains("No verified models"));
+
+        app.engine_selected = 2;
+        app.select_new_engine();
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.vendor_catalog_pending = Some((launch::Engine::DeepSeek, rx));
+        app.new_session.as_mut().unwrap().catalog_pending = true;
+        tx.send(None).unwrap();
+        assert!(app.poll_vendor_catalog());
+        assert_eq!(app.new_session.as_ref().unwrap().models, ["deepseek-flash", "deepseek-v4-pro"]);
+        assert!(app.new_session.as_ref().unwrap().catalog_note.contains("Static fallback"));
     }
 
     #[test]

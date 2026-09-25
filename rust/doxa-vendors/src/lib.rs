@@ -81,7 +81,7 @@ mod balance_tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0u8; 2048];
             let count = stream.read(&mut request).await.unwrap();
-            stream.write_all(reply.as_bytes()).await.unwrap();
+            let _ = stream.write_all(reply.as_bytes()).await;
             String::from_utf8_lossy(&request[..count]).into_owned()
         });
         (url, worker)
@@ -134,6 +134,12 @@ impl Vendor {
             Self::Glm => "https://api.z.ai/api/paas/v4/chat/completions",
         }
     }
+    pub fn models_endpoint(self) -> &'static str {
+        match self {
+            Self::DeepSeek => "https://api.deepseek.com/models",
+            Self::Glm => "https://api.z.ai/api/paas/v4/models",
+        }
+    }
     pub fn default_model(self) -> &'static str {
         match self {
             Self::DeepSeek => "deepseek-flash",
@@ -142,6 +148,78 @@ impl Vendor {
     }
     fn valid_effort(self, effort: &str) -> bool {
         matches!(effort, "low" | "high" | "max") || self == Self::DeepSeek && effort == "none"
+    }
+}
+
+/// Bounded account-scoped model catalogue. A missing credential, network
+/// failure, or malformed body returns None so callers can label a fallback.
+pub async fn catalog_models(vendor: Vendor) -> Option<Vec<String>> {
+    let key = std::env::var(vendor.env_var()).ok().filter(|key| !key.is_empty())?;
+    catalog_models_at(vendor.models_endpoint(), &key).await
+}
+
+async fn catalog_models_at(endpoint: &str, key: &str) -> Option<Vec<String>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::none()).build().ok()?;
+    let response = client.get(endpoint).bearer_auth(key).send().await.ok()?;
+    if !response.status().is_success() { return None; }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+        if body.len().saturating_add(chunk.len()) > 4 * 1024 * 1024 { return None; }
+        body.extend_from_slice(&chunk);
+    }
+    let payload: Value = serde_json::from_slice(&body).ok()?;
+    let rows = payload.get("data").and_then(Value::as_array)?;
+    let mut models = Vec::new();
+    for row in rows.iter().take(1000) {
+        let Some(id) = row.get("id").and_then(Value::as_str) else { continue; };
+        if !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control)
+            && !models.iter().any(|existing| existing == id) {
+            models.push(id.to_owned());
+        }
+    }
+    (!models.is_empty()).then_some(models)
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn serve(status: &str, body: String, extra_headers: &str) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/models", listener.local_addr().unwrap());
+        let reply = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra_headers}Connection: close\r\n\r\n{body}", body.len());
+        let worker = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let count = stream.read(&mut request).await.unwrap();
+            let _ = stream.write_all(reply.as_bytes()).await;
+            String::from_utf8_lossy(&request[..count]).into_owned()
+        });
+        (url, worker)
+    }
+
+    #[tokio::test]
+    async fn model_catalog_is_bounded_and_does_not_follow_redirects() {
+        let (url, worker) = serve("200 OK", r#"{"data":[{"id":"deepseek-flash"},{"id":"deepseek-flash"},{"id":"glm-5.3-flash"}]}"#.into(), "").await;
+        assert_eq!(catalog_models_at(&url, "test-secret").await.unwrap(), ["deepseek-flash", "glm-5.3-flash"]);
+        let request = worker.await.unwrap();
+        assert!(request.contains("Authorization: Bearer test-secret") || request.contains("authorization: Bearer test-secret"));
+        let (url, worker) = serve("302 Found", String::new(), "Location: https://example.invalid/models\r\n").await;
+        assert!(catalog_models_at(&url, "test-secret").await.is_none());
+        worker.await.unwrap();
+        let rows = (0..1001).map(|i| format!("{{\"id\":\"model-{i}\"}}")).collect::<Vec<_>>().join(",");
+        let (url, worker) = serve("200 OK", format!("{{\"data\":[{rows}]}}"), "").await;
+        assert_eq!(catalog_models_at(&url, "test-secret").await.unwrap().len(), 1000);
+        worker.await.unwrap();
+        let (url, worker) = serve("200 OK", format!("{{\"data\":[{{\"id\":\"{}\"}}]}}", "a".repeat(4 * 1024 * 1024)), "").await;
+        assert!(catalog_models_at(&url, "test-secret").await.is_none());
+        worker.await.unwrap();
     }
 }
 
