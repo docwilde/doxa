@@ -99,14 +99,22 @@ this is an alpha release.
 
 `Ctrl+R` opens a searchable picker for attached and archived sessions with
 bounded transcript tails. Archived transcripts open read-only and never receive
-prompts. `F2` (or `Alt+G`) opens a read-only, 256 KiB worktree diff in an
+prompts. `F2` (or `Alt+G`) opens a 256 KiB worktree diff in an
 asynchronous modal. It compares tracked changes with the recorded worktree
 base when one exists, or with `HEAD`, and lists bounded untracked filenames
 without reading their contents. `F4` keeps that diff visible beside the active
 session while its prompt stays usable; `F5` refreshes it and `Alt+PageUp` /
 `Alt+PageDown` scroll it. The other session pane reappears when the diff pane
-closes. The diff pane is read-only and requires enough terminal space for two
-panes. Each split pane has its own prompt and keeps a draft for its active
+closes. In the modal, `X` selects a regular tracked text hunk at the scroll position for rejection;
+in the side pane use `Alt+R`. `Y` confirms and `N` cancels. Rejection is
+available only when the session is idle. The frontend checks that the same
+patch still exists, reverse-applies just that hunk, then sends feedback through
+the session's normal prompt path. Hunks with rename, copy, creation, deletion,
+or mode metadata are excluded because reversing them can change the whole file.
+If the hunk has changed, it leaves the file
+alone and asks for a refresh. Rejections during active turns and user-entered
+reasons still need porting from Python 1.19.0. The diff pane requires enough
+terminal space for two panes. Each split pane has its own prompt and keeps a draft for its active
 session. Its status rows show engine and model chips, plus context, token usage,
 cost, and LORE status when the daemon reports them. Unknown values display `?`;
 token scope and estimated cost are labeled. In a prompt, `Enter` submits, while

@@ -679,6 +679,9 @@ pub struct App {
     diff_files: Vec<usize>,
     diff_hunks: Vec<usize>,
     diff_pending: Option<Receiver<(String, diff_view::DiffSnapshot)>>,
+    diff_snapshot: Option<diff_view::DiffSnapshot>,
+    diff_reject_confirm: Option<usize>,
+    diff_reject_pending: Option<Receiver<(String, Result<String, String>, String)>>,
     session_cwds: HashMap<String, PathBuf>,
     pending_peer_refresh: Option<String>,
     pub notice: String,
@@ -766,6 +769,9 @@ impl Default for App {
             diff_files: Vec::new(),
             diff_hunks: Vec::new(),
             diff_pending: None,
+            diff_snapshot: None,
+            diff_reject_confirm: None,
+            diff_reject_pending: None,
             session_cwds: HashMap::new(),
             pending_peer_refresh: None,
             notice: "Disconnected · waiting for daemon".into(),
@@ -1494,6 +1500,9 @@ impl App {
         if self.diff_modal {
             return self.diff_key(key);
         }
+        if self.diff_pane && self.diff_reject_confirm.is_some() {
+            return self.diff_key(key);
+        }
         if self.map_modal {
             let owner = self.groups[self.active_group]
                 .active_id()
@@ -1575,6 +1584,7 @@ impl App {
         if self.diff_pane {
             match key.code {
                 KeyCode::F(5) => { self.load_diff(); return true; }
+                KeyCode::Char('r' | 'R') if alt => { self.begin_diff_reject(); return true; }
                 KeyCode::PageUp if alt => { self.diff_scroll = self.diff_scroll.saturating_sub(10); return true; }
                 KeyCode::PageDown if alt => { self.diff_scroll = self.diff_scroll.saturating_add(10); return true; }
                 KeyCode::Char('n' | 'N') if alt => { self.jump_diff(true, true); return true; }
@@ -2212,6 +2222,8 @@ impl App {
         self.diff_files.clear();
         self.diff_hunks.clear();
         self.diff_pending = None;
+        self.diff_snapshot = None;
+        self.diff_reject_confirm = None;
         let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
             self.diff_target = None;
             self.diff_text = "Select a session to inspect its worktree.".into();
@@ -2229,6 +2241,32 @@ impl App {
     }
 
     fn poll_diff(&mut self) -> bool {
+        if let Some(receiver) = &self.diff_reject_pending {
+            match receiver.try_recv() {
+                Ok((id, result, message)) => {
+                    self.diff_reject_pending = None;
+                    match result {
+                        Ok(note) => {
+                            if self.pending_prompts.len() < MAX_PENDING_PROMPTS {
+                                self.pending_prompts.push((id, message));
+                                self.notice = format!("{note} · notifying the session");
+                            } else {
+                                self.notice = format!("{note} · prompt queue full; tell the session manually");
+                            }
+                            self.load_diff();
+                        }
+                        Err(note) => self.notice = note,
+                    }
+                    return true;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.diff_reject_pending = None;
+                    self.notice = "Hunk rejection worker stopped unexpectedly; inspect the worktree.".into();
+                    return true;
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
         if self.diff_pane && self.diff_target.as_deref() != self.groups[self.active_group].active_id() {
             self.load_diff();
             return true;
@@ -2239,8 +2277,9 @@ impl App {
                 self.diff_pending = None;
                 if self.groups[self.active_group].active_id() == Some(id.as_str()) {
                     self.diff_text = markdown::sanitize(&snapshot.text);
-                    self.diff_files = snapshot.files;
-                    self.diff_hunks = snapshot.hunks;
+                    self.diff_files = snapshot.files.clone();
+                    self.diff_hunks = snapshot.hunks.clone();
+                    self.diff_snapshot = Some(snapshot);
                     self.diff_scroll = 0;
                     return true;
                 }
@@ -2254,6 +2293,17 @@ impl App {
     }
 
     fn diff_key(&mut self, key: KeyEvent) -> bool {
+        if self.diff_reject_confirm.is_some() {
+            match key.code {
+                KeyCode::Char('y' | 'Y') => self.confirm_diff_reject(),
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                    self.diff_reject_confirm = None;
+                    self.notice = "Hunk rejection cancelled".into();
+                }
+                _ => return true,
+            }
+            return true;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::F(2) => self.diff_modal = false,
             KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::ALT) => self.diff_modal = false,
@@ -2266,9 +2316,63 @@ impl App {
             KeyCode::Char('p' | 'P') => self.jump_diff(true, false),
             KeyCode::Char('j' | 'J') => self.jump_diff(false, true),
             KeyCode::Char('k' | 'K') => self.jump_diff(false, false),
+            KeyCode::Char('x' | 'X') => self.begin_diff_reject(),
             _ => return false,
         }
         true
+    }
+
+    fn begin_diff_reject(&mut self) {
+        if self.diff_reject_pending.is_some() {
+            self.notice = "A hunk rejection is already in progress".into();
+            return;
+        }
+        let Some(id) = self.diff_target.as_ref() else { self.notice = "Select a session first".into(); return; };
+        if self.groups[self.active_group].active_id() != Some(id.as_str()) {
+            self.notice = "Active session changed; refresh the diff before rejecting".into();
+            return;
+        }
+        if self.session_activity.get(id).copied() != Some((false, 0)) {
+            self.notice = "Wait for this session to finish before rejecting an edit".into();
+            return;
+        }
+        let Some(snapshot) = self.diff_snapshot.as_ref() else { self.notice = "Load the diff before rejecting an edit".into(); return; };
+        let Some(row) = snapshot.hunks.iter().copied().filter(|row| *row <= self.diff_scroll).next_back()
+            .or_else(|| snapshot.hunks.first().copied()) else {
+            self.notice = "No tracked hunk is visible in this diff".into();
+            return;
+        };
+        let Some(index) = snapshot.rejectable.iter().position(|hunk| hunk.row == row) else {
+            self.notice = "This hunk has file-level changes or a truncated patch; inspect it with git".into();
+            return;
+        };
+        self.diff_scroll = snapshot.rejectable[index].row;
+        self.diff_reject_confirm = Some(index);
+        self.notice = format!("Reject {} in {}? Y confirm · N cancel",
+            snapshot.rejectable[index].header, snapshot.rejectable[index].path);
+    }
+
+    fn confirm_diff_reject(&mut self) {
+        let Some(index) = self.diff_reject_confirm.take() else { return; };
+        let Some(id) = self.diff_target.clone() else { return; };
+        if self.groups[self.active_group].active_id() != Some(id.as_str()) {
+            self.notice = "Active session changed; rejection cancelled".into();
+            return;
+        }
+        if self.session_activity.get(&id).copied() != Some((false, 0)) {
+            self.notice = "Session resumed editing; rejection cancelled".into();
+            return;
+        }
+        let Some(snapshot) = self.diff_snapshot.clone() else { return; };
+        let Some(hunk) = snapshot.rejectable.get(index) else { return; };
+        let message = hunk.message();
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.diff_reject_pending = Some(rx);
+        self.notice = "Checking and reverting the selected hunk…".into();
+        std::thread::spawn(move || {
+            let outcome = diff_view::reject(&snapshot, index);
+            let _ = tx.send((id, outcome, message));
+        });
     }
 
     fn jump_diff(&mut self, file: bool, forward: bool) {
@@ -3434,7 +3538,7 @@ impl App {
             Line::styled(line.to_owned(), Style::default().fg(color))
         }).collect();
         frame.render_widget(Paragraph::new(rows)
-            .block(Block::default().title(" Worktree diff · N/P files · J/K hunks · R refresh · F2/Esc close ")
+            .block(Block::default().title(" Worktree diff · N/P files · J/K hunks · X reject · R refresh · F2/Esc close ")
                 .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), modal);
     }
@@ -3450,7 +3554,7 @@ impl App {
                 Line::styled(line.to_owned(), Style::default().fg(color))
             }).collect();
         frame.render_widget(Paragraph::new(rows)
-            .block(Block::default().title(" Worktree diff · Alt+N/B files · Alt+J/K hunks · F5 refresh · F4 close ")
+            .block(Block::default().title(" Worktree diff · Alt+N/B files · Alt+J/K hunks · Alt+R reject · F5 refresh · F4 close ")
                 .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER)))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), area);
     }
@@ -5187,7 +5291,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_view_is_read_only_modal_and_renders_patch_colors() {
+    fn diff_view_modal_renders_patch_colors() {
         let mut app = App::default();
         app.handle(Event::Resize(100, 28));
         app.diff_modal = true;
@@ -5197,6 +5301,41 @@ mod tests {
         assert!(view.contains("+new"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         assert!(!app.diff_modal);
+    }
+
+    #[test]
+    fn diff_reject_requires_idle_session_and_sends_feedback_after_reverting() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args)
+            .current_dir(dir.path()).status().unwrap().success());
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("tracked.txt"), "old\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: baseline"]);
+        std::fs::write(dir.path().join("tracked.txt"), "new\n").unwrap();
+        let snapshot = diff_view::read(dir.path());
+        let mut app = App::default();
+        app.groups[0].tabs.push("session".into());
+        app.diff_target = Some("session".into());
+        app.diff_scroll = snapshot.rejectable[0].row;
+        app.diff_snapshot = Some(snapshot);
+        app.session_activity.insert("session".into(), (true, 0));
+        app.begin_diff_reject();
+        assert!(app.diff_reject_confirm.is_none());
+        assert_eq!(std::fs::read_to_string(dir.path().join("tracked.txt")).unwrap(), "new\n");
+        app.session_activity.insert("session".into(), (false, 0));
+        app.begin_diff_reject();
+        assert_eq!(app.diff_reject_confirm, Some(0));
+        app.confirm_diff_reject();
+        for _ in 0..100 {
+            if app.poll_diff() && app.diff_reject_pending.is_none() { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(app.diff_reject_pending.is_none());
+        assert_eq!(std::fs::read_to_string(dir.path().join("tracked.txt")).unwrap(), "old\n");
+        assert_eq!(app.pending_prompts.len(), 1);
+        assert_eq!(app.pending_prompts[0].0, "session");
+        assert!(app.pending_prompts[0].1.contains("Do not re-apply"));
     }
 
     #[test]
@@ -5223,6 +5362,9 @@ mod tests {
         assert_eq!(app.diff_scroll, 3);
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
         assert_eq!(app.input, "x");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT)));
+        assert!(app.stop_confirmation.is_none());
+        assert!(app.notice.contains("Wait for this session") || app.notice.contains("Load the diff"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
         assert!(!app.diff_pane);
         assert!(painted(&app).contains("hidden transcript"));

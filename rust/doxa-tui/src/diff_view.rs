@@ -1,8 +1,8 @@
-//! Read-only, bounded worktree diff for the native TUI.
+//! Bounded worktree diff and guarded, exact one-hunk rejection for the native TUI.
 //! Git runs on a worker thread; painting never waits for a repository.
 
 use std::fs::OpenOptions;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -19,11 +19,44 @@ pub struct DiffSnapshot {
     /// Zero-based display rows from the same git output as `text`.
     pub files: Vec<usize>,
     pub hunks: Vec<usize>,
+    pub rejectable: Vec<RejectableHunk>,
+    cwd: Option<PathBuf>,
+    base: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct RejectableHunk {
+    pub row: usize,
+    pub header: String,
+    pub path: String,
+    patch: Vec<u8>,
+}
+
+impl RejectableHunk {
+    pub fn message(&self) -> String {
+        let mut quoted = Vec::new();
+        let mut in_hunk = false;
+        for line in self.patch.split(|byte| *byte == b'\n') {
+            if line.starts_with(b"@@ ") { in_hunk = true; continue; }
+            if in_hunk && (line.starts_with(b"+") || line.starts_with(b"-")) {
+                let text = String::from_utf8_lossy(line);
+                let short = text.chars().take(240).collect::<String>();
+                quoted.push(if text.chars().count() > 240 { format!("{short}…") } else { short });
+            }
+        }
+        let more = quoted.len().saturating_sub(12);
+        quoted.truncate(12);
+        let path = self.path.chars().take(300).collect::<String>();
+        let header = self.header.chars().take(300).collect::<String>();
+        format!("I rejected one of your edits to `{}` and reverted it on disk. Do not re-apply it.\n\nThe hunk was {}:\n\n```diff\n{}\n```{}\n\nI did not give a reason. Ask me before redoing that part. Re-read the file before your next edit.",
+            path, header, quoted.join("\n"),
+            if more == 0 { String::new() } else { format!("\n… and {more} more changed lines") })
+    }
 }
 
 impl DiffSnapshot {
     fn message(text: String) -> Self {
-        Self { text, files: Vec::new(), hunks: Vec::new() }
+        Self { text, files: Vec::new(), hunks: Vec::new(), rejectable: Vec::new(), cwd: None, base: String::new() }
     }
 }
 
@@ -47,6 +80,99 @@ fn landmarks(patch: &str, truncated: bool) -> (Vec<usize>, Vec<usize>) {
         }
     }
     (files, hunks)
+}
+
+fn rejectable_hunks(bytes: &[u8]) -> Vec<RejectableHunk> {
+    let lines: Vec<&[u8]> = bytes.split_inclusive(|byte| *byte == b'\n').collect();
+    let mut result = Vec::new();
+    let mut file_header = Vec::new();
+    let mut hunk = Vec::new();
+    let mut row = 0;
+    let mut header = String::new();
+    let mut path = String::new();
+    let mut in_hunk = false;
+    let flush = |result: &mut Vec<RejectableHunk>, hunk: &mut Vec<u8>, row: usize, header: &str, path: &str, file_header: &[u8]| {
+        // File-level metadata can rename, delete or change mode when applied in
+        // reverse. A hunk action must never carry those side effects.
+        let regular_file = file_header.split(|byte| *byte == b'\n').any(|line| line.starts_with(b"--- a/"))
+            && file_header.split(|byte| *byte == b'\n').any(|line| line.starts_with(b"+++ b/"))
+            && !file_header.split(|byte| *byte == b'\n').any(|line| {
+                [b"rename ".as_slice(), b"copy ", b"new file mode ", b"deleted file mode ",
+                    b"old mode ", b"new mode "].iter().any(|prefix| line.starts_with(prefix))
+            });
+        if !hunk.is_empty() && regular_file {
+            let mut patch = file_header.to_vec();
+            patch.extend_from_slice(hunk);
+            result.push(RejectableHunk { row: row + 1, header: header.to_owned(), path: path.to_owned(), patch });
+            hunk.clear();
+        }
+    };
+    for (index, line) in lines.iter().enumerate() {
+        if line.starts_with(b"diff --git ") {
+            flush(&mut result, &mut hunk, row, &header, &path, &file_header);
+            file_header.clear();
+            file_header.extend_from_slice(line);
+            in_hunk = false;
+            path.clear();
+        } else if line.starts_with(b"@@ ") && line[3..].windows(3).any(|part| part == b" @@") && !file_header.is_empty() {
+            flush(&mut result, &mut hunk, row, &header, &path, &file_header);
+            row = index;
+            header = String::from_utf8_lossy(line).trim_end().to_owned();
+            hunk.extend_from_slice(line);
+            in_hunk = true;
+        } else if in_hunk {
+            hunk.extend_from_slice(line);
+        } else if !file_header.is_empty() {
+            if line.starts_with(b"+++ ") {
+                path = String::from_utf8_lossy(&line[4..]).trim_end().trim_start_matches("b/").to_owned();
+            }
+            file_header.extend_from_slice(line);
+        }
+    }
+    flush(&mut result, &mut hunk, row, &header, &path, &file_header);
+    result
+}
+
+fn apply_patch(cwd: &Path, patch: &[u8], check: bool) -> Result<(), String> {
+    let mut command = Command::new("git");
+    command.args(["--no-pager", "apply", "--reverse", "--recount"]);
+    if check { command.arg("--check"); }
+    let mut child = command.arg("-").current_dir(cwd).env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+        .map_err(|_| "Could not start git apply.".to_owned())?;
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let input = patch.to_vec();
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let deadline = Instant::now() + GIT_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => { let _ = child.kill(); let _ = child.wait(); break None; }
+        }
+    };
+    let written = writer.join().map_err(|_| "Git apply input writer stopped unexpectedly.".to_owned())?;
+    if status.is_none() { return Err("Git apply timed out; inspect the worktree before retrying.".into()); }
+    written.map_err(|_| "Git apply could not receive the patch.".to_owned())?;
+    if status.is_some_and(|status| status.success()) { Ok(()) }
+    else { Err("This hunk no longer applies; nothing was changed by this attempt.".into()) }
+}
+
+/// Reject a hunk only when the current worktree still contains that exact patch.
+/// Call off the UI thread and only after the session has finished editing.
+pub fn reject(snapshot: &DiffSnapshot, index: usize) -> Result<String, String> {
+    let hunk = snapshot.rejectable.get(index).ok_or("Choose a complete tracked hunk to reject.")?;
+    let cwd = snapshot.cwd.as_ref().ok_or("This diff has no verified worktree.")?;
+    if cwd.canonicalize().ok().as_ref() != Some(cwd) { return Err("Worktree location changed; refresh the diff.".into()); }
+    let (base, _) = base_for(cwd)?;
+    if base != snapshot.base { return Err("Worktree base changed; refresh the diff.".into()); }
+    let (current, truncated) = git_output(cwd, &["--no-pager", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--find-renames", "--unified=3", &base, "--"], MAX_DIFF_BYTES)?;
+    if truncated || !rejectable_hunks(&current).iter().any(|candidate| candidate.patch == hunk.patch) {
+        return Err("This hunk changed; refresh the diff before rejecting it.".into());
+    }
+    apply_patch(cwd, &hunk.patch, true)?;
+    apply_patch(cwd, &hunk.patch, false)?;
+    Ok(format!("Reverted {}", hunk.header))
 }
 
 fn git_output(cwd: &Path, args: &[&str], limit: usize) -> Result<(Vec<u8>, bool), String> {
@@ -183,6 +309,7 @@ pub fn read(cwd: &Path) -> DiffSnapshot {
     };
     let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_DIFF_BYTES)]);
     let (files, hunks) = landmarks(&text, truncated);
+    let rejectable = if truncated { Vec::new() } else { rejectable_hunks(&bytes) };
     let mut out = format!("Base: {base} ({source})\n");
     if text.is_empty() { out.push_str("No tracked changes in this comparison.\n"); }
     else { out.push_str(&text); }
@@ -191,7 +318,7 @@ pub fn read(cwd: &Path) -> DiffSnapshot {
         Ok((names, truncated)) => out.push_str(&untracked_names(&names, truncated)),
         Err(_) => out.push_str("\n[Untracked names unavailable.]\n"),
     }
-    DiffSnapshot { text: out, files, hunks }
+    DiffSnapshot { text: out, files, hunks, rejectable, cwd: Some(cwd), base }
 }
 
 #[cfg(test)]
@@ -255,6 +382,14 @@ mod tests {
     }
 
     #[test]
+    fn rejection_excludes_file_level_metadata_changes() {
+        let renamed = b"diff --git a/old b/new\nsimilarity index 90%\nrename from old\nrename to new\n--- a/old\n+++ b/new\n@@ -1 +1 @@\n-old\n+new\n";
+        let mode = b"diff --git a/file b/file\nold mode 100644\nnew mode 100755\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n";
+        assert!(rejectable_hunks(renamed).is_empty());
+        assert!(rejectable_hunks(mode).is_empty());
+    }
+
+    #[test]
     fn untracked_names_escape_control_characters_and_drop_partial_tail() {
         let names = untracked_names(b"normal.txt\0line\nbreak\0partial", true);
         assert!(names.contains("normal.txt"));
@@ -285,5 +420,49 @@ mod tests {
         let (bytes, truncated) = git_output(dir.path(), &["ls-files", "--others", "--exclude-standard", "-z", "--"], 128).unwrap();
         assert!(truncated);
         assert_eq!(bytes.len(), 129);
+    }
+
+    #[test]
+    fn rejects_exactly_one_hunk_and_refuses_a_stale_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        let worktree = dir.path().join("session");
+        std::fs::create_dir(&main).unwrap();
+        let git = |cwd: &Path, args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(cwd).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&main, &["init", "-q", "-b", "main"]);
+        let original = (1..=30).map(|n| format!("line{n}\n")).collect::<String>();
+        std::fs::write(main.join("tracked.txt"), &original).unwrap();
+        git(&main, &["add", "tracked.txt"]);
+        git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: baseline"]);
+        git(&main, &["worktree", "add", "-q", "-b", "doxa/session", worktree.to_str().unwrap()]);
+        let edited = original.replace("line3\n", "changed top\n").replace("line25\n", "changed bottom\n");
+        std::fs::write(worktree.join("tracked.txt"), &edited).unwrap();
+        let snapshot = read(&worktree);
+        assert_eq!(snapshot.rejectable.len(), 2);
+        assert!(snapshot.rejectable[0].header.starts_with("@@ "));
+        reject(&snapshot, 0).unwrap();
+        let after = std::fs::read_to_string(worktree.join("tracked.txt")).unwrap();
+        assert!(after.contains("line3\n"));
+        assert!(after.contains("changed bottom\n"));
+        assert!(reject(&snapshot, 0).is_err());
+        assert_eq!(std::fs::read_to_string(worktree.join("tracked.txt")).unwrap(), after);
+    }
+
+    #[test]
+    fn refuses_rejection_if_the_recorded_hunk_has_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| assert!(Command::new("git").args(args).current_dir(dir.path()).status().unwrap().success());
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("tracked.txt"), "old\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: baseline"]);
+        std::fs::write(dir.path().join("tracked.txt"), "new\n").unwrap();
+        let snapshot = read(dir.path());
+        std::fs::write(dir.path().join("tracked.txt"), "agent changed again\n").unwrap();
+        assert!(reject(&snapshot, 0).unwrap_err().contains("changed"));
+        assert_eq!(std::fs::read_to_string(dir.path().join("tracked.txt")).unwrap(), "agent changed again\n");
     }
 }
