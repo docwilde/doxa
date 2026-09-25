@@ -351,7 +351,8 @@ def test_memory_usage_sidecar_counts_only_curated_entries_for_each_scope(tmp_pat
         {"id": 2, "op": "memory_usage_v1", "cwd": str(second)},
         {"id": 3, "op": "memory_usage_v1", "cwd": ""},
     ]
-    env = dict(os.environ, LORE_ROOT=str(root), DOXA_LORE_SOURCE="package")
+    env = dict(os.environ, LORE_ROOT=str(root), DOXA_LORE_SOURCE="package",
+               LORE_MEMORY_CAP="5000", LORE_USER_CAP="7000")
     result = subprocess.run([sys.executable, "-m", "doxa.lore_bridge"],
                             input=b"".join(map(lore_bridge._frame, requests)),
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -360,9 +361,11 @@ def test_memory_usage_sidecar_counts_only_curated_entries_for_each_scope(tmp_pat
     frames = [json.loads(line) for line in result.stdout.splitlines()]
     assert "memory_usage_v1" in frames[0]["capabilities"]
     assert frames[1]["value"] == {"project_chars": len("- café 😊\n- second\n"),
-                                  "user_chars": len("- user 🌍\n")}
+                                  "user_chars": len("- user 🌍\n"),
+                                  "project_cap_chars": 5000, "user_cap_chars": 7000}
     assert frames[2]["value"] == {"project_chars": len("- βeta\n"),
-                                  "user_chars": len("- user 🌍\n")}
+                                  "user_chars": len("- user 🌍\n"),
+                                  "project_cap_chars": 5000, "user_cap_chars": 7000}
     assert frames[3] == {"type": "reply", "id": 3, "ok": False, "error": "operation_failed"}
     assert "café".encode() not in result.stdout and "🌍".encode() not in result.stdout
 

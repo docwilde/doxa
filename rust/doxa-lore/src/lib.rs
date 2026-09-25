@@ -28,6 +28,8 @@ const MAX_MEMORY_CHARS: u64 = 1024 * 1024;
 pub struct MemoryUsage {
     pub project_chars: u64,
     pub user_chars: u64,
+    pub project_cap_chars: u64,
+    pub user_cap_chars: u64,
 }
 
 /// A complete, immutable pending-file snapshot for a human review screen.
@@ -262,10 +264,14 @@ impl LoreClient {
         let value = self.request_value("memory_usage_v1", json!({"cwd":cwd}))?;
         let project_chars = value["project_chars"].as_u64().ok_or(LoreError::InvalidFrame)?;
         let user_chars = value["user_chars"].as_u64().ok_or(LoreError::InvalidFrame)?;
-        if project_chars > MAX_MEMORY_CHARS || user_chars > MAX_MEMORY_CHARS {
+        let project_cap_chars = value["project_cap_chars"].as_u64().ok_or(LoreError::InvalidFrame)?;
+        let user_cap_chars = value["user_cap_chars"].as_u64().ok_or(LoreError::InvalidFrame)?;
+        if project_chars > MAX_MEMORY_CHARS || user_chars > MAX_MEMORY_CHARS
+            || !(1..=MAX_MEMORY_CHARS).contains(&project_cap_chars)
+            || !(1..=MAX_MEMORY_CHARS).contains(&user_cap_chars) {
             return Err(LoreError::InvalidFrame);
         }
-        Ok(MemoryUsage { project_chars, user_chars })
+        Ok(MemoryUsage { project_chars, user_chars, project_cap_chars, user_cap_chars })
     }
 
     /// Ask LORE for its actual Python 1.x transcript location. Reimplementing

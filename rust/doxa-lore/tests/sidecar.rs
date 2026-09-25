@@ -74,17 +74,22 @@ print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','m
 for line in sys.stdin:
     req = json.loads(line)
     values = {
-        '/repo': {'project_chars': 7, 'user_chars': 12},
+        '/repo': {'project_chars': 7, 'user_chars': 12, 'project_cap_chars': 8800, 'user_cap_chars': 9000},
         '/missing': {'project_chars': 1},
-        '/negative': {'project_chars': -1, 'user_chars': 12},
-        '/boolean': {'project_chars': True, 'user_chars': 12},
-        '/large': {'project_chars': 1048577, 'user_chars': 12},
+        '/negative': {'project_chars': -1, 'user_chars': 12, 'project_cap_chars': 8800, 'user_cap_chars': 9000},
+        '/boolean': {'project_chars': True, 'user_chars': 12, 'project_cap_chars': 8800, 'user_cap_chars': 9000},
+        '/large': {'project_chars': 1048577, 'user_chars': 12, 'project_cap_chars': 8800, 'user_cap_chars': 9000},
+        '/zero-cap': {'project_chars': 7, 'user_chars': 12, 'project_cap_chars': 0, 'user_cap_chars': 9000},
+        '/bad-cap': {'project_chars': 7, 'user_chars': 12, 'project_cap_chars': True, 'user_cap_chars': 9000},
+        '/large-cap': {'project_chars': 7, 'user_chars': 12, 'project_cap_chars': 8800, 'user_cap_chars': 1048577},
     }
     print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':values[req['cwd']]}), flush=True)
 "#);
     let mut client = LoreClient::spawn(&path, Duration::from_secs(2)).unwrap();
-    assert_eq!(client.memory_usage("/repo").unwrap(), MemoryUsage { project_chars: 7, user_chars: 12 });
-    for cwd in ["/missing", "/negative", "/boolean", "/large", ""] {
+    assert_eq!(client.memory_usage("/repo").unwrap(), MemoryUsage {
+        project_chars: 7, user_chars: 12, project_cap_chars: 8800, user_cap_chars: 9000,
+    });
+    for cwd in ["/missing", "/negative", "/boolean", "/large", "/zero-cap", "/bad-cap", "/large-cap", ""] {
         assert!(matches!(client.memory_usage(cwd), Err(LoreError::InvalidFrame)), "{cwd}");
     }
     let old = fake(dir.path(), "print('{\"type\":\"hello\",\"proto\":1,\"capabilities\":[\"scrub\",\"snapshot\"]}', flush=True)");

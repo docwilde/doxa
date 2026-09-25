@@ -84,24 +84,27 @@ def _extensions() -> tuple[Any, Any, Any, Any] | None:
         return None
 
 
-def _memory_usage_ops() -> tuple[Any, Any, Any, Any] | None:
+def _memory_usage_ops() -> tuple[Any, Any, Any, Any, Any] | None:
     """LORE owns project identity, memory paths, and canonical entry rendering."""
     try:
         from . import _lore_bootstrap  # noqa: F401 -- choose LORE and root first
         from lore_core.config import project_slug
-        from lore_core.memory import memory_path, read_entries, render_entries
-        return project_slug, memory_path, read_entries, render_entries
+        from lore_core.memory import memory_cap, memory_path, read_entries, render_entries
+        return project_slug, memory_path, read_entries, render_entries, memory_cap
     except Exception:  # noqa: BLE001 -- optional on older LORE builds
         return None
 
 
-def _memory_usage(cwd: str, ops: tuple[Any, Any, Any, Any]) -> dict[str, int]:
-    """Exact Unicode chars in LORE's canonical curated entries, no content."""
+def _memory_usage(cwd: str, ops: tuple[Any, Any, Any, Any, Any]) -> dict[str, int]:
+    """Exact Unicode chars and LORE caps for curated entries, no content."""
     if not isinstance(cwd, str) or not cwd or len(cwd) > 4096 or "\x00" in cwd:
         raise ValueError("invalid memory usage input")
     slug = ops[0](cwd)
     result = {}
     for scope in ("project", "user"):
+        cap = ops[4](scope)
+        if type(cap) is not int or not 0 < cap <= _MAX_MEMORY_SOURCE_BYTES:
+            raise ValueError("invalid memory cap")
         path = ops[1](scope, slug)
         try:
             size = path.stat().st_size
@@ -113,6 +116,7 @@ def _memory_usage(cwd: str, ops: tuple[Any, Any, Any, Any]) -> dict[str, int]:
         if chars > _MAX_MEMORY_SOURCE_BYTES:
             raise ValueError("memory content too large")
         result[f"{scope}_chars"] = chars
+        result[f"{scope}_cap_chars"] = cap
     return result
 
 
