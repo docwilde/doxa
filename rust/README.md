@@ -68,7 +68,8 @@ sessions, use `--list` and select one by full ID or unique ID prefix.
 without a connection. `Ctrl+P` opens the action menu; use Up/Down, Enter, and
 Esc to navigate the peer map, tool activity, session rail selection, tabs, and
 panes. `Ctrl+M` and `Ctrl+T` remain direct shortcuts. `Ctrl+Q` detaches the Rust UI
-without stopping its daemon; `Ctrl+C` is left available for terminal copy.
+without stopping its daemon; `Ctrl+W` detaches only the active tab and leaves
+its session running. `Ctrl+C` is left available for terminal copy.
 Bare `/help`, `/about`, `/sessions`, `/model`, `/engine`, `/mode`, `/beliefs`,
 `/diff`, `/peers`, `/split`, `/vsplit`, `/pane`, `/sidebar`, and `/detach` are
 handled locally from the prompt. Forms with arguments remain in the draft with

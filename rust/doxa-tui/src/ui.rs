@@ -1469,7 +1469,7 @@ impl App {
                 self.focus = Focus::Prompt;
             }
             "/sidebar" => self.rail_visible = !self.rail_visible,
-            "/detach" => self.should_quit = true,
+            "/detach" => self.detach_active_tab(),
             _ => unreachable!("recognized bare DOXA command"),
         }
         true
@@ -1480,6 +1480,10 @@ impl App {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         if key.code == KeyCode::Char('q') && ctrl {
             self.should_quit = true;
+            return true;
+        }
+        if key.code == KeyCode::Char('w') && ctrl {
+            self.detach_active_tab();
             return true;
         }
         if self.active_request_index().is_some() {
@@ -2741,6 +2745,37 @@ impl App {
             tabs.scroll = 0;
             self.focus = Focus::Transcript;
         }
+    }
+
+    /// Remove only the active tab. Its daemon and rail entry remain available
+    /// for reattachment; closing the final tab exits the otherwise empty UI.
+    fn detach_active_tab(&mut self) {
+        let group = &mut self.groups[self.active_group];
+        if group.active >= group.tabs.len() {
+            self.notice = "No active tab to detach".into();
+            return;
+        }
+        let id = group.tabs.remove(group.active);
+        group.active = group.active.min(group.tabs.len().saturating_sub(1));
+        group.scroll = 0;
+        self.notice = format!("Tab detached · {id} remains available in sessions");
+
+        if self.groups.iter().all(|group| group.tabs.is_empty()) {
+            self.should_quit = true;
+        } else if self.groups[0].tabs.is_empty() {
+            self.groups.swap(0, 1);
+            for id in self.groups[0].tabs.clone() {
+                if let Some(draft) = self.input_drafts.remove(&(1, id.clone())) {
+                    self.input_drafts.insert((0, id), draft);
+                }
+            }
+            self.active_group = 0;
+            self.split_requested = false;
+        } else if self.groups[1].tabs.is_empty() {
+            self.active_group = 0;
+            self.split_requested = false;
+        }
+        self.focus = Focus::Prompt;
     }
 
     fn previous_tab(&mut self) {
@@ -4861,9 +4896,51 @@ mod tests {
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.active_group, 1);
 
+        app.input = "/pane".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.active_group, 0);
+
         app.input = "/detach".into();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn detach_keeps_other_tabs_and_reopens_from_rail() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        for id in ["first", "second"] {
+            app.apply_update(DaemonUpdate::Upsert(Session {
+                id: id.into(), title: id.into(), collection: String::new(),
+                transcript: String::new(), status: "Ready".into(),
+            }));
+        }
+        app.groups[0].tabs.push("second".into());
+        app.groups[0].active = 1;
+        app.input = "/detach".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].tabs, ["first"]);
+        assert!(!app.should_quit);
+        assert!(app.sessions.iter().any(|session| session.id == "second"));
+        app.rail_selected = app.rail_order().iter().position(|index| app.sessions[*index].id == "second").unwrap();
+        app.open_selected();
+        assert_eq!(app.groups[0].active_id(), Some("second"));
+    }
+
+    #[test]
+    fn detaching_last_tab_in_first_pane_preserves_other_pane_draft() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("first".into());
+        app.groups[1].tabs.push("second".into());
+        app.input_drafts.insert((1, "second".into()), ("other draft".into(), 11));
+        app.input = "/detach".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].active_id(), Some("second"));
+        assert!(app.groups[1].tabs.is_empty());
+        assert_eq!(app.input, "other draft");
+        assert!(!app.should_quit);
+        assert!(!app.split_requested);
     }
 
     #[test]
