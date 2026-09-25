@@ -51,10 +51,10 @@ fn new_deepseek_passes_only_vendor_options_and_never_key() {
     assert!(args.windows(2).any(|w| w == ["--engine", "deepseek"]));
     assert!(args.windows(2).any(|w| w == ["--model", "deepseek-test"]));
     assert!(args.windows(2).any(|w| w == ["--effort", "none"]));
-    let python = fs::canonicalize("/usr/bin/python3").unwrap();
+    let python = "/usr/bin/python3";
     assert!(args
         .windows(2)
-        .any(|w| w[0] == "--lore-python" && w[1] == python.to_string_lossy()));
+        .any(|w| w[0] == "--lore-python" && w[1] == python));
     assert!(!args.join(" ").contains("secret-vendor-key"));
     assert!(!args.iter().any(|a| matches!(
         a.as_str(),

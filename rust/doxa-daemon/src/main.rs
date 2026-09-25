@@ -195,7 +195,7 @@ fn options() -> io::Result<Options> {
         codex_bin = Some(executable(
             codex_bin.ok_or_else(|| invalid("Codex needs --codex-bin"))?,
         )?);
-        lore_python = Some(executable(
+        lore_python = Some(python_executable(
             lore_python.ok_or_else(|| invalid("Codex needs --lore-python"))?,
         )?);
         if claude_python.is_some() || claude_script.is_some() || resume {
@@ -208,7 +208,7 @@ fn options() -> io::Result<Options> {
         if resume && !explicit_session_id {
             return Err(invalid("Claude resume needs --session-id"));
         }
-        claude_python = Some(executable(
+        claude_python = Some(python_executable(
             claude_python.ok_or_else(|| invalid("Claude needs --claude-python"))?,
         )?);
         let script = claude_script.ok_or_else(|| invalid("Claude needs --claude-script"))?;
@@ -231,7 +231,7 @@ fn options() -> io::Result<Options> {
         {
             return Err(invalid("unsupported option for vendor engine"));
         }
-        lore_python = Some(executable(
+        lore_python = Some(python_executable(
             lore_python.ok_or_else(|| invalid("vendor needs --lore-python"))?,
         )?);
         if resume && !explicit_session_id {
@@ -283,6 +283,20 @@ fn executable(path: PathBuf) -> io::Result<PathBuf> {
         return Err(invalid("executable path must name an executable file"));
     }
     Ok(path)
+}
+/// Keep the final Python symlink so pyvenv.cfg can determine sys.prefix.
+/// Canonicalize only its parent to retain the absolute-path boundary.
+fn python_executable(path: PathBuf) -> io::Result<PathBuf> {
+    if !path.is_absolute() {
+        return Err(invalid("executable path must be absolute"));
+    }
+    let meta = fs::metadata(&path)?;
+    if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
+        return Err(invalid("executable path must name an executable file"));
+    }
+    let parent = fs::canonicalize(path.parent().ok_or_else(|| invalid("invalid executable path"))?)?;
+    let name = path.file_name().ok_or_else(|| invalid("invalid executable path"))?;
+    Ok(parent.join(name))
 }
 fn random_id() -> io::Result<String> {
     let mut bytes = [0u8; 16];
@@ -607,5 +621,41 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("doxa-daemon: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn python_validation_keeps_venv_link_and_imports_outside_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let venv = dir.path().join("venv");
+        assert!(Command::new("python3")
+            .args(["-m", "venv", "--without-pip"])
+            .arg(&venv)
+            .status()
+            .unwrap()
+            .success());
+        let python = venv.join("bin/python3");
+        assert!(fs::symlink_metadata(&python).unwrap().file_type().is_symlink());
+        let selected = python_executable(python.clone()).unwrap();
+        assert_eq!(selected, python);
+        assert_ne!(executable(python.clone()).unwrap(), python);
+        let site = Command::new(&selected)
+            .args(["-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"])
+            .output()
+            .unwrap();
+        assert!(site.status.success());
+        let site = PathBuf::from(String::from_utf8(site.stdout).unwrap().trim());
+        fs::write(site.join("doxa_venv_marker.py"), "VALUE = 'venv only'\n").unwrap();
+        let imported = Command::new(&selected)
+            .args(["-c", "import doxa_venv_marker, sys; assert doxa_venv_marker.VALUE == 'venv only'; print(sys.prefix)"])
+            .current_dir("/")
+            .output()
+            .unwrap();
+        assert!(imported.status.success());
+        assert_eq!(String::from_utf8(imported.stdout).unwrap().trim(), venv.to_str().unwrap());
     }
 }

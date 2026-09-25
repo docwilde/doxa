@@ -133,7 +133,7 @@ fn run(args: &[String]) -> io::Result<()> {
                     ));
                     checks.push((
                         "lore python",
-                        launch::executable(
+                        launch::python_executable(
                             options
                                 .lore_python
                                 .as_deref()
@@ -144,7 +144,7 @@ fn run(args: &[String]) -> io::Result<()> {
                 launch::Engine::Claude => {
                     checks.push((
                         "claude python",
-                        launch::executable(
+                        launch::python_executable(
                             options
                                 .claude_python
                                 .as_deref()
@@ -160,7 +160,7 @@ fn run(args: &[String]) -> io::Result<()> {
                 launch::Engine::DeepSeek | launch::Engine::Glm => {
                     checks.push((
                         "lore python",
-                        launch::executable(
+                        launch::python_executable(
                             options
                                 .lore_python
                                 .as_deref()

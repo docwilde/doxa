@@ -1335,6 +1335,58 @@ fn missing_lore_sidecar_rejects_session_before_socket_or_registry() {
 }
 
 #[test]
+fn claude_daemon_uses_venv_interpreter_from_absolute_argument() {
+    let dir = tempfile::tempdir().unwrap();
+    let venv = dir.path().join("venv");
+    assert!(Command::new("python3")
+        .args(["-m", "venv", "--without-pip"])
+        .arg(&venv)
+        .status()
+        .unwrap()
+        .success());
+    let python = venv.join("bin/python3");
+    let site = Command::new(&python)
+        .args(["-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"])
+        .output()
+        .unwrap();
+    assert!(site.status.success());
+    let site = PathBuf::from(String::from_utf8(site.stdout).unwrap().trim());
+    fs::write(site.join("doxa_venv_marker.py"), "VALUE = 'installed in venv'\n").unwrap();
+    let marker = dir.path().join("prefix.txt");
+    let script = dir.path().join("claude_sidecar.py");
+    fs::write(&script, r#"import json, os, pathlib, sys
+import doxa_venv_marker
+assert doxa_venv_marker.VALUE == 'installed in venv'
+pathlib.Path(os.environ['DOXA_TEST_VENV_MARKER']).write_text(sys.prefix)
+print(json.dumps({'type':'hello','protocol':'doxa-claude-sidecar','version':1,'capabilities':['start']}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    print(json.dumps({'type':'reply','id':request['id'],'ok':True,
+        'result':{'data':{'model':'fixture'},'permission_mode':'default'}}), flush=True)
+"#).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", dir.path().to_str().unwrap(),
+            "--cwd", dir.path().to_str().unwrap(),
+            "--session-id", "venv-claude", "--engine", "claude",
+            "--claude-python", python.to_str().unwrap(),
+            "--claude-script", script.to_str().unwrap(), "--linger", "10"])
+        .env("DOXA_TEST_VENV_MARKER", &marker)
+        .current_dir("/")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let _ = child.kill();
+    let output = child.wait_with_output().unwrap();
+    assert!(marker.exists(), "daemon did not start venv sidecar: {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(fs::read_to_string(marker).unwrap(), venv.to_str().unwrap());
+}
+
+#[test]
 fn queued_codex_prompt_is_scrubbed_for_other_clients() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");

@@ -57,9 +57,10 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
 
-/// Resolve a program to an absolute, executable, canonical path. A command
-/// name is searched on PATH; a path containing a slash is never searched.
-pub fn executable(input: &Path) -> io::Result<PathBuf> {
+/// Resolve a program to an absolute executable path. A command name is
+/// searched on PATH; a path containing a slash is never searched. Python's
+/// final symlink must survive: it identifies a venv for Python's sys.prefix.
+fn resolve_executable(input: &Path, preserve_python_link: bool) -> io::Result<PathBuf> {
     let candidates: Vec<PathBuf> = if input.components().count() > 1 || input.is_absolute() {
         vec![input.to_path_buf()]
     } else {
@@ -69,9 +70,15 @@ pub fn executable(input: &Path) -> io::Result<PathBuf> {
             .collect()
     };
     for candidate in candidates {
-        if let Ok(path) = fs::canonicalize(candidate) {
-            if let Ok(meta) = fs::metadata(&path) {
-                if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
+        if let Ok(meta) = fs::metadata(&candidate) {
+            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
+                if preserve_python_link {
+                    if let (Some(parent), Some(name)) = (candidate.parent(), candidate.file_name()) {
+                        if let Ok(parent) = fs::canonicalize(parent) {
+                            return Ok(parent.join(name));
+                        }
+                    }
+                } else if let Ok(path) = fs::canonicalize(&candidate) {
                     return Ok(path);
                 }
             }
@@ -81,6 +88,14 @@ pub fn executable(input: &Path) -> io::Result<PathBuf> {
         io::ErrorKind::NotFound,
         format!("executable not found: {}", input.display()),
     ))
+}
+
+pub fn executable(input: &Path) -> io::Result<PathBuf> {
+    resolve_executable(input, false)
+}
+
+pub fn python_executable(input: &Path) -> io::Result<PathBuf> {
+    resolve_executable(input, true)
 }
 
 /// The sidecar is Python source, not an executable. Require a real absolute
@@ -111,7 +126,7 @@ pub fn resolve_claude_script(options: &LaunchOptions) -> io::Result<PathBuf> {
 }
 
 pub fn claude_dependencies(options: &LaunchOptions) -> io::Result<(PathBuf, PathBuf)> {
-    let python = executable(
+    let python = python_executable(
         options
             .claude_python
             .as_deref()
@@ -292,7 +307,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
                 return Err(invalid("Claude options require --engine claude"));
             }
             let codex = executable(options.codex_bin.as_deref().unwrap_or(Path::new("codex")))?;
-            let python = executable(
+            let python = python_executable(
                 options
                     .lore_python
                     .as_deref()
@@ -343,7 +358,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
                 return Err(invalid(format!("{key} is required for native vendor chat")));
             }
             vendor_effort(options)?;
-            let python = executable(
+            let python = python_executable(
                 options
                     .lore_python
                     .as_deref()
@@ -499,6 +514,7 @@ mod tests {
         let link = dir.path().join("link");
         symlink(&script, &link).unwrap();
         assert_eq!(executable(&link).unwrap(), script);
+        assert_eq!(python_executable(&link).unwrap(), link);
         assert!(executable(&dir.path().join("missing")).is_err());
     }
 
