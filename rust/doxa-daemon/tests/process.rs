@@ -190,6 +190,54 @@ fn native_registry_uses_main_checkout_scope_from_linked_worktree() {
     }
     wait_until(|| process.exited());
 }
+
+#[test]
+fn daemon_runs_in_managed_worktree_and_cleans_it_on_real_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("repo");
+    let runtime = dir.path().join("runtime");
+    let home = dir.path().join("home");
+    fs::create_dir(&main).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").args(args).current_dir(&main).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    };
+    git(&["init", "-q", "-b", "main"]);
+    fs::write(main.join("README"), "seed\n").unwrap();
+    git(&["add", "README"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: seed"]);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", main.to_str().unwrap(),
+            "--session-id", "session123", "--linger", "10"])
+        .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "1")
+        .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry = runtime.join("registry/session123.json");
+    wait_until(|| registry.exists());
+    let row: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    let worktree = home.join("worktrees/repo-session1");
+    assert_eq!(row["cwd"], worktree.to_str().unwrap());
+    assert_eq!(row["repo_root"], main.to_str().unwrap());
+    assert!(worktree.join("README").exists());
+    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM); }
+    wait_until(|| child.try_wait().unwrap().is_some());
+    assert!(!worktree.exists());
+    assert!(!home.join("worktrees/.meta/repo-session1.json").exists());
+    assert!(!registry.exists());
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", main.to_str().unwrap(),
+            "--session-id", "session234", "--linger", "10"])
+        .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "1")
+        .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry = runtime.join("registry/session234.json");
+    wait_until(|| registry.exists());
+    let kept = home.join("worktrees/repo-session2");
+    fs::write(kept.join("user.txt"), "work to keep\n").unwrap();
+    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM); }
+    wait_until(|| child.try_wait().unwrap().is_some());
+    assert_eq!(fs::read_to_string(kept.join("user.txt")).unwrap(), "work to keep\n");
+    assert!(home.join("worktrees/.meta/repo-session2.json").exists());
+}
 fn executable(path: &Path, body: &str) {
     fs::write(path, body).unwrap();
     let mut perms = fs::metadata(path).unwrap().permissions();

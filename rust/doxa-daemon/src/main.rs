@@ -452,7 +452,20 @@ impl Drop for Registry {
     }
 }
 fn run() -> io::Result<()> {
-    let options = options()?;
+    let mut options = options()?;
+    // Fixture sessions normally retain the exact cwd named by tests. An
+    // explicit DOXA_WORKTREE=1 opts the fixture into lifecycle testing.
+    let manage_fixture = options.engine == Engine::Fixture
+        && env::var("DOXA_WORKTREE").is_ok_and(|value| value == "1");
+    let use_worktrees = options.engine != Engine::Fixture || manage_fixture;
+    let mut managed = if use_worktrees {
+        doxa_worktrees::create(&options.cwd, &options.session_id)
+    } else { None };
+    if use_worktrees && managed.is_none() && doxa_worktrees::enabled()
+        && doxa_worktrees::is_supported_checkout(&options.cwd) {
+        eprintln!("doxa-daemon: managed worktree unavailable; using launch directory {}", options.cwd.display());
+    }
+    if let Some(tree) = &managed { options.cwd = tree.path().to_path_buf(); }
     let mut codex_host = None;
     let mut claude_host = None;
     let mut vendor_host = None;
@@ -615,6 +628,10 @@ fn run() -> io::Result<()> {
         host.shutdown();
     }
     handle.shutdown();
+    if let Some(tree) = &mut managed {
+        let note = tree.finish();
+        if !note.is_empty() { eprintln!("doxa-daemon: {note}"); }
+    }
     result
 }
 fn main() {

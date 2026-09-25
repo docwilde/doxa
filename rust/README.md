@@ -48,6 +48,20 @@ The daemon executable is located beside `doxa-rs`, then on `PATH`; an absolute
 `linger_secs` config value. `--sandbox` sets the native Codex sandbox. Use
 `--engine fixture` only for local integration checks.
 
+Native sessions started in a Git checkout now get a linked worktree under
+`$DOXA_HOME/worktrees/<repo>-<session-prefix>` on a `doxa/<session-prefix>`
+branch. A sidecar in `worktrees/.meta` records the original repository and
+base branch. The new checkout starts at that branch tip; uncommitted changes
+in the launch directory stay there. `DOXA_WORKTREE=0` or `worktree_per_session = false` in
+`$DOXA_HOME/config.toml` runs in the launch directory; outside Git, sessions
+also run there. Detaching keeps the worktree. When the daemon actually exits,
+it removes only a verified clean checkout whose recorded branch has no commits
+ahead of its base. Dirty trees, unique commits, branch switches, unreadable
+metadata, and failed Git checks are kept for manual review. `doxa doctor`
+lists verified managed worktrees with no live session and never deletes them.
+Fixture sessions keep their supplied directory unless `DOXA_WORKTREE=1` is
+set explicitly for integration testing.
+
 Or compile and install the main line with the POSIX installer:
 
 ```sh

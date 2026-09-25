@@ -1,4 +1,5 @@
 use doxa_tui::{bridge, discovery, fleet_view, launch, ui_state};
+use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
 use std::process::Command;
@@ -196,6 +197,12 @@ fn run(args: &[String]) -> io::Result<()> {
             }
             let live = discovery::sessions()?;
             println!("live sessions: {}", live.len());
+            let ids: HashSet<String> = live.iter().map(|session| session.id.clone()).collect();
+            let orphans = doxa_worktrees::list_orphans(&ids);
+            println!("managed worktrees without a live session: {}", orphans.len());
+            for tree in orphans {
+                println!("  {:?}  branch:{:?}  session:{}", tree.path, tree.branch, tree.session_id);
+            }
             if missing {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
