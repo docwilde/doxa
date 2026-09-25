@@ -142,7 +142,7 @@ fn panes_reclaim_footer_row_and_keep_notice_visible() {
     let status_row = rendered.lines().nth(23).unwrap();
     assert!(status_row.contains("Prompt queue"), "{rendered}");
     assert!(!rendered.contains("Ctrl+P actions"), "{rendered}");
-    assert!(rendered.lines().nth(19).unwrap().contains("Vendor ?"));
+    assert!(rendered.lines().nth(19).unwrap().contains("Engine"));
 }
 
 #[test]

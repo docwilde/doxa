@@ -2574,22 +2574,21 @@ impl App {
         let telemetry = id.and_then(|id| self.session_telemetry.get(id));
         let mut chips = Vec::new();
         // Permission mode (including the classifier-backed `auto` mode) is
-        // independent of the provider running this session. Keep their roles
-        // visible even when a narrow pane shows only the first few chips.
+        // independent of the provider running this session.
         if let Some(mode) = id.and_then(|id| self.permission_modes.get(id)) {
             chips.push(("permission", format!("Permissions {mode}")));
         } else if id.is_some_and(|id| self.permission_capabilities.get(id).copied().unwrap_or(false)) {
             chips.push(("permission", "Permissions ?".to_owned()));
         }
         if let Some(engine) = identity.and_then(|pair| pair.0.as_deref()) {
-            chips.push(("engine", format!("Vendor {engine}")));
+            chips.push(("engine", engine.to_owned()));
         } else {
-            chips.push(("engine", "Vendor ?".to_owned()));
+            chips.push(("engine", "Engine".to_owned()));
         }
         if let Some(model) = identity.and_then(|pair| pair.1.as_deref()) {
-            chips.push(("model", format!("Model {model}")));
+            chips.push(("model", model.to_owned()));
         } else {
-            chips.push(("model", "Model ?".to_owned()));
+            chips.push(("model", "Model".to_owned()));
         }
         chips.push(("context", format!("Ctx {}", telemetry.and_then(|value| value.context.as_deref()).unwrap_or("?"))));
         chips.push(("usage", format!("Tokens {}", telemetry.and_then(|value| value.usage.as_deref()).unwrap_or("?"))));
@@ -4114,8 +4113,8 @@ mod tests {
 
         let chips = app.chips(0);
         assert_eq!(chips[0], ("permission", "Permissions auto".into()));
-        assert_eq!(chips[1], ("engine", "Vendor claude".into()));
-        assert_eq!(chips[2], ("model", "Model sonnet".into()));
+        assert_eq!(chips[1], ("engine", "claude".into()));
+        assert_eq!(chips[2], ("model", "sonnet".into()));
         assert_eq!(chips[3].0, "context");
         assert!(chips[3].1.starts_with("Ctx "));
 
@@ -4141,6 +4140,28 @@ mod tests {
         click(&mut app, model_x);
         assert_eq!(app.model_picker.as_ref().unwrap().session_id, "claude-1");
         assert_eq!(app.pending_model_queries, vec!["claude-1"]);
+    }
+
+    #[test]
+    fn wide_pane_keeps_four_primary_chips_visible_without_prefixes() {
+        let mut app = App::default();
+        app.handle(Event::Resize(148, 31));
+        app.split = Split::Horizontal;
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"claude-1",
+            "engine":"claude", "model":"claude-sonnet-4", "permission_mode":"default",
+            "can_set_permission_mode":true, "can_set_model":true}));
+        app.groups[0].tabs = vec!["claude-1".into()];
+        let pane = app.layout(app.size).panes.unwrap()[0];
+        let visible = app.chip_window(0, usize::from(pane.width));
+        assert_eq!(visible.iter().take(4).map(|(kind, _)| *kind).collect::<Vec<_>>(),
+            vec!["permission", "engine", "model", "context"]);
+        assert_eq!(visible[0].1, "Permissions default");
+        assert_eq!(visible[1].1, "claude");
+        assert_eq!(visible[2].1, "claude-sonnet-4");
+        assert!(visible[3].1.starts_with("Ctx "));
+        let occupied = visible.iter().map(|(kind, label)| chip_text(kind, label).width()).sum::<usize>()
+            + visible.len().saturating_sub(1);
+        assert!(occupied <= usize::from(pane.width));
     }
 
     #[test]
@@ -4522,7 +4543,7 @@ mod tests {
         let after = painted(&app);
         let lines: Vec<_> = after.lines().collect();
         assert!(lines[usize::from(menu.y)].contains("New session"));
-        assert!(lines[usize::from(menu.bottom())].contains("Vendor ?"));
+        assert!(lines[usize::from(menu.bottom())].contains("Engine"));
         assert!(lines[usize::from(menu.bottom() + 1)].contains("Prompt"));
         let old_lines: Vec<_> = before.lines().collect();
         for y in pane.y..pane.bottom() {
