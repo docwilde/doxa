@@ -683,7 +683,7 @@ pub struct App {
     // LORE owns these counts. A bounded background query keeps store I/O off
     // the draw path; an unavailable sidecar leaves the chip unknown.
     memory_cache: HashMap<String, (Option<(u64, u64)>, Instant)>,
-    memory_pending: Option<(String, Receiver<Option<(u64, u64)>>)>,
+    memory_pending: Option<(String, String, Receiver<Option<(u64, u64)>>)>,
     chip_offsets: [usize; 2],
     blink_on: bool,
     blink_at: Instant,
@@ -2546,17 +2546,21 @@ impl App {
 
     fn poll_memory(&mut self) -> bool {
         let mut changed = false;
-        if let Some((id, receiver)) = self.memory_pending.take() {
+        if let Some((id, cwd, receiver)) = self.memory_pending.take() {
             match receiver.try_recv() {
                 Ok(usage) => {
-                    changed = self.memory_cache.get(&id).is_none_or(|(old, _)| *old != usage);
-                    self.memory_cache.insert(id, (usage, Instant::now()));
+                    if self.session_cwds.get(&id).and_then(|path| path.to_str()) == Some(cwd.as_str()) {
+                        changed = self.memory_cache.get(&id).is_none_or(|(old, _)| *old != usage);
+                        self.memory_cache.insert(id, (usage, Instant::now()));
+                    }
                 }
                 Err(TryRecvError::Disconnected) => {
-                    changed = self.memory_cache.get(&id).is_none_or(|(old, _)| old.is_some());
-                    self.memory_cache.insert(id, (None, Instant::now()));
+                    if self.session_cwds.get(&id).and_then(|path| path.to_str()) == Some(cwd.as_str()) {
+                        changed = self.memory_cache.get(&id).is_none_or(|(old, _)| old.is_some());
+                        self.memory_cache.insert(id, (None, Instant::now()));
+                    }
                 }
-                Err(TryRecvError::Empty) => self.memory_pending = Some((id, receiver)),
+                Err(TryRecvError::Empty) => self.memory_pending = Some((id, cwd, receiver)),
             }
         }
         if self.memory_pending.is_some() { return changed; }
@@ -2572,7 +2576,7 @@ impl App {
             let python = std::env::var_os("DOXA_LORE_PYTHON")
                 .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"));
             let (tx, rx) = mpsc::sync_channel(1);
-            self.memory_pending = Some((id, rx));
+            self.memory_pending = Some((id, cwd.clone(), rx));
             std::thread::spawn(move || {
                 let usage = doxa_lore::LoreClient::spawn(&python, Duration::from_secs(2))
                     .and_then(|mut lore| lore.memory_usage(&cwd)).ok()
@@ -5597,6 +5601,26 @@ mod tests {
         click(&mut app, model_x);
         assert_eq!(app.model_picker.as_ref().unwrap().session_id, "claude-1");
         assert_eq!(app.pending_model_queries, vec!["claude-1"]);
+    }
+
+    #[test]
+    fn memory_chip_uses_lore_counts_and_ignores_old_project_reply() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "cwd":"/repo/old"}));
+        app.set_lore_memory_usage("s", 401, 80);
+        assert_eq!(app.chips(0).iter().find(|(kind, _)| *kind == "memory").unwrap().1,
+            "p≈101/u≈20");
+        assert_eq!(estimated_memory_tokens(0), 0);
+        assert_eq!(estimated_memory_tokens(4), 1);
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.memory_pending = Some(("s".into(), "/repo/old".into(), rx));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "cwd":"/repo/new"}));
+        app.offline_ids.insert("s".into());
+        tx.send(Some((400, 200))).unwrap();
+        app.poll_memory();
+        assert!(!app.memory_cache.contains_key("s"));
+        assert_eq!(app.chips(0).iter().find(|(kind, _)| *kind == "memory").unwrap().1,
+            "p ?/u ?");
     }
 
     #[test]
