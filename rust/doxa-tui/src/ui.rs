@@ -1006,6 +1006,13 @@ impl RenderedTranscript {
 }
 
 #[derive(Debug)]
+enum RailRow {
+    Heading(usize),
+    Session(usize),
+    LooseHeading,
+}
+
+#[derive(Debug)]
 pub struct App {
     pub sessions: Vec<Session>,
     pub collections: Vec<crate::collections::Collection>,
@@ -1302,7 +1309,7 @@ impl App {
         }
         self.rail_selected = self
             .rail_selected
-            .min(self.sessions.len().saturating_sub(1));
+            .min(self.rail_order().len().saturating_sub(1));
     }
 
     /// Apply one versioned daemon frame after transport decoding. Returns whether
@@ -2514,7 +2521,7 @@ impl App {
             }
             KeyCode::Down if self.focus == Focus::Rail => {
                 self.rail_selected =
-                    (self.rail_selected + 1).min(self.sessions.len().saturating_sub(1));
+                    (self.rail_selected + 1).min(self.rail_order().len().saturating_sub(1));
                 true
             }
             KeyCode::Enter if self.focus == Focus::Rail => {
@@ -4726,18 +4733,30 @@ impl App {
         true
     }
 
-    fn rail_order(&self) -> Vec<usize> {
-        let mut order = Vec::new();
+    fn rail_rows(&self) -> Vec<RailRow> {
+        let mut rows = Vec::new();
         let mut seen = HashSet::new();
-        for item in &self.collections {
+        for (heading, item) in self.collections.iter().enumerate() {
+            rows.push(RailRow::Heading(heading));
             for id in &item.sessions {
                 if let Some(index) = self.sessions.iter().position(|session| &session.id == id) {
-                    if seen.insert(index) { order.push(index); }
+                    if seen.insert(index) && !item.collapsed { rows.push(RailRow::Session(index)); }
                 }
             }
         }
-        order.extend((0..self.sessions.len()).filter(|index| seen.insert(*index)));
-        order
+        let loose: Vec<_> = (0..self.sessions.len()).filter(|index| seen.insert(*index)).collect();
+        if !loose.is_empty() {
+            rows.push(RailRow::LooseHeading);
+            rows.extend(loose.into_iter().map(RailRow::Session));
+        }
+        rows
+    }
+
+    fn rail_order(&self) -> Vec<usize> {
+        self.rail_rows().into_iter().filter_map(|row| match row {
+            RailRow::Session(index) => Some(index),
+            _ => None,
+        }).collect()
     }
 
     /// A transport loop drains this queue and sends each prompt to its session.
@@ -5681,6 +5700,27 @@ impl App {
                     return true;
                 }
                 let layout = self.layout(self.size);
+                if let Some(rail) = layout.rail {
+                    if mouse.column > rail.x && mouse.column < rail.right().saturating_sub(1)
+                        && mouse.row > rail.y && mouse.row < rail.bottom().saturating_sub(1) {
+                        let row = usize::from(mouse.row - rail.y - 1);
+                        match self.rail_rows().get(row) {
+                            Some(RailRow::Heading(index)) => {
+                                self.collections[*index].collapsed = !self.collections[*index].collapsed;
+                                self.rail_selected = self.rail_selected.min(self.rail_order().len().saturating_sub(1));
+                                self.focus = Focus::Rail;
+                                return true;
+                            }
+                            Some(RailRow::Session(index)) => {
+                                self.rail_selected = self.rail_order().iter().position(|visible| visible == index).unwrap_or(0);
+                                self.open_selected();
+                                return true;
+                            }
+                            Some(RailRow::LooseHeading) => { self.focus = Focus::Rail; return true; }
+                            None => {}
+                        }
+                    }
+                }
                 let in_outer = mouse.row >= layout.outer.y && mouse.row < layout.outer.bottom();
                 if in_outer
                     && layout.rail.is_some_and(|rail| {
@@ -6462,36 +6502,27 @@ impl App {
 
     fn draw_rail(&self, frame: &mut Frame, area: Rect) {
         let mut lines = Vec::new();
-        let mut last_collection = "";
-        for (position, index) in self.rail_order().into_iter().enumerate() {
-            let session = &self.sessions[index];
-            let heading = self.collections.iter().find(|item| item.sessions.iter().any(|id| id == &session.id))
-                .map_or("Sessions", |item| item.name.as_str());
-            if heading != last_collection {
-                last_collection = heading;
-                lines.push(Line::styled(
-                    format!(
-                        "  {}",
-                        if last_collection.is_empty() {
-                            "Sessions"
-                        } else {
-                            last_collection
-                        }
-                    ),
-                    Style::default()
-                        .fg(theme::ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                ));
+        let mut position = 0;
+        for row in self.rail_rows() {
+            match row {
+                RailRow::Heading(index) => {
+                    let item = &self.collections[index];
+                    let mark = if item.collapsed { "▸" } else { "▾" };
+                    lines.push(Line::styled(format!(" {mark} {}", item.name),
+                        Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)));
+                }
+                RailRow::LooseHeading => lines.push(Line::styled("  Sessions",
+                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))),
+                RailRow::Session(index) => {
+                    let session = &self.sessions[index];
+                    let mark = if position == self.rail_selected { "▸" } else { " " };
+                    let style = if self.waiting_for_input(&session.id) && self.blink_on {
+                        Style::default().fg(theme::TEXT).bg(theme::ERROR).add_modifier(Modifier::BOLD)
+                    } else { Style::default() };
+                    lines.push(Line::styled(format!("{mark} {}", session.title), style));
+                    position += 1;
+                }
             }
-            let mark = if position == self.rail_selected {
-                "▸"
-            } else {
-                " "
-            };
-            let style = if self.waiting_for_input(&session.id) && self.blink_on {
-                Style::default().fg(theme::TEXT).bg(theme::ERROR).add_modifier(Modifier::BOLD)
-            } else { Style::default() };
-            lines.push(Line::styled(format!("{mark} {}", session.title), style));
         }
         if lines.is_empty() {
             lines.push(Line::from("  No sessions"));
@@ -8892,6 +8923,33 @@ for line in sys.stdin:
         assert!(app.submit_local_command());
         assert!(app.collections[0].sessions.is_empty());
         assert!(app.take_prompts().is_empty());
+    }
+
+    #[test]
+    fn folded_collection_hides_members_and_rail_clicks_follow_visible_rows() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        for id in ["held", "loose"] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:id.into(),
+                collection:String::new(), transcript:String::new(), status:"Ready".into() }));
+        }
+        app.collections.push(crate::collections::Collection {
+            name:"Work".into(), sessions:vec!["held".into()], collapsed:false,
+        });
+        assert_eq!(app.rail_order(), [0, 1]);
+        let click = |row| MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column:3, row, modifiers:KeyModifiers::NONE };
+        assert!(app.mouse(click(1))); // Work heading
+        assert!(app.collections[0].collapsed);
+        assert_eq!(app.rail_order(), [1]);
+        let before = app.groups[0].tabs.clone();
+        assert!(app.mouse(click(2))); // Sessions heading, no session selected
+        assert_eq!(app.groups[0].tabs, before);
+        assert!(app.mouse(click(3))); // loose session
+        assert_eq!(app.groups[0].active_id(), Some("loose"));
+        assert!(app.mouse(click(1)));
+        assert!(!app.collections[0].collapsed);
+        assert_eq!(app.rail_order(), [0, 1]);
     }
 
     #[test]
