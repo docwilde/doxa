@@ -531,8 +531,14 @@ fn run() -> io::Result<()> {
         Ok(raw) if !raw.trim().is_empty() => {
             let value: f64 = raw.trim().parse().map_err(|_| invalid("invalid session budget"))?;
             if !value.is_finite() || value <= 0.0 { return Err(invalid("invalid session budget")); }
-            if options.engine != Engine::Claude && options.engine != Engine::Fixture {
-                return Err(invalid("native session budget requires reported USD cost; use the Python fleet harness"));
+            if options.engine == Engine::Codex {
+                return Err(invalid("native Codex budget requires complete priced usage accounting; use the Python fleet harness"));
+            }
+            if let Some(vendor) = options.engine.vendor() {
+                let model = options.model.as_deref().ok_or_else(|| invalid("budgeted vendor session requires a model"))?;
+                if !budget_host::priced_vendor_model(vendor.engine_id(), model) {
+                    return Err(invalid(&format!("no native budget price for {}:{model}", vendor.engine_id())));
+                }
             }
             if options.resume {
                 return Err(invalid("budgeted native resume requires durable spend accounting"));
@@ -645,6 +651,9 @@ fn run() -> io::Result<()> {
         }
     };
     let host: Arc<dyn Host> = match ceiling {
+        Some(value) if options.engine.vendor().is_some() => Arc::new(
+            BudgetHost::new_priced(host, value, options.engine.name(), options.model.as_deref().expect("validated budget model"))
+                .map_err(|error| invalid(&error))?),
         Some(value) => Arc::new(BudgetHost::new(host, value)),
         None => host,
     };

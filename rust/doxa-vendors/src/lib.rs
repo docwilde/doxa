@@ -677,6 +677,10 @@ pub struct TurnOutcome {
     pub reasoning: String,
     pub model: Option<String>,
     pub usage: TokenUsage,
+    /// Every provider request in this turn supplied both billable counters.
+    pub usage_complete: bool,
+    /// Every response named the requested model.
+    pub model_consistent: bool,
     /// Number of provider requests, including the final response request.
     pub requests: usize,
 }
@@ -817,6 +821,8 @@ async fn run_turn_at(
         reasoning: String::new(),
         model: None,
         usage: TokenUsage::default(),
+        usage_complete: true,
+        model_consistent: true,
         requests: 0,
     };
     loop {
@@ -845,6 +851,11 @@ async fn run_turn_at(
         )
         .await?;
         outcome.requests += 1;
+        outcome.model_consistent &= completion.model.as_deref() == Some(model);
+        outcome.usage_complete &= completion.usage.as_ref().is_some_and(|usage| {
+            usage.get("prompt_tokens").and_then(Value::as_u64).is_some()
+                && usage.get("completion_tokens").and_then(Value::as_u64).is_some()
+        });
         outcome.usage.add(completion.usage.as_ref())?;
         outcome.model = completion.model.or(outcome.model);
         outcome.text.push_str(&completion.text);
